@@ -1,0 +1,51 @@
+name: apply-canonical-direction-consensus
+on:
+  push:
+    branches: [fix/canonical-direction-consensus]
+permissions:
+  contents: write
+jobs:
+  apply-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/canonical-direction-consensus
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Apply canonical confidence-aware consensus
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('src/nifty_scalper_bot/core/underlying_direction.py')
+          s=p.read_text()
+          old='''    if spot is not None and futures is not None:\n        if spot.bias != futures.bias:\n            return UnderlyingDirectionResolution(observation=None, conflict=True)\n        return UnderlyingDirectionResolution(\n            observation=spot,\n            confirming_source=futures.source,\n        )\n    observation = spot if spot is not None else futures\n    return UnderlyingDirectionResolution(observation=observation)\n'''
+          new='''    if spot is not None and futures is not None:\n        if spot.bias != futures.bias:\n            # A disagreement is only actionable when both independent\n            # underlying sources carry comparable conviction. A weak/noisy\n            # secondary reading must not veto a materially stronger primary\n            # observation forever. Conversely, close-confidence disagreement\n            # remains ambiguous and therefore fails closed.\n            confidence_gap = abs(spot.confidence - futures.confidence)\n            dominance_gap = 0.20\n            if confidence_gap < dominance_gap:\n                return UnderlyingDirectionResolution(observation=None, conflict=True)\n            stronger = spot if spot.confidence > futures.confidence else futures\n            weaker = futures if stronger is spot else spot\n            # Require genuine conviction from the dominant source and keep the\n            # weaker source as disagreement provenance, not confirmation.\n            if stronger.confidence < 0.70:\n                return UnderlyingDirectionResolution(observation=None, conflict=True)\n            return UnderlyingDirectionResolution(\n                observation=stronger,\n                confirming_source=f\"{weaker.source}:weak_disagreement\",\n            )\n        return UnderlyingDirectionResolution(\n            observation=spot,\n            confirming_source=futures.source,\n        )\n    observation = spot if spot is not None else futures\n    return UnderlyingDirectionResolution(observation=observation)\n'''
+          if old not in s: raise SystemExit('arbitration marker missing')
+          p.write_text(s.replace(old,new,1))
+
+          t=Path('tests/core/test_underlying_direction.py')
+          s=t.read_text()
+          s=s.replace('''def test_fresh_spot_futures_direction_disagreement_fails_closed() -> None:\n    resolved = arbitrate_underlying_direction(\n        _obs("CE", source="spot_context", age=0.4),\n        _obs("PE", source="futures_context", age=0.1),\n    )\n\n    assert resolved.conflict is True\n    assert resolved.observation is None\n''','''def test_comparable_spot_futures_direction_disagreement_fails_closed() -> None:\n    resolved = arbitrate_underlying_direction(\n        _obs("CE", source="spot_context", age=0.4, confidence=0.82),\n        _obs("PE", source="futures_context", age=0.1, confidence=0.74),\n    )\n\n    assert resolved.conflict is True\n    assert resolved.observation is None\n\n\ndef test_materially_stronger_spot_wins_weak_futures_disagreement() -> None:\n    spot = _obs("PE", source="spot_context", age=0.2, confidence=0.90)\n    resolved = arbitrate_underlying_direction(\n        spot,\n        _obs("CE", source="futures_context", age=0.1, confidence=0.58),\n    )\n    assert resolved.conflict is False\n    assert resolved.observation is spot\n    assert resolved.confirming_source == "futures_context:weak_disagreement"\n\n\ndef test_materially_stronger_futures_can_win_weak_spot_disagreement() -> None:\n    futures = _obs("CE", source="futures_context", age=0.1, confidence=0.91)\n    resolved = arbitrate_underlying_direction(\n        _obs("PE", source="spot_context", age=0.2, confidence=0.60),\n        futures,\n    )\n    assert resolved.conflict is False\n    assert resolved.observation is futures\n    assert resolved.confirming_source == "spot_context:weak_disagreement"\n\n\ndef test_low_conviction_disagreement_still_fails_closed() -> None:\n    resolved = arbitrate_underlying_direction(\n        _obs("PE", source="spot_context", age=0.2, confidence=0.68),\n        _obs("CE", source="futures_context", age=0.1, confidence=0.45),\n    )\n    assert resolved.conflict is True\n    assert resolved.observation is None\n''')
+          t.write_text(s)
+          PY
+          python -m py_compile src/nifty_scalper_bot/core/underlying_direction.py
+      - name: Install dependencies
+        run: python -m pip install -e '.[dev]'
+      - name: Focused direction TDD
+        run: pytest -q tests/core/test_underlying_direction.py tests/core/test_spot_direction_evidence_parity.py tests/strategies/test_single_vote_score_floor.py
+      - name: Direction and execution regressions
+        run: pytest -q tests/core tests/strategies/test_single_vote_score_floor.py tests/execution/test_order_manager_execution_mode_regression.py tests/e2e/live_sim/test_live_runtime_startup_contract.py
+      - name: Full regression
+        run: pytest -q
+      - name: Commit validated fix
+        if: success()
+        run: |
+          rm .github/workflows/apply-canonical-direction-consensus.yml
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add src/nifty_scalper_bot/core/underlying_direction.py tests/core/test_underlying_direction.py .github/workflows/apply-canonical-direction-consensus.yml
+          git commit -m 'fix: make underlying direction consensus confidence-aware'
+          git push origin HEAD:fix/canonical-direction-consensus
