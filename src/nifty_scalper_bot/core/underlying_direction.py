@@ -1,11 +1,10 @@
 """Canonical arbitration for NIFTY underlying direction.
 
-This module owns one narrow invariant: an option premium may trigger a setup,
-but it must never become the authority for the NIFTY underlying direction.
-Only fresh spot/futures observations may authorize CE/PE direction. Direction,
-confidence and age travel together as one immutable observation; conflicting
-fresh spot/futures observations fail closed instead of being resolved by source
-order or by the option being evaluated.
+Option-premium data may trigger a setup but must never authorize NIFTY direction.
+Only fresh spot/futures observations participate.  Futures is the primary
+price-discovery source when both underlying sources agree; spot is confirmation.
+Disagreement remains fail-closed unless one source is materially stronger, so a
+source prior can never manufacture a trade from ambiguous evidence.
 """
 
 from __future__ import annotations
@@ -49,39 +48,34 @@ def arbitrate_underlying_direction(
     spot: UnderlyingDirectionObservation | None,
     futures: UnderlyingDirectionObservation | None,
 ) -> UnderlyingDirectionResolution:
-    """Resolve underlying direction without source-order or option-side bias.
+    """Resolve direction while preserving atomic confidence/freshness provenance.
 
-    Two resolved sources must agree. If both are present and disagree, return a
-    fail-closed conflict. When both agree, spot remains the primary price-index
-    authority and futures is recorded as confirmation. When only one source is
-    resolved, that complete observation is returned unchanged, preserving its
-    own confidence and freshness provenance.
+    Futures is primary only when both sources agree.  This reflects its
+    price-discovery role without turning that empirical prior into an override.
+    When sources disagree, the existing conservative evidence rule is retained:
+    comparable conviction fails closed and only a materially stronger,
+    high-conviction observation can override weak disagreement.
     """
 
     if spot is not None and futures is not None:
-        if spot.bias != futures.bias:
-            # A disagreement is only actionable when both independent
-            # underlying sources carry comparable conviction. A weak/noisy
-            # secondary reading must not veto a materially stronger primary
-            # observation forever. Conversely, close-confidence disagreement
-            # remains ambiguous and therefore fails closed.
-            confidence_gap = abs(spot.confidence - futures.confidence)
-            dominance_gap = 0.20
-            if confidence_gap < dominance_gap:
-                return UnderlyingDirectionResolution(observation=None, conflict=True)
-            stronger = spot if spot.confidence > futures.confidence else futures
-            weaker = futures if stronger is spot else spot
-            # Require genuine conviction from the dominant source and keep the
-            # weaker source as disagreement provenance, not confirmation.
-            if stronger.confidence < 0.70:
-                return UnderlyingDirectionResolution(observation=None, conflict=True)
+        if spot.bias == futures.bias:
             return UnderlyingDirectionResolution(
-                observation=stronger,
-                confirming_source=f"{weaker.source}:weak_disagreement",
+                observation=futures,
+                confirming_source=spot.source,
             )
+
+        confidence_gap = abs(spot.confidence - futures.confidence)
+        dominance_gap = 0.20
+        if confidence_gap < dominance_gap:
+            return UnderlyingDirectionResolution(observation=None, conflict=True)
+        stronger = spot if spot.confidence > futures.confidence else futures
+        weaker = futures if stronger is spot else spot
+        if stronger.confidence < 0.70:
+            return UnderlyingDirectionResolution(observation=None, conflict=True)
         return UnderlyingDirectionResolution(
-            observation=spot,
-            confirming_source=futures.source,
+            observation=stronger,
+            confirming_source=f"{weaker.source}:weak_disagreement",
         )
-    observation = spot if spot is not None else futures
+
+    observation = futures if futures is not None else spot
     return UnderlyingDirectionResolution(observation=observation)
