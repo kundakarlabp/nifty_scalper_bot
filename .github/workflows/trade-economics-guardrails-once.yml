@@ -32,26 +32,14 @@ jobs:
           python -m pip install -r dashboard/requirements.txt -q
       - name: Apply canonical source corrections
         run: python scripts/apply_trade_economics_guardrails_20260904.py
-      - name: Format new focused code and tests
-        run: |
-          python -m ruff check --fix \
-            src/nifty_scalper_bot/core/direction_stability.py \
-            tests/core/test_direction_stability_20260904.py \
-            tests/execution/test_trade_economics_guardrails_20260904.py \
-            tests/config/test_live_risk_envelope.py
-          python -m black \
-            src/nifty_scalper_bot/core/direction_stability.py \
-            tests/core/test_direction_stability_20260904.py \
-            tests/execution/test_trade_economics_guardrails_20260904.py \
-            tests/config/test_live_risk_envelope.py
-      - name: Incident and adjacent regressions
+      - name: Focused regressions
         run: |
           python -m pytest -q \
-            tests/execution/test_trade_economics_guardrails_20260904.py \
-            tests/core/test_direction_stability_20260904.py \
             tests/config/test_live_risk_envelope.py \
-            tests/risk/test_risk_check_order_daily_limits.py \
+            tests/execution/test_trade_economics_guardrails_20260904.py \
+            tests/strategies/test_direction_lock_persistence_20260907.py \
             tests/risk/test_risk_rejection_codes.py \
+            tests/risk/test_risk_check_order_daily_limits.py \
             tests/execution/test_execution_safety_audit_fixes.py \
             tests/execution/test_order_manager_preflight.py \
             tests/execution/test_order_manager_trade_plan.py \
@@ -63,31 +51,16 @@ jobs:
         run: |
           python -m compileall -q src dashboard scripts
           python -m ruff check \
-            src/nifty_scalper_bot/core/direction_stability.py \
+            src/nifty_scalper_bot/config/env_utils.py \
             src/nifty_scalper_bot/execution/entry_geometry.py \
-            tests/core/test_direction_stability_20260904.py \
+            src/nifty_scalper_bot/strategies/orchestrator.py \
+            tests/config/test_live_risk_envelope.py \
             tests/execution/test_trade_economics_guardrails_20260904.py \
-            tests/config/test_live_risk_envelope.py
+            tests/strategies/test_direction_lock_persistence_20260907.py
           python -m black --check \
-            src/nifty_scalper_bot/core/direction_stability.py \
-            tests/core/test_direction_stability_20260904.py \
+            tests/config/test_live_risk_envelope.py \
             tests/execution/test_trade_economics_guardrails_20260904.py \
-            tests/config/test_live_risk_envelope.py
-          python - <<'PY'
-          from pathlib import Path
-          import ast
-          for name in (
-              'src/nifty_scalper_bot/config/env_utils.py',
-              'src/nifty_scalper_bot/config/settings.py',
-              'src/nifty_scalper_bot/risk/entry_guard_patch.py',
-              'src/nifty_scalper_bot/risk/risk_manager.py',
-              'src/nifty_scalper_bot/execution/order_manager_core.py',
-              'src/nifty_scalper_bot/core/strategy_manager.py',
-          ):
-              path = Path(name)
-              ast.parse(path.read_text(encoding='utf-8'), filename=name)
-          print('all changed production modules parse')
-          PY
+            tests/strategies/test_direction_lock_persistence_20260907.py
       - name: Full repository suite
         run: python -m pytest -q
       - name: Clean temporary implementation files
@@ -101,19 +74,18 @@ jobs:
           git status --short
           python - <<'PY'
           import subprocess
+
           allowed = {
-              '.env.example',
               'src/nifty_scalper_bot/config/env_utils.py',
               'src/nifty_scalper_bot/config/settings.py',
-              'src/nifty_scalper_bot/core/direction_stability.py',
-              'src/nifty_scalper_bot/core/strategy_manager.py',
               'src/nifty_scalper_bot/execution/entry_geometry.py',
               'src/nifty_scalper_bot/execution/order_manager_core.py',
               'src/nifty_scalper_bot/risk/entry_guard_patch.py',
               'src/nifty_scalper_bot/risk/risk_manager.py',
+              'src/nifty_scalper_bot/strategies/orchestrator.py',
               'tests/config/test_live_risk_envelope.py',
-              'tests/core/test_direction_stability_20260904.py',
               'tests/execution/test_trade_economics_guardrails_20260904.py',
+              'tests/strategies/test_direction_lock_persistence_20260907.py',
               'scripts/apply_trade_economics_guardrails_20260904.py',
               '.github/workflows/trade-economics-guardrails-once.yml',
           }
@@ -125,16 +97,25 @@ jobs:
           required = {
               'src/nifty_scalper_bot/config/env_utils.py',
               'src/nifty_scalper_bot/config/settings.py',
-              'src/nifty_scalper_bot/core/direction_stability.py',
-              'src/nifty_scalper_bot/core/strategy_manager.py',
               'src/nifty_scalper_bot/execution/entry_geometry.py',
               'src/nifty_scalper_bot/execution/order_manager_core.py',
               'src/nifty_scalper_bot/risk/entry_guard_patch.py',
               'src/nifty_scalper_bot/risk/risk_manager.py',
+              'src/nifty_scalper_bot/strategies/orchestrator.py',
+              'tests/config/test_live_risk_envelope.py',
+              'tests/execution/test_trade_economics_guardrails_20260904.py',
+              'tests/strategies/test_direction_lock_persistence_20260907.py',
           }
           missing = sorted(required - changed)
           if missing:
-              raise SystemExit(f'missing expected source changes: {missing}')
+              raise SystemExit(f'missing expected source/test changes: {missing}')
+          forbidden = {
+              'src/nifty_scalper_bot/core/direction_stability.py',
+              'tests/core/test_direction_stability_20260904.py',
+          }
+          leaked = sorted(changed & forbidden)
+          if leaked:
+              raise SystemExit(f'duplicate direction implementation leaked: {leaked}')
           print('validated final files:', sorted(changed))
           PY
       - name: Commit validated correction
@@ -142,5 +123,5 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add -A
-          git commit -m 'fix(trading): harden entry atomicity and live risk economics'
+          git commit -m 'fix(trading): harden live risk and entry invariants'
           git push origin HEAD:fix/trade-economics-guardrails-20260904
