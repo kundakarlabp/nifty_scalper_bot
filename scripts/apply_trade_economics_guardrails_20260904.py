@@ -59,6 +59,11 @@ entry_guard.write_text(text.replace(old_trip, new_trip, 1), encoding="utf-8")
 
 risk_manager = Path("src/nifty_scalper_bot/risk/risk_manager.py")
 text = risk_manager.read_text(encoding="utf-8")
+old_risk_imports = '''from nifty_scalper_bot.utils.logging import get_logger, log_once_or_throttled\nfrom nifty_scalper_bot.utils.metrics import Counter, Gauge'''
+new_risk_imports = '''from nifty_scalper_bot.utils.logging import get_logger, log_once_or_throttled\nfrom nifty_scalper_bot.utils.lot_size import (\n    resolve_lot_size as resolve_lot_size_with_source,\n)\nfrom nifty_scalper_bot.utils.metrics import Counter, Gauge'''
+if text.count(old_risk_imports) != 1:
+    raise SystemExit("risk_manager.py: canonical lot-size import anchor mismatch")
+text = text.replace(old_risk_imports, new_risk_imports, 1)
 old_max_open = '''        if max_open > 0 and open_positions > max_open:\n            self._trip_breaker(f"max_open_positions breached: {open_positions}/{max_open}")\n            self._last_rejection = f"MAX_OPEN:{open_positions}/{max_open}"\n            self._logger.critical("risk_failsafe_triggered", extra={"event": "risk_failsafe_triggered", "kind": "max_open_positions"})\n            return False'''
 new_max_open = '''        if max_open > 0 and open_positions >= max_open:\n            self._last_rejection = f"MAX_OPEN:{open_positions}/{max_open}"\n            if open_positions > max_open:\n                self._trip_breaker(f"max_open_positions breached: {open_positions}/{max_open}")\n                self._logger.critical("risk_failsafe_triggered", extra={"event": "risk_failsafe_triggered", "kind": "max_open_positions"})\n            else:\n                self._logger.info("risk_capacity_reached", extra={"event": "risk_capacity_reached", "kind": "max_open_positions", "open_positions": open_positions, "max_open_positions": max_open})\n            return False'''
 if text.count(old_max_open) != 1:
