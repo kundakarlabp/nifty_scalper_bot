@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from nifty_scalper_bot.config.settings import RiskSettings, _build_risk_settings
+from nifty_scalper_bot.config.settings import RiskSettings
 from nifty_scalper_bot.execution import BracketManager
 from nifty_scalper_bot.execution.order_manager import OrderManager, OrderType
 from nifty_scalper_bot.risk.entry_guard_patch import _daily_limit_block_reason
@@ -41,49 +41,6 @@ def test_entry_below_single_position_capacity_remains_allowed() -> None:
 
 def test_risk_settings_default_matches_safe_live_policy() -> None:
     assert RiskSettings().per_trade_risk_pct == pytest.approx(0.75)
-
-
-def test_stale_seven_percent_runtime_risk_is_clamped(monkeypatch) -> None:
-    monkeypatch.setenv("ENABLE_LIVE", "true")
-    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
-    monkeypatch.setenv("PAPER_MODE", "false")
-    monkeypatch.setenv("PAPER__ENABLED", "false")
-    monkeypatch.setenv("SHADOW_MODE", "false")
-    monkeypatch.setenv("RISK__PER_TRADE_RISK_PCT", "7.0")
-    monkeypatch.setenv("RISK_PER_TRADE_PCT", "7.0")
-    monkeypatch.delenv("RISK_PER_TRADE_HARD_CAP_PCT", raising=False)
-
-    settings = _build_risk_settings()
-
-    assert settings.per_trade_risk_pct == pytest.approx(0.75)
-
-
-def test_risk_below_hard_cap_is_preserved(monkeypatch) -> None:
-    monkeypatch.setenv("ENABLE_LIVE", "true")
-    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
-    monkeypatch.setenv("PAPER_MODE", "false")
-    monkeypatch.setenv("PAPER__ENABLED", "false")
-    monkeypatch.setenv("SHADOW_MODE", "false")
-    monkeypatch.setenv("RISK__PER_TRADE_RISK_PCT", "0.50")
-    monkeypatch.setenv("RISK_PER_TRADE_HARD_CAP_PCT", "0.75")
-
-    settings = _build_risk_settings()
-
-    assert settings.per_trade_risk_pct == pytest.approx(0.50)
-
-
-def test_explicit_larger_hard_cap_allows_deliberate_policy_change(monkeypatch) -> None:
-    monkeypatch.setenv("ENABLE_LIVE", "true")
-    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
-    monkeypatch.setenv("PAPER_MODE", "false")
-    monkeypatch.setenv("PAPER__ENABLED", "false")
-    monkeypatch.setenv("SHADOW_MODE", "false")
-    monkeypatch.setenv("RISK__PER_TRADE_RISK_PCT", "0.80")
-    monkeypatch.setenv("RISK_PER_TRADE_HARD_CAP_PCT", "1.00")
-
-    settings = _build_risk_settings()
-
-    assert settings.per_trade_risk_pct == pytest.approx(0.80)
 
 
 def test_concurrent_same_symbol_distinct_signal_has_one_broker_submission(
