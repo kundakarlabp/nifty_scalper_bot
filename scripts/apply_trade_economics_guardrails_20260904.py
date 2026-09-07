@@ -37,18 +37,33 @@ replace_once(
     '''        per_trade_risk_pct=_env_float(\n            "RISK__PER_TRADE_RISK_PCT",\n            "RISK_PER_TRADE_PCT",\n            default=0.75,\n            minimum=0.0,\n        ),''',
 )
 
-# 2) Prospective single-position limit. can_trade/_daily_limit_block_reason are
-# entry gates, so 1/1 must reject the next risk-increasing entry.
+# 2) Prospective single-position limit. Capacity is a normal entry rejection,
+# not a global circuit-breaker event. A true >max invariant violation still trips.
 replace_once(
     "src/nifty_scalper_bot/risk/entry_guard_patch.py",
     "if open_positions > max_open:",
     "if open_positions >= max_open:",
 )
-replace_once(
-    "src/nifty_scalper_bot/risk/risk_manager.py",
-    "if max_open > 0 and open_positions > max_open:",
-    "if max_open > 0 and open_positions >= max_open:",
-)
+entry_guard = Path("src/nifty_scalper_bot/risk/entry_guard_patch.py")
+text = entry_guard.read_text(encoding="utf-8")
+old_helper_tail = '''    return None\n\n\ndef _stop_reentry_block_reason(position_manager: Any, signal: Any) -> str | None:'''
+new_helper_tail = '''    return None\n\n\ndef _daily_limit_should_trip_breaker(manager: Any, code: str) -> bool:\n    if not str(code or "").startswith("MAX_OPEN:"):\n        return True\n    settings = getattr(manager, "settings", None)\n    position_manager = getattr(manager, "position_manager", None)\n    max_open = int(getattr(settings, "max_open_positions", 0) or 0)\n    if max_open <= 0 or position_manager is None:\n        return False\n    return _open_position_count(position_manager) > max_open\n\n\ndef _stop_reentry_block_reason(position_manager: Any, signal: Any) -> str | None:'''
+if text.count(old_helper_tail) != 1:
+    raise SystemExit("entry_guard_patch.py: helper insertion mismatch")
+text = text.replace(old_helper_tail, new_helper_tail, 1)
+old_trip = '''            trip = getattr(self, "_trip_breaker", None)\n            if callable(trip):\n                with suppress(Exception):\n                    trip(reason)'''
+new_trip = '''            trip = getattr(self, "_trip_breaker", None)\n            if _daily_limit_should_trip_breaker(self, code) and callable(trip):\n                with suppress(Exception):\n                    trip(reason)'''
+if text.count(old_trip) != 1:
+    raise SystemExit("entry_guard_patch.py: breaker call mismatch")
+entry_guard.write_text(text.replace(old_trip, new_trip, 1), encoding="utf-8")
+
+risk_manager = Path("src/nifty_scalper_bot/risk/risk_manager.py")
+text = risk_manager.read_text(encoding="utf-8")
+old_max_open = '''        if max_open > 0 and open_positions > max_open:\n            self._trip_breaker(f"max_open_positions breached: {open_positions}/{max_open}")\n            self._last_rejection = f"MAX_OPEN:{open_positions}/{max_open}"\n            self._logger.critical("risk_failsafe_triggered", extra={"event": "risk_failsafe_triggered", "kind": "max_open_positions"})\n            return False'''
+new_max_open = '''        if max_open > 0 and open_positions >= max_open:\n            self._last_rejection = f"MAX_OPEN:{open_positions}/{max_open}"\n            if open_positions > max_open:\n                self._trip_breaker(f"max_open_positions breached: {open_positions}/{max_open}")\n                self._logger.critical("risk_failsafe_triggered", extra={"event": "risk_failsafe_triggered", "kind": "max_open_positions"})\n            else:\n                self._logger.info("risk_capacity_reached", extra={"event": "risk_capacity_reached", "kind": "max_open_positions", "open_positions": open_positions, "max_open_positions": max_open})\n            return False'''
+if text.count(old_max_open) != 1:
+    raise SystemExit("risk_manager.py: max-open block mismatch")
+risk_manager.write_text(text.replace(old_max_open, new_max_open, 1), encoding="utf-8")
 
 # 3) Keep the existing atomic entry reservation architecture, but attach an
 # owner identity. A distinct same-symbol signal cannot race the broker; the
