@@ -4,7 +4,6 @@ from types import SimpleNamespace
 
 from nifty_scalper_bot.strategies.orchestrator import StrategyOrchestrator
 
-
 CE = "NFO:NIFTY2690823950CE"
 PE = "NFO:NIFTY2690823950PE"
 
@@ -21,7 +20,9 @@ def _signal(symbol: str):
     return SimpleNamespace(symbol=symbol, action="BUY", confidence=0.90, metadata={})
 
 
-def test_direction_lock_survives_exit_and_blocks_fast_opposite_reentry(monkeypatch) -> None:
+def test_direction_lock_survives_exit_and_blocks_fast_opposite_reentry(
+    monkeypatch,
+) -> None:
     from nifty_scalper_bot.utils import market_hours
 
     monkeypatch.setattr(market_hours, "get_time_status_cached", lambda: (True, "open"))

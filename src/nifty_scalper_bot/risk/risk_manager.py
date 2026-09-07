@@ -18,6 +18,9 @@ from nifty_scalper_bot.infra.metrics import METRICS
 from nifty_scalper_bot.risk.limits import RiskSwitches
 from nifty_scalper_bot.utils.env import get_float
 from nifty_scalper_bot.utils.logging import get_logger, log_once_or_throttled
+from nifty_scalper_bot.utils.lot_size import (
+    resolve_lot_size as resolve_lot_size_with_source,
+)
 from nifty_scalper_bot.utils.metrics import Counter, Gauge
 from nifty_scalper_bot.utils.reasons import SOFT, canonical
 
@@ -1046,10 +1049,13 @@ class RiskManager:
             self._last_rejection = f"MAX_TRADES:{trades_today}/{max_trades}"
             self._logger.critical("risk_failsafe_triggered", extra={"event": "risk_failsafe_triggered", "kind": "max_trades_per_day"})
             return False
-        if max_open > 0 and open_positions > max_open:
-            self._trip_breaker(f"max_open_positions breached: {open_positions}/{max_open}")
+        if max_open > 0 and open_positions >= max_open:
             self._last_rejection = f"MAX_OPEN:{open_positions}/{max_open}"
-            self._logger.critical("risk_failsafe_triggered", extra={"event": "risk_failsafe_triggered", "kind": "max_open_positions"})
+            if open_positions > max_open:
+                self._trip_breaker(f"max_open_positions breached: {open_positions}/{max_open}")
+                self._logger.critical("risk_failsafe_triggered", extra={"event": "risk_failsafe_triggered", "kind": "max_open_positions"})
+            else:
+                self._logger.info("risk_capacity_reached", extra={"event": "risk_capacity_reached", "kind": "max_open_positions", "open_positions": open_positions, "max_open_positions": max_open})
             return False
         return True
 

@@ -938,6 +938,7 @@ class OrderManager:
         # Entries auto-expire after _ENTRY_INFLIGHT_TTL_SEC so a crashed
         # submission can never wedge the gate.
         self._entries_in_flight: dict[str, float] = {}
+        self._entry_inflight_owners: dict[str, str] = {}
         self._history: deque[OrderDetails] = deque(maxlen=1000)
         self._history_index: dict[str, int] = {}
         self._history_base_index = 0
@@ -3132,9 +3133,22 @@ class OrderManager:
                 for _sym, _ts in list(self._entries_in_flight.items()):
                     if _gate_now - _ts > self.ENTRY_INFLIGHT_TTL_SEC:
                         self._entries_in_flight.pop(_sym, None)
+                        self._entry_inflight_owners.pop(_sym, None)
+                _entry_owner = str(
+                    trade_lifecycle_id or client_order_id or signal_id or ""
+                ).strip()
                 conflict: str | None = None
                 for _sym in self._entries_in_flight:
                     if _sym != normalized_symbol:
+                        conflict = f"entry_in_flight:{_sym}"
+                        break
+                    existing_owner = self._entry_inflight_owners.get(_sym, "")
+                    same_recovery = bool(
+                        getattr(self, "_entry_recovery_active", False)
+                        and _entry_owner
+                        and existing_owner == _entry_owner
+                    )
+                    if not same_recovery:
                         conflict = f"entry_in_flight:{_sym}"
                         break
                 if conflict is None:
@@ -3193,6 +3207,10 @@ class OrderManager:
                 # second entry (CE vs PE) cannot pass the gate before this
                 # order is registered locally.
                 self._entries_in_flight[normalized_symbol] = _gate_now
+                if _entry_owner:
+                    self._entry_inflight_owners[normalized_symbol] = _entry_owner
+                else:
+                    self._entry_inflight_owners.pop(normalized_symbol, None)
 
         # ---------------------------------------------------------------------
         # 1. IDEMPOTENCY CHECK (The Fix for Duplicate Trades)
@@ -3811,6 +3829,7 @@ class OrderManager:
                     # single-position gate's in-flight reservation.
                     with self._lock:
                         self._entries_in_flight.pop(normalized_symbol, None)
+                        self._entry_inflight_owners.pop(normalized_symbol, None)
 
                     # C. Auto-Register Bracket
                     # SKIP if caller will register separately (e.g. place_bracket_order)

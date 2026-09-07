@@ -11,7 +11,6 @@ from nifty_scalper_bot.execution.order_manager import OrderManager, OrderType
 from nifty_scalper_bot.risk import OrderSignal, RiskManager
 from nifty_scalper_bot.risk.entry_guard_patch import _daily_limit_block_reason
 
-
 CE = "NFO:NIFTY2690823950CE"
 
 

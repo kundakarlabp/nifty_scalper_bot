@@ -131,6 +131,11 @@ class StrategyOrchestrator:
             return
         if self._has_open_position_for_locked_symbol(position_manager):
             return
+        import time as _t
+
+        cooldown = parse_float_env(os.getenv("DIRECTION_LOCK_SECONDS"), 10.0)
+        if _t.time() - self._direction_lock_time < cooldown:
+            return
         self.clear_direction_lock(reason="resolved_bias_flip", symbol=symbol)
 
     def register_strategy(
@@ -278,7 +283,11 @@ class StrategyOrchestrator:
             _dir_cooldown = parse_float_env(os.getenv("DIRECTION_LOCK_SECONDS"), 10.0)
 
             if self._active_direction and not self._has_open_position_for_locked_symbol(position_manager):
-                self.clear_direction_lock(reason="stale_lock_no_open_position", symbol=symbol)
+                _time_since_lock = _t.time() - self._direction_lock_time
+                if _time_since_lock >= _dir_cooldown:
+                    self.clear_direction_lock(
+                        reason="direction_lock_expired", symbol=symbol
+                    )
 
             if _direction and self._active_direction:
                 _time_since_lock = _t.time() - self._direction_lock_time
@@ -494,7 +503,17 @@ class StrategyOrchestrator:
         with self._lock:
             self._active.pop(normalized, None)
             self._pending_underlyings.pop(normalized, None)
-            self.clear_direction_lock(reason="notify_exit", symbol=normalized)
+        if self._active_direction:
+            self._logger.info(
+                "DIRECTION_LOCK_RETAINED_AFTER_EXIT direction=%s symbol=%s",
+                self._active_direction,
+                self._active_direction_symbol,
+                extra={
+                    "event": "orchestrator_direction_lock_retained_after_exit",
+                    "direction": self._active_direction,
+                    "symbol": self._active_direction_symbol,
+                },
+            )
         self._logger.info(
             "Condition met: orchestrator_release",
             extra={"event": "orchestrator_release", "underlying": normalized},
