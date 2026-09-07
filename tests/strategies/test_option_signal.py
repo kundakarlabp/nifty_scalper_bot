@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from nifty_scalper_bot.strategies.option_signal import (
     _PRIOR_OI,
+    _PRIOR_PRICE,
     score_option_candidate,
 )
 
 
 def setup_function() -> None:
     _PRIOR_OI.clear()
+    _PRIOR_PRICE.clear()
 
 
 def test_missing_metrics_is_neutral() -> None:
@@ -24,13 +26,31 @@ def test_rich_iv_penalized_cheap_iv_rewarded() -> None:
     assert delta == 0.5 and any("iv_reasonable" in r for r in reasons)
 
 
-def test_oi_buildup_rewarded_on_second_observation() -> None:
-    d1, _ = score_option_candidate("SYM3CE", {"oi": 100000})
-    assert d1 == 0.0  # first sight: no prior
-    d2, reasons = score_option_candidate("SYM3CE", {"oi": 105000})
-    assert d2 == 0.5 and "oi_buildup" in reasons
-    d3, reasons = score_option_candidate("SYM3CE", {"oi": 100000})
-    assert d3 == -0.25 and "oi_unwinding" in reasons
+def test_oi_buildup_requires_premium_confirmation() -> None:
+    d1, _ = score_option_candidate("SYM3CE", {"oi": 100000, "ltp": 100.0})
+    assert d1 == 0.0
+
+    d2, reasons = score_option_candidate("SYM3CE", {"oi": 105000, "ltp": 102.0})
+    assert d2 == 0.5
+    assert "oi_buildup_price_confirmed" in reasons
+
+    d3, reasons = score_option_candidate("SYM3CE", {"oi": 110000, "ltp": 99.0})
+    assert d3 == -0.5
+    assert "oi_buildup_price_divergence" in reasons
+
+
+def test_oi_change_without_price_context_is_neutral() -> None:
+    score_option_candidate("SYM_OI_ONLY", {"oi": 100000})
+    delta, reasons = score_option_candidate("SYM_OI_ONLY", {"oi": 105000})
+    assert delta == 0.0
+    assert "oi_change_unconfirmed" in reasons
+
+
+def test_oi_unwinding_is_not_directional_without_price_confirmation() -> None:
+    score_option_candidate("SYM_UNWIND", {"oi": 100000, "ltp": 100.0})
+    delta, reasons = score_option_candidate("SYM_UNWIND", {"oi": 95000, "ltp": 101.0})
+    assert delta == 0.0
+    assert "oi_unwinding_context" in reasons
 
 
 def test_depth_imbalance() -> None:
@@ -43,10 +63,10 @@ def test_depth_imbalance() -> None:
 
 
 def test_delta_clamped_and_disable_env(monkeypatch) -> None:
-    score_option_candidate("SYM6CE", {"oi": 100000})
+    score_option_candidate("SYM6CE", {"oi": 100000, "ltp": 100.0})
     delta, _ = score_option_candidate(
         "SYM6CE",
-        {"iv": 0.20, "oi": 110000,
+        {"iv": 0.20, "oi": 110000, "ltp": 102.0,
          "depth": {"buy": [{"quantity": 5000}], "sell": [{"quantity": 1000}]}},
     )
     assert delta == 1.5  # 0.5+0.5+0.5 clamped at +1.5
@@ -56,5 +76,5 @@ def test_delta_clamped_and_disable_env(monkeypatch) -> None:
 
 
 def test_malformed_inputs_never_raise() -> None:
-    delta, _ = score_option_candidate("SYM7CE", {"iv": "bad", "oi": object(), "depth": "junk"})
+    delta, _ = score_option_candidate("SYM7CE", {"iv": "bad", "oi": object(), "ltp": object(), "depth": "junk"})
     assert delta == 0.0
