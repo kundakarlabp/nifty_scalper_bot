@@ -1,5 +1,6 @@
 from pathlib import Path
 
+# One-shot TDD transform; removed after the validated production change lands.
 runner_path = Path("src/nifty_scalper_bot/strategies/runner.py")
 runner = runner_path.read_text()
 old = '''                    plan = TradePlan(\n                        symbol=symbol,\n                        side=side,\n                        quantity=normalized_qty,\n                        entry_price=order_price,\n                        stop_loss=stop_loss,\n                        take_profit=take_profit,\n                        strategy_name="runner",\n                        tag=f"runner_{side.lower()}",\n                        allow_market_entry=False,\n                        intent="ENTRY",\n                        intended_position_side="LONG" if side == "BUY" else "SHORT",\n                    )'''
