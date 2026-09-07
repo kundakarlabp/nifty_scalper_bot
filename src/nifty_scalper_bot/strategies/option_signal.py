@@ -1,20 +1,21 @@
 """Option-native candidate scoring: IV richness, OI/price confirmation, depth imbalance.
 
-Underlying direction is owned elsewhere.  This module only answers whether a
-candidate option is a good expression of that direction.  OI is therefore not
+Underlying direction is owned elsewhere. This module only answers whether a
+candidate option is a good expression of that direction. OI is therefore not
 treated as directional by itself: rising OI supports a long-premium candidate
-only when the premium is also rising, while rising OI against a falling premium
-is adverse divergence.  Static book imbalance remains a small confirmation,
-not entry authority.
+only when the premium also moves meaningfully higher, while rising OI against a
+meaningful premium fall is adverse divergence. Sub-noise premium changes are
+neutral. Static book imbalance remains a small confirmation, not entry authority.
 
 Every input is optional. Missing evidence is neutral and never crashes or
 manufactures a signal.
 
 Env overrides:
-- OPTION_SIGNAL_ENABLED   (default true)
-- OPTION_IV_RICH          (default 0.60: IV above this is penalized)
-- OPTION_IV_CHEAP         (default 0.30: IV below this is rewarded)
-- OPTION_DEPTH_IMBALANCE  (default 1.5: bid/ask qty ratio for support)
+- OPTION_SIGNAL_ENABLED          (default true)
+- OPTION_IV_RICH                 (default 0.60: IV above this is penalized)
+- OPTION_IV_CHEAP                (default 0.30: IV below this is rewarded)
+- OPTION_DEPTH_IMBALANCE         (default 1.5: bid/ask qty ratio for support)
+- OPTION_OI_MIN_PRICE_MOVE_PCT   (default 0.002: minimum premium move fraction)
 """
 
 from __future__ import annotations
@@ -54,6 +55,19 @@ def _premium(metrics: dict[str, Any]) -> float | None:
     if bid is not None and ask is not None and bid > 0 and ask >= bid:
         return (bid + ask) / 2.0
     return None
+
+
+def _premium_noise_floor(metrics: dict[str, Any], price: float) -> float:
+    """Return minimum meaningful premium move as a fraction of prior premium."""
+    configured = max(
+        0.0,
+        parse_float_env(os.getenv("OPTION_OI_MIN_PRICE_MOVE_PCT"), 0.002),
+    )
+    bid, ask = _f(metrics.get("bid")), _f(metrics.get("ask"))
+    if bid is None or ask is None or bid <= 0 or ask < bid or price <= 0:
+        return configured
+    half_spread_fraction = ((ask - bid) / 2.0) / price
+    return max(configured, half_spread_fraction)
 
 
 def _prune_cache() -> None:
@@ -97,17 +111,18 @@ def score_option_candidate(symbol: str, metrics: dict[str, Any] | None) -> tuple
                     reasons.append("oi_change_unconfirmed")
                 elif oi_change > 0:
                     price_change = (price - prior_price) / prior_price
-                    if price_change > 0:
+                    noise_floor = _premium_noise_floor(metrics, prior_price)
+                    if abs(price_change) < noise_floor:
+                        reasons.append("oi_buildup_price_noise")
+                    elif price_change > 0:
                         delta += 0.5
                         reasons.append("oi_buildup_price_confirmed")
-                    elif price_change < 0:
+                    else:
                         delta -= 0.5
                         reasons.append("oi_buildup_price_divergence")
-                    else:
-                        reasons.append("oi_buildup_price_flat")
                 else:
                     # Falling OI can represent either long liquidation or short
-                    # covering.  Without participant-side data it is context,
+                    # covering. Without participant-side data it is context,
                     # not a directional long-premium signal.
                     reasons.append("oi_unwinding_context")
         _PRIOR_OI[symbol] = oi
