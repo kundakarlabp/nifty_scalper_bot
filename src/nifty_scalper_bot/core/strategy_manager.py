@@ -3,7 +3,14 @@
 Runtime role:
 - Evaluates strategies using prepared DataHub/ActiveContractBasket context.
 - Propagates selected option/futures context to strategy code.
-- Must not select contracts or call broker instruments."""
+- Must not select contracts or call broker instruments.
+
+Direction-authority invariant:
+- OPTION PREMIUM DATA MUST NEVER AUTHORIZE UNDERLYING DIRECTION.
+- Only fresh NIFTY spot/futures context may authorize CE/PE direction.
+- Direction, confidence, freshness age and source are one atomic observation.
+- Fresh spot/futures disagreement fails closed; source order never breaks ties.
+- The final option combiner gate independently revalidates direction alignment."""
 
 from __future__ import annotations
 
@@ -26,6 +33,10 @@ from nifty_scalper_bot.core.adaptive_calibration import (
 )
 from nifty_scalper_bot.core.market_regime import RegimeSnapshot
 from nifty_scalper_bot.core.market_regime_manager import MarketRegimeManager
+from nifty_scalper_bot.core.underlying_direction import (
+    UnderlyingDirectionObservation,
+    arbitrate_underlying_direction,
+)
 from nifty_scalper_bot.infra.metrics import METRICS
 from nifty_scalper_bot.instruments.active_contracts import canonical_nifty_future_symbol
 from nifty_scalper_bot.strategies.elite_strategies.base_elite import EliteStrategy
@@ -3046,112 +3057,189 @@ class StrategyManager(_BaseStrategyManager):
                 indicators.setdefault("spot_context", spot_ctx)
             if fut_fresh:
                 indicators["futures_context"] = fut_ctx
-            direction_bias = (indicators.get("direction_bias") or indicators.get("underlying_direction_bias") or (spot_ctx.get("direction_bias") if spot_usable else None) or (fut_ctx.get("direction_bias") if fut_usable else None))
-            direction_confidence = (indicators.get("underlying_direction_confidence") or (spot_ctx.get("underlying_direction_confidence") if spot_usable else None) or (fut_ctx.get("underlying_direction_confidence") if fut_usable else None) or 0.0)
+            # Underlying direction is an independent market-context authority.
+            # Option-premium indicators may trigger a setup but must never authorize
+            # the NIFTY direction used to choose CE versus PE.
+            def _resolve_underlying_observation(
+                ctx: t.Mapping[str, t.Any],
+                *,
+                source: str,
+                fresh: bool,
+                direction_valid: bool,
+                tick_age_s: float | None,
+            ) -> UnderlyingDirectionObservation | None:
+                if not fresh or not ctx:
+                    return None
+                bias: t.Any = None
+                confidence: t.Any = 0.0
+                if direction_valid:
+                    bias = ctx.get("direction_bias") or ctx.get("underlying_direction_bias")
+                    confidence = ctx.get("underlying_direction_confidence") or 0.0
+                else:
+                    # Re-derive only from raw source evidence. Removing previously
+                    # derived fields prevents a stale/self-referential bias from
+                    # being accepted as independent fallback evidence.
+                    raw_ctx = dict(ctx)
+                    for key in (
+                        "direction_bias",
+                        "underlying_direction_bias",
+                        "underlying_direction_confidence",
+                        "direction_context_reasons",
+                    ):
+                        raw_ctx.pop(key, None)
+                    bias, confidence, _reasons = self._derive_context_direction(
+                        raw_ctx,
+                        role=str(ctx.get("role") or source),
+                    )
+                bias_norm = str(bias or "").upper()
+                if bias_norm not in {"CE", "PE"}:
+                    return None
+                age_s = tick_age_s
+                if age_s is None:
+                    try:
+                        ts = float(ctx.get("timestamp") or ctx.get("context_timestamp_epoch") or 0.0)
+                        age_s = max(0.0, now_ts - ts) if ts > 0 else None
+                    except (TypeError, ValueError):
+                        age_s = None
+                if age_s is None or age_s > max_context_age:
+                    return None
+                try:
+                    confidence_value = float(confidence or 0.0)
+                except (TypeError, ValueError):
+                    confidence_value = 0.0
+                return UnderlyingDirectionObservation(
+                    bias=bias_norm,
+                    confidence=confidence_value,
+                    age_seconds=max(0.0, float(age_s)),
+                    source=source,
+                )
+
+            # Discard any option-local direction before resolving the underlying.
+            # This is deliberate even if upstream copied a context bias into the
+            # option snapshot: the authoritative value is reconstructed atomically
+            # from the current spot/futures snapshots below.
+            indicators.pop("direction_bias", None)
+            indicators.pop("underlying_direction_bias", None)
+            indicators.pop("underlying_direction_confidence", None)
+            indicators.pop("context_age_seconds", None)
+            indicators.pop("context_fresh", None)
+            indicators.pop("direction_context_source", None)
+
+            spot_observation = _resolve_underlying_observation(
+                spot_ctx,
+                source="spot_context",
+                fresh=spot_fresh,
+                direction_valid=spot_direction_valid,
+                tick_age_s=spot_tick_age_s,
+            )
+            futures_observation = _resolve_underlying_observation(
+                fut_ctx,
+                source="futures_context",
+                fresh=fut_fresh,
+                direction_valid=fut_direction_valid,
+                tick_age_s=fut_tick_age_s,
+            )
+            resolution = arbitrate_underlying_direction(
+                spot_observation,
+                futures_observation,
+            )
             context_resolved = False
             direction_context_source: str | None = None
-            if str(direction_bias or "").upper() in {"CE", "PE"}:
-                indicators["direction_bias"] = str(direction_bias).upper()
-                indicators["underlying_direction_bias"] = str(direction_bias).upper()
-                try:
-                    indicators["underlying_direction_confidence"] = float(direction_confidence)
-                except (TypeError, ValueError):
-                    indicators["underlying_direction_confidence"] = 0.0
-                indicators["context_age_seconds"] = min(now_ts - float(spot_ctx.get("timestamp", now_ts)) if spot_usable else max_context_age + 1, now_ts - float(fut_ctx.get("timestamp", now_ts)) if fut_usable else max_context_age + 1)
-                indicators["context_fresh"] = bool(float(indicators.get("context_age_seconds") or max_context_age + 1) <= max_context_age)
-                indicators["direction_context_source"] = "primary"
-                context_resolved = bool(indicators["context_fresh"])
-                direction_context_source = "primary"
+            if resolution.conflict:
+                indicators["context_fresh"] = False
+                indicators["direction_context_source"] = "spot_futures_conflict"
+                direction_context_source = "spot_futures_conflict"
                 log_throttled(
                     log,
-                    f"direction_context_resolved_primary:{symbol}",
-                    "DIRECTION_CONTEXT_RESOLVED source=primary bias=%s confidence=%.2f age_s=%.2f symbol=%s",
-                    indicators["direction_bias"],
-                    float(indicators.get("underlying_direction_confidence") or 0.0),
-                    float(indicators.get("context_age_seconds") or 999.0),
+                    f"direction_context_conflict:{symbol}",
+                    "DIRECTION_CONTEXT_CONFLICT_FAIL_CLOSED symbol=%s spot_bias=%s futures_bias=%s spot_age_s=%s futures_age_s=%s",
                     symbol,
+                    spot_observation.bias if spot_observation else None,
+                    futures_observation.bias if futures_observation else None,
+                    spot_observation.age_seconds if spot_observation else None,
+                    futures_observation.age_seconds if futures_observation else None,
+                    interval_sec=30.0,
+                    level=logging.WARNING,
+                    extra={
+                        "event": "DIRECTION_CONTEXT_CONFLICT_FAIL_CLOSED",
+                        "symbol": symbol,
+                        "spot_bias": spot_observation.bias if spot_observation else None,
+                        "futures_bias": futures_observation.bias if futures_observation else None,
+                    },
+                )
+            elif resolution.observation is not None:
+                observation = resolution.observation
+                indicators["direction_bias"] = observation.bias
+                indicators["underlying_direction_bias"] = observation.bias
+                indicators["underlying_direction_confidence"] = observation.confidence
+                indicators["context_age_seconds"] = observation.age_seconds
+                indicators["context_fresh"] = True
+                indicators["direction_context_source"] = observation.source
+                if resolution.confirming_source:
+                    indicators["direction_context_confirming_source"] = resolution.confirming_source
+                direction_context_source = observation.source
+                context_resolved = True
+                log_throttled(
+                    log,
+                    f"direction_context_resolved:{symbol}",
+                    "DIRECTION_CONTEXT_RESOLVED source=%s bias=%s confidence=%.2f age_s=%.2f symbol=%s confirming_source=%s",
+                    observation.source,
+                    observation.bias,
+                    observation.confidence,
+                    observation.age_seconds,
+                    symbol,
+                    resolution.confirming_source,
                     interval_sec=30.0,
                     level=logging.INFO,
                 )
             else:
-                fallback_ctx = spot_ctx if spot_fresh else fut_ctx if fut_fresh else {}
-                fallback_direction, fallback_conf, fallback_reasons = self._derive_context_direction(
-                    fallback_ctx,
-                    role=str(fallback_ctx.get("role") or "spot_context"),
+                indicators["context_fresh"] = False
+                indicators["direction_context_source"] = "unresolved"
+                direction_context_source = "unresolved"
+
+            if not context_resolved:
+                log_throttled(
+                    log,
+                    f"option_underlying_context_missing:{symbol}",
+                    "OPTION_UNDERLYING_CONTEXT_MISSING symbol=%s spot_ctx_present=%s futures_ctx_present=%s spot_ctx_age=%s futures_ctx_age=%s selected_ce=%s selected_pe=%s",
+                    symbol,
+                    bool(spot_ctx),
+                    bool(fut_ctx),
+                    (now_ts - float(spot_ctx.get("timestamp", now_ts))) if spot_ctx else None,
+                    (now_ts - float(fut_ctx.get("timestamp", now_ts))) if fut_ctx else None,
+                    indicators.get("selected_ce"),
+                    indicators.get("selected_pe"),
+                    interval_sec=30.0,
+                    level=logging.INFO,
                 )
-                if str(fallback_direction or "").upper() in {"CE", "PE"}:
-                    fallback_age = (
-                        min(v for v in [spot_tick_age_s, fut_tick_age_s] if v is not None)
-                        if any(v is not None for v in [spot_tick_age_s, fut_tick_age_s])
-                        else (
-                            now_ts - float(fallback_ctx.get("timestamp", now_ts))
-                            if fallback_ctx
-                            else max_context_age + 1
-                        )
-                    )
-                    indicators["direction_bias"] = str(fallback_direction).upper()
-                    indicators["underlying_direction_bias"] = str(fallback_direction).upper()
-                    indicators["underlying_direction_confidence"] = float(max(fallback_conf, 0.05))
-                    indicators["context_age_seconds"] = float(max(0.0, fallback_age))
-                    indicators["context_fresh"] = bool(indicators["context_age_seconds"] <= max_context_age)
-                    indicators["direction_context_source"] = "fallback"
-                    indicators["direction_context_reasons"] = fallback_reasons
-                    direction_context_source = "fallback"
-                    context_resolved = bool(indicators["context_fresh"])
-                    log_throttled(
-                        log,
-                        f"direction_context_resolved_fallback:{symbol}",
-                        "DIRECTION_CONTEXT_RESOLVED source=fallback bias=%s confidence=%.2f age_s=%.2f symbol=%s reasons=%s",
-                        indicators["direction_bias"],
-                        float(indicators.get("underlying_direction_confidence") or 0.0),
-                        float(indicators.get("context_age_seconds") or 999.0),
-                        symbol,
-                        fallback_reasons,
-                        interval_sec=30.0,
-                        level=logging.INFO,
-                    )
-                if not context_resolved:
-                    log_throttled(
-                        log,
-                        f"option_underlying_context_missing:{symbol}",
-                        "OPTION_UNDERLYING_CONTEXT_MISSING symbol=%s spot_ctx_present=%s futures_ctx_present=%s spot_ctx_age=%s futures_ctx_age=%s selected_ce=%s selected_pe=%s",
-                        symbol,
-                        bool(spot_ctx),
-                        bool(fut_ctx),
-                        (now_ts - float(spot_ctx.get("timestamp", now_ts))) if spot_ctx else None,
-                        (now_ts - float(fut_ctx.get("timestamp", now_ts))) if fut_ctx else None,
-                        indicators.get("selected_ce"),
-                        indicators.get("selected_pe"),
-                        interval_sec=30.0,
-                        level=logging.INFO,
-                    )
-                    log_throttled(
-                        log,
-                        f"option_context_missing_direction_bias:{symbol}",
-                        "OPTION_CONTEXT_MISSING_DIRECTION_BIAS symbol=%s spot_fresh=%s fut_fresh=%s spot_direction_valid=%s fut_direction_valid=%s",
-                        symbol,
-                        spot_fresh,
-                        fut_fresh,
-                        spot_direction_valid,
-                        fut_direction_valid,
-                        interval_sec=30.0,
-                        level=logging.INFO,
-                        extra={
-                            "event": "OPTION_CONTEXT_MISSING_DIRECTION_BIAS",
-                            "symbol": symbol,
-                            "spot_fresh": spot_fresh,
-                            "fut_fresh": fut_fresh,
-                            "spot_direction_valid": spot_direction_valid,
-                            "fut_direction_valid": fut_direction_valid,
-                            "spot_direction_reasons": spot_ctx.get("direction_context_reasons"),
-                            "fut_direction_reasons": fut_ctx.get("direction_context_reasons"),
-                            "spot_ctx_keys": sorted(list(spot_ctx.keys())),
-                            "fut_ctx_keys": sorted(list(fut_ctx.keys())),
-                            "spot_tick_age_ms": spot_ctx.get("tick_age_ms"),
-                            "futures_tick_age_ms": fut_ctx.get("tick_age_ms"),
-                            "direction_context_source": direction_context_source,
-                        },
-                    )
+                log_throttled(
+                    log,
+                    f"option_context_missing_direction_bias:{symbol}",
+                    "OPTION_CONTEXT_MISSING_DIRECTION_BIAS symbol=%s spot_fresh=%s fut_fresh=%s spot_direction_valid=%s fut_direction_valid=%s",
+                    symbol,
+                    spot_fresh,
+                    fut_fresh,
+                    spot_direction_valid,
+                    fut_direction_valid,
+                    interval_sec=30.0,
+                    level=logging.INFO,
+                    extra={
+                        "event": "OPTION_CONTEXT_MISSING_DIRECTION_BIAS",
+                        "symbol": symbol,
+                        "spot_fresh": spot_fresh,
+                        "fut_fresh": fut_fresh,
+                        "spot_direction_valid": spot_direction_valid,
+                        "fut_direction_valid": fut_direction_valid,
+                        "spot_direction_reasons": spot_ctx.get("direction_context_reasons"),
+                        "fut_direction_reasons": fut_ctx.get("direction_context_reasons"),
+                        "spot_ctx_keys": sorted(list(spot_ctx.keys())),
+                        "fut_ctx_keys": sorted(list(fut_ctx.keys())),
+                        "spot_tick_age_ms": spot_ctx.get("tick_age_ms"),
+                        "futures_tick_age_ms": fut_ctx.get("tick_age_ms"),
+                        "direction_context_source": direction_context_source,
+                    },
+                )
+
             if fut_fresh and fut_ctx.get("futures_volume_ratio") is not None:
                 indicators["futures_volume_ratio"] = fut_ctx.get("futures_volume_ratio")
             if fut_fresh and fut_ctx.get("vwap") is not None:

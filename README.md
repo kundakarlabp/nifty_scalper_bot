@@ -39,6 +39,17 @@ InstrumentManager.load()
 → Execution trades options only
 ```
 
+### Underlying Direction Authority
+
+Direction used to authorize a NIFTY option entry is market context, not an
+option-premium feature. `StrategyManager` resolves it only from fresh NIFTY
+spot/futures snapshots. Direction, confidence, age and source are atomic:
+freshness from one source must never validate direction from another. Fresh
+spot/futures disagreement fails closed. Option-local CE/PE momentum remains
+valid setup evidence, but it cannot choose the underlying market direction.
+The final strategy-combiner alignment gate remains an independent fail-closed
+safety check before execution.
+
 ## Runtime Troubleshooting
 
 - `active_future_unresolved`: futures context is unavailable; option trading can continue when spot and option context are ready.
