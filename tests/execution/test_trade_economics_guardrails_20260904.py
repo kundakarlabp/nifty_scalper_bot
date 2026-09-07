@@ -8,6 +8,7 @@ import pytest
 from nifty_scalper_bot.config.settings import RiskSettings
 from nifty_scalper_bot.execution import BracketManager
 from nifty_scalper_bot.execution.order_manager import OrderManager, OrderType
+from nifty_scalper_bot.risk import OrderSignal, RiskManager
 from nifty_scalper_bot.risk.entry_guard_patch import _daily_limit_block_reason
 
 
@@ -37,6 +38,38 @@ def test_entry_below_single_position_capacity_remains_allowed() -> None:
     )
 
     assert _daily_limit_block_reason(manager) is None
+
+
+def test_capacity_rejection_does_not_trip_global_breaker(monkeypatch) -> None:
+    manager = RiskManager.__new__(RiskManager)
+    manager.settings = SimpleNamespace(max_trades_per_day=0, max_open_positions=1)
+    manager.position_manager = SimpleNamespace(
+        get_open_positions=lambda: [SimpleNamespace(symbol=CE, quantity=65)]
+    )
+    manager._last_rejection = None
+    manager._breaker_tripped = False
+    trips: list[str] = []
+    monkeypatch.setenv("PAPER_MODE", "true")
+    monkeypatch.setattr(
+        RiskManager, "_trip_breaker", lambda self, reason: trips.append(reason)
+    )
+
+    allowed, reason = manager.check_order(
+        OrderSignal(
+            symbol="NFO:NIFTY2690823950PE",
+            side="BUY",
+            quantity=65,
+            price=90.0,
+            stop_loss=84.0,
+            take_profit=104.0,
+        ),
+        live_enabled=True,
+    )
+
+    assert allowed is False
+    assert reason == "max_open_positions breached: 1/1"
+    assert manager._last_rejection == "MAX_OPEN:1/1"
+    assert trips == []
 
 
 def test_risk_settings_default_matches_safe_live_policy() -> None:
