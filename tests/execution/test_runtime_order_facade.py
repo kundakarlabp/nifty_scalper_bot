@@ -171,7 +171,7 @@ def test_managed_order_preserves_approved_strategy_name(monkeypatch) -> None:
     assert captured["strategy_name"] == "OrderFlow"
 
 
-def test_live_env_normalizes_per_trade_risk_to_seven_percent(monkeypatch) -> None:
+def test_live_env_normalizes_per_trade_risk_to_conservative_cap(monkeypatch) -> None:
     from nifty_scalper_bot.config.env_utils import normalise_live_env_defaults
 
     monkeypatch.setenv("ENABLE_LIVE", "true")
@@ -181,8 +181,8 @@ def test_live_env_normalizes_per_trade_risk_to_seven_percent(monkeypatch) -> Non
 
     normalise_live_env_defaults()
 
-    assert os.environ["RISK__PER_TRADE_RISK_PCT"] == "7.0"
-    assert os.environ["RISK_PER_TRADE_PCT"] == "7.0"
+    assert os.environ["RISK__PER_TRADE_RISK_PCT"] == "0.75"
+    assert os.environ["RISK_PER_TRADE_PCT"] == "0.75"
 
 
 def test_order_module_is_safe_when_imported_before_package() -> None:
