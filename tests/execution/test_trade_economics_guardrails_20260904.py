@@ -76,6 +76,18 @@ def test_risk_settings_default_matches_safe_live_policy() -> None:
     assert RiskSettings().per_trade_risk_pct == pytest.approx(0.75)
 
 
+def test_risk_manager_lot_size_resolver_uses_canonical_helper() -> None:
+    manager = RiskManager.__new__(RiskManager)
+    manager._lot_size_lookup = lambda _symbol: 65
+    manager._lot_size_symbol = CE
+    manager._logger = SimpleNamespace(
+        info=lambda *_args, **_kwargs: None,
+        error=lambda *_args, **_kwargs: None,
+    )
+
+    assert manager._resolve_lot_size(CE) == 65
+
+
 def test_concurrent_same_symbol_distinct_signal_has_one_broker_submission(
     monkeypatch, tmp_path
 ) -> None:
