@@ -1,8 +1,9 @@
-"""Fail-closed setup-quality and context-role gates for strategy combination.
+"""Compatibility wiring for the canonical strategy-vote policy.
 
-Context may confirm or veto a valid trigger, but it must never convert a setup
-that failed its own threshold into an entry. OrderFlow is permanently context
-only and cannot be promoted into a trigger.
+All setup/role policy lives in :mod:`strategy_vote_policy`.  This module is
+kept only as the existing import-time integration seam until StrategyManager's
+large legacy combiner can be edited directly without changing runtime import
+ordering.  It must not contain an independent threshold or role definition.
 """
 
 from __future__ import annotations
@@ -11,57 +12,24 @@ import dataclasses
 import logging
 from typing import Any, Mapping
 
+from nifty_scalper_bot.core.strategy_vote_policy import (
+    setup_gate_decision,
+    vote_role,
+)
 from nifty_scalper_bot.utils.logging import get_logger, log_throttled
 
 LOGGER = get_logger(__name__)
 
-_SCORE_KEYS = ("raw_setup_score", "setup_score", "strategy_score")
-_MIN_KEYS = ("setup_min", "setup_min_score", "trigger_min_score", "min_score")
-_CONTEXT_ONLY = frozenset({"orderflow"})
-
-
-def _float_from(metadata: Mapping[str, Any], keys: tuple[str, ...]) -> float | None:
-    for key in keys:
-        value = metadata.get(key)
-        if value is None:
-            continue
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            continue
-    return None
-
 
 def setup_gate_result(vote: Any) -> tuple[bool, float | None, float | None, str | None]:
-    """Return whether an explicit trigger setup contract passed."""
-    metadata = dict(getattr(vote, "metadata", {}) or {})
-    if str(metadata.get("role") or "trigger").strip().lower() == "context":
-        return True, None, None, None
-
-    score = _float_from(metadata, _SCORE_KEYS)
-    minimum = _float_from(metadata, _MIN_KEYS)
-    explicit_pass = metadata.get("setup_pass")
-    block_reason = str(metadata.get("trigger_block_reason") or "").strip() or None
-    has_contract = score is not None or minimum is not None or explicit_pass is not None
-
-    if not has_contract:
-        return True, score, minimum, None
-    if explicit_pass is False:
-        return False, score, minimum, block_reason or "setup_pass_false"
-    if block_reason in {"weak_score", "setup_below_minimum", "setup_failed"}:
-        return False, score, minimum, block_reason
-    if score is not None and minimum is not None and score < minimum:
-        return False, score, minimum, "setup_below_minimum"
-    return True, score, minimum, None
+    """Compatibility tuple view of the canonical setup-gate decision."""
+    decision = setup_gate_decision(vote)
+    return decision.passed, decision.score, decision.minimum, decision.reason
 
 
 def enforce_context_only_role(signal: Any, vote: Any) -> tuple[Any, bool]:
-    """Return a signal/vote pair with permanent context roles enforced safely."""
-    strategy = str(getattr(vote, "strategy", "") or "").strip().lower()
-    if strategy not in _CONTEXT_ONLY or getattr(signal, "action", None) in {
-        "CLOSE_LONG",
-        "CLOSE_SHORT",
-    }:
+    """Normalize a permanent context-only vote at the runtime integration seam."""
+    if vote_role(vote) != "context" or str(getattr(vote, "strategy", "") or "").strip().lower() != "orderflow" or getattr(signal, "action", None) in {"CLOSE_LONG", "CLOSE_SHORT"}:
         return signal, False
 
     enforced = {
@@ -82,9 +50,6 @@ def enforce_context_only_role(signal: Any, vote: Any) -> tuple[Any, bool]:
     vote_metadata.update(enforced)
     signal_metadata.update(enforced)
     vote.metadata = vote_metadata
-
-    # Signal is a frozen dataclass in production. Never assign signal.metadata;
-    # preserve immutability and return a replacement instead.
     with_metadata = getattr(signal, "with_metadata", None)
     if callable(with_metadata):
         signal = with_metadata(**enforced)
@@ -98,12 +63,12 @@ def enforce_context_only_role(signal: Any, vote: Any) -> tuple[Any, bool]:
 def filter_context_promotions(
     context_votes: list[tuple[Any, Any]],
 ) -> tuple[list[tuple[Any, Any]], list[str]]:
-    """Remove permanent context-only strategies from promotion candidates."""
+    """Exclude permanent context-only votes from legacy promotion machinery."""
     eligible: list[tuple[Any, Any]] = []
     blocked: list[str] = []
     for signal, vote in context_votes:
         strategy = str(getattr(vote, "strategy", "") or "").strip()
-        if strategy.lower() in _CONTEXT_ONLY:
+        if vote_role(vote) == "context" and strategy.lower() == "orderflow":
             blocked.append(strategy or "unknown")
         else:
             eligible.append((signal, vote))
@@ -111,6 +76,7 @@ def filter_context_promotions(
 
 
 def apply_patches() -> None:
+    """Wire canonical policy into the existing StrategyManager seam idempotently."""
     from nifty_scalper_bot.core import strategy_manager as strategy_module
 
     cls = strategy_module.StrategyManager
@@ -133,21 +99,17 @@ def apply_patches() -> None:
                 signal, role_changed = enforce_context_only_role(signal, vote)
                 if role_changed:
                     corrected.append(str(getattr(vote, "strategy", "unknown")))
-                metadata = dict(getattr(vote, "metadata", {}) or {})
-                role = str(metadata.get("role") or "trigger").strip().lower()
-                is_close = getattr(signal, "action", None) in {
-                    "CLOSE_LONG",
-                    "CLOSE_SHORT",
-                }
+                role = vote_role(vote)
+                is_close = getattr(signal, "action", None) in {"CLOSE_LONG", "CLOSE_SHORT"}
                 if role != "context" and not is_close:
-                    passed, score, minimum, reason = setup_gate_result(vote)
-                    if not passed:
+                    decision = setup_gate_decision(vote)
+                    if not decision.passed:
                         rejected.append(
                             {
                                 "strategy": getattr(vote, "strategy", None),
-                                "score": score,
-                                "minimum": minimum,
-                                "reason": reason,
+                                "score": decision.score,
+                                "minimum": decision.minimum,
+                                "reason": decision.reason,
                             }
                         )
                         continue
@@ -162,20 +124,12 @@ def apply_patches() -> None:
                     corrected,
                     interval_sec=30.0,
                     level=logging.WARNING,
-                    extra={
-                        "event": "PERMANENT_CONTEXT_ONLY_ROLE_ENFORCED",
-                        "symbol": str(symbol).upper(),
-                        "strategies": corrected,
-                    },
+                    extra={"event": "PERMANENT_CONTEXT_ONLY_ROLE_ENFORCED", "symbol": str(symbol).upper(), "strategies": corrected},
                 )
 
             trigger_exists = any(
-                str((getattr(vote, "metadata", {}) or {}).get("role") or "trigger")
-                .strip()
-                .lower()
-                != "context"
-                and getattr(signal, "action", None)
-                not in {"CLOSE_LONG", "CLOSE_SHORT"}
+                vote_role(vote) != "context"
+                and getattr(signal, "action", None) not in {"CLOSE_LONG", "CLOSE_SHORT"}
                 for signal, vote in eligible
             )
             if rejected and not trigger_exists:
@@ -187,11 +141,7 @@ def apply_patches() -> None:
                     rejected,
                     interval_sec=30.0,
                     level=logging.INFO,
-                    extra={
-                        "event": "HARD_SETUP_SCORE_GATE_BLOCKED",
-                        "symbol": str(symbol).upper(),
-                        "rejected": rejected,
-                    },
+                    extra={"event": "HARD_SETUP_SCORE_GATE_BLOCKED", "symbol": str(symbol).upper(), "rejected": rejected},
                 )
                 return None
             return original_combine(
@@ -226,26 +176,15 @@ def apply_patches() -> None:
                     blocked,
                     interval_sec=30.0,
                     level=logging.INFO,
-                    extra={
-                        "event": "PERMANENT_CONTEXT_ONLY_PROMOTION_BLOCKED",
-                        "symbol": str(symbol).upper(),
-                        "strategies": blocked,
-                    },
+                    extra={"event": "PERMANENT_CONTEXT_ONLY_PROMOTION_BLOCKED", "symbol": str(symbol).upper(), "strategies": blocked},
                 )
             if not eligible:
                 return None
-            return original_promotion(
-                self, symbol, eligible, indicators, mode_profile
-            )
+            return original_promotion(self, symbol, eligible, indicators, mode_profile)
 
         cls._permanent_context_only_original_promotion = original_promotion
         cls._try_context_promotion = _try_context_promotion
         cls._permanent_context_only_gate_installed = True
 
 
-__all__ = [
-    "apply_patches",
-    "enforce_context_only_role",
-    "filter_context_promotions",
-    "setup_gate_result",
-]
+__all__ = ["apply_patches", "enforce_context_only_role", "filter_context_promotions", "setup_gate_result"]
