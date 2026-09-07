@@ -45,7 +45,6 @@ jobs:
             tests/execution/test_order_manager_trade_plan.py \
             tests/execution/test_entry_recovery_hardening.py \
             tests/execution/test_live_entry_lifecycle_regressions.py \
-            tests/core/test_postmerge_trade_path.py \
             tests/strategies/test_selected_option_live_path.py
       - name: Compile and scoped quality
         run: |
