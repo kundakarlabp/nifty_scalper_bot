@@ -60,6 +60,27 @@ def test_materially_stronger_futures_can_override_weak_spot() -> None:
     assert resolved.confirming_source == "spot_context:weak_disagreement"
 
 
+def test_credible_opposition_is_transition_and_fails_closed_despite_large_gap() -> None:
+    resolved = arbitrate_underlying_direction(
+        _obs("PE", source="spot_context", age=0.2, confidence=0.69),
+        _obs("CE", source="futures_context", age=0.1, confidence=0.91),
+    )
+
+    assert resolved.conflict is True
+    assert resolved.observation is None
+
+
+def test_weak_disagreement_boundary_still_allows_dominant_source() -> None:
+    futures = _obs("PE", source="futures_context", age=0.1, confidence=0.90)
+    resolved = arbitrate_underlying_direction(
+        _obs("CE", source="spot_context", age=0.2, confidence=0.60),
+        futures,
+    )
+
+    assert resolved.conflict is False
+    assert resolved.observation is futures
+
+
 def test_low_conviction_disagreement_still_fails_closed() -> None:
     resolved = arbitrate_underlying_direction(
         _obs("PE", source="spot_context", age=0.2, confidence=0.68),
