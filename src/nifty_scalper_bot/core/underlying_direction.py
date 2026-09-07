@@ -60,7 +60,25 @@ def arbitrate_underlying_direction(
 
     if spot is not None and futures is not None:
         if spot.bias != futures.bias:
-            return UnderlyingDirectionResolution(observation=None, conflict=True)
+            # A disagreement is only actionable when both independent
+            # underlying sources carry comparable conviction. A weak/noisy
+            # secondary reading must not veto a materially stronger primary
+            # observation forever. Conversely, close-confidence disagreement
+            # remains ambiguous and therefore fails closed.
+            confidence_gap = abs(spot.confidence - futures.confidence)
+            dominance_gap = 0.20
+            if confidence_gap < dominance_gap:
+                return UnderlyingDirectionResolution(observation=None, conflict=True)
+            stronger = spot if spot.confidence > futures.confidence else futures
+            weaker = futures if stronger is spot else spot
+            # Require genuine conviction from the dominant source and keep the
+            # weaker source as disagreement provenance, not confirmation.
+            if stronger.confidence < 0.70:
+                return UnderlyingDirectionResolution(observation=None, conflict=True)
+            return UnderlyingDirectionResolution(
+                observation=stronger,
+                confirming_source=f"{weaker.source}:weak_disagreement",
+            )
         return UnderlyingDirectionResolution(
             observation=spot,
             confirming_source=futures.source,

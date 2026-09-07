@@ -28,12 +28,43 @@ def test_spot_and_futures_agreement_preserves_spot_atomic_provenance() -> None:
     assert resolved.confirming_source == "futures_context"
 
 
-def test_fresh_spot_futures_direction_disagreement_fails_closed() -> None:
+def test_comparable_spot_futures_direction_disagreement_fails_closed() -> None:
     resolved = arbitrate_underlying_direction(
-        _obs("CE", source="spot_context", age=0.4),
-        _obs("PE", source="futures_context", age=0.1),
+        _obs("CE", source="spot_context", age=0.4, confidence=0.82),
+        _obs("PE", source="futures_context", age=0.1, confidence=0.74),
     )
 
+    assert resolved.conflict is True
+    assert resolved.observation is None
+
+
+def test_materially_stronger_spot_wins_weak_futures_disagreement() -> None:
+    spot = _obs("PE", source="spot_context", age=0.2, confidence=0.90)
+    resolved = arbitrate_underlying_direction(
+        spot,
+        _obs("CE", source="futures_context", age=0.1, confidence=0.58),
+    )
+    assert resolved.conflict is False
+    assert resolved.observation is spot
+    assert resolved.confirming_source == "futures_context:weak_disagreement"
+
+
+def test_materially_stronger_futures_can_win_weak_spot_disagreement() -> None:
+    futures = _obs("CE", source="futures_context", age=0.1, confidence=0.91)
+    resolved = arbitrate_underlying_direction(
+        _obs("PE", source="spot_context", age=0.2, confidence=0.60),
+        futures,
+    )
+    assert resolved.conflict is False
+    assert resolved.observation is futures
+    assert resolved.confirming_source == "spot_context:weak_disagreement"
+
+
+def test_low_conviction_disagreement_still_fails_closed() -> None:
+    resolved = arbitrate_underlying_direction(
+        _obs("PE", source="spot_context", age=0.2, confidence=0.68),
+        _obs("CE", source="futures_context", age=0.1, confidence=0.45),
+    )
     assert resolved.conflict is True
     assert resolved.observation is None
 
