@@ -39,6 +39,22 @@ def test_oi_buildup_requires_premium_confirmation() -> None:
     assert "oi_buildup_price_divergence" in reasons
 
 
+def test_oi_buildup_ignores_sub_noise_premium_move(monkeypatch) -> None:
+    monkeypatch.setenv("OPTION_OI_MIN_PRICE_MOVE_PCT", "0.002")
+    score_option_candidate("SYM_NOISE", {"oi": 100000, "ltp": 100.0})
+    delta, reasons = score_option_candidate("SYM_NOISE", {"oi": 105000, "ltp": 100.05})
+    assert delta == 0.0
+    assert "oi_buildup_price_noise" in reasons
+
+
+def test_oi_buildup_uses_half_spread_as_noise_floor(monkeypatch) -> None:
+    monkeypatch.setenv("OPTION_OI_MIN_PRICE_MOVE_PCT", "0.001")
+    score_option_candidate("SYM_SPREAD", {"oi": 100000, "ltp": 100.0, "bid": 99.0, "ask": 101.0})
+    delta, reasons = score_option_candidate("SYM_SPREAD", {"oi": 105000, "ltp": 100.5, "bid": 99.5, "ask": 101.5})
+    assert delta == 0.0
+    assert "oi_buildup_price_noise" in reasons
+
+
 def test_oi_change_without_price_context_is_neutral() -> None:
     score_option_candidate("SYM_OI_ONLY", {"oi": 100000})
     delta, reasons = score_option_candidate("SYM_OI_ONLY", {"oi": 105000})
