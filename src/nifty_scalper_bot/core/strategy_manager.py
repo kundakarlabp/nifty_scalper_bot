@@ -2181,7 +2181,10 @@ class StrategyManager(_BaseStrategyManager):
             return None
 
         def _history_ema(period: int) -> float | None:
-            if role != "futures_context":
+            # Spot and futures are co-equal underlying-direction authorities.
+            # Both must receive the same history-backed EMA evidence when the
+            # fast-path indicator payload omits precomputed EMA fields.
+            if role not in {"spot_context", "futures_context"}:
                 return None
             getter = getattr(getattr(self, "_indicator_engine", None), "get_ema", None)
             if not callable(getter):
@@ -2204,7 +2207,9 @@ class StrategyManager(_BaseStrategyManager):
                 return None
 
         def _history_vwap_slope() -> float | None:
-            if role != "futures_context":
+            # Preserve evidence symmetry across the two underlying sources;
+            # option-premium history remains excluded from direction authority.
+            if role not in {"spot_context", "futures_context"}:
                 return None
             getter = getattr(
                 getattr(self, "_indicator_engine", None),
@@ -2256,7 +2261,7 @@ class StrategyManager(_BaseStrategyManager):
         ema_fast_source = "indicator" if ema_fast is not None else "unavailable"
         ema_slow_source = "indicator" if ema_slow is not None else "unavailable"
         ema_50_source = "indicator" if ema_50 is not None else "unavailable"
-        if role == "futures_context":
+        if role in {"spot_context", "futures_context"}:
             if vwap_slope is None:
                 vwap_slope = _history_vwap_slope()
                 if vwap_slope is not None:
