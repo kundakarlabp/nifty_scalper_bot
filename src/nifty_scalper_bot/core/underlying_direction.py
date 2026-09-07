@@ -1,10 +1,11 @@
 """Canonical arbitration for NIFTY underlying direction.
 
 Option-premium data may trigger a setup but must never authorize NIFTY direction.
-Only fresh spot/futures observations participate.  Futures is the primary
+Only fresh spot/futures observations participate. Futures is the primary
 price-discovery source when both underlying sources agree; spot is confirmation.
-Disagreement remains fail-closed unless one source is materially stronger, so a
-source prior can never manufacture a trade from ambiguous evidence.
+Disagreement remains fail-closed unless one source is materially stronger and
+the opposing source is genuinely weak. This treats two credible opposing views
+as a transition/reversal warning instead of forcing a CE/PE decision.
 """
 
 from __future__ import annotations
@@ -12,6 +13,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 _VALID_DIRECTIONS = {"CE", "PE"}
+_DOMINANCE_GAP = 0.20
+_MIN_DOMINANT_CONFIDENCE = 0.70
+_MAX_WEAK_DISAGREEMENT_CONFIDENCE = 0.60
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,11 +54,12 @@ def arbitrate_underlying_direction(
 ) -> UnderlyingDirectionResolution:
     """Resolve direction while preserving atomic confidence/freshness provenance.
 
-    Futures is primary only when both sources agree.  This reflects its
-    price-discovery role without turning that empirical prior into an override.
-    When sources disagree, the existing conservative evidence rule is retained:
-    comparable conviction fails closed and only a materially stronger,
-    high-conviction observation can override weak disagreement.
+    Futures is primary only when both sources agree. This reflects its empirical
+    price-discovery role without turning that prior into an unconditional
+    override. Opposing credible observations are treated as a possible
+    transition/reversal and fail closed. An override is allowed only when one
+    observation is high-conviction, materially stronger, and the contradictory
+    observation is genuinely weak.
     """
 
     if spot is not None and futures is not None:
@@ -65,13 +70,16 @@ def arbitrate_underlying_direction(
             )
 
         confidence_gap = abs(spot.confidence - futures.confidence)
-        dominance_gap = 0.20
-        if confidence_gap < dominance_gap:
+        if confidence_gap < _DOMINANCE_GAP:
             return UnderlyingDirectionResolution(observation=None, conflict=True)
+
         stronger = spot if spot.confidence > futures.confidence else futures
         weaker = futures if stronger is spot else spot
-        if stronger.confidence < 0.70:
+        if stronger.confidence < _MIN_DOMINANT_CONFIDENCE:
             return UnderlyingDirectionResolution(observation=None, conflict=True)
+        if weaker.confidence > _MAX_WEAK_DISAGREEMENT_CONFIDENCE:
+            return UnderlyingDirectionResolution(observation=None, conflict=True)
+
         return UnderlyingDirectionResolution(
             observation=stronger,
             confirming_source=f"{weaker.source}:weak_disagreement",
