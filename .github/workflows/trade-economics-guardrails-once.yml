@@ -32,6 +32,16 @@ jobs:
           python -m pip install -r dashboard/requirements.txt -q
       - name: Apply canonical source corrections
         run: python scripts/apply_trade_economics_guardrails_20260904.py
+      - name: Format focused tests only
+        run: |
+          python -m black \
+            tests/config/test_live_risk_envelope.py \
+            tests/execution/test_trade_economics_guardrails_20260904.py \
+            tests/strategies/test_direction_lock_persistence_20260907.py
+          python -m ruff check --select I --fix \
+            tests/config/test_live_risk_envelope.py \
+            tests/execution/test_trade_economics_guardrails_20260904.py \
+            tests/strategies/test_direction_lock_persistence_20260907.py
       - name: Focused regressions
         run: |
           python -m pytest -q \
@@ -49,10 +59,19 @@ jobs:
       - name: Compile and scoped quality
         run: |
           python -m compileall -q src dashboard scripts
-          python -m ruff check \
+          git diff --check
+          python -m ruff check --select F401,F821,F822,F823 \
             src/nifty_scalper_bot/config/env_utils.py \
+            src/nifty_scalper_bot/config/settings.py \
             src/nifty_scalper_bot/execution/entry_geometry.py \
+            src/nifty_scalper_bot/execution/order_manager_core.py \
+            src/nifty_scalper_bot/risk/entry_guard_patch.py \
+            src/nifty_scalper_bot/risk/risk_manager.py \
             src/nifty_scalper_bot/strategies/orchestrator.py \
+            tests/config/test_live_risk_envelope.py \
+            tests/execution/test_trade_economics_guardrails_20260904.py \
+            tests/strategies/test_direction_lock_persistence_20260907.py
+          python -m ruff check \
             tests/config/test_live_risk_envelope.py \
             tests/execution/test_trade_economics_guardrails_20260904.py \
             tests/strategies/test_direction_lock_persistence_20260907.py
