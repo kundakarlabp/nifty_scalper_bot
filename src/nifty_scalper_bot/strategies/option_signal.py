@@ -1,14 +1,14 @@
-"""Option-native candidate scoring: IV richness, OI buildup, depth imbalance.
+"""Option-native candidate scoring: IV richness, OI/price confirmation, depth imbalance.
 
-All current strategy signals read the underlying price series. This module
-adds the option-specific information that actually differentiates option
-trades: whether the premium is expensive (IV), whether positioning supports
-the move (open-interest buildup), and whether the order book leans with the
-trade (bid/ask depth imbalance).
+Underlying direction is owned elsewhere.  This module only answers whether a
+candidate option is a good expression of that direction.  OI is therefore not
+treated as directional by itself: rising OI supports a long-premium candidate
+only when the premium is also rising, while rising OI against a falling premium
+is adverse divergence.  Static book imbalance remains a small confirmation,
+not entry authority.
 
-Design: one pure scoring function plus a tiny module-level OI cache. Every
-input is optional — missing data contributes nothing, so the scorer can
-never block trading or crash on sparse feeds.
+Every input is optional. Missing evidence is neutral and never crashes or
+manufactures a signal.
 
 Env overrides:
 - OPTION_SIGNAL_ENABLED   (default true)
@@ -24,8 +24,8 @@ from typing import Any
 
 from nifty_scalper_bot.config.env_utils import parse_bool_env, parse_float_env
 
-# prior OI per symbol within this process; small and self-pruning
 _PRIOR_OI: dict[str, float] = {}
+_PRIOR_PRICE: dict[str, float] = {}
 _MAX_CACHE = 64
 
 
@@ -34,7 +34,7 @@ def _f(value: Any) -> float | None:
         out = float(value)
     except (TypeError, ValueError):
         return None
-    return out if out == out else None  # reject NaN
+    return out if out == out else None
 
 
 def _depth_totals(depth: Any) -> tuple[float, float]:
@@ -46,10 +46,26 @@ def _depth_totals(depth: Any) -> tuple[float, float]:
     return bid_qty, ask_qty
 
 
+def _premium(metrics: dict[str, Any]) -> float | None:
+    price = _f(metrics.get("ltp") or metrics.get("last_price"))
+    if price is not None and price > 0:
+        return price
+    bid, ask = _f(metrics.get("bid")), _f(metrics.get("ask"))
+    if bid is not None and ask is not None and bid > 0 and ask >= bid:
+        return (bid + ask) / 2.0
+    return None
+
+
+def _prune_cache() -> None:
+    if len(_PRIOR_OI) <= _MAX_CACHE:
+        return
+    for stale in list(_PRIOR_OI)[: len(_PRIOR_OI) - _MAX_CACHE]:
+        _PRIOR_OI.pop(stale, None)
+        _PRIOR_PRICE.pop(stale, None)
+
+
 def score_option_candidate(symbol: str, metrics: dict[str, Any] | None) -> tuple[float, list[str]]:
-    """Args: option symbol, DataHub.get_option_metrics payload (or None).
-    Returns: (score_delta in [-1.5, +1.5], reasons). Raises: none.
-    """
+    """Return option-expression score delta in [-1.5, +1.5] and reasons."""
     if not parse_bool_env(os.getenv("OPTION_SIGNAL_ENABLED"), True):
         return 0.0, ["option_signal_disabled"]
     if not metrics:
@@ -69,21 +85,35 @@ def score_option_candidate(symbol: str, metrics: dict[str, Any] | None) -> tuple
             delta += 0.5
             reasons.append(f"iv_reasonable_{iv:.2f}")
 
+    price = _premium(metrics)
     oi = _f(metrics.get("oi"))
     if oi is not None and oi > 0:
-        prior = _PRIOR_OI.get(symbol)
-        if prior is not None and prior > 0:
-            change = (oi - prior) / prior
-            if change >= 0.01:
-                delta += 0.5
-                reasons.append("oi_buildup")
-            elif change <= -0.01:
-                delta -= 0.25
-                reasons.append("oi_unwinding")
+        prior_oi = _PRIOR_OI.get(symbol)
+        prior_price = _PRIOR_PRICE.get(symbol)
+        if prior_oi is not None and prior_oi > 0:
+            oi_change = (oi - prior_oi) / prior_oi
+            if abs(oi_change) >= 0.01:
+                if price is None or prior_price is None or prior_price <= 0:
+                    reasons.append("oi_change_unconfirmed")
+                elif oi_change > 0:
+                    price_change = (price - prior_price) / prior_price
+                    if price_change > 0:
+                        delta += 0.5
+                        reasons.append("oi_buildup_price_confirmed")
+                    elif price_change < 0:
+                        delta -= 0.5
+                        reasons.append("oi_buildup_price_divergence")
+                    else:
+                        reasons.append("oi_buildup_price_flat")
+                else:
+                    # Falling OI can represent either long liquidation or short
+                    # covering.  Without participant-side data it is context,
+                    # not a directional long-premium signal.
+                    reasons.append("oi_unwinding_context")
         _PRIOR_OI[symbol] = oi
-        if len(_PRIOR_OI) > _MAX_CACHE:
-            for stale in list(_PRIOR_OI)[: len(_PRIOR_OI) - _MAX_CACHE]:
-                _PRIOR_OI.pop(stale, None)
+        if price is not None:
+            _PRIOR_PRICE[symbol] = price
+        _prune_cache()
 
     bid_qty, ask_qty = _depth_totals(metrics.get("depth"))
     if bid_qty > 0 and ask_qty > 0:
