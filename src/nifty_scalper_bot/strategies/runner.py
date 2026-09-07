@@ -7394,6 +7394,7 @@ class StrategyRunner:
             max_attempts = 3
             for attempt in range(max_attempts):
                 try:
+                    decision_ts = float(timestamp.timestamp())
                     plan = TradePlan(
                         symbol=symbol,
                         side=side,
@@ -7403,9 +7404,20 @@ class StrategyRunner:
                         take_profit=take_profit,
                         strategy_name="runner",
                         tag=f"runner_{side.lower()}",
+                        max_signal_age_seconds=safe_positive_float_env(
+                            "LIVE_ENTRY_MAX_SIGNAL_AGE_SECONDS", 5.0, minimum=0.1
+                        ),
+                        max_entry_drift_pct=safe_positive_float_env(
+                            "LIVE_ENTRY_MAX_ADVERSE_DRIFT_PCT", 1.0, minimum=0.05
+                        ),
                         allow_market_entry=False,
                         intent="ENTRY",
                         intended_position_side="LONG" if side == "BUY" else "SHORT",
+                        trade_provenance={
+                            **dict(metadata or {}),
+                            "decision_ts": decision_ts,
+                            "decision_reference_price": float(price),
+                        },
                     )
                     submit_result = self._order_manager.submit_trade_plan_result(plan)
                     if not submit_result.accepted or not submit_result.order_id:
