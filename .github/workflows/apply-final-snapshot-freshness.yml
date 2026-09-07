@@ -3,7 +3,7 @@ on:
   push:
     branches: [main]
     paths:
-      - '.github/workflows/apply-final-snapshot-freshness.yml'
+      - 'scripts/apply_final_snapshot_freshness.py'
 permissions:
   contents: write
 jobs:
@@ -17,11 +17,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Apply canonical transform on clean production base
+      - name: Apply canonical transform on current main
         run: |
-          cp scripts/apply_final_snapshot_freshness.py /tmp/apply_final_snapshot_freshness.py
-          git checkout -B fix/final-snapshot-freshness 54250ac9477e11d21fffe4bba8ae62c5ea6aa662
-          python /tmp/apply_final_snapshot_freshness.py
+          git checkout -B fix/final-snapshot-freshness
+          python scripts/apply_final_snapshot_freshness.py
       - name: Install project
         run: python -m pip install -e '.[dev]'
       - name: Focused freshness tests
