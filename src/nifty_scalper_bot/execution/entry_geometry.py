@@ -123,11 +123,18 @@ def release_prebroker_entry_reservation(
     if not symbol or not isinstance(reservations, dict) or symbol not in reservations:
         return False
     lock = getattr(manager, "_lock", None)
-    if lock is None:
+    owners = getattr(manager, "_entry_inflight_owners", None)
+
+    def _release() -> None:
         reservations.pop(symbol, None)
+        if isinstance(owners, dict):
+            owners.pop(symbol, None)
+
+    if lock is None:
+        _release()
     else:
         with lock:
-            reservations.pop(symbol, None)
+            _release()
     return True
 
 

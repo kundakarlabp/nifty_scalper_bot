@@ -151,12 +151,23 @@ def _daily_limit_block_reason(manager: Any) -> tuple[str, str] | None:
     max_open = int(getattr(settings, "max_open_positions", 0) or 0)
     if max_open > 0:
         open_positions = _open_position_count(position_manager)
-        if open_positions > max_open:
+        if open_positions >= max_open:
             return (
                 f"max_open_positions breached: {open_positions}/{max_open}",
                 f"MAX_OPEN:{open_positions}/{max_open}",
             )
     return None
+
+
+def _daily_limit_should_trip_breaker(manager: Any, code: str) -> bool:
+    if not str(code or "").startswith("MAX_OPEN:"):
+        return True
+    settings = getattr(manager, "settings", None)
+    position_manager = getattr(manager, "position_manager", None)
+    max_open = int(getattr(settings, "max_open_positions", 0) or 0)
+    if max_open <= 0 or position_manager is None:
+        return False
+    return _open_position_count(position_manager) > max_open
 
 
 def _stop_reentry_block_reason(position_manager: Any, signal: Any) -> str | None:
@@ -419,7 +430,7 @@ def _patched_check_order(self: Any, signal: Any, live_enabled: bool) -> tuple[bo
             reason, code = blocker
             self._last_rejection = code
             trip = getattr(self, "_trip_breaker", None)
-            if callable(trip):
+            if _daily_limit_should_trip_breaker(self, code) and callable(trip):
                 with suppress(Exception):
                     trip(reason)
             logger = getattr(self, "_logger", None)

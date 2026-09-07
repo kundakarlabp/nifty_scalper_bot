@@ -745,7 +745,7 @@ class RiskSettings:
     daily_loss_pct: float = 2.0
     daily_pnl_cap_pct: float = 2.0
     max_daily_loss_absolute: float = 0.0
-    per_trade_risk_pct: float = 10.0
+    per_trade_risk_pct: float = 0.75
     per_trade_cap_pct: float = 25.0
     max_consecutive_losses: int = 3
     max_trades_per_day: int = 6  # enforced by RiskManager failsafe; 0 = unlimited
@@ -1237,7 +1237,7 @@ def _build_risk_settings() -> RiskSettings:
         per_trade_risk_pct=_env_float(
             "RISK__PER_TRADE_RISK_PCT",
             "RISK_PER_TRADE_PCT",
-            default=5.0,
+            default=0.75,
             minimum=0.0,
         ),
         per_trade_cap_pct=_env_float(

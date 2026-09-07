@@ -3,15 +3,14 @@ from __future__ import annotations
 import importlib
 import json
 import os
-from types import SimpleNamespace
 import subprocess
 import sys
 import threading
+from types import SimpleNamespace
 from typing import Any
 
 import nifty_scalper_bot.execution as execution
-from nifty_scalper_bot.execution import order_manager
-from nifty_scalper_bot.execution import order_manager_core
+from nifty_scalper_bot.execution import order_manager, order_manager_core
 from nifty_scalper_bot.execution.native_entry_gate import NO_BLOCK
 from nifty_scalper_bot.execution.runtime_order_manager import RuntimeOrderManager
 
@@ -152,7 +151,9 @@ def test_managed_order_preserves_approved_strategy_name(monkeypatch) -> None:
             broker_attempted=True,
         )
 
-    monkeypatch.setattr(order_manager_core.OrderManager, "place_order", core_place_order)
+    monkeypatch.setattr(
+        order_manager_core.OrderManager, "place_order", core_place_order
+    )
     monkeypatch.setattr(
         order_manager_core.OrderManager,
         "place_managed_order_result",
@@ -171,7 +172,7 @@ def test_managed_order_preserves_approved_strategy_name(monkeypatch) -> None:
     assert captured["strategy_name"] == "OrderFlow"
 
 
-def test_live_env_normalizes_per_trade_risk_to_seven_percent(monkeypatch) -> None:
+def test_live_env_normalizes_per_trade_risk_to_conservative_cap(monkeypatch) -> None:
     from nifty_scalper_bot.config.env_utils import normalise_live_env_defaults
 
     monkeypatch.setenv("ENABLE_LIVE", "true")
@@ -181,12 +182,12 @@ def test_live_env_normalizes_per_trade_risk_to_seven_percent(monkeypatch) -> Non
 
     normalise_live_env_defaults()
 
-    assert os.environ["RISK__PER_TRADE_RISK_PCT"] == "7.0"
-    assert os.environ["RISK_PER_TRADE_PCT"] == "7.0"
+    assert os.environ["RISK__PER_TRADE_RISK_PCT"] == "0.75"
+    assert os.environ["RISK_PER_TRADE_PCT"] == "0.75"
 
 
 def test_order_module_is_safe_when_imported_before_package() -> None:
-    code = r'''
+    code = r"""
 import importlib
 import json
 om = importlib.import_module("nifty_scalper_bot.execution.order_manager")
@@ -201,7 +202,7 @@ print(json.dumps({
     "after_method": id(om.OrderManager.submit_trade_plan_result),
     "module": om.OrderManager.__module__,
 }))
-'''
+"""
     completed = subprocess.run(
         [sys.executable, "-c", code],
         check=True,
@@ -228,7 +229,9 @@ def test_exit_identity_reaches_core_place_order(monkeypatch) -> None:
         captured.update(kwargs)
         return "EXIT-1"
 
-    monkeypatch.setattr(order_manager_core.OrderManager, "place_order", core_place_order)
+    monkeypatch.setattr(
+        order_manager_core.OrderManager, "place_order", core_place_order
+    )
 
     result = manager.place_order(
         symbol="NFO:NIFTY2681124500CE",
