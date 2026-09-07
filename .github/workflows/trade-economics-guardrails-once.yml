@@ -119,6 +119,9 @@ jobs:
           unexpected = sorted(changed - allowed)
           if unexpected:
               raise SystemExit(f'unexpected files: {unexpected}')
+          # These files are transformed in this run. Some regression files were
+          # intentionally committed earlier for TDD and therefore need not be
+          # dirty at this point even though they remain in the final PR diff.
           required = {
               'src/nifty_scalper_bot/config/env_utils.py',
               'src/nifty_scalper_bot/config/settings.py',
@@ -127,14 +130,13 @@ jobs:
               'src/nifty_scalper_bot/risk/entry_guard_patch.py',
               'src/nifty_scalper_bot/risk/risk_manager.py',
               'src/nifty_scalper_bot/strategies/orchestrator.py',
-              'tests/config/test_live_risk_envelope.py',
               'tests/execution/test_trade_economics_guardrails_20260904.py',
               'tests/execution/test_runtime_order_facade.py',
               'tests/strategies/test_direction_lock_persistence_20260907.py',
           }
           missing = sorted(required - changed)
           if missing:
-              raise SystemExit(f'missing expected source/test changes: {missing}')
+              raise SystemExit(f'missing expected transformed changes: {missing}')
           forbidden = {
               'src/nifty_scalper_bot/core/direction_stability.py',
               'tests/core/test_direction_stability_20260904.py',
@@ -142,7 +144,7 @@ jobs:
           leaked = sorted(changed & forbidden)
           if leaked:
               raise SystemExit(f'duplicate direction implementation leaked: {leaked}')
-          print('validated final files:', sorted(changed))
+          print('validated transformed files:', sorted(changed))
           PY
       - name: Commit validated correction
         run: |
