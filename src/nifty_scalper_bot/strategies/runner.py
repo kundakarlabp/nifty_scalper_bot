@@ -355,6 +355,13 @@ def safe_positive_int_env(name: str, default: int, *, minimum: int = 1) -> int:
     return max(parsed, int(minimum))
 
 
+def _runner_history_cap() -> int:
+    """Return the single Runner history-retention cap for reseed and live ingest."""
+    return safe_positive_int_env(
+        "RUNNER_SYMBOL_HISTORY_MAX_BARS", 500, minimum=1
+    )
+
+
 def safe_positive_float_env(
     name: str, default: float, *, minimum: float = 0.0
 ) -> float:
@@ -2320,6 +2327,42 @@ class StrategyRunner:
             return None
         return self._history_row_timestamp(rows[-1]) if rows else None
 
+    def _backfill_history_tail(
+        self,
+        symbol: str,
+        rows: Iterable[Mapping[str, Any]],
+        *,
+        after: datetime,
+        source: str,
+    ) -> int:
+        """Append a small canonical tail without evaluating entry strategies."""
+        normalized_symbol = self._normalize_symbol(symbol)
+        candidates: list[tuple[datetime, dict[str, Any]]] = []
+        for raw_row in rows:
+            row = normalize_history_row(
+                normalized_symbol, dict(raw_row), source=source
+            )
+            if row is None:
+                continue
+            row_ts = self._history_row_timestamp(row)
+            if row_ts is None or row_ts <= after:
+                continue
+            candidates.append((row_ts, row))
+        candidates.sort(key=lambda item: item[0])
+        for row_ts, row in candidates:
+            bar = OneMinuteBar(
+                open=float(row["open"]),
+                high=float(row["high"]),
+                low=float(row["low"]),
+                close=float(row["close"]),
+                volume=max(int(float(row.get("volume", 0) or 0)), 0),
+                start=row_ts,
+                end=row_ts + timedelta(minutes=1),
+                synthetic=False,
+            )
+            self._ingest_bar(normalized_symbol, bar, is_backfill=True)
+        return len(candidates)
+
     def sync_history_from_mdm(
         self,
         symbol: str,
@@ -2393,15 +2436,76 @@ class StrategyRunner:
             and mdm_last_ts is not None
             and indicator_last_ts >= mdm_last_ts
         )
+        runner_depth_target = min(source_count, _runner_history_cap())
+        runner_depth_short = runner_before < runner_depth_target
+        indicator_depth_short = source_count > indicator_count
+        incremental_rows: list[dict[str, Any]] = []
+        if (
+            rows
+            and runner_ready
+            and indicator_ready
+            and runner_last_ts is not None
+            and indicator_last_ts == runner_last_ts
+            and mdm_last_ts is not None
+            and runner_last_ts < mdm_last_ts
+        ):
+            for row in rows:
+                row_ts = self._history_row_timestamp(row)
+                if row_ts is not None and row_ts > runner_last_ts:
+                    incremental_rows.append(row)
+        incremental_limit = safe_positive_int_env(
+            "RUNNER_HISTORY_INCREMENTAL_BACKFILL_MAX_BARS", 5, minimum=1
+        )
+        can_incremental = bool(
+            incremental_rows
+            and len(incremental_rows) <= incremental_limit
+            and indicator_count + len(incremental_rows) >= source_count
+        )
         needs_seed = bool(
             rows
+            and not can_incremental
             and (
-                source_count > runner_before
-                or source_count > indicator_count
+                runner_depth_short
+                or indicator_depth_short
                 or not indicator_current
                 or not runner_current
             )
         )
+        if can_incremental:
+            try:
+                appended = self._backfill_history_tail(
+                    normalized, incremental_rows, after=runner_last_ts, source=reason
+                )
+                if appended != len(incremental_rows):
+                    raise RuntimeError("incomplete_incremental_backfill")
+                self._logger.info(
+                    "RUNNER_HISTORY_INCREMENTAL_BACKFILL symbol=%s bars=%d source=%s",
+                    normalized,
+                    appended,
+                    reason,
+                    extra={
+                        "event": "RUNNER_HISTORY_INCREMENTAL_BACKFILL",
+                        "symbol": normalized,
+                        "bars": appended,
+                        "source": reason,
+                    },
+                )
+            except Exception as exc:  # noqa: BLE001 - fall back to canonical reseed
+                needs_seed = True
+                self._logger.warning(
+                    "RUNNER_HISTORY_INCREMENTAL_BACKFILL_FAILED symbol=%s source=%s error_type=%s error=%s",
+                    normalized,
+                    reason,
+                    type(exc).__name__,
+                    exc,
+                    extra={
+                        "event": "RUNNER_HISTORY_INCREMENTAL_BACKFILL_FAILED",
+                        "symbol": normalized,
+                        "source": reason,
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                    },
+                )
         if needs_seed:
             try:
                 self.reseed_history_from_bars(
@@ -2606,11 +2710,12 @@ class StrategyRunner:
                         or indicator_last < mdm_last
                     )
                 )
+                runner_depth_target = min(source_count, _runner_history_cap())
                 needs_sync = bool(
                     indicator_count < minimum
                     or runner_count < minimum
                     or source_count > indicator_count
-                    or source_count > runner_count
+                    or runner_count < runner_depth_target
                     or stale_projection
                 )
                 after = indicator_count
@@ -5863,9 +5968,7 @@ class StrategyRunner:
                 # session (~375 bars), not days of history. Cap well above a single
                 # session for indicator warmup, but far below the old 2000 (≈5 days)
                 # that bloated RAM on the memory-tight host. Env-tunable.
-                _hist_cap = int(
-                    os.getenv("RUNNER_SYMBOL_HISTORY_MAX_BARS", "500") or "500"
-                )
+                _hist_cap = _runner_history_cap()
                 self._symbol_history[normalized_symbol] = list(
                     one_minute_bars[-_hist_cap:]
                 )
@@ -6701,8 +6804,9 @@ class StrategyRunner:
         history.append(bar)
         if not is_backfill:
             self._candle_versions[symbol] += 1
-        if len(history) > 400:
-            del history[:-400]
+        history_cap = _runner_history_cap()
+        if len(history) > history_cap:
+            del history[:-history_cap]
 
         try:
             # 3. INDICATORS: Feed the Engine

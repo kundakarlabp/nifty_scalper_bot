@@ -281,8 +281,8 @@ async def test_mdm_readiness_concepts_are_explicit_and_separate() -> None:
     assert "def is_ohlc_ready" in text
     assert "def is_market_data_ready" in text
     wait_src = _func_source(SRC / "data" / "market_data_manager.py", "wait_until_ready")
-    assert "len(self._ohlc" not in wait_src
-    assert "len(self._raw_tick_history" in wait_src
+    assert "get_ohlc_bars" in wait_src
+    assert "_raw_tick_history" not in wait_src
 
 
 async def test_historical_bar_ingestion_does_not_write_raw_tick_history() -> None:

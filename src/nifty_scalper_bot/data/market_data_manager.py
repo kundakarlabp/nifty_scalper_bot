@@ -5551,12 +5551,12 @@ class MarketDataManager:
             with self._lock:
                 subscribed_symbols = sorted(self._active_subscribed_symbols)
                 min_bars = self._min_required_bars
-                # Startup/live data readiness is raw tick readiness.  Historical
-                # OHLC readiness is checked separately by ensure_history/app gates.
-                bars = {
-                    symbol: len(self._raw_tick_history.get(symbol, ()))
-                    for symbol in subscribed_symbols
-                }
+            # Readiness depth is completed canonical OHLC. Fresh live-tick proof
+            # remains independently enforced by _readiness_state().
+            bars = {
+                symbol: len(self.get_ohlc_bars(symbol) or [])
+                for symbol in subscribed_symbols
+            }
             requirements = dict(self._readiness_requirements)
             readiness_state = self._readiness_state(bars, min_bars, requirements)
             self._last_readiness_state = dict(readiness_state)
