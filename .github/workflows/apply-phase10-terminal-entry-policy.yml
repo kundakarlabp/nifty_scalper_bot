@@ -31,6 +31,10 @@ jobs:
           python -m pip install -e '.[dev]' -q
       - name: Apply focused phase10 correction
         run: python scripts/apply_phase10_terminal_entry_policy.py
+      - name: Canonicalize nested cooldown condition
+        run: |
+          python -m ruff check --fix --select SIM102 \
+            src/nifty_scalper_bot/strategies/runner.py
       - name: Format focused files
         run: |
           python -m black \
