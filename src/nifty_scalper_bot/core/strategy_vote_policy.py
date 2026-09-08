@@ -1,9 +1,7 @@
 """Canonical strategy-vote policy used by StrategyManager.
 
-This module contains pure policy decisions only. It deliberately does not
-monkey-patch StrategyManager or any runtime class. StrategyManager remains the
-single owner of orchestration; these helpers make trigger/context semantics
-explicit and testable before the legacy runtime adapters are removed.
+Pure policy decisions live here. Runtime adapters may call these helpers, but
+must not redefine strategy roles, setup contracts, or confirmation semantics.
 """
 
 from __future__ import annotations
@@ -38,11 +36,7 @@ def _float_from(metadata: Mapping[str, Any], keys: tuple[str, ...]) -> float | N
 
 
 def vote_role(vote: Any) -> str:
-    """Return the effective immutable role for a vote.
-
-    OrderFlow is context-only by architecture, irrespective of malformed or
-    legacy metadata. Other strategies retain their declared role.
-    """
+    """Return the effective immutable role for a vote."""
     strategy = str(getattr(vote, "strategy", "") or "").strip().lower()
     if strategy in _CONTEXT_ONLY_STRATEGIES:
         return "context"
@@ -77,11 +71,10 @@ def setup_gate_decision(vote: Any) -> SetupGateDecision:
     return SetupGateDecision(True, score, minimum)
 
 
-def partition_votes(signals: Sequence[tuple[Any, Any]]) -> tuple[list[tuple[Any, Any]], list[tuple[Any, Any]], list[dict[str, Any]]]:
-    """Partition valid triggers/context and reject failed setup contracts.
-
-    Close signals are never blocked by entry setup policy.
-    """
+def partition_votes(
+    signals: Sequence[tuple[Any, Any]],
+) -> tuple[list[tuple[Any, Any]], list[tuple[Any, Any]], list[dict[str, Any]]]:
+    """Partition valid triggers/context and reject failed entry setup contracts."""
     triggers: list[tuple[Any, Any]] = []
     context: list[tuple[Any, Any]] = []
     rejected: list[dict[str, Any]] = []
@@ -93,40 +86,59 @@ def partition_votes(signals: Sequence[tuple[Any, Any]]) -> tuple[list[tuple[Any,
         if not is_close_signal(signal):
             decision = setup_gate_decision(vote)
             if not decision.passed:
-                rejected.append({
-                    "strategy": getattr(vote, "strategy", None),
-                    "score": decision.score,
-                    "minimum": decision.minimum,
-                    "reason": decision.reason,
-                })
+                rejected.append(
+                    {
+                        "strategy": getattr(vote, "strategy", None),
+                        "score": decision.score,
+                        "minimum": decision.minimum,
+                        "reason": decision.reason,
+                    }
+                )
                 continue
         triggers.append((signal, vote))
     return triggers, context, rejected
 
 
-def independent_same_side_confirmation(signals: Sequence[tuple[Any, Any]]) -> tuple[bool, list[str]]:
-    """Return bounded confirmation from a distinct same-side trigger strategy."""
-    trigger_votes = [
-        vote
-        for signal, vote in signals
-        if vote_role(vote) != "context" and not is_close_signal(signal)
-    ]
+def independent_same_side_confirmation(
+    signals: Sequence[tuple[Any, Any]],
+) -> tuple[bool, list[str]]:
+    """Return confirmation only from distinct, setup-valid trigger strategies.
+
+    Context-only strategies (notably OrderFlow), close signals, and triggers
+    that failed their own setup contract can never manufacture consensus.
+    """
+    trigger_votes = []
+    for signal, vote in signals:
+        if vote_role(vote) == "context" or is_close_signal(signal):
+            continue
+        if not setup_gate_decision(vote).passed:
+            continue
+        trigger_votes.append(vote)
+
     if len(trigger_votes) < 2:
         return False, []
     try:
-        best = max(trigger_votes, key=lambda vote: float(getattr(vote, "score", 0.0) or 0.0))
-    except Exception:
+        best = max(
+            trigger_votes,
+            key=lambda vote: float(getattr(vote, "score", 0.0) or 0.0),
+        )
+    except (TypeError, ValueError):
         return False, []
+
     best_side = str(getattr(best, "side", "") or "").upper()
     best_strategy = str(getattr(best, "strategy", "") or "").strip().lower()
     if best_side not in {"CE", "PE"} or not best_strategy:
         return False, []
-    confirming = sorted({
-        str(getattr(vote, "strategy", "") or "").strip()
-        for vote in trigger_votes
-        if str(getattr(vote, "side", "") or "").upper() == best_side
-        and str(getattr(vote, "strategy", "") or "").strip().lower() not in {"", best_strategy}
-    })
+
+    confirming = sorted(
+        {
+            str(getattr(vote, "strategy", "") or "").strip()
+            for vote in trigger_votes
+            if str(getattr(vote, "side", "") or "").upper() == best_side
+            and str(getattr(vote, "strategy", "") or "").strip().lower()
+            not in {"", best_strategy}
+        }
+    )
     return bool(confirming), confirming
 
 
