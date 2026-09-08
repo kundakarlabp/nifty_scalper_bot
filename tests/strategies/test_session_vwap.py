@@ -82,11 +82,13 @@ def test_unvolumed_bars_do_not_get_fake_weights() -> None:
 
 def test_vwap_pro_prefers_the_exchange_reference() -> None:
     import inspect
+    import re
 
     from nifty_scalper_bot.strategies.elite_strategies import vwap_pro
 
     source = inspect.getsource(vwap_pro.VWAPProStrategy._evaluate_signal)
     exchange = source.index("exchange_vwap")
     session = source.index("session_vwap")
-    rolling = source.index("indicators.get('vwap')")
-    assert exchange < session < rolling
+    rolling_match = re.search(r"indicators\.get\([\"']vwap[\"']\)", source)
+    assert rolling_match is not None
+    assert exchange < session < rolling_match.start()
