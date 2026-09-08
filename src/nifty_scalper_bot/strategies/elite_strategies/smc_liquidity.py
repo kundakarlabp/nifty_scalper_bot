@@ -382,9 +382,6 @@ class SMCStrategy(EliteStrategy):
         reclaim_buffer_atr = max(
             0.0, safe_float_env("SMC_RECLAIM_BUFFER_ATR", 0.03)
         )
-        # sweep_distance_points was previously dead configuration. In v2 it is
-        # an absolute cap on the ATR-normalised minimum, preventing shock-vol
-        # regimes from demanding an unrealistically large minimum penetration.
         configured_cap = max(
             0.05, float(self._cfg.sweep_distance_points or 0.05)
         )
@@ -463,6 +460,156 @@ class SMCStrategy(EliteStrategy):
         }
         return bullish, bearish
 
+    def _build_sweep_event(
+        self,
+        snapshot: Mapping[str, Any],
+        side: str,
+        desired: Mapping[str, Any],
+        *,
+        recovered_from_history: bool = False,
+    ) -> dict[str, Any]:
+        """Build the canonical persisted SMC sweep-state payload."""
+        current = snapshot["current"]
+        volume_ratio = float(snapshot["volume_ratio"])
+        volume_threshold = max(0.0, float(self._cfg.volume_spike_mult or 0.0))
+        volume_confirmation = bool(
+            volume_threshold > 0 and volume_ratio >= volume_threshold
+        )
+        sweep_extreme = (
+            float(current["low"]) if side == "CE" else float(current["high"])
+        )
+        return {
+            "side": side,
+            "sweep_ts": snapshot["current_ts"],
+            "sweep_level": float(desired["level"]),
+            "sweep_extreme": sweep_extreme,
+            "sweep_bar_high": float(current["high"]),
+            "sweep_bar_low": float(current["low"]),
+            "depth_points": float(desired["depth_points"]),
+            "depth_atr": float(desired["depth_atr"]),
+            "reclaim_points": float(desired["reclaim_points"]),
+            "reclaim_atr": float(desired["reclaim_atr"]),
+            "volume_ratio": volume_ratio,
+            "volume_confirmation": volume_confirmation,
+            "effective_min_sweep_points": float(
+                self.last_sweep_diagnostics["effective_min_sweep_points"]
+            ),
+            "recovered_from_history": bool(recovered_from_history),
+        }
+
+    def _event_consumed_or_invalidated_before_current(
+        self,
+        rows: list[dict[str, Any]],
+        candidate_index: int,
+        event: Mapping[str, Any],
+    ) -> bool:
+        """Reject stale reconstruction when uninterrupted runtime already acted."""
+        side = str(event["side"])
+        extreme = float(event["sweep_extreme"])
+        displacement_min = max(
+            0.05,
+            safe_float_env("SMC_CONFIRMATION_DISPLACEMENT_ATR", 0.25),
+        )
+        for index in range(candidate_index + 1, len(rows) - 1):
+            row = rows[index]
+            close = float(row["close"])
+            if (side == "CE" and close <= extreme) or (
+                side == "PE" and close >= extreme
+            ):
+                return True
+            atr = max(1.0, self._atr(rows[: index + 1]))
+            body = abs(close - float(row["open"]))
+            price_confirmation = (
+                close > float(event["sweep_bar_high"])
+                if side == "CE"
+                else close < float(event["sweep_bar_low"])
+            )
+            if price_confirmation and (body / atr) >= displacement_min:
+                return True
+        return False
+
+    def _recover_recent_sweep_event(
+        self,
+        snapshot: Mapping[str, Any],
+        contract_side: str,
+    ) -> dict[str, Any] | None:
+        """Recover one still-unconfirmed underlying sweep after state loss.
+
+        Reconstruction uses only completed futures/spot history already owned by
+        the SMC structure source. It never reads option-premium history and it
+        refuses a sweep if an intervening completed bar would already have
+        confirmed or invalidated the setup.
+        """
+        rows = [dict(row) for row in snapshot.get("rows", []) if isinstance(row, Mapping)]
+        if len(rows) < 2 or contract_side not in {"CE", "PE"}:
+            return None
+        current_ts = snapshot["current_ts"]
+        max_age_minutes = max(
+            1.0, safe_float_env("SMC_CONFIRMATION_MAX_MINUTES", 5.0)
+        )
+        recovery_bars = _env_int("SMC_RECOVERY_LOOKBACK_BARS", 5)
+        recovery_bars = min(recovery_bars, 20)
+        strength = _env_int("SMC_PIVOT_STRENGTH", 2)
+        lookback = _env_int(
+            "SMC_PIVOT_LOOKBACK", 30, minimum=(strength * 2) + 1
+        )
+        earliest = max((strength * 2) + 1, len(rows) - 1 - recovery_bars)
+
+        for index in range(len(rows) - 2, earliest - 1, -1):
+            prefix = rows[: index + 1]
+            candidate = prefix[-1]
+            candidate_ts = candidate["timestamp"]
+            age_minutes = (current_ts - candidate_ts).total_seconds() / 60.0
+            if age_minutes <= 0 or age_minutes > max_age_minutes:
+                continue
+            pivot_low, pivot_high = self._latest_confirmed_pivots(
+                prefix, strength=strength, lookback=lookback
+            )
+            candidate_snapshot = {
+                "source": snapshot["source"],
+                "symbol": snapshot["symbol"],
+                "rows": prefix,
+                "current": candidate,
+                "current_ts": candidate_ts,
+                "atr": self._atr(prefix),
+                "volume_ratio": self._volume_ratio(prefix),
+                "pivot_low": pivot_low,
+                "pivot_high": pivot_high,
+                "history_count": len(prefix),
+            }
+            bullish, bearish = self._sweep_diagnostics(candidate_snapshot)
+            desired = bullish if contract_side == "CE" else bearish
+            if not bool(desired.get("valid")):
+                continue
+            event = self._build_sweep_event(
+                candidate_snapshot,
+                contract_side,
+                desired,
+                recovered_from_history=True,
+            )
+            if self._event_consumed_or_invalidated_before_current(
+                rows, index, event
+            ):
+                continue
+            LOGGER.info(
+                "SMC_SWEEP_RECOVERED structure_symbol=%s option_side=%s sweep_ts=%s current_ts=%s source=%s",
+                snapshot["symbol"],
+                contract_side,
+                candidate_ts,
+                current_ts,
+                snapshot["source"],
+                extra={
+                    "event": "SMC_SWEEP_RECOVERED",
+                    "structure_symbol": snapshot["symbol"],
+                    "side": contract_side,
+                    "sweep_timestamp": candidate_ts,
+                    "current_timestamp": current_ts,
+                    "structure_source": snapshot["source"],
+                },
+            )
+            return event
+        return None
+
     @staticmethod
     def _side_from_symbol(symbol: str) -> str:
         upper = str(symbol or "").strip().upper()
@@ -525,9 +672,6 @@ class SMCStrategy(EliteStrategy):
                 self._no_vote("stale_or_invalid_data")
                 return None
 
-            # Execution identity is owned by the evaluated candidate symbol.
-            # Underlying/futures context may describe structure, but it cannot
-            # turn a validated CE/PE candidate into a non-option instrument.
             contract_side = self._side_from_symbol(symbol)
             if contract_side not in {"CE", "PE"}:
                 self._no_vote("smc_executable_symbol_not_option")
@@ -547,6 +691,10 @@ class SMCStrategy(EliteStrategy):
                 return None
 
             event = self._events.get(event_key)
+            if event is None:
+                event = self._recover_recent_sweep_event(snapshot, contract_side)
+                if event is not None:
+                    self._events[event_key] = event
             if event is not None:
                 max_age_minutes = max(
                     1.0,
@@ -770,6 +918,9 @@ class SMCStrategy(EliteStrategy):
                     "latest_bar_ts": current_ts,
                     "setup_candle_timestamp": current_ts,
                     "sweep_timestamp": event["sweep_ts"],
+                    "sweep_recovered_from_history": bool(
+                        event.get("recovered_from_history")
+                    ),
                 }
                 self._events.pop(event_key, None)
                 self._last_emitted_bar[event_key] = current_ts
@@ -824,37 +975,12 @@ class SMCStrategy(EliteStrategy):
                 self._no_vote("smc_direction_conflict")
                 return None
 
-            volume_ratio = float(snapshot["volume_ratio"])
-            volume_threshold = max(
-                0.0, float(self._cfg.volume_spike_mult or 0.0)
+            self._events[event_key] = self._build_sweep_event(
+                snapshot,
+                side,
+                desired,
             )
-            volume_confirmation = bool(
-                volume_threshold > 0 and volume_ratio >= volume_threshold
-            )
-            sweep_extreme = (
-                float(current["low"])
-                if side == "CE"
-                else float(current["high"])
-            )
-            self._events[event_key] = {
-                "side": side,
-                "sweep_ts": current_ts,
-                "sweep_level": float(desired["level"]),
-                "sweep_extreme": sweep_extreme,
-                "sweep_bar_high": float(current["high"]),
-                "sweep_bar_low": float(current["low"]),
-                "depth_points": float(desired["depth_points"]),
-                "depth_atr": float(desired["depth_atr"]),
-                "reclaim_points": float(desired["reclaim_points"]),
-                "reclaim_atr": float(desired["reclaim_atr"]),
-                "volume_ratio": volume_ratio,
-                "volume_confirmation": volume_confirmation,
-                "effective_min_sweep_points": float(
-                    self.last_sweep_diagnostics[
-                        "effective_min_sweep_points"
-                    ]
-                ),
-            }
+            event = self._events[event_key]
             self._no_vote("smc_awaiting_confirmation")
             LOGGER.info(
                 "SMC_SWEEP_ARMED symbol=%s option_side=%s "
@@ -865,23 +991,23 @@ class SMCStrategy(EliteStrategy):
                 side,
                 underlying_symbol,
                 snapshot["source"],
-                float(desired["level"]),
-                float(desired["depth_points"]),
-                float(desired["depth_atr"]),
-                float(desired["reclaim_points"]),
-                volume_ratio,
+                float(event["sweep_level"]),
+                float(event["depth_points"]),
+                float(event["depth_atr"]),
+                float(event["reclaim_points"]),
+                float(event["volume_ratio"]),
                 extra={
                     "event": "SMC_SWEEP_ARMED",
                     "symbol": symbol,
                     "side": side,
                     "structure_symbol": underlying_symbol,
                     "structure_source": snapshot["source"],
-                    "sweep_level": float(desired["level"]),
-                    "sweep_depth_points": float(desired["depth_points"]),
-                    "sweep_depth_atr": float(desired["depth_atr"]),
-                    "reclaim_points": float(desired["reclaim_points"]),
-                    "volume_ratio": volume_ratio,
-                    "volume_confirmation": volume_confirmation,
+                    "sweep_level": float(event["sweep_level"]),
+                    "sweep_depth_points": float(event["depth_points"]),
+                    "sweep_depth_atr": float(event["depth_atr"]),
+                    "reclaim_points": float(event["reclaim_points"]),
+                    "volume_ratio": float(event["volume_ratio"]),
+                    "volume_confirmation": bool(event["volume_confirmation"]),
                 },
             )
             return None
