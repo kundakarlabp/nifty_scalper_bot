@@ -1,0 +1,84 @@
+name: Apply Phase10 Terminal Entry Policy
+
+on:
+  push:
+    branches:
+      - fix/phase10-terminal-entry-policy
+
+permissions:
+  contents: write
+
+jobs:
+  apply-validate-commit:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      NSB_TEST_MODE: "1"
+      BRACKET_AUTO_RESTORE: "false"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/phase10-terminal-entry-policy
+          fetch-depth: 50
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install project and test dependencies
+        run: |
+          python -m pip install --upgrade pip -q
+          python -m pip install -e '.[dev]' -q
+      - name: Apply focused phase10 correction
+        run: python scripts/apply_phase10_terminal_entry_policy.py
+      - name: Format focused files
+        run: |
+          python -m black \
+            src/nifty_scalper_bot/strategies/runner.py \
+            tests/strategies/test_runner_symbol_role_gate.py
+      - name: Focused TDD regressions
+        run: |
+          python -m pytest -q \
+            tests/strategies/test_runner_symbol_role_gate.py \
+            tests/strategies/test_order_rejected_observability.py \
+            tests/strategies/test_runner_live_suppression_regressions.py \
+            tests/risk/test_expiry_gate.py \
+            tests/e2e/live_sim/test_live_runtime_startup_contract.py
+      - name: Changed-code quality
+        run: |
+          python -m py_compile src/nifty_scalper_bot/strategies/runner.py
+          python -m ruff check \
+            src/nifty_scalper_bot/strategies/runner.py \
+            tests/strategies/test_runner_symbol_role_gate.py
+          python -m black --check \
+            src/nifty_scalper_bot/strategies/runner.py \
+            tests/strategies/test_runner_symbol_role_gate.py
+          git diff --check
+      - name: Remove one-shot patch machinery
+        run: |
+          rm -f scripts/apply_phase10_terminal_entry_policy.py
+          rm -f .github/workflows/apply-phase10-terminal-entry-policy.yml
+      - name: Verify final production diff
+        run: |
+          python - <<'PY'
+          import subprocess
+          allowed = {
+              'src/nifty_scalper_bot/strategies/runner.py',
+              'tests/strategies/test_runner_symbol_role_gate.py',
+              'scripts/apply_phase10_terminal_entry_policy.py',
+              '.github/workflows/apply-phase10-terminal-entry-policy.yml',
+          }
+          lines = subprocess.check_output(['git', 'status', '--porcelain'], text=True).splitlines()
+          changed = {line[3:] for line in lines if len(line) > 3}
+          unexpected = sorted(changed - allowed)
+          if unexpected:
+              raise SystemExit(f'unexpected files: {unexpected}')
+          print('validated files:', sorted(changed))
+          PY
+      - name: Commit validated correction
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'fix(execution): make phase10 entry rejections terminal [skip ci]'
+          git push origin HEAD:fix/phase10-terminal-entry-policy
