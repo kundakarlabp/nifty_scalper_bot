@@ -1,0 +1,100 @@
+name: Temporary history hotpath cleanup
+
+on:
+  push:
+    branches:
+      - fix/readiness-history-projection-hotpath-v2
+
+permissions:
+  contents: write
+
+jobs:
+  rebuild:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/readiness-history-projection-hotpath-v2
+          fetch-depth: 0
+      - name: Rebuild focused diff from main
+        shell: bash
+        run: |
+          git fetch origin main
+          git checkout origin/main -- \
+            src/nifty_scalper_bot/data/market_data_manager.py \
+            src/nifty_scalper_bot/strategies/runner.py \
+            tests/architecture/test_history_ownership.py
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              p = Path(path)
+              text = p.read_text(encoding='utf-8')
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{path}: expected exactly one source match, found {count}')
+              p.write_text(text.replace(old, new, 1), encoding='utf-8')
+
+          mdm = 'src/nifty_scalper_bot/data/market_data_manager.py'
+          replace_once(
+              mdm,
+              '''            with self._lock:\n                subscribed_symbols = sorted(self._active_subscribed_symbols)\n                min_bars = self._min_required_bars\n                # Startup/live data readiness is raw tick readiness.  Historical\n                # OHLC readiness is checked separately by ensure_history/app gates.\n                bars = {\n                    symbol: len(self._raw_tick_history.get(symbol, ()))\n                    for symbol in subscribed_symbols\n                }\n''',
+              '''            with self._lock:\n                subscribed_symbols = sorted(self._active_subscribed_symbols)\n                min_bars = self._min_required_bars\n            # Readiness depth is completed canonical OHLC. Fresh live-tick proof\n            # remains independently enforced by _readiness_state().\n            bars = {\n                symbol: len(self.get_ohlc_bars(symbol) or [])\n                for symbol in subscribed_symbols\n            }\n''',
+          )
+
+          runner = 'src/nifty_scalper_bot/strategies/runner.py'
+          replace_once(
+              runner,
+              '''def safe_positive_int_env(name: str, default: int, *, minimum: int = 1) -> int:\n    parsed = parse_int_env(os.getenv(name), default)\n    return max(parsed, int(minimum))\n\n\ndef safe_positive_float_env(\n''',
+              '''def safe_positive_int_env(name: str, default: int, *, minimum: int = 1) -> int:\n    parsed = parse_int_env(os.getenv(name), default)\n    return max(parsed, int(minimum))\n\n\ndef _runner_history_cap() -> int:\n    """Return the single Runner history-retention cap for reseed and live ingest."""\n    return safe_positive_int_env(\n        "RUNNER_SYMBOL_HISTORY_MAX_BARS", 500, minimum=1\n    )\n\n\ndef safe_positive_float_env(\n''',
+          )
+          replace_once(
+              runner,
+              '''                _hist_cap = int(\n                    os.getenv("RUNNER_SYMBOL_HISTORY_MAX_BARS", "500") or "500"\n                )\n''',
+              '''                _hist_cap = _runner_history_cap()\n''',
+          )
+          replace_once(
+              runner,
+              '''        if len(history) > 400:\n            del history[:-400]\n''',
+              '''        history_cap = _runner_history_cap()\n        if len(history) > history_cap:\n            del history[:-history_cap]\n''',
+          )
+
+          helper_anchor = '''    def sync_history_from_mdm(\n        self,\n'''
+          helper = '''    def _backfill_history_tail(\n        self,\n        symbol: str,\n        rows: Iterable[Mapping[str, Any]],\n        *,\n        after: datetime,\n        source: str,\n    ) -> int:\n        """Append a small canonical tail without evaluating entry strategies."""\n        normalized_symbol = self._normalize_symbol(symbol)\n        candidates: list[tuple[datetime, dict[str, Any]]] = []\n        for raw_row in rows:\n            row = normalize_history_row(\n                normalized_symbol, dict(raw_row), source=source\n            )\n            if row is None:\n                continue\n            row_ts = self._history_row_timestamp(row)\n            if row_ts is None or row_ts <= after:\n                continue\n            candidates.append((row_ts, row))\n        candidates.sort(key=lambda item: item[0])\n        for row_ts, row in candidates:\n            bar = OneMinuteBar(\n                open=float(row["open"]),\n                high=float(row["high"]),\n                low=float(row["low"]),\n                close=float(row["close"]),\n                volume=max(int(float(row.get("volume", 0) or 0)), 0),\n                start=row_ts,\n                end=row_ts + timedelta(minutes=1),\n                synthetic=False,\n            )\n            self._ingest_bar(normalized_symbol, bar, is_backfill=True)\n        return len(candidates)\n\n'''
+          replace_once(runner, helper_anchor, helper + helper_anchor)
+
+          replace_once(
+              runner,
+              '''        needs_seed = bool(\n            rows\n            and (\n                source_count > runner_before\n                or source_count > indicator_count\n                or not indicator_current\n                or not runner_current\n            )\n        )\n        if needs_seed:\n            try:\n''',
+              '''        runner_depth_target = min(source_count, _runner_history_cap())\n        runner_depth_short = runner_before < runner_depth_target\n        indicator_depth_short = source_count > indicator_count\n        incremental_rows: list[dict[str, Any]] = []\n        if (\n            rows\n            and runner_ready\n            and indicator_ready\n            and runner_last_ts is not None\n            and indicator_last_ts == runner_last_ts\n            and mdm_last_ts is not None\n            and runner_last_ts < mdm_last_ts\n        ):\n            for row in rows:\n                row_ts = self._history_row_timestamp(row)\n                if row_ts is not None and row_ts > runner_last_ts:\n                    incremental_rows.append(row)\n        incremental_limit = safe_positive_int_env(\n            "RUNNER_HISTORY_INCREMENTAL_BACKFILL_MAX_BARS", 5, minimum=1\n        )\n        can_incremental = bool(\n            incremental_rows\n            and len(incremental_rows) <= incremental_limit\n            and indicator_count + len(incremental_rows) >= source_count\n        )\n        needs_seed = bool(\n            rows\n            and not can_incremental\n            and (\n                runner_depth_short\n                or indicator_depth_short\n                or not indicator_current\n                or not runner_current\n            )\n        )\n        if can_incremental:\n            try:\n                appended = self._backfill_history_tail(\n                    normalized, incremental_rows, after=runner_last_ts, source=reason\n                )\n                if appended != len(incremental_rows):\n                    raise RuntimeError("incomplete_incremental_backfill")\n                self._logger.info(\n                    "RUNNER_HISTORY_INCREMENTAL_BACKFILL symbol=%s bars=%d source=%s",\n                    normalized,\n                    appended,\n                    reason,\n                    extra={\n                        "event": "RUNNER_HISTORY_INCREMENTAL_BACKFILL",\n                        "symbol": normalized,\n                        "bars": appended,\n                        "source": reason,\n                    },\n                )\n            except Exception as exc:  # noqa: BLE001 - fall back to canonical reseed\n                needs_seed = True\n                self._logger.warning(\n                    "RUNNER_HISTORY_INCREMENTAL_BACKFILL_FAILED symbol=%s source=%s error_type=%s error=%s",\n                    normalized,\n                    reason,\n                    type(exc).__name__,\n                    exc,\n                    extra={\n                        "event": "RUNNER_HISTORY_INCREMENTAL_BACKFILL_FAILED",\n                        "symbol": normalized,\n                        "source": reason,\n                        "error_type": type(exc).__name__,\n                        "error": str(exc),\n                    },\n                )\n        if needs_seed:\n            try:\n''',
+          )
+
+          replace_once(
+              runner,
+              '''                needs_sync = bool(\n                    indicator_count < minimum\n                    or runner_count < minimum\n                    or source_count > indicator_count\n                    or source_count > runner_count\n                    or stale_projection\n                )\n''',
+              '''                runner_depth_target = min(source_count, _runner_history_cap())\n                needs_sync = bool(\n                    indicator_count < minimum\n                    or runner_count < minimum\n                    or source_count > indicator_count\n                    or runner_count < runner_depth_target\n                    or stale_projection\n                )\n''',
+          )
+
+          test_path = 'tests/architecture/test_history_ownership.py'
+          replace_once(
+              test_path,
+              '''    assert "len(self._ohlc" not in wait_src\n    assert "len(self._raw_tick_history" in wait_src\n''',
+              '''    assert "get_ohlc_bars" in wait_src\n    assert "_raw_tick_history" not in wait_src\n''',
+          )
+          PY
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Focused regression tests
+        run: |
+          python -m pip install -e '.[dev]' -q
+          python -m pytest -q tests/strategies/test_history_projection_hotpath.py tests/strategies/test_canonical_history_depth_expansion.py tests/strategies/test_canonical_runner_history_sync.py tests/architecture/test_history_ownership.py
+      - name: Commit focused source changes and remove temporary workflow
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm .github/workflows/_temporary_history_hotpath_cleanup.yml
+          git add src/nifty_scalper_bot/data/market_data_manager.py src/nifty_scalper_bot/strategies/runner.py tests/architecture/test_history_ownership.py tests/strategies/test_history_projection_hotpath.py
+          git commit -m 'fix(data): keep history hotpath patch focused'
+          git push origin HEAD:fix/readiness-history-projection-hotpath-v2
