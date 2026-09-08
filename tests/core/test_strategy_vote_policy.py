@@ -73,3 +73,19 @@ def test_opposite_side_or_context_vote_is_not_confirmation():
         (_signal(), _vote(strategy="OrderFlow", side="CE", score=9.0, role="trigger")),
     ]
     assert independent_same_side_confirmation(signals) == (False, [])
+
+
+def test_failed_setup_trigger_cannot_count_as_independent_confirmation():
+    signals = [
+        (_signal(), _vote(strategy="ORBPro", side="CE", score=8.0, role="trigger", raw_setup_score=8.0, setup_min=5.5, setup_pass=True)),
+        (_signal(), _vote(strategy="VWAPPro", side="CE", score=9.0, role="trigger", raw_setup_score=4.0, setup_min=5.8, setup_pass=False)),
+    ]
+    assert independent_same_side_confirmation(signals) == (False, [])
+
+
+def test_close_vote_cannot_count_as_independent_entry_confirmation():
+    signals = [
+        (_signal(), _vote(strategy="ORBPro", side="CE", score=8.0, role="trigger")),
+        (_signal("CLOSE_LONG"), _vote(strategy="VWAPPro", side="CE", score=9.0, role="trigger")),
+    ]
+    assert independent_same_side_confirmation(signals) == (False, [])
