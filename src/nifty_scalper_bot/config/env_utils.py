@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 
 LOGGER = logging.getLogger(__name__)
-LIVE_PER_TRADE_RISK_PCT = "0.75"
+LIVE_PER_TRADE_RISK_PCT = "2.0"
 # Daily loss is an independent portfolio-level circuit breaker. An indivisible
 # lot that cannot fit the per-trade risk budget is skipped rather than widening
 # either limit at runtime.
@@ -208,10 +208,9 @@ def normalise_live_env_defaults() -> None:
         _persist_production_live_defaults(defaults)
 
     if live_requested:
-        # One conservative canonical live risk envelope. Accepted aliases are
-        # synchronized here so stale deployment values cannot silently widen
-        # risk. Existing sizing clamps and final RiskManager breakers remain
-        # unchanged.
+        # Canonical live risk envelope. Accepted aliases are synchronized here
+        # so stale deployment values cannot silently change per-trade risk.
+        # Existing sizing clamps and final RiskManager breakers remain unchanged.
         os.environ['RISK__PER_TRADE_RISK_PCT'] = LIVE_PER_TRADE_RISK_PCT
         os.environ['RISK_PER_TRADE_PCT'] = LIVE_PER_TRADE_RISK_PCT
         os.environ['RISK_DAILY_LOSS_PCT'] = LIVE_DAILY_LOSS_PCT
