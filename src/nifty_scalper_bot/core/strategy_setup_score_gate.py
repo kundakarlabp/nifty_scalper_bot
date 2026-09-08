@@ -1,9 +1,8 @@
 """Compatibility wiring for the canonical strategy-vote policy.
 
-All setup/role policy lives in :mod:`strategy_vote_policy`.  This module is
-kept only as the existing import-time integration seam until StrategyManager's
-large legacy combiner can be edited directly without changing runtime import
-ordering.  It must not contain an independent threshold or role definition.
+All setup/role policy lives in :mod:`strategy_vote_policy`. This module is only
+the import-time integration seam for the legacy StrategyManager and therefore
+must not define independent thresholds, roles, or confirmation semantics.
 """
 
 from __future__ import annotations
@@ -13,6 +12,7 @@ import logging
 from typing import Any, Mapping
 
 from nifty_scalper_bot.core.strategy_vote_policy import (
+    partition_votes,
     setup_gate_decision,
     vote_role,
 )
@@ -28,8 +28,13 @@ def setup_gate_result(vote: Any) -> tuple[bool, float | None, float | None, str 
 
 
 def enforce_context_only_role(signal: Any, vote: Any) -> tuple[Any, bool]:
-    """Normalize a permanent context-only vote at the runtime integration seam."""
-    if vote_role(vote) != "context" or str(getattr(vote, "strategy", "") or "").strip().lower() != "orderflow" or getattr(signal, "action", None) in {"CLOSE_LONG", "CLOSE_SHORT"}:
+    """Normalize permanent context-only metadata at the runtime seam."""
+    strategy = str(getattr(vote, "strategy", "") or "").strip().lower()
+    if (
+        vote_role(vote) != "context"
+        or strategy != "orderflow"
+        or getattr(signal, "action", None) in {"CLOSE_LONG", "CLOSE_SHORT"}
+    ):
         return signal, False
 
     enforced = {
@@ -76,7 +81,7 @@ def filter_context_promotions(
 
 
 def apply_patches() -> None:
-    """Wire canonical policy into the existing StrategyManager seam idempotently."""
+    """Wire canonical policy into the legacy StrategyManager seam idempotently."""
     from nifty_scalper_bot.core import strategy_manager as strategy_module
 
     cls = strategy_module.StrategyManager
@@ -92,28 +97,16 @@ def apply_patches() -> None:
             indicators: Mapping[str, Any],
             no_vote_reason_counts: Mapping[str, int] | None = None,
         ) -> Any:
-            eligible: list[tuple[Any, Any]] = []
-            rejected: list[dict[str, Any]] = []
+            normalized: list[tuple[Any, Any]] = []
             corrected: list[str] = []
             for signal, vote in signals:
                 signal, role_changed = enforce_context_only_role(signal, vote)
                 if role_changed:
                     corrected.append(str(getattr(vote, "strategy", "unknown")))
-                role = vote_role(vote)
-                is_close = getattr(signal, "action", None) in {"CLOSE_LONG", "CLOSE_SHORT"}
-                if role != "context" and not is_close:
-                    decision = setup_gate_decision(vote)
-                    if not decision.passed:
-                        rejected.append(
-                            {
-                                "strategy": getattr(vote, "strategy", None),
-                                "score": decision.score,
-                                "minimum": decision.minimum,
-                                "reason": decision.reason,
-                            }
-                        )
-                        continue
-                eligible.append((signal, vote))
+                normalized.append((signal, vote))
+
+            triggers, contexts, rejected = partition_votes(normalized)
+            eligible = triggers + contexts
 
             if corrected:
                 log_throttled(
@@ -124,15 +117,18 @@ def apply_patches() -> None:
                     corrected,
                     interval_sec=30.0,
                     level=logging.WARNING,
-                    extra={"event": "PERMANENT_CONTEXT_ONLY_ROLE_ENFORCED", "symbol": str(symbol).upper(), "strategies": corrected},
+                    extra={
+                        "event": "PERMANENT_CONTEXT_ONLY_ROLE_ENFORCED",
+                        "symbol": str(symbol).upper(),
+                        "strategies": corrected,
+                    },
                 )
 
-            trigger_exists = any(
-                vote_role(vote) != "context"
-                and getattr(signal, "action", None) not in {"CLOSE_LONG", "CLOSE_SHORT"}
-                for signal, vote in eligible
+            entry_trigger_exists = any(
+                getattr(signal, "action", None) not in {"CLOSE_LONG", "CLOSE_SHORT"}
+                for signal, _vote in triggers
             )
-            if rejected and not trigger_exists:
+            if rejected and not entry_trigger_exists:
                 log_throttled(
                     LOGGER,
                     f"hard_setup_score_gate:{str(symbol).upper()}",
@@ -141,9 +137,14 @@ def apply_patches() -> None:
                     rejected,
                     interval_sec=30.0,
                     level=logging.INFO,
-                    extra={"event": "HARD_SETUP_SCORE_GATE_BLOCKED", "symbol": str(symbol).upper(), "rejected": rejected},
+                    extra={
+                        "event": "HARD_SETUP_SCORE_GATE_BLOCKED",
+                        "symbol": str(symbol).upper(),
+                        "rejected": rejected,
+                    },
                 )
                 return None
+
             return original_combine(
                 self,
                 symbol=symbol,
@@ -176,7 +177,11 @@ def apply_patches() -> None:
                     blocked,
                     interval_sec=30.0,
                     level=logging.INFO,
-                    extra={"event": "PERMANENT_CONTEXT_ONLY_PROMOTION_BLOCKED", "symbol": str(symbol).upper(), "strategies": blocked},
+                    extra={
+                        "event": "PERMANENT_CONTEXT_ONLY_PROMOTION_BLOCKED",
+                        "symbol": str(symbol).upper(),
+                        "strategies": blocked,
+                    },
                 )
             if not eligible:
                 return None
@@ -187,4 +192,9 @@ def apply_patches() -> None:
         cls._permanent_context_only_gate_installed = True
 
 
-__all__ = ["apply_patches", "enforce_context_only_role", "filter_context_promotions", "setup_gate_result"]
+__all__ = [
+    "apply_patches",
+    "enforce_context_only_role",
+    "filter_context_promotions",
+    "setup_gate_result",
+]
