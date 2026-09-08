@@ -125,7 +125,12 @@ def test_option_premium_sweep_cannot_replace_underlying_structure(monkeypatch) -
     assert strategy.last_no_vote_reason in {
         "underlying_no_liquidity_sweep",
         "smc_awaiting_sweep",
+        "smc_awaiting_confirmation",
     }
+    if strategy.last_no_vote_reason == "smc_awaiting_confirmation":
+        recovered = strategy._events[(FUTURES, "CE")]
+        assert recovered["recovered_from_history"] is True
+        assert all(not key.startswith("premium_") for key in recovered)
 
 
 def test_bullish_underlying_sweep_requires_later_confirmation_bar(monkeypatch) -> None:
