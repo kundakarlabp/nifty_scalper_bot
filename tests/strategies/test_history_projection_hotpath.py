@@ -58,6 +58,14 @@ def test_wait_until_ready_uses_completed_ohlc_depth_not_raw_tick_count() -> None
     assert "_raw_tick_history" not in source
 
 
+def test_live_ingest_and_reseed_share_runner_history_cap() -> None:
+    ingest_source = inspect.getsource(StrategyRunner._ingest_bar)
+    reseed_source = inspect.getsource(StrategyRunner.reseed_history_from_bars)
+    assert "_runner_history_cap()" in ingest_source
+    assert "_runner_history_cap()" in reseed_source
+    assert "len(history) > 400" not in ingest_source
+
+
 def test_capped_runner_same_latest_does_not_reseed(monkeypatch) -> None:
     monkeypatch.setenv("RUNNER_SYMBOL_HISTORY_MAX_BARS", "500")
     canonical = _bars(600)
