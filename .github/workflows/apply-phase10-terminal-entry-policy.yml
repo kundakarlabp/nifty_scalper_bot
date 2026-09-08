@@ -35,43 +35,6 @@ jobs:
           python -m pip install -e '.[dev]' -q
       - name: Apply focused phase10 correction
         run: python scripts/apply_phase10_terminal_entry_policy.py
-      - name: Align current terminal diagnostic assertions
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-          import re
-
-          path = Path('tests/strategies/test_runner_symbol_role_gate.py')
-          text = path.read_text()
-          assertion = '''    assert len(out) == 1
-              result = out[0]
-              assert result["status"] == "rejected"
-              assert result["broker_attempted"] is False
-              assert result["execution_allowed"] is False
-              assert result["entry_gate_allowed"] is False
-              assert result["entry_gate_failure_reason"] == "strategy_role_blocked"
-              assert result["reason"] == "context_only_no_trigger"
-              assert result["strategy_role"] == "context_only"
-          '''
-          assertion = '\n'.join(line[10:] if line.startswith('          ') else line for line in assertion.splitlines()) + '\n'
-          for name in (
-              'test_structured_veto_blocks_live_order',
-              'test_structured_execution_accounting_blocks_live_order',
-          ):
-              pattern = re.compile(
-                  rf'((?:async\s+)?def\s+{name}\b.*?)(?=\n(?:async\s+)?def\s+|\Z)',
-                  re.S,
-              )
-              match = pattern.search(text)
-              if not match:
-                  raise SystemExit(f'{name}: function not found')
-              section = match.group(1)
-              if section.count('    assert out == []\n') != 1:
-                  raise SystemExit(f'{name}: stale assertion match count != 1')
-              updated = section.replace('    assert out == []\n', assertion, 1)
-              text = text[:match.start(1)] + updated + text[match.end(1):]
-          path.write_text(text)
-          PY
       - name: Format focused files
         run: |
           python -m black \
