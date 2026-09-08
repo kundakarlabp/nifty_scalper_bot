@@ -8,7 +8,6 @@ from nifty_scalper_bot.data.market_data_manager import MarketDataManager
 from nifty_scalper_bot.strategies.indicators import IndicatorEngine
 from nifty_scalper_bot.strategies.runner import StrategyRunner
 
-
 SYMBOL = "NFO:NIFTY26SEPFUT"
 
 
@@ -27,7 +26,9 @@ def _bars(count: int) -> list[dict[str, object]]:
     ]
 
 
-def _runner(canonical: list[dict[str, object]], projected: list[dict[str, object]]) -> StrategyRunner:
+def _runner(
+    canonical: list[dict[str, object]], projected: list[dict[str, object]]
+) -> StrategyRunner:
     runner = StrategyRunner.__new__(StrategyRunner)
     runner._logger = SimpleNamespace(
         info=lambda *a, **k: None,
@@ -37,12 +38,16 @@ def _runner(canonical: list[dict[str, object]], projected: list[dict[str, object
     runner._normalize_symbol = lambda value: str(value)
     runner._symbol_history = {SYMBOL: list(projected)}
     runner._indicator_engine = IndicatorEngine()
-    runner._indicator_engine.replace_history(SYMBOL, projected, source="test", min_bars=1)
+    runner._indicator_engine.replace_history(
+        SYMBOL, projected, source="test", min_bars=1
+    )
     runner._get_mdm_bars = lambda _symbol, limit: list(canonical)[-limit:]
     runner._set_symbol_hydration_state = lambda *_a, **_k: None
     runner._schedule_runtime_history_ensure = lambda *_a, **_k: True
     runner._should_log_throttled = lambda *_a, **_k: False
-    runner._market_data = SimpleNamespace(history_capacity_for=lambda *_a, **_k: len(canonical))
+    runner._market_data = SimpleNamespace(
+        history_capacity_for=lambda *_a, **_k: len(canonical)
+    )
     runner._data_hub = None
     return runner
 
@@ -58,10 +63,14 @@ def test_capped_runner_same_latest_does_not_reseed(monkeypatch) -> None:
     canonical = _bars(600)
     projected = canonical[-500:]
     runner = _runner(canonical, projected)
-    runner._indicator_engine.replace_history(SYMBOL, canonical, source="test", min_bars=1)
+    runner._indicator_engine.replace_history(
+        SYMBOL, canonical, source="test", min_bars=1
+    )
 
     def _unexpected_reseed(*_a, **_k):
-        raise AssertionError("bounded runner depth with the same latest bar must not reseed")
+        raise AssertionError(
+            "bounded runner depth with the same latest bar must not reseed"
+        )
 
     runner.reseed_history_from_bars = _unexpected_reseed
     result = runner.sync_history_from_mdm(
@@ -85,7 +94,9 @@ def test_single_missing_tail_bar_is_backfilled_without_full_reseed(monkeypatch) 
     calls: list[tuple[str, bool, datetime]] = []
 
     def _unexpected_reseed(*_a, **_k):
-        raise AssertionError("one advancing canonical bar must use incremental backfill")
+        raise AssertionError(
+            "one advancing canonical bar must use incremental backfill"
+        )
 
     def _ingest(symbol, bar, is_backfill=False):
         calls.append((symbol, bool(is_backfill), bar.timestamp))
