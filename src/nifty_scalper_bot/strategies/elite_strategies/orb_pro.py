@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime, time, timedelta, timezone
 import os
+from datetime import datetime, time, timedelta, timezone
 from typing import Any, Mapping
 from zoneinfo import ZoneInfo
 
@@ -133,7 +133,12 @@ class ORBProStrategy(EliteStrategy):
             volume = _safe_float(raw.get("volume")) or 0.0
             if ts is None or None in {open_price, high, low, close}:
                 continue
-            assert open_price is not None and high is not None and low is not None and close is not None
+            assert (
+                open_price is not None
+                and high is not None
+                and low is not None
+                and close is not None
+            )
             if min(open_price, high, low, close) <= 0:
                 continue
             completed.append(
@@ -170,18 +175,22 @@ class ORBProStrategy(EliteStrategy):
         return max(1.0, average)
 
     @staticmethod
-    def _volume_ratio(rows: list[dict[str, Any]]) -> float:
-        if not rows:
+    def _volume_ratio_at(rows: list[dict[str, Any]], index: int) -> float:
+        if not rows or index < 0 or index >= len(rows):
             return 0.0
-        current = float(rows[-1].get("volume") or 0.0)
+        current = float(rows[index].get("volume") or 0.0)
         prior = [
             float(row.get("volume") or 0.0)
-            for row in rows[-21:-1]
+            for row in rows[max(0, index - 20) : index]
             if float(row.get("volume") or 0.0) > 0.0
         ]
         if current <= 0 or not prior:
             return 0.0
         return current / (sum(prior) / len(prior))
+
+    @classmethod
+    def _volume_ratio(cls, rows: list[dict[str, Any]]) -> float:
+        return cls._volume_ratio_at(rows, len(rows) - 1)
 
     def _underlying_snapshot(
         self, indicators: Mapping[str, Any]
@@ -228,7 +237,9 @@ class ORBProStrategy(EliteStrategy):
                 continue
             atr = self._underlying_atr(rows)
             body_range = max(float(latest["high"]) - float(latest["low"]), 1e-9)
-            body_ratio = abs(float(latest["close"]) - float(latest["open"])) / body_range
+            body_ratio = (
+                abs(float(latest["close"]) - float(latest["open"])) / body_range
+            )
             return {
                 "source": source,
                 "symbol": underlying_symbol,
@@ -244,9 +255,102 @@ class ORBProStrategy(EliteStrategy):
                 "atr": atr,
                 "body_ratio": body_ratio,
                 "volume_ratio": self._volume_ratio(rows),
+                "rows": rows,
                 "minutes_after_range": max(
                     0.0, (latest_ts - cutoff).total_seconds() / 60.0
                 ),
+            }
+        return None
+
+    def _recover_unconfirmed_breakout(
+        self,
+        snapshot: Mapping[str, Any],
+        *,
+        side: str,
+        buffer: float,
+        tolerance: float,
+    ) -> dict[str, Any] | None:
+        """Recover only a breakout that could still be awaiting its first retest.
+
+        The scan refuses momentum breakouts and any event already retested or
+        invalidated before the current bar. This restores state lost between
+        bars without replaying a signal that the previous process could have
+        emitted.
+        """
+        rows = list(snapshot.get("rows") or ())
+        if len(rows) < 3:
+            return None
+        current_ts = snapshot["current_ts"]
+        cutoff = snapshot["cutoff"]
+        boundary = float(snapshot["orb_high"] if side == "CE" else snapshot["orb_low"])
+        underlying_atr = float(snapshot["atr"])
+        max_age = max(60.0, _env_float("ORB_BREAKOUT_MAX_AGE_SECONDS", 600.0))
+
+        for index in range(len(rows) - 2, 0, -1):
+            breakout = rows[index]
+            breakout_ts = breakout["timestamp"]
+            if (
+                breakout_ts < cutoff
+                or (current_ts - breakout_ts).total_seconds() > max_age
+            ):
+                break
+            previous_close = float(rows[index - 1]["close"])
+            breakout_close = float(breakout["close"])
+            if side == "CE":
+                fresh = (
+                    previous_close <= boundary + buffer
+                    and breakout_close > boundary + buffer
+                )
+            else:
+                fresh = (
+                    previous_close >= boundary - buffer
+                    and breakout_close < boundary - buffer
+                )
+            if not fresh:
+                continue
+
+            bar_range = max(float(breakout["high"]) - float(breakout["low"]), 1e-9)
+            body_ratio = (
+                abs(float(breakout["close"]) - float(breakout["open"])) / bar_range
+            )
+            if body_ratio < max(0.0, _env_float("ORB_MIN_BREAKOUT_BODY_PCT", 0.35)):
+                continue
+            penetration_atr = abs(breakout_close - boundary) / max(underlying_atr, 1e-9)
+            volume_ratio = self._volume_ratio_at(rows, index)
+            momentum_emitted = bool(
+                _env_bool("ORB_MOMENTUM_BRANCH_ENABLED", True)
+                and body_ratio >= _env_float("ORB_MOMENTUM_MIN_BODY_PCT", 0.60)
+                and penetration_atr
+                >= _env_float("ORB_MOMENTUM_MIN_PENETRATION_ATR", 0.20)
+                and volume_ratio >= _env_float("ORB_MOMENTUM_MIN_VOLUME_RATIO", 1.20)
+            )
+            if momentum_emitted:
+                return None
+
+            for following in rows[index + 1 : -1]:
+                following_close = float(following["close"])
+                if side == "CE":
+                    invalidated = following_close < boundary - tolerance
+                    retested = bool(
+                        float(following["low"]) <= boundary + tolerance
+                        and following_close >= boundary
+                    )
+                else:
+                    invalidated = following_close > boundary + tolerance
+                    retested = bool(
+                        float(following["high"]) >= boundary - tolerance
+                        and following_close <= boundary
+                    )
+                if invalidated or retested:
+                    return None
+
+            return {
+                "status": "AWAITING_RETEST",
+                "boundary": boundary,
+                "breakout_timestamp": breakout_ts,
+                "body_ratio": body_ratio,
+                "penetration_atr": penetration_atr,
+                "recovered_from_history": True,
             }
         return None
 
@@ -283,7 +387,9 @@ class ORBProStrategy(EliteStrategy):
             score += 1.0
             reasons.append("normalized_breakout_penetration")
         slope = _safe_float(indicators.get("futures_vwap_slope"))
-        if slope is not None and ((side == "CE" and slope > 0) or (side == "PE" and slope < 0)):
+        if slope is not None and (
+            (side == "CE" and slope > 0) or (side == "PE" and slope < 0)
+        ):
             score += 1.0
             reasons.append("futures_vwap_slope_alignment")
         return max(0.0, min(10.0, score)), reasons
@@ -315,7 +421,9 @@ class ORBProStrategy(EliteStrategy):
             _env_float("ORB_RETEST_TOLERANCE_ATR", 0.15) * underlying_atr,
         )
         underlying_invalidation = (
-            boundary - invalidation_buffer if side == "CE" else boundary + invalidation_buffer
+            boundary - invalidation_buffer
+            if side == "CE"
+            else boundary + invalidation_buffer
         )
         current_underlying = float(snapshot["current"]["close"])
         penetration_atr = abs(current_underlying - boundary) / max(underlying_atr, 1e-9)
@@ -348,7 +456,9 @@ class ORBProStrategy(EliteStrategy):
             "candidate_symbol": symbol,
             "setup_id": setup_id,
             "setup_type": "underlying_opening_range_breakout",
-            "signal_domain": "NIFTY_FUTURES" if source == "futures" else "NIFTY_SPOT_FALLBACK",
+            "signal_domain": (
+                "NIFTY_FUTURES" if source == "futures" else "NIFTY_SPOT_FALLBACK"
+            ),
             "source_domain": "underlying_orb",
             "opening_range_source": source,
             "underlying_symbol": snapshot["symbol"],
@@ -358,13 +468,18 @@ class ORBProStrategy(EliteStrategy):
             "opening_range_complete": True,
             "breakout_side": side,
             "breakout_timestamp": breakout_ts.timestamp(),
+            "breakout_recovered_from_history": bool(
+                event.get("recovered_from_history")
+            ),
             "breakout_age_seconds": max(
                 0.0,
                 (snapshot["current_ts"] - breakout_ts).total_seconds(),
             ),
             "entry_branch": branch,
             "retest_confirmed": branch == "retest",
-            "retest_timestamp": retest_timestamp.timestamp() if retest_timestamp else None,
+            "retest_timestamp": (
+                retest_timestamp.timestamp() if retest_timestamp else None
+            ),
             "underlying_atr": underlying_atr,
             "underlying_breakout_body_pct": round(float(event["body_ratio"]), 4),
             "underlying_volume_ratio": round(float(snapshot["volume_ratio"]), 4),
@@ -390,7 +505,8 @@ class ORBProStrategy(EliteStrategy):
             "rejection_reasons": [],
         }
         LOGGER.info(
-            "STRATEGY_VOTE strategy=ORBProV2 side=%s branch=%s score=%.2f source=%s underlying=%s",
+            "STRATEGY_VOTE strategy=ORBProV2 side=%s branch=%s score=%.2f "
+            "source=%s underlying=%s",
             side,
             branch,
             strategy_score,
@@ -459,14 +575,18 @@ class ORBProStrategy(EliteStrategy):
         orb_low = float(snapshot["orb_low"])
         underlying_atr = float(snapshot["atr"])
         buffer = max(0.0, _env_float("ORB_BREAKOUT_BUFFER_ATR", 0.05)) * underlying_atr
-        tolerance = max(0.0, _env_float("ORB_RETEST_TOLERANCE_ATR", 0.15)) * underlying_atr
+        tolerance = (
+            max(0.0, _env_float("ORB_RETEST_TOLERANCE_ATR", 0.15)) * underlying_atr
+        )
         previous_close = float(snapshot["previous"]["close"])
         current_bar = snapshot["current"]
         current_close = float(current_bar["close"])
 
         event = self._events.get(key)
         if event is not None and event.get("status") == "EMITTED":
-            back_inside = current_close <= orb_high if side == "CE" else current_close >= orb_low
+            back_inside = (
+                current_close <= orb_high if side == "CE" else current_close >= orb_low
+            )
             if back_inside:
                 self._events.pop(key, None)
                 event = None
@@ -474,7 +594,9 @@ class ORBProStrategy(EliteStrategy):
                 self._no_vote("orb_event_already_emitted")
                 return None
         if event is not None and event.get("status") in {"INVALIDATED", "EXPIRED"}:
-            back_inside = current_close <= orb_high if side == "CE" else current_close >= orb_low
+            back_inside = (
+                current_close <= orb_high if side == "CE" else current_close >= orb_low
+            )
             if back_inside:
                 self._events.pop(key, None)
                 event = None
@@ -483,16 +605,32 @@ class ORBProStrategy(EliteStrategy):
                 return None
 
         if event is None:
+            event = self._recover_unconfirmed_breakout(
+                snapshot,
+                side=side,
+                buffer=buffer,
+                tolerance=tolerance,
+            )
+            if event is not None:
+                self._events[key] = event
+
+        if event is None:
             max_events = max(1, _env_int("ORB_MAX_EVENTS_PER_SIDE", 2))
             if self._event_count_by_key.get(key, 0) >= max_events:
                 self._no_vote("orb_session_event_limit")
                 return None
             if side == "CE":
                 boundary = orb_high
-                fresh_breakout = previous_close <= boundary + buffer and current_close > boundary + buffer
+                fresh_breakout = (
+                    previous_close <= boundary + buffer
+                    and current_close > boundary + buffer
+                )
             else:
                 boundary = orb_low
-                fresh_breakout = previous_close >= boundary - buffer and current_close < boundary - buffer
+                fresh_breakout = (
+                    previous_close >= boundary - buffer
+                    and current_close < boundary - buffer
+                )
             if not fresh_breakout:
                 self._no_vote("no_fresh_underlying_breakout")
                 return None
@@ -515,7 +653,8 @@ class ORBProStrategy(EliteStrategy):
             momentum_confirmed = bool(
                 momentum_enabled
                 and body_ratio >= _env_float("ORB_MOMENTUM_MIN_BODY_PCT", 0.60)
-                and penetration_atr >= _env_float("ORB_MOMENTUM_MIN_PENETRATION_ATR", 0.20)
+                and penetration_atr
+                >= _env_float("ORB_MOMENTUM_MIN_PENETRATION_ATR", 0.20)
                 and float(snapshot["volume_ratio"])
                 >= _env_float("ORB_MOMENTUM_MIN_VOLUME_RATIO", 1.20)
             )
