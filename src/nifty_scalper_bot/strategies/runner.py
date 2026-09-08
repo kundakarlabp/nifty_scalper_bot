@@ -229,7 +229,6 @@ def _derive_strike_distance_from_atm(
     marker instead of inventing a value.
     Args: symbol, snapshot, metadata. Returns: points or None. Raises: none.
     """
-
     def _num(*values: Any) -> float | None:
         for value in values:
             if value in (None, ""):
@@ -358,7 +357,9 @@ def safe_positive_int_env(name: str, default: int, *, minimum: int = 1) -> int:
 
 def _runner_history_cap() -> int:
     """Return the single Runner history-retention cap for reseed and live ingest."""
-    return safe_positive_int_env("RUNNER_SYMBOL_HISTORY_MAX_BARS", 500, minimum=1)
+    return safe_positive_int_env(
+        "RUNNER_SYMBOL_HISTORY_MAX_BARS", 500, minimum=1
+    )
 
 
 def safe_positive_float_env(
@@ -1907,12 +1908,18 @@ class StrategyRunner:
         role = self._history_role_for_symbol(normalized)
         if role in {"spot_context", "futures_context"}:
             try:
-                smc_min = max(1, int(HistoryReadinessPolicy.from_env().smc_min_bars))
+                smc_min = max(
+                    1, int(HistoryReadinessPolicy.from_env().smc_min_bars)
+                )
             except Exception:
-                smc_min = safe_positive_int_env("SMC_MIN_BARS_REQUIRED", 30, minimum=1)
+                smc_min = safe_positive_int_env(
+                    "SMC_MIN_BARS_REQUIRED", 30, minimum=1
+                )
             resolved_limit = max(resolved_limit, smc_min)
             if _env_bool("ORB_ENABLED", True):
-                resolved_limit = max(resolved_limit, _CONTEXT_SESSION_HISTORY_BARS)
+                resolved_limit = max(
+                    resolved_limit, _CONTEXT_SESSION_HISTORY_BARS
+                )
 
         for source in (self._market_data, self._data_hub):
             if source is None:
@@ -2332,7 +2339,9 @@ class StrategyRunner:
         normalized_symbol = self._normalize_symbol(symbol)
         candidates: list[tuple[datetime, dict[str, Any]]] = []
         for raw_row in rows:
-            row = normalize_history_row(normalized_symbol, dict(raw_row), source=source)
+            row = normalize_history_row(
+                normalized_symbol, dict(raw_row), source=source
+            )
             if row is None:
                 continue
             row_ts = self._history_row_timestamp(row)
@@ -2839,7 +2848,9 @@ class StrategyRunner:
                     trace_id=trace_id,
                 )
 
-    def _option_context_history_ready(self, symbol: str, *, required_bars: int) -> bool:
+    def _option_context_history_ready(
+        self, symbol: str, *, required_bars: int
+    ) -> bool:
         """Return whether Runner and Indicator histories both meet the target."""
         runner_history = getattr(self, "_symbol_history", {}) or {}
         runner_bars = len(runner_history.get(symbol, []) or [])
@@ -5716,7 +5727,9 @@ class StrategyRunner:
         registered = normalized in self._datahub_registered_symbols
         checker = getattr(self._data_hub, "has_tick_subscription", None)
         if callable(checker):
-            registered = bool(checker(normalized, self.on_datahub_tick, token=token))
+            registered = bool(
+                checker(normalized, self.on_datahub_tick, token=token)
+            )
             if registered:
                 self._datahub_registered_symbols.add(normalized)
             else:
@@ -6388,7 +6401,8 @@ class StrategyRunner:
 
         if now - self._last_strategy_status_log >= 150.0:
             positions_active = len(
-                getattr(self._position_manager, "get_all_positions", lambda: [])() or []
+                getattr(self._position_manager, "get_all_positions", lambda: [])()
+                or []
             )
             self._logger.info(
                 "STRATEGY_STATUS_REPORT symbols_evaluated=%d "
@@ -8254,9 +8268,9 @@ class StrategyRunner:
             self._mirror_authoritative_candle_engine(normalized_symbol)
             now_mono = time.monotonic()
             self._last_tick_seen_ts = now_mono
-            self._runner_tick_received_count = (
-                int(getattr(self, "_runner_tick_received_count", 0) or 0) + 1
-            )
+            self._runner_tick_received_count = int(
+                getattr(self, "_runner_tick_received_count", 0) or 0
+            ) + 1
             self._last_runner_tick_received_at = now_mono
             if self._is_selected_option_symbol(normalized_symbol):
                 self._last_selected_option_tick_ts = now_mono
@@ -8347,9 +8361,9 @@ class StrategyRunner:
                     {**dict(tick), "trace_id": trace_id},
                 )
                 if route == EntryEvaluationRoute.OPTION_CANDIDATE:
-                    self._entry_eligible_tick_count = (
-                        int(getattr(self, "_entry_eligible_tick_count", 0) or 0) + 1
-                    )
+                    self._entry_eligible_tick_count = int(
+                        getattr(self, "_entry_eligible_tick_count", 0) or 0
+                    ) + 1
                     self._last_entry_eligible_tick_at = now_mono
                 self._notify_entry_eval_pending(normalized_symbol, trace_id=trace_id)
                 return
@@ -8465,10 +8479,7 @@ class StrategyRunner:
         if self._bracket_manager:
             try:
                 _ltp_raw = (
-                    tick.get("ltp")
-                    or tick.get("last_price")
-                    or tick.get("price")
-                    or 0.0
+                    tick.get("ltp") or tick.get("last_price") or tick.get("price") or 0.0
                 )
                 _ltp = float(_ltp_raw)
                 if _ltp > 0:
@@ -8484,9 +8495,7 @@ class StrategyRunner:
                     if isinstance(tick_err_map, dict):
                         tick_err_map[symbol] = False
             except Exception as _bm_err:
-                tick_err_map = getattr(
-                    self._bracket_manager, "_tick_error_logged", None
-                )
+                tick_err_map = getattr(self._bracket_manager, "_tick_error_logged", None)
                 already_logged = bool(
                     isinstance(tick_err_map, dict) and tick_err_map.get(symbol)
                 )
@@ -8553,7 +8562,6 @@ class StrategyRunner:
             # the next time the loop is driven. Evaluation is never inline.
             return False
         try:
-
             def _start_drain() -> None:
                 try:
                     safe_task(self._drain_pending_entry_evaluations())
@@ -8591,14 +8599,15 @@ class StrategyRunner:
                 ):
                     self._entry_eval_last_progress_ts = time.monotonic()
                 self._pending_entry_eval_symbols.add(symbol)
-                self._entry_eval_enqueue_count = (
-                    int(getattr(self, "_entry_eval_enqueue_count", 0) or 0) + 1
-                )
+                self._entry_eval_enqueue_count = int(
+                    getattr(self, "_entry_eval_enqueue_count", 0) or 0
+                ) + 1
                 self._last_entry_eval_enqueued_at = time.monotonic()
                 if trace_id:
                     self._entry_eval_trace_id_by_symbol[symbol] = trace_id
                 should_schedule = (
-                    not self._entry_eval_drain_scheduled and not self._entry_eval_active
+                    not self._entry_eval_drain_scheduled
+                    and not self._entry_eval_active
                 )
                 if should_schedule:
                     self._entry_eval_drain_scheduled = True
@@ -8667,7 +8676,9 @@ class StrategyRunner:
         with lock:
             started_at = getattr(self, "_entry_eval_active_started_at", None)
             drain_active = bool(getattr(self, "_entry_eval_active", False))
-            drain_scheduled = bool(getattr(self, "_entry_eval_drain_scheduled", False))
+            drain_scheduled = bool(
+                getattr(self, "_entry_eval_drain_scheduled", False)
+            )
             pending = sorted(getattr(self, "_pending_entry_eval_symbols", set()))
             active_age = (
                 max(0.0, now - float(started_at))
@@ -8730,13 +8741,14 @@ class StrategyRunner:
                 and tick_age <= 5.0
                 and progress_age >= dispatch_stall_s
             )
-            worker_stalled = (
-                bool(
-                    work_outstanding
-                    and (active_age >= 90.0 if drain_active else progress_age >= 90.0)
+            worker_stalled = bool(
+                work_outstanding
+                and (
+                    active_age >= 90.0
+                    if drain_active
+                    else progress_age >= 90.0
                 )
-                or dispatch_stalled
-            )
+            ) or dispatch_stalled
             return {
                 "tick_age_s": round(tick_age, 1) if tick_age != float("inf") else None,
                 "dispatch_stalled": dispatch_stalled,
@@ -8746,23 +8758,18 @@ class StrategyRunner:
                 "drain_active_age_s": round(active_age, 1),
                 "last_progress_age_s": round(progress_age, 1),
                 "selected_eval_age_s": (
-                    round(selected_eval_age, 1)
-                    if selected_eval_age is not None
-                    else None
+                    round(selected_eval_age, 1) if selected_eval_age is not None else None
                 ),
-                "evaluation_alive": (
-                    bool(
-                        selected_eval_at > 0.0
-                        and selected_eval_age is not None
-                        and selected_eval_age
-                        < float(
-                            getattr(self, "_entry_eval_dispatch_stall_s", 120.0)
-                            or 120.0
-                        )
+                "evaluation_alive": bool(
+                    selected_eval_at > 0.0
+                    and selected_eval_age is not None
+                    and selected_eval_age
+                    < float(
+                        getattr(self, "_entry_eval_dispatch_stall_s", 120.0) or 120.0
                     )
-                    if has_selected
-                    else bool(progress_age < 120.0)
-                ),
+                )
+                if has_selected
+                else bool(progress_age < 120.0),
                 "work_outstanding": work_outstanding,
                 "drain_stranded": drain_stranded,
                 "worker_stalled": worker_stalled,
@@ -8847,12 +8854,8 @@ class StrategyRunner:
                 "runner_tick_received_count": getattr(
                     self, "_runner_tick_received_count", 0
                 ),
-                "entry_eval_enqueue_count": getattr(
-                    self, "_entry_eval_enqueue_count", 0
-                ),
-                "entry_eval_started_count": getattr(
-                    self, "_entry_eval_started_count", 0
-                ),
+                "entry_eval_enqueue_count": getattr(self, "_entry_eval_enqueue_count", 0),
+                "entry_eval_started_count": getattr(self, "_entry_eval_started_count", 0),
                 "entry_eval_completed_count": getattr(
                     self, "_entry_eval_completed_count", 0
                 ),
@@ -9019,9 +9022,9 @@ class StrategyRunner:
                 },
             )
             return
-        self._entry_eval_started_count = (
-            int(getattr(self, "_entry_eval_started_count", 0) or 0) + 1
-        )
+        self._entry_eval_started_count = int(
+            getattr(self, "_entry_eval_started_count", 0) or 0
+        ) + 1
         self._last_entry_eval_started_at = time.monotonic()
         tick_payload = dict(latest_tick)
         tick_payload["trace_id"] = (
@@ -9031,15 +9034,14 @@ class StrategyRunner:
         # was ingested, so _on_tick must not run it a second time.
         tick_payload["_protection_already_handled"] = True
         self._on_tick(symbol, tick_payload)
-        self._entry_eval_completed_count = (
-            int(getattr(self, "_entry_eval_completed_count", 0) or 0) + 1
-        )
+        self._entry_eval_completed_count = int(
+            getattr(self, "_entry_eval_completed_count", 0) or 0
+        ) + 1
         self._last_entry_eval_completed_at = time.monotonic()
         if route == EntryEvaluationRoute.OPTION_CANDIDATE:
-            self._selected_candidate_eval_completed_count = (
-                int(getattr(self, "_selected_candidate_eval_completed_count", 0) or 0)
-                + 1
-            )
+            self._selected_candidate_eval_completed_count = int(
+                getattr(self, "_selected_candidate_eval_completed_count", 0) or 0
+            ) + 1
             self._last_selected_candidate_eval_completed_ts = (
                 self._last_entry_eval_completed_at
             )
@@ -9109,7 +9111,9 @@ class StrategyRunner:
         ):
             watchdog_coro = asyncio.to_thread(_run)
             try:
-                asyncio.run_coroutine_threadsafe(watchdog_coro, runtime_loop)
+                asyncio.run_coroutine_threadsafe(
+                    watchdog_coro, runtime_loop
+                )
                 return
             except RuntimeError:
                 watchdog_coro.close()
@@ -9474,10 +9478,7 @@ class StrategyRunner:
         if overloaded:
             self._logger.warning(
                 "ENTRY_EVAL_RECOVERY_FAILED reason=pipeline_overload",
-                extra={
-                    "event": "ENTRY_EVAL_RECOVERY_FAILED",
-                    "reason": "pipeline_overload",
-                },
+                extra={"event": "ENTRY_EVAL_RECOVERY_FAILED", "reason": "pipeline_overload"},
             )
             return
         reason = str(getattr(self, "_runtime_readiness_reason", "") or "")
@@ -9516,9 +9517,7 @@ class StrategyRunner:
         liveness = self._entry_eval_liveness_snapshot(now)
         hub = getattr(self, "_data_hub", None)
         mdm = getattr(self, "_market_data", None)
-        selected_tick_at = float(
-            getattr(self, "_last_selected_option_tick_ts", 0.0) or 0.0
-        )
+        selected_tick_at = float(getattr(self, "_last_selected_option_tick_ts", 0.0) or 0.0)
         selected_eval_at = float(
             getattr(self, "_last_selected_candidate_eval_completed_ts", 0.0) or 0.0
         )
@@ -9534,12 +9533,8 @@ class StrategyRunner:
             "selected_eval_age_s": liveness.get("selected_eval_age_s"),
             "strategy_evaluation_stalled": bool(liveness.get("dispatch_stalled")),
             "entry_eval_worker_stalled": bool(liveness.get("worker_stalled")),
-            "mdm_selected_tick_count": int(
-                getattr(mdm, "_mdm_selected_tick_count", 0) or 0
-            ),
-            "last_mdm_selected_tick_at": getattr(
-                mdm, "_last_mdm_selected_tick_at", None
-            ),
+            "mdm_selected_tick_count": int(getattr(mdm, "_mdm_selected_tick_count", 0) or 0),
+            "last_mdm_selected_tick_at": getattr(mdm, "_last_mdm_selected_tick_at", None),
             "datahub_runner_delivery_count": int(
                 getattr(hub, "_datahub_runner_delivery_count", 0) or 0
             ),
@@ -9567,9 +9562,7 @@ class StrategyRunner:
             "entry_eval_started_count": int(
                 getattr(self, "_entry_eval_started_count", 0) or 0
             ),
-            "last_entry_eval_started_at": getattr(
-                self, "_last_entry_eval_started_at", None
-            ),
+            "last_entry_eval_started_at": getattr(self, "_last_entry_eval_started_at", None),
             "entry_eval_completed_count": int(
                 getattr(self, "_entry_eval_completed_count", 0) or 0
             ),
@@ -14392,9 +14385,14 @@ class StrategyRunner:
                     self._context_history_probe_at = _probe_state
                 _probe_now = time.monotonic()
                 _last_probe = float(_probe_state.get(_context_symbol, 0.0) or 0.0)
-                if _probe_now - _last_probe >= _CONTEXT_HISTORY_PROBE_INTERVAL_SECONDS:
+                if (
+                    _probe_now - _last_probe
+                    >= _CONTEXT_HISTORY_PROBE_INTERVAL_SECONDS
+                ):
                     _probe_state[_context_symbol] = _probe_now
-                    self._sync_context_history_if_cold(source="context_tick_bar_sync")
+                    self._sync_context_history_if_cold(
+                        source="context_tick_bar_sync"
+                    )
         except Exception:
             pass
         self._logger.debug(
@@ -17819,6 +17817,7 @@ class StrategyRunner:
                 details={"trace_id": trace_id, "error": str(exc)},
             )
 
+
     def _broker_reports_symbol_flat(self, symbol: str) -> bool:
         """Return True only when the validated PositionManager snapshot proves flat."""
 
@@ -17883,9 +17882,7 @@ class StrategyRunner:
                 if qty <= 0 or entry <= 0:
                     continue
 
-                exposure_getter = getattr(
-                    self._position_manager, "broker_exposure_state", None
-                )
+                exposure_getter = getattr(self._position_manager, "broker_exposure_state", None)
                 try:
                     exposure = (
                         exposure_getter(symbol)
@@ -17922,11 +17919,7 @@ class StrategyRunner:
                         symbol,
                         getattr(exposure, "value", str(exposure)),
                         getattr(lifecycle, "value", str(lifecycle)),
-                        (
-                            snapshot.get("age_seconds")
-                            if isinstance(snapshot, dict)
-                            else None
-                        ),
+                        snapshot.get("age_seconds") if isinstance(snapshot, dict) else None,
                         snapshot.get("fresh") if isinstance(snapshot, dict) else None,
                         extra={
                             "event": "ORPHAN_ADOPTION_DEFERRED_BROKER_UNKNOWN",
@@ -17939,9 +17932,7 @@ class StrategyRunner:
                                 else None
                             ),
                             "snapshot_fresh": (
-                                snapshot.get("fresh")
-                                if isinstance(snapshot, dict)
-                                else None
+                                snapshot.get("fresh") if isinstance(snapshot, dict) else None
                             ),
                         },
                     )
@@ -19407,7 +19398,9 @@ class StrategyRunner:
                             direction_bias=option_side,
                             atm_strike=atm_strike,
                             snapshots=valid_snapshots,
-                            gross_rr=float(metadata.get("premium_target_rr") or 2.0),
+                            gross_rr=float(
+                                metadata.get("premium_target_rr") or 2.0
+                            ),
                         )
                     )
                     candidate, candidate_capacity_decisions = (
@@ -20517,7 +20510,8 @@ class StrategyRunner:
                         price,
                         qty,
                         float(
-                            metadata.get("premium_cost_floor_original_distance") or 0.0
+                            metadata.get("premium_cost_floor_original_distance")
+                            or 0.0
                         ),
                         float(metadata.get("premium_cost_floor_distance") or 0.0),
                         float(metadata.get("premium_cost_floor_half_spread") or 0.0),
@@ -20845,11 +20839,15 @@ class StrategyRunner:
                 allow_market_entry=allow_market_entry,
                 max_signal_age_seconds=max(
                     0.0,
-                    float(os.getenv("ENTRY_MAX_SIGNAL_AGE_SECONDS", "15") or "15"),
+                    float(
+                        os.getenv("ENTRY_MAX_SIGNAL_AGE_SECONDS", "15") or "15"
+                    ),
                 ),
                 max_entry_drift_pct=max(
                     0.0,
-                    float(os.getenv("ENTRY_MAX_PRICE_DRIFT_PCT", "2.0") or "2.0"),
+                    float(
+                        os.getenv("ENTRY_MAX_PRICE_DRIFT_PCT", "2.0") or "2.0"
+                    ),
                 ),
                 trade_lifecycle_id=_trade_lifecycle_id,
                 client_order_id=_client_order_id,
@@ -20878,7 +20876,9 @@ class StrategyRunner:
                     "regime": str(metadata.get("runtime_regime") or "UNKNOWN"),
                     "signal_id": signal.deterministic_id,
                     "trace_id": trace_id,
-                    "strategy_profile_version": getattr(self, "_build_info", {}).get(
+                    "strategy_profile_version": getattr(
+                        self, "_build_info", {}
+                    ).get(
                         "strategy_profile_version", "unknown"
                     ),
                     "final_score": metadata.get("final_score"),
