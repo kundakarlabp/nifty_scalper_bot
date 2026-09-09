@@ -41,14 +41,13 @@ def _order_manager(*, balance: float = 15_000.0):
     )
 
 
-def test_affordability_rejects_cash_affordable_contract_when_one_lot_stop_risk_exceeds_budget() -> None:
+def test_affordability_rejects_cash_affordable_contract_when_minimum_viable_risk_exceeds_budget() -> None:
     decision = evaluate_minimum_lot_affordability(
         symbol="NFO:NIFTY2691523500PE",
         quote={
             "bid": 105.20,
             "ask": 105.30,
-            "candidate_entry_price": 105.55,
-            "candidate_stop_loss": 99.40,
+            "candidate_min_risk_distance": 6.15,
         },
         order_manager=_order_manager(),
         data_hub=SimpleNamespace(get_available_balance=lambda force=False: 15_000.0),
@@ -56,15 +55,15 @@ def test_affordability_rejects_cash_affordable_contract_when_one_lot_stop_risk_e
     )
 
     assert decision.cash_affordable is True
-    assert decision.risk_affordable is False
+    assert decision.risk_floor_affordable is False
     assert decision.affordable is False
     assert decision.reason == "minimum_lot_unaffordable"
-    assert decision.capacity_blocker == "stop_risk"
-    assert decision.one_lot_stop_risk == pytest.approx((105.55 - 99.40) * 65)
+    assert decision.capacity_blocker == "minimum_stop_risk"
+    assert decision.one_lot_minimum_risk == pytest.approx(6.15 * 65)
     assert decision.effective_one_lot_risk_budget == pytest.approx(300.0)
 
 
-def test_candidate_capacity_falls_back_when_preferred_contract_breaks_stop_risk_budget() -> None:
+def test_candidate_capacity_falls_back_when_preferred_contract_has_impossible_minimum_risk() -> None:
     runner = object.__new__(StrategyRunner)
     runner._logger = _Logger()
     runner._order_manager = _order_manager()
@@ -85,16 +84,14 @@ def test_candidate_capacity_falls_back_when_preferred_contract_breaks_stop_risk_
             "bid": 105.20,
             "ask": 105.30,
             "ltp": 105.25,
-            "candidate_entry_price": 105.55,
-            "candidate_stop_loss": 99.40,
+            "candidate_min_risk_distance": 6.15,
         },
         {
             "symbol": fallback.symbol,
             "bid": 79.90,
             "ask": 80.00,
             "ltp": 79.95,
-            "candidate_entry_price": 80.00,
-            "candidate_stop_loss": 76.50,
+            "candidate_min_risk_distance": 4.00,
         },
     ]
 
@@ -108,12 +105,12 @@ def test_candidate_capacity_falls_back_when_preferred_contract_breaks_stop_risk_
 
     assert selected is fallback
     assert decisions[preferred.symbol]["cash_affordable"] is True
-    assert decisions[preferred.symbol]["risk_affordable"] is False
-    assert decisions[preferred.symbol]["capacity_blocker"] == "stop_risk"
-    assert decisions[fallback.symbol]["risk_affordable"] is True
+    assert decisions[preferred.symbol]["risk_floor_affordable"] is False
+    assert decisions[preferred.symbol]["capacity_blocker"] == "minimum_stop_risk"
+    assert decisions[fallback.symbol]["risk_floor_affordable"] is True
 
 
-def test_trade_selector_exposes_its_existing_geometry_to_capacity_screen(
+def test_trade_selector_exposes_existing_cost_aware_floor_to_capacity_screen(
     monkeypatch,
 ) -> None:
     import nifty_scalper_bot.strategies.trade_selector as selector_module
@@ -153,7 +150,7 @@ def test_trade_selector_exposes_its_existing_geometry_to_capacity_screen(
     )
 
     assert ranked
-    assert snapshot["candidate_entry_price"] == pytest.approx(ranked[0].entry_price)
-    assert snapshot["candidate_stop_loss"] == pytest.approx(ranked[0].stop_loss)
-    assert snapshot["candidate_target"] == pytest.approx(ranked[0].target)
-    assert snapshot["candidate_rr"] == pytest.approx(ranked[0].rr)
+    assert snapshot["candidate_min_risk_distance"] > 0.0
+    assert snapshot["candidate_gross_rr"] == pytest.approx(2.0)
+    candidate_risk_distance = ranked[0].entry_price - ranked[0].stop_loss
+    assert snapshot["candidate_min_risk_distance"] <= candidate_risk_distance + 1e-9
