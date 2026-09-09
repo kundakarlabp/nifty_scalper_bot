@@ -31,10 +31,10 @@ class MinimumLotAffordability:
     remaining_daily_risk_budget: float | None = None
     effective_one_lot_risk_budget: float | None = None
     max_stop_distance_one_lot: float | None = None
-    candidate_stop_loss: float | None = None
-    one_lot_stop_risk: float | None = None
+    minimum_viable_risk_distance: float | None = None
+    one_lot_minimum_risk: float | None = None
     cash_affordable: bool | None = None
-    risk_affordable: bool | None = None
+    risk_floor_affordable: bool | None = None
     capacity_blocker: str | None = None
 
     def to_dict(self) -> dict[str, object]:
@@ -90,11 +90,9 @@ def _risk_budget_snapshot(
 ) -> tuple[float | None, float | None, float | None, float | None]:
     """Return per-trade/day/effective risk budgets and one-lot stop distance.
 
-    When the selector has supplied its already-computed candidate stop geometry,
-    the returned effective budget is also used as a pre-selection one-lot screen.
-    MarginEngine and RiskManager remain authoritative immediately before broker
-    submission; this helper only prevents selecting a contract that cannot fit the
-    same configured stop-risk budget in the first place.
+    The effective budget mirrors the policy consumed by MarginEngine: configured
+    per-trade risk constrained by any remaining daily-loss budget. MarginEngine
+    and RiskManager remain authoritative immediately before broker submission.
     """
     manager = getattr(order_manager, "_risk_manager", None)
     if manager is None or lot_size <= 0:
@@ -152,11 +150,11 @@ def evaluate_minimum_lot_affordability(
 
     Cash affordability mirrors the MarginEngine fallback path: ask premium × lot
     size × margin factor, with the configured margin buffer reducing executable
-    cash. If the upstream TradeCandidateSelector has supplied its canonical
-    candidate entry/stop geometry, the same one-lot stop risk is also checked
-    against the configured per-trade and remaining daily risk budgets. Missing
-    candidate geometry does not invent a stop; the downstream authoritative risk
-    gates still decide the order.
+    cash. When the upstream selector supplies its transaction-cost-aware minimum
+    viable risk distance, this function also rejects contracts for which even that
+    lower bound cannot fit one lot inside the configured per-trade/daily risk
+    budget. It never invents or tightens a strategy stop; final stop geometry is
+    still checked by MarginEngine and RiskManager immediately before submission.
     """
 
     normalized_symbol = str(symbol or "").strip()
@@ -240,33 +238,34 @@ def evaluate_minimum_lot_affordability(
         available_balance=available,
     )
 
-    candidate_entry = _finite_float(
-        _field(quote, "candidate_entry_price"), minimum=0.0
+    minimum_viable_risk_distance = _finite_float(
+        _field(
+            quote,
+            "candidate_min_risk_distance",
+            "minimum_viable_risk_distance",
+        ),
+        minimum=0.0,
     )
-    if candidate_entry is None or candidate_entry <= 0.0:
-        candidate_entry = ask
-    candidate_stop_loss = _finite_float(
-        _field(quote, "candidate_stop_loss"), minimum=0.0
+    one_lot_minimum_risk = (
+        minimum_viable_risk_distance * float(lot_size)
+        if minimum_viable_risk_distance is not None
+        else None
     )
-    one_lot_stop_risk = None
-    risk_affordable: bool | None = None
-    if candidate_stop_loss is not None and effective_one_lot_risk_budget is not None:
-        if 0.0 < candidate_stop_loss < candidate_entry:
-            one_lot_stop_risk = (
-                candidate_entry - candidate_stop_loss
-            ) * float(lot_size)
-            risk_affordable = bool(
-                one_lot_stop_risk <= effective_one_lot_risk_budget + 1e-9
-            )
-        else:
-            risk_affordable = False
+    risk_floor_affordable: bool | None = None
+    if (
+        one_lot_minimum_risk is not None
+        and effective_one_lot_risk_budget is not None
+    ):
+        risk_floor_affordable = bool(
+            one_lot_minimum_risk <= effective_one_lot_risk_budget + 1e-9
+        )
 
-    affordable = bool(cash_affordable and risk_affordable is not False)
+    affordable = bool(cash_affordable and risk_floor_affordable is not False)
     capacity_blocker = None
     if not cash_affordable:
         capacity_blocker = "cash"
-    elif risk_affordable is False:
-        capacity_blocker = "stop_risk"
+    elif risk_floor_affordable is False:
+        capacity_blocker = "minimum_stop_risk"
 
     return MinimumLotAffordability(
         normalized_symbol,
@@ -276,7 +275,7 @@ def evaluate_minimum_lot_affordability(
         available,
         required,
         executable_capacity,
-        candidate_entry,
+        ask,
         lot_size,
         margin_factor,
         margin_buffer,
@@ -285,10 +284,10 @@ def evaluate_minimum_lot_affordability(
         remaining_daily_risk_budget=remaining_daily_risk_budget,
         effective_one_lot_risk_budget=effective_one_lot_risk_budget,
         max_stop_distance_one_lot=max_stop_distance_one_lot,
-        candidate_stop_loss=candidate_stop_loss,
-        one_lot_stop_risk=one_lot_stop_risk,
+        minimum_viable_risk_distance=minimum_viable_risk_distance,
+        one_lot_minimum_risk=one_lot_minimum_risk,
         cash_affordable=cash_affordable,
-        risk_affordable=risk_affordable,
+        risk_floor_affordable=risk_floor_affordable,
         capacity_blocker=capacity_blocker,
     )
 
