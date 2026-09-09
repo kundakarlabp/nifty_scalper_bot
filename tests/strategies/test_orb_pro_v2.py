@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from nifty_scalper_bot.strategies.elite_strategies.config_models import ORBProStrategyConfig
-from nifty_scalper_bot.strategies.elite_strategies.orb_pro import ORBProStrategy
+import pytest
 
+from nifty_scalper_bot.strategies.elite_strategies.config_models import (
+    ORBProStrategyConfig,
+)
+from nifty_scalper_bot.strategies.elite_strategies.orb_pro import ORBProStrategy
 
 FUTURE = "NFO:NIFTY26SEPFUT"
 SPOT = "NSE:NIFTY"
@@ -303,3 +306,85 @@ def test_late_breakout_outside_orb_entry_lifetime_fails_closed(monkeypatch) -> N
 
     assert strategy.generate_signal(CE, indicators, 50.0) is None
     assert strategy.last_no_vote_reason == "orb_entry_window_expired"
+
+
+@pytest.mark.parametrize("missing_minute", [0, 8, 14])
+def test_incomplete_opening_range_cannot_generate_breakout(
+    monkeypatch, missing_minute
+) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    rows = _opening_rows()
+    rows.pop(missing_minute)
+    # A duplicate must not disguise a missing minute as fifteen complete bars.
+    rows.append(dict(rows[1]))
+    rows.append(
+        _bar(
+            15,
+            open_=24_008.0,
+            high=24_034.0,
+            low=24_006.0,
+            close=24_030.0,
+            volume=3_000.0,
+        )
+    )
+    strategy = _strategy({FUTURE: rows})
+
+    assert (
+        strategy.generate_signal(
+            CE, _base_indicators("CE", rows[-1]["timestamp"]), 50.0
+        )
+        is None
+    )
+    assert strategy.last_no_vote_reason == "underlying_orb_not_ready"
+
+
+def test_incomplete_futures_range_can_use_complete_spot_range(monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    rows = _opening_rows()
+    rows.append(
+        _bar(
+            15,
+            open_=24_008.0,
+            high=24_034.0,
+            low=24_006.0,
+            close=24_030.0,
+            volume=3_000.0,
+        )
+    )
+    strategy = _strategy({FUTURE: rows[1:], SPOT: rows})
+
+    signal = strategy.generate_signal(
+        CE, _base_indicators("CE", rows[-1]["timestamp"]), 50.0
+    )
+
+    assert signal is not None
+    assert signal.metadata["opening_range_source"] == "spot_fallback"
+
+
+@pytest.mark.parametrize("orb_minutes", [5, 10, 15])
+def test_opening_range_backfill_restores_same_bar_evaluation(
+    monkeypatch, orb_minutes
+) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    rows = _opening_rows()[:orb_minutes]
+    missing = rows.pop(0)
+    rows.append(
+        _bar(
+            orb_minutes,
+            open_=24_008.0,
+            high=24_034.0,
+            low=24_006.0,
+            close=24_030.0,
+            volume=3_000.0,
+        )
+    )
+    strategy = _strategy({FUTURE: rows}, orb_minutes=orb_minutes)
+    indicators = _base_indicators("CE", rows[-1]["timestamp"])
+
+    assert strategy.generate_signal(CE, indicators, 50.0) is None
+    rows.insert(0, missing)
+    signal = strategy.generate_signal(CE, indicators, 50.0)
+
+    assert signal is not None
+    assert signal.metadata["opening_range_complete"] is True
+    assert signal.metadata["orb_window_minutes"] == orb_minutes
