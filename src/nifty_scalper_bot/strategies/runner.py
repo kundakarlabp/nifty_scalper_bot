@@ -944,6 +944,8 @@ class StrategyRunner:
         self._first_tick_logged_symbols: set[str] = set()
         self._first_live_bar_logged_symbols: set[str] = set()
         self._symbol_last_signal_ts: dict[str, float] = {}
+        self._terminal_signal_trace_ids: dict[str, float] = {}
+        self._terminal_signal_lock = threading.RLock()
         self._underlying_last_signal_ts: dict[str, float] = {}
         self._reason_last_signal_ts: dict[str, float] = {}
         self._submitted_entry_order_context: dict[str, dict[str, Any]] = {}
@@ -3768,73 +3770,79 @@ class StrategyRunner:
                     allowed=False,
                     trace_id=trace_id,
                 )
-                self._logger.info(
-                    "SIGNAL_EXECUTION_RESULT symbol=%s accepted=%s reason=%s order_id=%s trace_id=%s",
-                    signal.symbol,
-                    False,
-                    prepare_reason,
-                    None,
-                    trace_id,
-                    extra={
-                        "event": "SIGNAL_EXECUTION_RESULT",
-                        "symbol": signal.symbol,
-                        "accepted": False,
-                        "reason": prepare_reason,
-                        "order_id": None,
-                        "trace_id": trace_id,
-                    },
+                self._emit_signal_execution_result(
+                    symbol=signal.symbol,
+                    trace_id=trace_id,
+                    result=SignalExecutionResult(
+                        False,
+                        str(prepare_reason or "signal_prepare_failed"),
+                        details={"broker_attempted": False},
+                    ),
+                    broker_attempted=False,
                 )
                 return
             result = self._handle_signal(prepared_signal, price, now, trace_id=trace_id)
-            self._logger.info(
-                "SIGNAL_EXECUTION_RESULT symbol=%s accepted=%s reason=%s order_id=%s trace_id=%s",
-                signal.symbol,
-                result.accepted,
-                result.reason,
-                result.order_id,
-                trace_id,
-                extra={
-                    "event": "SIGNAL_EXECUTION_RESULT",
-                    "symbol": signal.symbol,
-                    "accepted": result.accepted,
-                    "reason": result.reason,
-                    "order_id": result.order_id,
-                    "trace_id": trace_id,
-                },
+            self._emit_signal_execution_result(
+                symbol=signal.symbol,
+                trace_id=trace_id,
+                result=result,
             )
 
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
-            prepared_signal, prepare_reason = asyncio.run(
-                self._prepare_signal_for_handling(signal, price, trace_id)
-            )
+            try:
+                prepared_signal, prepare_reason = asyncio.run(
+                    self._prepare_signal_for_handling(signal, price, trace_id)
+                )
+            except Exception as exc:  # noqa: BLE001
+                self._logger.error(
+                    "SIGNAL_PREPARATION_FAILED symbol=%s trace_id=%s error=%s",
+                    signal.symbol,
+                    trace_id,
+                    exc,
+                    exc_info=exc,
+                )
+                return False, "signal_preparation_failed"
             if prepared_signal is None:
                 return False, prepare_reason
             result = self._handle_signal(prepared_signal, price, now, trace_id=trace_id)
-            self._logger.info(
-                "SIGNAL_EXECUTION_RESULT symbol=%s accepted=%s reason=%s order_id=%s trace_id=%s",
-                signal.symbol,
-                result.accepted,
-                result.reason,
-                result.order_id,
-                trace_id,
-                extra={
-                    "event": "SIGNAL_EXECUTION_RESULT",
-                    "symbol": signal.symbol,
-                    "accepted": result.accepted,
-                    "reason": result.reason,
-                    "order_id": result.order_id,
-                    "trace_id": trace_id,
-                },
+            self._emit_signal_execution_result(
+                symbol=signal.symbol,
+                trace_id=trace_id,
+                result=result,
             )
             return True, None
-        task = loop.create_task(
-            _job(), name=f"signal_prepare:{signal.symbol}:{trace_id}"
-        )
+        job = _job()
+        try:
+            task = loop.create_task(
+                job, name=f"signal_prepare:{signal.symbol}:{trace_id}"
+            )
+        except Exception as exc:  # noqa: BLE001
+            job.close()
+            self._logger.error(
+                "SIGNAL_PREPARATION_SCHEDULING_FAILED symbol=%s trace_id=%s error=%s",
+                signal.symbol,
+                trace_id,
+                exc,
+                exc_info=exc,
+            )
+            return False, "signal_preparation_scheduling_failed"
 
         def _on_done(done_task: asyncio.Task[None]) -> None:
             """Handle async task completion. Args: done_task. Returns: None. Raises: None."""
+            if done_task.cancelled():
+                self._emit_signal_execution_result(
+                    symbol=signal.symbol,
+                    trace_id=trace_id,
+                    result=SignalExecutionResult(
+                        False,
+                        "signal_preparation_cancelled",
+                        details={"broker_attempted": False},
+                    ),
+                    broker_attempted=False,
+                )
+                return
             try:
                 done_task.result()
             except Exception as exc:  # noqa: BLE001
@@ -3850,6 +3858,20 @@ class StrategyRunner:
                         "error": str(exc),
                     },
                     exc_info=exc,
+                )
+                self._emit_signal_execution_result(
+                    symbol=signal.symbol,
+                    trace_id=trace_id,
+                    result=SignalExecutionResult(
+                        False,
+                        "signal_preparation_task_failed",
+                        details={
+                            "broker_attempted": False,
+                            "error_type": type(exc).__name__,
+                            "error": str(exc),
+                        },
+                    ),
+                    broker_attempted=False,
                 )
 
         task.add_done_callback(_on_done)
@@ -4643,7 +4665,11 @@ class StrategyRunner:
                     interval_sec=15.0,
                     level=logging.INFO,
                 )
-                return SignalExecutionResult(False, f"{reject_reason}_reject_cooldown")
+                return SignalExecutionResult(
+                    False,
+                    f"{reject_reason}_reject_cooldown",
+                    details={"broker_attempted": False},
+                )
         return None
 
     @staticmethod
@@ -5177,24 +5203,13 @@ class StrategyRunner:
     ) -> SignalExecutionResult:
         """Log and return rejection. Args: symbol/trace_id/reason/details. Returns: result. Raises: none."""
         payload = dict(details or {})
-        log_throttled_live(
-            self._logger,
-            logging.INFO,
-            "SIGNAL_EXECUTION_RESULT",
-            f"SIGNAL_EXECUTION_RESULT:{symbol}:{reason}",
-            float(os.getenv("LOG_THROTTLE_STRATEGY_REJECT_SECONDS", "120") or "120"),
-            "SIGNAL_EXECUTION_RESULT accepted=False reason=%s symbol=%s trace_id=%s",
-            reason,
-            symbol,
-            trace_id,
-            extra={
-                "event": "SIGNAL_EXECUTION_RESULT",
-                "accepted": False,
-                "reason": reason,
-                "symbol": symbol,
-                "trace_id": trace_id,
-                **payload,
-            },
+        payload.setdefault("broker_attempted", False)
+        result = SignalExecutionResult(False, reason, details=payload)
+        self._emit_signal_execution_result(
+            symbol=symbol,
+            trace_id=trace_id,
+            result=result,
+            broker_attempted=False,
         )
         self._record_trade_decision_snapshot(
             symbol=symbol,
@@ -5234,7 +5249,66 @@ class StrategyRunner:
                     ),
                 },
             )
-        return SignalExecutionResult(False, reason, details=payload)
+        return result
+
+    def _emit_signal_execution_result(
+        self,
+        *,
+        symbol: str,
+        trace_id: str,
+        result: SignalExecutionResult,
+        broker_attempted: bool | None = None,
+    ) -> bool:
+        """Emit one unthrottled terminal event for a generated candidate trace."""
+        terminal_ids = getattr(self, "_terminal_signal_trace_ids", None)
+        if not isinstance(terminal_ids, dict):
+            terminal_ids = {}
+            self._terminal_signal_trace_ids = terminal_ids
+        lock = getattr(self, "_terminal_signal_lock", None)
+        if lock is None:
+            lock = threading.RLock()
+            self._terminal_signal_lock = lock
+        trace_key = (
+            str(trace_id)
+            if trace_id
+            else f"{symbol}:untracked:{time_module.monotonic_ns()}"
+        )
+        with lock:
+            if trace_key in terminal_ids:
+                return False
+            if len(terminal_ids) >= 4096:
+                terminal_ids.pop(next(iter(terminal_ids)))
+            terminal_ids[trace_key] = time.time()
+
+        details = dict(result.details or {})
+        attempted = (
+            bool(broker_attempted)
+            if broker_attempted is not None
+            else bool(details.get("broker_attempted", result.accepted))
+        )
+        details["broker_attempted"] = attempted
+        self._logger.info(
+            "SIGNAL_EXECUTION_RESULT symbol=%s accepted=%s reason=%s order_id=%s "
+            "trace_id=%s broker_attempted=%s",
+            symbol,
+            result.accepted,
+            result.reason,
+            result.order_id,
+            trace_id,
+            attempted,
+            extra={
+                **details,
+                "event": "SIGNAL_EXECUTION_RESULT",
+                "symbol": symbol,
+                "accepted": result.accepted,
+                "reason": result.reason,
+                "order_id": result.order_id,
+                "trace_id": trace_id,
+                "broker_attempted": attempted,
+                "bypass_filters": True,
+            },
+        )
+        return True
 
     def _directional_dedup_key(
         self, *, underlying: str, option_side: str, reason: str
@@ -5529,9 +5603,10 @@ class StrategyRunner:
                     self._symbol_state[symbol] = state
 
                 state.trade_history.append(record)
-                state.last_trade_at = _coerce_epoch_seconds(record.timestamp)
-                state.last_order_id = record.order_id
-                state.last_trade_symbol = symbol
+                if self._is_authoritative_accepted_entry_record(record):
+                    state.last_trade_at = _coerce_epoch_seconds(record.timestamp)
+                    state.last_order_id = record.order_id
+                    state.last_trade_symbol = symbol
 
             restored += 1
 
@@ -14373,6 +14448,8 @@ class StrategyRunner:
 
     def _on_tick(self, symbol: str, tick: Mapping[str, Any]) -> None:
         """Handle incoming tick. Args: symbol, tick. Returns: None. Raises: Exception."""
+        candidate_generated = False
+        trace_id = str(tick.get("trace_id") or f"{symbol}-{time_module.monotonic_ns()}")
         try:
             _context_symbol = self._normalize_symbol(symbol)
             if self._history_role_for_symbol(_context_symbol) in {
@@ -14465,10 +14542,6 @@ class StrategyRunner:
             # =================================================================
 
             now = datetime.now(timezone.utc)
-            trace_id = str(
-                tick.get("trace_id") or f"{symbol}-{time_module.monotonic_ns()}"
-            )
-
             # Helper: Extract timestamp for freshness check
             def _extract_timestamp(t, fallback):
                 ts = t.get("timestamp") or t.get("exchange_timestamp")
@@ -16725,8 +16798,10 @@ class StrategyRunner:
                                 ),
                                 "symbol": symbol,
                                 "direction": signal.action,
+                                "trace_id": trace_id,
                             },
                         )
+                        candidate_generated = True
                         self._signals_last_hour.append(time.time())
 
                     now_ts = time.time()
@@ -16799,7 +16874,7 @@ class StrategyRunner:
                 self._last_strategy_versions[symbol] = current_version
                 signal_phase = self._data_phase.get(symbol)
                 entry_symbol = str(signal.symbol or symbol)
-                if signal.action in {"BUY", "SELL"} and is_nifty_option_symbol(
+                if signal.action == "BUY" and is_nifty_option_symbol(
                     entry_symbol
                 ):
                     expiry_blocked, expiry_reason = expiry_theta_block()
@@ -16810,6 +16885,15 @@ class StrategyRunner:
                             reason=expiry_reason,
                             allowed=False,
                             trace_id=trace_id,
+                        )
+                        self._reject_signal_execution(
+                            symbol=entry_symbol,
+                            trace_id=trace_id,
+                            reason=expiry_reason,
+                            details={
+                                "stage": "phase10_entry_policy",
+                                "broker_attempted": False,
+                            },
                         )
                         return
                 live_ready, live_ready_reason, live_ready_details = (
@@ -16869,6 +16953,16 @@ class StrategyRunner:
                             "trace_id": trace_id,
                         },
                     )
+                    self._reject_signal_execution(
+                        symbol=entry_symbol,
+                        trace_id=trace_id,
+                        reason=str(live_ready_reason or "live_readiness_failed"),
+                        details={
+                            **live_ready_details,
+                            "stage": "phase10_live_readiness",
+                            "broker_attempted": False,
+                        },
+                    )
                     return
                 self._update_symbol_execution_phase(
                     symbol, "LIVE_READY", "symbol_live_ready"
@@ -16926,6 +17020,15 @@ class StrategyRunner:
                                 "confidence": float(signal.confidence or 0.0),
                             },
                         )
+                        self._reject_signal_execution(
+                            symbol=entry_symbol,
+                            trace_id=trace_id,
+                            reason="low_volatility_rejected",
+                            details={
+                                "stage": "phase10_regime",
+                                "broker_attempted": False,
+                            },
+                        )
                         return
                 if (
                     signal.action in {"BUY", "SELL"}
@@ -16938,17 +17041,28 @@ class StrategyRunner:
                         reason="max_concurrent_strategies_reached",
                         max_slots=self._strategy_slot_limit,
                     )
+                    self._reject_signal_execution(
+                        symbol=entry_symbol,
+                        trace_id=trace_id,
+                        reason="max_concurrent_strategies_reached",
+                        details={
+                            "stage": "phase10_strategy_slots",
+                            "broker_attempted": False,
+                        },
+                    )
                     return
                 with self._lock:
-                    state = self._symbol_state.get(symbol)
+                    state = self._symbol_state.get(
+                        entry_symbol
+                    ) or self._symbol_state.get(symbol)
                     if state:
                         symbol_now = time.time()
-                        last_signal_ts = self._symbol_last_signal_ts.get(symbol, 0.0)
-                        if (
-                            symbol_now - last_signal_ts
-                            < self._config.signal_cooldown_seconds
-                        ):
-                            elapsed_s = max(symbol_now - last_signal_ts, 0.0)
+                        remaining_s = state.trade_cooldown_remaining(
+                            symbol_now, self._config.trade_cooldown_seconds
+                        )
+                        if remaining_s > 0.0:
+                            last_trade_at = float(state.last_trade_at or symbol_now)
+                            elapsed_s = max(symbol_now - last_trade_at, 0.0)
                             if self._should_log_throttled(
                                 f"runner_signal_cooldown:{symbol}",
                                 self._cooldown_log_throttle_seconds,
@@ -16960,11 +17074,21 @@ class StrategyRunner:
                                         "symbol": symbol,
                                         "elapsed_s": round(elapsed_s, 3),
                                         "required_s": float(
-                                            self._config.signal_cooldown_seconds
+                                            self._config.trade_cooldown_seconds
                                         ),
                                         "allowed": False,
                                     },
                                 )
+                            self._reject_signal_execution(
+                                symbol=entry_symbol,
+                                trace_id=trace_id,
+                                reason="trade_cooldown_active",
+                                details={
+                                    "stage": "phase10_trade_cooldown",
+                                    "cooldown_remaining_s": remaining_s,
+                                    "broker_attempted": False,
+                                },
+                            )
                             return
 
                         state.strategy_data["last_signal"] = {
@@ -17013,20 +17137,13 @@ class StrategyRunner:
                             "recent_failures": ks_status.get("recent_failures"),
                         },
                     )
-                    self._logger.info(
-                        "SIGNAL_EXECUTION_RESULT symbol=%s accepted=%s reason=%s order_id=%s trace_id=%s",
-                        symbol,
-                        False,
-                        "order_manager_kill_switch_active",
-                        None,
-                        trace_id,
-                        extra={
-                            "event": "SIGNAL_EXECUTION_RESULT",
-                            "symbol": symbol,
-                            "accepted": False,
-                            "reason": "order_manager_kill_switch_active",
-                            "order_id": None,
-                            "trace_id": trace_id,
+                    self._reject_signal_execution(
+                        symbol=entry_symbol,
+                        trace_id=trace_id,
+                        reason="order_manager_kill_switch_active",
+                        details={
+                            "stage": "phase10_kill_switch",
+                            "kill_switch_status": ks_status,
                             "broker_attempted": False,
                         },
                     )
@@ -17077,6 +17194,16 @@ class StrategyRunner:
                         stage="phase10_execute",
                         reason="data_pipeline_overloaded",
                         allowed=False,
+                        trace_id=trace_id,
+                    )
+                    self._reject_signal_execution(
+                        symbol=entry_symbol,
+                        trace_id=trace_id,
+                        reason="data_pipeline_overloaded",
+                        details={
+                            "stage": "phase10_execute",
+                            "broker_attempted": False,
+                        },
                     )
                     return
                 if getattr(self, "_live_mode", False) and not getattr(
@@ -17101,6 +17228,16 @@ class StrategyRunner:
                         stage="phase10_execute",
                         reason="live_orders_not_armed",
                         allowed=False,
+                        trace_id=trace_id,
+                    )
+                    self._reject_signal_execution(
+                        symbol=entry_symbol,
+                        trace_id=trace_id,
+                        reason="live_orders_not_armed",
+                        details={
+                            "stage": "phase10_execute",
+                            "broker_attempted": False,
+                        },
                     )
                     return
                 scheduled, prepare_reason = self._schedule_signal_preparation(
@@ -17114,21 +17251,11 @@ class StrategyRunner:
                         allowed=False,
                         trace_id=trace_id,
                     )
-                    self._logger.info(
-                        "SIGNAL_EXECUTION_RESULT symbol=%s accepted=%s reason=%s order_id=%s trace_id=%s",
-                        symbol,
-                        False,
-                        prepare_reason,
-                        None,
-                        trace_id,
-                        extra={
-                            "event": "SIGNAL_EXECUTION_RESULT",
-                            "symbol": symbol,
-                            "accepted": False,
-                            "reason": prepare_reason,
-                            "order_id": None,
-                            "trace_id": trace_id,
-                        },
+                    self._reject_signal_execution(
+                        symbol=entry_symbol,
+                        trace_id=trace_id,
+                        reason=str(prepare_reason or "signal_prepare_failed"),
+                        details={"broker_attempted": False},
                     )
                 return
         except Exception as exc:
@@ -17147,6 +17274,21 @@ class StrategyRunner:
                 },
                 exc_info=True,
             )
+            if candidate_generated:
+                self._emit_signal_execution_result(
+                    symbol=str(getattr(locals().get("signal"), "symbol", symbol)),
+                    trace_id=trace_id,
+                    result=SignalExecutionResult(
+                        False,
+                        "phase10_execution_failure",
+                        details={
+                            "broker_attempted": False,
+                            "error_type": type(exc).__name__,
+                            "error": str(exc),
+                        },
+                    ),
+                    broker_attempted=False,
+                )
             return
 
     def _should_enforce_freshness_backoff(self) -> bool:
@@ -18938,7 +19080,7 @@ class StrategyRunner:
                 return SignalExecutionResult(False, "unknown_option_side")
             candidate_snapshots_obj = metadata.get("candidate_snapshots")
             is_directional_option = option_side in {"CE", "PE"}
-            if is_directional_option:
+            if signal.action == "BUY" and is_directional_option:
                 expiry_blocked, expiry_reason = expiry_theta_block()
                 if expiry_blocked:
                     self._reset_execution_state(base_symbol)
@@ -20932,6 +21074,7 @@ class StrategyRunner:
                     submit_details = {
                         **dict(getattr(submit_result, "details", {}) or {}),
                         "trace_id": trace_id,
+                        "broker_attempted": broker_attempted,
                     }
                     self._mark_deterministic_execution_reject_cooldown(
                         symbol=order_symbol,
@@ -21656,6 +21799,17 @@ class StrategyRunner:
 
         return {"net_delta": net_delta, "net_gamma": net_gamma, "net_theta": net_theta}
 
+    @staticmethod
+    def _is_authoritative_accepted_entry_record(record: TradeRecord) -> bool:
+        """Return whether a record proves that an entry was accepted."""
+        return (
+            str(record.action or "").upper() in {"BUY", "SELL"}
+            and int(record.quantity or 0) > 0
+            and bool(str(record.order_id or "").strip())
+            and str(record.status or "").strip().lower()
+            in {"submitted", "accepted", "open", "filled", "complete", "completed"}
+        )
+
     def _record_trade(self, symbol: str, record: TradeRecord) -> None:
         """Record a trade for auditing and persistence."""
         with self._lock:
@@ -21664,9 +21818,10 @@ class StrategyRunner:
                 return
 
             state.trade_history.append(record)
-            state.last_trade_at = _coerce_epoch_seconds(record.timestamp)
-            state.last_order_id = record.order_id
-            state.last_trade_symbol = symbol
+            if self._is_authoritative_accepted_entry_record(record):
+                state.last_trade_at = _coerce_epoch_seconds(record.timestamp)
+                state.last_order_id = record.order_id
+                state.last_trade_symbol = symbol
 
         manager = self._persistent_state
         if manager is not None:

@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import pytest
+
 from nifty_scalper_bot.core.message_bus import MessageBus
 from nifty_scalper_bot.strategies.runner import (
     EntryEvaluationRoute,
@@ -495,3 +497,152 @@ def test_expiry_entry_policy_blocks_before_live_readiness_and_preparation(monkey
         for call in runner_obj._emit_runner_eval_decision.call_args_list
     )
 
+
+@pytest.mark.parametrize(
+    ("gate", "expected_reason"),
+    [
+        ("expiry", "expiry_day_after_13:30_ist"),
+        ("live_readiness", "candidate_not_ready"),
+        ("low_volatility", "low_volatility_rejected"),
+        ("strategy_slots", "max_concurrent_strategies_reached"),
+        ("trade_cooldown", "trade_cooldown_active"),
+        ("pipeline_overload", "data_pipeline_overloaded"),
+        ("live_orders_unarmed", "live_orders_not_armed"),
+        ("preparation_failure", "signal_preparation_scheduling_failed"),
+    ],
+)
+def test_phase10_prebroker_guards_emit_terminal_result(
+    monkeypatch, gate, expected_reason
+):
+    runner_obj, strategy_manager, _risk_manager, order_manager, selected_ce = (
+        _build_phase9_runner(monkeypatch)
+    )
+    runner_obj._trigger_candidate_symbols = {"NSE:NIFTY"}
+    runner_obj._reject_signal_execution = Mock()
+    runner_obj._config.trade_cooldown_seconds = 0.0
+    runner_obj._emit_live_universe_bootstrap_status = lambda **_kwargs: None
+
+    if gate == "expiry":
+        monkeypatch.setattr(
+            "nifty_scalper_bot.strategies.runner.expiry_theta_block",
+            lambda: (True, "expiry_day_after_13:30_ist"),
+        )
+    elif gate == "live_readiness":
+        runner_obj._symbol_live_entry_ready = lambda *_args, **_kwargs: (
+            False,
+            "candidate_not_ready",
+            {},
+        )
+    elif gate == "low_volatility":
+        runner_obj.detect_market_regime = lambda _symbol: "low_volatility"
+        runner_obj._block_low_volatility = True
+    elif gate == "strategy_slots":
+        runner_obj._strategy_slots_available = lambda: False
+    elif gate == "trade_cooldown":
+        runner_obj._config.trade_cooldown_seconds = 30.0
+        option_state = SymbolRuntimeState(selected_ce, 10)
+        option_state.last_trade_at = time.time()
+        runner_obj._symbol_state[selected_ce] = option_state
+    elif gate == "pipeline_overload":
+        runner_obj._market_data.pipeline_overloaded = True
+    elif gate == "live_orders_unarmed":
+        runner_obj._live_mode = True
+        runner_obj._runtime_live_orders_armed = False
+    elif gate == "preparation_failure":
+        runner_obj._schedule_signal_preparation = lambda *_args: (
+            False,
+            "signal_preparation_scheduling_failed",
+        )
+
+    runner_obj._on_tick(
+        "NSE:NIFTY",
+        {
+            "symbol": "NSE:NIFTY",
+            "last_price": 24000.0,
+            "timestamp": time.time(),
+            "trace_id": f"phase10-{gate}",
+            "source": "ws",
+        },
+    )
+
+    strategy_manager.generate_signal.assert_called_once()
+    order_manager.submit.assert_not_called()
+    runner_obj._reject_signal_execution.assert_called_once()
+    terminal = runner_obj._reject_signal_execution.call_args.kwargs
+    assert terminal["reason"] == expected_reason
+    assert terminal["details"]["broker_attempted"] is False
+
+
+def test_expiry_buy_gate_does_not_block_sell_strategy(monkeypatch):
+    runner_obj, strategy_manager, _risk_manager, order_manager, selected_ce = (
+        _build_phase9_runner(monkeypatch)
+    )
+    runner_obj._trigger_candidate_symbols = {"NSE:NIFTY"}
+    runner_obj._emit_live_universe_bootstrap_status = lambda **_kwargs: None
+    strategy_manager.generate_signal.return_value = Signal(
+        "SELL",
+        selected_ce,
+        75,
+        0.9,
+        "sell_strategy",
+        120.0,
+        90.0,
+        metadata={"timestamp": time.time()},
+    )
+    monkeypatch.setattr(
+        "nifty_scalper_bot.strategies.runner.expiry_theta_block",
+        lambda: (True, "expiry_day_after_13:30_ist"),
+    )
+
+    runner_obj._on_tick(
+        "NSE:NIFTY",
+        {
+            "symbol": "NSE:NIFTY",
+            "last_price": 24000.0,
+            "timestamp": time.time(),
+            "trace_id": "expiry-sell-allowed",
+            "source": "ws",
+        },
+    )
+
+    order_manager.submit.assert_called_once()
+
+
+def test_generated_candidate_and_terminal_result_share_one_trace(monkeypatch):
+    runner_obj, _strategy_manager, _risk_manager, order_manager, _selected_ce = (
+        _build_phase9_runner(monkeypatch)
+    )
+    runner_obj._trigger_candidate_symbols = {"NSE:NIFTY"}
+    runner_obj._emit_live_universe_bootstrap_status = lambda **_kwargs: None
+    runner_obj._logger = Mock()
+    monkeypatch.setattr(
+        "nifty_scalper_bot.strategies.runner.expiry_theta_block",
+        lambda: (True, "expiry_day_after_13:30_ist"),
+    )
+
+    runner_obj._on_tick(
+        "NSE:NIFTY",
+        {
+            "symbol": "NSE:NIFTY",
+            "last_price": 24000.0,
+            "timestamp": time.time(),
+            "trace_id": "candidate-terminal-contract",
+            "source": "ws",
+        },
+    )
+
+    events = [
+        call.kwargs.get("extra", {})
+        for call in runner_obj._logger.info.call_args_list
+        if call.kwargs.get("extra", {}).get("event")
+        in {"SIGNAL_CANDIDATE_GENERATED", "SIGNAL_EXECUTION_RESULT"}
+    ]
+    assert [event["event"] for event in events] == [
+        "SIGNAL_CANDIDATE_GENERATED",
+        "SIGNAL_EXECUTION_RESULT",
+    ]
+    assert {event["trace_id"] for event in events} == {
+        "candidate-terminal-contract"
+    }
+    assert events[-1]["broker_attempted"] is False
+    order_manager.submit.assert_not_called()
