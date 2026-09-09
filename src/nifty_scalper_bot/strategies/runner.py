@@ -4692,6 +4692,7 @@ class StrategyRunner:
                 "margin needed=",
                 "margin_no_qty",
                 "available_balance_unavailable",
+                "no_affordable_execution_candidate",
             )
         ):
             return "risk_capacity_unavailable"
@@ -19601,6 +19602,14 @@ class StrategyRunner:
                         }
                         for decision in candidate_capacity_decisions.values()
                     )
+                    if capacity_blocked:
+                        self._mark_deterministic_execution_reject_cooldown(
+                            symbol=base_symbol,
+                            reason_key=reason_key,
+                            reason="no_affordable_execution_candidate",
+                            now_epoch=now_epoch,
+                            broker_attempted=False,
+                        )
                     self._reset_execution_state(base_symbol)
                     return self._reject_signal_execution(
                         symbol=base_symbol,
