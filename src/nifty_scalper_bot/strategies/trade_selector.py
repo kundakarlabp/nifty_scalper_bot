@@ -213,6 +213,8 @@ class TradeCandidateSelector:
                 rejects['net_rr_insufficient'] += 1
                 self._log_reject('net_rr_insufficient', symbol, throttle_key_parts=('net_rr_insufficient', symbol), entry=entry, gross_rr=strategy_rr, reason='no_viable_distance')
                 continue
+            s['candidate_min_risk_distance'] = float(economic_floor)
+            s['candidate_gross_rr'] = float(strategy_rr)
             risk = max(atr * 0.8, entry * 0.08, 5.0)
             risk = max(min(18.0, max(4.0, risk)), economic_floor)
             sl = entry - risk
