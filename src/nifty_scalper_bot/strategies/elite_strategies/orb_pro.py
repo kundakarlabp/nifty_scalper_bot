@@ -225,7 +225,15 @@ class ORBProStrategy(EliteStrategy):
             range_rows = [
                 row for row in rows if session_open <= row["timestamp"] < cutoff
             ]
-            if not range_rows or latest_ts < cutoff:
+            # Elapsed time or row count cannot prove coverage: a missing minute
+            # can hide the true range extreme, even when duplicates fill the count.
+            expected_starts = {
+                session_open + timedelta(minutes=minute)
+                for minute in range(orb_minutes)
+            }
+            if {
+                row["timestamp"] for row in range_rows
+            } != expected_starts or latest_ts < cutoff:
                 continue
             prior_rows = [row for row in rows if row["timestamp"] < latest_ts]
             if not prior_rows:
