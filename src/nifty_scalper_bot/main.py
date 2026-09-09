@@ -419,10 +419,32 @@ def _symbol_bar_counts(ctx, symbol):  # noqa: ANN001
 
 
 def _broker_session_status(ctx):  # noqa: ANN001
+    feed_authentication_proven = False
+    feed_health_getter = getattr(
+        getattr(ctx, "market_data_manager", None), "trading_feed_health", None
+    )
+    if callable(feed_health_getter):
+        try:
+            feed_health = feed_health_getter()
+            symbol_readiness = (
+                feed_health.get("required_symbol_readiness", {})
+                if isinstance(feed_health, dict)
+                else {}
+            )
+            feed_authentication_proven = any(
+                bool(readiness.get("ready"))
+                and bool(readiness.get("subscription_confirmed"))
+                and bool(readiness.get("current_generation_tick_received"))
+                for readiness in symbol_readiness.values()
+                if isinstance(readiness, dict)
+            )
+        except Exception:  # noqa: BLE001 - health reporting must remain available
+            feed_authentication_proven = False
     market_data_authenticated = bool(
         getattr(ctx, "market_data_authenticated", False)
         or getattr(ctx, "broker_authenticated", False)
         or getattr(ctx, "broker_auth_verified", False)
+        or feed_authentication_proven
     )
     funds_endpoint_verified = bool(getattr(ctx, "broker_balance_valid", False))
     order_endpoint_verified = bool(

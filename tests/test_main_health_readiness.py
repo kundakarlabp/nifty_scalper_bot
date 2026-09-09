@@ -474,3 +474,31 @@ def test_generic_broker_auth_flags_do_not_verify_order_endpoint():
     assert body["broker"]["broker_session_state"] == "funds_verified"
     assert body["broker"]["authentication"] == "authenticated"
     assert "order_endpoint_unverified" not in body["live_order_readiness"]["missing"]
+
+
+def test_fresh_current_generation_feed_proves_market_data_authentication():
+    class MDM:
+        def trading_feed_health(self):
+            return {
+                "required_symbol_readiness": {
+                    "NSE:NIFTY": {
+                        "ready": True,
+                        "subscription_confirmed": True,
+                        "current_generation_tick_received": True,
+                    }
+                }
+            }
+
+    ctx = _ctx(
+        market_data_manager=MDM(),
+        broker_balance_valid=True,
+        position_reconciliation_completed=True,
+    )
+    main.app.state.bot = SimpleNamespace(_ctx=ctx)
+
+    body = _json(main.health_trading())
+
+    assert body["broker"]["market_data_authenticated"] is True
+    assert body["broker"]["funds_endpoint_verified"] is True
+    assert body["broker"]["order_endpoint_verified"] is False
+    assert body["broker"]["broker_session_state"] == "funds_verified"
