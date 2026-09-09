@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import dataclasses
+import time
 from collections import deque
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -541,6 +543,82 @@ def test_live_candidate_selection_fails_closed_when_capacity_is_unknown() -> Non
     assert selected is None
     assert decisions[candidate.symbol]["reason"] == "available_balance_unavailable"
     assert decisions[candidate.symbol]["determinate"] is False
+
+
+def test_capacity_exhaustion_arms_existing_prebroker_risk_cooldown(monkeypatch) -> None:
+    """An unchanged risk-impossible setup must not retry on every quote tick."""
+    runner, _ = _execution_runner(monkeypatch, ce_ok=True, pe_ok=False)
+    runner._resolve_execution_mode_snapshot = lambda: ExecutionModeSnapshot(
+        "live", True, False, False, True, True
+    )
+    runner._trade_candidate_selector = SimpleNamespace(
+        min_option_premium=25.0,
+        max_option_premium=650.0,
+        _last_rejects={},
+        select_ranked_candidates=lambda **_kwargs: [
+            SimpleNamespace(symbol="NFO:CE")
+        ],
+    )
+    runner._build_candidate_snapshots_sync_safe = lambda **kwargs: (
+        kwargs["existing_snapshots"],
+        False,
+        "test_fixture",
+    )
+    runner._select_capital_eligible_candidate = lambda **_kwargs: (
+        None,
+        {
+            "NFO:CE": {
+                "reason": "minimum_lot_unaffordable",
+                "capacity_blocker": "minimum_stop_risk",
+            }
+        },
+    )
+    signal = dataclasses.replace(
+        _signal("NFO:CE"),
+        metadata={
+            "strategy_name": "test",
+            "final_score": 10.0,
+            "atm_strike": 25000,
+            "candidate_snapshots": [
+                {
+                    "symbol": "NFO:CE",
+                    "side": "CE",
+                    "strike": 25000,
+                    "bid": 99.0,
+                    "ask": 100.0,
+                    "ltp": 99.5,
+                    "tick_age_ms": 10.0,
+                    "tradable_quote": True,
+                    "is_selected_option": True,
+                }
+            ],
+        },
+    )
+
+    result = runner._handle_entry_signal_inner(
+        signal,
+        "NFO:CE",
+        "NFO:CE",
+        100.0,
+        datetime.now(timezone.utc),
+        trace_id="risk-impossible",
+    )
+
+    assert result.reason == "no_affordable_execution_candidate", result.details
+    assert runner._execution_reject_cooldown_ts == {
+        "NFO:CE:test:risk_capacity_unavailable": pytest.approx(time.time(), abs=2.0)
+    }
+    runner._exec_reject_runtime_not_ready_seconds = 10.0
+    runner._exec_reject_invalid_lot_seconds = 300.0
+    runner._exec_reject_rr_seconds = 5.0
+    runner._exec_reject_margin_seconds = 30.0
+    runner._exec_reject_position_seconds = 15.0
+    retry = StrategyRunner._execution_reject_cooldown_result(
+        runner, "NFO:CE", "test", time.time(), "risk-repeat"
+    )
+    assert retry is not None
+    assert retry.reason == "risk_capacity_unavailable_reject_cooldown"
+    assert retry.details["broker_attempted"] is False
 
 
 def test_final_contract_gate_accepts_only_runner_approved_replacement() -> None:
