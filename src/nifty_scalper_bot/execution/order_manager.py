@@ -87,11 +87,11 @@ def _release_failed_prebroker_entry_reservation(self, kwargs):
 
 
 def _place_order_with_prebroker_reservation_cleanup(self, *args, **kwargs):
-    """Delegate unchanged, then clear only proven pre-broker rejected entries."""
-    try:
-        return _original_runtime_place_order(self, *args, **kwargs)
-    finally:
+    """Delegate unchanged and clear only a proven, normally returned local reject."""
+    result = _original_runtime_place_order(self, *args, **kwargs)
+    if result is None:
         _release_failed_prebroker_entry_reservation(self, kwargs)
+    return result
 
 
 RuntimeOrderManager.place_order = _place_order_with_prebroker_reservation_cleanup
