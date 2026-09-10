@@ -286,7 +286,11 @@ def apply_cost_aware_risk_floor(
     # unchanged.  A repair outside the bounded target-uplift policy fails closed.
     updated["entry_price"] = entry
     updated["half_spread"] = spread
-    repair_signal = dataclasses.replace(signal, metadata=updated)
+    # Signal.quantity is strategy lots; the cost helper requires broker units.
+    # Convert only this calculation copy, leaving the returned lot count intact.
+    repair_signal = dataclasses.replace(
+        signal, quantity=int(quantity), metadata=updated
+    )
     adjusted_target = minimum_target_for_net_rr(repair_signal)
     updated["premium_cost_floor_original_distance"] = current_distance
     updated["premium_cost_floor_original_target"] = target
