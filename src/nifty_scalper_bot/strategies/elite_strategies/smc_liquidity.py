@@ -861,6 +861,12 @@ class SMCStrategy(EliteStrategy):
                     "source_domain": "underlying_price",
                     "structure_source": snapshot["source"],
                     "structure_symbol": underlying_symbol,
+                    # Identity belongs to the underlying sweep, not option swings
+                    # or the later confirmation bar; history recovery preserves it.
+                    "setup_id": (
+                        f"smcv2:{underlying_symbol}:{contract_side}:"
+                        f"{event['sweep_ts'].isoformat()}"
+                    ),
                     "preliminary_only": True,
                     "requires_runner_final_score": True,
                     "requires_orderflow_confirmation": True,
