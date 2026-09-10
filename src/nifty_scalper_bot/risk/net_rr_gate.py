@@ -96,13 +96,25 @@ def _minimum_net_rr() -> float:
 
 def _max_target_uplift_r() -> float:
     """Return the maximum extra gross-R permitted to repair transaction costs."""
-    raw = os.getenv("MAX_NET_RR_TARGET_UPLIFT_R", "0.35")
+    raw = os.getenv("MAX_NET_RR_TARGET_UPLIFT_R", "0.75")
     try:
-        parsed = float(raw or 0.35)
+        parsed = float(raw or 0.75)
     except (TypeError, ValueError):
-        return 0.35
+        return 0.75
     if not math.isfinite(parsed):
-        return 0.35
+        return 0.75
+    return max(0.0, parsed)
+
+
+def _max_target_uplift_pct() -> float:
+    """Return the maximum repair uplift as percent of entry premium."""
+    raw = os.getenv("MAX_NET_RR_TARGET_UPLIFT_PCT", "2.5")
+    try:
+        parsed = float(raw or 2.5)
+    except (TypeError, ValueError):
+        return 2.5
+    if not math.isfinite(parsed):
+        return 2.5
     return max(0.0, parsed)
 
 
@@ -159,10 +171,12 @@ def evaluate_final_net_rr(signal: Any) -> NetRRResult | None:
 def minimum_target_for_net_rr(signal: Any, *, tick_size: float = 0.05) -> float | None:
     """Return the smallest bounded BUY-option target satisfying final net RR.
 
-    The final gate remains authoritative. This helper only compensates a modest
+    The final gate remains authoritative. This helper only compensates
     transaction-cost erosion of an already valid distance-based strategy target.
-    If the configured net RR cannot be reached within ``MAX_NET_RR_TARGET_UPLIFT_R``
-    additional gross R, ``None`` is returned and the caller must fail closed.
+    The repair is bounded independently in risk units and as a percentage of
+    entry premium, so tight stops can absorb fixed one-lot costs without allowing
+    an unbounded or unrealistic target expansion. If the configured net RR cannot
+    be reached inside both caps, ``None`` is returned and the caller fails closed.
     """
     current = evaluate_final_net_rr(signal)
     if current is None:
@@ -188,8 +202,11 @@ def minimum_target_for_net_rr(signal: Any, *, tick_size: float = 0.05) -> float 
     if risk_points <= 0.0 or target <= entry:
         return None
     current_gross_rr = (target - entry) / risk_points
-    cap_rr = current_gross_rr + _max_target_uplift_r()
-    cap_target = entry + risk_points * cap_rr
+    cap_rr_target = entry + risk_points * (
+        current_gross_rr + _max_target_uplift_r()
+    )
+    cap_pct_target = target + entry * _max_target_uplift_pct() / 100.0
+    cap_target = min(cap_rr_target, cap_pct_target)
     tick = float(tick_size) if math.isfinite(float(tick_size)) and tick_size > 0 else 0.05
     max_tick_target = math.floor((cap_target + 1e-12) / tick) * tick
     if max_tick_target <= target:
