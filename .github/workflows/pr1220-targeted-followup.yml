@@ -1,0 +1,234 @@
+name: PR1220 targeted follow-up
+
+on:
+  push:
+    branches:
+      - cursor/regime-ontology-and-policy-owners-a799
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: ${{ !contains(github.event.head_commit.message, '[pr1220-auto-fix]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: cursor/regime-ontology-and-policy-owners-a799
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Apply targeted ownership follow-up
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              p = Path(path)
+              text = p.read_text(encoding="utf-8")
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"expected exactly one match in {path}, found {count}: {old[:120]!r}")
+              p.write_text(text.replace(old, new, 1), encoding="utf-8")
+
+          runner = "src/nifty_scalper_bot/strategies/runner.py"
+          replace_once(
+              runner,
+              '''                # EVALUATION policy: this guard sits above the selector's
+                # execution cap and only rejects contracts nobody should have
+                # been looking at. The binding execution cap stays with
+                # TradeCandidateSelector.
+                if spread_pct > resolve_entry_policy().evaluation_max_spread_pct:
+''',
+              '''                # FINAL EXECUTION policy: candidate selection is the primary
+                # microstructure gate, but this pre-submit guard independently
+                # enforces the same binding cap in case any alternate route
+                # reaches order execution.
+                if spread_pct > resolve_entry_policy().execution_max_spread_pct:
+''',
+          )
+          replace_once(
+              runner,
+              '''        # Expressed in the canonical vocabulary. LOW_ACTIVITY and UNKNOWN are
+        # absent deliberately: no participation and no resolved regime are both
+        # states in which an entry must not be originated.
+        default_allowed = "TREND,RANGE,VOLATILE"
+        if env_name == "RUNNER_VWAP_ALLOWED_REGIMES":
+            default_allowed = "TREND,RANGE"
+''',
+              '''        # Canonical vocabulary with the pre-ontology *effective* defaults
+        # preserved. RANGE was not emitted as NORMAL by the runtime engine, so
+        # adding RANGE here would silently broaden live admission. Enable RANGE
+        # only through an explicit strategy env after expectancy validation.
+        default_allowed = "TREND,VOLATILE"
+        if env_name == "RUNNER_VWAP_ALLOWED_REGIMES":
+            default_allowed = "TREND"
+''',
+          )
+          replace_once(
+              runner,
+              '''            # option_score is the microstructure verdict owned by
+            # TradeCandidateSelector and promoted from the selected candidate
+            # above. It carries 20% of the composite, so there is no honest
+            # default for it: a fabricated mid-scale value both awarded points
+            # for evidence never gathered and, because it was seeded before the
+            # candidate promotion below, displaced the genuine candidate score.
+            # Absent candidate evidence must leave it unset so the final-score
+            # precheck rejects with missing_final_score_components.
+            if metadata.get("option_quality") is not None:
+                metadata.setdefault("option_score", float(metadata["option_quality"]))
+''',
+              '''            # option_score has exactly one production owner:
+            # TradeCandidateSelector. It is promoted from the selected candidate
+            # after materialisation below. With no selected-candidate evidence it
+            # stays absent and the final-score precheck fails closed.
+''',
+          )
+
+          entry = "src/nifty_scalper_bot/config/entry_policy.py"
+          replace_once(
+              entry,
+              '''    execution_spread = _env_float(
+        "LIVE_CANDIDATE_MAX_SPREAD_PCT", _DEFAULT_EXECUTION_MAX_SPREAD_PCT_LIVE
+    )
+''',
+              '''    # One execution-spread owner. The explicit canonical/live-candidate
+    # settings retain their historical ability to configure the binding cap.
+    # Older quality/order aliases are accepted only as *tighter* fallbacks so
+    # they can never silently loosen the established 0.75% live default.
+    canonical_execution_spread = _env_float("EXECUTION_MAX_OPTION_SPREAD_PCT", None)
+    live_candidate_spread = _env_float("LIVE_CANDIDATE_MAX_SPREAD_PCT", None)
+    if canonical_execution_spread is not None:
+        execution_spread = canonical_execution_spread
+    elif live_candidate_spread is not None:
+        execution_spread = live_candidate_spread
+    else:
+        legacy_caps = [
+            value
+            for value in (
+                _env_float("ORDER_MAX_SPREAD_PCT", None),
+                _env_float("SPREAD_MAX_PCT", None),
+            )
+            if value is not None and value > 0
+        ]
+        execution_spread = min(
+            [_DEFAULT_EXECUTION_MAX_SPREAD_PCT_LIVE, *legacy_caps]
+        )
+''',
+          )
+
+          quality = "src/nifty_scalper_bot/strategies/signal_quality.py"
+          replace_once(
+              quality,
+              '''    Explicit order-level configuration still wins. Absent that, this follows
+    the execution policy rather than the old 10% fallback, which described a
+    contract the execution layer would never accept and so let quality
+    evidence disagree with the binding constraint.
+    """
+    for name in ("ORDER_MAX_SPREAD_PCT", "SPREAD_MAX_PCT"):
+        raw = os.getenv(name)
+        if raw is None:
+            continue
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            return value
+    return resolve_entry_policy().execution_max_spread_pct
+''',
+              '''    Quality evidence consumes the same binding execution policy as the
+    candidate selector and final pre-submit guard. Legacy aliases are resolved
+    inside ``config.entry_policy`` and cannot override this helper locally.
+    """
+    return resolve_entry_policy().execution_max_spread_pct
+''',
+          )
+
+          policy_test = "tests/config/test_entry_policy_owner.py"
+          replace_once(
+              policy_test,
+              '''        "LIVE_CANDIDATE_MAX_SPREAD_PCT",
+        "ORDER_MAX_SPREAD_PCT",
+''',
+              '''        "LIVE_CANDIDATE_MAX_SPREAD_PCT",
+        "EXECUTION_MAX_OPTION_SPREAD_PCT",
+        "ORDER_MAX_SPREAD_PCT",
+''',
+          )
+          replace_once(
+              policy_test,
+              '''    monkeypatch.setenv("ORDER_MAX_SPREAD_PCT", "2.5")
+    assert canonical_max_spread_pct() == 2.5
+''',
+              '''    # A legacy quality/order alias may tighten the default, never loosen it.
+    monkeypatch.setenv("ORDER_MAX_SPREAD_PCT", "2.5")
+    assert canonical_max_spread_pct() == 0.75
+    monkeypatch.setenv("SPREAD_MAX_PCT", "0.60")
+    assert canonical_max_spread_pct() == 0.60
+
+    # The canonical execution override remains explicit and authoritative.
+    monkeypatch.setenv("EXECUTION_MAX_OPTION_SPREAD_PCT", "0.90")
+    assert canonical_max_spread_pct() == 0.90
+''',
+          )
+          with Path(policy_test).open("a", encoding="utf-8") as fh:
+              fh.write('''\n\ndef test_runner_final_spread_guard_uses_execution_policy() -> None:\n    from pathlib import Path\n\n    source = Path("src/nifty_scalper_bot/strategies/runner.py").read_text(encoding="utf-8")\n    assert "spread_pct > resolve_entry_policy().execution_max_spread_pct" in source\n    assert "spread_pct > resolve_entry_policy().evaluation_max_spread_pct" not in source\n''')
+
+          regime_test = "tests/strategies/test_regime_gate_aliases.py"
+          with Path(regime_test).open("a", encoding="utf-8") as fh:
+              fh.write('''\n\ndef test_default_gate_preserves_pre_ontology_effective_admission(monkeypatch) -> None:\n    monkeypatch.setenv("RUNNER_ENABLE_REGIME_GATE", "true")\n    for name in ("RUNNER_VWAP_ALLOWED_REGIMES", "RUNNER_ORB_ALLOWED_REGIMES"):\n        monkeypatch.delenv(name, raising=False)\n    runner = StrategyRunner.__new__(StrategyRunner)\n    runner._logger = __import__("logging").getLogger("test")\n\n    assert StrategyRunner._strategy_allowed_for_regime(runner, "SMC", MarketRegime.TREND)\n    assert StrategyRunner._strategy_allowed_for_regime(runner, "SMC", MarketRegime.VOLATILE)\n    assert not StrategyRunner._strategy_allowed_for_regime(runner, "SMC", MarketRegime.RANGE)\n    assert StrategyRunner._strategy_allowed_for_regime(runner, "vwap_pro", MarketRegime.TREND)\n    assert not StrategyRunner._strategy_allowed_for_regime(runner, "vwap_pro", MarketRegime.RANGE)\n    assert not StrategyRunner._strategy_allowed_for_regime(runner, "vwap_pro", MarketRegime.VOLATILE)\n''')
+
+          option_test = "tests/strategies/test_option_score_fails_closed.py"
+          replace_once(
+              option_test,
+              '''def test_runner_never_seeds_option_score_with_an_invented_default() -> None:
+    source = _RUNNER.read_text(encoding="utf-8")
+    for call in _setdefault_calls(source, "option_score"):
+        assert len(call.args) > 1, "setdefault without a default is meaningless here"
+        rendered = ast.unparse(call.args[1])
+        numeric_literals = [
+            node.value
+            for node in ast.walk(call.args[1])
+            if isinstance(node, ast.Constant) and isinstance(node.value, (int, float))
+        ]
+        assert not numeric_literals, (
+            f"option_score must not fall back to a constant: {rendered}"
+        )
+''',
+              '''def test_runner_never_seeds_option_score_outside_candidate_selection() -> None:
+    source = _RUNNER.read_text(encoding="utf-8")
+    assert _setdefault_calls(source, "option_score") == []
+''',
+          )
+          PY
+
+          git fetch origin main --depth=1
+          git checkout origin/main -- positions.json
+          git rm .github/workflows/pr1220-targeted-followup.yml
+
+      - name: Validate targeted invariants
+        shell: bash
+        run: |
+          python -m pip install -e '.[dev]' -q
+          python -m compileall -q src
+          python -m pytest -q \
+            tests/config/test_entry_policy_owner.py \
+            tests/strategies/test_option_score_fails_closed.py \
+            tests/strategies/test_regime_gate_aliases.py \
+            tests/strategies/test_entry_eval_coalescing.py
+
+      - name: Commit targeted follow-up
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          git commit -m 'fix: tighten PR 1220 ownership invariants [pr1220-auto-fix]'
+          git push origin HEAD:cursor/regime-ontology-and-policy-owners-a799
