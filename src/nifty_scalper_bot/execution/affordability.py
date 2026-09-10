@@ -2,7 +2,8 @@
 
 This module evaluates one supplied contract and never chooses a strike. Callers
 may use the result only after strategy, side, expiry and liquidity ranking; the
-authoritative order-manager margin gate still runs immediately before submission.
+authoritative order-manager margin/risk gates still run immediately before
+submission.
 """
 
 from __future__ import annotations
@@ -88,11 +89,12 @@ def _risk_budget_snapshot(
     *,
     available_balance: float | None = None,
 ) -> tuple[float | None, float | None, float | None, float | None]:
-    """Return per-trade/day/effective risk budgets and one-lot stop distance.
+    """Return risk-budget telemetry without making a readiness decision.
 
-    The effective budget mirrors the policy consumed by MarginEngine: configured
-    per-trade risk constrained by any remaining daily-loss budget. MarginEngine
-    and RiskManager remain authoritative immediately before broker submission.
+    MarginEngine and RiskManager own final position sizing and stop-risk
+    enforcement.  Readiness exposes the same configured budgets only for
+    diagnostics so a transaction-cost model cannot become a second sizing
+    authority before the actual strategy stop is materialized.
     """
     manager = getattr(order_manager, "_risk_manager", None)
     if manager is None or lot_size <= 0:
@@ -146,15 +148,15 @@ def evaluate_minimum_lot_affordability(
     data_hub: Any | None = None,
     fallback_balance: Any | None = None,
 ) -> MinimumLotAffordability:
-    """Evaluate whether one supplied BUY option lot is executable.
+    """Evaluate whether one supplied BUY option lot is cash executable.
 
-    Cash affordability mirrors the MarginEngine fallback path: ask premium × lot
+    Readiness mirrors the MarginEngine cash-capacity path: ask premium × lot
     size × margin factor, with the configured margin buffer reducing executable
-    cash. When the upstream selector supplies its transaction-cost-aware minimum
-    viable risk distance, this function also rejects contracts for which even that
-    lower bound cannot fit one lot inside the configured per-trade/daily risk
-    budget. It never invents or tightens a strategy stop; final stop geometry is
-    still checked by MarginEngine and RiskManager immediately before submission.
+    cash.  Risk-budget fields remain diagnostic only.  In particular,
+    ``candidate_min_risk_distance`` is a transaction-cost/net-R:R modelling
+    quantity, not an actual strategy stop, so it must never veto a contract.
+    The final materialized stop is still enforced by MarginEngine and
+    RiskManager immediately before broker submission.
     """
 
     normalized_symbol = str(symbol or "").strip()
@@ -238,6 +240,10 @@ def evaluate_minimum_lot_affordability(
         available_balance=available,
     )
 
+    # Keep the historical floor fields for observability/API compatibility, but
+    # do not let them decide readiness.  This floor answers a different question:
+    # how wide a stop would need to be if gross target R were held fixed after
+    # transaction costs.  It is not the strategy's actual stop-risk exposure.
     minimum_viable_risk_distance = _finite_float(
         _field(
             quote,
@@ -260,12 +266,8 @@ def evaluate_minimum_lot_affordability(
             one_lot_minimum_risk <= effective_one_lot_risk_budget + 1e-9
         )
 
-    affordable = bool(cash_affordable and risk_floor_affordable is not False)
-    capacity_blocker = None
-    if not cash_affordable:
-        capacity_blocker = "cash"
-    elif risk_floor_affordable is False:
-        capacity_blocker = "minimum_stop_risk"
+    affordable = bool(cash_affordable)
+    capacity_blocker = None if cash_affordable else "cash"
 
     return MinimumLotAffordability(
         normalized_symbol,
