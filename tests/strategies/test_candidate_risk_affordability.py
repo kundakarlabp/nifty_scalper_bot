@@ -41,7 +41,8 @@ def _order_manager(*, balance: float = 15_000.0):
     )
 
 
-def test_affordability_rejects_cash_affordable_contract_when_minimum_viable_risk_exceeds_budget() -> None:
+def test_affordability_keeps_theoretical_cost_floor_diagnostic_only() -> None:
+    """A fixed-RR cost floor is not the strategy's actual stop-risk exposure."""
     decision = evaluate_minimum_lot_affordability(
         symbol="NFO:NIFTY2691523500PE",
         quote={
@@ -55,15 +56,18 @@ def test_affordability_rejects_cash_affordable_contract_when_minimum_viable_risk
     )
 
     assert decision.cash_affordable is True
+    # Preserve observability: the old model still shows that 6.15 * 65 exceeds
+    # the 2% budget. It must no longer veto a contract before the actual strategy
+    # stop and bounded target repair are materialized.
     assert decision.risk_floor_affordable is False
-    assert decision.affordable is False
-    assert decision.reason == "minimum_lot_unaffordable"
-    assert decision.capacity_blocker == "minimum_stop_risk"
     assert decision.one_lot_minimum_risk == pytest.approx(6.15 * 65)
     assert decision.effective_one_lot_risk_budget == pytest.approx(300.0)
+    assert decision.affordable is True
+    assert decision.reason == "affordable"
+    assert decision.capacity_blocker is None
 
 
-def test_candidate_capacity_falls_back_when_preferred_contract_has_impossible_minimum_risk() -> None:
+def test_candidate_capacity_keeps_preferred_cash_affordable_contract() -> None:
     runner = object.__new__(StrategyRunner)
     runner._logger = _Logger()
     runner._order_manager = _order_manager()
@@ -103,14 +107,14 @@ def test_candidate_capacity_falls_back_when_preferred_contract_has_impossible_mi
         preferred_symbol=preferred.symbol,
     )
 
-    assert selected is fallback
+    assert selected is preferred
     assert decisions[preferred.symbol]["cash_affordable"] is True
     assert decisions[preferred.symbol]["risk_floor_affordable"] is False
-    assert decisions[preferred.symbol]["capacity_blocker"] == "minimum_stop_risk"
-    assert decisions[fallback.symbol]["risk_floor_affordable"] is True
+    assert decisions[preferred.symbol]["capacity_blocker"] is None
+    assert decisions[preferred.symbol]["affordable"] is True
 
 
-def test_trade_selector_exposes_existing_cost_aware_floor_to_capacity_screen(
+def test_trade_selector_exposes_cost_floor_as_diagnostic_metadata(
     monkeypatch,
 ) -> None:
     import nifty_scalper_bot.strategies.trade_selector as selector_module
@@ -152,5 +156,3 @@ def test_trade_selector_exposes_existing_cost_aware_floor_to_capacity_screen(
     assert ranked
     assert snapshot["candidate_min_risk_distance"] > 0.0
     assert snapshot["candidate_gross_rr"] == pytest.approx(2.0)
-    candidate_risk_distance = ranked[0].entry_price - ranked[0].stop_loss
-    assert snapshot["candidate_min_risk_distance"] <= candidate_risk_distance + 1e-9

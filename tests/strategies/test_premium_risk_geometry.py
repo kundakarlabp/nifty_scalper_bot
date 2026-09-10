@@ -43,8 +43,9 @@ def test_absolute_premium_distance_builds_buy_geometry() -> None:
     assert result.metadata["premium_risk_source"] == "premium_stop_distance"
 
 
-def test_cost_floor_replaces_unviable_percentage_geometry(monkeypatch) -> None:
+def test_cost_floor_repairs_target_without_widening_stop(monkeypatch) -> None:
     monkeypatch.setenv("MIN_NET_REWARD_RISK", "1.5")
+    monkeypatch.setenv("MAX_NET_RR_TARGET_UPLIFT_R", "0.35")
     signal = apply_premium_risk_contract(
         _signal(
             premium_stop_distance=1.2,
@@ -57,6 +58,8 @@ def test_cost_floor_replaces_unviable_percentage_geometry(monkeypatch) -> None:
         60.0,
     )
 
+    original_stop = signal.stop_loss
+    original_target = signal.take_profit
     result = apply_cost_aware_risk_floor(
         signal,
         entry_price=60.0,
@@ -64,16 +67,51 @@ def test_cost_floor_replaces_unviable_percentage_geometry(monkeypatch) -> None:
         half_spread=0.1,
     )
 
-    assert 8.4 < 60.0 - result.stop_loss < 9.6
-    assert (result.take_profit - 60.0) / (60.0 - result.stop_loss) == pytest.approx(
-        1.8
+    assert result.stop_loss == pytest.approx(original_stop)
+    assert 60.0 - result.stop_loss == pytest.approx(1.2)
+    assert result.take_profit >= original_target
+    assert result.metadata["premium_cost_floor_applied"] is False
+    assert result.metadata["premium_cost_floor_original_distance"] == pytest.approx(1.2)
+    # This very narrow 1.8R setup may be uneconomic even after the bounded
+    # target uplift. The critical invariant is that transaction costs never
+    # increase its stop-loss exposure.
+    assert result.metadata["premium_cost_floor_distance"] > 1.2
+
+
+def test_live_2pct_regression_target_uplift_preserves_stop_and_clears_net_rr(monkeypatch) -> None:
+    """10-Sep live economics: costs must not turn a safe stop into >2% risk."""
+    monkeypatch.setenv("MIN_NET_REWARD_RISK", "1.5")
+    monkeypatch.setenv("MAX_NET_RR_TARGET_UPLIFT_R", "0.35")
+    entry = 82.15
+    distance = 4.50
+    signal = _signal(
+        stop_loss=entry - distance,
+        take_profit=entry + 2.0 * distance,
+        premium_stop_distance=distance,
+        premium_target_rr=2.0,
+        invalidation_level_domain="option_premium",
+        bracket_anchor_mode="distance",
+        entry_price=entry,
+        bid=81.95,
+        ask=82.15,
     )
-    assert result.metadata["premium_cost_floor_applied"] is True
-    assert result.metadata["premium_cost_floor_original_distance"] == pytest.approx(
-        1.2
+
+    before_risk = (entry - signal.stop_loss) * 65
+    result = apply_cost_aware_risk_floor(
+        signal,
+        entry_price=entry,
+        quantity=65,
+        half_spread=0.10,
     )
+    after_risk = (entry - result.stop_loss) * 65
+
+    assert before_risk == pytest.approx(292.50)
+    assert after_risk == pytest.approx(before_risk)
+    assert result.stop_loss == pytest.approx(signal.stop_loss)
+    assert result.take_profit >= signal.take_profit
     net_rr = evaluate_final_net_rr(result)
     assert net_rr is not None and net_rr.allowed is True
+    assert net_rr.net_rr >= 1.5
 
 
 def test_cost_floor_does_not_move_absolute_technical_geometry() -> None:
