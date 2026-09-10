@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import deque
 from typing import Any
 
+from nifty_scalper_bot.config.regime_ontology import MarketRegime, normalize_regime
 from nifty_scalper_bot.strategies.elite_strategies.base_elite import EliteSignal, EliteStrategy
 from nifty_scalper_bot.strategies.elite_strategies.config_models import RSIDivergenceStrategyConfig
 from nifty_scalper_bot.strategies.signal_quality import resolve_signal_domain
@@ -34,7 +35,7 @@ class RSIDivergenceStrategy(EliteStrategy):
             rsi = float(indicators.get('rsi') or 50.0)
             close = float(indicators.get('close') or current_price)
             atr = max(float(indicators.get('atr') or 0.0), current_price * 0.01, 1.0)
-            regime = str(indicators.get('regime') or 'UNKNOWN').upper()
+            regime = normalize_regime(indicators.get('regime'))
             direction = str(indicators.get('direction_bias') or '').upper()
             hist = self._history.setdefault(symbol, deque(maxlen=10))
             hist.append((close, rsi))
@@ -73,10 +74,10 @@ class RSIDivergenceStrategy(EliteStrategy):
 
             score = 2.0 + 2.0
             reasons = ['valid_divergence', 'structure_confirmation']
-            if regime in {'RANGE', 'LOW_VOLATILITY'}:
+            if regime in {MarketRegime.RANGE, MarketRegime.LOW_ACTIVITY}:
                 score += 2.0
                 reasons.append('regime_support')
-            elif regime in {'TREND_UP', 'TREND_DOWN'}:
+            elif regime is MarketRegime.TREND:
                 score -= 1.5
                 reasons.append('strong_trend_penalty')
             if direction in {'CE', 'PE'} and direction == side:
@@ -123,7 +124,7 @@ class RSIDivergenceStrategy(EliteStrategy):
                 'divergence_type': 'bullish' if bullish_div else 'bearish',
                 'swing_points': [(p1, r1), (p2, r2)],
                 'confirmation_candle': confirmation,
-                'trend_regime': regime,
+                'trend_regime': regime.value,
                 'reversal_quality': round(strategy_score / 10.0, 3),
                 'context_score': strategy_score,
                 'premium_stop_distance': max(atr * 1.0, current_price * 0.02, 1.0),

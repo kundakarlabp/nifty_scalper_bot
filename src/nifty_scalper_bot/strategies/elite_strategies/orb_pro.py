@@ -5,6 +5,7 @@ from datetime import datetime, time, timedelta, timezone
 from typing import Any, Mapping
 from zoneinfo import ZoneInfo
 
+from nifty_scalper_bot.config.regime_ontology import MarketRegime, normalize_regime
 from nifty_scalper_bot.strategies.elite_strategies.base_elite import (
     EliteSignal,
     EliteStrategy,
@@ -548,9 +549,9 @@ class ORBProStrategy(EliteStrategy):
         if not side:
             self._no_vote("invalid_option_contract_side")
             return None
-        regime = str(indicators.get("regime") or "").upper()
-        if regime == "CHOPPY":
-            self._no_vote("choppy_regime")
+        regime = normalize_regime(indicators.get("regime"))
+        if regime in {MarketRegime.RANGE, MarketRegime.LOW_ACTIVITY}:
+            self._no_vote("non_breakout_regime")
             return None
 
         snapshot = self._underlying_snapshot(indicators)

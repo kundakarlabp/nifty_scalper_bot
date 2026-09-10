@@ -6,6 +6,16 @@ import os
 from dataclasses import dataclass, field
 from typing import Mapping
 
+from nifty_scalper_bot.config.regime_ontology import MarketRegime, normalize_regime
+
+# Regimes in which a long-option directional entry is considered suitable.
+# EVENT and LOW_ACTIVITY are excluded because premium behaviour there is
+# dominated by gap/IV risk and by absent participation respectively, and
+# UNKNOWN is excluded so an unresolved regime never scores as suitable.
+TRADABLE_REGIMES: frozenset[MarketRegime] = frozenset(
+    {MarketRegime.TREND, MarketRegime.RANGE, MarketRegime.VOLATILE}
+)
+
 REQUIRED_SCORE_COMPONENTS: tuple[str, ...] = (
     'direction_score',
     'strategy_score',
@@ -97,8 +107,8 @@ def build_trade_quality_evidence(
     else:
         liquidity_score = 0.0
 
-    regime = str(payload.get("regime") or payload.get("market_regime") or "").upper()
-    regime_score = 1.0 if regime and regime != "CHOPPY" else 0.0
+    regime = normalize_regime(payload.get("regime") or payload.get("market_regime"))
+    regime_score = 1.0 if regime in TRADABLE_REGIMES else 0.0
 
     return {
         "direction_alignment_score": (
