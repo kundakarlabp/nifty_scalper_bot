@@ -3,6 +3,8 @@ from __future__ import annotations
 from threading import RLock
 from types import SimpleNamespace
 
+import pytest
+
 from nifty_scalper_bot.execution import order_manager as order_manager_module
 
 
@@ -93,5 +95,27 @@ def test_allowed_path_does_not_release_reservation(monkeypatch) -> None:
     )
 
     assert result is sentinel
+    assert SYMBOL in manager._entries_in_flight
+    assert SYMBOL in manager._entry_inflight_owners
+
+
+def test_exception_path_preserves_reservation_fail_closed(monkeypatch) -> None:
+    """Unexpected local exceptions must never clear an in-flight entry guard."""
+    manager = _manager(broker_attempted=False)
+
+    def _raise(self, *args, **kwargs):
+        raise RuntimeError("synthetic local failure")
+
+    monkeypatch.setattr(order_manager_module, "_original_runtime_place_order", _raise)
+
+    with pytest.raises(RuntimeError, match="synthetic local failure"):
+        order_manager_module._place_order_with_prebroker_reservation_cleanup(
+            manager,
+            symbol=SYMBOL,
+            side="BUY",
+            intent="ENTRY",
+            check_risk=True,
+        )
+
     assert SYMBOL in manager._entries_in_flight
     assert SYMBOL in manager._entry_inflight_owners
