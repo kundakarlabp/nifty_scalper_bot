@@ -51,21 +51,10 @@ def resolve_signal_domain(symbol: str, metadata: dict[str, object] | None = None
 def canonical_max_spread_pct() -> float:
     """Return the spread limit quality evidence is judged against.
 
-    Explicit order-level configuration still wins. Absent that, this follows
-    the execution policy rather than the old 10% fallback, which described a
-    contract the execution layer would never accept and so let quality
-    evidence disagree with the binding constraint.
+    Quality evidence consumes the same binding execution policy as the
+    candidate selector and final pre-submit guard. Legacy aliases are resolved
+    inside ``config.entry_policy`` and cannot override this helper locally.
     """
-    for name in ("ORDER_MAX_SPREAD_PCT", "SPREAD_MAX_PCT"):
-        raw = os.getenv(name)
-        if raw is None:
-            continue
-        try:
-            value = float(raw)
-        except (TypeError, ValueError):
-            continue
-        if value > 0:
-            return value
     return resolve_entry_policy().execution_max_spread_pct
 
 

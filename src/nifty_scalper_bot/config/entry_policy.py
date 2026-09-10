@@ -150,9 +150,28 @@ def resolve_entry_policy() -> EntryPolicy:
     evaluation_spread = _env_float(
         "MAX_OPTION_SPREAD_PCT_FOR_EVAL", _DEFAULT_EVALUATION_MAX_SPREAD_PCT
     )
-    execution_spread = _env_float(
-        "LIVE_CANDIDATE_MAX_SPREAD_PCT", _DEFAULT_EXECUTION_MAX_SPREAD_PCT_LIVE
-    )
+    # One execution-spread owner. The explicit canonical/live-candidate
+    # settings retain their historical ability to configure the binding cap.
+    # Older quality/order aliases are accepted only as *tighter* fallbacks so
+    # they can never silently loosen the established 0.75% live default.
+    canonical_execution_spread = _env_float("EXECUTION_MAX_OPTION_SPREAD_PCT", None)
+    live_candidate_spread = _env_float("LIVE_CANDIDATE_MAX_SPREAD_PCT", None)
+    if canonical_execution_spread is not None:
+        execution_spread = canonical_execution_spread
+    elif live_candidate_spread is not None:
+        execution_spread = live_candidate_spread
+    else:
+        legacy_caps = [
+            value
+            for value in (
+                _env_float("ORDER_MAX_SPREAD_PCT", None),
+                _env_float("SPREAD_MAX_PCT", None),
+            )
+            if value is not None and value > 0
+        ]
+        execution_spread = min(
+            [_DEFAULT_EXECUTION_MAX_SPREAD_PCT_LIVE, *legacy_caps]
+        )
 
     evaluation_min = max(0.0, float(evaluation_min or 0.0))
     execution_min = max(0.0, float(execution_min or 0.0))

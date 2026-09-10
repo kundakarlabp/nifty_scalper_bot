@@ -7562,11 +7562,11 @@ class StrategyRunner:
             if bid_price > 0 and ask_price > 0:
                 spread = max(0.0, ask_price - bid_price)
                 spread_pct = (spread / max(price, 1e-6)) * 100.0
-                # EVALUATION policy: this guard sits above the selector's
-                # execution cap and only rejects contracts nobody should have
-                # been looking at. The binding execution cap stays with
-                # TradeCandidateSelector.
-                if spread_pct > resolve_entry_policy().evaluation_max_spread_pct:
+                # FINAL EXECUTION policy: candidate selection is the primary
+                # microstructure gate, but this pre-submit guard independently
+                # enforces the same binding cap in case any alternate route
+                # reaches order execution.
+                if spread_pct > resolve_entry_policy().execution_max_spread_pct:
                     raise RuntimeError("Execution blocked due to option spread guard")
             if (bid_qty + ask_qty) < 300:
                 raise RuntimeError("Execution blocked due to liquidity guard")
@@ -9946,12 +9946,13 @@ class StrategyRunner:
             "orbpro": "RUNNER_ORB_ALLOWED_REGIMES",
         }
         env_name = strategy_env_map.get(normalized)
-        # Expressed in the canonical vocabulary. LOW_ACTIVITY and UNKNOWN are
-        # absent deliberately: no participation and no resolved regime are both
-        # states in which an entry must not be originated.
-        default_allowed = "TREND,RANGE,VOLATILE"
+        # Canonical vocabulary with the pre-ontology *effective* defaults
+        # preserved. RANGE was not emitted as NORMAL by the runtime engine, so
+        # adding RANGE here would silently broaden live admission. Enable RANGE
+        # only through an explicit strategy env after expectancy validation.
+        default_allowed = "TREND,VOLATILE"
         if env_name == "RUNNER_VWAP_ALLOWED_REGIMES":
-            default_allowed = "TREND,RANGE"
+            default_allowed = "TREND"
         allowed_csv = (
             os.getenv(env_name or "", default_allowed) if env_name else default_allowed
         )
@@ -20079,16 +20080,10 @@ class StrategyRunner:
                 "strategy_score",
                 float(metadata.get("setup_quality", quality_hint) or quality_hint),
             )
-            # option_score is the microstructure verdict owned by
-            # TradeCandidateSelector and promoted from the selected candidate
-            # above. It carries 20% of the composite, so there is no honest
-            # default for it: a fabricated mid-scale value both awarded points
-            # for evidence never gathered and, because it was seeded before the
-            # candidate promotion below, displaced the genuine candidate score.
-            # Absent candidate evidence must leave it unset so the final-score
-            # precheck rejects with missing_final_score_components.
-            if metadata.get("option_quality") is not None:
-                metadata.setdefault("option_score", float(metadata["option_quality"]))
+            # option_score has exactly one production owner:
+            # TradeCandidateSelector. It is promoted from the selected candidate
+            # after materialisation below. With no selected-candidate evidence it
+            # stays absent and the final-score precheck fails closed.
             metadata.setdefault(
                 "data_score",
                 float(metadata.get("data_quality", quality_hint) or quality_hint),

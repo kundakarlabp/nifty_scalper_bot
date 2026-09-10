@@ -23,6 +23,7 @@ def _clean_policy_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "MAX_OPTION_PREMIUM",
         "MAX_OPTION_SPREAD_PCT_FOR_EVAL",
         "LIVE_CANDIDATE_MAX_SPREAD_PCT",
+        "EXECUTION_MAX_OPTION_SPREAD_PCT",
         "ORDER_MAX_SPREAD_PCT",
         "SPREAD_MAX_PCT",
     ):
@@ -110,8 +111,15 @@ def test_quality_spread_limit_follows_execution_policy_not_a_ten_percent_default
 
     assert canonical_max_spread_pct() == resolve_entry_policy().execution_max_spread_pct
 
+    # A legacy quality/order alias may tighten the default, never loosen it.
     monkeypatch.setenv("ORDER_MAX_SPREAD_PCT", "2.5")
-    assert canonical_max_spread_pct() == 2.5
+    assert canonical_max_spread_pct() == 0.75
+    monkeypatch.setenv("SPREAD_MAX_PCT", "0.60")
+    assert canonical_max_spread_pct() == 0.60
+
+    # The canonical execution override remains explicit and authoritative.
+    monkeypatch.setenv("EXECUTION_MAX_OPTION_SPREAD_PCT", "0.90")
+    assert canonical_max_spread_pct() == 0.90
 
 
 def test_candidate_selector_takes_its_floor_from_the_execution_policy(
@@ -123,3 +131,11 @@ def test_candidate_selector_takes_its_floor_from_the_execution_policy(
     selector = TradeCandidateSelector()
 
     assert selector.min_option_premium == 45.0
+
+
+def test_runner_final_spread_guard_uses_execution_policy() -> None:
+    from pathlib import Path
+
+    source = Path("src/nifty_scalper_bot/strategies/runner.py").read_text(encoding="utf-8")
+    assert "spread_pct > resolve_entry_policy().execution_max_spread_pct" in source
+    assert "spread_pct > resolve_entry_policy().evaluation_max_spread_pct" not in source

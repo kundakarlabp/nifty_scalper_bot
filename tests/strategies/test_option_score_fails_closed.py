@@ -37,19 +37,9 @@ def _setdefault_calls(source: str, key: str) -> list[ast.Call]:
     return found
 
 
-def test_runner_never_seeds_option_score_with_an_invented_default() -> None:
+def test_runner_never_seeds_option_score_outside_candidate_selection() -> None:
     source = _RUNNER.read_text(encoding="utf-8")
-    for call in _setdefault_calls(source, "option_score"):
-        assert len(call.args) > 1, "setdefault without a default is meaningless here"
-        rendered = ast.unparse(call.args[1])
-        numeric_literals = [
-            node.value
-            for node in ast.walk(call.args[1])
-            if isinstance(node, ast.Constant) and isinstance(node.value, (int, float))
-        ]
-        assert not numeric_literals, (
-            f"option_score must not fall back to a constant: {rendered}"
-        )
+    assert _setdefault_calls(source, "option_score") == []
 
 
 def test_option_score_is_a_required_component() -> None:
