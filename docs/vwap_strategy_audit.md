@@ -1,5 +1,27 @@
 # VWAP Strategy Audit (In-Depth)
 
+## VWAP timestamp identity correction — 2026-09-10 (Asia/Kolkata)
+
+Source baseline: `64ef657a293ef1d6256797a486dd89bbd486eccb`.
+The restart-identity concern below is now reproduced and corrected locally.
+Four RED cases showed equivalent ISO/epoch bar timestamps generating different
+setup IDs after recovery. One strategy-local normalizer now owns live reset,
+reclaim and history-recovery anchor representation. Fourteen cases cover both
+arming paths, seven timestamp representations, and downstream deterministic IDs.
+The existing UTC datetime string representation is preserved, matching
+`IndicatorEngine` bar timestamps and the `signal_generator` timestamp source.
+Naive timestamps follow the indicator engine's UTC convention. Opaque legacy
+anchors retain their text fallback; no wall-clock timestamp is invented.
+
+Rollout limitation: previously persisted noncanonical IDs are not rewritten.
+Prefer a between-session rollout if a running producer emits ISO/epoch anchors;
+no production producer format or deployed SHA was verified during this change.
+Historical-versus-current VWAP selection remains a separate open concern.
+No entry thresholds, session/contract scopes, risk policy or order path change.
+Engineering owner: repository maintainer/assistant. Required validation and merge
+evidence are recorded in the associated PR; next review is deployed identity
+pairing, followed by a moving-VWAP recovery regression. No external deadline.
+
 ## Current strategy/execution review — 2026-09-10 (Asia/Kolkata)
 
 Source baseline: `cf330a1f3605cd8d3d66d494ab6f389aa7aaad58`.
