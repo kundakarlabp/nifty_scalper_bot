@@ -76,7 +76,7 @@ class MarketRegimeManager:
 
     # ✅ FIXED: Missing field that caused the crash
     _refresh_task_started: bool = field(init=False, default=False, repr=False)
-    
+
     # ✅ FIX: Add indicators_ready field (required by startup_sequence)
     indicators_ready: bool = field(init=False, default=False, repr=False)
 
@@ -107,10 +107,10 @@ class MarketRegimeManager:
                 )
 
         self._lock = threading.RLock()
-        
+
         # ✅ FIXED: Ensure this is initialized
         self._refresh_task_started = False
-        
+
         self._history: Deque[RegimeSnapshot] = deque(maxlen=max(5, self.history_limit))
         self._decisions: Deque[RegimeDecision] = deque(maxlen=200)
         self._current: RegimeSnapshot | None = None
@@ -155,7 +155,7 @@ class MarketRegimeManager:
                 if self._refresh_task_started:
                     return
                 self._refresh_task_started = True
-            
+
             try:
                 loop = asyncio.get_running_loop()
                 loop.create_task(self._run_indicator_refresh_loop())
@@ -163,7 +163,9 @@ class MarketRegimeManager:
             except Exception as exc:
                 with self._lock:
                     self._refresh_task_started = False
-                logger.error(f"❌ Failed to start regime refresh loop: {exc}", exc_info=True)
+                logger.error(
+                    f"❌ Failed to start regime refresh loop: {exc}", exc_info=True
+                )
                 raise
 
     # ------------------------------------------------------------------
@@ -434,37 +436,25 @@ class MarketRegimeManager:
         # 1. Pull required metrics from IndicatorEngine
         getter = getattr(self.indicators, "get_indicators", None)
         if not callable(getter):
-            single_getter = getattr(self.indicators, "get", None)
-            if not callable(single_getter):
-                return
-            try:
-                atr_trend = single_getter("atr_trend")
-                vol_index = single_getter("volatility_index")
-            except Exception:
-                return
-            enrichment = {
-                "trend_score": atr_trend,
-                "adx": max(25.0, float(atr_trend) * 15.0),
-                "price_momentum": 0.01,
-                "ema_fast": 102.0,
-                "ema_slow": 100.0,
-                "atr": max(13.0, float(atr_trend) * 10.0),
-                "iv_rank": vol_index,
-                "price": 1.0,
-                "close": 1.0,
-                "volume_ratio": 1.0,
-            }
-            snapshot = self.detector.evaluate(self._indicator_symbol, enrichment)
-            if snapshot is not None:
-                snapshot.regime = str(snapshot.regime or "").upper()
-                self.ingest_snapshot(snapshot)
-                self._last_indicator_refresh = time.time()
+            logger.warning(
+                "REGIME_REFRESH_SKIPPED reason=indicator_engine_unavailable",
+                extra={
+                    "event": "REGIME_REFRESH_SKIPPED",
+                    "reason": "indicator_engine_unavailable",
+                    "symbol": self._indicator_symbol,
+                },
+            )
             return
 
         required_keys = [
-            "ema_fast", "ema_slow", "adx", "atr",
-            "volume_spike_ratio", "iv_rank",
-            "price", "close",
+            "ema_fast",
+            "ema_slow",
+            "adx",
+            "atr",
+            "volume_spike_ratio",
+            "iv_rank",
+            "price",
+            "close",
         ]
 
         try:
@@ -587,10 +577,9 @@ class MarketRegimeManager:
                 # ✅ FIX: Check for auto-bypass when regime data is unavailable
                 # This provides graceful degradation during API outages
                 auto_bypass = coalesce_bool(
-                    "REGIME_BYPASS_ON_UNAVAILABLE", 
-                    default=False
+                    "REGIME_BYPASS_ON_UNAVAILABLE", default=False
                 )
-                
+
                 if auto_bypass:
                     # Log warning but allow trading with caution
                     logger.warning(
@@ -598,12 +587,12 @@ class MarketRegimeManager:
                         extra={
                             "event": "regime_unavailable_bypass",
                             "action": "allow_with_caution",
-                        }
+                        },
                     )
                     # Allow trading but record the bypass reason
                     allowed = True
                     reasons.append("regime_unavailable_bypassed")
-                    
+
                     # ✅ Create a synthetic "cautious" regime decision
                     decision = RegimeDecision(
                         allowed=True,
@@ -631,10 +620,9 @@ class MarketRegimeManager:
                 if age > self.stale_after_seconds:
                     # ✅ FIX: Check for stale bypass
                     stale_bypass = coalesce_bool(
-                        "REGIME_BYPASS_ON_STALE",
-                        default=False
+                        "REGIME_BYPASS_ON_STALE", default=False
                     )
-                    
+
                     if stale_bypass and age < (self.stale_after_seconds * 3):
                         # Allow if data is stale but not ancient (3x threshold)
                         logger.warning(
@@ -643,7 +631,7 @@ class MarketRegimeManager:
                                 "event": "regime_stale_bypass",
                                 "age_seconds": age,
                                 "threshold": self.stale_after_seconds,
-                            }
+                            },
                         )
                         reasons.append("regime_stale_bypassed")
                         # Don't set allowed=False, continue to other checks

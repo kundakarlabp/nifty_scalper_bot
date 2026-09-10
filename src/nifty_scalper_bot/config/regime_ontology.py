@@ -1,18 +1,15 @@
-"""Canonical market-regime vocabulary.
+"""File purpose:
+    Own the single market-regime vocabulary used by detectors, gates and scoring.
 
-Regime labels were previously invented independently by the core detector
-(``trend``/``range``/``volatile``/``event``), the runner engine
-(``TREND``/``RANGE``/``VOLATILE``/``LOW_ACTIVITY``), the runner gate
-(``HIGH_VOLATILITY``/``NORMAL``) and the vote-weight table
-(``TREND_UP``/``TREND_DOWN``/``CHOPPY``/``LOW_VOLATILITY``). Because the
-producers and consumers used different words for the same states, several
-gates and weights silently resolved to their neutral default and never fired.
+Key responsibilities:
+    - Define the canonical MarketRegime states.
+    - Normalise every producer, config and persisted label onto that set.
+    - Keep regime orthogonal to direction.
 
-This module is the single owner of the regime vocabulary. Producers emit a
-:class:`MarketRegime`; consumers normalise whatever they receive through
-:func:`normalize_regime` before comparing. Regime describes *market state
-only* -- direction is an orthogonal observation owned by the underlying
-direction bias and must not be encoded in a regime label.
+Operational constraints:
+    - Unrecognised labels resolve to UNKNOWN, which is not a tradable state.
+    - Direction stays with the underlying-direction observation; TREND_UP and
+      TREND_DOWN collapse to TREND.
 """
 
 from __future__ import annotations
