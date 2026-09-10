@@ -122,6 +122,17 @@ def test_quality_spread_limit_follows_execution_policy_not_a_ten_percent_default
     assert canonical_max_spread_pct() == 0.90
 
 
+def test_explicit_execution_spread_override_precedes_legacy_aliases(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Legacy aliases cannot unexpectedly override the canonical operator setting."""
+    monkeypatch.setenv("EXECUTION_MAX_OPTION_SPREAD_PCT", "0.70")
+    monkeypatch.setenv("LIVE_CANDIDATE_MAX_SPREAD_PCT", "0.55")
+    monkeypatch.setenv("SPREAD_MAX_PCT", "0.40")
+
+    assert resolve_entry_policy().execution_max_spread_pct == 0.70
+
+
 def test_candidate_selector_takes_its_floor_from_the_execution_policy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
