@@ -406,7 +406,13 @@ class VWAPProStrategy(EliteStrategy):
                 score += 1.0
                 reasons.append("volume_confirmation")
 
-            bias = direction if direction in {"CE", "PE"} else underlying_direction
+            # Explicit underlying direction owns alignment; generic bias is a
+            # fallback only when no usable underlying direction is available.
+            bias = (
+                underlying_direction
+                if underlying_direction in {"CE", "PE"}
+                else direction
+            )
             if bias in {"CE", "PE"}:
                 trend_alignment = bias == contract_side
                 if trend_alignment:
@@ -639,15 +645,7 @@ class VWAPProStrategy(EliteStrategy):
                 "underlying_direction_confidence": underlying_direction_confidence,
                 "context_age_seconds": context_age_seconds,
                 "context_fresh": context_fresh,
-                "context_direction_used": (
-                    direction
-                    if direction in {"CE", "PE"}
-                    else (
-                        underlying_direction
-                        if underlying_direction in {"CE", "PE"}
-                        else None
-                    )
-                ),
+                "context_direction_used": bias if bias in {"CE", "PE"} else None,
                 "preliminary_only": True,
                 "requires_runner_final_score": True,
                 "raw_setup_score": strategy_score,
