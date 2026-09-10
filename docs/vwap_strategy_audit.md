@@ -1,5 +1,56 @@
 # VWAP Strategy Audit (In-Depth)
 
+## Current strategy/execution review — 2026-09-10 (Asia/Kolkata)
+
+Source baseline: `cf330a1f3605cd8d3d66d494ab6f389aa7aaad58`.
+This dated review supersedes the historical narrative below. In particular,
+current VWAPPro uses option-premium VWAP/ATR; it does not require futures/index
+VWAP or implement the historical z-score/multi-bar acceptance description.
+No current production logs, deployed SHA or net-cost profitability were verified
+in this review. Code correctness is not evidence of trading alpha.
+
+| Priority | Finding and source | Decision/status | Next review |
+| --- | --- | --- | --- |
+| P0 | `order_manager_core.place_order` rejects single-position conflicts before acquiring a reservation. The public `order_manager` wrapper then calls `entry_geometry.release_prebroker_entry_reservation`, which could delete the preceding entry's reservation. | Reproduced for distinct and repeated setup identities. Four-line native correction preserves the reservation on `single_position_gate:` rejection. | Required CI and merge; subsequently verify deployed SHA and reservation lifecycle in logs. |
+| P1 | `vwap_pro._evaluate_signal` now uses explicit underlying direction for alignment; PR #1215. | Already merged at the source baseline; retain generic fallback and existing confidence/freshness rules. | Replay accepted/rejected candidates with conflicting direction fields. |
+| P1 | `vwap_pro._recover_thesis_anchor_from_history` compares historical OHLC with the current VWAP and returns an unnormalized timestamp string. | Audit concern, not a proven production incident. Test moving-VWAP recovery and equivalent timestamp representations before changing state reconstruction. | Next focused strategy correction, after the P0 merge. |
+| P1 | SMC uses the underlying sweep timestamp/source for setup identity; ORB checks exact opening-minute coverage. | Preserve these already merged corrections. | Replay restart, duplicate bars, synthetic bars and ATM rotation with recorded provenance. |
+| P2 | VWAP early-trend pullback requires `not premium_above_vwap`, but below-VWAP closes return earlier. | Confirmed unreachable branch. Do not enable additional entries without separate replay evidence. | Decide removal versus explicitly specified opt-in behavior. |
+| P2 | Cleanup still reads shared `_last_order_decision`; other early-return and concurrent ownership paths need review. | Broader lifecycle audit remains open; this correction covers the reproduced single-position-gate path only. | Test stale decisions, incomplete broker-attempt evidence and ownership replacement under lock. |
+
+Engineering owner: repository maintainer with assistant implementation support.
+No external deadline was supplied. Review order is event-based: finish required
+CI/merge before starting another production correction. No live orders are used
+for validation, and no risk limit, entry threshold or stop geometry is relaxed.
+
+Local verification: two new cases failed before the fix; all 16 focused tests
+passed afterward. Full pytest and separate execution/risk/E2E/architecture suites
+passed with `PYTHONPATH=src TZ=Asia/Kolkata BRACKET_AUTO_RESTORE=false`; the full
+suite had one existing skip and emitted a background closed-log-stream warning.
+Production compilation and helper mypy passed. Baseline comparison found no new
+Ruff/Black debt. Required remote CI and merge evidence are recorded in the PR.
+
+Source register and evidence boundary:
+
+- Complete VWAP evaluation/recovery functions, public execution facade,
+  reservation helper, runtime `place_order`, and core decision/gate ordering
+  provide the direct behavioral evidence. Focused regressions exercise the
+  public cleanup wrapper with the core gate's exact decision contract.
+- [Kite order documentation](https://kite.trade/docs/connect/v3/orders/), reviewed
+  2026-09-10: placement acknowledgement does not establish execution; order
+  history/status and asynchronous updates own broker truth. Preserving pending
+  entry protection is consistent with that distinction.
+- [OCC/OIC option price behavior](https://www.optionseducation.org/referencelibrary/faq/option-price-behavior),
+  reviewed 2026-09-10: premiums depend on underlying price, volatility, time and
+  other inputs. This supports separating directional context from premium
+  execution geometry, not a profitability claim for any particular VWAP rule.
+- Parameter changes require timestamped underlying/futures bars, selected option
+  bid/ask and depth, setup IDs, candidate/result pairs, fills and realized costs.
+  Evaluate incremental net expectancy, drawdown and turnover on chronological
+  holdout periods before considering live parameter changes.
+
+## Historical narrative — retained for provenance, not current specifications
+
 ## Scope and intent
 This audit focuses on the VWAP-driven strategy stack and its data/telemetry flow. The goal is **maximum diagnostic clarity** with **minimal code change** and **zero regressions**, while preserving **strategy logic, thresholds, and execution order**.
 

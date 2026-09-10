@@ -118,6 +118,10 @@ def release_prebroker_entry_reservation(
         return False
     if bool(decision.get("broker_attempted")):
         return False
+    # The single-position gate rejects before acquiring a reservation. Its
+    # contender must never release the entry that caused the conflict.
+    if str(decision.get("block_reason") or "").startswith("single_position_gate:"):
+        return False
     symbol = normalize_symbol(str(values.get("symbol") or ""))
     reservations = getattr(manager, "_entries_in_flight", None)
     if not symbol or not isinstance(reservations, dict) or symbol not in reservations:
