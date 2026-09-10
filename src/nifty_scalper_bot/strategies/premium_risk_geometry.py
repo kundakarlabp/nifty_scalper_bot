@@ -14,6 +14,7 @@ from typing import Any, Mapping
 from nifty_scalper_bot.risk.net_rr_gate import (
     estimate_half_spread,
     minimum_risk_distance_for_net_rr,
+    minimum_target_for_net_rr,
 )
 
 _TICK_SIZE = 0.05
@@ -216,7 +217,16 @@ def apply_cost_aware_risk_floor(
     quantity: int,
     half_spread: float | None = None,
 ) -> Any:
-    """Apply the minimum viable distance to distance-anchored long options."""
+    """Preserve stop risk while compensating bounded transaction-cost erosion.
+
+    The historical implementation widened the stop until a fixed gross target R
+    cleared the net-R:R gate.  That makes transaction costs increase monetary
+    loss exposure and can deterministically violate the canonical per-trade risk
+    cap for an indivisible option lot.  The strategy stop is now immutable here.
+    When costs erode an otherwise-valid distance-anchored setup, only the target
+    may receive the existing bounded uplift; the final net-R:R and risk gates
+    remain authoritative immediately before broker submission.
+    """
 
     entry = float(entry_price or 0.0)
     action = str(getattr(signal, "action", "") or "").upper()
@@ -260,23 +270,42 @@ def apply_cost_aware_risk_floor(
     updated["premium_cost_floor_distance"] = floor
     updated["premium_cost_floor_quantity"] = int(quantity)
     updated["premium_cost_floor_half_spread"] = spread
+    updated["premium_cost_floor_applied"] = False
     if floor is None:
         updated["premium_cost_floor_viable"] = False
-        return dataclasses.replace(signal, metadata=updated)
-    updated["premium_cost_floor_viable"] = True
-    if current_distance + 1e-9 >= floor:
-        updated["premium_cost_floor_applied"] = False
+        updated["premium_cost_target_repair_viable"] = False
         return dataclasses.replace(signal, metadata=updated)
 
-    updated["premium_cost_floor_applied"] = True
+    updated["premium_cost_floor_viable"] = True
+    if current_distance + 1e-9 >= floor:
+        updated["premium_cost_target_repair_viable"] = True
+        return dataclasses.replace(signal, metadata=updated)
+
+    # Feed the exact execution entry and spread into the existing target-only
+    # repair helper.  This keeps stop distance and therefore one-lot loss risk
+    # unchanged.  A repair outside the bounded target-uplift policy fails closed.
+    updated["entry_price"] = entry
+    updated["half_spread"] = spread
+    repair_signal = dataclasses.replace(signal, metadata=updated)
+    adjusted_target = minimum_target_for_net_rr(repair_signal)
     updated["premium_cost_floor_original_distance"] = current_distance
-    updated["premium_stop_distance"] = floor
-    updated["premium_risk_distance"] = floor
-    updated["premium_risk_source"] = "cost_aware_minimum"
+    updated["premium_cost_floor_original_target"] = target
+    if adjusted_target is None:
+        updated["premium_cost_target_repair_viable"] = False
+        return dataclasses.replace(signal, metadata=updated)
+
+    updated["premium_cost_target_repair_viable"] = True
+    if adjusted_target <= target + 1e-9:
+        return dataclasses.replace(signal, metadata=updated)
+
+    updated["premium_cost_target_adjusted"] = True
+    updated["premium_cost_adjusted_target"] = float(adjusted_target)
+    updated["premium_risk_source"] = metadata.get(
+        "premium_risk_source", "strategy_distance"
+    )
     return dataclasses.replace(
         signal,
-        stop_loss=max(_TICK_SIZE, entry - floor),
-        take_profit=entry + floor * rr,
+        take_profit=float(adjusted_target),
         metadata=updated,
     )
 
