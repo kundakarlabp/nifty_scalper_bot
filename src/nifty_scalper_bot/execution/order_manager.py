@@ -16,6 +16,7 @@ import math
 from collections.abc import Mapping
 
 from nifty_scalper_bot.execution import order_manager_core as _core
+from nifty_scalper_bot.execution.entry_geometry import release_prebroker_entry_reservation
 from nifty_scalper_bot.execution.readiness import resolve_quote_bid_ask_spread
 
 for _name in dir(_core):
@@ -50,6 +51,50 @@ def _enrich_trade_plan_exit_provenance(plan):
 # Patch that one helper rather than introducing a second submission path.
 _runtime._enrich_trade_plan_exit_provenance = _enrich_trade_plan_exit_provenance
 RuntimeOrderManager = _runtime.RuntimeOrderManager
+
+# Keep the atomic single-position reservation only while an entry can still
+# reach the broker. Core takes this reservation before the final RiskManager
+# check. Any local rejection with broker_attempted=False must release it
+# immediately; otherwise one legitimate local rejection suppresses subsequent
+# valid signals until ENTRY_INFLIGHT_TTL_SEC expires.
+_original_runtime_place_order = RuntimeOrderManager.place_order
+
+
+def _release_failed_prebroker_entry_reservation(self, kwargs):
+    """Release an entry reservation only after an explicit local rejection."""
+    try:
+        released = release_prebroker_entry_reservation(self, kwargs)
+    except Exception:
+        return False
+    if not released:
+        return False
+    logger = getattr(self, "_logger", None)
+    log = getattr(logger, "info", None)
+    if callable(log):
+        log(
+            "PREBROKER_ENTRY_RESERVATION_RELEASED symbol=%s reason=%s",
+            kwargs.get("symbol"),
+            (getattr(self, "_last_order_decision", {}) or {}).get("block_reason"),
+            extra={
+                "event": "PREBROKER_ENTRY_RESERVATION_RELEASED",
+                "symbol": kwargs.get("symbol"),
+                "block_reason": (
+                    getattr(self, "_last_order_decision", {}) or {}
+                ).get("block_reason"),
+            },
+        )
+    return True
+
+
+def _place_order_with_prebroker_reservation_cleanup(self, *args, **kwargs):
+    """Delegate unchanged and clear only a proven, normally returned local reject."""
+    result = _original_runtime_place_order(self, *args, **kwargs)
+    if result is None:
+        _release_failed_prebroker_entry_reservation(self, kwargs)
+    return result
+
+
+RuntimeOrderManager.place_order = _place_order_with_prebroker_reservation_cleanup
 
 _original_extract_quote_diagnostics = RuntimeOrderManager._extract_quote_diagnostics
 _original_get_latest_quote_safe = RuntimeOrderManager._get_latest_quote_safe
