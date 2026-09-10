@@ -3678,11 +3678,16 @@ class StrategyManager(_BaseStrategyManager):
                     )
                     combined = None
             if combined:
-                scaled_quantity = max(1, int(round(combined.quantity * regime_scale)))
+                # Quantity belongs to the risk engine. Scaling it here could
+                # never protect capital anyway: the requested size is one lot,
+                # and max(1, round(1 * 0.6)) is still one lot, so a defensive
+                # regime multiplier was a no-op while an expansive one could
+                # still raise size outside the 2% risk owner. The regime scale
+                # stays in metadata as sizing evidence for the risk layer.
                 combined = Signal(
                     action=combined.action,
                     symbol=combined.symbol,
-                    quantity=scaled_quantity,
+                    quantity=combined.quantity,
                     confidence=combined.confidence,  # ✅ FIX #6: Was metadata.get("probability", combined.confidence); that bypassed score weighting
                     reason=combined.reason,
                     stop_loss=combined.stop_loss,
