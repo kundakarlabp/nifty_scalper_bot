@@ -20071,10 +20071,16 @@ class StrategyRunner:
                 "strategy_score",
                 float(metadata.get("setup_quality", quality_hint) or quality_hint),
             )
-            metadata.setdefault(
-                "option_score",
-                float(metadata.get("option_quality", 5.5) or 5.5),
-            )
+            # option_score is the microstructure verdict owned by
+            # TradeCandidateSelector and promoted from the selected candidate
+            # above. It carries 20% of the composite, so there is no honest
+            # default for it: a fabricated mid-scale value both awarded points
+            # for evidence never gathered and, because it was seeded before the
+            # candidate promotion below, displaced the genuine candidate score.
+            # Absent candidate evidence must leave it unset so the final-score
+            # precheck rejects with missing_final_score_components.
+            if metadata.get("option_quality") is not None:
+                metadata.setdefault("option_score", float(metadata["option_quality"]))
             metadata.setdefault(
                 "data_score",
                 float(metadata.get("data_quality", quality_hint) or quality_hint),
