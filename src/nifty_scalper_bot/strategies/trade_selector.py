@@ -7,6 +7,7 @@ import logging
 import os
 from typing import Any
 
+from nifty_scalper_bot.config.entry_policy import resolve_entry_policy
 from nifty_scalper_bot.config.env_utils import parse_int_env
 from nifty_scalper_bot.execution.quote_readiness import resolve_real_tick_count, resolve_tick_age_ms
 from nifty_scalper_bot.risk.cost_model import evaluate_net_reward_risk
@@ -70,8 +71,11 @@ class TradeCandidateSelector:
         self.quality_mode = quality_mode
         self.option_metrics_getter = option_metrics_getter if callable(option_metrics_getter) else None
         self.option_strike_window_each_side = option_strike_window_each_side
-        self.min_option_premium = float(min_option_premium if min_option_premium is not None else os.getenv('MIN_OPTION_PREMIUM', '40'))
-        self.max_option_premium = float(max_option_premium if max_option_premium is not None else os.getenv('MAX_OPTION_PREMIUM', '650'))
+        # EXECUTION policy: the binding premium floor. Owned by
+        # config.entry_policy so it cannot drift from the evaluation floor.
+        policy = resolve_entry_policy()
+        self.min_option_premium = float(min_option_premium if min_option_premium is not None else policy.execution_min_premium)
+        self.max_option_premium = float(max_option_premium if max_option_premium is not None else policy.max_premium)
         if self.min_option_premium <= 0:
             raise ValueError('min_option_premium must be > 0')
         if self.max_option_premium <= self.min_option_premium:
@@ -104,7 +108,8 @@ class TradeCandidateSelector:
             min_ticks = int(self.require_real_ticks_last_60s)
         is_live = _real_live_mode()
         if is_live:
-            max_spread = min(max_spread, _float_env('LIVE_CANDIDATE_MAX_SPREAD_PCT', 0.75, minimum=0.01))
+            # EXECUTION policy: the binding spread cap.
+            max_spread = min(max_spread, resolve_entry_policy().execution_max_spread_pct)
             max_age = min(max_age, _float_env('LIVE_CANDIDATE_MAX_TICK_AGE_S', 2.5, minimum=0.1))
             min_ticks = max(min_ticks, parse_int_env(os.getenv('LIVE_CANDIDATE_MIN_REAL_TICKS_60S'), 2))
         return max_spread, max_age, min_ticks, is_live

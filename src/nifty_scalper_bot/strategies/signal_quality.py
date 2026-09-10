@@ -6,6 +6,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Mapping
 
+from nifty_scalper_bot.config.entry_policy import resolve_entry_policy
 from nifty_scalper_bot.config.regime_ontology import MarketRegime, normalize_regime
 
 # Regimes in which a long-option directional entry is considered suitable.
@@ -48,7 +49,13 @@ def resolve_signal_domain(symbol: str, metadata: dict[str, object] | None = None
 
 
 def canonical_max_spread_pct() -> float:
-    """Return the single live entry spread limit used by strategy and execution."""
+    """Return the spread limit quality evidence is judged against.
+
+    Explicit order-level configuration still wins. Absent that, this follows
+    the execution policy rather than the old 10% fallback, which described a
+    contract the execution layer would never accept and so let quality
+    evidence disagree with the binding constraint.
+    """
     for name in ("ORDER_MAX_SPREAD_PCT", "SPREAD_MAX_PCT"):
         raw = os.getenv(name)
         if raw is None:
@@ -59,7 +66,7 @@ def canonical_max_spread_pct() -> float:
             continue
         if value > 0:
             return value
-    return 10.0
+    return resolve_entry_policy().execution_max_spread_pct
 
 
 def build_trade_quality_evidence(

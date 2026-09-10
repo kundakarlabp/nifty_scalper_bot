@@ -140,6 +140,7 @@ from nifty_scalper_bot.risk.position_sizing import (
     RiskSnapshot,
 )
 from nifty_scalper_bot.strategies.bar_builder import OneMinuteBar, OneMinuteBarBuilder
+from nifty_scalper_bot.config.entry_policy import resolve_entry_policy
 from nifty_scalper_bot.config.regime_ontology import normalize_regime
 from nifty_scalper_bot.strategies.indicators import IndicatorEngine
 from nifty_scalper_bot.strategies.market_regime_engine import (
@@ -7561,7 +7562,11 @@ class StrategyRunner:
             if bid_price > 0 and ask_price > 0:
                 spread = max(0.0, ask_price - bid_price)
                 spread_pct = (spread / max(price, 1e-6)) * 100.0
-                if spread_pct > 1.5:
+                # EVALUATION policy: this guard sits above the selector's
+                # execution cap and only rejects contracts nobody should have
+                # been looking at. The binding execution cap stays with
+                # TradeCandidateSelector.
+                if spread_pct > resolve_entry_policy().evaluation_max_spread_pct:
                     raise RuntimeError("Execution blocked due to option spread guard")
             if (bid_qty + ask_qty) < 300:
                 raise RuntimeError("Execution blocked due to liquidity guard")
@@ -16036,9 +16041,10 @@ class StrategyRunner:
                                     },
                                 )
                             return
-                        _min_premium = float(
-                            os.getenv("MIN_OPTION_PREMIUM", "20") or "20"
-                        )
+                        # EVALUATION policy: what the strategy layer may look
+                        # at. Deliberately no stricter than the execution
+                        # floor enforced by TradeCandidateSelector.
+                        _min_premium = resolve_entry_policy().evaluation_min_premium
                         if _pregate_ltp < _min_premium:
                             if self._should_log_throttled(
                                 f"pregate_low_premium:{symbol}", 60.0
@@ -16112,9 +16118,11 @@ class StrategyRunner:
                         if _env_bool("SKIP_WIDE_SPREAD_OPTION_EVAL", True):
                             _pg_spread = _pg_ask - _pg_bid
                             _pg_mid = (_pg_bid + _pg_ask) / 2.0
-                            _max_spread_pct = float(
-                                os.getenv("MAX_OPTION_SPREAD_PCT_FOR_EVAL", "1.5")
-                                or "1.5"
+                            # EVALUATION policy: never tighter than the
+                            # execution cap, so a contract cannot pass
+                            # execution without having been evaluated.
+                            _max_spread_pct = (
+                                resolve_entry_policy().evaluation_max_spread_pct
                             )
                             if (
                                 _pg_mid > 0
