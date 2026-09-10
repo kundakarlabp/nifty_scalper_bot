@@ -4,18 +4,11 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from enum import Enum
 from typing import Mapping
 
+from nifty_scalper_bot.config.regime_ontology import MarketRegime
 
-class MarketRegime(str, Enum):
-    """Supported market regime labels."""
-
-    TREND = "TREND"
-    RANGE = "RANGE"
-    VOLATILE = "VOLATILE"
-    LOW_ACTIVITY = "LOW_ACTIVITY"
-    UNKNOWN = "UNKNOWN"
+__all__ = ["MarketRegime", "MarketRegimeEngine", "RegimeSnapshot"]
 
 
 @dataclass(slots=True)

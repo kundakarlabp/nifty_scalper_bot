@@ -736,10 +736,13 @@ def test_entry_eval_burst_invariants_bounded_and_no_duplicates(monkeypatch):
         ingest_duration_s = time.perf_counter() - start
 
         assert _wait_until(
-            lambda: not runner_obj._pending_entry_eval_symbols, timeout=5.0
+            lambda: not runner_obj._pending_entry_eval_symbols
+            and not runner_obj._entry_eval_active,
+            timeout=5.0,
         )
         with runner_obj._eval_gate_lock:
             assert not runner_obj._entry_eval_active
+            assert not runner_obj._pending_entry_eval_symbols
 
         # Materially fewer evaluations than ticks submitted (coalescing did
         # its job), never concurrent (single-flight drain), and pending

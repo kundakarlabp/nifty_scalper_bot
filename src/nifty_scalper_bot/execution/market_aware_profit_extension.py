@@ -23,6 +23,7 @@ import os
 import time
 from typing import Any, Callable
 
+from nifty_scalper_bot.config.regime_ontology import MarketRegime, normalize_regime
 from nifty_scalper_bot.core.active_basket import active_contract_selection_from_basket
 
 LOGGER = logging.getLogger("nifty_scalper_bot.execution.market_aware_profit_extension")
@@ -541,19 +542,19 @@ def assess_continuation(manager: Any, bracket: Any, ltp: float) -> ContinuationD
             _add_vote("underlying_direction_conflict", -2.0, positive=positive, negative=negative, score_box=score)
             critical_block = True
 
-    regime = str(
+    regime = normalize_regime(
         future.get("regime")
         or future.get("market_regime")
         or spot.get("regime")
         or spot.get("market_regime")
-        or ""
-    ).upper()
-    if regime:
+    )
+    if regime is not MarketRegime.UNKNOWN:
         evidence_count += 1
-        aligned_regime = "TREND_UP" if symbol.endswith("CE") else "TREND_DOWN"
-        if regime == aligned_regime:
+        # Regime carries no direction, so a trend only supports holding this
+        # contract when the underlying bias points the same way as the option.
+        if regime is MarketRegime.TREND and direction_bias == symbol[-2:]:
             _add_vote("trend_regime", 1.0, positive=positive, negative=negative, score_box=score)
-        elif regime in {"RANGE", "CHOPPY", "LOW_VOLATILITY"}:
+        elif regime in {MarketRegime.RANGE, MarketRegime.LOW_ACTIVITY}:
             _add_vote("nontrend_regime", -0.75, positive=positive, negative=negative, score_box=score)
 
     current_pcr = _chain_pcr(manager)

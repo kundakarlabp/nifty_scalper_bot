@@ -23,6 +23,49 @@ PriceInput = float | Mapping[str, float] | Sequence[float]
 
 _INDIA_TZ = ZoneInfo("Asia/Kolkata")
 _MARKET_OPEN = time(hour=9, minute=15)
+# NSE cash/FO session is 09:15-15:30 IST. Minute-bar realised vol must be
+# annualised with this count, not as if each 1-minute return were a daily return.
+_NSE_SESSION_MINUTES = 375
+_TRADING_DAYS_PER_YEAR = 252
+_DEFAULT_BAR_SECONDS = 60.0
+_MIN_BAR_SECONDS = 15.0
+_MAX_BAR_SECONDS = 24.0 * 60.0 * 60.0
+
+
+def _median_bar_seconds(timestamps: Sequence[datetime]) -> float | None:
+    """Return the median positive bar interval in seconds, if one exists."""
+    deltas: list[float] = []
+    for previous, current in zip(timestamps, timestamps[1:]):
+        try:
+            delta = (current - previous).total_seconds()
+        except Exception:
+            continue
+        if delta > 0:
+            deltas.append(float(delta))
+    if not deltas:
+        return None
+    deltas.sort()
+    mid = len(deltas) // 2
+    if len(deltas) % 2:
+        return deltas[mid]
+    return (deltas[mid - 1] + deltas[mid]) / 2.0
+
+
+def realised_vol_annualisation_factor(bar_seconds: float | None = None) -> float:
+    """Scale a per-bar standard deviation to an annualised percentage factor.
+
+    Minute returns must be scaled by ``sqrt(252 * session_bars)``, not
+    ``sqrt(252)``. The latter treats each 1-minute observation as a daily return.
+    """
+    interval = (
+        float(bar_seconds) if bar_seconds and bar_seconds > 0 else _DEFAULT_BAR_SECONDS
+    )
+    interval = min(max(interval, _MIN_BAR_SECONDS), _MAX_BAR_SECONDS)
+    session_seconds = _NSE_SESSION_MINUTES * 60.0
+    bars_per_session = session_seconds / interval
+    return (_TRADING_DAYS_PER_YEAR * bars_per_session) ** 0.5
+
+
 _MARKET_CLOSE = time(hour=15, minute=30)
 
 
@@ -230,6 +273,7 @@ class IndicatorEngine:
         self._cache: Dict[str, Dict[str, tuple[Any, datetime]]] = {}
         self._runtime_context: Dict[str, Dict[str, Any]] = {}
         self._last_valid_vwap: Dict[str, float] = {}
+        self._last_valid_vwap_at: Dict[str, datetime] = {}
         self._lock = threading.RLock()
         self._logger = get_logger(__name__)
 
@@ -962,17 +1006,34 @@ class IndicatorEngine:
 
             # Pre-check: skip calculation if all volumes are zero
             if not volumes or all(v == 0 for v in volumes):
-                return self._last_valid_vwap.get(symbol)
+                return None
 
             value = self._calculate_vwap(prices, volumes)
             if value is None:
-                # Return last known good VWAP to avoid signal dropout
-                return self._last_valid_vwap.get(symbol)
+                return None
             self._last_valid_vwap[symbol] = float(value)
+            if last_timestamp is not None:
+                self._last_valid_vwap_at[symbol] = last_timestamp
             self._set_cache(symbol, cache_key, value, last_timestamp)
             return value
         except Exception:
-            return self._last_valid_vwap.get(symbol)
+            return None
+
+    def get_stale_vwap_diagnostic(self, symbol: str) -> dict[str, object] | None:
+        """Return the last successfully computed rolling VWAP as a stale diagnostic.
+
+        The current VWAP evidence is :meth:`get_vwap`. This diagnostic exists so
+        operators can inspect a previous value without it being presented as
+        fresh evidence.
+        """
+        value = self._last_valid_vwap.get(symbol)
+        if value is None:
+            return None
+        return {
+            "value": float(value),
+            "timestamp": self._last_valid_vwap_at.get(symbol),
+            "stale": True,
+        }
 
     def get_session_vwap(self, symbol: str) -> float | None:
         """Return the session-anchored VWAP for *symbol*. NEVER raises.
@@ -1006,7 +1067,9 @@ class IndicatorEngine:
                 volume = float(volumes[index] or 0.0)
                 if volume <= 0:
                     continue
-                high = float(highs[index]) if index < len(highs) else float(closes[index])
+                high = (
+                    float(highs[index]) if index < len(highs) else float(closes[index])
+                )
                 low = float(lows[index]) if index < len(lows) else float(closes[index])
                 typical = (high + low + float(closes[index])) / 3.0
                 cum_pv += typical * volume
@@ -1018,9 +1081,7 @@ class IndicatorEngine:
         except Exception:  # noqa: BLE001 - indicator pipeline must not crash
             return None
 
-    def get_session_vwap_slope(
-        self, symbol: str, *, lookback: int = 3
-    ) -> float | None:
+    def get_session_vwap_slope(self, symbol: str, *, lookback: int = 3) -> float | None:
         """Return percentage change in session VWAP over finalized volume bars."""
         try:
             with self._lock:
@@ -1238,7 +1299,10 @@ class IndicatorEngine:
             recent = returns[-window:]
             mean_return = sum(recent) / window
             variance = sum((value - mean_return) ** 2 for value in recent) / window
-            volatility = float((variance**0.5) * (252.0**0.5) * 100.0)
+            timestamps = history.get_timestamps(window + 1)
+            bar_seconds = _median_bar_seconds(timestamps)
+            scale = realised_vol_annualisation_factor(bar_seconds)
+            volatility = float((variance**0.5) * scale * 100.0)
             self._set_cache(symbol, cache_key, volatility, last_timestamp)
             LOGGER.debug(
                 "Condition met: volatility_index_computed",
@@ -1969,15 +2033,14 @@ class IndicatorEngine:
 
     def calculate_slope(
         self, symbol: str, indicator_name: str = "close", period: int = 5
-    ) -> float:
+    ) -> float | None:
+        """Return the slope of a price series in degrees, or None when unavailable."""
         try:
-            # ✅ FIX: Use self._histories (plural)
             history = self._histories.get(symbol)
 
             if not history or len(history) < period:
-                return 0.0
+                return None
 
-            # Use getters based on indicator_name
             if indicator_name == "close":
                 values = history.get_closes(period)
             elif indicator_name == "high":
@@ -1985,34 +2048,33 @@ class IndicatorEngine:
             elif indicator_name == "low":
                 values = history.get_lows(period)
             else:
-                return 0.0
+                return None
 
-            # 3. Normalize to Basis Points (Price agnostic)
             start = values[0]
             if start == 0:
-                return 0.0
+                return None
 
-            # Convert to relative change (100 -> 100.1 = +10)
             y = [(v - start) / start * 10000 for v in values]
             x = list(range(len(y)))
 
-            # 4. Linear Regression (Least Squares)
             n = len(x)
             sum_x = sum(x)
             sum_y = sum(y)
             sum_xy = sum(xi * yi for xi, yi in zip(x, y))
             sum_xx = sum(xi**2 for xi in x)
 
-            slope_m = (n * sum_xy - sum_x * sum_y) / (n * sum_xx - sum_x**2)
+            denominator = n * sum_xx - sum_x**2
+            if denominator == 0:
+                return None
+            slope_m = (n * sum_xy - sum_x * sum_y) / denominator
 
-            # 5. Convert to Degrees
             import math
 
             return math.degrees(math.atan(slope_m))
 
         except Exception as e:
             self._logger.debug(f"Slope calc failed for {symbol}: {e}")
-            return 0.0
+            return None
 
     def get_latest(self, symbol: str) -> dict[str, float | None]:
         """Args: symbol. Returns: latest indicator snapshot. Raises: Exception."""

@@ -13,19 +13,21 @@ from nifty_scalper_bot.core.market_regime_manager import MarketRegimeManager
 
 @dataclass(slots=True)
 class DummyIndicators:
-    """Simple indicator provider used for testing."""
+    """Indicator provider that speaks the production get_indicators contract."""
 
-    atr_trend: float
-    vol_index: float
-
-    def get(self, key: str) -> float:
-        """Return stored indicator value for *key*."""
-
-        if key == "atr_trend":
-            return self.atr_trend
-        if key == "volatility_index":
-            return self.vol_index
-        raise KeyError(key)
+    def get_indicators(self, symbol: str, names=None) -> dict[str, float]:
+        del symbol, names
+        return {
+            "ema_fast": 102.0,
+            "ema_slow": 100.0,
+            "adx": 32.0,
+            "atr": 14.0,
+            "volume_spike_ratio": 1.1,
+            "iv_rank": 10.0,
+            "price": 100.0,
+            "close": 100.0,
+            "price_momentum": 0.02,
+        }
 
 
 @pytest.mark.asyncio
@@ -33,7 +35,7 @@ async def test_refresh_from_indicators_updates_snapshot() -> None:
     """Ensure indicator refresh updates regime state and history."""
 
     detector = MarketRegimeDetector()
-    indicators = DummyIndicators(atr_trend=2.0, vol_index=10.0)
+    indicators = DummyIndicators()
     manager = MarketRegimeManager(
         detector,
         indicators=indicators,
@@ -46,9 +48,29 @@ async def test_refresh_from_indicators_updates_snapshot() -> None:
 
     await manager.refresh_from_indicators()
 
-    assert manager.get_current_regime() == "TREND"
+    assert manager.get_current_regime() == "trend"
     history = manager.get_history(limit=5)
-    assert any(snapshot.regime == "TREND" for snapshot in history)
+    assert any(snapshot.regime == "trend" for snapshot in history)
+
+
+@pytest.mark.asyncio
+async def test_refresh_from_indicators_does_not_fabricate_features() -> None:
+    """A mapping-style .get() provider must not invent ema/price evidence."""
+
+    class MappingOnlyIndicators:
+        def get(self, key: str) -> float:
+            return {"atr_trend": 2.0, "volatility_index": 10.0}[key]
+
+    detector = MarketRegimeDetector()
+    manager = MarketRegimeManager(
+        detector,
+        indicators=MappingOnlyIndicators(),
+        regime_settings={"symbol": "NIFTY"},
+    )
+
+    await manager.refresh_from_indicators()
+
+    assert manager.get_latest_snapshot() is None
 
 
 def test_can_trade_respects_bypass_toggle() -> None:

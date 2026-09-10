@@ -140,6 +140,8 @@ from nifty_scalper_bot.risk.position_sizing import (
     RiskSnapshot,
 )
 from nifty_scalper_bot.strategies.bar_builder import OneMinuteBar, OneMinuteBarBuilder
+from nifty_scalper_bot.config.entry_policy import resolve_entry_policy
+from nifty_scalper_bot.config.regime_ontology import normalize_regime
 from nifty_scalper_bot.strategies.indicators import IndicatorEngine
 from nifty_scalper_bot.strategies.market_regime_engine import (
     MarketRegime,
@@ -7560,7 +7562,11 @@ class StrategyRunner:
             if bid_price > 0 and ask_price > 0:
                 spread = max(0.0, ask_price - bid_price)
                 spread_pct = (spread / max(price, 1e-6)) * 100.0
-                if spread_pct > 1.5:
+                # FINAL EXECUTION policy: candidate selection is the primary
+                # microstructure gate, but this pre-submit guard independently
+                # enforces the same binding cap in case any alternate route
+                # reaches order execution.
+                if spread_pct > resolve_entry_policy().execution_max_spread_pct:
                     raise RuntimeError("Execution blocked due to option spread guard")
             if (bid_qty + ask_qty) < 300:
                 raise RuntimeError("Execution blocked due to liquidity guard")
@@ -9895,7 +9901,7 @@ class StrategyRunner:
             self._logger.error(
                 "Failure in StrategyRunner._compute_regime_snapshot: %s", exc
             )
-            return self._last_regime_by_symbol.get(symbol, MarketRegime.LOW_ACTIVITY)
+            return self._last_regime_by_symbol.get(symbol, MarketRegime.UNKNOWN)
 
     def detect_market_regime(self, symbol: str) -> str:
         """Args: symbol. Returns: coarse regime label. Raises: None."""
@@ -9922,18 +9928,6 @@ class StrategyRunner:
     def _strategy_allowed_for_regime(self, strategy: str, regime: MarketRegime) -> bool:
         """Validate regime gate for strategy. Args: strategy, regime; Returns: bool; Raises: none."""
 
-        def _canonical_regime_name(value: str) -> str:
-            """Normalize regime aliases. Args: value. Returns: canonical name. Raises: none."""
-            normalized_value = str(value or "").strip().upper()
-            aliases = {
-                "VOLATILE": "HIGH_VOLATILITY",
-                "HIGHVOL": "HIGH_VOLATILITY",
-                "HIGH_VOL": "HIGH_VOLATILITY",
-                "TRENDING": "TREND",
-                "RANGING": "RANGE",
-            }
-            return aliases.get(normalized_value, normalized_value)
-
         if not _env_bool("RUNNER_ENABLE_REGIME_GATE", True):
             self._logger.debug(
                 "REGIME_GATE_BYPASSED strategy=%s regime=%s reason=disabled",
@@ -9952,18 +9946,22 @@ class StrategyRunner:
             "orbpro": "RUNNER_ORB_ALLOWED_REGIMES",
         }
         env_name = strategy_env_map.get(normalized)
-        default_allowed = "TREND,NORMAL,HIGH_VOLATILITY"
+        # Canonical vocabulary with the pre-ontology *effective* defaults
+        # preserved. RANGE was not emitted as NORMAL by the runtime engine, so
+        # adding RANGE here would silently broaden live admission. Enable RANGE
+        # only through an explicit strategy env after expectancy validation.
+        default_allowed = "TREND,VOLATILE"
         if env_name == "RUNNER_VWAP_ALLOWED_REGIMES":
-            default_allowed = "TREND,NORMAL"
+            default_allowed = "TREND"
         allowed_csv = (
             os.getenv(env_name or "", default_allowed) if env_name else default_allowed
         )
         allowed = {
-            _canonical_regime_name(item)
+            normalize_regime(item).value
             for item in allowed_csv.split(",")
             if item.strip()
         }
-        regime_name = _canonical_regime_name(regime.value)
+        regime_name = normalize_regime(regime).value
         allowed_for_regime = regime_name in allowed
         self._logger.debug(
             "REGIME_GATE_DECISION strategy=%s regime=%s allowed=%s allowed_regimes=%s env=%s",
@@ -9987,14 +9985,7 @@ class StrategyRunner:
         """Return strategy-regime compatibility decision. Args: strategy/regime/symbol/metadata; Returns: tuple[bool,str]; Raises: none."""
         del symbol
         normalized = (strategy or "").strip().lower()
-        regime_name = str(regime.value or "").upper()
-        canonical = {
-            "VOLATILE": "HIGH_VOLATILITY",
-            "HIGHVOL": "HIGH_VOLATILITY",
-            "HIGH_VOL": "HIGH_VOLATILITY",
-            "TRENDING": "TREND",
-            "RANGING": "RANGE",
-        }.get(regime_name, regime_name)
+        canonical = normalize_regime(regime)
         meta = dict(metadata or {})
         selected = bool(
             meta.get("candidate_selected")
@@ -10023,7 +10014,7 @@ class StrategyRunner:
             rr = 0.0
         if self._strategy_allowed_for_regime(strategy, regime):
             return True, "regime_in_allowed_list"
-        if normalized in {"vwap_pro", "vwappro"} and canonical == "HIGH_VOLATILITY":
+        if normalized in {"vwap_pro", "vwappro"} and canonical is MarketRegime.VOLATILE:
             max_spread = float(
                 os.getenv("VWAP_HIGH_VOL_MAX_SPREAD_PCT", "0.75") or "0.75"
             )
@@ -16051,9 +16042,10 @@ class StrategyRunner:
                                     },
                                 )
                             return
-                        _min_premium = float(
-                            os.getenv("MIN_OPTION_PREMIUM", "20") or "20"
-                        )
+                        # EVALUATION policy: what the strategy layer may look
+                        # at. Deliberately no stricter than the execution
+                        # floor enforced by TradeCandidateSelector.
+                        _min_premium = resolve_entry_policy().evaluation_min_premium
                         if _pregate_ltp < _min_premium:
                             if self._should_log_throttled(
                                 f"pregate_low_premium:{symbol}", 60.0
@@ -16127,9 +16119,11 @@ class StrategyRunner:
                         if _env_bool("SKIP_WIDE_SPREAD_OPTION_EVAL", True):
                             _pg_spread = _pg_ask - _pg_bid
                             _pg_mid = (_pg_bid + _pg_ask) / 2.0
-                            _max_spread_pct = float(
-                                os.getenv("MAX_OPTION_SPREAD_PCT_FOR_EVAL", "1.5")
-                                or "1.5"
+                            # EVALUATION policy: never tighter than the
+                            # execution cap, so a contract cannot pass
+                            # execution without having been evaluated.
+                            _max_spread_pct = (
+                                resolve_entry_policy().evaluation_max_spread_pct
                             )
                             if (
                                 _pg_mid > 0
@@ -20086,10 +20080,10 @@ class StrategyRunner:
                 "strategy_score",
                 float(metadata.get("setup_quality", quality_hint) or quality_hint),
             )
-            metadata.setdefault(
-                "option_score",
-                float(metadata.get("option_quality", 5.5) or 5.5),
-            )
+            # option_score has exactly one production owner:
+            # TradeCandidateSelector. It is promoted from the selected candidate
+            # after materialisation below. With no selected-candidate evidence it
+            # stays absent and the final-score precheck fails closed.
             metadata.setdefault(
                 "data_score",
                 float(metadata.get("data_quality", quality_hint) or quality_hint),
