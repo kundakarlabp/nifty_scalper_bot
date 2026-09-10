@@ -3,8 +3,11 @@ from __future__ import annotations
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from nifty_scalper_bot.strategies.elite_strategies.config_models import VWAPProStrategyConfig
 from nifty_scalper_bot.strategies.elite_strategies.vwap_pro import VWAPProStrategy
+from nifty_scalper_bot.strategies.signal_identity_patch import _deterministic_id
 
 
 class _HistoryEngine:
@@ -68,7 +71,7 @@ def test_new_strategy_instance_recovers_same_contract_same_session_thesis(monkey
     assert signal is not None
     assert signal.metadata["thesis_recovered_from_history"] is True
     assert signal.metadata["thesis_scope_session"] == "2026-09-08"
-    assert "2026-09-08 10:00:00" in signal.metadata["setup_id"]
+    assert "2026-09-08 04:30:00+00:00" in signal.metadata["setup_id"]
 
 
 def test_recovery_never_uses_prior_session_history(monkeypatch):
@@ -101,3 +104,46 @@ def test_recovery_never_uses_another_contract(monkeypatch):
 
     assert signal is None
     assert strategy.last_no_vote_reason == "vwap_thesis_not_armed"
+
+
+@pytest.mark.parametrize(
+    "live_anchor",
+    [
+        "2026-09-08T10:00:00+05:30",
+        "2026-09-08T04:30:00Z",
+        datetime.fromisoformat("2026-09-08T04:30:00+00:00").timestamp(),
+        datetime.fromisoformat("2026-09-08T04:30:00+00:00").timestamp() * 1000,
+        "1788841800000.0",
+        datetime.fromisoformat("2026-09-08T04:30:00+00:00"),
+        datetime.fromisoformat("2026-09-08T04:30:00"),
+    ],
+)
+@pytest.mark.parametrize("reset_close", [99.5, 103.0])
+def test_restart_preserves_identity_for_equivalent_anchor_formats(
+    monkeypatch, live_anchor, reset_close
+):
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    symbol = "NFO:NIFTY2690823650CE"
+    reset = _bar("2026-09-08T10:00:00", open_=101, high=104, low=99, close=reset_close)
+    live = VWAPProStrategy(VWAPProStrategyConfig(), _HistoryEngine([]))
+    reset_indicators = _indicators(session_date="2026-09-08", latest_bar_ts=live_anchor)
+    reset_indicators.update({k: reset[k] for k in ("open", "high", "low", "close")})
+    initial = live._evaluate_signal(symbol, reset_indicators, reset_close)
+    if reset_close < 100.0:
+        assert initial is None
+    else:
+        assert initial is not None
+    current = _indicators(
+        session_date="2026-09-08", latest_bar_ts="2026-09-08T10:02:00+05:30"
+    )
+    uninterrupted = live._evaluate_signal(symbol, current, 103.0)
+    restarted = VWAPProStrategy(VWAPProStrategyConfig(), _HistoryEngine([reset]))
+    recovered = restarted._evaluate_signal(symbol, current, 103.0)
+
+    assert uninterrupted is not None and recovered is not None
+    # Preserve the existing ID representation emitted by UTC indicator bars.
+    assert uninterrupted.metadata["setup_id"] == (
+        f"vwap:CE:2026-09-08 04:30:00+00:00:2026-09-08:{symbol}"
+    )
+    assert uninterrupted.metadata["setup_id"] == recovered.metadata["setup_id"]
+    assert _deterministic_id(uninterrupted) == _deterministic_id(recovered)

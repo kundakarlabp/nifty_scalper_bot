@@ -26,6 +26,26 @@ def _fmt_optional(value: float | None, digits: int) -> str:
         return "unavailable"
 
 
+def _normalize_thesis_anchor(value: Any) -> str:
+    """Use one UTC representation for live and recovered bar identities."""
+    text = str(value).strip()
+    try:
+        if isinstance(value, datetime):
+            timestamp = value
+        elif len(text) >= 10 and text[4:5] == "-" and text[7:8] == "-":
+            timestamp = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        else:
+            seconds = float(text)
+            if seconds > 100_000_000_000:
+                seconds /= 1000.0
+            timestamp = datetime.fromtimestamp(seconds, tz=timezone.utc)
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=timezone.utc)
+        return str(timestamp.astimezone(timezone.utc))
+    except (TypeError, ValueError, OverflowError, OSError):
+        return text
+
+
 def _resolve_session_token(indicators: dict[str, Any], bar_anchor: Any) -> str:
     """Resolve a stable trading-session identity without broker access."""
     explicit = indicators.get("session_date")
@@ -182,7 +202,7 @@ class VWAPProStrategy(EliteStrategy):
             if min(row_open, row_low, row_close) <= 0:
                 continue
             if row_close < vwap or row_open < vwap or row_low < vwap:
-                return str(timestamp)
+                return _normalize_thesis_anchor(timestamp)
         return None
 
     def _evaluate_signal(
@@ -330,11 +350,15 @@ class VWAPProStrategy(EliteStrategy):
             thesis_recovered_from_history = False
             if close < vwap:
                 if bar_anchor is not None:
-                    self._thesis_anchor_by_scope[thesis_scope] = str(bar_anchor)
+                    self._thesis_anchor_by_scope[thesis_scope] = (
+                        _normalize_thesis_anchor(bar_anchor)
+                    )
                 self._no_vote("vwap_thesis_reset")
                 return None
             if (open_price < vwap or low < vwap) and bar_anchor is not None:
-                self._thesis_anchor_by_scope[thesis_scope] = str(bar_anchor)
+                self._thesis_anchor_by_scope[thesis_scope] = _normalize_thesis_anchor(
+                    bar_anchor
+                )
             thesis_anchor = self._thesis_anchor_by_scope.get(thesis_scope)
             if not thesis_anchor:
                 recovered_anchor = self._recover_thesis_anchor_from_history(
