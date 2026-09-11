@@ -18,6 +18,16 @@ _PNL_DIAGNOSTIC_REASONS = {
     "pnl_session_date_unverified",
     "pnl_reconciliation_mismatch",
 }
+_POST_PNL_SAFETY_METHODS = (
+    "current_position_reconciliation_blocker",
+    "current_orphan_position_blocker",
+    "current_exit_lifecycle_blocker",
+)
+_REQUIRED_CANONICAL_SAFETY_METHODS = (
+    *_POST_PNL_SAFETY_METHODS,
+    "unresolved_terminal_summary",
+    "get_open_positions",
+)
 _PATCH_APPLIED = False
 _ORIGINAL_NORMALIZE_READINESS: Any = None
 _ORIGINAL_BOUND_ENTRY_BLOCKER: Any = None
@@ -52,9 +62,10 @@ def _bound_entry_blocker_without_pnl(self: Any) -> Mapping[str, Any] | None:
     if not _is_pnl_diagnostic(blocker.get("block_reason")):
         return blocker
 
-    # The original blocker order checks entry protection before P&L.  Re-enter
+    # The original blocker order checks entry protection before P&L. Re-enter
     # only the checks that follow P&L so a diagnostic P&L state cannot mask a
-    # real position/lifecycle safety blocker.
+    # real position/lifecycle safety blocker. An incomplete manager contract
+    # remains fail-closed rather than bypassing a safety check that is absent.
     from nifty_scalper_bot.execution.ownership import (
         _block,
         _call_blocker,
@@ -66,13 +77,14 @@ def _bound_entry_blocker_without_pnl(self: Any) -> Mapping[str, Any] | None:
         getattr(self, "order_manager", None)
     )
     if position_manager is None:
-        return None
-
-    for method_name in (
-        "current_position_reconciliation_blocker",
-        "current_orphan_position_blocker",
-        "current_exit_lifecycle_blocker",
+        return blocker
+    if not all(
+        callable(getattr(position_manager, name, None))
+        for name in _REQUIRED_CANONICAL_SAFETY_METHODS
     ):
+        return blocker
+
+    for method_name in _POST_PNL_SAFETY_METHODS:
         reason = _call_blocker(position_manager, method_name)
         if reason:
             return _block(str(reason), source=method_name)
