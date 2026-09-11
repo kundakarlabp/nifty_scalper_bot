@@ -10124,6 +10124,16 @@ async def _recompute_and_push_runtime_readiness(
             missing.append("unprotected_broker_position")
         if bool(getattr(ctx, "unprotected_broker_positions", set())):
             missing.append("unprotected_broker_position")
+        position_manager = getattr(ctx, "position_manager", None)
+        pnl_blocker_reader = getattr(
+            position_manager, "current_pnl_reconciliation_blocker", None
+        )
+        if callable(pnl_blocker_reader):
+            pnl_blocker = None
+            with suppress(Exception):
+                pnl_blocker = pnl_blocker_reader()
+            if pnl_blocker:
+                missing.append(str(pnl_blocker))
     normalized_decision = normalize_readiness_blockers(
         list(dict.fromkeys(missing)),
         get_market_state(),

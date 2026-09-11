@@ -53,3 +53,11 @@ def test_pnl_entry_gate_blockers_fail_closed_in_live_readiness() -> None:
         assert decision.primary_blocker == blocker
         assert decision.live_orders_armed is False
         assert decision.execution_ready is False
+
+
+def test_canonical_app_readiness_consumes_position_manager_pnl_blocker() -> None:
+    from pathlib import Path
+
+    source = Path("src/nifty_scalper_bot/core/app.py").read_text(encoding="utf-8")
+    assert "current_pnl_reconciliation_blocker" in source
+    assert "missing.append(str(pnl_blocker))" in source
