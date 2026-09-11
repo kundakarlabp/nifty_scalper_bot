@@ -185,6 +185,44 @@ def test_final_order_gate_blocks_stop_risk_above_remaining_daily_budget(
     assert risk._breaker_tripped is False
 
 
+def test_live_final_gate_includes_round_trip_costs_in_two_percent_risk(
+    monkeypatch,
+) -> None:
+    """A one-lot stop must fit the cap after unavoidable trading costs."""
+
+    settings = RiskSettings(
+        per_trade_risk_pct=2.0,
+        daily_loss_pct=2.0,
+        cooldown_on_reject_seconds=0.0,
+    )
+    risk = RiskManager(
+        settings=settings,
+        position_manager=DummyPositionManager(realized=0.0),
+        account_balance=14_935.35,
+    )
+    for name in ("BROKER_SIMULATION", "PAPER_MODE", "PAPER__ENABLED", "SHADOW_MODE"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("MIN_NET_REWARD_RISK", "1.0")
+    monkeypatch.setenv("COST_FALLBACK_HALF_SPREAD_PCT", "0")
+    signal = OrderSignal(
+        symbol="NFO:NIFTY2691523400PE",
+        side="BUY",
+        quantity=65,
+        price=85.80,
+        stop_loss=81.80,
+        take_profit=94.65,
+    )
+
+    allowed, reason = risk.check_order(signal, live_enabled=True)
+
+    # Gross stop-risk is only Rs260, but the canonical round-trip charges push
+    # the loss beyond the Rs298.71 two-percent budget.
+    assert allowed is False
+    assert reason.startswith("cost-inclusive risk budget insufficient:")
+    assert risk._last_rejection == "DAILY_RISK_BUDGET"
+    assert risk._breaker_tripped is False
+
+
 def test_suggest_position_size_zero_or_invalid_confidence_fails_closed() -> None:
     risk = _make_risk_manager()
     risk.set_lot_size_provider(lambda _symbol: 25)
@@ -205,8 +243,8 @@ def test_risk_config_max_concurrent_positions_matches_enforced_single_position()
     """Slice-4: the second (dead-code) RiskManager's config default must not
     silently disagree with the single-position policy enforced at the
     execution choke point (order_manager_core's single-position gate)."""
-    from nifty_scalper_bot.config.base import RiskConfig
     from nifty_scalper_bot.config import defaults
+    from nifty_scalper_bot.config.base import RiskConfig
 
     assert RiskConfig().max_concurrent_positions == 1
     assert defaults.DEFAULT_RISK_MAX_CONCURRENT_POSITIONS == 1
