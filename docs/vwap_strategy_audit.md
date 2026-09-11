@@ -1,5 +1,23 @@
 # VWAP Strategy Audit (In-Depth)
 
+## VWAP historical-recovery correction — 2026-09-11 (Asia/Kolkata)
+
+Source baseline: `f1ef2af78e4d85c487595d2111b5d6f8294352a5`.
+The moving-VWAP recovery concern is reproduced and corrected. Previously, old
+option candles were compared with the latest VWAP, so later session movement
+could retroactively create a reclaim thesis. Recovery now reconstructs the
+session's cumulative option VWAP in chronological order and compares every
+completed candle only with the VWAP observable at that candle. The newest valid
+touch inside the configured recovery lookback owns the setup anchor.
+
+Acceptance evidence: the forward-looking fixture failed before the correction;
+all 18 restart/identity tests, the strategy/context suites, backtest/replay
+suites, compilation, and a clean full-suite rerun passed. One unrelated partial
+fill simulation failed during the first full run, passed in isolation, and
+passed in the clean rerun. No threshold, sizing, stop, execution mode, or live
+order behavior was changed. Engineering owner: repository maintainer/assistant;
+next review is remote CI and unchanged-head merge. No external deadline.
+
 ## VWAP timestamp identity correction — 2026-09-10 (Asia/Kolkata)
 
 Source baseline: `64ef657a293ef1d6256797a486dd89bbd486eccb`.
@@ -16,7 +34,7 @@ anchors retain their text fallback; no wall-clock timestamp is invented.
 Rollout limitation: previously persisted noncanonical IDs are not rewritten.
 Prefer a between-session rollout if a running producer emits ISO/epoch anchors;
 no production producer format or deployed SHA was verified during this change.
-Historical-versus-current VWAP selection remains a separate open concern.
+Historical-versus-current VWAP selection is resolved in the dated correction above.
 No entry thresholds, session/contract scopes, risk policy or order path change.
 Engineering owner: repository maintainer/assistant. Required validation and merge
 evidence are recorded in the associated PR; next review is deployed identity
@@ -35,7 +53,7 @@ in this review. Code correctness is not evidence of trading alpha.
 | --- | --- | --- | --- |
 | P0 | `order_manager_core.place_order` rejects single-position conflicts before acquiring a reservation. The public `order_manager` wrapper then calls `entry_geometry.release_prebroker_entry_reservation`, which could delete the preceding entry's reservation. | Reproduced for distinct and repeated setup identities. Four-line native correction preserves the reservation on `single_position_gate:` rejection. | Required CI and merge; subsequently verify deployed SHA and reservation lifecycle in logs. |
 | P1 | `vwap_pro._evaluate_signal` now uses explicit underlying direction for alignment; PR #1215. | Already merged at the source baseline; retain generic fallback and existing confidence/freshness rules. | Replay accepted/rejected candidates with conflicting direction fields. |
-| P1 | `vwap_pro._recover_thesis_anchor_from_history` compares historical OHLC with the current VWAP and returns an unnormalized timestamp string. | Audit concern, not a proven production incident. Test moving-VWAP recovery and equivalent timestamp representations before changing state reconstruction. | Next focused strategy correction, after the P0 merge. |
+| P1 | `vwap_pro._recover_thesis_anchor_from_history` compared historical OHLC with the latest VWAP. | Reproduced and corrected on 2026-09-11 using contemporaneous cumulative session VWAP; timestamp normalization remains preserved. | Required CI and merge, then verify recovered setup IDs in deployed logs. |
 | P1 | SMC uses the underlying sweep timestamp/source for setup identity; ORB checks exact opening-minute coverage. | Preserve these already merged corrections. | Replay restart, duplicate bars, synthetic bars and ATM rotation with recorded provenance. |
 | P2 | VWAP early-trend pullback requires `not premium_above_vwap`, but below-VWAP closes return earlier. | Confirmed unreachable branch. Do not enable additional entries without separate replay evidence. | Decide removal versus explicitly specified opt-in behavior. |
 | P2 | Cleanup still reads shared `_last_order_decision`; other early-return and concurrent ownership paths need review. | Broader lifecycle audit remains open; this correction covers the reproduced single-position-gate path only. | Test stale decisions, incomplete broker-attempt evidence and ownership replacement under lock. |

@@ -183,7 +183,10 @@ class VWAPProStrategy(EliteStrategy):
         except (TypeError, ValueError):
             lookback = 30
         lookback = max(5, min(120, lookback))
-        for raw in reversed(list(rows)[-lookback:]):
+        session_rows: list[tuple[Any, float, float, float, float]] = []
+        cumulative_turnover = 0.0
+        cumulative_volume = 0.0
+        for raw in rows:
             if not isinstance(raw, Mapping):
                 continue
             if raw.get("is_provisional") is True or raw.get("is_complete") is False:
@@ -195,13 +198,37 @@ class VWAPProStrategy(EliteStrategy):
                 continue
             try:
                 row_open = float(raw.get("open") or 0.0)
+                row_high = float(raw.get("high") or raw.get("close") or 0.0)
                 row_low = float(raw.get("low") or 0.0)
                 row_close = float(raw.get("close") or 0.0)
+                row_volume = float(raw.get("volume") or 0.0)
             except (TypeError, ValueError):
                 continue
-            if min(row_open, row_low, row_close) <= 0:
+            if min(row_open, row_high, row_low, row_close) <= 0:
                 continue
-            if row_close < vwap or row_open < vwap or row_low < vwap:
+            if row_volume > 0:
+                typical_price = (row_high + row_low + row_close) / 3.0
+                cumulative_turnover += typical_price * row_volume
+                cumulative_volume += row_volume
+            if cumulative_volume <= 0:
+                continue
+            session_rows.append(
+                (
+                    timestamp,
+                    row_open,
+                    row_low,
+                    row_close,
+                    cumulative_turnover / cumulative_volume,
+                )
+            )
+        for timestamp, row_open, row_low, row_close, row_vwap in reversed(
+            session_rows[-lookback:]
+        ):
+            if (
+                row_close < row_vwap
+                or row_open < row_vwap
+                or row_low < row_vwap
+            ):
                 return _normalize_thesis_anchor(timestamp)
         return None
 
