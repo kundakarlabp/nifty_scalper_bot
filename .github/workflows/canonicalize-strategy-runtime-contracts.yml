@@ -1,0 +1,267 @@
+name: One-time canonical strategy source migration
+
+on:
+  push:
+    branches: [canonical-strategy-runtime-contracts-20260911]
+
+permissions:
+  contents: write
+
+jobs:
+  canonicalize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: canonical-strategy-runtime-contracts-20260911
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Canonicalize strategy runtime contracts
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          root = Path('.')
+
+          def replace_once(text: str, old: str, new: str, label: str) -> str:
+              count = text.count(old)
+              if count != 1:
+                  raise RuntimeError(f'{label}: expected exactly one match, found {count}')
+              return text.replace(old, new, 1)
+
+          # 1) Convert signal identity from import-time monkey patch to neutral utility.
+          old_identity = root / 'src/nifty_scalper_bot/strategies/signal_identity_patch.py'
+          new_identity = root / 'src/nifty_scalper_bot/strategies/signal_identity.py'
+          identity = old_identity.read_text()
+          identity = identity.replace('\n_PATCHED = False\n', '\n', 1)
+          start = identity.index('def _install_elite_signal_observability()')
+          identity = identity[:start] + '''def finalise_strategy_signal(\n    signal: Any,\n    indicators: Mapping[str, Any],\n    *,\n    strategy_name: str = "",\n) -> Any:\n    """Stamp stable evaluation identity and emit one canonical vote log."""\n    if signal is None:\n        return None\n    signal = _stamp_evaluation_identity(signal, indicators)\n    metadata = dict(getattr(signal, "metadata", {}) or {})\n    strategy = str(\n        metadata.get("strategy_name")\n        or metadata.get("strategy")\n        or strategy_name\n        or "unknown"\n    )\n    _, side = _option_thesis(getattr(signal, "symbol", ""), metadata)\n    setup_anchor = _anchor_value(metadata)\n    setup_id = metadata.get("setup_id") or metadata.get("setup_structure_id")\n    raw_score = metadata.get("raw_setup_score")\n    if raw_score is None:\n        raw_score = metadata.get("strategy_score") or metadata.get("context_score")\n    role = str(metadata.get("role") or "trigger").lower()\n    vote_event = "STRATEGY_CONTEXT_VOTE" if role == "context" else "STRATEGY_TRIGGER_VOTE"\n    LOGGER.log(\n        logging.DEBUG if role == "context" else logging.INFO,\n        (\n            f"{vote_event} strategy=%s symbol=%s side=%s "\n            "raw_setup_score=%s confidence=%s setup_id=%s setup_anchor=%s "\n            "quote_update_version=%s evaluation_snapshot_id=%s"\n        ),\n        strategy,\n        getattr(signal, "symbol", ""),\n        side or None,\n        raw_score,\n        getattr(signal, "confidence", None),\n        setup_id,\n        setup_anchor,\n        metadata.get("quote_update_version"),\n        metadata.get("evaluation_snapshot_id"),\n        extra={\n            "event": vote_event,\n            "strategy": strategy,\n            "symbol": getattr(signal, "symbol", ""),\n            "side": side or None,\n            "raw_setup_score": raw_score,\n            "confidence": getattr(signal, "confidence", None),\n            "setup_id": setup_id,\n            "setup_anchor": setup_anchor,\n            "quote_update_version": metadata.get("quote_update_version"),\n            "quote_update_version_source": metadata.get("quote_update_version_source"),\n            "setup_signal_id": metadata.get("setup_signal_id"),\n            "evaluation_snapshot_id": metadata.get("evaluation_snapshot_id"),\n            "role": role,\n        },\n    )\n    return signal\n\n\n__all__ = [\n    "_deterministic_id",\n    "_option_thesis",\n    "_stamp_evaluation_identity",\n    "current_order_setup_metadata",\n    "finalise_strategy_signal",\n    "has_setup_anchor",\n    "order_setup_context",\n    "setup_metadata_for_signal_id",\n]\n'''
+          new_identity.write_text(identity)
+          old_identity.unlink()
+
+          # 2) Native Signal.deterministic_id; no wall-clock fallback or class mutation.
+          signal_file = root / 'src/nifty_scalper_bot/strategies/signal_generator.py'
+          text = signal_file.read_text()
+          import_anchor = 'from nifty_scalper_bot.instruments.active_contracts import canonical_nifty_future_symbol\n'
+          if 'from nifty_scalper_bot.strategies.signal_identity import _deterministic_id\n' not in text:
+              text = replace_once(
+                  text,
+                  import_anchor,
+                  import_anchor + 'from nifty_scalper_bot.strategies.signal_identity import _deterministic_id\n',
+                  'signal identity import',
+              )
+          pattern = re.compile(
+              r'    @property\n    def deterministic_id\(self\) -> str:\n.*?(?=    @property\n    def direction)',
+              re.S,
+          )
+          replacement = '''    @property\n    def deterministic_id(self) -> str:\n        """Return stable setup identity without any wall-clock fallback."""\n        return _deterministic_id(self)\n\n'''
+          text, count = pattern.subn(replacement, text, count=1)
+          if count != 1:
+              raise RuntimeError(f'native Signal.deterministic_id replacement count={count}')
+          signal_file.write_text(text)
+
+          # 3) Native EliteStrategy observability/identity finalization.
+          base_file = root / 'src/nifty_scalper_bot/strategies/elite_strategies/base_elite.py'
+          text = base_file.read_text()
+          import_anchor = 'from nifty_scalper_bot.strategies.signal_generator import Signal, Strategy\n'
+          if 'from nifty_scalper_bot.strategies.signal_identity import finalise_strategy_signal\n' not in text:
+              text = replace_once(
+                  text,
+                  import_anchor,
+                  import_anchor + 'from nifty_scalper_bot.strategies.signal_identity import finalise_strategy_signal\n',
+                  'elite finalizer import',
+              )
+          text = text.replace(
+              '    Implements the Bridge Pattern and Signal Patching.\n',
+              '    Provides the canonical elite-strategy lifecycle and signal finalization.\n',
+              1,
+          )
+          gen_start = text.index('    def generate_signal(')
+          gen_end = text.index('    def _record_evaluation_failure', gen_start)
+          section = text[gen_start:gen_end]
+          section = replace_once(
+              section,
+              '                return self._process_signal(elite_signal)\n',
+              '                processed = self._process_signal(elite_signal)\n                return finalise_strategy_signal(\n                    processed, indicators_payload, strategy_name=self.name\n                )\n',
+              'elite native finalization',
+          )
+          text = text[:gen_start] + section + text[gen_end:]
+          base_file.write_text(text)
+
+          # 4) Move live runtime-context normalization into IndicatorEngine itself.
+          runtime_file = root / 'src/nifty_scalper_bot/strategies/runtime_context_contract.py'
+          runtime = runtime_file.read_text()
+          installer_start = runtime.find('def install_indicator_runtime_context_contract()')
+          if installer_start < 0:
+              raise RuntimeError('runtime context installer not found')
+          runtime = runtime[:installer_start].rstrip() + '''\n\n\n__all__ = [\n    "live_direction_context_has_proof",\n    "normalise_live_direction_context",\n    "resolve_context_age_seconds",\n]\n'''
+          runtime_file.write_text(runtime)
+
+          indicators_file = root / 'src/nifty_scalper_bot/strategies/indicators.py'
+          text = indicators_file.read_text()
+          import_anchor = 'import numpy as np\n\n'
+          if 'from nifty_scalper_bot.strategies.runtime_context_contract import normalise_live_direction_context\n' not in text:
+              text = replace_once(
+                  text,
+                  import_anchor,
+                  import_anchor + 'from nifty_scalper_bot.strategies.runtime_context_contract import normalise_live_direction_context\n',
+                  'runtime context import',
+              )
+          old_store = '''            with self._lock:\n                symbol_context = (\n                    self._runtime_context.setdefault(symbol, {}) if merge else {}\n                )\n                for key, value in dict(context).items():\n                    if key in allowed_context_keys:\n                        symbol_context[key] = value\n                self._runtime_context[symbol] = symbol_context\n                self._cache.pop(symbol, None)\n'''
+          new_store = '''            payload = {\n                key: value\n                for key, value in dict(context).items()\n                if key in allowed_context_keys\n            }\n            # Direction/freshness/quote-identity keys are normalized and\n            # whitelisted by the canonical runtime-context contract itself.\n            payload.update(normalise_live_direction_context(context))\n            with self._lock:\n                symbol_context = (\n                    self._runtime_context.setdefault(symbol, {}) if merge else {}\n                )\n                symbol_context.update(payload)\n                self._runtime_context[symbol] = symbol_context\n                self._cache.pop(symbol, None)\n'''
+          text = replace_once(text, old_store, new_store, 'native runtime context storage')
+          indicators_file.write_text(text)
+
+          # 5) Extend the existing quote-identity utility with deterministic fallback.
+          quote_file = root / 'src/nifty_scalper_bot/strategies/quote_update_identity.py'
+          quote = quote_file.read_text()
+          quote = quote.replace('import hashlib\n', 'import hashlib\nimport zlib\n', 1)
+          insert_at = quote.index('\ndef build_evaluation_snapshot_id(')
+          fallback = '''\n_TIMESTAMP_VERSION_KEYS = (\n    "last_tick_ts_ms",\n    "timestamp_ms",\n    "last_tick_timestamp",\n)\n\n\ndef _stable_fallback_version(value: Any) -> int:\n    try:\n        numeric = int(float(value))\n    except (TypeError, ValueError):\n        numeric = 0\n    if numeric > 0:\n        return numeric\n    return int(zlib.crc32(str(value).encode("utf-8")) & 0x7FFFFFFF) or 1\n\n\ndef resolve_quote_update_identity_with_fallback(\n    *sources: tuple[str, Mapping[str, Any] | None],\n) -> tuple[int | None, str | None]:\n    """Resolve authoritative quote identity, then a stable quote fingerprint."""\n    version, source = resolve_quote_update_identity(*sources)\n    if version is not None:\n        return version, source\n    for source_name, payload in sources:\n        if not isinstance(payload, Mapping):\n            continue\n        for key in _TIMESTAMP_VERSION_KEYS:\n            value = payload.get(key)\n            if value not in (None, "", 0, 0.0):\n                return _stable_fallback_version(value), f"{source_name}:{key}"\n    values: dict[str, Any] = {}\n    for _, payload in sources:\n        if not isinstance(payload, Mapping):\n            continue\n        for key in ("bid", "ask", "depth_imbalance", "tick_direction"):\n            if key not in values and payload.get(key) not in (None, ""):\n                values[key] = payload.get(key)\n    if not values:\n        return None, None\n    raw = ":".join(str(values.get(key, "na")) for key in ("bid", "ask", "depth_imbalance", "tick_direction"))\n    return _stable_fallback_version(raw), "microstructure_fingerprint"\n\n'''
+          quote = quote[:insert_at] + fallback + quote[insert_at:]
+          quote = quote.replace(
+              '    "resolve_quote_update_identity",\n',
+              '    "resolve_quote_update_identity",\n    "resolve_quote_update_identity_with_fallback",\n',
+              1,
+          )
+          quote_file.write_text(quote)
+
+          # Use the canonical fallback in signal identity, preserving source precedence.
+          identity = new_identity.read_text()
+          identity = identity.replace(
+              '    resolve_quote_update_identity,\n',
+              '    resolve_quote_update_identity_with_fallback,\n',
+              1,
+          )
+          identity = identity.replace(
+              '    version, resolved_source = resolve_quote_update_identity(\n',
+              '    version, resolved_source = resolve_quote_update_identity_with_fallback(\n',
+              1,
+          )
+          new_identity.write_text(identity)
+
+          # 6) OrderFlow is structurally context-only. Remove dead trigger machinery
+          # and the sidecar that could promote it back into a trigger.
+          order_file = root / 'src/nifty_scalper_bot/strategies/elite_strategies/order_flow.py'
+          text = order_file.read_text()
+          text = text.replace(
+              'from nifty_scalper_bot.strategies.elite_strategies.order_flow_live_context_patch import (\n    apply_orderflow_live_context_proof,\n)\n',
+              '',
+              1,
+          )
+          role_block = '''            # ROLE (structural, not configurable): OrderFlow is CONTEXT ONLY.\n            # Setup families own entries; OrderFlow supplies measured confirmation.\n            # This permission must not be restored through an environment flag.\n            allow_orderflow_trigger = False\n            allow_ltp_trigger = str(\n                os.getenv("ORDERFLOW_ALLOW_LTP_FALLBACK_TRIGGER", "false")\n            ).strip().lower() in {"1", "true", "yes", "on"}\n'''
+          text = replace_once(
+              text,
+              role_block,
+              '            # Structural role: OrderFlow supplies context only; setup families own entries.\n',
+              'orderflow role block',
+          )
+          # LTP fallback can never become a trigger.
+          ltp_start = text.index('                trigger_conditions_met = bool(')
+          ltp_end = text.index('                side_aligns = direction in {"CE", "PE"} and direction == side', ltp_start)
+          text = text[:ltp_start] + '''                trigger_conditions_met = False\n                trigger_block_reason = "context_only_role"\n\n''' + text[ltp_end:]
+          text = text.replace('                    "role": "trigger" if trigger_conditions_met else "context",\n', '                    "role": "context",\n', 1)
+          text = text.replace('                    "can_trigger": bool(trigger_conditions_met),\n', '                    "can_trigger": False,\n', 1)
+
+          # Main depth path: remove permanently unreachable trigger/override branches.
+          marker = '            selected_or_near_atm = bool(indicators.get("is_selected_option"))'
+          depth_search_start = text.index(marker)
+          trigger_start = text.index('            trigger_conditions_met = bool(', depth_search_start)
+          trigger_end = text.index('            context_evidence_score, context_confirmation_score = (', trigger_start)
+          text = text[:trigger_start] + '''            trigger_conditions_met = False\n            trigger_block_reason = "context_only_role"\n            conflict_override_requested = False\n            conflict_override_applied = False\n\n''' + text[trigger_end:]
+          text = text.replace(
+              '            if trigger_conditions_met:\n                metadata["approval_candidate"] = "orderflow_live_depth_trigger"\n',
+              '',
+              1,
+          )
+          text = replace_once(
+              text,
+              '            return apply_orderflow_live_context_proof(signal, indicators)\n',
+              '            return signal\n',
+              'orderflow sidecar return',
+          )
+          order_file.write_text(text)
+          sidecar = root / 'src/nifty_scalper_bot/strategies/elite_strategies/order_flow_live_context_patch.py'
+          sidecar.unlink()
+
+          # 7) Package import is now declarative: no import-time mutation.
+          init_file = root / 'src/nifty_scalper_bot/strategies/__init__.py'
+          init_file.write_text('''"""Strategy package exports."""\n\nfrom nifty_scalper_bot.utils.logging import get_logger\n\nfrom .elite_strategies import *  # noqa: F401,F403\n\nLOGGER = get_logger(__name__)\n\ntry:\n    from .elite_strategies import __all__ as _elite_all  # type: ignore\n\n    __all__ = list(_elite_all)\nexcept ImportError:  # pragma: no cover - optional convenience export only\n    LOGGER.warning(\n        "ELITE_STRATEGY_EXPORTS_UNAVAILABLE",\n        extra={"event": "ELITE_STRATEGY_EXPORTS_UNAVAILABLE"},\n    )\n    __all__ = []\n''')
+
+          # 8) Update imports to the neutral signal-identity utility everywhere.
+          for base in (root / 'src', root / 'tests'):
+              for path in base.rglob('*.py'):
+                  source = path.read_text()
+                  updated = source.replace('signal_identity_patch', 'signal_identity')
+                  if updated != source:
+                      path.write_text(updated)
+
+          # 9) Replace tests that encoded installer/sidecar architecture.
+          identity_test = root / 'tests/strategies/test_identity_contract_installed.py'
+          identity_test.write_text('''"""Signal identity/observability must be native, not monkey-patched."""\n\nfrom __future__ import annotations\n\nimport inspect\n\nimport nifty_scalper_bot.strategies as strategies\nfrom nifty_scalper_bot.strategies.elite_strategies.base_elite import EliteStrategy\nfrom nifty_scalper_bot.strategies.signal_generator import Signal\n\n\ndef test_signal_identity_is_native() -> None:\n    source = inspect.getsource(Signal.deterministic_id.fget)\n    assert "_deterministic_id" in source\n    assert not hasattr(Signal, "_stable_setup_identity_patch")\n\n\ndef test_elite_observability_is_native() -> None:\n    source = inspect.getsource(EliteStrategy.generate_signal)\n    assert "finalise_strategy_signal" in source\n    assert "_elite_signal_observability_patch" not in source\n\n\ndef test_strategy_package_has_no_runtime_patch_installers() -> None:\n    source = inspect.getsource(strategies)\n    assert "apply_patches" not in source\n    assert "install_indicator_runtime_context_contract" not in source\n\n\ndef test_elite_exports_are_available() -> None:\n    assert strategies.__all__\n''')
+
+          runtime_test = root / 'tests/strategies/test_runtime_context_contract_autoinstall.py'
+          runtime_native_test = root / 'tests/strategies/test_runtime_context_contract_native.py'
+          runtime_native_test.write_text(runtime_test.read_text().replace(
+              'def test_strategy_package_installs_quote_context_contract() -> None:\n    importlib.import_module("nifty_scalper_bot.strategies")\n',
+              'def test_indicator_engine_natively_preserves_quote_context_contract() -> None:\n    importlib.import_module("nifty_scalper_bot.strategies")\n',
+          ).replace(
+              'import importlib\n',
+              'import importlib\n',
+          ))
+          runtime_test.unlink()
+
+          orderflow_test = root / 'tests/strategies/test_orderflow_live_context_age.py'
+          orderflow_native_test = root / 'tests/strategies/test_orderflow_context_only_contract.py'
+          orderflow_native_test.write_text('''from __future__ import annotations\n\nimport inspect\n\nfrom nifty_scalper_bot.strategies.elite_strategies.order_flow import OrderFlowStrategy\n\n\ndef test_orderflow_is_natively_context_only() -> None:\n    source = inspect.getsource(OrderFlowStrategy._evaluate_signal)\n    assert "order_flow_live_context_patch" not in source\n    assert "allow_orderflow_trigger" not in source\n    assert 'trigger_block_reason = "context_only_role"' in source\n    assert '"role": "context"' in source\n    assert '"can_trigger": False' in source\n''')
+          orderflow_test.unlink()
+
+          obs_test = root / 'tests/strategies/test_signal_observability_contract.py'
+          obs = obs_test.read_text()
+          obs = obs.replace(
+              'from nifty_scalper_bot.strategies.elite_strategies.order_flow_live_context_patch import (\n    apply_orderflow_live_context_proof,\n)\n',
+              '',
+          )
+          obs = obs.replace(
+              'from nifty_scalper_bot.strategies.signal_identity import (\n    _stamp_evaluation_identity,\n)\n',
+              'from nifty_scalper_bot.strategies.quote_update_identity import (\n    resolve_quote_update_identity_with_fallback,\n)\nfrom nifty_scalper_bot.strategies.signal_identity import _stamp_evaluation_identity\n',
+          )
+          helper_start = obs.index('def _orderflow_signal(')
+          helper_end = obs.index('def test_runner_candidate_counter_is_not_exposed_as_a_trade_signal_count()', helper_start)
+          new_helpers = '''def _orderflow_quote(*, bid: float = 99.5) -> dict[str, object]:\n    return {\n        "bid": bid,\n        "ask": 100.0,\n        "depth_imbalance": 0.25,\n        "tick_direction": "UP",\n    }\n\n\ndef test_orderflow_quote_fingerprint_is_stable_and_changes_with_quote() -> None:\n    first, first_source = resolve_quote_update_identity_with_fallback(\n        ("signal_metadata", _orderflow_quote())\n    )\n    repeated, _ = resolve_quote_update_identity_with_fallback(\n        ("signal_metadata", _orderflow_quote())\n    )\n    changed, _ = resolve_quote_update_identity_with_fallback(\n        ("signal_metadata", _orderflow_quote(bid=99.6))\n    )\n\n    assert first_source == "microstructure_fingerprint"\n    assert first == repeated\n    assert first != changed\n\n\ndef test_orderflow_prefers_existing_quote_version() -> None:\n    version, source = resolve_quote_update_identity_with_fallback(\n        ("indicator_context", {"quote_update_version": 42}),\n        ("signal_metadata", _orderflow_quote()),\n    )\n\n    assert version == 42\n    assert source == "indicator_context:quote_update_version"\n\n\n'''
+          obs = obs[:helper_start] + new_helpers + obs[helper_end:]
+          obs_test.write_text(obs)
+
+          # Quote utility regression for fallback behavior.
+          quote_test = root / 'tests/strategies/test_quote_update_identity.py'
+          qt = quote_test.read_text()
+          qt = qt.replace(
+              '    resolve_quote_update_identity,\n',
+              '    resolve_quote_update_identity,\n    resolve_quote_update_identity_with_fallback,\n',
+              1,
+          )
+          qt += '''\n\ndef test_quote_identity_fallback_is_stable_without_authoritative_version() -> None:\n    first, source = resolve_quote_update_identity_with_fallback(\n        ("context", {"bid": 99.5, "ask": 100.0, "depth_imbalance": 0.2, "tick_direction": "UP"})\n    )\n    repeated, _ = resolve_quote_update_identity_with_fallback(\n        ("context", {"bid": 99.5, "ask": 100.0, "depth_imbalance": 0.2, "tick_direction": "UP"})\n    )\n    changed, _ = resolve_quote_update_identity_with_fallback(\n        ("context", {"bid": 99.6, "ask": 100.0, "depth_imbalance": 0.2, "tick_direction": "UP"})\n    )\n    assert source == "microstructure_fingerprint"\n    assert first == repeated\n    assert first != changed\n'''
+          quote_test.write_text(qt)
+
+          # The migration workflow is one-shot and must not remain in production source.
+          Path('.github/workflows/canonicalize-strategy-runtime-contracts.yml').unlink()
+          PY
+      - name: Validate migration source
+        run: |
+          python -m compileall -q src/nifty_scalper_bot/strategies
+          python -m pip install -e '.[dev]' -q
+          python -m pytest -q tests/strategies/test_identity_contract_installed.py tests/strategies/test_runtime_context_contract_native.py tests/strategies/test_orderflow_context_only_contract.py tests/strategies/test_quote_update_identity.py tests/strategies/test_signal_observability_contract.py tests/strategies/test_orderflow_depth_context.py
+          python -m ruff check src/nifty_scalper_bot/strategies tests/strategies/test_identity_contract_installed.py tests/strategies/test_runtime_context_contract_native.py tests/strategies/test_orderflow_context_only_contract.py tests/strategies/test_quote_update_identity.py tests/strategies/test_signal_observability_contract.py
+          python -m black --check src/nifty_scalper_bot/strategies tests/strategies/test_identity_contract_installed.py tests/strategies/test_runtime_context_contract_native.py tests/strategies/test_orderflow_context_only_contract.py tests/strategies/test_quote_update_identity.py tests/strategies/test_signal_observability_contract.py
+      - name: Commit canonical source
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'Refactor: canonicalize strategy runtime contracts'
+          git push origin HEAD:canonical-strategy-runtime-contracts-20260911
