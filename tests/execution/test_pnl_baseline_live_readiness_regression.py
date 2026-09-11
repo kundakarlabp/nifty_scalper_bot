@@ -90,3 +90,13 @@ def test_canonical_app_readiness_consumes_position_manager_pnl_blocker() -> None
     source = Path("src/nifty_scalper_bot/core/app.py").read_text(encoding="utf-8")
     assert "current_pnl_reconciliation_blocker" in source
     assert "missing.append(str(pnl_blocker))" in source
+
+def test_canonical_app_requires_pnl_baseline_before_broker_hydration() -> None:
+    source = Path("src/nifty_scalper_bot/core/app.py").read_text(encoding="utf-8")
+    manager_index = source.index("position_manager = PositionManager")
+    baseline_index = source.index(
+        "position_manager.require_pnl_session_baseline()", manager_index
+    )
+    hydration_index = source.index("\n    _hydrate_positions(", manager_index)
+
+    assert baseline_index < hydration_index
