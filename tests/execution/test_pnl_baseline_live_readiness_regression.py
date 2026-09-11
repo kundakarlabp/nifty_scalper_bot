@@ -1,10 +1,17 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from nifty_scalper_bot.execution.position_manager import PositionManager
 from nifty_scalper_bot.execution.readiness import normalize_readiness_blockers
 
 
-def test_authoritative_empty_broker_snapshot_establishes_required_zero_baseline(tmp_path) -> None:
+SYMBOL = "NFO:NIFTY2691523250PE"
+
+
+def test_authoritative_empty_broker_snapshot_establishes_required_zero_baseline(
+    tmp_path,
+) -> None:
     manager = PositionManager(state_file=str(tmp_path / "positions.json"))
     manager.require_pnl_session_baseline()
 
@@ -16,6 +23,30 @@ def test_authoritative_empty_broker_snapshot_establishes_required_zero_baseline(
     assert snapshot["session_opening_realized_baseline"] == 0.0
     assert snapshot["pnl_trading_date"] == manager._trading_date_ist()
     assert snapshot["baseline_source"] == "validated_broker_empty_snapshot"
+    assert manager.current_pnl_reconciliation_blocker() is None
+    assert manager.get_realized_pnl() == 0.0
+
+
+def test_explicit_broker_realized_initializes_zero_local_baseline(tmp_path) -> None:
+    manager = PositionManager(state_file=str(tmp_path / "positions.json"))
+    manager.require_pnl_session_baseline()
+
+    manager.synchronize_with_broker(
+        [
+            {
+                "symbol": SYMBOL,
+                "product": "MIS",
+                "quantity": 0,
+                "average_price": 101.0,
+                "last_price": 101.0,
+                "realised": -240.0,
+            }
+        ]
+    )
+
+    snapshot = manager.pnl_reconciliation_snapshot()
+    assert snapshot["session_opening_realized_baseline"] == -240.0
+    assert snapshot["baseline_source"] == "validated_broker_positions"
     assert manager.current_pnl_reconciliation_blocker() is None
     assert manager.get_realized_pnl() == 0.0
 
@@ -56,8 +87,6 @@ def test_pnl_entry_gate_blockers_fail_closed_in_live_readiness() -> None:
 
 
 def test_canonical_app_readiness_consumes_position_manager_pnl_blocker() -> None:
-    from pathlib import Path
-
     source = Path("src/nifty_scalper_bot/core/app.py").read_text(encoding="utf-8")
     assert "current_pnl_reconciliation_blocker" in source
     assert "missing.append(str(pnl_blocker))" in source
