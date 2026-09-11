@@ -2832,7 +2832,10 @@ class PositionManager:
         raise ValueError("broker position quantity is null or invalid")
 
     def synchronize_with_broker(
-        self, broker_positions: Sequence[Mapping[str, object]]
+        self,
+        broker_positions: Sequence[Mapping[str, object]],
+        *,
+        session_bootstrap: bool = False,
     ) -> None:
         """Validate and atomically replace managed positions from broker truth."""
         try:
@@ -2992,22 +2995,26 @@ class PositionManager:
                 self._session_opening_realized_baseline is None
                 or self._pnl_trading_date != session_date
             )
-            empty_snapshot_can_seed_zero = (
-                not snapshot.rows and self._local_realized_pnl == 0.0
+            empty_snapshot_can_seed_zero = not snapshot.rows and (
+                session_bootstrap or self._local_realized_pnl == 0.0
             )
             if baseline_missing_or_stale and (
                 snapshot_realized_seen or empty_snapshot_can_seed_zero
             ):
-                if (
+                if session_bootstrap or (
                     self._pnl_trading_date is not None
                     and self._pnl_trading_date != session_date
                 ):
                     self._local_realized_pnl = 0.0
                     self._local_provisional_realized_pnl = 0.0
                 self._session_opening_realized_baseline = float(
-                    snapshot_realized_pnl - self._local_realized_pnl
-                    if snapshot_realized_seen
-                    else 0.0
+                    0.0
+                    if session_bootstrap
+                    else (
+                        snapshot_realized_pnl - self._local_realized_pnl
+                        if snapshot_realized_seen
+                        else 0.0
+                    )
                 )
                 self._pnl_trading_date = session_date
                 self._pnl_product_scope = "MIS"
