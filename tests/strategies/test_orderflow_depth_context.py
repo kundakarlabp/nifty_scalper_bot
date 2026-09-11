@@ -30,8 +30,9 @@ def test_orderflow_no_missing_depth_when_bid_ask_and_depth_exist() -> None:
     )
     assert signal is not None
     assert getattr(strategy, "last_no_vote_reason", None) != "missing_depth"
-    assert signal.metadata["context_evidence_score"] == 6.0
-    assert signal.metadata["context_bonus_score"] == 3.0
+    assert signal.metadata["strategy_score"] == 8.0
+    assert signal.metadata["context_evidence_score"] == 4.0
+    assert signal.metadata["context_bonus_score"] == 2.0
     assert signal.metadata["depth_supports_side"] is True
 
 
@@ -58,9 +59,9 @@ def test_option_book_ask_pressure_does_not_earn_depth_confirmation() -> None:
     assert signal.metadata["depth_score"] == 0.0
     assert "depth_imbalance_support" not in signal.metadata["score_reasons"]
     assert "strong_depth_imbalance_support" not in signal.metadata["score_reasons"]
-    assert signal.metadata["strategy_score"] == 8.0
-    assert signal.metadata["context_evidence_score"] == 4.0
-    assert signal.metadata["context_bonus_score"] == 2.0
+    assert signal.metadata["strategy_score"] == 6.0
+    assert signal.metadata["context_evidence_score"] == 2.0
+    assert signal.metadata["context_bonus_score"] == 1.0
 
 
 def test_live_unready_quote_cannot_contribute_orderflow_context(monkeypatch) -> None:
