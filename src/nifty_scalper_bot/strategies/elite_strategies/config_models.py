@@ -47,14 +47,15 @@ class SMCStrategyConfig(EliteStrategyConfig):
 
 @dataclass(slots=True)
 class VWAPProStrategyConfig(EliteStrategyConfig):
-    """VWAP Pro native scoring configuration.
+    """VWAP Pro native scoring and warm-up configuration.
 
     ``proximity_pct`` is expressed in percentage points (0.15 == 0.15%) and is
-    consumed directly by :class:`VWAPProStrategy`. Directional EMA authority is
-    owned by the underlying-context engine, so no duplicate VWAP EMA setting is
-    exposed here.
+    consumed directly by :class:`VWAPProStrategy`. ``ema_period`` is the native
+    history warm-up floor for the existing EMA-aware context contract; it does
+    not create another scoring layer or a second direction authority.
     """
 
+    ema_period: int = 50
     proximity_pct: float = 0.15
 
 
