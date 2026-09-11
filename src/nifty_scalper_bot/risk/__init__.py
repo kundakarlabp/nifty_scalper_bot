@@ -2,6 +2,7 @@
 
 from .risk_manager import OrderSignal, RiskManager, RiskSnapshot, RiskState
 from .entry_guard_patch import apply_patches as _apply_entry_guard_patch
+from .broker_pnl_risk_patch import apply_patches as _apply_broker_pnl_risk_patch
 from .time_based_sizer import TimeBasedSizer
 from .volatility_sizer import VolatilitySizer
 
@@ -28,6 +29,7 @@ def _resolve_lot_size_from_provider(self: RiskManager, symbol: str | None) -> in
 # introducing another lot-size lookup path.
 RiskManager._resolve_lot_size = _resolve_lot_size_from_provider
 _apply_entry_guard_patch()
+_apply_broker_pnl_risk_patch()
 
 __all__ = [
     "OrderSignal",
