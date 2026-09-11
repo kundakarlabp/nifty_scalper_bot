@@ -51,7 +51,9 @@ def test_explicit_broker_realized_initializes_zero_local_baseline(tmp_path) -> N
     assert manager.get_realized_pnl() == 0.0
 
 
-def test_empty_snapshot_does_not_erase_unverified_nonzero_local_pnl(tmp_path) -> None:
+def test_empty_snapshot_preserves_unverified_nonzero_local_pnl_as_diagnostic(
+    tmp_path,
+) -> None:
     manager = PositionManager(state_file=str(tmp_path / "positions.json"))
     manager.require_pnl_session_baseline()
     manager._local_realized_pnl = -125.0
@@ -66,14 +68,14 @@ def test_empty_snapshot_does_not_erase_unverified_nonzero_local_pnl(tmp_path) ->
     assert manager.current_pnl_reconciliation_blocker() == "pnl_baseline_uninitialized"
 
 
-def test_pnl_entry_gate_blockers_fail_closed_in_live_readiness() -> None:
-    for blocker in (
+def test_pnl_diagnostics_do_not_block_live_readiness() -> None:
+    for diagnostic in (
         "pnl_baseline_uninitialized",
         "pnl_session_date_unverified",
         "pnl_reconciliation_mismatch",
     ):
         decision = normalize_readiness_blockers(
-            [blocker],
+            [diagnostic],
             "OPEN",
             broker_state={"broker_balance_valid": True},
             live_mode=True,
@@ -81,15 +83,25 @@ def test_pnl_entry_gate_blockers_fail_closed_in_live_readiness() -> None:
             execution_ready=True,
         )
 
-        assert decision.primary_blocker == blocker
-        assert decision.live_orders_armed is False
-        assert decision.execution_ready is False
+        assert decision.primary_blocker is None
+        assert decision.blocker_list == []
+        assert decision.live_orders_armed is True
+        assert decision.execution_ready is True
 
 
-def test_canonical_app_readiness_consumes_position_manager_pnl_blocker() -> None:
-    source = Path("src/nifty_scalper_bot/core/app.py").read_text(encoding="utf-8")
-    assert "current_pnl_reconciliation_blocker" in source
-    assert "missing.append(str(pnl_blocker))" in source
+def test_canonical_app_pnl_diagnostics_are_filtered_before_arming() -> None:
+    app_source = Path("src/nifty_scalper_bot/core/app.py").read_text(encoding="utf-8")
+    patch_source = Path(
+        "src/nifty_scalper_bot/execution/pnl_nonblocking_patch.py"
+    ).read_text(encoding="utf-8")
+
+    assert "current_pnl_reconciliation_blocker" in app_source
+    assert "missing.append(str(pnl_blocker))" in app_source
+    assert "_normalize_readiness_without_pnl_blocking" in patch_source
+    assert '"pnl_baseline_uninitialized"' in patch_source
+    assert '"pnl_session_date_unverified"' in patch_source
+    assert '"pnl_reconciliation_mismatch"' in patch_source
+
 
 def test_canonical_app_requires_pnl_baseline_before_broker_hydration() -> None:
     source = Path("src/nifty_scalper_bot/core/app.py").read_text(encoding="utf-8")
