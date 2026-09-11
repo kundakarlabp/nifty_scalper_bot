@@ -286,6 +286,7 @@ def _should_emit_pnl_log(self: Any, fingerprint: object, now_mono: float) -> boo
             self._broker_pnl_last_log_mono = now_mono
         return should_log
 
+
 def refresh_broker_pnl_diagnostic(
     self: Any,
     *,
