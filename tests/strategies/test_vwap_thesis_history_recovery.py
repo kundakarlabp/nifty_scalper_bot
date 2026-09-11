@@ -19,14 +19,22 @@ class _HistoryEngine:
         return list(self.rows)
 
 
-def _bar(ts: str, *, open_: float, high: float, low: float, close: float):
+def _bar(
+    ts: str,
+    *,
+    open_: float,
+    high: float,
+    low: float,
+    close: float,
+    volume: float = 1000.0,
+):
     return {
         "timestamp": datetime.fromisoformat(ts).replace(tzinfo=ZoneInfo("Asia/Kolkata")),
         "open": open_,
         "high": high,
         "low": low,
         "close": close,
-        "volume": 1000.0,
+        "volume": volume,
         "is_complete": True,
     }
 
@@ -71,7 +79,7 @@ def test_new_strategy_instance_recovers_same_contract_same_session_thesis(monkey
     assert signal is not None
     assert signal.metadata["thesis_recovered_from_history"] is True
     assert signal.metadata["thesis_scope_session"] == "2026-09-08"
-    assert "2026-09-08 04:30:00+00:00" in signal.metadata["setup_id"]
+    assert "2026-09-08 04:31:00+00:00" in signal.metadata["setup_id"]
 
 
 def test_recovery_never_uses_prior_session_history(monkeypatch):
@@ -100,6 +108,66 @@ def test_recovery_never_uses_another_contract(monkeypatch):
         "NFO:NIFTY2690823650CE",
         _indicators(session_date="2026-09-08", latest_bar_ts="2026-09-08T10:02:00+05:30"),
         103.0,
+    )
+
+    assert signal is None
+    assert strategy.last_no_vote_reason == "vwap_thesis_not_armed"
+
+
+def test_recovery_does_not_compare_old_bars_with_latest_vwap(monkeypatch):
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("VWAP_THESIS_RECOVERY_LOOKBACK_BARS", "5")
+    history = [
+        _bar(
+            f"2026-09-08T09:{minute:02d}:00",
+            open_=90.0,
+            high=90.0,
+            low=90.0,
+            close=90.0,
+            volume=100.0,
+        )
+        for minute in range(15, 20)
+    ]
+    history.extend(
+        _bar(
+            f"2026-09-08T09:{minute:02d}:00",
+            open_=110.0,
+            high=111.0,
+            low=109.8,
+            close=110.5,
+            volume=10.0,
+        )
+        for minute in range(20, 24)
+    )
+    history.append(
+        _bar(
+            "2026-09-08T09:24:00",
+            open_=130.0,
+            high=131.0,
+            low=129.5,
+            close=130.5,
+            volume=2000.0,
+        )
+    )
+    strategy = VWAPProStrategy(VWAPProStrategyConfig(), _HistoryEngine(history))
+    indicators = _indicators(
+        session_date="2026-09-08",
+        latest_bar_ts="2026-09-08T09:25:00+05:30",
+    )
+    indicators.update(
+        {
+            "vwap": 120.0,
+            "open": 130.0,
+            "high": 132.0,
+            "low": 129.0,
+            "close": 131.0,
+        }
+    )
+
+    signal = strategy._evaluate_signal(
+        "NFO:NIFTY2690823650CE",
+        indicators,
+        131.0,
     )
 
     assert signal is None
