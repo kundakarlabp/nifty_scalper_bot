@@ -2998,11 +2998,16 @@ class PositionManager:
             if baseline_missing_or_stale and (
                 snapshot_realized_seen or empty_snapshot_can_seed_zero
             ):
-                if self._pnl_trading_date != session_date:
+                if (
+                    self._pnl_trading_date is not None
+                    and self._pnl_trading_date != session_date
+                ):
                     self._local_realized_pnl = 0.0
                     self._local_provisional_realized_pnl = 0.0
                 self._session_opening_realized_baseline = float(
-                    snapshot_realized_pnl if snapshot_realized_seen else 0.0
+                    snapshot_realized_pnl - self._local_realized_pnl
+                    if snapshot_realized_seen
+                    else 0.0
                 )
                 self._pnl_trading_date = session_date
                 self._pnl_product_scope = "MIS"
