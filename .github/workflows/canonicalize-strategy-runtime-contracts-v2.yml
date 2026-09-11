@@ -37,10 +37,12 @@ jobs:
           exec(compile(script, '<canonical-strategy-migration>', 'exec'))
           Path('.github/workflows/canonicalize-strategy-runtime-contracts-v2.yml').unlink()
           PY
-      - name: Validate migration source
+      - name: Format and validate migration source
         run: |
           python -m compileall -q src/nifty_scalper_bot/strategies
           python -m pip install -e '.[dev]' -q
+          python -m black src/nifty_scalper_bot/strategies/quote_update_identity.py src/nifty_scalper_bot/strategies/indicators.py tests/strategies/test_signal_observability_contract.py tests/strategies/test_quote_update_identity.py
+          python -m compileall -q src/nifty_scalper_bot/strategies
           python -m pytest -q tests/strategies/test_identity_contract_installed.py tests/strategies/test_runtime_context_contract_native.py tests/strategies/test_orderflow_context_only_contract.py tests/strategies/test_quote_update_identity.py tests/strategies/test_signal_observability_contract.py tests/strategies/test_orderflow_depth_context.py
           python -m ruff check src/nifty_scalper_bot/strategies tests/strategies/test_identity_contract_installed.py tests/strategies/test_runtime_context_contract_native.py tests/strategies/test_orderflow_context_only_contract.py tests/strategies/test_quote_update_identity.py tests/strategies/test_signal_observability_contract.py
           python -m black --check src/nifty_scalper_bot/strategies tests/strategies/test_identity_contract_installed.py tests/strategies/test_runtime_context_contract_native.py tests/strategies/test_orderflow_context_only_contract.py tests/strategies/test_quote_update_identity.py tests/strategies/test_signal_observability_contract.py
