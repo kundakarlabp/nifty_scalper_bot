@@ -3033,7 +3033,12 @@ class PositionManager:
                         exc,
                         extra={"event": "position_manager_flat_hook_error"},
                     )
-        if not old_keys and not new_keys and not snapshot_realized_seen:
+        if (
+            not old_keys
+            and not new_keys
+            and not snapshot_realized_seen
+            and not baseline_initialized
+        ):
             return
         self.save_state()
         self._logger.info(
