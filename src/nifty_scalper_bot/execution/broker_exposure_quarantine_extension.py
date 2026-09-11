@@ -185,10 +185,14 @@ def apply_patches() -> None:
         _ORIGINALS["PositionManager.__init__"](self, *args, **kwargs)
         self._quarantined_broker_exposures = {}
 
-    def synchronize_with_broker(self: Any, broker_positions: Any) -> Any:
+    def synchronize_with_broker(
+        self: Any, broker_positions: Any, **kwargs: Any
+    ) -> Any:
         prepared, unresolved = _position_identity._prepare_broker_positions(self, broker_positions)
         self._quarantined_broker_exposures = _build_exposures(prepared, set(unresolved))
-        return _ORIGINALS["PositionManager.synchronize_with_broker"](self, broker_positions)
+        return _ORIGINALS["PositionManager.synchronize_with_broker"](
+            self, broker_positions, **kwargs
+        )
 
     def current_entry_protection_blocker(self: Any, symbol: str | None = None) -> str | None:
         exposures = getattr(self, "_quarantined_broker_exposures", {}) or {}
