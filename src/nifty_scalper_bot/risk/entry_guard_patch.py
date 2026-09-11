@@ -185,7 +185,8 @@ def _net_rr_block_reason(signal: Any) -> tuple[str, NetRRResult] | None:
         result = evaluate_final_net_rr(signal)
         if result is not None and not result.allowed:
             return (
-                f"net reward-risk insufficient: {result.net_rr:.2f}/{result.minimum:.2f}",
+                "net reward-risk insufficient: "
+                f"{result.net_rr:.2f}/{result.minimum:.2f}",
                 result,
             )
     return None
@@ -340,7 +341,8 @@ def _patched_suggest_position_size(
                 )
                 if callable(log):
                     log(
-                        "%s symbol=%s requested_sized=%s safe_qty=%s allowed_risk=%.2f effective_risk=%.2f risk_distance=%.4f",
+                        "%s symbol=%s requested_sized=%s safe_qty=%s "
+                        "allowed_risk=%.2f effective_risk=%.2f risk_distance=%.4f",
                         event,
                         symbol,
                         quantity,
@@ -459,6 +461,74 @@ def _patched_check_order(self: Any, signal: Any, live_enabled: bool) -> tuple[bo
             self
         )
         prospective_stop_risk = _signal_stop_risk(signal)
+        prospective_loss_risk = prospective_stop_risk
+        cost_reserve = 0.0
+        effective_risk_budget = remaining_day_budget
+        if _real_broker_live(live_enabled):
+            with suppress(Exception):
+                economics = evaluate_final_net_rr(signal)
+                if economics is not None:
+                    prospective_loss_risk = max(
+                        float(economics.net_risk),
+                        float(prospective_stop_risk or 0.0),
+                    )
+                    cost_reserve = max(
+                        prospective_loss_risk - float(prospective_stop_risk or 0.0),
+                        0.0,
+                    )
+            with suppress(TypeError, ValueError, AttributeError):
+                balance = max(float(getattr(self, "account_balance", 0.0) or 0.0), 0.0)
+                risk_pct = max(
+                    float(
+                        getattr(
+                            getattr(self, "settings", None), "per_trade_risk_pct", 0.0
+                        )
+                        or 0.0
+                    ),
+                    0.0,
+                )
+                per_trade_budget = balance * risk_pct / 100.0
+                if per_trade_budget > 0.0:
+                    effective_risk_budget = (
+                        per_trade_budget
+                        if effective_risk_budget is None
+                        else min(effective_risk_budget, per_trade_budget)
+                    )
+        if (
+            _real_broker_live(live_enabled)
+            and effective_risk_budget is not None
+            and prospective_loss_risk is not None
+            and prospective_loss_risk > effective_risk_budget
+        ):
+            reason = (
+                "cost-inclusive risk budget insufficient: "
+                f"{prospective_loss_risk:.2f}/{effective_risk_budget:.2f}"
+            )
+            self._last_rejection = "DAILY_RISK_BUDGET"
+            logger = getattr(self, "_logger", None)
+            log = getattr(logger, "warning", None)
+            if callable(log):
+                log(
+                    "RISK_FINAL_GATE_BLOCK reason=%s symbol=%s",
+                    reason,
+                    getattr(signal, "symbol", None),
+                    extra={
+                        "event": "RISK_FINAL_GATE_BLOCK",
+                        "reason": reason,
+                        "code": "DAILY_RISK_BUDGET",
+                        "symbol": getattr(signal, "symbol", None),
+                        "final_order_gate": True,
+                        "risk_basis": "stop_plus_round_trip_costs",
+                        "prospective_stop_risk": prospective_stop_risk,
+                        "transaction_cost_reserve": cost_reserve,
+                        "prospective_loss_risk": prospective_loss_risk,
+                        "effective_risk_budget": effective_risk_budget,
+                        "remaining_day_budget": remaining_day_budget,
+                        "current_day_loss": current_day_loss,
+                        "max_day_loss": max_day_loss,
+                    },
+                )
+            return False, reason
         if (
             remaining_day_budget is not None
             and prospective_stop_risk is not None
