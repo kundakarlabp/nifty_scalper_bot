@@ -1223,6 +1223,10 @@ class RiskManager:
                     if isinstance(circuit_state, Mapping):
                         session_date = circuit_state.get("trading_date")
         if not session_date or not today or str(session_date) != today:
+            baseline_guard = getattr(manager, "require_pnl_session_baseline", None)
+            if callable(baseline_guard):
+                with suppress(Exception):
+                    baseline_guard(True)
             self._logger.warning(
                 "DAY_PNL_SEED_SKIPPED realized=%.2f session_date=%s today=%s",
                 realized,

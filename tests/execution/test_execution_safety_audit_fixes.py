@@ -543,6 +543,27 @@ def test_pnl_reconciliation_mismatch_exposes_entry_blocker(tmp_path) -> None:
     assert manager.current_pnl_reconciliation_blocker() == "pnl_reconciliation_mismatch"
 
 
+def test_required_pnl_baseline_must_be_verified_for_current_trading_date(
+    tmp_path,
+) -> None:
+    manager = PositionManager(state_file=str(tmp_path / "positions.json"))
+    manager.require_pnl_session_baseline()
+    manager._session_opening_realized_baseline = -150.0
+    manager._pnl_trading_date = None
+
+    assert (
+        manager.current_pnl_reconciliation_blocker()
+        == "pnl_session_date_unverified"
+    )
+
+    manager.establish_pnl_session_baseline(
+        -150.0,
+        trading_date=manager._trading_date_ist(),
+    )
+
+    assert manager.current_pnl_reconciliation_blocker() is None
+
+
 def test_entry_bracket_id_alone_does_not_resolve_without_protection_ack(
     tmp_path,
 ) -> None:
