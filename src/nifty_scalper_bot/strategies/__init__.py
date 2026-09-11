@@ -13,13 +13,9 @@ from nifty_scalper_bot.utils.logging import get_logger
 from .elite_strategies import *  # noqa: F401,F403
 from .runtime_context_contract import install_indicator_runtime_context_contract
 from .signal_identity_patch import apply_patches as _apply_signal_identity_patches
-from .strategy_quality_patch import apply_patches as _apply_strategy_quality_patches
 
 LOGGER = get_logger(__name__)
 
-# Quality must wrap the native elite strategy first so the identity/observability
-# layer records the normalized score rather than the pre-quality raw score.
-_apply_strategy_quality_patches()
 _apply_signal_identity_patches()
 install_indicator_runtime_context_contract()
 

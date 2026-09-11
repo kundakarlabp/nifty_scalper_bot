@@ -39,21 +39,20 @@ class EliteStrategyConfig:
 
 @dataclass(slots=True)
 class SMCStrategyConfig(EliteStrategyConfig):
-    """SMC Liquidity: sweep and participation thresholds."""
+    """SMC Liquidity sweep and participation thresholds."""
 
-    # Keep the dataclass default aligned with settings._build_elite_settings().
     sweep_distance_points: float = 15.0
     volume_spike_mult: float = 2.0
 
 
 @dataclass(slots=True)
 class VWAPProStrategyConfig(EliteStrategyConfig):
-    """VWAP Pro configuration.
+    """VWAP Pro native scoring and warm-up configuration.
 
-    ``proximity_pct`` is an active quality-contract setting expressed in
-    percentage points (0.15 == 0.15%). ``ema_period`` is retained only for
-    configuration compatibility; directional EMA authority is centralized in
-    the underlying-context engine rather than duplicated inside VWAPPro.
+    ``proximity_pct`` is expressed in percentage points (0.15 == 0.15%) and is
+    consumed directly by :class:`VWAPProStrategy`. ``ema_period`` is the native
+    history warm-up floor for the existing EMA-aware context contract; it does
+    not create another scoring layer or a second direction authority.
     """
 
     ema_period: int = 50
@@ -91,16 +90,13 @@ class CPRBreakoutStrategyConfig(EliteStrategyConfig):
 
 @dataclass(slots=True)
 class OrderFlowStrategyConfig(EliteStrategyConfig):
-    """OrderFlow context-quality thresholds.
+    """OrderFlow native context-scoring thresholds.
 
-    ``large_order_threshold_pct`` is the normalized depth-imbalance support
-    floor. ``imbalance_ratio_min`` is converted to the equivalent normalized
-    imbalance and used for strong-depth confirmation. Both are consumed by the
-    canonical strategy-quality contract.
+    ``large_order_threshold_pct`` becomes the normalized depth-imbalance support
+    floor. ``imbalance_ratio_min`` is converted to normalized imbalance for
+    strong-depth confirmation. Both are consumed directly by OrderFlowStrategy.
     """
 
-    # Match production settings defaults so direct construction and runtime
-    # construction have identical semantics.
     imbalance_ratio_min: float = 2.8
     large_order_threshold_pct: float = 15.0
 

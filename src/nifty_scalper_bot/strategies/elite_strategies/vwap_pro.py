@@ -81,6 +81,10 @@ class VWAPProStrategy(EliteStrategy):
         """Args: config, indicator_engine. Returns: None. Raises: Exception."""
         super().__init__(config=config, indicator_engine=indicator_engine)
         self._cfg = config
+        # The exposed EMA period has one native role: warm-up/history sufficiency.
+        # Direction remains owned by the underlying context engine; there is no
+        # second EMA direction calculation inside VWAPPro.
+        self.MIN_BARS_REQUIRED = max(10, int(self._cfg.ema_period or 10))
         self._allow_pullback = str(os.getenv("VWAP_ALLOW_PULLBACK_ENTRY", "1")).lower() in {
             "1",
             "true",
@@ -93,6 +97,13 @@ class VWAPProStrategy(EliteStrategy):
         )
         self._max_atr_distance_mult = float(
             os.getenv("VWAP_MAX_ATR_DISTANCE_MULT", "1.5") or 1.5
+        )
+        self._quality_max_distance_atr = max(
+            0.5, float(os.getenv("VWAP_QUALITY_MAX_DISTANCE_ATR", "2.0") or 2.0)
+        )
+        self._trend_quality_max_distance_atr = max(
+            self._quality_max_distance_atr,
+            float(os.getenv("VWAP_TREND_QUALITY_MAX_DISTANCE_ATR", "5.0") or 5.0),
         )
         self._min_penetration_atr = max(
             0.0,
@@ -283,6 +294,16 @@ class VWAPProStrategy(EliteStrategy):
                 or fut_ctx.get("direction_bias")
                 or ""
             ).upper()
+            context_age_seconds = resolve_context_age_seconds(indicators)
+            try:
+                underlying_direction_confidence = float(
+                    indicators.get("underlying_direction_confidence")
+                    or spot_ctx.get("underlying_direction_confidence")
+                    or fut_ctx.get("underlying_direction_confidence")
+                    or 0.0
+                )
+            except (TypeError, ValueError):
+                underlying_direction_confidence = 0.0
 
             def _optional_float(value: Any) -> float | None:
                 try:
@@ -307,12 +328,40 @@ class VWAPProStrategy(EliteStrategy):
             stale_data = bool(indicators.get("stale_data_used")) or float(
                 indicators.get("data_age_seconds") or 0.0
             ) > max_data_age
-            distance_pct = abs(current_price - vwap) / max(vwap, 1e-9)
+            atr_safe = max(atr, current_price * 0.01, 1.0)
+            distance_points = abs(current_price - vwap)
+            distance_pct = distance_points / max(vwap, 1e-9)
+            distance_atr = distance_points / atr_safe
+            configured_proximity_pct = max(0.0, float(self._cfg.proximity_pct))
+            configured_proximity_fraction = configured_proximity_pct / 100.0
+            near_configured_vwap = distance_pct <= configured_proximity_fraction
             allowed_distance = max(
                 self._max_distance_pct,
-                self._max_atr_distance_mult * atr / max(vwap, 1e-9),
+                self._max_atr_distance_mult * atr_safe / max(vwap, 1e-9),
             )
-            overextended = distance_pct > allowed_distance
+            symbol_upper = str(symbol or "").upper()
+            preliminary_side = (
+                "CE"
+                if symbol_upper.endswith("CE")
+                else "PE"
+                if symbol_upper.endswith("PE")
+                else ""
+            )
+            strong_fresh_trend_context = bool(
+                preliminary_side in {"CE", "PE"}
+                and underlying_direction == preliminary_side
+                and underlying_direction_confidence >= self._early_trend_min_context_conf
+                and context_age_seconds <= self._early_trend_max_context_age
+            )
+            effective_quality_max_distance_atr = (
+                self._trend_quality_max_distance_atr
+                if strong_fresh_trend_context
+                else self._quality_max_distance_atr
+            )
+            overextended = bool(
+                distance_pct > allowed_distance
+                or distance_atr > effective_quality_max_distance_atr
+            )
             if overextended:
                 self._no_vote("distance_outside_band")
                 LOGGER.debug("STRATEGY_NO_VOTE strategy=VWAPPro reason=overextended")
@@ -327,7 +376,6 @@ class VWAPProStrategy(EliteStrategy):
                 LOGGER.debug("STRATEGY_NO_VOTE strategy=VWAPPro reason=wide_spread")
                 return None
 
-            score = 0.0
             reasons: list[str] = []
             conflict_penalty_applied = 0.0
             contract_side, option_premium_domain, _ = resolve_signal_domain(
@@ -343,11 +391,9 @@ class VWAPProStrategy(EliteStrategy):
                     contract_side = fallback_side
                 elif symbol.upper().endswith("CE"):
                     contract_side = "CE"
-                    score -= 1.0
                     reasons.append("symbol_side_fallback")
                 elif symbol.upper().endswith("PE"):
                     contract_side = "PE"
-                    score -= 1.0
                     reasons.append("symbol_side_fallback")
                 else:
                     self._no_vote("unknown_contract_side")
@@ -415,47 +461,27 @@ class VWAPProStrategy(EliteStrategy):
                 return None
 
             premium_above_vwap = close >= vwap
-            if premium_above_vwap:
-                score += 2.0
-                reasons.append("premium_above_vwap")
-
             candle_body = abs(close - open_price)
-            atr_safe = max(atr, current_price * 0.01, 1.0)
             continuation_confirmed = bool(
                 close > open_price and candle_body >= (0.35 * atr_safe)
             )
-            if continuation_confirmed:
-                score += 1.5
-                reasons.append("premium_continuation")
-
             reclaim_from_below = bool(
                 low <= (vwap - (atr_safe * self._slack_atr_mult * 0.2))
                 and close >= vwap
             )
             if self._allow_pullback and reclaim_from_below:
                 pullback_flag = True
-                score += 1.5
-                reasons.append("premium_reclaim_vwap")
 
             penetration_atr = max(0.0, close - vwap) / atr_safe
             penetration_confirmed = bool(
                 premium_above_vwap
                 and penetration_atr >= self._min_penetration_atr
             )
-            if penetration_confirmed:
-                reasons.append("premium_vwap_penetration")
-
-            if distance_pct <= self._max_distance_pct * 0.7:
-                score += 1.0
-                reasons.append("not_overextended")
 
             vol_support = avg_vol > 0 and vol >= 0.6 * avg_vol
             fut_vol_support = (
                 futures_volume_ratio is not None and futures_volume_ratio >= 1.0
             )
-            if vol_support or fut_vol_support:
-                score += 1.0
-                reasons.append("volume_confirmation")
 
             # Explicit underlying direction owns alignment; generic bias is a
             # fallback only when no usable underlying direction is available.
@@ -466,11 +492,7 @@ class VWAPProStrategy(EliteStrategy):
             )
             if bias in {"CE", "PE"}:
                 trend_alignment = bias == contract_side
-                if trend_alignment:
-                    score += 2.0
-                    reasons.append("trend_alignment")
-                else:
-                    score -= 2.0
+                if not trend_alignment:
                     reasons.append("direction_conflict")
 
             if futures_vwap_slope is None:
@@ -484,18 +506,8 @@ class VWAPProStrategy(EliteStrategy):
                     (contract_side == "CE" and futures_vwap_slope > 0)
                     or (contract_side == "PE" and futures_vwap_slope < 0)
                 )
-                if slope_support:
-                    score += 1.0
-                    reasons.append("futures_slope_alignment")
-                else:
+                if not slope_support:
                     reasons.append("futures_slope_conflict")
-            if not trend_alignment and bias in {"CE", "PE"}:
-                if "direction_conflict" not in reasons:
-                    conflict_penalty_applied = float(
-                        os.getenv("VWAP_PRO_CONFLICT_PENALTY", "2.0") or "2.0"
-                    )
-                    score -= conflict_penalty_applied
-                    reasons.append("conflict_penalty")
 
             execution_mode = str(
                 os.getenv("EXECUTION_MODE", "SHADOW") or "SHADOW"
@@ -514,16 +526,6 @@ class VWAPProStrategy(EliteStrategy):
                 if trend_alignment
                 else os.getenv("VWAP_PRO_MIN_SCORE", min_score_default)
             )
-            context_age_seconds = resolve_context_age_seconds(indicators)
-            try:
-                underlying_direction_confidence = float(
-                    indicators.get("underlying_direction_confidence")
-                    or spot_ctx.get("underlying_direction_confidence")
-                    or fut_ctx.get("underlying_direction_confidence")
-                    or 0.0
-                )
-            except (TypeError, ValueError):
-                underlying_direction_confidence = 0.0
             context_fresh = context_age_seconds <= float(
                 os.getenv("VWAP_CONTEXT_MAX_AGE_SECONDS", "120") or "120"
             )
@@ -559,30 +561,6 @@ class VWAPProStrategy(EliteStrategy):
                     ),
                 )
             )
-            if early_trend_pullback:
-                score += 1.2
-                reasons.append("early_trend_pullback_context")
-            if (
-                trend_alignment
-                and context_fresh
-                and underlying_direction_confidence
-                >= float(
-                    os.getenv("VWAP_CONTEXT_BOOST_MIN_CONFIDENCE", "0.90") or "0.90"
-                )
-                and spread_pct
-                <= min(
-                    canonical_max_spread_pct(),
-                    float(
-                        os.getenv("VWAP_CONTEXT_BOOST_MAX_SPREAD_PCT", "0.75") or "0.75"
-                    ),
-                )
-                and premium_above_vwap
-            ):
-                boost = float(
-                    os.getenv("VWAP_PRO_TREND_CONTEXT_BOOST", "0.5") or "0.5"
-                )
-                score = min(10.0, score + boost)
-                reasons.append("trend_context_boost")
 
             event_confirmed = bool(
                 continuation_confirmed
@@ -609,15 +587,77 @@ class VWAPProStrategy(EliteStrategy):
                     },
                 )
                 return None
-            threshold_source = "trend_aligned" if trend_alignment else "base"
 
+            # Canonical VWAP score: each independent evidence family contributes
+            # once. Continuation/reclaim/penetration are alternative event proofs,
+            # not separate points for the same price action.
+            score = 0.0
+            if premium_above_vwap:
+                score += 1.5
+                reasons.append("premium_above_vwap")
+            if event_confirmed:
+                score += 2.0
+                if early_trend_pullback:
+                    reasons.append("early_trend_pullback_context")
+                elif pullback_flag:
+                    reasons.append("premium_reclaim_vwap")
+                elif continuation_confirmed:
+                    reasons.append("premium_continuation")
+                else:
+                    reasons.append("premium_vwap_penetration")
+            if distance_atr <= 1.0:
+                score += 1.0
+                reasons.append("vwap_distance_within_1atr")
+            elif distance_atr <= 1.5:
+                score += 0.5
+                reasons.append("vwap_distance_within_1_5atr")
+            if near_configured_vwap:
+                score += 0.5
+                reasons.append("configured_vwap_proximity")
+            if vol_support or fut_vol_support:
+                score += 1.0
+                reasons.append("volume_confirmation")
+            if trend_alignment:
+                score += 2.0
+                reasons.append("trend_alignment")
+            elif bias in {"CE", "PE"}:
+                conflict_penalty_applied = float(
+                    os.getenv("VWAP_PRO_CONFLICT_PENALTY", "2.0") or "2.0"
+                )
+                score -= conflict_penalty_applied
+            if slope_support:
+                score += 1.0
+                reasons.append("futures_slope_alignment")
+            if (
+                trend_alignment
+                and context_fresh
+                and underlying_direction_confidence
+                >= float(
+                    os.getenv("VWAP_CONTEXT_BOOST_MIN_CONFIDENCE", "0.90") or "0.90"
+                )
+                and spread_pct
+                <= min(
+                    canonical_max_spread_pct(),
+                    float(
+                        os.getenv("VWAP_CONTEXT_BOOST_MAX_SPREAD_PCT", "0.75") or "0.75"
+                    ),
+                )
+                and premium_above_vwap
+            ):
+                boost = float(
+                    os.getenv("VWAP_PRO_TREND_CONTEXT_BOOST", "0.5") or "0.5"
+                )
+                score = min(10.0, score + boost)
+                reasons.append("trend_context_boost")
+
+            threshold_source = "trend_aligned" if trend_alignment else "base"
             if score < min_score:
                 self._no_vote("weak_score")
                 LOGGER.info(
                     "STRATEGY_NO_VOTE strategy=VWAPPro reason=weak_score "
                     "symbol=%s score=%.2f min_score=%.2f threshold_source=%s "
                     "direction=%s underlying_direction=%s contract_side=%s current_price=%.2f "
-                    "vwap=%.2f distance_pct=%.4f allowed_distance=%.4f atr=%.2f "
+                    "vwap=%.2f distance_pct=%.4f distance_atr=%.3f allowed_distance=%.4f atr=%.2f "
                     "volume=%.2f avg_volume=%.2f trend_alignment=%s pullback_flag=%s "
                     "context_age_seconds=%.2f context_fresh=%s context_confidence=%.2f "
                     "futures_vwap_slope=%s futures_volume_ratio=%s slope_support=%s "
@@ -632,6 +672,7 @@ class VWAPProStrategy(EliteStrategy):
                     current_price,
                     vwap,
                     distance_pct,
+                    distance_atr,
                     allowed_distance,
                     atr_safe,
                     vol,
@@ -670,6 +711,9 @@ class VWAPProStrategy(EliteStrategy):
                         "trend_alignment": trend_alignment,
                         "pullback_flag": pullback_flag,
                         "early_trend_pullback": early_trend_pullback,
+                        "distance_atr": distance_atr,
+                        "configured_proximity_pct": configured_proximity_pct,
+                        "effective_quality_max_distance_atr": effective_quality_max_distance_atr,
                     },
                 )
                 return None
@@ -719,7 +763,14 @@ class VWAPProStrategy(EliteStrategy):
                 "rejection_reasons": [],
                 "vwap": vwap,
                 "distance_pct": round(distance_pct, 4),
+                "vwap_distance_atr": round(distance_atr, 4),
                 "allowed_distance_pct": round(allowed_distance, 4),
+                "vwap_quality_max_distance_atr": effective_quality_max_distance_atr,
+                "vwap_base_quality_max_distance_atr": self._quality_max_distance_atr,
+                "vwap_trend_quality_max_distance_atr": self._trend_quality_max_distance_atr,
+                "vwap_strong_fresh_trend_context": strong_fresh_trend_context,
+                "vwap_configured_proximity_pct": configured_proximity_pct,
+                "vwap_configured_proximity_pass": near_configured_vwap,
                 "atr": atr_safe,
                 "pullback_flag": pullback_flag,
                 "trend_alignment": trend_alignment,
@@ -739,9 +790,7 @@ class VWAPProStrategy(EliteStrategy):
                 "conflict_penalty_applied": conflict_penalty_applied,
                 "final_vwap_score": strategy_score,
                 "futures_volume_ratio": futures_volume_ratio,
-                "trigger_block_reason": (
-                    "" if strategy_score >= min_score else "weak_score"
-                ),
+                "trigger_block_reason": "",
                 "continuation_confirmed": continuation_confirmed,
                 "penetration_confirmed": penetration_confirmed,
                 "vwap_penetration_atr": round(penetration_atr, 4),

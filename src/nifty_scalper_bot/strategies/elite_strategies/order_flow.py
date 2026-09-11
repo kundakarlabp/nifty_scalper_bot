@@ -69,6 +69,15 @@ def _depth_supports_side(
     )
 
 
+def _normalised_depth_thresholds(config: OrderFlowStrategyConfig) -> tuple[float, float]:
+    """Return canonical support/strong-support thresholds from strategy config."""
+    support = max(0.05, min(0.50, float(config.large_order_threshold_pct) / 100.0))
+    ratio = max(1.0, float(config.imbalance_ratio_min))
+    ratio_threshold = (ratio - 1.0) / (ratio + 1.0) if ratio > 1.0 else 0.0
+    strong = max(support, min(0.85, ratio_threshold))
+    return support, strong
+
+
 class OrderFlowStrategy(EliteStrategy):
     """Order-flow vote using spread, depth imbalance and tick direction."""
 
@@ -358,9 +367,10 @@ class OrderFlowStrategy(EliteStrategy):
                     else 0.0,
                     "depth_score": 0.0,
                     "tick_score": 2.0 if tick_supports else 0.0,
-                    "direction_alignment_score": 2.0
+                    "direction_alignment_score": 1.0
                     if (direction in {"CE", "PE"} and direction == side)
                     else 0.0,
+                    "freshness_score": 0.0,
                     "premium_stop_distance": max(
                         0.8 * atr, current_price * 0.02, 1.0
                     ),
@@ -423,26 +433,34 @@ class OrderFlowStrategy(EliteStrategy):
             context_spread_limit = (
                 trigger_max_spread_pct if is_live_mode else 12.0
             )
+            spread_score = 0.0
             if spread_pct <= context_spread_limit:
-                score += 2.0
+                spread_score = 2.0
+                score += spread_score
                 reasons.append("tight_spread")
 
+            support_threshold, strong_support_threshold = _normalised_depth_thresholds(
+                self._cfg
+            )
             depth_supports_side = _depth_supports_side(
                 depth_imbalance,
                 side=side,
                 option_premium_domain=option_premium_domain,
-                threshold=0.15,
+                threshold=support_threshold,
             )
             strong_depth_supports_side = _depth_supports_side(
                 depth_imbalance,
                 side=side,
                 option_premium_domain=option_premium_domain,
-                threshold=0.50,
+                threshold=strong_support_threshold,
             )
+            depth_score = 0.0
             if depth_supports_side:
+                depth_score += 2.0
                 score += 2.0
                 reasons.append("depth_imbalance_support")
             if strong_depth_supports_side:
+                depth_score += 1.0
                 score += 1.0
                 reasons.append("strong_depth_imbalance_support")
 
@@ -454,21 +472,24 @@ class OrderFlowStrategy(EliteStrategy):
                     or (side == "PE" and tick_direction in {"DOWN", "SELL"})
                 )
             )
+            tick_score = 2.0 if tick_supports else 0.0
             if tick_supports:
-                score += 2.0
+                score += tick_score
                 reasons.append("tick_direction_alignment")
-            if direction in {"CE", "PE"} and direction == side:
-                score += 2.0
+            side_aligns = direction in {"CE", "PE"} and direction == side
+            direction_score = 1.0 if side_aligns else 0.0
+            if side_aligns:
+                score += direction_score
                 reasons.append("direction_context_alignment")
-            if not bool(indicators.get("stale_data_used")):
-                score += 1.0
-            score += 1.0
+            freshness_score = 1.0 if not bool(indicators.get("stale_data_used")) else 0.0
+            if freshness_score:
+                score += freshness_score
+                reasons.append("fresh_context")
             strategy_score = max(0.0, min(10.0, score))
             if strategy_score < context_min_score:
                 self._no_vote("low_score")
                 return None
 
-            side_aligns = direction in {"CE", "PE"} and direction == side
             bias_conflict = direction in {"CE", "PE"} and not side_aligns
             min_reversal_imbalance = safe_float_env(
                 "ORDERFLOW_REVERSAL_MIN_IMBALANCE", 0.20
@@ -744,6 +765,10 @@ class OrderFlowStrategy(EliteStrategy):
                 "direction_bias": direction if direction in {"CE", "PE"} else None,
                 "strategy_score": strategy_score,
                 "setup_quality": strategy_score,
+                "raw_setup_score": strategy_score,
+                "setup_score": strategy_score,
+                "setup_min": context_min_score,
+                "setup_pass": strategy_score >= context_min_score,
                 "setup_type": "microstructure_imbalance",
                 "required_data_present": depth_available,
                 "stale_data_used": bool(indicators.get("stale_data_used")),
@@ -756,6 +781,12 @@ class OrderFlowStrategy(EliteStrategy):
                 "depth_imbalance": round(depth_imbalance, 4),
                 "depth_supports_side": depth_supports_side,
                 "strong_depth_supports_side": strong_depth_supports_side,
+                "depth_support_threshold": round(support_threshold, 4),
+                "strong_depth_support_threshold": round(strong_support_threshold, 4),
+                "orderflow_config_imbalance_ratio_min": float(self._cfg.imbalance_ratio_min),
+                "orderflow_config_large_order_threshold_pct": float(
+                    self._cfg.large_order_threshold_pct
+                ),
                 "tick_direction": tick_direction,
                 "liquidity_ok": spread_pct <= context_spread_limit,
                 "premium_stop_distance": max(
@@ -773,15 +804,12 @@ class OrderFlowStrategy(EliteStrategy):
                 "direction_context_ok": direction_context_ok,
                 "trigger_eligible": bool(trigger_conditions_met),
                 "trigger_disqualified_by": trigger_block_reason or None,
-                "liquidity_score": 2.0
-                if spread_pct <= context_spread_limit
-                else 0.5,
-                "spread_score": 2.0
-                if spread_pct <= trigger_max_spread_pct
-                else 0.0,
-                "depth_score": 2.0 if depth_supports_side else 0.0,
-                "tick_score": 2.0 if tick_supports else 0.0,
-                "direction_alignment_score": 2.0 if side_alignment_ok else 0.0,
+                "liquidity_score": spread_score if spread_score > 0 else 0.5,
+                "spread_score": spread_score,
+                "depth_score": depth_score,
+                "tick_score": tick_score,
+                "direction_alignment_score": direction_score,
+                "freshness_score": freshness_score,
                 "tradable_quote": tradable_quote,
                 "depth_available": depth_available,
                 "premium_flow_direction": tick_direction,

@@ -773,7 +773,11 @@ class SMCStrategy(EliteStrategy):
                     and effective_direction == contract_side
                 )
 
-                score = 5.0
+                # One canonical score lives here. Core sweep/reclaim/displacement
+                # proves the setup exists but does not, by itself, make a high-
+                # quality live entry. Independent participation/structure/retest
+                # evidence must lift the setup above the live admission floor.
+                score = 4.0
                 reasons = [
                     "underlying_liquidity_sweep",
                     "reclaim",
@@ -788,17 +792,24 @@ class SMCStrategy(EliteStrategy):
                 if structure_confirmed:
                     score += 1.0
                     reasons.append("structure_confirmation")
-                if retest_confirmed:
+                if retest_confirmed or premium_reclaim:
                     score += 0.5
-                    reasons.append("retest_mitigation")
-                if premium_reclaim:
-                    score += 0.5
-                    reasons.append("premium_reclaim_support")
+                    if retest_confirmed:
+                        reasons.append("retest_mitigation")
+                    if premium_reclaim:
+                        reasons.append("premium_reclaim_support")
                 depth_atr = float(event["depth_atr"])
                 if 0.12 <= depth_atr <= 0.50:
                     score += 0.5
                     reasons.append("balanced_sweep_depth")
 
+                independent_quality_confirmation = bool(
+                    bool(event["volume_confirmation"])
+                    or structure_confirmed
+                    or retest_confirmed
+                    or premium_reclaim
+                    or 0.12 <= depth_atr <= 0.50
+                )
                 strategy_score = max(0.0, min(10.0, score))
                 min_score = float(
                     os.getenv("SMC_MIN_SCORE_LIVE", "6.5")
@@ -871,6 +882,10 @@ class SMCStrategy(EliteStrategy):
                     "requires_runner_final_score": True,
                     "requires_orderflow_confirmation": True,
                     "orderflow_confirmation_owner": "StrategyManager",
+                    "raw_setup_score": strategy_score,
+                    "setup_score": strategy_score,
+                    "setup_min": min_score,
+                    "setup_pass": True,
                     "direction_score": strategy_score,
                     "strategy_score": strategy_score,
                     "data_score": 8.0,
@@ -920,6 +935,7 @@ class SMCStrategy(EliteStrategy):
                     "partial_features_used": False,
                     "feature_completeness": feature_completeness,
                     "smc_quality_score": strategy_score,
+                    "smc_quality_independent_confirmation": independent_quality_confirmation,
                     "smc_block_reason": "",
                     "latest_bar_ts": current_ts,
                     "setup_candle_timestamp": current_ts,
