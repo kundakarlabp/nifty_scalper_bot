@@ -2865,6 +2865,8 @@ class PositionManager:
                 return value
             return float(default)
 
+        baseline_initialized = False
+        baseline_source: str | None = None
         with self._lock:
             existing_positions = copy.deepcopy(self._positions)
             reconciled: Dict[str, Position] = {}
@@ -2980,8 +2982,44 @@ class PositionManager:
             self._broker_snapshot_local_generation = self._local_position_generation
             self._last_broker_position_snapshot_source = snapshot.source
             self._last_broker_position_snapshot_failure_reason = None
+
+            # A successfully decoded broker snapshot is authoritative evidence for
+            # the current MIS session.  The risk manager may start requiring a
+            # baseline after startup hydration, so establish it here on the next
+            # reconciliation instead of leaving entries permanently blocked.
+            session_date = self._trading_date_ist()
+            baseline_missing_or_stale = (
+                self._session_opening_realized_baseline is None
+                or self._pnl_trading_date != session_date
+            )
+            empty_snapshot_can_seed_zero = (
+                not snapshot.rows and self._local_realized_pnl == 0.0
+            )
+            if baseline_missing_or_stale and (
+                snapshot_realized_seen or empty_snapshot_can_seed_zero
+            ):
+                if self._pnl_trading_date != session_date:
+                    self._local_realized_pnl = 0.0
+                    self._local_provisional_realized_pnl = 0.0
+                self._session_opening_realized_baseline = float(
+                    snapshot_realized_pnl if snapshot_realized_seen else 0.0
+                )
+                self._pnl_trading_date = session_date
+                self._pnl_product_scope = "MIS"
+                self._baseline_established_at = _now()
+                baseline_source = (
+                    "validated_broker_positions"
+                    if snapshot_realized_seen
+                    else "validated_broker_empty_snapshot"
+                )
+                self._baseline_source = baseline_source
+                baseline_initialized = True
+
             if snapshot_realized_seen:
                 self._broker_realized_pnl = float(snapshot_realized_pnl)
+            elif baseline_initialized:
+                self._broker_realized_pnl = 0.0
+            if snapshot_realized_seen or baseline_initialized:
                 self._refresh_realized_pnl_locked()
 
         if removed_symbols:
