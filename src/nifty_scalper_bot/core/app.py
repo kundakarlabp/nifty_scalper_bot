@@ -2210,7 +2210,9 @@ def _hydrate_positions(
     if broker_positions is None:
         position_manager.restore_positions(persisted_positions)
     else:
-        position_manager.synchronize_with_broker(broker_positions)
+        position_manager.synchronize_with_broker(
+            broker_positions, session_bootstrap=True
+        )
 
     _sync_data_hub_positions(data_hub, position_manager, logger=logger)
     return broker_positions
