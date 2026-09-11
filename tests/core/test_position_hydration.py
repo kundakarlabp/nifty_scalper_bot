@@ -18,6 +18,7 @@ class _PositionManager:
     def __init__(self) -> None:
         self.restored: list[Any] | None = None
         self.synced: list[dict[str, Any]] | None = None
+        self.session_bootstrap = False
         self._positions: list[Any] = []
         self.broker_client: Any | None = None
 
@@ -28,8 +29,14 @@ class _PositionManager:
         self.restored = list(positions)
         self._positions = list(positions)
 
-    def synchronize_with_broker(self, positions: list[dict[str, Any]]) -> None:
+    def synchronize_with_broker(
+        self,
+        positions: list[dict[str, Any]],
+        *,
+        session_bootstrap: bool = False,
+    ) -> None:
         self.synced = list(positions)
+        self.session_bootstrap = session_bootstrap
         self._positions = [
             SimpleNamespace(
                 symbol=str(entry["tradingsymbol"]).upper(),
@@ -101,6 +108,7 @@ def test_hydrate_positions_prefers_broker_snapshot() -> None:
     assert manager.broker_client is broker_client
     assert manager.restored is None
     assert manager.synced == broker_positions
+    assert manager.session_bootstrap is True
     assert data_hub.rows == [
         {
             "symbol": "NIFTY25O2025450CE",
