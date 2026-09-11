@@ -168,11 +168,109 @@ def _snapshot_has_authoritative_realized(payload: Any) -> bool:
     return False
 
 
+def _pnl_baseline_seed_from_snapshot(payload: Any) -> tuple[bool, float, str]:
+    """Resolve a safe opening realised-P&L baseline from broker truth.
+
+    Zerodha's authoritative ``data.net`` snapshot is an empty list before any
+    intraday position exists. That is positive evidence for a zero opening
+    baseline, not missing P&L evidence. Non-empty snapshots are only usable
+    when a managed MIS row explicitly carries ``realised``/``realized``.
+    """
+    try:
+        snapshot = decode_position_snapshot(payload)
+    except Exception:
+        return False, 0.0, ""
+    if not snapshot.rows:
+        return True, 0.0, "validated_broker_empty_snapshot"
+
+    total = 0.0
+    seen = False
+    for row in snapshot.rows:
+        record = row.raw
+        if not is_strategy_instrument(row.symbol):
+            continue
+        if str(record.get("product") or "").strip().upper() != "MIS":
+            continue
+        key = "realised" if "realised" in record else "realized" if "realized" in record else None
+        if key is None:
+            continue
+        try:
+            total += float(record.get(key) or 0.0)
+        except (TypeError, ValueError):
+            return False, 0.0, ""
+        seen = True
+    if seen:
+        return True, total, "validated_broker_positions"
+    return False, 0.0, ""
+
+
+def _maybe_seed_pnl_session_baseline(self: Any, payload: Any) -> bool:
+    """Initialize today's baseline only from authoritative broker evidence.
+
+    A non-zero local ledger with no verified trading date is deliberately left
+    blocked because its session provenance cannot be reconstructed safely.
+    A stale dated ledger may be reset by ``establish_pnl_session_baseline`` for
+    the new IST trading day, which is the existing owner of day rollover.
+    """
+    available, seed_value, source = _pnl_baseline_seed_from_snapshot(payload)
+    if not available:
+        return False
+    today = self._trading_date_ist()
+    with getattr(self, "_lock"):
+        baseline = getattr(self, "_session_opening_realized_baseline", None)
+        session_date = getattr(self, "_pnl_trading_date", None)
+        local_realized = float(getattr(self, "_local_realized_pnl", 0.0) or 0.0)
+    if baseline is not None and str(session_date or "") == today:
+        return False
+    stale_dated_state = bool(session_date) and str(session_date) != today
+    if abs(local_realized) > 1e-6 and not stale_dated_state:
+        self._logger.warning(
+            "PNL_BASELINE_SEED_BLOCKED local_realized=%.2f session_date=%s source=%s",
+            local_realized,
+            session_date,
+            source,
+            extra={
+                "event": "PNL_BASELINE_SEED_BLOCKED",
+                "reason": "unverified_nonzero_local_pnl",
+                "local_realized": local_realized,
+                "session_date": session_date,
+                "source": source,
+            },
+        )
+        return False
+    establish = getattr(self, "establish_pnl_session_baseline", None)
+    if not callable(establish):
+        return False
+    established = bool(
+        establish(
+            seed_value,
+            trading_date=today,
+            source=source,
+        )
+    )
+    self._logger.info(
+        "PNL_SESSION_BASELINE_READY trading_date=%s baseline=%.2f source=%s established=%s",
+        today,
+        seed_value,
+        source,
+        established,
+        extra={
+            "event": "PNL_SESSION_BASELINE_READY",
+            "trading_date": today,
+            "baseline": seed_value,
+            "source": source,
+            "established": established,
+        },
+    )
+    return True
+
+
 def _patched_synchronize_with_broker(self: Any, broker_positions: Any) -> Any:
     """Reconcile local session P&L to explicit broker truth after a valid sync."""
     payload = _materialize_broker_positions(broker_positions)
     broker_realized_authoritative = _snapshot_has_authoritative_realized(payload)
     result = _ORIGINAL_SYNCHRONIZE_WITH_BROKER(self, payload)
+    _maybe_seed_pnl_session_baseline(self, payload)
     if not broker_realized_authoritative:
         return result
 
