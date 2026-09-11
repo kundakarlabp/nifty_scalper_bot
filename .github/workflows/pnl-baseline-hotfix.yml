@@ -1,0 +1,88 @@
+name: PnL baseline hotfix
+
+on:
+  push:
+    branches:
+      - fix/pnl-baseline-readiness-20260911
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Apply focused production patch
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              p = Path(path)
+              text = p.read_text(encoding='utf-8')
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{path}: expected one match, found {count}')
+              p.write_text(text.replace(old, new, 1), encoding='utf-8')
+
+          risk_patch = 'src/nifty_scalper_bot/execution/position_risk_state_patch.py'
+          old = '''def _patched_synchronize_with_broker(self: Any, broker_positions: Any) -> Any:\n    \"\"\"Reconcile local session P&L to explicit broker truth after a valid sync.\"\"\"\n    payload = _materialize_broker_positions(broker_positions)\n    broker_realized_authoritative = _snapshot_has_authoritative_realized(payload)\n    result = _ORIGINAL_SYNCHRONIZE_WITH_BROKER(self, payload)\n    if not broker_realized_authoritative:\n        return result\n'''
+          new = '''def _pnl_baseline_seed_from_snapshot(payload: Any) -> tuple[bool, float, str]:\n    \"\"\"Resolve a safe opening realised-P&L baseline from broker truth.\n\n    Zerodha's authoritative ``data.net`` snapshot is an empty list before any\n    intraday position exists. That is positive evidence for a zero opening\n    baseline, not missing P&L evidence. Non-empty snapshots are only usable\n    when a managed MIS row explicitly carries ``realised``/``realized``.\n    \"\"\"\n    try:\n        snapshot = decode_position_snapshot(payload)\n    except Exception:\n        return False, 0.0, \"\"\n    if not snapshot.rows:\n        return True, 0.0, \"validated_broker_empty_snapshot\"\n\n    total = 0.0\n    seen = False\n    for row in snapshot.rows:\n        record = row.raw\n        if not is_strategy_instrument(row.symbol):\n            continue\n        if str(record.get(\"product\") or \"\").strip().upper() != \"MIS\":\n            continue\n        key = \"realised\" if \"realised\" in record else \"realized\" if \"realized\" in record else None\n        if key is None:\n            continue\n        try:\n            total += float(record.get(key) or 0.0)\n        except (TypeError, ValueError):\n            return False, 0.0, \"\"\n        seen = True\n    if seen:\n        return True, total, \"validated_broker_positions\"\n    return False, 0.0, \"\"\n\n\ndef _maybe_seed_pnl_session_baseline(self: Any, payload: Any) -> bool:\n    \"\"\"Initialize today's baseline only from authoritative broker evidence.\n\n    A non-zero local ledger with no verified trading date is deliberately left\n    blocked because its session provenance cannot be reconstructed safely.\n    A stale dated ledger may be reset by ``establish_pnl_session_baseline`` for\n    the new IST trading day, which is the existing owner of day rollover.\n    \"\"\"\n    available, seed_value, source = _pnl_baseline_seed_from_snapshot(payload)\n    if not available:\n        return False\n    today = self._trading_date_ist()\n    with getattr(self, \"_lock\"):\n        baseline = getattr(self, \"_session_opening_realized_baseline\", None)\n        session_date = getattr(self, \"_pnl_trading_date\", None)\n        local_realized = float(getattr(self, \"_local_realized_pnl\", 0.0) or 0.0)\n    if baseline is not None and str(session_date or \"\") == today:\n        return False\n    stale_dated_state = bool(session_date) and str(session_date) != today\n    if abs(local_realized) > 1e-6 and not stale_dated_state:\n        self._logger.warning(\n            \"PNL_BASELINE_SEED_BLOCKED local_realized=%.2f session_date=%s source=%s\",\n            local_realized,\n            session_date,\n            source,\n            extra={\n                \"event\": \"PNL_BASELINE_SEED_BLOCKED\",\n                \"reason\": \"unverified_nonzero_local_pnl\",\n                \"local_realized\": local_realized,\n                \"session_date\": session_date,\n                \"source\": source,\n            },\n        )\n        return False\n    establish = getattr(self, \"establish_pnl_session_baseline\", None)\n    if not callable(establish):\n        return False\n    established = bool(\n        establish(\n            seed_value,\n            trading_date=today,\n            source=source,\n        )\n    )\n    self._logger.info(\n        \"PNL_SESSION_BASELINE_READY trading_date=%s baseline=%.2f source=%s established=%s\",\n        today,\n        seed_value,\n        source,\n        established,\n        extra={\n            \"event\": \"PNL_SESSION_BASELINE_READY\",\n            \"trading_date\": today,\n            \"baseline\": seed_value,\n            \"source\": source,\n            \"established\": established,\n        },\n    )\n    return True\n\n\ndef _patched_synchronize_with_broker(self: Any, broker_positions: Any) -> Any:\n    \"\"\"Reconcile local session P&L to explicit broker truth after a valid sync.\"\"\"\n    payload = _materialize_broker_positions(broker_positions)\n    broker_realized_authoritative = _snapshot_has_authoritative_realized(payload)\n    result = _ORIGINAL_SYNCHRONIZE_WITH_BROKER(self, payload)\n    _maybe_seed_pnl_session_baseline(self, payload)\n    if not broker_realized_authoritative:\n        return result\n'''
+          replace_once(risk_patch, old, new)
+
+          readiness = 'src/nifty_scalper_bot/execution/readiness.py'
+          replace_once(
+              readiness,
+              '''    \"position_reconciliation_incomplete\",\n    \"unresolved_exit_position\",\n''',
+              '''    \"position_reconciliation_incomplete\",\n    \"pnl_baseline_uninitialized\",\n    \"pnl_session_date_unverified\",\n    \"pnl_reconciliation_mismatch\",\n    \"unresolved_exit_position\",\n''',
+          )
+          replace_once(
+              readiness,
+              '''        \"position_reconciliation_incomplete\",\n        \"unresolved_exit_position\",\n''',
+              '''        \"position_reconciliation_incomplete\",\n        \"pnl_baseline_uninitialized\",\n        \"pnl_session_date_unverified\",\n        \"pnl_reconciliation_mismatch\",\n        \"unresolved_exit_position\",\n''',
+          )
+
+          app = 'src/nifty_scalper_bot/core/app.py'
+          replace_once(
+              app,
+              '''        if bool(getattr(ctx, \"unprotected_broker_positions\", set())):\n            missing.append(\"unprotected_broker_position\")\n    normalized_decision = normalize_readiness_blockers(\n''',
+              '''        if bool(getattr(ctx, \"unprotected_broker_positions\", set())):\n            missing.append(\"unprotected_broker_position\")\n        position_manager = getattr(ctx, \"position_manager\", None)\n        pnl_blocker_reader = getattr(\n            position_manager, \"current_pnl_reconciliation_blocker\", None\n        )\n        if callable(pnl_blocker_reader):\n            pnl_blocker = None\n            with suppress(Exception):\n                pnl_blocker = pnl_blocker_reader()\n            if pnl_blocker:\n                missing.append(str(pnl_blocker))\n    normalized_decision = normalize_readiness_blockers(\n''',
+          )
+
+          test_path = Path('tests/execution/test_pnl_baseline_live_readiness_regression.py')
+          test_text = test_path.read_text(encoding='utf-8')
+          if 'test_canonical_app_readiness_consumes_position_manager_pnl_blocker' not in test_text:
+              test_text += '''\n\ndef test_canonical_app_readiness_consumes_position_manager_pnl_blocker() -> None:\n    from pathlib import Path\n\n    source = Path(\"src/nifty_scalper_bot/core/app.py\").read_text(encoding=\"utf-8\")\n    assert \"current_pnl_reconciliation_blocker\" in source\n    assert \"missing.append(str(pnl_blocker))\" in source\n'''
+              test_path.write_text(test_text, encoding='utf-8')
+          PY
+      - name: Install test dependencies
+        run: python -m pip install -q -e '.[dev]'
+      - name: Run focused regressions
+        run: |
+          python -m compileall -q src
+          pytest -q \
+            tests/execution/test_pnl_baseline_live_readiness_regression.py \
+            tests/execution/test_execution_safety_audit_fixes.py \
+            tests/execution/test_readiness_execution_safety_blockers.py \
+            tests/risk/test_day_pnl_restart_seed.py
+      - name: Commit focused fix
+        shell: bash
+        run: |
+          rm -f .github/workflows/pnl-baseline-hotfix.yml
+          git config user.name 'Kundakarlabp'
+          git config user.email 'kundakarlabp@gmail.com'
+          git add src/nifty_scalper_bot/execution/position_risk_state_patch.py \
+                  src/nifty_scalper_bot/execution/readiness.py \
+                  src/nifty_scalper_bot/core/app.py \
+                  tests/execution/test_pnl_baseline_live_readiness_regression.py \
+                  .github/workflows/pnl-baseline-hotfix.yml
+          git commit -m 'fix: initialize authoritative pnl baseline before live arming'
+          git push origin HEAD:fix/pnl-baseline-readiness-20260911
