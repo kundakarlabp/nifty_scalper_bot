@@ -22,6 +22,11 @@ def _manager(
         reset_hour_utc=3,
     )
     tripped: list[str] = []
+    baseline_requirements: list[bool] = []
+
+    def require_baseline(required: bool = True) -> None:
+        baseline_requirements.append(bool(required))
+
     stub = SimpleNamespace(
         _switches=switches,
         _logger=SimpleNamespace(warning=lambda *a, **k: None),
@@ -30,6 +35,7 @@ def _manager(
         _trip_breaker=lambda reason: tripped.append(reason),
         position_manager=SimpleNamespace(
             get_realized_pnl=lambda: realized,
+            require_pnl_session_baseline=require_baseline,
             get_risk_circuit_state=lambda: (
                 {"trading_date": circuit_date} if circuit_date else {}
             ),
@@ -40,6 +46,7 @@ def _manager(
     stub._seed_day_pnl_from_persisted_state = MethodType(
         RiskManager._seed_day_pnl_from_persisted_state, stub
     )
+    stub._baseline_requirements = baseline_requirements
     return stub, switches, tripped
 
 
@@ -72,6 +79,7 @@ def test_unknown_session_date_is_not_seeded() -> None:
     stub._seed_day_pnl_from_persisted_state()
 
     assert switches.day_loss() == 0.0
+    assert stub._baseline_requirements == [True]
 
 
 def test_same_day_risk_circuit_recovers_missing_pnl_session_date() -> None:
@@ -93,6 +101,7 @@ def test_previous_risk_circuit_date_does_not_recover_missing_session_date() -> N
     stub._seed_day_pnl_from_persisted_state()
 
     assert switches.day_loss() == 0.0
+    assert stub._baseline_requirements == [True]
 
 
 def test_flat_pnl_is_a_no_op() -> None:
