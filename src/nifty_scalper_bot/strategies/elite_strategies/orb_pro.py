@@ -376,16 +376,19 @@ class ORBProStrategy(EliteStrategy):
         self,
         *,
         side: str,
-        branch: str,
         direction: str,
         penetration_atr: float,
         volume_ratio: float,
+        opening_range_atr: float,
         indicators: Mapping[str, Any],
-    ) -> tuple[float, list[str]]:
-        score = 4.0
-        reasons = ["underlying_opening_range_complete", "fresh_underlying_breakout"]
-        score += 2.0
-        reasons.append("retest_hold" if branch == "retest" else "momentum_acceptance")
+    ) -> tuple[float, list[str], bool, float, float]:
+        """Score independent ORB quality domains once on a common 0..10 scale."""
+        score = 5.0
+        reasons = [
+            "underlying_opening_range_complete",
+            "fresh_underlying_breakout",
+            "breakout_event_confirmed",
+        ]
         if direction == side:
             score += 1.0
             reasons.append("underlying_direction_alignment")
@@ -401,7 +404,21 @@ class ORBProStrategy(EliteStrategy):
         ):
             score += 1.0
             reasons.append("futures_vwap_slope_alignment")
-        return max(0.0, min(10.0, score)), reasons
+        balanced_min = max(0.05, _env_float("ORB_BALANCED_RANGE_MIN_ATR", 0.25))
+        balanced_max = max(
+            balanced_min, _env_float("ORB_BALANCED_RANGE_MAX_ATR", 1.75)
+        )
+        balanced_range = balanced_min <= opening_range_atr <= balanced_max
+        if balanced_range:
+            score += 1.0
+            reasons.append("balanced_opening_range")
+        return (
+            max(0.0, min(10.0, score)),
+            reasons,
+            balanced_range,
+            balanced_min,
+            balanced_max,
+        )
 
     def _build_signal(
         self,
@@ -414,7 +431,7 @@ class ORBProStrategy(EliteStrategy):
         event: Mapping[str, Any],
         branch: str,
         retest_timestamp: datetime | None,
-    ) -> EliteSignal:
+    ) -> EliteSignal | None:
         option_atr = max(float(indicators.get("atr") or 0.0), current_price * 0.01, 1.0)
         max_stop_pct = max(0.5, _env_float("ORB_PREMIUM_STOP_MAX_PCT", 8.0)) / 100.0
         atr_stop = max(0.5, _env_float("ORB_PREMIUM_STOP_ATR_MULT", 0.75) * option_atr)
@@ -436,19 +453,38 @@ class ORBProStrategy(EliteStrategy):
         )
         current_underlying = float(snapshot["current"]["close"])
         penetration_atr = abs(current_underlying - boundary) / max(underlying_atr, 1e-9)
+        opening_range_atr = (
+            float(snapshot["orb_high"]) - float(snapshot["orb_low"])
+        ) / max(underlying_atr, 1e-9)
         direction = str(
             indicators.get("underlying_direction_bias")
             or indicators.get("direction_bias")
             or ""
         ).upper()
-        strategy_score, reasons = self._quality_score(
+        (
+            strategy_score,
+            reasons,
+            balanced_range,
+            balanced_min,
+            balanced_max,
+        ) = self._quality_score(
             side=side,
-            branch=branch,
             direction=direction,
             penetration_atr=penetration_atr,
             volume_ratio=float(snapshot["volume_ratio"]),
+            opening_range_atr=opening_range_atr,
             indicators=indicators,
         )
+        reasons.append("retest_hold" if branch == "retest" else "momentum_acceptance")
+        is_live = str(os.getenv("EXECUTION_MODE", "SHADOW") or "SHADOW").strip().upper() == "LIVE"
+        min_score = _env_float(
+            "ORB_QUALITY_MIN_SCORE_LIVE" if is_live else "ORB_QUALITY_MIN_SCORE_SHADOW",
+            6.0 if is_live else 5.0,
+        )
+        if strategy_score < min_score:
+            self._no_vote("orb_quality_below_minimum")
+            return None
+
         breakout_ts = event["breakout_timestamp"]
         source = str(snapshot["source"])
         setup_id = (
@@ -474,6 +510,10 @@ class ORBProStrategy(EliteStrategy):
             "orb_window_minutes": int(snapshot["orb_minutes"]),
             "opening_range_high": float(snapshot["orb_high"]),
             "opening_range_low": float(snapshot["orb_low"]),
+            "opening_range_width_atr": round(opening_range_atr, 4),
+            "opening_range_balanced": balanced_range,
+            "opening_range_balanced_min_atr": balanced_min,
+            "opening_range_balanced_max_atr": balanced_max,
             "opening_range_complete": True,
             "breakout_side": side,
             "breakout_timestamp": breakout_ts.timestamp(),
@@ -498,6 +538,9 @@ class ORBProStrategy(EliteStrategy):
             "premium_stop_distance": premium_stop_distance,
             "premium_target_rr": target_rr,
             "raw_setup_score": strategy_score,
+            "setup_score": strategy_score,
+            "setup_min": min_score,
+            "setup_pass": True,
             "strategy_score": strategy_score,
             "setup_quality": strategy_score,
             "confidence_semantics": "setup_quality_fraction_not_probability",
@@ -515,12 +558,13 @@ class ORBProStrategy(EliteStrategy):
         }
         LOGGER.info(
             "STRATEGY_VOTE strategy=ORBProV2 side=%s branch=%s score=%.2f "
-            "source=%s underlying=%s",
+            "source=%s underlying=%s opening_range_atr=%.3f",
             side,
             branch,
             strategy_score,
             source,
             snapshot["symbol"],
+            opening_range_atr,
         )
         return EliteSignal(
             symbol=symbol,
@@ -602,7 +646,11 @@ class ORBProStrategy(EliteStrategy):
             else:
                 self._no_vote("orb_event_already_emitted")
                 return None
-        if event is not None and event.get("status") in {"INVALIDATED", "EXPIRED"}:
+        if event is not None and event.get("status") in {
+            "INVALIDATED",
+            "EXPIRED",
+            "QUALITY_REJECTED",
+        }:
             back_inside = (
                 current_close <= orb_high if side == "CE" else current_close >= orb_low
             )
@@ -668,9 +716,7 @@ class ORBProStrategy(EliteStrategy):
                 >= _env_float("ORB_MOMENTUM_MIN_VOLUME_RATIO", 1.20)
             )
             if momentum_confirmed:
-                event["status"] = "EMITTED"
-                self._event_count_by_key[key] = self._event_count_by_key.get(key, 0) + 1
-                return self._build_signal(
+                signal = self._build_signal(
                     symbol=symbol,
                     side=side,
                     current_price=current_price,
@@ -680,6 +726,12 @@ class ORBProStrategy(EliteStrategy):
                     branch="momentum",
                     retest_timestamp=None,
                 )
+                if signal is None:
+                    event["status"] = "QUALITY_REJECTED"
+                    return None
+                event["status"] = "EMITTED"
+                self._event_count_by_key[key] = self._event_count_by_key.get(key, 0) + 1
+                return signal
             self._no_vote("awaiting_orb_retest")
             return None
 
@@ -713,9 +765,7 @@ class ORBProStrategy(EliteStrategy):
             self._no_vote("awaiting_orb_retest")
             return None
 
-        event["status"] = "EMITTED"
-        self._event_count_by_key[key] = self._event_count_by_key.get(key, 0) + 1
-        return self._build_signal(
+        signal = self._build_signal(
             symbol=symbol,
             side=side,
             current_price=current_price,
@@ -725,6 +775,12 @@ class ORBProStrategy(EliteStrategy):
             branch="retest",
             retest_timestamp=current_ts,
         )
+        if signal is None:
+            event["status"] = "QUALITY_REJECTED"
+            return None
+        event["status"] = "EMITTED"
+        self._event_count_by_key[key] = self._event_count_by_key.get(key, 0) + 1
+        return signal
 
 
 __all__ = ["ORBProStrategy"]
