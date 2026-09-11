@@ -1990,6 +1990,11 @@ class PositionManager:
                 and self._session_opening_realized_baseline is None
             ):
                 return "pnl_baseline_uninitialized"
+            if (
+                self._require_pnl_baseline_for_entries
+                and self._pnl_trading_date != self._trading_date_ist()
+            ):
+                return "pnl_session_date_unverified"
             if self._pnl_reconciliation_status == "mismatch":
                 return "pnl_reconciliation_mismatch"
             return None
