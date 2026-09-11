@@ -81,6 +81,10 @@ class VWAPProStrategy(EliteStrategy):
         """Args: config, indicator_engine. Returns: None. Raises: Exception."""
         super().__init__(config=config, indicator_engine=indicator_engine)
         self._cfg = config
+        # The exposed EMA period has one native role: warm-up/history sufficiency.
+        # Direction remains owned by the underlying context engine; there is no
+        # second EMA direction calculation inside VWAPPro.
+        self.MIN_BARS_REQUIRED = max(10, int(self._cfg.ema_period or 10))
         self._allow_pullback = str(os.getenv("VWAP_ALLOW_PULLBACK_ENTRY", "1")).lower() in {
             "1",
             "true",
@@ -96,6 +100,10 @@ class VWAPProStrategy(EliteStrategy):
         )
         self._quality_max_distance_atr = max(
             0.5, float(os.getenv("VWAP_QUALITY_MAX_DISTANCE_ATR", "2.0") or 2.0)
+        )
+        self._trend_quality_max_distance_atr = max(
+            self._quality_max_distance_atr,
+            float(os.getenv("VWAP_TREND_QUALITY_MAX_DISTANCE_ATR", "5.0") or 5.0),
         )
         self._min_penetration_atr = max(
             0.0,
@@ -286,6 +294,16 @@ class VWAPProStrategy(EliteStrategy):
                 or fut_ctx.get("direction_bias")
                 or ""
             ).upper()
+            context_age_seconds = resolve_context_age_seconds(indicators)
+            try:
+                underlying_direction_confidence = float(
+                    indicators.get("underlying_direction_confidence")
+                    or spot_ctx.get("underlying_direction_confidence")
+                    or fut_ctx.get("underlying_direction_confidence")
+                    or 0.0
+                )
+            except (TypeError, ValueError):
+                underlying_direction_confidence = 0.0
 
             def _optional_float(value: Any) -> float | None:
                 try:
@@ -321,9 +339,28 @@ class VWAPProStrategy(EliteStrategy):
                 self._max_distance_pct,
                 self._max_atr_distance_mult * atr_safe / max(vwap, 1e-9),
             )
+            symbol_upper = str(symbol or "").upper()
+            preliminary_side = (
+                "CE"
+                if symbol_upper.endswith("CE")
+                else "PE"
+                if symbol_upper.endswith("PE")
+                else ""
+            )
+            strong_fresh_trend_context = bool(
+                preliminary_side in {"CE", "PE"}
+                and underlying_direction == preliminary_side
+                and underlying_direction_confidence >= self._early_trend_min_context_conf
+                and context_age_seconds <= self._early_trend_max_context_age
+            )
+            effective_quality_max_distance_atr = (
+                self._trend_quality_max_distance_atr
+                if strong_fresh_trend_context
+                else self._quality_max_distance_atr
+            )
             overextended = bool(
                 distance_pct > allowed_distance
-                or distance_atr > self._quality_max_distance_atr
+                or distance_atr > effective_quality_max_distance_atr
             )
             if overextended:
                 self._no_vote("distance_outside_band")
@@ -489,16 +526,6 @@ class VWAPProStrategy(EliteStrategy):
                 if trend_alignment
                 else os.getenv("VWAP_PRO_MIN_SCORE", min_score_default)
             )
-            context_age_seconds = resolve_context_age_seconds(indicators)
-            try:
-                underlying_direction_confidence = float(
-                    indicators.get("underlying_direction_confidence")
-                    or spot_ctx.get("underlying_direction_confidence")
-                    or fut_ctx.get("underlying_direction_confidence")
-                    or 0.0
-                )
-            except (TypeError, ValueError):
-                underlying_direction_confidence = 0.0
             context_fresh = context_age_seconds <= float(
                 os.getenv("VWAP_CONTEXT_MAX_AGE_SECONDS", "120") or "120"
             )
@@ -686,6 +713,7 @@ class VWAPProStrategy(EliteStrategy):
                         "early_trend_pullback": early_trend_pullback,
                         "distance_atr": distance_atr,
                         "configured_proximity_pct": configured_proximity_pct,
+                        "effective_quality_max_distance_atr": effective_quality_max_distance_atr,
                     },
                 )
                 return None
@@ -737,7 +765,10 @@ class VWAPProStrategy(EliteStrategy):
                 "distance_pct": round(distance_pct, 4),
                 "vwap_distance_atr": round(distance_atr, 4),
                 "allowed_distance_pct": round(allowed_distance, 4),
-                "vwap_quality_max_distance_atr": self._quality_max_distance_atr,
+                "vwap_quality_max_distance_atr": effective_quality_max_distance_atr,
+                "vwap_base_quality_max_distance_atr": self._quality_max_distance_atr,
+                "vwap_trend_quality_max_distance_atr": self._trend_quality_max_distance_atr,
+                "vwap_strong_fresh_trend_context": strong_fresh_trend_context,
                 "vwap_configured_proximity_pct": configured_proximity_pct,
                 "vwap_configured_proximity_pass": near_configured_vwap,
                 "atr": atr_safe,
