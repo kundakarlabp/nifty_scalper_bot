@@ -23,6 +23,11 @@ _PROVIDER_BLOCKER_METHODS = (
     "current_execution_blocker",
     "current_reconciliation_blocker",
 )
+_REFRESHABLE_PNL_BLOCKERS = {
+    "pnl_baseline_uninitialized",
+    "pnl_session_date_unverified",
+    "pnl_reconciliation_mismatch",
+}
 
 
 def configure_provider(manager: Any, provider: Any | None) -> None:
@@ -132,9 +137,61 @@ def _provider_block_details(provider: Any, manager: Any) -> dict[str, Any] | Non
     return None
 
 
+def _refresh_pnl_blocker(
+    provider: Any,
+    manager: Any,
+    details: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Refresh broker P&L authority once before rejecting a live entry."""
+
+    reason = str(details.get("block_reason") or "").strip()
+    if reason not in _REFRESHABLE_PNL_BLOCKERS:
+        return details
+    position_manager = getattr(manager, "_positions", None) or getattr(
+        manager, "_position_manager", None
+    )
+    reconcile = getattr(position_manager, "reconcile_now", None)
+    if not callable(reconcile):
+        return details
+
+    reconciled = False
+    error: str | None = None
+    try:
+        reconciled = bool(reconcile())
+    except Exception as exc:  # noqa: BLE001 - unresolved authority stays blocked
+        error = f"{type(exc).__name__}: {exc}"
+
+    logger = getattr(manager, "_logger", None)
+    if reconciled:
+        refreshed = _provider_block_details(provider, manager)
+        if refreshed is None:
+            log = getattr(logger, "info", None)
+            if callable(log):
+                log(
+                    "PNL_ENTRY_RECONCILE_RESOLVED prior_reason=%s",
+                    reason,
+                    extra={
+                        "event": "PNL_ENTRY_RECONCILE_RESOLVED",
+                        "prior_reason": reason,
+                        "pnl_reconcile_attempted": True,
+                    },
+                )
+            return None
+        details = refreshed
+
+    details = dict(details)
+    details["pnl_reconcile_attempted"] = True
+    details["pnl_reconcile_success"] = reconciled
+    if error:
+        details["pnl_reconcile_error"] = error
+    return details
+
+
 def unresolved_details(manager: Any) -> dict[str, Any] | None:
     provider = getattr(manager, "_unresolved_exit_provider", None)
     provider_block = _provider_block_details(provider, manager)
+    if provider_block is not None:
+        provider_block = _refresh_pnl_blocker(provider, manager, provider_block)
     if provider_block is not None:
         _record_block(manager, provider_block)
         return provider_block

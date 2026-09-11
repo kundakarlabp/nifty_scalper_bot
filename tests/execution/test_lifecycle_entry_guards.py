@@ -5,6 +5,7 @@ from typing import Any
 
 from nifty_scalper_bot.execution import native_entry_gate
 from nifty_scalper_bot.execution.ownership import BoundBracketManager
+from nifty_scalper_bot.execution.position_manager import PositionManager
 
 
 class _Result:
@@ -33,6 +34,87 @@ class _Manager:
 
     def is_live_mode(self) -> bool:
         return True
+
+
+def test_native_entry_gate_refreshes_broker_pnl_before_blocking() -> None:
+    state = {"blocker": "pnl_baseline_uninitialized", "reconcile_calls": 0}
+
+    def reconcile_now() -> bool:
+        state["reconcile_calls"] += 1
+        state["blocker"] = None
+        return True
+
+    provider = SimpleNamespace(
+        current_entry_blocker=lambda: state["blocker"],
+    )
+    manager = _Manager(provider)
+    manager._positions = SimpleNamespace(reconcile_now=reconcile_now)
+
+    result = native_entry_gate.block_result(
+        manager,
+        _BaseModule,
+        _base_place_order,
+        "place_order",
+        (),
+        {"intent": "ENTRY"},
+    )
+
+    assert result is native_entry_gate.NO_BLOCK
+    assert state["reconcile_calls"] == 1
+    assert manager._last_order_decision == {}
+    assert manager.skip_reasons == []
+
+
+def test_native_entry_gate_uses_authoritative_broker_snapshot_for_pnl(
+    tmp_path,
+) -> None:
+    position_manager = PositionManager(state_file=str(tmp_path / "positions.json"))
+    position_manager.require_pnl_session_baseline()
+    position_manager.set_broker_client(
+        SimpleNamespace(get_positions=lambda: {"net": []})
+    )
+    provider = SimpleNamespace(
+        current_entry_blocker=position_manager.current_pnl_reconciliation_blocker,
+    )
+    manager = _Manager(provider)
+    manager._positions = position_manager
+
+    result = native_entry_gate.block_result(
+        manager,
+        _BaseModule,
+        _base_place_order,
+        "place_order",
+        (),
+        {"intent": "ENTRY"},
+    )
+
+    assert result is native_entry_gate.NO_BLOCK
+    assert position_manager.current_pnl_reconciliation_blocker() is None
+    assert position_manager.pnl_reconciliation_snapshot()["baseline_source"] == (
+        "validated_broker_empty_snapshot"
+    )
+
+
+def test_native_entry_gate_keeps_pnl_block_when_broker_refresh_fails() -> None:
+    provider = SimpleNamespace(
+        current_entry_blocker=lambda: "pnl_reconciliation_mismatch",
+    )
+    manager = _Manager(provider)
+    manager._positions = SimpleNamespace(reconcile_now=lambda: False)
+
+    result = native_entry_gate.block_result(
+        manager,
+        _BaseModule,
+        _base_place_order,
+        "submit_trade_plan_result",
+        (object(),),
+        {},
+    )
+
+    assert result.accepted is False
+    assert result.reason == "pnl_reconciliation_mismatch"
+    assert result.details["pnl_reconcile_attempted"] is True
+    assert result.details["pnl_reconcile_success"] is False
 
 
 def _base_place_order(_manager: Any, *, intent: str | None = None, tag: str | None = None) -> None:
