@@ -22,6 +22,7 @@ from nifty_scalper_bot.execution.protective_order_intent_patch import apply_patc
 from nifty_scalper_bot.execution.position_risk_state_patch import apply_patches as _apply_position_risk_state_patches
 from nifty_scalper_bot.execution.stop_rearm_contract_patch import apply_patches as _apply_stop_rearm_contract_patches
 from nifty_scalper_bot.execution.broker_pnl_authority_patch import apply_patches as _apply_broker_pnl_authority_patches
+from nifty_scalper_bot.execution.pnl_session_rollover_patch import apply_patches as _apply_pnl_session_rollover_patches
 from nifty_scalper_bot.execution.pnl_nonblocking_patch import apply_patches as _apply_pnl_nonblocking_patches
 import nifty_scalper_bot.data.quote_identity_extension as _quote_identity_extension
 import nifty_scalper_bot.execution.bracket_ownership_extension as _bracket_ownership_extension
@@ -41,6 +42,7 @@ _broker_order_ledger_patch.apply_patches()
 _bracket_ownership_extension.apply_patches()
 _trade_plan_identity_guard.apply_patches()
 _apply_broker_pnl_authority_patches()
+_apply_pnl_session_rollover_patches()
 _apply_pnl_nonblocking_patches()
 
 CanonicalBracketManager = BracketManager
