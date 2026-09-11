@@ -5882,6 +5882,10 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     position_state_path = Path(data_dir) / "positions.json"
     position_manager = PositionManager(state_file=str(position_state_path))
     position_manager.attach_persistent_state(persistent_state)
+    # RiskManager enables this guard during construction, which occurs after
+    # broker hydration.  Enable it first so the authoritative startup snapshot
+    # can initialize today's MIS P&L baseline atomically with position recovery.
+    position_manager.require_pnl_session_baseline()
     if hasattr(market_data_manager, "set_position_manager"):
         market_data_manager.set_position_manager(position_manager)
 
