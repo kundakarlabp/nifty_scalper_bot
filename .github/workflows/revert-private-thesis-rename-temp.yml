@@ -45,7 +45,7 @@ jobs:
           ALLOW_REAL_BROKER: 'false'
           BROKER_SIMULATION: 'true'
         run: |
-          python -m pip install -r requirements.txt >/dev/null
+          python -m pip install -r requirements.txt pytest >/dev/null
           python -m pytest -q \
             tests/risk/test_persisted_cap_and_stop_reentry.py \
             tests/risk/test_structural_stop_rearm.py \
