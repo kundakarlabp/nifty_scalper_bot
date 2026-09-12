@@ -53,7 +53,10 @@ class BBSqueezeStrategy(EliteStrategy):
             mid = float(indicators.get("bollinger_middle") or 0.0)
             close = float(indicators.get("close") or current_price)
             open_price = float(indicators.get("open") or current_price)
-            atr = max(float(indicators.get("atr") or 0.0), current_price * 0.01, 1.0)
+            atr = float(indicators.get("atr") or 0.0)
+            if not atr > 0.0:
+                self._no_vote("atr_unavailable")
+                return None
             direction = str(indicators.get("direction_bias") or "").upper()
             volume = float(indicators.get("volume") or 0.0)
             avg_volume = float(indicators.get("avg_volume") or 0.0)
