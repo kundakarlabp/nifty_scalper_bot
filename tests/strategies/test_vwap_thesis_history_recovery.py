@@ -7,7 +7,7 @@ import pytest
 
 from nifty_scalper_bot.strategies.elite_strategies.config_models import VWAPProStrategyConfig
 from nifty_scalper_bot.strategies.elite_strategies.vwap_pro import VWAPProStrategy
-from nifty_scalper_bot.strategies.signal_identity_patch import _deterministic_id
+from nifty_scalper_bot.strategies.signal_identity import deterministic_signal_id
 
 
 class _HistoryEngine:
@@ -214,4 +214,4 @@ def test_restart_preserves_identity_for_equivalent_anchor_formats(
         f"vwap:CE:2026-09-08 04:30:00+00:00:2026-09-08:{symbol}"
     )
     assert uninterrupted.metadata["setup_id"] == recovered.metadata["setup_id"]
-    assert _deterministic_id(uninterrupted) == _deterministic_id(recovered)
+    assert deterministic_signal_id(uninterrupted) == deterministic_signal_id(recovered)

@@ -15,8 +15,8 @@ from nifty_scalper_bot.strategies.elite_strategies.orb_pro import ORBProStrategy
 from nifty_scalper_bot.strategies.elite_strategies.order_flow import (
     _stamp_quote_update_identity,
 )
-from nifty_scalper_bot.strategies.signal_identity_patch import (
-    _stamp_evaluation_identity,
+from nifty_scalper_bot.strategies.signal_identity import (
+    stamp_evaluation_identity,
 )
 
 
@@ -159,7 +159,7 @@ def test_indicator_quote_version_overrides_stale_signal_metadata() -> None:
         },
     )
 
-    result = _stamp_evaluation_identity(
+    result = stamp_evaluation_identity(
         signal,
         {
             "quote_update_version": 7,
@@ -187,7 +187,7 @@ def test_signal_metadata_quote_version_is_valid_fallback() -> None:
         },
     )
 
-    result = _stamp_evaluation_identity(signal, {})
+    result = stamp_evaluation_identity(signal, {})
 
     assert result.metadata["quote_update_version"] == 6
     assert result.metadata["quote_update_version_source"] == "microstructure_fingerprint"

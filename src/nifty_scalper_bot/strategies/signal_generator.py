@@ -7,21 +7,22 @@ Runtime role:
 
 from __future__ import annotations
 
+import dataclasses
+import datetime as dt
+import math
+import os
 from abc import ABC, abstractmethod
 from collections import defaultdict, deque
 from contextlib import suppress
-import dataclasses
-import datetime as dt
 from dataclasses import dataclass, field
 from datetime import datetime, time
-import hashlib
-import math
-import os
 from typing import Any, Deque, Iterable, Literal, Mapping, MutableMapping, Protocol
 
 from nifty_scalper_bot.config.env_utils import parse_bool_env, parse_float_env
 from nifty_scalper_bot.core.signal_arbitrator import SignalArbitrator
-from nifty_scalper_bot.core.strategy_context_builder import build_strategy_history_context
+from nifty_scalper_bot.core.strategy_context_builder import (
+    build_strategy_history_context,
+)
 from nifty_scalper_bot.execution.readiness import HistoryReadinessPolicy
 from nifty_scalper_bot.instruments.active_contracts import canonical_nifty_future_symbol
 from nifty_scalper_bot.utils.logging import get_logger, log_throttled
@@ -94,25 +95,10 @@ class Signal:
 
     @property
     def deterministic_id(self) -> str:
-        """
-        Generate a stable, restart-safe ID for this signal.
-        Logic: HASH(Strategy + Symbol + Action + MinuteTimestamp)
-        """
-        ts_raw = self.metadata.get("timestamp")
+        """Return the native stable setup identity for this signal."""
+        from nifty_scalper_bot.strategies.signal_identity import deterministic_signal_id
 
-        if isinstance(ts_raw, str):
-            ts_str = ts_raw[:16]
-        elif isinstance(ts_raw, (int, float)):
-            ts_str = str(int(ts_raw / 60))
-        elif isinstance(ts_raw, datetime):
-            ts_str = ts_raw.strftime("%Y%m%d%H%M")
-        else:
-            now = datetime.now()
-            ts_str = now.strftime("%Y%m%d%H%M")
-
-        strategy = self.metadata.get("strategy", "manual")
-        raw_sig = f"{strategy}:{self.symbol}:{self.action}:{ts_str}"
-        return hashlib.md5(raw_sig.encode()).hexdigest()[:16]
+        return deterministic_signal_id(self)
 
     @property
     def direction(self) -> str:

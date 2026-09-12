@@ -5,8 +5,8 @@ from typing import Any
 
 from nifty_scalper_bot.execution import order_manager_core
 from nifty_scalper_bot.execution.runtime_order_manager import RuntimeOrderManager
-from nifty_scalper_bot.strategies.signal_identity_patch import (
-    _deterministic_id,
+from nifty_scalper_bot.strategies.signal_identity import (
+    deterministic_signal_id,
     current_order_setup_metadata,
 )
 
@@ -47,7 +47,7 @@ def test_runtime_order_scopes_exact_setup_identity_to_core_call(monkeypatch) -> 
             "setup_candle_timestamp": setup_timestamp,
         },
     )
-    signal_id = _deterministic_id(signal)
+    signal_id = deterministic_signal_id(signal)
     observed: dict[str, Any] = {}
 
     def core_place_order(self: Any, *args: Any, **kwargs: Any) -> str:
@@ -83,7 +83,7 @@ def test_context_only_vote_does_not_become_rearm_provenance(monkeypatch) -> None
             "setup_candle_timestamp": "2026-08-11T09:47:00+05:30",
         },
     )
-    signal_id = _deterministic_id(signal)
+    signal_id = deterministic_signal_id(signal)
     observed: dict[str, Any] = {"sentinel": True}
 
     def core_place_order(self: Any, *args: Any, **kwargs: Any) -> str:

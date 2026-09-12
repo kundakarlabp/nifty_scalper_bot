@@ -3,8 +3,8 @@ from __future__ import annotations
 import importlib
 
 
-def test_strategy_package_installs_quote_context_contract() -> None:
-    importlib.import_module("nifty_scalper_bot.strategies")
+def test_indicator_engine_natively_preserves_quote_context_contract() -> None:
+    importlib.import_module("nifty_scalper_bot.strategies.indicators")
     from nifty_scalper_bot.strategies.indicators import IndicatorEngine
 
     engine = IndicatorEngine()
@@ -23,7 +23,13 @@ def test_strategy_package_installs_quote_context_contract() -> None:
 
     indicators = engine.get_indicators(
         symbol,
-        names={"tick_age_ms", "quote_age_s", "quote_update_version", "real_ticks_last_60s", "quote_depth_valid"},
+        names={
+            "tick_age_ms",
+            "quote_age_s",
+            "quote_update_version",
+            "real_ticks_last_60s",
+            "quote_depth_valid",
+        },
     )
 
     assert indicators["tick_age_ms"] == 120

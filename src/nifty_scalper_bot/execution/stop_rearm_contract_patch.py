@@ -73,7 +73,7 @@ def _signal_setup_epoch(signal: Any) -> float | None:
     # runtime order facade scopes the exact deterministic strategy setup to this
     # synchronous call, so recover that identity without using wall-clock time.
     try:
-        from nifty_scalper_bot.strategies.signal_identity_patch import (
+        from nifty_scalper_bot.strategies.signal_identity import (
             current_order_setup_metadata,
         )
 

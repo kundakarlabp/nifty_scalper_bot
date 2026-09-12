@@ -12,8 +12,8 @@ from nifty_scalper_bot.strategies.elite_strategies.base_elite import (
 from nifty_scalper_bot.strategies.elite_strategies.config_models import (
     EliteStrategyConfig,
 )
-from nifty_scalper_bot.strategies.signal_identity_patch import (
-    _deterministic_id,
+from nifty_scalper_bot.strategies.signal_identity import (
+    deterministic_signal_id,
     has_setup_anchor,
 )
 from nifty_scalper_bot.strategies.signal_quality import build_trade_quality_evidence
@@ -101,8 +101,8 @@ def test_anchorless_identity_is_stable_across_wall_clock_time(monkeypatch) -> No
     signal = _elite_signal()
     probe = SimpleNamespace(symbol=signal.symbol, action="BUY", metadata=signal.metadata)
 
-    first = _deterministic_id(probe)
-    second = _deterministic_id(probe)
+    first = deterministic_signal_id(probe)
+    second = deterministic_signal_id(probe)
 
     assert first == second
 
@@ -111,9 +111,9 @@ def test_anchorless_identity_is_stable_across_strike_rotation() -> None:
     first = _elite_signal("NFO:NIFTY2680424400CE")
     second = _elite_signal("NFO:NIFTY2680424350CE")
 
-    assert _deterministic_id(
+    assert deterministic_signal_id(
         SimpleNamespace(symbol=first.symbol, action="BUY", metadata=first.metadata)
-    ) == _deterministic_id(
+    ) == deterministic_signal_id(
         SimpleNamespace(symbol=second.symbol, action="BUY", metadata=second.metadata)
     )
 
@@ -124,9 +124,9 @@ def test_identity_is_stable_across_strike_rotation() -> None:
     for signal in (first, second):
         EliteStrategy._stamp_setup_anchor(signal, {"latest_bar_ts": BAR_TS})
 
-    assert _deterministic_id(
+    assert deterministic_signal_id(
         SimpleNamespace(symbol=first.symbol, action="BUY", metadata=first.metadata)
-    ) == _deterministic_id(
+    ) == deterministic_signal_id(
         SimpleNamespace(symbol=second.symbol, action="BUY", metadata=second.metadata)
     )
 
@@ -137,9 +137,9 @@ def test_identity_changes_on_a_new_setup_candle() -> None:
     EliteStrategy._stamp_setup_anchor(first, {"latest_bar_ts": BAR_TS})
     EliteStrategy._stamp_setup_anchor(second, {"latest_bar_ts": BAR_TS + 60.0})
 
-    assert _deterministic_id(
+    assert deterministic_signal_id(
         SimpleNamespace(symbol=first.symbol, action="BUY", metadata=first.metadata)
-    ) != _deterministic_id(
+    ) != deterministic_signal_id(
         SimpleNamespace(symbol=second.symbol, action="BUY", metadata=second.metadata)
     )
 
@@ -173,7 +173,7 @@ def test_strategy_hook_does_not_own_order_lifecycle() -> None:
 
     assert first is not None
     assert repeated is not None
-    assert _deterministic_id(first) == _deterministic_id(repeated)
+    assert deterministic_signal_id(first) == deterministic_signal_id(repeated)
 
 
 def test_context_vote_remains_tick_responsive_on_same_anchor() -> None:

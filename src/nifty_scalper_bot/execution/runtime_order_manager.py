@@ -32,7 +32,7 @@ from nifty_scalper_bot.execution.native_entry_gate import (
     configure_provider,
 )
 from nifty_scalper_bot.risk.net_rr_gate import minimum_target_for_net_rr
-from nifty_scalper_bot.strategies.signal_identity_patch import order_setup_context
+from nifty_scalper_bot.strategies.signal_identity import order_setup_context
 
 _EXIT_IDENTITY_KWARGS = {"linked_entry_order_id", "trade_lifecycle_id", "bracket_id"}
 
