@@ -1,7 +1,4 @@
-"""
-Factory for building elite strategies dynamically.
-Production-Grade: Explicit Registry Mapping for Stability and Fault-Tolerance.
-"""
+"""Factory and canonical catalog for elite strategy construction."""
 
 from __future__ import annotations
 
@@ -29,9 +26,6 @@ from nifty_scalper_bot.strategies.elite_strategies.rsi_divergence import (
     RSIDivergenceStrategy,
 )
 from nifty_scalper_bot.strategies.elite_strategies.smc_liquidity import SMCStrategy
-from nifty_scalper_bot.strategies.elite_strategies.straddle_theta import (
-    StraddleThetaStrategy,
-)
 from nifty_scalper_bot.strategies.elite_strategies.vwap_pro import VWAPProStrategy
 from nifty_scalper_bot.strategies.elite_tuesday_gamma_buyer import (
     EliteTuesdayGammaBuyer,
@@ -39,6 +33,24 @@ from nifty_scalper_bot.strategies.elite_tuesday_gamma_buyer import (
 from nifty_scalper_bot.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
+
+# field -> (module, class, display label). This is the single runtime catalog.
+STRATEGY_CATALOG: dict[str, tuple[str, Type[EliteStrategy], str]] = {
+    "smc": ("smc_liquidity", SMCStrategy, "SMC Liquidity"),
+    "vwap": ("vwap_pro", VWAPProStrategy, "VWAP Pro Pullback"),
+    "oi_max_pain": ("oi_max_pain", OIMaxPainStrategy, "OI Mean Reversion"),
+    "gamma_scalping": ("gamma_scalping", GammaScalpingStrategy, "Gamma Acceleration"),
+    "tuesday_gamma_buyer": (
+        "elite_tuesday_gamma_buyer",
+        EliteTuesdayGammaBuyer,
+        "Tuesday Gamma Buyer",
+    ),
+    "cpr": ("cpr_breakout", CPRBreakoutStrategy, "CPR Trend Breakout"),
+    "order_flow": ("order_flow", OrderFlowStrategy, "Order Flow Imbalance"),
+    "bb_squeeze": ("bb_squeeze", BBSqueezeStrategy, "BB Volatility Squeeze"),
+    "rsi_div": ("rsi_divergence", RSIDivergenceStrategy, "RSI Divergence"),
+    "orb": ("orb_pro", ORBProStrategy, "Opening Range Breakout"),
+}
 
 _PRIMARY_DIRECTIONAL = {"smc", "vwap", "orb"}
 _CONTEXT_ONLY = {"oi_max_pain", "order_flow", "bb_squeeze", "cpr", "rsi_div"}
@@ -55,12 +67,27 @@ _EXPERIMENTAL_CONTEXT_FLAGS = {
     "rsi_div": "ENABLE_RSI_DIVERGENCE_EXPERIMENTAL",
 }
 _EXPIRY_ONLY = {"gamma_scalping", "tuesday_gamma_buyer"}
-_THETA_ONLY = {"straddle"}
 _TRUE_VALUES = {"1", "true", "yes", "on"}
 
 
 def _env_true(name: str, default: str = "false") -> bool:
     return str(os.getenv(name, default) or default).strip().lower() in _TRUE_VALUES
+
+
+def strategy_module_names() -> tuple[str, ...]:
+    """Return module identifiers owned by the canonical runtime catalog."""
+    return tuple(spec[0] for spec in STRATEGY_CATALOG.values())
+
+
+def build_strategy_module(module: str, indicator_engine: Any = None) -> EliteStrategy:
+    """Build one catalog strategy for compatibility callers."""
+    requested = str(module or "").strip()
+    for field_name, (module_name, strategy_cls, _label) in STRATEGY_CATALOG.items():
+        if module_name != requested:
+            continue
+        config = getattr(EliteStrategiesSettings(), field_name)
+        return strategy_cls(config=config, indicator_engine=indicator_engine)
+    raise KeyError(f"Unknown elite strategy module: {module}")
 
 
 def _strategy_runtime_role(
@@ -79,8 +106,6 @@ def _strategy_runtime_role(
 
     if field_name in _EXPIRY_ONLY:
         return "trigger" if strategy_mode == "expiry_gamma" and allow_expiry_gamma else None
-    if field_name in _THETA_ONLY:
-        return "trigger" if strategy_mode == "theta" else None
 
     if strategy_mode == "directional_scalp":
         if field_name in _PRIMARY_DIRECTIONAL:
@@ -201,23 +226,9 @@ def build_elite_strategies(
     active_names: list[str] = []
     disabled_names: list[str] = []
 
-    registry: Dict[str, Type[EliteStrategy]] = {
-        "smc": SMCStrategy,
-        "vwap": VWAPProStrategy,
-        "oi_max_pain": OIMaxPainStrategy,
-        "gamma_scalping": GammaScalpingStrategy,
-        "tuesday_gamma_buyer": EliteTuesdayGammaBuyer,
-        "cpr": CPRBreakoutStrategy,
-        "order_flow": OrderFlowStrategy,
-        "bb_squeeze": BBSqueezeStrategy,
-        "rsi_div": RSIDivergenceStrategy,
-        "orb": ORBProStrategy,
-        "straddle": StraddleThetaStrategy,
-    }
-
     LOGGER.info("🏗️  Building Elite Strategy Engine...")
 
-    for field_name, strategy_cls in registry.items():
+    for field_name, (_module, strategy_cls, _label) in STRATEGY_CATALOG.items():
         try:
             if not hasattr(settings, field_name):
                 LOGGER.warning("⚠️  Builder: No config found for '%s'. Skipping.", field_name)
@@ -257,7 +268,17 @@ def build_elite_strategies(
                 exc_info=True,
             )
 
-    LOGGER.info("📊 Strategy Build Complete: %s/%s active.", len(strategies), len(registry))
+    if getattr(settings, "straddle", None) is not None:
+        disabled_names.append("StraddleTheta")
+        LOGGER.info(
+            "STRATEGY_RETIRED strategy=StraddleTheta reason=multi_leg_execution_contract_required"
+        )
+
+    LOGGER.info(
+        "📊 Strategy Build Complete: %s/%s active.",
+        len(strategies),
+        len(STRATEGY_CATALOG),
+    )
     trigger_capable, context_names = _production_strategy_roles(
         active_names,
         strategy_mode=strategy_mode,
@@ -277,21 +298,8 @@ def get_strategy_tags(settings: EliteStrategiesSettings) -> Dict[str, List[str]]
     tags: Dict[str, List[str]] = {}
     strategy_mode = str(os.getenv("STRATEGY_MODE", "directional_scalp")).strip().lower()
     allow_expiry_gamma = _env_true("ALLOW_EXPIRY_GAMMA_STRATEGIES")
-    display_names = {
-        "smc": "SMC Liquidity",
-        "vwap": "VWAP Pro Pullback",
-        "oi_max_pain": "OI Mean Reversion",
-        "gamma_scalping": "Gamma Acceleration",
-        "tuesday_gamma_buyer": "Tuesday Gamma Buyer",
-        "cpr": "CPR Trend Breakout",
-        "order_flow": "Order Flow Imbalance",
-        "bb_squeeze": "BB Volatility Squeeze",
-        "rsi_div": "RSI Divergence",
-        "orb": "Opening Range Breakout",
-        "straddle": "Theta Decay",
-    }
 
-    for field_name, label in display_names.items():
+    for field_name, (_module, _strategy_cls, label) in STRATEGY_CATALOG.items():
         config = getattr(settings, field_name, None)
         if not config or not config.enabled:
             continue
@@ -306,7 +314,10 @@ def get_strategy_tags(settings: EliteStrategiesSettings) -> Dict[str, List[str]]
 
 
 __all__ = [
+    "STRATEGY_CATALOG",
     "build_elite_strategies",
     "build_production_strategy_profile",
+    "build_strategy_module",
     "get_strategy_tags",
+    "strategy_module_names",
 ]
