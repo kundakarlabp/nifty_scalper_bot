@@ -5,7 +5,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from nifty_scalper_bot.execution.position_manager import PositionManager
-from nifty_scalper_bot.execution.position_risk_state_patch import _option_thesis
+from nifty_scalper_bot.execution.position_risk_state_patch import option_thesis
 from nifty_scalper_bot.risk.entry_guard_patch import (
     _daily_limit_block_reason,
     _stop_reentry_block_reason,
@@ -48,9 +48,9 @@ def test_previous_trading_date_count_is_not_restored(tmp_path) -> None:
 
 
 def test_option_thesis_is_strike_independent() -> None:
-    assert _option_thesis("NFO:NIFTY2680424400PE") == ("NIFTY", "PE")
-    assert _option_thesis("NFO:NIFTY2680424350PE") == ("NIFTY", "PE")
-    assert _option_thesis("NFO:NIFTY2680424400CE") == ("NIFTY", "CE")
+    assert option_thesis("NFO:NIFTY2680424400PE") == ("NIFTY", "PE")
+    assert option_thesis("NFO:NIFTY2680424350PE") == ("NIFTY", "PE")
+    assert option_thesis("NFO:NIFTY2680424400CE") == ("NIFTY", "CE")
 
 
 def test_stop_loss_blocks_same_side_across_strikes(monkeypatch, tmp_path) -> None:

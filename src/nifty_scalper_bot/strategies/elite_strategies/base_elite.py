@@ -16,6 +16,7 @@ from nifty_scalper_bot.strategies.elite_strategies.config_models import (
     EliteStrategyConfig,
 )
 from nifty_scalper_bot.strategies.signal_generator import Signal, Strategy
+from nifty_scalper_bot.strategies.signal_identity import finalize_signal_observability
 from nifty_scalper_bot.strategies.signal_quality import build_trade_quality_evidence
 from nifty_scalper_bot.utils.logging import get_logger
 
@@ -255,7 +256,13 @@ class EliteStrategy(Strategy):
                     "Condition met: elite signal generated",
                     extra={"event": "elite_strategy_signal", "strategy": self.name},
                 )
-                return self._process_signal(elite_signal)
+                processed_signal = self._process_signal(elite_signal)
+                return finalize_signal_observability(
+                    processed_signal,
+                    indicators_payload,
+                    strategy_name=self.name,
+                    symbol=symbol,
+                )
 
             LOGGER.debug(
                 "No signal generated",

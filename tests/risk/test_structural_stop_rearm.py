@@ -5,8 +5,8 @@ import time
 from types import SimpleNamespace
 
 from nifty_scalper_bot.execution.position_manager import PositionManager
-from nifty_scalper_bot.strategies.signal_identity_patch import (
-    _deterministic_id,
+from nifty_scalper_bot.strategies.signal_identity import (
+    deterministic_signal_id,
     order_setup_context,
 )
 
@@ -106,7 +106,7 @@ def test_runtime_setup_context_rearms_only_after_minimum_cooldown(
     pm = _stopped_manager(monkeypatch, tmp_path)
     stopped_at = float(pm._recent_stop_thesis["stopped_at_epoch"])
     setup = _vwap_setup_signal("NFO:NIFTY2680424350PE", stopped_at + 60)
-    signal_id = _deterministic_id(setup)
+    signal_id = deterministic_signal_id(setup)
     minimal_risk_signal = SimpleNamespace(symbol=setup.symbol)
 
     with order_setup_context(signal_id):

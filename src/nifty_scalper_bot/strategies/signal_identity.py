@@ -6,14 +6,14 @@ strategy classes at import time; native owners call these helpers explicitly.
 
 from __future__ import annotations
 
-from collections import OrderedDict
-from contextlib import contextmanager
-from contextvars import ContextVar
-from datetime import datetime, timezone
 import hashlib
 import logging
 import re
 import threading
+from collections import OrderedDict
+from contextlib import contextmanager
+from contextvars import ContextVar
+from datetime import datetime, timezone
 from typing import Any, Iterator, Mapping
 
 from nifty_scalper_bot.strategies.quote_update_identity import (
@@ -85,7 +85,11 @@ def anchor_value(metadata: Mapping[str, Any]) -> str | None:
         if value in (None, ""):
             continue
         if isinstance(value, datetime):
-            dt = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+            dt = (
+                value
+                if value.tzinfo is not None
+                else value.replace(tzinfo=timezone.utc)
+            )
             return dt.isoformat()
         if isinstance(value, (int, float)):
             return str(int(float(value)))
@@ -237,7 +241,9 @@ def finalize_signal_observability(
     if raw_score is None:
         raw_score = metadata.get("strategy_score") or metadata.get("context_score")
     role = str(metadata.get("role") or "trigger").lower()
-    vote_event = "STRATEGY_CONTEXT_VOTE" if role == "context" else "STRATEGY_TRIGGER_VOTE"
+    vote_event = (
+        "STRATEGY_CONTEXT_VOTE" if role == "context" else "STRATEGY_TRIGGER_VOTE"
+    )
     LOGGER.log(
         logging.DEBUG if role == "context" else logging.INFO,
         (

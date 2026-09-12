@@ -7,16 +7,19 @@ that calculates common technical indicators from the stored price history.
 
 from __future__ import annotations
 
-from collections import deque
-from datetime import datetime, time, timedelta, timezone
 import logging
 import os
 import threading
+from collections import deque
+from datetime import datetime, time, timedelta, timezone
 from typing import Any, Callable, Deque, Dict, Iterable, Literal, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
 import numpy as np
 
+from nifty_scalper_bot.strategies.runtime_context_contract import (
+    normalise_live_direction_context,
+)
 from nifty_scalper_bot.utils.logging import get_logger, log_throttled
 
 PriceInput = float | Mapping[str, float] | Sequence[float]
@@ -324,6 +327,7 @@ class IndicatorEngine:
                 for key, value in dict(context).items():
                     if key in allowed_context_keys:
                         symbol_context[key] = value
+                symbol_context.update(normalise_live_direction_context(context))
                 self._runtime_context[symbol] = symbol_context
                 self._cache.pop(symbol, None)
         except Exception as e:
@@ -2138,12 +2142,3 @@ class IndicatorEngine:
         """Args: feature_name. Returns: support flag. Raises: none."""
         return supports_feature(feature_name)
 
-
-# ── Explicit runtime-context contract integration (definition site) ─────────
-# Previously installed from strategies/__init__.py; centralized here so
-# IndicatorEngine always carries the contract regardless of import path.
-from nifty_scalper_bot.strategies.runtime_context_contract import (  # noqa: E402
-    install_indicator_runtime_context_contract as _install_ctx_contract,
-)
-
-_install_ctx_contract()

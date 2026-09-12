@@ -18,7 +18,7 @@ from typing import Any, Mapping
 from nifty_scalper_bot.execution.position_risk_state_patch import (
     _cooldown_seconds,
     _is_stop_reason,
-    _option_thesis,
+    option_thesis,
 )
 
 _PATCHED = False
@@ -73,7 +73,7 @@ def _signal_setup_epoch(signal: Any) -> float | None:
     # runtime order facade scopes the exact deterministic strategy setup to this
     # synchronous call, so recover that identity without using wall-clock time.
     try:
-        from nifty_scalper_bot.strategies.signal_identity_patch import (
+        from nifty_scalper_bot.strategies.signal_identity import (
             current_order_setup_metadata,
         )
 
@@ -120,7 +120,7 @@ def record_stop_exit(self: Any, symbol: Any, reason: Any) -> bool:
     """
     if not _is_stop_reason(reason):
         return False
-    thesis = _option_thesis(symbol)
+    thesis = option_thesis(symbol)
     if thesis is None:
         return False
     underlying, option_side = thesis
@@ -156,7 +156,7 @@ def _patched_close_position(
 
 
 def stop_reentry_block_reason(self: Any, signal: Any) -> str | None:
-    thesis = _option_thesis(getattr(signal, "symbol", None))
+    thesis = option_thesis(getattr(signal, "symbol", None))
     if thesis is None:
         return None
     with getattr(self, "_lock"):

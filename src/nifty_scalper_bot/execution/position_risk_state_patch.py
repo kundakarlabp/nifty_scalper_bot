@@ -39,7 +39,7 @@ _ORIGINAL_SYNCHRONIZE_WITH_BROKER: Any = None
 _RISK_KEY = "_risk_runtime"
 
 
-def _option_thesis(symbol: object) -> tuple[str, str] | None:
+def option_thesis(symbol: object) -> tuple[str, str] | None:
     text = str(symbol or "").strip().upper()
     if ":" in text:
         text = text.split(":", 1)[1]
@@ -336,7 +336,7 @@ def _patched_close_position(
     result = _ORIGINAL_CLOSE_POSITION(
         self, symbol, exit_price, reason, close_time=close_time
     )
-    thesis = _option_thesis(symbol)
+    thesis = option_thesis(symbol)
     cooldown = _cooldown_seconds()
     if thesis is not None and cooldown > 0.0 and _is_stop_reason(reason):
         underlying, option_side = thesis
@@ -372,7 +372,7 @@ def persist_risk_circuit_state(self: Any, **values: Any) -> None:
 
 def stop_reentry_block_reason(self: Any, signal: Any) -> str | None:
     """Return an entry-only block reason for an active stop-loss thesis lock."""
-    thesis = _option_thesis(getattr(signal, "symbol", None))
+    thesis = option_thesis(getattr(signal, "symbol", None))
     if thesis is None:
         return None
     with getattr(self, "_lock"):
@@ -424,6 +424,6 @@ __all__ = [
     "stop_reentry_block_reason",
     "get_risk_circuit_state",
     "persist_risk_circuit_state",
-    "_option_thesis",
+    "option_thesis",
     "_snapshot_has_authoritative_realized",
 ]
