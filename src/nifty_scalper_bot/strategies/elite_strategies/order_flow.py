@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import os
 import time
-from typing import Any
+import zlib
+from typing import Any, Mapping
 
 from nifty_scalper_bot.execution.quote_readiness import evaluate_execution_quote
 from nifty_scalper_bot.strategies.elite_strategies.base_elite import (
@@ -11,9 +12,6 @@ from nifty_scalper_bot.strategies.elite_strategies.base_elite import (
 )
 from nifty_scalper_bot.strategies.elite_strategies.config_models import (
     OrderFlowStrategyConfig,
-)
-from nifty_scalper_bot.strategies.elite_strategies.order_flow_live_context_patch import (
-    apply_orderflow_live_context_proof,
 )
 from nifty_scalper_bot.strategies.runtime_context_contract import (
     resolve_context_age_seconds,
@@ -76,6 +74,62 @@ def _normalised_depth_thresholds(config: OrderFlowStrategyConfig) -> tuple[float
     ratio_threshold = (ratio - 1.0) / (ratio + 1.0) if ratio > 1.0 else 0.0
     strong = max(support, min(0.85, ratio_threshold))
     return support, strong
+
+
+def _safe_float_value(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number == number else None
+
+
+def _stable_quote_version(value: Any) -> int:
+    try:
+        numeric = int(float(value))
+    except (TypeError, ValueError):
+        numeric = 0
+    if numeric > 0:
+        return numeric
+    return int(zlib.crc32(str(value).encode("utf-8")) & 0x7FFFFFFF) or 1
+
+
+def _stamp_quote_update_identity(
+    metadata: dict[str, Any], indicators: Mapping[str, Any]
+) -> None:
+    """Preserve a real quote version or stable microstructure fingerprint."""
+    for source in (metadata, indicators):
+        for key in (
+            "quote_update_version",
+            "update_version",
+            "tick_version",
+            "last_tick_ts_ms",
+            "timestamp_ms",
+            "last_tick_timestamp",
+        ):
+            value = source.get(key)
+            if value not in (None, "", 0, 0.0):
+                metadata["quote_update_version"] = _stable_quote_version(value)
+                metadata.setdefault("quote_update_version_source", key)
+                return
+
+    bid = _safe_float_value(metadata.get("bid") or indicators.get("bid"))
+    ask = _safe_float_value(metadata.get("ask") or indicators.get("ask"))
+    imbalance = _safe_float_value(
+        metadata.get("depth_imbalance") or indicators.get("depth_imbalance")
+    )
+    tick_direction = str(
+        metadata.get("tick_direction") or indicators.get("tick_direction") or ""
+    ).upper()
+    if bid is None and ask is None and imbalance is None and not tick_direction:
+        return
+    raw = (
+        f"{bid if bid is not None else 'na'}:"
+        f"{ask if ask is not None else 'na'}:"
+        f"{imbalance if imbalance is not None else 'na'}:{tick_direction or 'na'}"
+    )
+    metadata["quote_update_version"] = _stable_quote_version(raw)
+    metadata["quote_update_version_source"] = "microstructure_fingerprint"
 
 
 class OrderFlowStrategy(EliteStrategy):
@@ -885,7 +939,8 @@ class OrderFlowStrategy(EliteStrategy):
                 strategy_name="OrderFlow",
                 metadata=metadata,
             )
-            return apply_orderflow_live_context_proof(signal, indicators)
+            _stamp_quote_update_identity(signal.metadata, indicators)
+            return signal
         except Exception as e:
             LOGGER.error(
                 "Failure in OrderFlowStrategy._evaluate_signal: %s", e, exc_info=e

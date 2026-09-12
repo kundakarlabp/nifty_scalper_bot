@@ -12,8 +12,8 @@ from nifty_scalper_bot.strategies.elite_strategies.config_models import (
     ORBProStrategyConfig,
 )
 from nifty_scalper_bot.strategies.elite_strategies.orb_pro import ORBProStrategy
-from nifty_scalper_bot.strategies.elite_strategies.order_flow_live_context_patch import (
-    apply_orderflow_live_context_proof,
+from nifty_scalper_bot.strategies.elite_strategies.order_flow import (
+    _stamp_quote_update_identity,
 )
 from nifty_scalper_bot.strategies.signal_identity_patch import (
     _stamp_evaluation_identity,
@@ -210,9 +210,12 @@ def test_orderflow_quote_fingerprint_is_stable_and_changes_with_quote(
     monkeypatch,
 ) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
-    first = apply_orderflow_live_context_proof(_orderflow_signal(), {})
-    repeated = apply_orderflow_live_context_proof(_orderflow_signal(), {})
-    changed = apply_orderflow_live_context_proof(_orderflow_signal(bid=99.6), {})
+    first = _orderflow_signal()
+    repeated = _orderflow_signal()
+    changed = _orderflow_signal(bid=99.6)
+    _stamp_quote_update_identity(first.metadata, {})
+    _stamp_quote_update_identity(repeated.metadata, {})
+    _stamp_quote_update_identity(changed.metadata, {})
 
     first_version = first.metadata["quote_update_version"]
     assert first.metadata["quote_update_version_source"] == "microstructure_fingerprint"
