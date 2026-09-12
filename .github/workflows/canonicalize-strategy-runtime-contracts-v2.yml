@@ -41,6 +41,22 @@ jobs:
           script = script.replace(anchor, replacement, 1)
           exec(compile(script, '<canonical-strategy-migration>', 'exec'))
           PY
+      - name: Inspect generated ownership seam
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import ast
+
+          source = Path('src/nifty_scalper_bot/strategies/elite_strategies/base_elite.py').read_text()
+          tree = ast.parse(source)
+          for node in ast.walk(tree):
+              if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in {'generate_signal', '_finalize_signal'}:
+                  print(f'--- {node.name} ---')
+                  print(ast.get_source_segment(source, node))
+          print('--- identity test ---')
+          print(Path('tests/strategies/test_identity_contract_installed.py').read_text())
+          PY
       - name: Format and validate migration source
         run: |
           python -m compileall -q src/nifty_scalper_bot/strategies
