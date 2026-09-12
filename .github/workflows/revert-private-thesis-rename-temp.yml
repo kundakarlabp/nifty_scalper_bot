@@ -1,0 +1,62 @@
+name: Revert private thesis rename temp
+
+on:
+  push:
+    branches:
+      - canonical-native-strategy-contracts-20260912
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    if: ${{ !startsWith(github.event.head_commit.message, 'Revert unintended private thesis rename') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: canonical-native-strategy-contracts-20260912
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Revert only the unintended execution-risk helper rename
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          paths = [
+              Path('src/nifty_scalper_bot/execution/position_risk_state_patch.py'),
+              Path('src/nifty_scalper_bot/execution/stop_rearm_contract_patch.py'),
+              Path('tests/risk/test_persisted_cap_and_stop_reentry.py'),
+          ]
+          for path in paths:
+              text = path.read_text(encoding='utf-8')
+              text = text.replace('option_thesis', '_option_thesis')
+              path.write_text(text, encoding='utf-8')
+          PY
+      - name: Verify identity-module migration remains intact
+        run: |
+          grep -q 'from nifty_scalper_bot.strategies.signal_identity import' src/nifty_scalper_bot/execution/stop_rearm_contract_patch.py
+          ! grep -R 'signal_identity_patch' -n src tests
+      - name: Run affected risk regressions
+        env:
+          ALLOW_NETWORK: 'false'
+          ALLOW_REAL_BROKER: 'false'
+          BROKER_SIMULATION: 'true'
+        run: |
+          python -m pip install -r requirements.txt >/dev/null
+          python -m pytest -q \
+            tests/risk/test_persisted_cap_and_stop_reentry.py \
+            tests/risk/test_structural_stop_rearm.py \
+            tests/execution/test_stop_rearm_setup_context.py
+      - name: Commit cleanup
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/nifty_scalper_bot/execution/position_risk_state_patch.py \
+                  src/nifty_scalper_bot/execution/stop_rearm_contract_patch.py \
+                  tests/risk/test_persisted_cap_and_stop_reentry.py
+          git diff --cached --quiet && { echo 'No cleanup changes'; exit 1; }
+          git commit -m 'Revert unintended private thesis rename'
+          git push origin HEAD:canonical-native-strategy-contracts-20260912
