@@ -35,8 +35,6 @@ _TREND_TAGS: tuple[str, ...] = ("Crossover", "MACD", "Breakout", "ORB")
 logger = get_logger(__name__)
 
 
-
-
 class Position(Protocol):
     """Protocol describing the minimal position information required."""
 
@@ -840,161 +838,6 @@ class BollingerBandStrategy(Strategy):
                 stop_loss,
                 take_profit,
                 metadata,
-            )
-
-        logger.debug(f"SKIP {self.name}: neutral | {symbol}")
-        return None
-
-
-class OpeningRangeBreakoutStrategy(Strategy):
-    """Opening Range Breakout Strategy."""
-
-    def __init__(
-        self,
-        *,
-        opening_minutes: int = 30,
-        volume_spike_ratio: float = 1.5,
-        premium_stop_pct: float = 0.35,
-        premium_target_rr: float = 2.5,
-        default_quantity: int = 1,
-    ) -> None:
-        parameters = {
-            "opening_minutes": opening_minutes,
-            "volume_spike_ratio": volume_spike_ratio,
-            "premium_stop_pct": premium_stop_pct,
-            "premium_target_rr": premium_target_rr,
-            "default_quantity": default_quantity,
-        }
-        super().__init__("Opening Range Breakout", parameters)
-
-    def get_required_indicators(self) -> list[str]:
-        return [
-            "orb_high",
-            "orb_low",
-            "orb_ready",
-            "nr7",
-            "nr7_range",
-            "nr7_min_range",
-            "futures_volume_ratio",
-            "minutes_since_open",
-            "minutes_until_close",
-            "atr",
-        ]
-
-    def generate_signal(
-        self,
-        symbol: str,
-        indicators: Mapping[str, Any],
-        current_price: float,
-        position: Position | None,
-    ) -> Signal | None:
-        logger.debug(f"EVAL {self.name}: {symbol}")
-
-        try:
-            orb_high = indicators.get("orb_high")
-            orb_low = indicators.get("orb_low")
-            orb_ready = indicators.get("orb_ready")
-            atr = indicators.get("atr")
-            nr7_flag = bool(indicators.get("nr7"))
-            volume_ratio = indicators.get("futures_volume_ratio")
-            minutes_since_open = indicators.get("minutes_since_open")
-            minutes_until_close = indicators.get("minutes_until_close")
-
-            if (
-                orb_high is None
-                or orb_low is None
-                or not bool(orb_ready)
-                or atr is None
-                or minutes_since_open is None
-                or minutes_until_close is None
-            ):
-                logger.debug(f"SKIP {self.name}: data_missing | {symbol}")
-                return None
-
-            parameters = self._parameters
-            min_volume_ratio = float(parameters["volume_spike_ratio"])
-
-            if volume_ratio is None or float(volume_ratio) < min_volume_ratio:
-                logger.debug(
-                    f"SKIP {self.name}: volume_filter ({volume_ratio} < {min_volume_ratio}) | {symbol}"
-                )
-                return None
-            if not nr7_flag:
-                logger.debug(f"SKIP {self.name}: nr7_filter | {symbol}")
-                return None
-            if float(minutes_since_open) < float(parameters["opening_minutes"]):
-                logger.debug(f"SKIP {self.name}: pre_window | {symbol}")
-                return None
-            if float(minutes_until_close) < 20.0:
-                logger.debug(f"SKIP {self.name}: near_close | {symbol}")
-                return None
-
-            qty = int(parameters.get("default_quantity", 1))
-            atr_value = float(atr)
-            metadata = {
-                "strategy": self.name,
-                "orb_high": float(orb_high),
-                "orb_low": float(orb_low),
-                "atr": atr_value,
-                "premium_stop_pct": float(parameters["premium_stop_pct"]),
-                "premium_target_rr": float(parameters["premium_target_rr"]),
-            }
-
-            if position is not None:
-                if position.side == "LONG" and current_price < float(orb_low):
-                    reason = "Price lost opening range low"
-                    logger.info(f"SIGNAL {self.name}: CLOSE_LONG | {reason}")
-                    return Signal(
-                        "CLOSE_LONG",
-                        symbol,
-                        position.quantity,
-                        self._bounded_confidence(0.6),
-                        reason,
-                        None,
-                        None,
-                        metadata,
-                    )
-
-                if position.side == "SHORT" and current_price > float(orb_high):
-                    reason = "Price reclaimed opening range high"
-                    logger.info(f"SIGNAL {self.name}: CLOSE_SHORT | {reason}")
-                    return Signal(
-                        "CLOSE_SHORT",
-                        symbol,
-                        position.quantity,
-                        self._bounded_confidence(0.6),
-                        reason,
-                        None,
-                        None,
-                        metadata,
-                    )
-
-            if current_price > float(orb_high) and (
-                position is None or position.side != "LONG"
-            ):
-                distance = current_price - float(orb_high)
-                confidence = self._bounded_confidence(distance / max(atr_value, 1.0))
-                reason = "ORB breakout above opening high"
-                logger.info(f"SIGNAL {self.name}: BUY | {reason}")
-                return Signal(
-                    "BUY", symbol, qty, confidence, reason, None, None, metadata
-                )
-
-            if current_price < float(orb_low) and (
-                position is None or position.side != "SHORT"
-            ):
-                distance = float(orb_low) - current_price
-                confidence = self._bounded_confidence(distance / max(atr_value, 1.0))
-                reason = "ORB breakdown below opening low"
-                logger.info(f"SIGNAL {self.name}: SELL | {reason}")
-                return Signal(
-                    "SELL", symbol, qty, confidence, reason, None, None, metadata
-                )
-
-        except Exception as exc:
-            logger.error(
-                f"Failure in {self.name}.generate_signal: {exc}",
-                extra={"symbol": symbol},
             )
 
         logger.debug(f"SKIP {self.name}: neutral | {symbol}")
@@ -1916,7 +1759,11 @@ class StrategyManager:
             volume_source = None
             for key in ("volume_traded_today", "volume_traded"):
                 candidate = self._extract_float(quote, (key,))
-                if candidate is not None and math.isfinite(candidate) and candidate >= 0:
+                if (
+                    candidate is not None
+                    and math.isfinite(candidate)
+                    and candidate >= 0
+                ):
                     volume = candidate
                     volume_source = key
                     break
@@ -2292,7 +2139,6 @@ __all__ = [
     "EMACrossoverStrategy",
     "MACDStrategy",
     "BollingerBandStrategy",
-    "OpeningRangeBreakoutStrategy",
     "VWAPMeanReversionStrategy",
     "StrategyManager",
 ]
