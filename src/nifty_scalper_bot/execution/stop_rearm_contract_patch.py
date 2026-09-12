@@ -18,7 +18,7 @@ from typing import Any, Mapping
 from nifty_scalper_bot.execution.position_risk_state_patch import (
     _cooldown_seconds,
     _is_stop_reason,
-    option_thesis,
+    _option_thesis,
 )
 
 _PATCHED = False
@@ -120,7 +120,7 @@ def record_stop_exit(self: Any, symbol: Any, reason: Any) -> bool:
     """
     if not _is_stop_reason(reason):
         return False
-    thesis = option_thesis(symbol)
+    thesis = _option_thesis(symbol)
     if thesis is None:
         return False
     underlying, option_side = thesis
@@ -156,7 +156,7 @@ def _patched_close_position(
 
 
 def stop_reentry_block_reason(self: Any, signal: Any) -> str | None:
-    thesis = option_thesis(getattr(signal, "symbol", None))
+    thesis = _option_thesis(getattr(signal, "symbol", None))
     if thesis is None:
         return None
     with getattr(self, "_lock"):
