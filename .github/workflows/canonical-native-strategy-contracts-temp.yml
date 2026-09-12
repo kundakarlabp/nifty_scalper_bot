@@ -29,6 +29,7 @@ jobs:
       - name: Apply canonical migration
         run: |
           python .github/scripts/canonicalize_native_strategy_contracts.py
+          python .github/scripts/remove_indicator_runtime_installer.py
           sed -i '/^import hashlib$/d' src/nifty_scalper_bot/strategies/signal_generator.py
       - name: Format new and directly rewritten small owners
         run: |
