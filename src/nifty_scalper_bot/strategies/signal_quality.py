@@ -86,9 +86,10 @@ def build_trade_quality_evidence(
 
     spread_observed = payload.get("spread_pct") is not None
     try:
-        spread_pct = float(payload.get("spread_pct")) if spread_observed else 999.0
+        spread_pct = float(payload.get("spread_pct")) if spread_observed else 0.0
     except (TypeError, ValueError):
-        spread_pct = 999.0
+        spread_pct = 0.0
+        spread_observed = False
     if not spread_observed and bid_ask_valid:
         midpoint = (bid + ask) / 2.0
         if midpoint > 0:
@@ -96,14 +97,27 @@ def build_trade_quality_evidence(
             spread_observed = True
 
     spread_limit = canonical_max_spread_pct()
-    spread_pass = bool(not spread_observed or spread_pct <= spread_limit)
+    spread_pass: bool | None = (
+        spread_pct <= spread_limit if spread_observed else None
+    )
+    spread_status = (
+        "unknown"
+        if spread_pass is None
+        else "pass"
+        if spread_pass
+        else "fail"
+    )
+
     depth_valid = bool(payload.get("quote_depth_valid"))
     tradable_quote = bool(payload.get("tradable_quote"))
     quote_valid = bool(bid_ask_valid or tradable_quote)
-    if depth_valid and quote_valid and spread_pass:
+    if depth_valid and quote_valid and spread_pass is True:
         liquidity_score = 2.0
-    elif quote_valid and spread_pass:
+    elif quote_valid and spread_pass is True:
         liquidity_score = 1.0
+    elif tradable_quote and spread_pass is None:
+        # Unknown spread remains non-blocking, but is not positive spread evidence.
+        liquidity_score = 0.5
     else:
         liquidity_score = 0.0
 
@@ -120,6 +134,7 @@ def build_trade_quality_evidence(
         "regime_time_suitability_score": regime_score,
         "quality_spread_observed": spread_observed,
         "quality_spread_pass": spread_pass,
+        "quality_spread_status": spread_status,
         "quality_spread_pct": spread_pct if spread_observed else None,
         "quality_spread_limit_pct": spread_limit,
     }
@@ -360,11 +375,7 @@ def score_signal_quality(
         option_score=option,
         data_score=data,
         rr_score=rr,
-        allowed=(
-            not context_only
-            and final >= threshold
-            and direction >= 6.0
-        ),
+        allowed=(not context_only and final >= threshold and direction >= 6.0),
         reasons=reasons,
         components={
             "direction_score": direction,

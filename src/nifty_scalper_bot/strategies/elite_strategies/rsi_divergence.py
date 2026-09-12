@@ -75,7 +75,10 @@ class RSIDivergenceStrategy(EliteStrategy):
         try:
             self._no_vote("stale_or_invalid_data")
             close = float(indicators.get("close") or current_price)
-            atr = max(float(indicators.get("atr") or 0.0), current_price * 0.01, 1.0)
+            atr = float(indicators.get("atr") or 0.0)
+            if not atr > 0.0:
+                self._no_vote("atr_unavailable")
+                return None
             regime = normalize_regime(indicators.get("regime"))
             direction = str(indicators.get("direction_bias") or "").upper()
 
@@ -181,6 +184,8 @@ class RSIDivergenceStrategy(EliteStrategy):
                 "confirmation_candle": True,
                 "trend_regime": regime.value,
                 "reversal_quality": round(strategy_score / 10.0, 3),
+                "atr": atr,
+                "close": close,
             }
             LOGGER.info(
                 "STRATEGY_CONTEXT strategy=RSIDivergence side=%s score=%.2f",

@@ -1,11 +1,8 @@
-"""
-Compatibility facade for elite strategy configuration objects.
-Standardises imports and prevents circular dependencies across the bot.
-"""
+"""Compatibility facade for elite strategy configuration objects."""
 
 from __future__ import annotations
 
-# ✅ Standardized re-exports from the source of truth
+from .builder import strategy_module_names
 from .config_models import (
     BBSqueezeStrategyConfig,
     CPRBreakoutStrategyConfig,
@@ -21,24 +18,9 @@ from .config_models import (
     VWAPProStrategyConfig,
 )
 
-# ✅ EXPLICIT MODULE REGISTRY
-# Used by the StrategyRunner and DataHub to identify valid strategy files.
-# These names must match the filenames in the elite_strategies folder exactly.
-ELITE_STRATEGY_MODULES = [
-    "smc_liquidity",
-    "vwap_pro",
-    "oi_max_pain",
-    "gamma_scalping",
-    "elite_tuesday_gamma_buyer",
-    "cpr_breakout",
-    "order_flow",
-    "bb_squeeze",
-    "rsi_divergence",
-    "orb_pro",
-    "straddle_theta",
-]
+# Compatibility export; values are derived from the canonical builder catalog.
+ELITE_STRATEGY_MODULES = strategy_module_names()
 
-# ✅ PUBLIC API DEFINITION
 __all__ = [
     "ELITE_STRATEGY_MODULES",
     "BBSqueezeStrategyConfig",

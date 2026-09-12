@@ -11,7 +11,6 @@ from .orb_pro import ORBProStrategy
 from .order_flow import OrderFlowStrategy
 from .rsi_divergence import RSIDivergenceStrategy
 from .smc_liquidity import SMCStrategy
-from .straddle_theta import StraddleThetaStrategy
 from .vwap_pro import VWAPProStrategy
 
 __all__ = [
@@ -24,6 +23,5 @@ __all__ = [
     "OrderFlowStrategy",
     "RSIDivergenceStrategy",
     "SMCStrategy",
-    "StraddleThetaStrategy",
     "VWAPProStrategy",
 ]
