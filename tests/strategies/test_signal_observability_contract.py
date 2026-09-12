@@ -224,7 +224,14 @@ def test_orderflow_prefers_existing_quote_version(monkeypatch) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
     signal = _orderflow_signal()
 
-    result = apply_orderflow_live_context_proof(signal, {"quote_update_version": 42})
+    # The canonical OrderFlow owner stamps quote identity directly. The migration
+    # workflow replaces the legacy import above with this native helper.
+    from nifty_scalper_bot.strategies.elite_strategies.order_flow import (
+        _stamp_quote_update_identity,
+    )
+
+    _stamp_quote_update_identity(signal.metadata, {"quote_update_version": 42})
+    result = signal
 
     assert result.metadata["quote_update_version"] == 42
     assert result.metadata["quote_update_version_source"] == "quote_update_version"
