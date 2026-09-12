@@ -53,7 +53,10 @@ class CPRBreakoutStrategy(EliteStrategy):
             pivot = float(indicators.get("pivot") or 0.0)
             r1 = float(indicators.get("r1") or 0.0)
             s1 = float(indicators.get("s1") or 0.0)
-            atr = max(float(indicators.get("atr") or 0.0), current_price * 0.01, 1.0)
+            atr = float(indicators.get("atr") or 0.0)
+            if not atr > 0.0:
+                self._no_vote("atr_unavailable")
+                return None
             direction = str(indicators.get("direction_bias") or "").upper()
 
             if min(cpr_bottom, cpr_top, pivot) <= 0 or cpr_top <= cpr_bottom:
