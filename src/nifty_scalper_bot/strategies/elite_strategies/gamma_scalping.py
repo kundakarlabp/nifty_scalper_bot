@@ -36,7 +36,9 @@ class GammaScalpingStrategy(EliteStrategy):
 
     MIN_BARS_REQUIRED = 3
 
-    def __init__(self, config: GammaScalpingStrategyConfig, indicator_engine: Any) -> None:
+    def __init__(
+        self, config: GammaScalpingStrategyConfig, indicator_engine: Any
+    ) -> None:
         super().__init__(config=config, indicator_engine=indicator_engine)
         self._cfg = config
 
@@ -72,9 +74,7 @@ class GammaScalpingStrategy(EliteStrategy):
 
             gamma = float(indicators.get("gamma") or 0.0)
             theta = float(indicators.get("theta") or 0.0)
-            atr = max(
-                float(indicators.get("atr") or 0.0), current_price * 0.01, 1.0
-            )
+            atr = max(float(indicators.get("atr") or 0.0), current_price * 0.01, 1.0)
             direction = str(indicators.get("direction_bias") or "").upper()
             min_gamma = float(self._cfg.min_gamma)
 
