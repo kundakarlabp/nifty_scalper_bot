@@ -114,7 +114,11 @@ def _strategy_runtime_role(
             return "context"
         return None
 
-    return "context" if field_name in _CONTEXT_ONLY else "trigger"
+    if strategy_mode == "expiry_gamma":
+        return "context" if field_name in _CONTEXT_ONLY else None
+
+    # Unsupported/retired modes (including legacy theta) fail closed.
+    return None
 
 
 def _production_strategy_roles(
