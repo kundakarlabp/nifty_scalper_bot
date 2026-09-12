@@ -9,6 +9,13 @@ raw tick history. Execution candidate readiness therefore saw
 This adapter records only WS receipts that MDM itself accepted as belonging to
 the current subscription generation. It does not alter quote/cache ordering,
 strategy thresholds, risk gates, or order routing.
+
+The same #1157 liveness instrumentation also introduced two names for the
+selected-option completion heartbeat (``..._ts`` is read by the watchdog while
+``..._at`` is written by the evaluator). The small compatibility adapter below
+mirrors the producer timestamp into the watchdog SSOT before liveness is
+computed. It changes no stall threshold and cannot turn a genuinely stale
+heartbeat into a fresh one.
 """
 
 from __future__ import annotations
@@ -20,6 +27,7 @@ import time
 from typing import Any, Mapping
 
 _PATCH_ATTR = "_live_ws_tick_receipt_patch_installed"
+_RUNNER_HEARTBEAT_PATCH_ATTR = "_selected_eval_liveness_heartbeat_patch_installed"
 _RECEIPTS_ATTR = "_live_ws_receipts_60s"
 _WS_SOURCES = frozenset({"ws", "ws_full", "websocket", "stream"})
 _WINDOW_SECONDS = 60.0
@@ -32,9 +40,44 @@ def _prune(receipts: deque[float], now_mono: float) -> None:
         receipts.popleft()
 
 
+def _install_selected_eval_heartbeat_compat() -> bool:
+    """Keep the selected-eval heartbeat producer and watchdog on one timestamp."""
+    from nifty_scalper_bot.strategies.runner import StrategyRunner
+
+    if bool(getattr(StrategyRunner, _RUNNER_HEARTBEAT_PATCH_ATTR, False)):
+        return True
+
+    original_liveness = StrategyRunner._entry_eval_liveness_snapshot
+
+    @wraps(original_liveness)
+    def _entry_eval_liveness_snapshot(
+        self: Any, now: float | None = None
+    ) -> dict[str, Any]:
+        canonical_ts = float(
+            getattr(self, "_last_selected_candidate_eval_completed_ts", 0.0) or 0.0
+        )
+        producer_ts = float(
+            getattr(self, "_last_selected_candidate_eval_completed_at", 0.0) or 0.0
+        )
+        if producer_ts > canonical_ts:
+            self._last_selected_candidate_eval_completed_ts = producer_ts
+        return original_liveness(self, now)
+
+    StrategyRunner._entry_eval_liveness_snapshot = (  # type: ignore[method-assign]
+        _entry_eval_liveness_snapshot
+    )
+    setattr(StrategyRunner, _RUNNER_HEARTBEAT_PATCH_ATTR, True)
+    return True
+
+
 def apply_patch() -> bool:
-    """Install the MDM live-WS receipt counter idempotently."""
+    """Install the MDM live-WS receipt counter and liveness heartbeat fix."""
     from nifty_scalper_bot.data.market_data_manager import MarketDataManager
+
+    # Run before the MDM idempotence return: a long-lived interpreter can have
+    # the older receipt patch installed already while loading this newer build.
+    if not _install_selected_eval_heartbeat_compat():
+        return False
 
     if bool(getattr(MarketDataManager, _PATCH_ATTR, False)):
         return True
