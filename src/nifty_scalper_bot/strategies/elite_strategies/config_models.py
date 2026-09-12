@@ -124,7 +124,7 @@ class ORBProStrategyConfig(EliteStrategyConfig):
 
 @dataclass(slots=True)
 class StraddleThetaStrategyConfig(EliteStrategyConfig):
-    """Straddle/Theta: Option Greek thresholds."""
+    """Legacy theta settings retained until a canonical multi-leg contract exists."""
 
     adx_threshold: float = 25.0
     min_iv: float = 12.0
@@ -132,19 +132,17 @@ class StraddleThetaStrategyConfig(EliteStrategyConfig):
 
 @dataclass(slots=True)
 class EliteStrategiesSettings:
-    """
-    Aggregate configuration for the entire elite strategy suite.
-    Production-Grade: Field names are mapped 1:1 to Builder Registry.
-    """
+    """Aggregate configuration for the elite strategy suite."""
 
     max_concurrent_strategies: int = 3
     position_size_pct: float = 2.0
 
-    # Strategy-Specific Config Objects
     smc: SMCStrategyConfig = field(default_factory=SMCStrategyConfig)
     vwap: VWAPProStrategyConfig = field(default_factory=VWAPProStrategyConfig)
     oi_max_pain: OIMaxPainStrategyConfig = field(default_factory=OIMaxPainStrategyConfig)
-    gamma_scalping: GammaScalpingStrategyConfig = field(default_factory=GammaScalpingStrategyConfig)
+    gamma_scalping: GammaScalpingStrategyConfig = field(
+        default_factory=GammaScalpingStrategyConfig
+    )
     tuesday_gamma_buyer: TuesdayGammaBuyerStrategyConfig = field(
         default_factory=TuesdayGammaBuyerStrategyConfig
     )
@@ -153,7 +151,10 @@ class EliteStrategiesSettings:
     bb_squeeze: BBSqueezeStrategyConfig = field(default_factory=BBSqueezeStrategyConfig)
     rsi_div: RSIDivergenceStrategyConfig = field(default_factory=RSIDivergenceStrategyConfig)
     orb: ORBProStrategyConfig = field(default_factory=ORBProStrategyConfig)
-    straddle: StraddleThetaStrategyConfig = field(default_factory=StraddleThetaStrategyConfig)
+    # Parse compatibility only; the single-leg placeholder runtime was retired.
+    straddle: StraddleThetaStrategyConfig = field(
+        default_factory=StraddleThetaStrategyConfig
+    )
 
     def __post_init__(self) -> None:
         """Final aggregate validation."""
