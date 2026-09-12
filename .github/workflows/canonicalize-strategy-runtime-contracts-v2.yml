@@ -18,7 +18,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Apply canonical migration with duplicate installer removal
+      - name: Apply canonical migration without workflow self-modification
         shell: bash
         run: |
           python - <<'PY'
@@ -29,13 +29,17 @@ jobs:
           text = workflow.read_text()
           script = text.split("          python - <<'PY'\n", 1)[1].split("\n          PY\n", 1)[0]
           script = textwrap.dedent(script)
+          script = script.replace(
+              "Path('.github/workflows/canonicalize-strategy-runtime-contracts.yml').unlink()",
+              "# workflow cleanup is handled via the GitHub API after source validation",
+              1,
+          )
           anchor = """indicators_file.write_text(text)\n\n# 5) Extend the existing quote-identity utility with deterministic fallback.\n"""
           replacement = """indicators_file.write_text(text)\n\n# Remove the historical definition-site installer as well. The native setter\n# now owns this contract and must not mutate its own class after definition.\ntext = indicators_file.read_text()\nbottom_installer = '''\n\n# ── Explicit runtime-context contract integration (definition site) ─────────\n# Previously installed from strategies/__init__.py; centralized here so\n# IndicatorEngine always carries the contract regardless of import path.\nfrom nifty_scalper_bot.strategies.runtime_context_contract import (  # noqa: E402\n    install_indicator_runtime_context_contract as _install_ctx_contract,\n)\n\n_install_ctx_contract()\n'''\ntext = replace_once(text, bottom_installer, '\\n', 'definition-site runtime installer')\nindicators_file.write_text(text)\n\n# 5) Extend the existing quote-identity utility with deterministic fallback.\n"""
           if anchor not in script:
               raise RuntimeError('migration anchor not found')
           script = script.replace(anchor, replacement, 1)
           exec(compile(script, '<canonical-strategy-migration>', 'exec'))
-          Path('.github/workflows/canonicalize-strategy-runtime-contracts-v2.yml').unlink()
           PY
       - name: Format and validate migration source
         run: |
@@ -46,11 +50,11 @@ jobs:
           python -m pytest -q tests/strategies/test_identity_contract_installed.py tests/strategies/test_runtime_context_contract_native.py tests/strategies/test_orderflow_context_only_contract.py tests/strategies/test_quote_update_identity.py tests/strategies/test_signal_observability_contract.py tests/strategies/test_orderflow_depth_context.py
           python -m ruff check src/nifty_scalper_bot/strategies tests/strategies/test_identity_contract_installed.py tests/strategies/test_runtime_context_contract_native.py tests/strategies/test_orderflow_context_only_contract.py tests/strategies/test_quote_update_identity.py tests/strategies/test_signal_observability_contract.py
           python -m black --check src/nifty_scalper_bot/strategies tests/strategies/test_identity_contract_installed.py tests/strategies/test_runtime_context_contract_native.py tests/strategies/test_orderflow_context_only_contract.py tests/strategies/test_quote_update_identity.py tests/strategies/test_signal_observability_contract.py
-      - name: Commit canonical source
+      - name: Commit canonical source only
         shell: bash
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add -A
+          git add src/nifty_scalper_bot/strategies tests/strategies
           git commit -m 'Refactor: canonicalize strategy runtime contracts'
           git push origin HEAD:canonical-strategy-runtime-contracts-20260911
