@@ -423,3 +423,44 @@ def test_repeated_authoritative_broker_pnl_sync_is_idempotent(tmp_path) -> None:
 
     assert first == pytest.approx(-234.0)
     assert second == pytest.approx(-234.0)
+
+
+def test_flat_broker_row_uses_day_pnl_when_realised_zero(tmp_path) -> None:
+    manager = PositionManager(state_file=str(tmp_path / "positions.json"))
+    manager.establish_pnl_session_baseline(0.0)
+    manager.synchronize_with_broker(
+        [{"symbol": SYMBOL, "product": "MIS", "quantity": 0, "pnl": -234.0, "realised": 0.0}]
+    )
+    snapshot = manager.pnl_reconciliation_snapshot()
+    assert snapshot["broker_realized_snapshot"] == pytest.approx(-234.0)
+    assert manager.get_realized_pnl() == pytest.approx(-234.0)
+
+
+def test_flat_broker_row_preserves_nonzero_realised_over_day_pnl(tmp_path) -> None:
+    manager = PositionManager(state_file=str(tmp_path / "positions.json"))
+    manager.establish_pnl_session_baseline(0.0)
+    manager.synchronize_with_broker(
+        [{"symbol": SYMBOL, "product": "MIS", "quantity": 0, "pnl": -234.0, "realised": -210.0}]
+    )
+    snapshot = manager.pnl_reconciliation_snapshot()
+    assert snapshot["broker_realized_snapshot"] == pytest.approx(-210.0)
+    assert manager.get_realized_pnl() == pytest.approx(-210.0)
+
+
+def test_open_broker_row_never_promotes_day_pnl_to_realised(tmp_path) -> None:
+    manager = PositionManager(state_file=str(tmp_path / "positions.json"))
+    manager.establish_pnl_session_baseline(0.0)
+    manager.synchronize_with_broker(
+        [{
+            "symbol": SYMBOL,
+            "product": "MIS",
+            "quantity": 65,
+            "average_price": 100.0,
+            "last_price": 96.4,
+            "pnl": -234.0,
+            "realised": 0.0,
+        }]
+    )
+    snapshot = manager.pnl_reconciliation_snapshot()
+    assert snapshot["broker_realized_snapshot"] == pytest.approx(0.0)
+    assert manager.get_realized_pnl() == pytest.approx(0.0)
