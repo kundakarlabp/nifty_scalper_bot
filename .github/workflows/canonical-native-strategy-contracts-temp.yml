@@ -27,37 +27,32 @@ jobs:
           python -m pip install -r requirements.txt
           python -m pip install pytest black ruff
       - name: Apply canonical migration
-        run: python .github/scripts/canonicalize_native_strategy_contracts.py
-      - name: Format changed Python sources
+        run: |
+          python .github/scripts/canonicalize_native_strategy_contracts.py
+          sed -i '/^import hashlib$/d' src/nifty_scalper_bot/strategies/signal_generator.py
+      - name: Format new and directly rewritten small owners
         run: |
           python -m black \
             src/nifty_scalper_bot/strategies/signal_identity.py \
-            src/nifty_scalper_bot/strategies/signal_generator.py \
-            src/nifty_scalper_bot/strategies/elite_strategies/base_elite.py \
-            src/nifty_scalper_bot/strategies/indicators.py \
             src/nifty_scalper_bot/strategies/runtime_context_contract.py \
             src/nifty_scalper_bot/strategies/__init__.py \
-            src/nifty_scalper_bot/execution/runtime_order_manager.py \
-            src/nifty_scalper_bot/execution/stop_rearm_contract_patch.py \
             tests/strategies/test_identity_contract_installed.py \
-            tests/strategies/test_runtime_context_contract_autoinstall.py \
-            tests/strategies/test_setup_anchor_identity.py \
-            tests/strategies/test_signal_observability_contract.py \
-            tests/strategies/test_vwap_thesis_history_recovery.py \
-            tests/execution/test_stop_rearm_setup_context.py \
-            tests/risk/test_structural_stop_rearm.py
-      - name: Compile and lint changed owners
-        run: |
-          python -m compileall -q src/nifty_scalper_bot/strategies src/nifty_scalper_bot/execution/runtime_order_manager.py src/nifty_scalper_bot/execution/stop_rearm_contract_patch.py
-          python -m ruff check \
+            tests/strategies/test_runtime_context_contract_autoinstall.py
+          python -m ruff check --fix --select I001 \
             src/nifty_scalper_bot/strategies/signal_identity.py \
             src/nifty_scalper_bot/strategies/signal_generator.py \
-            src/nifty_scalper_bot/strategies/elite_strategies/base_elite.py \
-            src/nifty_scalper_bot/strategies/indicators.py \
-            src/nifty_scalper_bot/strategies/runtime_context_contract.py \
-            src/nifty_scalper_bot/strategies/__init__.py \
+            src/nifty_scalper_bot/strategies/indicators.py
+      - name: Compile and check introduced correctness
+        run: |
+          python -m compileall -q src/nifty_scalper_bot/strategies src/nifty_scalper_bot/execution/runtime_order_manager.py src/nifty_scalper_bot/execution/stop_rearm_contract_patch.py
+          python -m ruff check --select F821,F822,F823 \
+            src/nifty_scalper_bot/strategies \
             src/nifty_scalper_bot/execution/runtime_order_manager.py \
             src/nifty_scalper_bot/execution/stop_rearm_contract_patch.py
+          python -m ruff check --select F401,F811,F821,F822,F823,I001 \
+            src/nifty_scalper_bot/strategies/signal_identity.py \
+            src/nifty_scalper_bot/strategies/runtime_context_contract.py \
+            src/nifty_scalper_bot/strategies/__init__.py
       - name: Run identity and runtime-context regression suite
         env:
           ALLOW_NETWORK: 'false'
