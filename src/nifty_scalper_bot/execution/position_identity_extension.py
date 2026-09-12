@@ -387,7 +387,9 @@ def apply_patches() -> None:
             **kwargs,
         )
 
-    def synchronize_with_broker(self: Any, broker_positions: Any) -> Any:
+    def synchronize_with_broker(
+        self: Any, broker_positions: Any, **kwargs: Any
+    ) -> Any:
         lifecycle_snapshot = _snapshot_owned_position_lifecycle(self)
         prepared, unresolved = _prepare_broker_positions(self, broker_positions)
         self._cost_basis_unresolved_symbols = set(unresolved)
@@ -398,6 +400,7 @@ def apply_patches() -> None:
         result = _ORIGINALS["PositionManager.synchronize_with_broker"](
             self,
             prepared,
+            **kwargs,
         )
         _canonicalize_position_store(self)
         restored = _restore_owned_position_lifecycle(self, lifecycle_snapshot)

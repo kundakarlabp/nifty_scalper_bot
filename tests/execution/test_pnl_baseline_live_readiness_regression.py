@@ -112,3 +112,19 @@ def test_canonical_app_requires_pnl_baseline_before_broker_hydration() -> None:
     hydration_index = source.index("\n    _hydrate_positions(", manager_index)
 
     assert baseline_index < hydration_index
+
+def test_startup_empty_broker_snapshot_replaces_undated_legacy_pnl(tmp_path) -> None:
+    manager = PositionManager(state_file=str(tmp_path / "positions.json"))
+    manager.require_pnl_session_baseline()
+    manager._local_realized_pnl = -125.0
+    with manager._lock:
+        manager._refresh_realized_pnl_locked()
+
+    manager.synchronize_with_broker([], session_bootstrap=True)
+
+    snapshot = manager.pnl_reconciliation_snapshot()
+    assert snapshot["session_opening_realized_baseline"] == 0.0
+    assert snapshot["baseline_source"] == "validated_broker_empty_snapshot"
+    assert snapshot["pnl_authority"] == "validated_broker_positions"
+    assert manager.get_realized_pnl() == 0.0
+    assert manager.current_pnl_reconciliation_blocker() is None

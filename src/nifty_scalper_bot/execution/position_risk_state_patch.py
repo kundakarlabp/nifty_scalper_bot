@@ -265,11 +265,18 @@ def _maybe_seed_pnl_session_baseline(self: Any, payload: Any) -> bool:
     return True
 
 
-def _patched_synchronize_with_broker(self: Any, broker_positions: Any) -> Any:
+def _patched_synchronize_with_broker(
+    self: Any,
+    broker_positions: Any,
+    *,
+    session_bootstrap: bool = False,
+) -> Any:
     """Reconcile local session P&L to explicit broker truth after a valid sync."""
     payload = _materialize_broker_positions(broker_positions)
     broker_realized_authoritative = _snapshot_has_authoritative_realized(payload)
-    result = _ORIGINAL_SYNCHRONIZE_WITH_BROKER(self, payload)
+    result = _ORIGINAL_SYNCHRONIZE_WITH_BROKER(
+        self, payload, session_bootstrap=session_bootstrap
+    )
     _maybe_seed_pnl_session_baseline(self, payload)
     if not broker_realized_authoritative:
         return result
