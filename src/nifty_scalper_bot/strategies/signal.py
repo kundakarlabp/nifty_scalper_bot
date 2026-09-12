@@ -8,29 +8,18 @@ from typing import Any
 import yaml  # type: ignore[import-untyped]
 
 from nifty_scalper_bot.core.strategy_manager import StrategyManager
+from nifty_scalper_bot.strategies.elite_strategies.builder import build_strategy_module
 from nifty_scalper_bot.strategies.elite_strategies.config import ELITE_STRATEGY_MODULES
-from nifty_scalper_bot.strategies.registry import load_strategy_module
 from nifty_scalper_bot.utils.logging import get_logger
 
 from .signal_generator import Signal, Strategy
 
 LOGGER = get_logger(__name__)
-ACTIVE_STRATEGIES = ['SMC']
+ACTIVE_STRATEGIES = ["SMC"]
 
 
 def _load_enabled_strategy_modules() -> list[str]:
-    """Load enabled elite strategy modules from YAML.
-
-    Args:
-        None.
-
-    Returns:
-        list[str]: Ordered module identifiers from configuration.
-
-    Raises:
-        None.
-    """
-
+    """Load enabled elite strategy modules from YAML."""
     LOGGER.debug(
         "Entered _load_enabled_strategy_modules",
         extra={"event": "load_enabled_strategy_modules"},
@@ -98,27 +87,14 @@ def basic_signal(
     ltp: float,
     indicators: dict[str, float] | None = None,
 ) -> Signal | None:
-    """Generate a minimal signal using the elite RSI divergence strategy.
-
-    Args:
-        symbol: Trading symbol being evaluated.
-        ltp: Latest traded price for *symbol*.
-        indicators: Optional indicator snapshot.
-
-    Returns:
-        Signal | None: Generated signal when conditions permit.
-
-    Raises:
-        None.
-    """
-
+    """Generate a minimal compatibility signal from RSI divergence evidence."""
     LOGGER.debug(
         "Entered basic_signal",
         extra={"event": "basic_signal", "symbol": symbol},
     )
     indicators = indicators or {}
     try:
-        strategy = load_strategy_module("rsi_divergence")
+        strategy = build_strategy_module("rsi_divergence", indicator_engine=None)
     except Exception as exc:  # noqa: BLE001
         LOGGER.error(
             "Failure in basic_signal: %s",
@@ -133,19 +109,7 @@ def basic_signal(
 def build_default_strategy_manager(
     indicator_engine: Any, position_manager: Any
 ) -> StrategyManager:
-    """Create a strategy manager initialised with elite strategies.
-
-    Args:
-        indicator_engine: Indicator engine supplying market context.
-        position_manager: Position manager used for exposure checks.
-
-    Returns:
-        StrategyManager: Manager initialised with configured strategies.
-
-    Raises:
-        None.
-    """
-
+    """Create a compatibility manager using canonical strategy construction."""
     LOGGER.debug(
         "Entered build_default_strategy_manager",
         extra={"event": "build_default_strategy_manager"},
@@ -154,7 +118,10 @@ def build_default_strategy_manager(
     strategies: list[Strategy] = []
     for module in modules:
         try:
-            strategy_instance = load_strategy_module(module)
+            strategy_instance = build_strategy_module(
+                module,
+                indicator_engine=indicator_engine,
+            )
         except Exception as exc:  # noqa: BLE001
             LOGGER.error(
                 "Failure loading elite strategy %s: %s",
