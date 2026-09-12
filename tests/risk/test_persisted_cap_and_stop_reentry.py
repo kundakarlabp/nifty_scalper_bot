@@ -47,7 +47,7 @@ def test_previous_trading_date_count_is_not_restored(tmp_path) -> None:
     assert restarted.trades_today() == 0
 
 
-def test__option_thesis_is_strike_independent() -> None:
+def test_option_thesis_is_strike_independent() -> None:
     assert _option_thesis("NFO:NIFTY2680424400PE") == ("NIFTY", "PE")
     assert _option_thesis("NFO:NIFTY2680424350PE") == ("NIFTY", "PE")
     assert _option_thesis("NFO:NIFTY2680424400CE") == ("NIFTY", "CE")
