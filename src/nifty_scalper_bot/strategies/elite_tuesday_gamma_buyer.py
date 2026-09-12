@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from datetime import date
-import os
 from typing import Any, Mapping
 
 from nifty_scalper_bot.strategies.elite_strategies.base_elite import (
@@ -15,6 +15,10 @@ from nifty_scalper_bot.strategies.elite_strategies.config_models import (
     TuesdayGammaBuyerStrategyConfig,
 )
 from nifty_scalper_bot.utils.logging import get_logger
+from nifty_scalper_bot.utils.smart_symbol import (
+    WEEKLY_EXPIRY_WEEKDAY,
+    get_actual_expiry_date,
+)
 
 LOGGER = get_logger(__name__)
 
@@ -136,7 +140,18 @@ class EliteTuesdayGammaBuyer(BaseEliteStrategy):
                 return None
 
             if now_local is not None:
-                if now_local.weekday() != 1:
+                raw_days_to_expiry = indicators.get('days_to_expiry')
+                if raw_days_to_expiry is not None:
+                    try:
+                        expiry_session = float(raw_days_to_expiry) <= 0.0
+                    except (TypeError, ValueError):
+                        expiry_session = False
+                else:
+                    today = now_local.date()
+                    expiry_session = (
+                        get_actual_expiry_date(today, WEEKLY_EXPIRY_WEEKDAY) == today
+                    )
+                if not expiry_session:
                     return None
                 if now_local.hour < 9 or now_local.hour > 14:
                     return None
@@ -177,9 +192,9 @@ class EliteTuesdayGammaBuyer(BaseEliteStrategy):
             else:
                 score -= 2
 
-            if current_price > recent_high:
+            if recent_high > 0 and spot > recent_high:
                 score += 2
-            elif recent_low > 0 and current_price < recent_low:
+            elif recent_low > 0 and spot < recent_low:
                 score -= 2
 
             if avg_volume > 0 and volume > 1.5 * avg_volume:
