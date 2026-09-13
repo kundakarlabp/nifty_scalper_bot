@@ -302,3 +302,39 @@ def test_structural_strategy_invalid_state_remains_a_hard_block(monkeypatch) -> 
     assert result is None
     decision = manager._last_no_signal_decision_by_symbol[_SYMBOL]
     assert decision.blocked_at == "strategy_explicit_block"
+
+
+def test_manager_final_trade_score_is_reference_only_runner_owns_numeric_quality(monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    monkeypatch.setenv("STRATEGY_TRIGGER_MIN_SCORE", "4.5")
+    manager = StrategyManager.__new__(StrategyManager)
+    manager._last_no_signal_decision_by_symbol = {}
+
+    vwap = _signal_vote(
+        "VWAPPro", raw_score=8.5, weighted_score=5.5, confidence=0.90
+    )
+    orb = _signal_vote(
+        "ORBPro", raw_score=8.0, weighted_score=5.0, confidence=0.85
+    )
+    opposing_context = _signal_vote(
+        "OrderFlow",
+        side="PE",
+        raw_score=3.0,
+        weighted_score=3.0,
+        confidence=0.70,
+        role="context",
+    )
+    opposing_context[1].metadata["context_veto_score"] = 3.0
+
+    result = manager._combine_strategy_votes(
+        symbol=_SYMBOL,
+        signals=[vwap, orb, opposing_context],
+        indicators=_live_indicators(),
+    )
+
+    assert result is not None
+    assert result.metadata["final_trade_score"] < 4.5
+    assert result.metadata["manager_final_score_reference_only"] is True
+    assert result.metadata["manager_final_score_reference_pass"] is False
+    assert result.metadata["quality_gate_owner"] == "runner_final_execution_score"
