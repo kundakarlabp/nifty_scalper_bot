@@ -1,15 +1,17 @@
 name: Canonicalize runner quality owner once
 
 on:
-  pull_request:
-    types: [opened, synchronize, reopened]
+  push:
+    branches:
+      - canonical-runner-quality-owner-20260913
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
   migrate:
-    if: github.event.pull_request.head.ref == 'canonical-runner-quality-owner-20260913'
+    if: github.ref == 'refs/heads/canonical-runner-quality-owner-20260913'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
