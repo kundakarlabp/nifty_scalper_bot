@@ -20,7 +20,7 @@ from types import SimpleNamespace
 import pytest
 
 from nifty_scalper_bot.execution.position_manager import PositionManager
-from nifty_scalper_bot.risk.entry_guard_patch import _daily_limit_block_reason
+from nifty_scalper_bot.risk.entry_policy import _daily_limit_block_reason
 
 
 def _pm(tmp_path) -> PositionManager:

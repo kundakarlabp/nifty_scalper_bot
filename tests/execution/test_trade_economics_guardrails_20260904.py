@@ -9,7 +9,7 @@ from nifty_scalper_bot.config.settings import RiskSettings
 from nifty_scalper_bot.execution import BracketManager
 from nifty_scalper_bot.execution.order_manager import OrderManager, OrderType
 from nifty_scalper_bot.risk import OrderSignal, RiskManager
-from nifty_scalper_bot.risk.entry_guard_patch import _daily_limit_block_reason
+from nifty_scalper_bot.risk.entry_policy import _daily_limit_block_reason
 
 CE = "NFO:NIFTY2690823950CE"
 # Release regressions below assert the canonical live risk and entry invariants.

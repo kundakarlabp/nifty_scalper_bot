@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from nifty_scalper_bot.risk.entry_guard_patch import (
+from nifty_scalper_bot.risk.entry_policy import (
     _net_rr_block_reason,
     _real_broker_live,
 )

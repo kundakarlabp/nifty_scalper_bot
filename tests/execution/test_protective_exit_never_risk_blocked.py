@@ -6,12 +6,12 @@ import inspect
 import re
 
 from nifty_scalper_bot.execution import bracket_core, order_manager_core
-from nifty_scalper_bot.risk import entry_guard_patch
+from nifty_scalper_bot.risk.risk_manager import RiskManager
 
 
 def test_tripped_breaker_blocks_every_order_at_the_risk_manager() -> None:
     """Documents why exits must not reach check_order at all."""
-    source = inspect.getsource(entry_guard_patch._ORIGINAL_CHECK_ORDER)
+    source = inspect.getsource(RiskManager._check_order_core)
     assert "if self._breaker_tripped:" in source
     assert "Stop loss required" in source
 

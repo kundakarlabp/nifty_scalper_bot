@@ -63,6 +63,9 @@
 
 8. **Risk, sizing and daily P&L authority**
    - Native owner: `risk/risk_manager.py::RiskManager`
+   - `RiskManager.check_order()` is the single final order-admission decision.
+     `risk/entry_policy.py` supplies pure policy helpers; it does not patch runtime
+     methods or provide an alternate gate.
    - Position sizing consumes the injected InstrumentManager lot-size provider
      and enforces per-trade and remaining-day risk budgets natively.
    - Fresh Zerodha account P&L drives the daily loss/profit circuit.
