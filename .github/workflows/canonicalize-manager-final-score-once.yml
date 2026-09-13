@@ -1,0 +1,45 @@
+name: Canonicalize manager final score once
+
+on:
+  push:
+    branches: [canonical-manager-final-score-owner-20260913]
+
+permissions:
+  contents: write
+
+jobs:
+  migrate:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: canonical-manager-final-score-owner-20260913
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Apply canonical migration
+        run: python tools/canonicalize_manager_final_score_once.py
+      - name: Validate behavior
+        run: |
+          python -m pip install -e '.[dev]' -q
+          python -m compileall -q src/nifty_scalper_bot/core
+          python -m pytest -q \
+            tests/core/test_postmerge_trade_path.py \
+            tests/strategies/test_single_vote_score_floor.py \
+            tests/core/test_strategy_setup_score_gate.py
+          git diff --check
+      - name: Publish validated source
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add \
+            src/nifty_scalper_bot/core/strategy_manager.py \
+            tests/core/test_postmerge_trade_path.py
+          if git diff --cached --quiet; then
+            echo 'No source changes.'
+            exit 0
+          fi
+          git commit -m 'Refactor: make manager final score diagnostic only'
+          git push origin HEAD:canonical-manager-final-score-owner-20260913
