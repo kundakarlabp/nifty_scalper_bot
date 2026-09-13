@@ -61,7 +61,14 @@
    - Runtime owner: `execution/hardened_adaptive_trailing.py::HardenedAdaptiveTrailingController`
    - The controller can tighten protection only; it cannot weaken an established stop.
 
-8. **Notifications and audit**
+8. **Risk and daily P&L authority**
+   - Native owner: `risk/risk_manager.py::RiskManager`
+   - Fresh Zerodha account P&L drives the daily loss/profit circuit.
+   - The local fill ledger remains the strategy-trade accounting source and the
+     fallback when broker account P&L is unavailable.
+   - P&L reconciliation diagnostics do not create a second entry gate.
+
+9. **Notifications and audit**
    - `notifications/telegram_controller.py`
    - systemd journal, structured logs and the bracket fill ledger
    - Notifications consume persisted lifecycle transitions; they do not own state.

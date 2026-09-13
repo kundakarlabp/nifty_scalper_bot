@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import math
+import os
+import threading
+import time
 from collections import deque
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-import os
 from statistics import median
-import threading
-import time
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal, Mapping, Protocol
 
 from nifty_scalper_bot.execution.position_manager import Position
@@ -38,6 +39,43 @@ COOLDOWN_SLOP_MS = max(int(os.getenv("RISK_COOLDOWN_SLOP_MS", "250")), 0)
 
 
 LOGGER = get_logger(__name__)
+
+
+def _finite_float(value: object) -> float | None:
+    """Return a finite numeric value, otherwise ``None``."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    return numeric if math.isfinite(numeric) else None
+
+
+def _resolve_broker_realized_pnl(
+    position_manager: Any,
+    *,
+    force: bool = False,
+) -> float | None:
+    """Return fresh broker account realised P&L when available."""
+    refresh = getattr(position_manager, "refresh_broker_pnl_diagnostic", None)
+    if force and callable(refresh):
+        with suppress(Exception):
+            refresh(force=True)
+
+    getter = getattr(position_manager, "get_broker_account_realized_pnl", None)
+    if not callable(getter):
+        return None
+    try:
+        value = getter(force=False)
+    except TypeError:
+        try:
+            value = getter()
+        except Exception:
+            return None
+    except Exception:
+        return None
+    return _finite_float(value)
 
 
 class PositionManagerProtocol(Protocol):
@@ -1131,6 +1169,17 @@ class RiskManager:
                 self._switches.max_day_loss = max(pct_cap, abs_cap)
             self._switches.reset_day()
             self._completed_trade_costs_today = 0.0
+            broker_realized = _resolve_broker_realized_pnl(
+                self.position_manager, force=True
+            )
+            if broker_realized is not None:
+                self._last_pnl_snapshot = broker_realized
+                if abs(broker_realized) >= 1e-6:
+                    self._switches.record_pnl(broker_realized)
+                self._record_realized_pnl_metrics(
+                    broker_realized, suppress_errors=True
+                )
+                self._trip_on_switch_breach()
 
     def _current_trading_day(self) -> datetime:  # pragma: no cover
         now = datetime.now(timezone.utc)
@@ -1145,20 +1194,31 @@ class RiskManager:
         Refresh realized PnL tracking with ZOMBIE PROTECTION.
         Synchronizes with PositionManager without tripping breakers on startup history load.
         """
-        current = float(self.position_manager.get_realized_pnl())
+        broker_realized = _resolve_broker_realized_pnl(self.position_manager)
+        current = (
+            broker_realized
+            if broker_realized is not None
+            else float(self.position_manager.get_realized_pnl())
+        )
         delta = current - self._last_pnl_snapshot
 
         if abs(delta) < 1e-6:
             return
 
-        # [FIX] Zombie Data Protection
+        # [FIX] Zombie Data Protection applies only to the local ledger. Broker
+        # account P&L is external capital truth and must reach the risk circuit.
         # If we see a massive drop AND we have the override enabled,
         # assume this is history loading and ignore the loss.
         is_override = self._soft_override or os.getenv("RISK__SOFT_OVERRIDE", "false").lower() == "true"
 
         # Threshold: If delta is negative and > 50% of daily limit (or just huge)
         # This catches the -11L restore event.
-        if is_override and delta < 0 and abs(delta) > 5000:
+        if (
+            broker_realized is None
+            and is_override
+            and delta < 0
+            and abs(delta) > 5000
+        ):
             self._logger.warning(
                 f"🧟 ZOMBIE DATA DETECTED: PnL jumped from {self._last_pnl_snapshot:.2f} to {current:.2f} ({delta:.2f}). "
                 "Ignoring this loss due to RISK__SOFT_OVERRIDE."
@@ -1176,33 +1236,82 @@ class RiskManager:
         self._switches.record_pnl(delta)
         self._last_pnl_snapshot = current
 
+        self._record_realized_pnl_metrics(
+            current, suppress_errors=broker_realized is not None
+        )
+        if broker_realized is not None:
+            self._logger.info(
+                "DAY_PNL_REFRESHED_FROM_BROKER realized=%.2f delta=%.2f day_loss=%.2f",
+                current,
+                delta,
+                self._switches.day_loss(),
+                extra={
+                    "event": "DAY_PNL_REFRESHED_FROM_BROKER",
+                    "realized": current,
+                    "delta": delta,
+                    "day_loss": self._switches.day_loss(),
+                    "source": "zerodha_margins_m2m",
+                },
+            )
+        self._trip_on_switch_breach()
+
+    def _record_realized_pnl_metrics(
+        self, current: float, *, suppress_errors: bool = False
+    ) -> None:
+        """Publish daily realised P&L without altering risk state."""
         try:
             METRICS.set_live_pnl(book="primary", value=current)
-        except Exception as e:
-            self._logger.exception("Unhandled exception in risk manager", exc_info=True)
-            raise
+        except Exception:
+            self._logger.exception("P&L metric update failed", exc_info=True)
+            if not suppress_errors:
+                raise
         try:
             METRICS.set_pnl_breakdown(book="primary", realized=current)
-        except Exception as e:
-            self._logger.exception("Unhandled exception in risk manager", exc_info=True)
-            raise
+        except Exception:
+            self._logger.exception("P&L metric update failed", exc_info=True)
+            if not suppress_errors:
+                raise
 
+    def _trip_on_switch_breach(self) -> None:
+        """Trip the breaker for the current canonical switch state."""
         reason = self._switches.breach_reason()
         if reason:
-            formatted = self._format_switch_reason(reason)
-            self._trip_breaker(formatted)
+            self._trip_breaker(self._format_switch_reason(reason))
 
     def _seed_day_pnl_from_persisted_state(self) -> None:
-        """Carry an intraday restart's realised P&L into the day-loss circuit.
+        """Seed the day-loss circuit from broker P&L or same-day local state.
 
         __post_init__ adopts the persisted realised P&L as _last_pnl_snapshot,
         so _refresh_realized_pnl() sees a zero delta and the day-loss circuit
         restarted at 0.00 while the real capital loss for the session was
         already booked. A mid-session redeploy therefore handed the bot a fresh
         full daily loss allowance. Seed the switches with the persisted amount
-        when it belongs to the current trading day.
+        when it belongs to the current trading day. A fresh broker account value
+        takes precedence because it is the external capital authority.
         """
         manager = self.position_manager
+        broker_realized = _resolve_broker_realized_pnl(manager, force=True)
+        if broker_realized is not None:
+            self._last_pnl_snapshot = broker_realized
+            if abs(broker_realized) >= 1e-6:
+                self._switches.record_pnl(broker_realized)
+            self._logger.warning(
+                "DAY_PNL_SEEDED_FROM_BROKER realized=%.2f day_loss=%.2f "
+                "source=zerodha_margins_m2m",
+                broker_realized,
+                self._switches.day_loss(),
+                extra={
+                    "event": "DAY_PNL_SEEDED_FROM_BROKER",
+                    "realized": broker_realized,
+                    "day_loss": self._switches.day_loss(),
+                    "source": "zerodha_margins_m2m",
+                },
+            )
+            self._record_realized_pnl_metrics(
+                broker_realized, suppress_errors=True
+            )
+            self._trip_on_switch_breach()
+            return
         try:
             realized = float(manager.get_realized_pnl())
         except Exception:  # noqa: BLE001 - risk init must not fail on accounting
