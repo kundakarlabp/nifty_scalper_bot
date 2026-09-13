@@ -147,7 +147,8 @@ def test_opposite_trigger_does_not_receive_quality_confirmation(monkeypatch) -> 
 
     assert result is None
     decision = manager._last_no_signal_decision_by_symbol[_SYMBOL]
-    assert decision.blocked_at == "trade_quality_gate"
+    assert decision.blocked_at == "trigger_direction_gate"
+    assert decision.reason == "conflicting_trigger_direction"
 
 
 def _wired_mdm() -> tuple[MarketDataManager, str, str]:
@@ -232,3 +233,72 @@ def test_unknown_normal_queue_remains_fail_closed() -> None:
         mdm._update_pipeline_overload_locked()
 
     assert mdm.pipeline_overloaded is True
+
+
+def test_manager_quality_reference_is_diagnostic_runner_owns_final_score(monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    manager = StrategyManager.__new__(StrategyManager)
+    manager._last_no_signal_decision_by_symbol = {}
+    manager._compute_trade_quality_score = lambda *args, **kwargs: (
+        3.0,
+        {
+            "trade_quality_score": 3.0,
+            "trade_quality_components": {},
+            "trade_quality_penalties": {},
+            "quality_block_reason": "ok",
+            "already_blocked_by_strategy": False,
+            "strategy_block_reason": None,
+        },
+    )
+    vwap = _signal_vote(
+        "VWAPPro", raw_score=8.5, weighted_score=8.5, confidence=0.90
+    )
+    orb = _signal_vote(
+        "ORBPro", raw_score=8.0, weighted_score=8.0, confidence=0.85
+    )
+
+    result = manager._combine_strategy_votes(
+        symbol=_SYMBOL,
+        signals=[vwap, orb],
+        indicators=_live_indicators(),
+    )
+
+    assert result is not None
+    assert result.metadata["quality_pass"] is False
+    assert result.metadata["manager_quality_reference_only"] is True
+    assert result.metadata["quality_gate_owner"] == "runner_final_execution_score"
+
+
+def test_structural_strategy_invalid_state_remains_a_hard_block(monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    manager = StrategyManager.__new__(StrategyManager)
+    manager._last_no_signal_decision_by_symbol = {}
+    manager._compute_trade_quality_score = lambda *args, **kwargs: (
+        9.0,
+        {
+            "trade_quality_score": 9.0,
+            "trade_quality_components": {},
+            "trade_quality_penalties": {},
+            "quality_block_reason": "quote_depth_invalid",
+            "already_blocked_by_strategy": True,
+            "strategy_block_reason": None,
+        },
+    )
+    vwap = _signal_vote(
+        "VWAPPro", raw_score=8.5, weighted_score=8.5, confidence=0.90
+    )
+    orb = _signal_vote(
+        "ORBPro", raw_score=8.0, weighted_score=8.0, confidence=0.85
+    )
+
+    result = manager._combine_strategy_votes(
+        symbol=_SYMBOL,
+        signals=[vwap, orb],
+        indicators=_live_indicators(),
+    )
+
+    assert result is None
+    decision = manager._last_no_signal_decision_by_symbol[_SYMBOL]
+    assert decision.blocked_at == "strategy_explicit_block"
