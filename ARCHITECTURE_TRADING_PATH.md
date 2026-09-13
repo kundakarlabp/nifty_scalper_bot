@@ -61,8 +61,10 @@
    - Runtime owner: `execution/hardened_adaptive_trailing.py::HardenedAdaptiveTrailingController`
    - The controller can tighten protection only; it cannot weaken an established stop.
 
-8. **Risk and daily P&L authority**
+8. **Risk, sizing and daily P&L authority**
    - Native owner: `risk/risk_manager.py::RiskManager`
+   - Position sizing consumes the injected InstrumentManager lot-size provider
+     and enforces per-trade and remaining-day risk budgets natively.
    - Fresh Zerodha account P&L drives the daily loss/profit circuit.
    - The local fill ledger remains the strategy-trade accounting source and the
      fallback when broker account P&L is unavailable.

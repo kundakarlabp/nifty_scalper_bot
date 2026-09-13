@@ -75,6 +75,32 @@ def _resolve_broker_realized_pnl(
     return _finite_float(value)
 
 
+def _daily_risk_budget_state(manager: Any) -> tuple[float | None, float, float]:
+    """Return remaining day-loss budget, current loss, and configured cap."""
+    switches = getattr(manager, "_switches", None)
+    if switches is None:
+        return None, 0.0, 0.0
+    with suppress(TypeError, ValueError):
+        max_day_loss = max(
+            float(getattr(switches, "max_day_loss", 0.0) or 0.0), 0.0
+        )
+        if max_day_loss <= 0.0:
+            return None, 0.0, 0.0
+        day_loss_reader = getattr(switches, "day_loss", None)
+        if not callable(day_loss_reader):
+            return 0.0, 0.0, max_day_loss
+        try:
+            current_day_loss = max(float(day_loss_reader() or 0.0), 0.0)
+        except Exception:
+            return 0.0, 0.0, max_day_loss
+        return (
+            max(max_day_loss - current_day_loss, 0.0),
+            current_day_loss,
+            max_day_loss,
+        )
+    return None, 0.0, 0.0
+
+
 class PositionManagerProtocol(Protocol):
     """Subset of :class:`PositionManager` required by :class:`RiskManager`."""
 
@@ -805,6 +831,26 @@ class RiskManager:
             extra={"event": "risk_suggest_position_size_entered", "symbol": symbol},
         )
 
+        confidence_value = 1.0
+        if confidence is not None:
+            try:
+                confidence_value = float(confidence)
+            except (TypeError, ValueError):
+                confidence_value = 0.0
+        confidence_value = max(0.0, min(1.0, confidence_value))
+        if confidence_value <= 0.0:
+            self._logger.info(
+                "RISK_SIZING_BLOCKED_ZERO_CONFIDENCE symbol=%s confidence=%s",
+                symbol,
+                confidence,
+                extra={
+                    "event": "RISK_SIZING_BLOCKED_ZERO_CONFIDENCE",
+                    "symbol": symbol,
+                    "confidence": confidence,
+                },
+            )
+            return 0
+
         try:
             # ✅ FIX 1: Enhanced diagnostic logging
             self._logger.info(
@@ -875,17 +921,52 @@ class RiskManager:
             if allowed_risk > balance > 0:
                 allowed_risk = balance
 
+            authoritative_balance = float(self.account_balance or 0.0)
+            if authoritative_balance <= 0.0:
+                authoritative_balance = float(
+                    getattr(self, "_cached_balance", 0.0) or 0.0
+                )
+            remaining_day_budget, current_day_loss, max_day_loss = (
+                _daily_risk_budget_state(self)
+            )
+            percent_cap = authoritative_balance * (
+                self.settings.per_trade_risk_pct / 100.0
+            )
+            if authoritative_balance > 0.0 and percent_cap > 0.0:
+                effective_allowed_risk = allowed_risk
+                effective_allowed_risk = min(effective_allowed_risk, percent_cap)
+                if remaining_day_budget is not None:
+                    effective_allowed_risk = min(
+                        effective_allowed_risk, remaining_day_budget
+                    )
+                if effective_allowed_risk < allowed_risk:
+                    event = (
+                        "RISK_SIZING_CLAMPED_TO_REMAINING_DAY_BUDGET"
+                        if remaining_day_budget is not None
+                        and remaining_day_budget < percent_cap
+                        else "RISK_SIZING_CLAMPED_TO_PERCENT_CAP"
+                    )
+                    self._logger.warning(
+                        "%s symbol=%s allowed_risk=%.2f effective_risk=%.2f",
+                        event,
+                        symbol,
+                        allowed_risk,
+                        effective_allowed_risk,
+                        extra={
+                            "event": event,
+                            "symbol": symbol,
+                            "allowed_risk": allowed_risk,
+                            "effective_allowed_risk": effective_allowed_risk,
+                            "remaining_day_budget": remaining_day_budget,
+                            "current_day_loss": current_day_loss,
+                            "max_day_loss": max_day_loss,
+                        },
+                    )
+                allowed_risk = effective_allowed_risk
+
             self._logger.info(
                 f"💰 Balance={balance:,.2f} | AllowedRisk={allowed_risk:.2f} | SL_Dist={sl_distance:.2f}"
             )
-
-            confidence_value = 1.0
-            if confidence is not None:
-                try:
-                    confidence_value = float(confidence)
-                except (TypeError, ValueError):
-                    confidence_value = 0.0
-            confidence_value = max(0.0, min(1.0, confidence_value))
 
             # Lot size resolution with fallback
             try:
