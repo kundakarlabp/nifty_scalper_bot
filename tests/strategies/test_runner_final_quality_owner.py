@@ -5,6 +5,7 @@ from nifty_scalper_bot.strategies.signal_quality import score_signal_quality
 
 _RUNNER = Path("src/nifty_scalper_bot/strategies/runner.py")
 _ORB = Path("src/nifty_scalper_bot/strategies/elite_strategies/orb_pro.py")
+_SIGNAL_QUALITY = Path("src/nifty_scalper_bot/strategies/signal_quality.py")
 
 
 def test_runner_has_one_final_quality_decision_owner() -> None:
@@ -13,6 +14,15 @@ def test_runner_has_one_final_quality_decision_owner() -> None:
     assert 'metadata.get("direction_quality", quality_hint)' not in source
     assert 'quality_reject_reason = "final_score_below_live_threshold"' in source
     assert "if not quality.allowed:" in source
+
+
+def test_signal_quality_has_no_dead_alternate_scoring_engine() -> None:
+    source = _SIGNAL_QUALITY.read_text(encoding="utf-8")
+    assert source.count("def score_signal_quality(") == 1
+    assert "def compute_final_execution_score(" not in source
+    assert "def compute_context_boost(" not in source
+    assert "def context_boost_cap(" not in source
+    assert "def rejection_cooldown(" not in source
 
 
 def test_orb_pro_publishes_native_direction_evidence() -> None:
