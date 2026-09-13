@@ -66,3 +66,9 @@ def test_promoted_candidate_score_is_the_option_score_source() -> None:
     source = _RUNNER.read_text(encoding="utf-8")
     assert "float(candidate.score or 0.0)" in source
     assert 'metadata["option_score"] = max(' in source
+
+
+def test_candidate_identity_never_inflates_underlying_direction_score() -> None:
+    source = _RUNNER.read_text(encoding="utf-8")
+    assert 'if str(candidate.side or "").upper() == option_side:' not in source
+    assert 'Candidate identity is not independent underlying-direction evidence.' in source

@@ -19817,10 +19817,9 @@ class StrategyRunner:
                     float(metadata.get("rr_score", 0.0) or 0.0),
                     min(10.0, float(candidate.rr or 0.0) * 5.0),
                 )
-                if str(candidate.side or "").upper() == option_side:
-                    metadata["direction_score"] = max(
-                        float(metadata.get("direction_score", 0.0) or 0.0), 7.5
-                    )
+                # Candidate identity is not independent underlying-direction evidence.
+                # Candidate selection may contribute option/data/RR quality only;
+                # direction quality must come from the strategy/context path.
                 metadata["strategy_score"] = max(
                     float(metadata.get("strategy_score", 0.0) or 0.0),
                     float(metadata.get("raw_setup_score", 0.0) or 0.0),
