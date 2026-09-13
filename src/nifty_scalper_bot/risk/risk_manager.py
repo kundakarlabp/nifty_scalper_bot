@@ -16,7 +16,18 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal, Mapping, Pr
 
 from nifty_scalper_bot.execution.position_manager import Position
 from nifty_scalper_bot.infra.metrics import METRICS
+from nifty_scalper_bot.risk.entry_policy import (
+    _daily_limit_block_reason,
+    _daily_limit_should_trip_breaker,
+    _daily_risk_budget_state,
+    _is_reducing_order,
+    _net_rr_block_reason,
+    _real_broker_live,
+    _signal_stop_risk,
+    _stop_reentry_block_reason,
+)
 from nifty_scalper_bot.risk.limits import RiskSwitches
+from nifty_scalper_bot.risk.net_rr_gate import evaluate_final_net_rr
 from nifty_scalper_bot.utils.env import get_float
 from nifty_scalper_bot.utils.logging import get_logger, log_once_or_throttled
 from nifty_scalper_bot.utils.metrics import Counter, Gauge
@@ -73,32 +84,6 @@ def _resolve_broker_realized_pnl(
     except Exception:
         return None
     return _finite_float(value)
-
-
-def _daily_risk_budget_state(manager: Any) -> tuple[float | None, float, float]:
-    """Return remaining day-loss budget, current loss, and configured cap."""
-    switches = getattr(manager, "_switches", None)
-    if switches is None:
-        return None, 0.0, 0.0
-    with suppress(TypeError, ValueError):
-        max_day_loss = max(
-            float(getattr(switches, "max_day_loss", 0.0) or 0.0), 0.0
-        )
-        if max_day_loss <= 0.0:
-            return None, 0.0, 0.0
-        day_loss_reader = getattr(switches, "day_loss", None)
-        if not callable(day_loss_reader):
-            return 0.0, 0.0, max_day_loss
-        try:
-            current_day_loss = max(float(day_loss_reader() or 0.0), 0.0)
-        except Exception:
-            return 0.0, 0.0, max_day_loss
-        return (
-            max(max_day_loss - current_day_loss, 0.0),
-            current_day_loss,
-            max_day_loss,
-        )
-    return None, 0.0, 0.0
 
 
 class PositionManagerProtocol(Protocol):
@@ -629,10 +614,158 @@ class RiskManager:
         age = max(time.time() - self._last_balance_refresh, 0.0)
         return age >= threshold
 
+    def _final_order_block(
+        self,
+        signal: OrderSignal,
+        reason: str,
+        code: str,
+        *,
+        critical: bool = False,
+        **details: Any,
+    ) -> tuple[bool, str]:
+        """Record one canonical final-entry rejection."""
+        self._last_rejection = code
+        logger = getattr(self, "_logger", None)
+        log = getattr(logger, "critical" if critical else "warning", None)
+        if callable(log):
+            log(
+                "RISK_FINAL_GATE_BLOCK reason=%s symbol=%s",
+                reason,
+                getattr(signal, "symbol", None),
+                extra={
+                    "event": "RISK_FINAL_GATE_BLOCK",
+                    "reason": reason,
+                    "code": code,
+                    "symbol": getattr(signal, "symbol", None),
+                    "final_order_gate": True,
+                    **details,
+                },
+            )
+        return False, reason
+
     def check_order(
         self, signal: OrderSignal, live_enabled: bool
+    ) -> tuple[bool, str]:
+        """Apply entry-only policy around the canonical core risk checks."""
+        position_manager = self.position_manager
+        if _is_reducing_order(position_manager, signal):
+            return self._check_order_core(signal, live_enabled)
+
+        if live_enabled:
+            reentry_reason = _stop_reentry_block_reason(position_manager, signal)
+            if reentry_reason is not None:
+                return self._final_order_block(
+                    signal, reentry_reason, "STOP_REENTRY_COOLDOWN"
+                )
+
+        broker_live = _real_broker_live(live_enabled)
+        if broker_live:
+            net_rr_block = _net_rr_block_reason(signal)
+            if net_rr_block is not None:
+                reason, result = net_rr_block
+                return self._final_order_block(
+                    signal,
+                    reason,
+                    "NET_RR_INSUFFICIENT",
+                    net_rr=round(result.net_rr, 4),
+                    min_net_rr=result.minimum,
+                    gross_reward=round(result.gross_reward, 2),
+                    gross_risk=round(result.gross_risk, 2),
+                    net_reward=round(result.net_reward, 2),
+                    net_risk=round(result.net_risk, 2),
+                    target_cost=round(result.target_cost, 2),
+                    stop_cost=round(result.stop_cost, 2),
+                    half_spread=round(result.half_spread, 4),
+                )
+
+        if live_enabled and not bool(getattr(self, "_breaker_tripped", False)):
+            blocker = _daily_limit_block_reason(self)
+            if blocker is not None:
+                reason, code = blocker
+                if _daily_limit_should_trip_breaker(self, code):
+                    with suppress(Exception):
+                        self._trip_breaker(reason)
+                return self._final_order_block(
+                    signal, reason, code, critical=True
+                )
+
+        allowed, reason = self._check_order_core(signal, live_enabled)
+        if not allowed or not live_enabled:
+            return allowed, reason
+
+        remaining, current_loss, daily_cap = _daily_risk_budget_state(self)
+        stop_risk = _signal_stop_risk(signal)
+        prospective_risk = stop_risk
+        cost_reserve = 0.0
+        effective_budget = remaining
+        if broker_live:
+            with suppress(Exception):
+                economics = evaluate_final_net_rr(signal)
+                if economics is not None:
+                    prospective_risk = max(
+                        float(economics.net_risk), float(stop_risk or 0.0)
+                    )
+                    cost_reserve = max(
+                        prospective_risk - float(stop_risk or 0.0), 0.0
+                    )
+            with suppress(TypeError, ValueError, AttributeError):
+                balance = max(float(self.account_balance or 0.0), 0.0)
+                risk_pct = max(float(self.settings.per_trade_risk_pct or 0.0), 0.0)
+                per_trade_budget = balance * risk_pct / 100.0
+                if per_trade_budget > 0.0:
+                    effective_budget = (
+                        per_trade_budget
+                        if effective_budget is None
+                        else min(effective_budget, per_trade_budget)
+                    )
+
+        if (
+            broker_live
+            and effective_budget is not None
+            and prospective_risk is not None
+            and prospective_risk > effective_budget
+        ):
+            reason = (
+                "cost-inclusive risk budget insufficient: "
+                f"{prospective_risk:.2f}/{effective_budget:.2f}"
+            )
+            return self._final_order_block(
+                signal,
+                reason,
+                "DAILY_RISK_BUDGET",
+                risk_basis="stop_plus_round_trip_costs",
+                prospective_stop_risk=stop_risk,
+                transaction_cost_reserve=cost_reserve,
+                prospective_loss_risk=prospective_risk,
+                effective_risk_budget=effective_budget,
+                remaining_day_budget=remaining,
+                current_day_loss=current_loss,
+                max_day_loss=daily_cap,
+            )
+        if (
+            remaining is not None
+            and stop_risk is not None
+            and stop_risk > remaining
+        ):
+            reason = (
+                "remaining daily loss budget insufficient: "
+                f"{stop_risk:.2f}/{remaining:.2f}"
+            )
+            return self._final_order_block(
+                signal,
+                reason,
+                "DAILY_RISK_BUDGET",
+                prospective_stop_risk=stop_risk,
+                remaining_day_budget=remaining,
+                current_day_loss=current_loss,
+                max_day_loss=daily_cap,
+            )
+        return allowed, reason
+
+    def _check_order_core(
+        self, signal: OrderSignal, live_enabled: bool
     ) -> tuple[bool, str]:  # pragma: no cover
-        """Return ``(allowed, reason)`` for the provided order signal."""
+        """Apply common risk checks shared by entry and reducing orders."""
 
         try:
             force_refresh = self._should_force_balance_refresh()

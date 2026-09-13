@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 from nifty_scalper_bot.execution.position_manager import PositionManager
 from nifty_scalper_bot.execution.position_risk_state_patch import _option_thesis
-from nifty_scalper_bot.risk.entry_guard_patch import (
+from nifty_scalper_bot.risk.entry_policy import (
     _daily_limit_block_reason,
     _stop_reentry_block_reason,
 )

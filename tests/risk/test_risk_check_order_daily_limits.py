@@ -1,7 +1,6 @@
 from types import SimpleNamespace
 
 from nifty_scalper_bot.risk import OrderSignal, RiskManager
-from nifty_scalper_bot.risk import entry_guard_patch
 
 
 def test_check_order_enforces_max_trades_per_day_at_final_gate(monkeypatch):
@@ -74,7 +73,11 @@ def test_final_daily_limits_do_not_block_reducing_orders(monkeypatch):
     manager._last_rejection = None
     trips = []
     monkeypatch.setattr(RiskManager, "_trip_breaker", lambda self, reason: trips.append(reason))
-    monkeypatch.setattr(entry_guard_patch, "_ORIGINAL_CHECK_ORDER", lambda self, signal, live_enabled: (True, "original_ok"))
+    monkeypatch.setattr(
+        RiskManager,
+        "_check_order_core",
+        lambda self, signal, live_enabled: (True, "original_ok"),
+    )
 
     allowed, reason = manager.check_order(
         OrderSignal(
