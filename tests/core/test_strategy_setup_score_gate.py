@@ -50,6 +50,7 @@ def test_setup_gate_preserves_legacy_vote_without_explicit_contract() -> None:
 
 def test_context_cannot_promote_an_explicitly_failed_trigger() -> None:
     manager = StrategyManager.__new__(StrategyManager)
+    manager._last_no_signal_decision_by_symbol = {}
     weak_trigger = (
         SimpleNamespace(action="BUY"),
         _vote(
@@ -196,3 +197,20 @@ def test_close_signal_is_never_blocked_by_setup_gate() -> None:
     assert passed is False
     # Close bypass is enforced by the wrapper before setup_gate_result is used.
     assert "CLOSE_LONG" in {"CLOSE_LONG", "CLOSE_SHORT"}
+
+
+def test_setup_policy_is_native_not_import_time_patched() -> None:
+    from pathlib import Path
+
+    core_init = Path("src/nifty_scalper_bot/core/__init__.py").read_text(encoding="utf-8")
+    setup_module = Path(
+        "src/nifty_scalper_bot/core/strategy_setup_score_gate.py"
+    ).read_text(encoding="utf-8")
+    reliability = Path(
+        "src/nifty_scalper_bot/core/runtime_reliability_hardening.py"
+    ).read_text(encoding="utf-8")
+
+    assert "_apply_strategy_setup_score_gate" not in core_init
+    assert "def apply_patches" not in setup_module
+    assert "_install_trade_quality_patch" not in reliability
+    assert "_install_strategy_reason_patch" not in reliability

@@ -35,10 +35,15 @@ def _float_from(metadata: Mapping[str, Any], keys: tuple[str, ...]) -> float | N
     return None
 
 
+def is_permanent_context_only(vote: Any) -> bool:
+    """Return whether a strategy is structurally context-only."""
+    strategy = str(getattr(vote, "strategy", "") or "").strip().lower()
+    return strategy in _CONTEXT_ONLY_STRATEGIES
+
+
 def vote_role(vote: Any) -> str:
     """Return the effective immutable role for a vote."""
-    strategy = str(getattr(vote, "strategy", "") or "").strip().lower()
-    if strategy in _CONTEXT_ONLY_STRATEGIES:
+    if is_permanent_context_only(vote):
         return "context"
     metadata = dict(getattr(vote, "metadata", {}) or {})
     return str(metadata.get("role") or "trigger").strip().lower()
@@ -146,6 +151,7 @@ __all__ = [
     "SetupGateDecision",
     "independent_same_side_confirmation",
     "is_close_signal",
+    "is_permanent_context_only",
     "partition_votes",
     "setup_gate_decision",
     "vote_role",

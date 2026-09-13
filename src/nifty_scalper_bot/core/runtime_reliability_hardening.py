@@ -8,7 +8,6 @@ diagnostics while preserving fail-closed behavior for entry-critical queues.
 
 from __future__ import annotations
 
-from dataclasses import replace
 from datetime import datetime
 from functools import wraps
 import logging
@@ -230,185 +229,6 @@ def _install_datahub_tick_hotpath_patch() -> bool:
     return True
 
 
-def _trigger_confirmation_details(
-    signals: list[tuple[Any, Any]],
-) -> tuple[bool, list[str]]:
-    """Return bounded independent same-side trigger confirmation evidence."""
-
-    trigger_votes = [
-        vote
-        for signal, vote in signals
-        if str((getattr(vote, "metadata", {}) or {}).get("role") or "trigger").lower()
-        != "context"
-        and str(getattr(signal, "action", "")) not in {"CLOSE_LONG", "CLOSE_SHORT"}
-    ]
-    if len(trigger_votes) < 2:
-        return False, []
-    try:
-        best = max(trigger_votes, key=lambda vote: float(getattr(vote, "score", 0.0) or 0.0))
-    except Exception:  # noqa: BLE001 - uncertainty never creates confirmation
-        return False, []
-    best_side = str(getattr(best, "side", "") or "").upper()
-    best_strategy = str(getattr(best, "strategy", "") or "").strip().lower()
-    if best_side not in {"CE", "PE"} or not best_strategy:
-        return False, []
-    confirming = sorted(
-        {
-            str(getattr(vote, "strategy", "") or "").strip()
-            for vote in trigger_votes
-            if str(getattr(vote, "side", "") or "").upper() == best_side
-            and str(getattr(vote, "strategy", "") or "").strip().lower()
-            not in {"", best_strategy}
-        }
-    )
-    return bool(confirming), confirming
-
-
-def _install_trade_quality_patch() -> bool:
-    """Credit one bounded independent trigger before the unchanged quality gate."""
-
-    from nifty_scalper_bot.core.strategy_manager import StrategyManager
-
-    attr = "_independent_trigger_quality_hardening_installed"
-    if bool(getattr(StrategyManager, attr, False)):
-        return True
-    original = StrategyManager._compute_trade_quality_score
-
-    def _compute_trade_quality_score(
-        self: Any,
-        vote: Any,
-        indicators: Mapping[str, Any],
-        *,
-        symbol: str,
-        selected_ok: bool,
-        near_atm_ok: bool,
-        context_votes: list[Any],
-    ) -> tuple[float, dict[str, Any]]:
-        score, metadata = original(
-            self,
-            vote,
-            indicators,
-            symbol=symbol,
-            selected_ok=selected_ok,
-            near_atm_ok=near_atm_ok,
-            context_votes=context_votes,
-        )
-        details = dict(metadata or {})
-        components = dict(details.get("trade_quality_components") or {})
-        confirmation = bool(indicators.get("independent_trigger_confirmation"))
-        already_blocked = bool(details.get("already_blocked_by_strategy"))
-        bonus = 0.5 if confirmation and not already_blocked else 0.0
-        components["independent_trigger_confirmation"] = bonus
-        adjusted = max(0.0, min(10.0, float(score) + bonus))
-        details["trade_quality_components"] = components
-        details["trade_quality_score"] = round(adjusted, 3)
-        details["independent_trigger_confirmation"] = bool(bonus)
-        details["independent_trigger_confirmation_strategies"] = list(
-            indicators.get("independent_trigger_confirmation_strategies") or []
-        )
-        return adjusted, details
-
-    StrategyManager._compute_trade_quality_score = (  # type: ignore[method-assign]
-        _compute_trade_quality_score
-    )
-    setattr(StrategyManager, attr, True)
-    return True
-
-
-def _install_strategy_reason_patch() -> bool:
-    from nifty_scalper_bot.core.strategy_manager import StrategyManager
-
-    attr = "_weighted_rejection_reason_hardening_installed"
-    if bool(getattr(StrategyManager, attr, False)):
-        return True
-    original = StrategyManager._combine_strategy_votes
-
-    def _combine_strategy_votes(
-        self: Any,
-        *,
-        symbol: str,
-        signals: list[tuple[Any, Any]],
-        indicators: Mapping[str, Any],
-        no_vote_reason_counts: Mapping[str, int] | None = None,
-    ) -> Any:
-        confirmation, confirmation_strategies = _trigger_confirmation_details(signals)
-        effective_indicators = dict(indicators or {})
-        if confirmation:
-            effective_indicators["independent_trigger_confirmation"] = True
-            effective_indicators["independent_trigger_confirmation_strategies"] = (
-                confirmation_strategies
-            )
-        result = original(
-            self,
-            symbol=symbol,
-            signals=signals,
-            indicators=effective_indicators,
-            no_vote_reason_counts=no_vote_reason_counts,
-        )
-        if result is not None:
-            return result
-
-        symbol_norm = str(symbol or "").strip().upper()
-        decision_map = getattr(self, "_last_no_signal_decision_by_symbol", None)
-        decision = decision_map.get(symbol_norm) if isinstance(decision_map, dict) else None
-        if decision is None or str(getattr(decision, "reason", "")) != "raw_score_below_min":
-            return result
-
-        trigger_votes = [
-            vote
-            for signal, vote in signals
-            if str((getattr(vote, "metadata", {}) or {}).get("role") or "trigger").lower()
-            != "context"
-            and str(getattr(signal, "action", "")) not in {"CLOSE_LONG", "CLOSE_SHORT"}
-        ]
-        if len(trigger_votes) != 1:
-            return result
-
-        vote = trigger_votes[0]
-        try:
-            raw_score = float(self._extract_raw_score(vote))
-            weighted_score = float(getattr(vote, "score", 0.0) or 0.0)
-            score_min = float(self._single_vote_thresholds(vote.strategy)[0])
-        except Exception:
-            return result
-
-        if raw_score < score_min or weighted_score >= score_min:
-            return result
-        corrected_reason = "regime_weighted_score_below_min"
-        try:
-            decision_map[symbol_norm] = replace(
-                decision,
-                reason=corrected_reason,
-                final_block_reason=corrected_reason,
-            )
-        except Exception:
-            return result
-        _LOG.info(
-            "STRATEGY_REJECTION_REASON_CORRECTED symbol=%s strategy=%s raw_score=%.2f "
-            "weighted_score=%.2f score_min=%.2f reason=%s",
-            symbol_norm,
-            getattr(vote, "strategy", None),
-            raw_score,
-            weighted_score,
-            score_min,
-            corrected_reason,
-            extra={
-                "event": "STRATEGY_REJECTION_REASON_CORRECTED",
-                "symbol": symbol_norm,
-                "strategy": getattr(vote, "strategy", None),
-                "raw_score": raw_score,
-                "weighted_score": weighted_score,
-                "score_min": score_min,
-                "reason": corrected_reason,
-            },
-        )
-        return result
-
-    StrategyManager._combine_strategy_votes = _combine_strategy_votes  # type: ignore[method-assign]
-    setattr(StrategyManager, attr, True)
-    return True
-
-
 def _is_dynamic_option_symbol(symbol: object) -> bool:
     upper = normalize_symbol(str(symbol or "")).upper()
     return upper.startswith("NFO:NIFTY") and upper.endswith(("CE", "PE"))
@@ -515,8 +335,6 @@ def apply_patches() -> dict[str, bool]:
     state = {
         "mdm_overload": _install_mdm_overload_patch(),
         "datahub_tick_hotpath": _install_datahub_tick_hotpath_patch(),
-        "trade_quality": _install_trade_quality_patch(),
-        "strategy_reason": _install_strategy_reason_patch(),
         "runner_cpu_telemetry": _install_runner_cpu_telemetry_patch(),
         "runner_tick_latency_telemetry": _install_runner_tick_latency_telemetry_patch(),
     }
@@ -535,5 +353,4 @@ __all__ = [
     "_critical_oldest_pending_age_ms_locked",
     "_is_canonical_runtime_tick",
     "_runtime_tick_timestamp_ms",
-    "_trigger_confirmation_details",
 ]

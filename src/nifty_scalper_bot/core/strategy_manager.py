@@ -34,6 +34,11 @@ from nifty_scalper_bot.core.adaptive_calibration import (
 )
 from nifty_scalper_bot.core.market_regime import RegimeSnapshot
 from nifty_scalper_bot.core.market_regime_manager import MarketRegimeManager
+from nifty_scalper_bot.core.strategy_vote_policy import (
+    independent_same_side_confirmation,
+    is_permanent_context_only,
+    partition_votes,
+)
 from nifty_scalper_bot.core.underlying_direction import (
     UnderlyingDirectionObservation,
     arbitrate_underlying_direction,
@@ -4097,19 +4102,81 @@ class StrategyManager(_BaseStrategyManager):
             except (TypeError, ValueError):
                 return 1.0
         mode_profile = self.get_strategy_mode_profile()
-        trigger_votes: list[tuple[Signal, StrategyVote]] = []
-        context_votes: list[tuple[Signal, StrategyVote]] = []
+        entry_signals: list[tuple[Signal, StrategyVote]] = []
         for signal, vote in signals:
             if signal.action in {"CLOSE_LONG", "CLOSE_SHORT"}:
                 signal.metadata = dict(signal.metadata or {})
                 signal.metadata["approval_path"] = "close_signal"
                 log.info("TRADE_DECISION_TRACE approval_path=%s symbol=%s", "close_signal", symbol_norm)
                 return signal
-            role = str((vote.metadata or {}).get("role") or "trigger").lower()
-            if role == "context":
-                context_votes.append((signal, vote))
-            else:
-                trigger_votes.append((signal, vote))
+            entry_signals.append((signal, vote))
+
+        trigger_votes, context_votes, rejected_setups = partition_votes(entry_signals)
+        if rejected_setups and not trigger_votes:
+            log_throttled(
+                log,
+                f"strategy_setup_contract_failed:{symbol_norm}",
+                "STRATEGY_SETUP_CONTRACT_FAILED symbol=%s rejected=%s",
+                symbol_norm,
+                rejected_setups,
+                interval_sec=30.0,
+                level=logging.INFO,
+                extra={
+                    "event": "STRATEGY_SETUP_CONTRACT_FAILED",
+                    "symbol": symbol_norm,
+                    "rejected": rejected_setups,
+                },
+            )
+            _record_no_signal(
+                "strategy_setup_rejected",
+                "setup_contract_failed",
+                "strategy_setup_gate",
+                trigger_vote_count=0,
+                context_vote_count=len(context_votes),
+                final_block_reason="setup_contract_failed",
+            )
+            return None
+
+        trigger_sides = {
+            str(vote.side or "").upper()
+            for _signal, vote in trigger_votes
+            if str(vote.side or "").upper() in {"CE", "PE"}
+        }
+        if len(trigger_sides) > 1:
+            _record_no_signal(
+                "strategy_conflict",
+                "conflicting_trigger_direction",
+                "trigger_direction_gate",
+                trigger_vote_count=len(trigger_votes),
+                context_vote_count=len(context_votes),
+                final_block_reason="conflicting_trigger_direction",
+            )
+            log_throttled(
+                log,
+                f"conflicting_trigger_direction:{symbol_norm}",
+                "CONFLICTING_TRIGGER_DIRECTION_BLOCKED symbol=%s sides=%s strategies=%s",
+                symbol_norm,
+                sorted(trigger_sides),
+                [vote.strategy for _signal, vote in trigger_votes],
+                interval_sec=30.0,
+                level=logging.INFO,
+                extra={
+                    "event": "CONFLICTING_TRIGGER_DIRECTION_BLOCKED",
+                    "symbol": symbol_norm,
+                    "sides": sorted(trigger_sides),
+                    "strategies": [vote.strategy for _signal, vote in trigger_votes],
+                },
+            )
+            return None
+
+        confirmation, confirmation_strategies = independent_same_side_confirmation(
+            entry_signals
+        )
+        if confirmation:
+            indicator_map["independent_trigger_confirmation"] = True
+            indicator_map["independent_trigger_confirmation_strategies"] = (
+                confirmation_strategies
+            )
         # ── Underlying-direction authority gate (fail closed) ──
         # An option ENTRY may only be approved with a fresh, valid underlying
         # (spot/futures) direction that matches the option side. Missing or
@@ -4735,42 +4802,76 @@ class StrategyManager(_BaseStrategyManager):
         metadata.update(quality_meta)
         metadata["quality_min_required"] = quality_min_required
         metadata["quality_pass"] = quality_pass
-        if not quality_pass:
-            raw_reason = str(metadata.get("quality_block_reason") or "").strip().lower()
-            metadata["quality_block_reason"] = "trade_quality_below_threshold" if raw_reason in {"", "ok"} else str(metadata.get("quality_block_reason"))
+        metadata["quality_gate_owner"] = "runner_final_execution_score"
+        metadata["manager_quality_reference_only"] = True
+
+        explicit_strategy_block = bool(quality_meta.get("already_blocked_by_strategy"))
+        if explicit_strategy_block:
+            blocked_reason = str(
+                quality_meta.get("strategy_block_reason")
+                or quality_meta.get("quality_block_reason")
+                or "strategy_evidence_invalid"
+            )
             log_throttled_live(
                 log,
                 logging.INFO,
-                "STRATEGY_QUALITY_REJECT",
-                f"STRATEGY_QUALITY_REJECT:{best_vote.strategy}:{symbol_norm}:{metadata['quality_block_reason']}",
+                "STRATEGY_EXPLICIT_BLOCK",
+                f"STRATEGY_EXPLICIT_BLOCK:{best_vote.strategy}:{symbol_norm}:{blocked_reason}",
                 float(os.getenv("LOG_THROTTLE_STRATEGY_REJECT_SECONDS", "120") or "120"),
-                "STRATEGY_QUALITY_REJECT symbol=%s strategy=%s side=%s score=%.2f reason=%s",
+                "STRATEGY_EXPLICIT_BLOCK symbol=%s strategy=%s side=%s reason=%s",
+                symbol_norm,
+                best_vote.strategy,
+                best_vote.side,
+                blocked_reason,
+                extra={
+                    "event": "STRATEGY_EXPLICIT_BLOCK",
+                    "symbol": symbol_norm,
+                    "strategy": best_vote.strategy,
+                    "side": best_vote.side,
+                    "reason": blocked_reason,
+                },
+            )
+            record_strategy_evaluation(
+                strategy=str(best_vote.strategy),
+                symbol=symbol_norm,
+                accepted=False,
+                reason=blocked_reason,
+                score=quality_score,
+            )
+            maybe_emit_strategy_rejection_summary(log, interval_seconds=300.0)
+            _record_no_signal(
+                "strategy_no_trigger",
+                blocked_reason,
+                "strategy_explicit_block",
+                trigger_vote_count=len(trigger_votes),
+                context_vote_count=len(context_votes),
+                final_block_reason=blocked_reason,
+            )
+            return None
+
+        if not quality_pass:
+            log_throttled_live(
+                log,
+                logging.INFO,
+                "STRATEGY_QUALITY_REFERENCE_BELOW_MIN",
+                f"STRATEGY_QUALITY_REFERENCE_BELOW_MIN:{best_vote.strategy}:{symbol_norm}",
+                float(os.getenv("LOG_THROTTLE_STRATEGY_REJECT_SECONDS", "120") or "120"),
+                "STRATEGY_QUALITY_REFERENCE_BELOW_MIN symbol=%s strategy=%s side=%s score=%.2f reference_min=%.2f final_owner=runner",
                 symbol_norm,
                 best_vote.strategy,
                 best_vote.side,
                 quality_score,
-                metadata["quality_block_reason"],
-                extra={"event": "STRATEGY_QUALITY_REJECT", "symbol": symbol_norm, "strategy": best_vote.strategy, "side": best_vote.side, "score": quality_score, "reason": metadata["quality_block_reason"]},
+                quality_min_required,
+                extra={
+                    "event": "STRATEGY_QUALITY_REFERENCE_BELOW_MIN",
+                    "symbol": symbol_norm,
+                    "strategy": best_vote.strategy,
+                    "side": best_vote.side,
+                    "score": quality_score,
+                    "reference_min": quality_min_required,
+                    "final_owner": "runner_final_execution_score",
+                },
             )
-            log_throttled_live(
-                log,
-                logging.INFO,
-                "TRADE_DECISION_TRACE",
-                f"TRADE_DECISION_TRACE:{best_vote.strategy}:{symbol_norm}:{metadata['quality_block_reason']}",
-                float(os.getenv("LOG_THROTTLE_STRATEGY_REJECT_SECONDS", "120") or "120"),
-                "TRADE_DECISION_TRACE symbol=%s strategy=%s side=%s allowed=%s blocked_at=%s blocked_reason=%s",
-                symbol_norm,
-                best_vote.strategy,
-                best_vote.side,
-                False,
-                "trade_quality_gate",
-                metadata["quality_block_reason"],
-                extra={"event": "TRADE_DECISION_TRACE", "symbol": symbol_norm, "strategy": best_vote.strategy, "side": best_vote.side, "allowed": False, "blocked_at": "trade_quality_gate", "blocked_reason": metadata["quality_block_reason"]},
-            )
-            record_strategy_evaluation(strategy=str(best_vote.strategy), symbol=symbol_norm, accepted=False, reason=str(metadata["quality_block_reason"]), score=quality_score)
-            maybe_emit_strategy_rejection_summary(log, interval_seconds=300.0)
-            _record_no_signal("strategy_no_trigger", str(metadata["quality_block_reason"]), "trade_quality_gate", trigger_vote_count=len(trigger_votes), context_vote_count=len(context_votes))
-            return None
 
         direction_bias = str(indicator_map.get("direction_bias") or indicator_map.get("underlying_direction_bias") or "").upper()
         max_context_age = self._live_context_max_age_seconds()
@@ -4795,7 +4896,6 @@ class StrategyManager(_BaseStrategyManager):
             and selected_ok_combined
             and quote_depth_ok
             and spread_pct <= self._env_float("LIVE_MAX_SPREAD_PCT", 0.75)
-            and quality_pass
             and not hard_veto_reasons
             and not no_vote_counts.get("negative_premium_flow")
         )
@@ -4970,6 +5070,11 @@ class StrategyManager(_BaseStrategyManager):
         mode_profile: dict[str, t.Any],
     ) -> tuple[Signal, StrategyVote] | None:
         """Args: symbol/context votes/indicators/profile. Returns: promoted candidate or None. Raises: none."""
+        if not context_votes:
+            return None
+        context_votes = [
+            pair for pair in context_votes if not is_permanent_context_only(pair[1])
+        ]
         if not context_votes:
             return None
         if not bool(mode_profile.get("allow_context_promotion", True)):
@@ -5198,6 +5303,13 @@ class StrategyManager(_BaseStrategyManager):
         if str(vote.strategy).lower() == "orderflow" and str(payload.get("role", "")).lower() == "trigger":
             if not bool(payload.get("quote_depth_valid")):
                 penalties["orderflow_missing_depth"] = -2.0
+        confirmation_bonus = (
+            0.5
+            if bool(indicators.get("independent_trigger_confirmation"))
+            and not already_blocked_by_strategy
+            else 0.0
+        )
+        components["independent_trigger_confirmation"] = confirmation_bonus
         score = max(0.0, min(10.0, sum(components.values()) + sum(penalties.values())))
         block_reason = "ok" if score >= 0 else "invalid"
         if penalties:
@@ -5212,6 +5324,10 @@ class StrategyManager(_BaseStrategyManager):
             "quality_evidence_complete": evidence_complete,
             "already_blocked_by_strategy": already_blocked_by_strategy,
             "strategy_block_reason": strategy_block_reason or None,
+            "independent_trigger_confirmation": bool(confirmation_bonus),
+            "independent_trigger_confirmation_strategies": list(
+                indicators.get("independent_trigger_confirmation_strategies") or []
+            ),
             "trade_quality_symbol": symbol,
         }
 
