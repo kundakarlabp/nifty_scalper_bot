@@ -20,7 +20,19 @@ jobs:
         with:
           python-version: '3.11'
       - name: Apply source migration
-        run: python tools/canonicalize_entry_admission_once.py
+        shell: bash
+        run: |
+          python tools/canonicalize_entry_admission_once.py
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('tests/core/test_strategy_setup_score_gate.py')
+          text = path.read_text(encoding='utf-8')
+          old = '''def test_context_cannot_promote_an_explicitly_failed_trigger() -> None:\n    manager = StrategyManager.__new__(StrategyManager)\n'''
+          new = old + '    manager._last_no_signal_decision_by_symbol = {}\n'
+          assert text.count(old) == 1, text.count(old)
+          path.write_text(text.replace(old, new, 1), encoding='utf-8')
+          PY
       - name: Validate source migration
         shell: bash
         run: |
