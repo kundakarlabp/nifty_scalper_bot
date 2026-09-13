@@ -12,10 +12,10 @@ from contextlib import suppress
 from typing import Any
 
 from nifty_scalper_bot.risk.net_rr_gate import NetRRResult, evaluate_final_net_rr
+from nifty_scalper_bot.risk.risk_manager import _daily_risk_budget_state
 
 _PATCH_APPLIED = False
 _ORIGINAL_CHECK_ORDER: Any = None
-_ORIGINAL_SUGGEST_POSITION_SIZE: Any = None
 _REDUCING_INTENTS = {"EXIT", "REDUCE", "FLATTEN", "SQUARE_OFF", "SQUAREOFF"}
 _TRUE_VALUES = {"1", "true", "yes", "y", "on"}
 
@@ -192,54 +192,6 @@ def _net_rr_block_reason(signal: Any) -> tuple[str, NetRRResult] | None:
     return None
 
 
-def _confidence_value(value: Any) -> float:
-    if value is None:
-        return 1.0
-    with suppress(TypeError, ValueError):
-        return max(0.0, min(1.0, float(value)))
-    return 0.0
-
-
-def _sizing_risk_distance(
-    *, side: str, price: float, stop_loss: Any, atr: Any
-) -> float:
-    effective_stop = stop_loss
-    if effective_stop is None:
-        default_sl_pct = float(os.getenv("DEFAULT_SL_PCT", "2.0"))
-        effective_stop = (
-            price * (1 - default_sl_pct / 100.0)
-            if str(side).strip().upper() == "BUY"
-            else price * (1 + default_sl_pct / 100.0)
-        )
-    with suppress(TypeError, ValueError):
-        distance = abs(float(price) - float(effective_stop))
-        if atr is not None:
-            with suppress(TypeError, ValueError):
-                distance = max(distance, abs(float(atr)))
-        return max(distance, float(price) * 0.005)
-    return 0.0
-
-
-def _daily_risk_budget_state(manager: Any) -> tuple[float | None, float, float]:
-    """Return remaining day-loss budget, current day loss and configured cap."""
-    switches = getattr(manager, "_switches", None)
-    if switches is None:
-        return None, 0.0, 0.0
-    with suppress(TypeError, ValueError):
-        max_day_loss = max(float(getattr(switches, "max_day_loss", 0.0) or 0.0), 0.0)
-        if max_day_loss <= 0.0:
-            return None, 0.0, 0.0
-        day_loss_reader = getattr(switches, "day_loss", None)
-        if not callable(day_loss_reader):
-            return 0.0, 0.0, max_day_loss
-        try:
-            current_day_loss = max(float(day_loss_reader() or 0.0), 0.0)
-        except Exception:
-            return 0.0, 0.0, max_day_loss
-        return max(max_day_loss - current_day_loss, 0.0), current_day_loss, max_day_loss
-    return None, 0.0, 0.0
-
-
 def _signal_stop_risk(signal: Any) -> float | None:
     """Return deterministic stop-risk for a normalized entry signal."""
     with suppress(TypeError, ValueError):
@@ -250,122 +202,6 @@ def _signal_stop_risk(signal: Any) -> float | None:
             return None
         return abs(price - float(stop_loss)) * quantity
     return None
-
-
-def _patched_suggest_position_size(
-    self: Any,
-    *,
-    side: str,
-    price: float,
-    stop_loss: float | None,
-    atr: float | None,
-    requested_quantity: int,
-    confidence: float | None = None,
-    symbol: str | None = None,
-) -> int:
-    """Preserve existing sizing, then enforce percentage and remaining-day caps."""
-    confidence_value = _confidence_value(confidence)
-    if confidence_value <= 0.0:
-        logger = getattr(self, "_logger", None)
-        log = getattr(logger, "info", None)
-        if callable(log):
-            log(
-                "RISK_SIZING_BLOCKED_ZERO_CONFIDENCE symbol=%s confidence=%s",
-                symbol,
-                confidence,
-                extra={
-                    "event": "RISK_SIZING_BLOCKED_ZERO_CONFIDENCE",
-                    "symbol": symbol,
-                    "confidence": confidence,
-                },
-            )
-        return 0
-
-    quantity = int(
-        _ORIGINAL_SUGGEST_POSITION_SIZE(
-            self,
-            side=side,
-            price=price,
-            stop_loss=stop_loss,
-            atr=atr,
-            requested_quantity=requested_quantity,
-            confidence=confidence,
-            symbol=symbol,
-        )
-        or 0
-    )
-    if quantity <= 0:
-        return 0
-
-    with suppress(TypeError, ValueError, AttributeError):
-        balance = float(getattr(self, "account_balance", 0.0) or 0.0)
-        if balance <= 0.0:
-            balance = float(getattr(self, "_cached_balance", 0.0) or 0.0)
-        risk_pct = float(
-            getattr(getattr(self, "settings", None), "per_trade_risk_pct", 0.0)
-            or 0.0
-        )
-        allowed_risk = balance * (risk_pct / 100.0)
-        remaining_day_budget, current_day_loss, max_day_loss = _daily_risk_budget_state(
-            self
-        )
-        effective_allowed_risk = allowed_risk
-        if remaining_day_budget is not None:
-            effective_allowed_risk = min(allowed_risk, remaining_day_budget)
-        distance = _sizing_risk_distance(
-            side=side,
-            price=float(price),
-            stop_loss=stop_loss,
-            atr=atr,
-        )
-        if balance > 0.0 and allowed_risk > 0.0 and distance > 0.0:
-            try:
-                lot_size = int(self._resolve_lot_size(symbol))
-            except Exception:
-                lot_size = int(os.getenv("DEFAULT_LOT_SIZE", "25"))
-            if lot_size <= 0:
-                return 0
-            max_lots = int(effective_allowed_risk // (distance * lot_size))
-            safe_quantity = max(0, max_lots * lot_size)
-            if quantity > safe_quantity:
-                logger = getattr(self, "_logger", None)
-                log = getattr(logger, "warning", None)
-                daily_budget_tighter = (
-                    remaining_day_budget is not None
-                    and remaining_day_budget < allowed_risk
-                )
-                event = (
-                    "RISK_SIZING_CLAMPED_TO_REMAINING_DAY_BUDGET"
-                    if daily_budget_tighter
-                    else "RISK_SIZING_CLAMPED_TO_PERCENT_CAP"
-                )
-                if callable(log):
-                    log(
-                        "%s symbol=%s requested_sized=%s safe_qty=%s "
-                        "allowed_risk=%.2f effective_risk=%.2f risk_distance=%.4f",
-                        event,
-                        symbol,
-                        quantity,
-                        safe_quantity,
-                        allowed_risk,
-                        effective_allowed_risk,
-                        distance,
-                        extra={
-                            "event": event,
-                            "symbol": symbol,
-                            "sized_quantity": quantity,
-                            "safe_quantity": safe_quantity,
-                            "allowed_risk": allowed_risk,
-                            "effective_allowed_risk": effective_allowed_risk,
-                            "risk_distance": distance,
-                            "per_trade_risk_pct": risk_pct,
-                            "remaining_day_budget": remaining_day_budget,
-                            "current_day_loss": current_day_loss,
-                            "max_day_loss": max_day_loss,
-                        },
-                    )
-                return safe_quantity
-    return quantity
 
 
 def _patched_check_order(self: Any, signal: Any, live_enabled: bool) -> tuple[bool, str]:
@@ -563,7 +399,7 @@ def _patched_check_order(self: Any, signal: Any, live_enabled: bool) -> tuple[bo
 
 
 def apply_patches() -> None:
-    global _PATCH_APPLIED, _ORIGINAL_CHECK_ORDER, _ORIGINAL_SUGGEST_POSITION_SIZE
+    global _PATCH_APPLIED, _ORIGINAL_CHECK_ORDER
     if _PATCH_APPLIED:
         return
     from nifty_scalper_bot.risk.risk_manager import RiskManager
@@ -572,23 +408,18 @@ def apply_patches() -> None:
         _PATCH_APPLIED = True
         return
     _ORIGINAL_CHECK_ORDER = RiskManager.check_order
-    _ORIGINAL_SUGGEST_POSITION_SIZE = RiskManager.suggest_position_size
     RiskManager.check_order = _patched_check_order
-    RiskManager.suggest_position_size = _patched_suggest_position_size
     RiskManager._entry_guard_patch = True
     _PATCH_APPLIED = True
 
 
 __all__ = [
     "apply_patches",
-    "_confidence_value",
     "_daily_limit_block_reason",
     "_daily_risk_budget_state",
     "_is_reducing_order",
     "_net_rr_block_reason",
-    "_patched_suggest_position_size",
     "_real_broker_live",
     "_signal_stop_risk",
-    "_sizing_risk_distance",
     "_stop_reentry_block_reason",
 ]
