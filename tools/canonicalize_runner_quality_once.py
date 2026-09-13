@@ -1,0 +1,257 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+
+def replace_once(text: str, old: str, new: str, label: str) -> str:
+    count = text.count(old)
+    assert count == 1, f"{label}: expected exactly one match, found {count}"
+    return text.replace(old, new, 1)
+
+
+runner_path = Path("src/nifty_scalper_bot/strategies/runner.py")
+runner = runner_path.read_text(encoding="utf-8")
+
+runner = replace_once(
+    runner,
+    '''            metadata.setdefault(
+                "direction_score",
+                float(metadata.get("direction_quality", quality_hint) or quality_hint),
+            )
+''',
+    '''            if (
+                metadata.get("direction_score") is None
+                and metadata.get("direction_quality") is not None
+            ):
+                metadata["direction_score"] = float(
+                    metadata.get("direction_quality") or 0.0
+                )
+''',
+    "remove confidence-to-direction fallback",
+)
+
+precheck_start = runner.index(
+    '            if requires_final_score:\n'
+    '                required_components = (\n'
+)
+precheck_end = runner.index(
+    '            if missing_components and reason_key == "premium_momentum_squeeze":',
+    precheck_start,
+)
+precheck = '''            missing_components = missing_score_components(metadata)
+            if requires_final_score:
+                has_components = not missing_components
+                has_candidate = bool(metadata.get("candidate_selected"))
+                has_quote_usable = bool(metadata.get("quote_usable_for_order_plan"))
+
+                if not (has_components and has_candidate and has_quote_usable):
+                    if missing_components:
+                        final_score_block_reason = "missing_final_score_components"
+                    elif not has_candidate:
+                        final_score_block_reason = "candidate_not_selected"
+                    elif not has_quote_usable:
+                        final_score_block_reason = "quote_not_usable_for_order_plan"
+                    else:
+                        final_score_block_reason = "final_score_precheck_failed_unknown"
+                    strategy_name = (
+                        metadata.get("strategy_name")
+                        or metadata.get("strategy")
+                        or signal.reason
+                    )
+                    self._logger.info(
+                        "TRADE_DECISION_TRACE symbol=%s strategy=%s side=%s allowed=%s blocked_at=%s blocked_reason=%s missing_components=%s has_candidate=%s has_quote_usable=%s candidate_symbol=%s selected_snapshot_symbol=%s latest_bid=%s latest_ask=%s latest_quote_tradable=%s",
+                        base_symbol,
+                        strategy_name,
+                        infer_option_side(signal.symbol, metadata),
+                        False,
+                        "runner_final_score_precheck",
+                        final_score_block_reason,
+                        missing_components,
+                        has_candidate,
+                        has_quote_usable,
+                        metadata.get("candidate_symbol"),
+                        metadata.get("selected_snapshot_symbol"),
+                        metadata.get("latest_quote_bid"),
+                        metadata.get("latest_quote_ask"),
+                        metadata.get("latest_quote_tradable"),
+                        extra={
+                            "event": "TRADE_DECISION_TRACE",
+                            "symbol": base_symbol,
+                            "strategy": strategy_name,
+                            "side": infer_option_side(signal.symbol, metadata),
+                            "allowed": False,
+                            "blocked_at": "runner_final_score_precheck",
+                            "blocked_reason": final_score_block_reason,
+                            "trace_id": trace_id,
+                            "missing_components": missing_components,
+                            "has_candidate": has_candidate,
+                            "has_quote_usable": has_quote_usable,
+                            "candidate_symbol": metadata.get("candidate_symbol"),
+                            "selected_snapshot_symbol": metadata.get(
+                                "selected_snapshot_symbol"
+                            ),
+                            "latest_bid": metadata.get("latest_quote_bid"),
+                            "latest_ask": metadata.get("latest_quote_ask"),
+                            "latest_quote_tradable": metadata.get(
+                                "latest_quote_tradable"
+                            ),
+                        },
+                    )
+                    _trace(final_score_block_reason)
+                    return _reject_after_dedup(reason=final_score_block_reason)
+'''
+runner = runner[:precheck_start] + precheck + runner[precheck_end:]
+
+score_anchor = runner.index("            quality = score_signal_quality(")
+duplicate_start = runner.index(
+    '            if requires_final_score:\n'
+    '                live_threshold = float(quality.components.get("threshold", 0.0) or 0.0)\n',
+    score_anchor,
+)
+duplicate_end = runner.index("            if not quality.allowed:\n", duplicate_start)
+runner = runner[:duplicate_start] + runner[duplicate_end:]
+
+reject_start = runner.index("            if not quality.allowed:\n", score_anchor)
+reject_end = runner.index("            signal = dataclasses.replace(\n", reject_start)
+unified_reject = '''            if not quality.allowed:
+                rejection_reasons = list(quality.reasons or [])
+                if "context_only_strategy" in rejection_reasons:
+                    quality_reject_reason = "context_only_strategy"
+                elif requires_final_score and "score_below_threshold" in rejection_reasons:
+                    quality_reject_reason = "final_score_below_live_threshold"
+                elif "direction_below_minimum" in rejection_reasons:
+                    quality_reject_reason = "direction_below_minimum"
+                elif "score_below_threshold" in rejection_reasons:
+                    quality_reject_reason = "score_below_threshold"
+                else:
+                    quality_reject_reason = "signal_quality_rejected"
+                threshold = float(quality.components.get("threshold", 0.0) or 0.0)
+                delta = quality.final_score - threshold
+                self._logger.info(
+                    "SIGNAL_SCORE_REJECTED symbol=%s strategy_name=%s final=%.2f threshold=%.2f delta=%.2f reason=%s reasons=%s components=%s",
+                    base_symbol,
+                    quality.components.get("strategy_name", ""),
+                    quality.final_score,
+                    threshold,
+                    delta,
+                    quality_reject_reason,
+                    rejection_reasons,
+                    quality.components,
+                )
+                if requires_final_score:
+                    self._logger.info(
+                        "TRADE_DECISION_TRACE symbol=%s strategy=%s side=%s allowed=%s blocked_at=%s blocked_reason=%s final_score=%.2f threshold=%.2f reasons=%s trace_id=%s",
+                        base_symbol,
+                        str(quality.components.get("strategy_name", "")),
+                        infer_option_side(signal.symbol, metadata),
+                        False,
+                        "runner_final_score",
+                        quality_reject_reason,
+                        quality.final_score,
+                        threshold,
+                        rejection_reasons,
+                        trace_id,
+                        extra={
+                            "event": "TRADE_DECISION_TRACE",
+                            "symbol": base_symbol,
+                            "trace_id": trace_id,
+                            "final_score": quality.final_score,
+                            "threshold": threshold,
+                            "allowed": False,
+                            "blocked_at": "runner_final_score",
+                            "blocked_reason": quality_reject_reason,
+                            "reasons": rejection_reasons,
+                        },
+                    )
+                self._signal_reject_cooldown_ts[reject_cooldown_key] = now_epoch
+                return _reject_after_dedup(
+                    reason=quality_reject_reason,
+                    details={"score": quality.final_score, "reasons": rejection_reasons},
+                )
+'''
+runner = runner[:reject_start] + unified_reject + runner[reject_end:]
+
+assert "quality.final_score < live_threshold" not in runner
+assert 'metadata.get("direction_quality", quality_hint)' not in runner
+runner_path.write_text(runner, encoding="utf-8")
+
+orb_path = Path("src/nifty_scalper_bot/strategies/elite_strategies/orb_pro.py")
+orb = orb_path.read_text(encoding="utf-8")
+orb = replace_once(
+    orb,
+    '''            "setup_pass": True,
+            "strategy_score": strategy_score,
+            "setup_quality": strategy_score,
+''',
+    '''            "setup_pass": True,
+            "direction_score": strategy_score,
+            "strategy_score": strategy_score,
+            "setup_quality": strategy_score,
+''',
+    "ORB native direction score",
+)
+orb_path.write_text(orb, encoding="utf-8")
+
+test_path = Path("tests/strategies/test_runner_final_quality_owner.py")
+test_path.write_text(
+    '''from pathlib import Path
+
+from nifty_scalper_bot.strategies.signal_quality import score_signal_quality
+
+
+_RUNNER = Path("src/nifty_scalper_bot/strategies/runner.py")
+_ORB = Path("src/nifty_scalper_bot/strategies/elite_strategies/orb_pro.py")
+
+
+def test_runner_has_one_final_quality_decision_owner() -> None:
+    source = _RUNNER.read_text(encoding="utf-8")
+    assert "quality.final_score < live_threshold" not in source
+    assert 'metadata.get("direction_quality", quality_hint)' not in source
+    assert 'quality_reject_reason = "final_score_below_live_threshold"' in source
+    assert "if not quality.allowed:" in source
+
+
+def test_orb_pro_publishes_native_direction_evidence() -> None:
+    source = _ORB.read_text(encoding="utf-8")
+    assert '"direction_score": strategy_score' in source
+
+
+def test_signal_quality_allowed_owns_threshold_and_direction(monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    low_score = score_signal_quality(
+        direction_score=7.0,
+        strategy_score=7.0,
+        option_score=7.0,
+        data_score=7.0,
+        rr_score=7.0,
+        strategy_name="VWAPPro",
+    )
+    assert low_score.allowed is False
+    assert "score_below_threshold" in low_score.reasons
+
+    low_direction = score_signal_quality(
+        direction_score=5.9,
+        strategy_score=10.0,
+        option_score=10.0,
+        data_score=10.0,
+        rr_score=10.0,
+        strategy_name="VWAPPro",
+    )
+    assert low_direction.allowed is False
+    assert "direction_below_minimum" in low_direction.reasons
+
+    context_only = score_signal_quality(
+        direction_score=10.0,
+        strategy_score=10.0,
+        option_score=10.0,
+        data_score=10.0,
+        rr_score=10.0,
+        strategy_name="OrderFlow",
+    )
+    assert context_only.allowed is False
+    assert "context_only_strategy" in context_only.reasons
+''',
+    encoding="utf-8",
+)
+
+print("runner quality migration prepared")
