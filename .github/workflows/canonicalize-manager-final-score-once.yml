@@ -21,12 +21,16 @@ jobs:
           python-version: '3.11'
       - name: Apply canonical migration
         run: python tools/canonicalize_manager_final_score_once.py
-      - name: Validate behavior
+      - name: Validate manager admission behavior
         run: |
           python -m pip install -e '.[dev]' -q
           python -m compileall -q src/nifty_scalper_bot/core
           python -m pytest -q \
-            tests/core/test_postmerge_trade_path.py \
+            tests/core/test_postmerge_trade_path.py::test_aligned_independent_trigger_can_clear_unchanged_live_quality_floor \
+            tests/core/test_postmerge_trade_path.py::test_opposite_trigger_does_not_receive_quality_confirmation \
+            tests/core/test_postmerge_trade_path.py::test_manager_quality_reference_is_diagnostic_runner_owns_final_score \
+            tests/core/test_postmerge_trade_path.py::test_structural_strategy_invalid_state_remains_a_hard_block \
+            tests/core/test_postmerge_trade_path.py::test_manager_final_trade_score_is_reference_only_runner_owns_numeric_quality \
             tests/strategies/test_single_vote_score_floor.py \
             tests/core/test_strategy_setup_score_gate.py
           git diff --check
