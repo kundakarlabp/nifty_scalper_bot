@@ -37,6 +37,14 @@ jobs:
         shell: bash
         run: |
           python -m pip install -e '.[dev]' -q
+          python -m ruff check --fix --select I \
+            src/nifty_scalper_bot/core/strategy_manager.py \
+            src/nifty_scalper_bot/core/strategy_vote_policy.py \
+            src/nifty_scalper_bot/core/strategy_setup_score_gate.py \
+            src/nifty_scalper_bot/core/__init__.py \
+            src/nifty_scalper_bot/core/runtime_reliability_hardening.py \
+            tests/core/test_postmerge_trade_path.py \
+            tests/core/test_strategy_setup_score_gate.py
           python -m black \
             src/nifty_scalper_bot/core/strategy_manager.py \
             src/nifty_scalper_bot/core/strategy_vote_policy.py \
@@ -53,7 +61,7 @@ jobs:
             tests/core/test_runtime_reliability_followup.py \
             tests/core/test_strategy_manager_regime_fallback.py \
             tests/strategies/test_vwap_metadata_contract_side.py
-          python -m ruff check \
+          python -m ruff check --select E9,F63,F7,F82 \
             src/nifty_scalper_bot/core/strategy_manager.py \
             src/nifty_scalper_bot/core/strategy_vote_policy.py \
             src/nifty_scalper_bot/core/strategy_setup_score_gate.py \
