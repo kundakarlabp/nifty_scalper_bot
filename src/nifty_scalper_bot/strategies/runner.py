@@ -20071,10 +20071,13 @@ class StrategyRunner:
                     float(metadata.get("confidence", 0.0) or 0.0) * 10.0,
                 ),
             )
-            metadata.setdefault(
-                "direction_score",
-                float(metadata.get("direction_quality", quality_hint) or quality_hint),
-            )
+            if (
+                metadata.get("direction_score") is None
+                and metadata.get("direction_quality") is not None
+            ):
+                metadata["direction_score"] = float(
+                    metadata.get("direction_quality") or 0.0
+                )
             metadata.setdefault(
                 "strategy_score",
                 float(metadata.get("setup_quality", quality_hint) or quality_hint),
@@ -20269,25 +20272,11 @@ class StrategyRunner:
                 )
                 _trace("regime_not_allowed")
                 return _reject_after_dedup(reason="regime_not_allowed")
+            missing_components = missing_score_components(metadata)
             if requires_final_score:
-                required_components = (
-                    "direction_score",
-                    "strategy_score",
-                    "option_score",
-                    "data_score",
-                    "rr_score",
-                )
-                has_components = all(
-                    metadata.get(component) is not None
-                    for component in required_components
-                )
+                has_components = not missing_components
                 has_candidate = bool(metadata.get("candidate_selected"))
                 has_quote_usable = bool(metadata.get("quote_usable_for_order_plan"))
-                missing_components = [
-                    component
-                    for component in required_components
-                    if metadata.get(component) is None
-                ]
 
                 if not (has_components and has_candidate and has_quote_usable):
                     if missing_components:
@@ -20344,7 +20333,6 @@ class StrategyRunner:
                     )
                     _trace(final_score_block_reason)
                     return _reject_after_dedup(reason=final_score_block_reason)
-            missing_components = missing_score_components(metadata)
             if missing_components and reason_key == "premium_momentum_squeeze":
                 metadata["shadow_only"] = True
                 metadata["missing_reason"] = (
@@ -20403,92 +20391,60 @@ class StrategyRunner:
                     "final_score": quality.final_score,
                 },
             )
-            if requires_final_score:
-                live_threshold = float(quality.components.get("threshold", 0.0) or 0.0)
-                if quality.final_score < live_threshold:
+            if not quality.allowed:
+                rejection_reasons = list(quality.reasons or [])
+                if "context_only_strategy" in rejection_reasons:
+                    quality_reject_reason = "context_only_strategy"
+                elif requires_final_score and "score_below_threshold" in rejection_reasons:
+                    quality_reject_reason = "final_score_below_live_threshold"
+                elif "direction_below_minimum" in rejection_reasons:
+                    quality_reject_reason = "direction_below_minimum"
+                elif "score_below_threshold" in rejection_reasons:
+                    quality_reject_reason = "score_below_threshold"
+                else:
+                    quality_reject_reason = "signal_quality_rejected"
+                threshold = float(quality.components.get("threshold", 0.0) or 0.0)
+                delta = quality.final_score - threshold
+                self._logger.info(
+                    "SIGNAL_SCORE_REJECTED symbol=%s strategy_name=%s final=%.2f threshold=%.2f delta=%.2f reason=%s reasons=%s components=%s",
+                    base_symbol,
+                    quality.components.get("strategy_name", ""),
+                    quality.final_score,
+                    threshold,
+                    delta,
+                    quality_reject_reason,
+                    rejection_reasons,
+                    quality.components,
+                )
+                if requires_final_score:
                     self._logger.info(
-                        "TRADE_DECISION_TRACE symbol=%s strategy=%s side=%s allowed=%s blocked_at=%s blocked_reason=%s final_score=%.2f threshold=%.2f direction_score=%.2f strategy_score=%.2f option_score=%.2f data_score=%.2f rr_score=%.2f reasons=%s trace_id=%s",
+                        "TRADE_DECISION_TRACE symbol=%s strategy=%s side=%s allowed=%s blocked_at=%s blocked_reason=%s final_score=%.2f threshold=%.2f reasons=%s trace_id=%s",
                         base_symbol,
                         str(quality.components.get("strategy_name", "")),
                         infer_option_side(signal.symbol, metadata),
                         False,
                         "runner_final_score",
-                        "final_score_below_live_threshold",
+                        quality_reject_reason,
                         quality.final_score,
-                        live_threshold,
-                        float(
-                            quality.components.get(
-                                "direction_score", quality.direction_score
-                            )
-                            or 0.0
-                        ),
-                        float(
-                            quality.components.get(
-                                "strategy_score", quality.strategy_score
-                            )
-                            or 0.0
-                        ),
-                        float(
-                            quality.components.get("option_score", quality.option_score)
-                            or 0.0
-                        ),
-                        float(
-                            quality.components.get("data_score", quality.data_score)
-                            or 0.0
-                        ),
-                        float(
-                            quality.components.get("rr_score", quality.rr_score) or 0.0
-                        ),
-                        quality.reasons,
+                        threshold,
+                        rejection_reasons,
                         trace_id,
                         extra={
                             "event": "TRADE_DECISION_TRACE",
                             "symbol": base_symbol,
                             "trace_id": trace_id,
                             "final_score": quality.final_score,
-                            "threshold": live_threshold,
+                            "threshold": threshold,
                             "allowed": False,
                             "blocked_at": "runner_final_score",
-                            "blocked_reason": "final_score_below_live_threshold",
-                            "direction_score": quality.components.get(
-                                "direction_score", quality.direction_score
-                            ),
-                            "strategy_score": quality.components.get(
-                                "strategy_score", quality.strategy_score
-                            ),
-                            "option_score": quality.components.get(
-                                "option_score", quality.option_score
-                            ),
-                            "data_score": quality.components.get(
-                                "data_score", quality.data_score
-                            ),
-                            "rr_score": quality.components.get(
-                                "rr_score", quality.rr_score
-                            ),
-                            "reasons": quality.reasons,
+                            "blocked_reason": quality_reject_reason,
+                            "reasons": rejection_reasons,
                         },
                     )
-                    _trace("final_score_below_live_threshold")
-                    return _reject_after_dedup(
-                        reason="final_score_below_live_threshold"
-                    )
-            if not quality.allowed:
-                delta = quality.final_score - float(
-                    quality.components.get("threshold", 0.0) or 0.0
-                )
-                self._logger.info(
-                    "SIGNAL_SCORE_REJECTED symbol=%s strategy_name=%s final=%.2f threshold=%.2f delta=%.2f components=%s",
-                    base_symbol,
-                    quality.components.get("strategy_name", ""),
-                    quality.final_score,
-                    float(quality.components.get("threshold", 0.0) or 0.0),
-                    delta,
-                    quality.components,
-                )
                 self._signal_reject_cooldown_ts[reject_cooldown_key] = now_epoch
                 return _reject_after_dedup(
-                    reason="score_below_threshold",
-                    details={"score": quality.final_score},
+                    reason=quality_reject_reason,
+                    details={"score": quality.final_score, "reasons": rejection_reasons},
                 )
             signal = dataclasses.replace(
                 signal,

@@ -541,6 +541,7 @@ class ORBProStrategy(EliteStrategy):
             "setup_score": strategy_score,
             "setup_min": min_score,
             "setup_pass": True,
+            "direction_score": strategy_score,
             "strategy_score": strategy_score,
             "setup_quality": strategy_score,
             "confidence_semantics": "setup_quality_fraction_not_probability",
