@@ -19,9 +19,6 @@ from nifty_scalper_bot.infra.metrics import METRICS
 from nifty_scalper_bot.risk.limits import RiskSwitches
 from nifty_scalper_bot.utils.env import get_float
 from nifty_scalper_bot.utils.logging import get_logger, log_once_or_throttled
-from nifty_scalper_bot.utils.lot_size import (
-    resolve_lot_size as resolve_lot_size_with_source,
-)
 from nifty_scalper_bot.utils.metrics import Counter, Gauge
 from nifty_scalper_bot.utils.reasons import SOFT, canonical
 
@@ -963,21 +960,20 @@ class RiskManager:
         self._lot_size_symbol = symbol
 
     def _resolve_lot_size(self, symbol: str | None) -> int:
-        """Resolve lot size. Args: symbol. Returns: lot size. Raises: Exception."""
+        """Resolve lot size from the InstrumentManager provider wired by the app."""
         lookup = self._lot_size_lookup if callable(self._lot_size_lookup) else None
         target_symbol = symbol or self._lot_size_symbol or "NIFTY"
-        try:
-            lot_size, source = resolve_lot_size_with_source(target_symbol, lookup)
-            self._logger.info(
-                "LOT_SIZE_RESOLVED underlying=%s lot_size=%s source=%s",
-                "NIFTY" if "NIFTY" in str(target_symbol).upper() else target_symbol,
-                lot_size,
-                source,
-            )
-            return lot_size
-        except Exception as e:
-            self._logger.error("Failure in _resolve_lot_size: %s", e, exc_info=True)
-            raise
+        if lookup is None:
+            raise RuntimeError("lot size provider not configured")
+        lot_size = int(lookup(target_symbol) or 0)
+        if lot_size <= 0:
+            raise ValueError(f"invalid lot size for {target_symbol}: {lot_size}")
+        self._logger.info(
+            "LOT_SIZE_RESOLVED underlying=%s lot_size=%s source=provider",
+            "NIFTY" if "NIFTY" in str(target_symbol).upper() else target_symbol,
+            lot_size,
+        )
+        return lot_size
 
     def record_fill(self, realized_pnl: float) -> None:  # pragma: no cover
         """Update realised PnL state and consecutive loss counters."""
