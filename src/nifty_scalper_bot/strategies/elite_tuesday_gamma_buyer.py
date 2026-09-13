@@ -1,10 +1,13 @@
-"""Capital-aware Tuesday expiry gamma buyer elite strategy."""
+"""Tuesday-expiry long-premium gamma strategy.
+
+Direction comes only from the canonical fresh underlying context. Position sizing,
+daily-loss limits and open-position admission remain owned by the centralized risk
+and execution layers.
+"""
 
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
-from datetime import date
 from typing import Any, Mapping
 
 from nifty_scalper_bot.strategies.elite_strategies.base_elite import (
@@ -18,105 +21,80 @@ from nifty_scalper_bot.utils.logging import get_logger
 from nifty_scalper_bot.utils.smart_symbol import (
     WEEKLY_EXPIRY_WEEKDAY,
     get_actual_expiry_date,
+    now_ist,
 )
 
 LOGGER = get_logger(__name__)
 
 BaseEliteStrategy = EliteStrategy
-NIFTY_LOT_SIZE = int(os.getenv("NIFTY_LOT_SIZE", "65"))
-MAX_RISK_PER_TRADE = 0.006
-MAX_DAILY_RISK = 0.02
-MAX_CAPITAL_DEPLOYMENT = 0.15
 
 
-@dataclass(slots=True)
-class _AccountState:
-    """Args: none. Returns: account state container. Raises: never."""
+def _positive_float(value: Any) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if parsed <= 0.0 or parsed != parsed:
+        return None
+    return parsed
 
-    available_equity: float = 0.0
+
+def _mapping(value: Any) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def _aligned(side: str, bullish: bool) -> bool:
+    return bullish if side == "CE" else not bullish
 
 
 class EliteTuesdayGammaBuyer(BaseEliteStrategy):
-    """Args: config, indicator_engine. Returns: initialized strategy. Raises: Exception."""
+    """Expiry-day long-premium trigger using canonical underlying context."""
 
     def __init__(
         self,
         config: TuesdayGammaBuyerStrategyConfig,
         indicator_engine: Any,
     ) -> None:
-        """Args: config, indicator_engine. Returns: None. Raises: Exception."""
         super().__init__(config=config, indicator_engine=indicator_engine)
         self._config = config
-        self.account_state = _AccountState()
-        self.daily_realized_pnl = 0.0
-        self._trading_disabled_day: date | None = None
 
     def get_required_indicators(self) -> set[str]:
-        """Args: none. Returns: required indicators. Raises: Exception."""
-        return {
-            "spot",
-            "ltp",
-            "vwap",
-            "ema_fast",
-            "ema_slow",
-            "recent_high",
-            "recent_low",
-            "volume",
-            "avg_volume",
-            "atr",
-            "atr_ma",
-            "spot_return_3min",
-        }
+        """Return only option-local indicators required before context enrichment."""
+        return {"atr", "direction_bias"}
 
-    def disable_trading_for_day(self) -> None:
-        """Args: none. Returns: None. Raises: Exception."""
-        try:
-            self._trading_disabled_day = self._today_local()
-            hook = getattr(self, "_on_daily_trading_disabled", None)
-            if callable(hook):
-                hook(self.name)
-            LOGGER.info(
-                "Condition met: tuesday_gamma_daily_halt",
-                extra={"event": "tuesday_gamma_daily_halt", "strategy": self.name},
-            )
-        except Exception as e:
-            LOGGER.error("Failure in disable_trading_for_day: %s", e, exc_info=e)
-
-    def compute_position_size(self, entry: float, stop: float) -> int:
-        """Args: entry, stop. Returns: lot-aligned quantity. Raises: Exception."""
-        try:
-            capital = float(self.account_state.available_equity)
-            if capital <= 0:
-                return 0
-
-            risk_amount = capital * MAX_RISK_PER_TRADE
-            risk_per_unit = abs(entry - stop)
-            if risk_per_unit <= 0:
-                return 0
-
-            contracts = int(risk_amount / (risk_per_unit * NIFTY_LOT_SIZE))
-            contracts = max(0, contracts)
-
-            max_deploy = capital * MAX_CAPITAL_DEPLOYMENT
-            while contracts > 0 and (entry * contracts * NIFTY_LOT_SIZE) > max_deploy:
-                contracts -= 1
-
-            quantity = contracts * NIFTY_LOT_SIZE
-            if quantity < NIFTY_LOT_SIZE:
-                return 0
-            return quantity
-        except Exception as e:
-            LOGGER.error("Failure in compute_position_size: %s", e, exc_info=e)
-            return 0
-
-    def _today_local(self) -> date:
-        """Args: none. Returns: local trading date. Raises: Exception."""
+    def _now_local(self):
         clock = getattr(self, "clock", None)
         if clock and callable(getattr(clock, "now_local", None)):
-            return clock.now_local().date()
-        from datetime import datetime
+            return clock.now_local()
+        return now_ist()
 
-        return datetime.now().date()
+    @staticmethod
+    def _underlying_context(
+        indicators: Mapping[str, Any],
+    ) -> tuple[Mapping[str, Any], str] | None:
+        """Resolve one coherent underlying price/indicator domain."""
+        spot = _mapping(indicators.get("spot_context"))
+        futures = _mapping(indicators.get("futures_context"))
+        for context, source in ((spot, "spot_context"), (futures, "futures_context")):
+            price = _positive_float(
+                context.get("ltp") or context.get("close") or context.get("price")
+            )
+            if price is not None:
+                return context, source
+        return None
+
+    @staticmethod
+    def _expiry_session(indicators: Mapping[str, Any], trading_date) -> bool:
+        raw_days = indicators.get("days_to_expiry")
+        if raw_days is not None:
+            try:
+                return float(raw_days) <= 0.0
+            except (TypeError, ValueError):
+                return False
+        return (
+            get_actual_expiry_date(trading_date, WEEKLY_EXPIRY_WEEKDAY)
+            == trading_date
+        )
 
     def _evaluate_signal(
         self,
@@ -125,188 +103,202 @@ class EliteTuesdayGammaBuyer(BaseEliteStrategy):
         current_price: float,
         position: Any | None = None,
     ) -> EliteSignal | None:
-        """Args: symbol, indicators, current_price, position. Returns: EliteSignal|None. Raises: Exception."""
         del position
         try:
-            now_local = None
-            clock = getattr(self, "clock", None)
-            if clock and callable(getattr(clock, "now_local", None)):
-                now_local = clock.now_local()
-
-            strategy_mode = str(os.getenv("STRATEGY_MODE", "directional_scalp")).lower()
+            strategy_mode = str(
+                os.getenv("STRATEGY_MODE", "directional_scalp")
+            ).strip().lower()
             gamma_enabled = str(
                 os.getenv("ALLOW_EXPIRY_GAMMA_STRATEGIES", "false")
-            ).lower() in {"1", "true", "yes", "on"}
+            ).strip().lower() in {"1", "true", "yes", "on"}
             if not (strategy_mode == "expiry_gamma" and gamma_enabled):
                 self._no_vote("gamma_mode_disabled")
                 return None
 
-            if now_local is not None:
-                raw_days_to_expiry = indicators.get("days_to_expiry")
-                if raw_days_to_expiry is not None:
-                    try:
-                        expiry_session = float(raw_days_to_expiry) <= 0.0
-                    except (TypeError, ValueError):
-                        expiry_session = False
-                else:
-                    today = now_local.date()
-                    expiry_session = (
-                        get_actual_expiry_date(today, WEEKLY_EXPIRY_WEEKDAY) == today
-                    )
-                if not expiry_session:
-                    return None
-                if now_local.hour < 9 or now_local.hour > 14:
-                    return None
-                if now_local.hour == 9 and now_local.minute < 20:
-                    return None
-                if now_local.hour == 14 and now_local.minute >= 45:
-                    return None
-
-            if self._trading_disabled_day == self._today_local():
+            now_local = self._now_local()
+            if not self._expiry_session(indicators, now_local.date()):
+                self._no_vote("not_expiry_session")
+                return None
+            minute_of_day = now_local.hour * 60 + now_local.minute
+            if minute_of_day < 9 * 60 + 20 or minute_of_day >= 14 * 60 + 45:
+                self._no_vote("outside_expiry_gamma_window")
                 return None
 
-            spot = float(indicators.get("spot") or current_price or 0.0)
-            vwap = float(indicators.get("vwap") or 0.0)
-            ema_fast = float(indicators.get("ema_fast") or 0.0)
-            ema_slow = float(indicators.get("ema_slow") or 0.0)
-            recent_high = float(indicators.get("recent_high") or 0.0)
-            recent_low = float(indicators.get("recent_low") or 0.0)
-            volume = float(indicators.get("volume") or 0.0)
-            avg_volume = float(indicators.get("avg_volume") or 0.0)
-            atr = float(indicators.get("atr") or 0.0)
-            atr_ma = float(indicators.get("atr_ma") or 0.0)
-            spot_return_3min = float(indicators.get("spot_return_3min") or 0.0)
+            if not bool(indicators.get("context_fresh")):
+                self._no_vote("underlying_context_stale")
+                return None
+            side = str(
+                indicators.get("underlying_direction_bias")
+                or indicators.get("direction_bias")
+                or ""
+            ).upper()
+            if side not in {"CE", "PE"}:
+                self._no_vote("underlying_direction_unresolved")
+                return None
 
-            if not atr > 0.0:
+            resolved = self._underlying_context(indicators)
+            if resolved is None:
+                self._no_vote("underlying_context_unavailable")
+                return None
+            context, context_source = resolved
+            underlying_price = _positive_float(
+                context.get("ltp") or context.get("close") or context.get("price")
+            )
+            if underlying_price is None:
+                self._no_vote("underlying_context_unavailable")
+                return None
+
+            option_atr = _positive_float(indicators.get("atr"))
+            if option_atr is None:
                 self._no_vote("atr_unavailable")
                 return None
-            if abs(spot_return_3min) > 0.006:
+
+            vwap = _positive_float(context.get("vwap"))
+            ema_fast = _positive_float(context.get("ema_fast"))
+            ema_slow = _positive_float(context.get("ema_slow"))
+            price_alignment: bool | None = None
+            ema_alignment: bool | None = None
+            if vwap is not None:
+                price_alignment = _aligned(side, underlying_price > vwap)
+            if ema_fast is not None and ema_slow is not None:
+                ema_alignment = _aligned(side, ema_fast > ema_slow)
+
+            observed_alignment = [
+                item for item in (price_alignment, ema_alignment) if item is not None
+            ]
+            if not observed_alignment:
+                self._no_vote("underlying_trend_evidence_unavailable")
                 return None
-            if spot <= 0:
-                return None
-
-            score = 0
-            if spot > vwap:
-                score += 2
-            else:
-                score -= 2
-
-            if ema_fast > ema_slow:
-                score += 2
-            else:
-                score -= 2
-
-            if recent_high > 0 and spot > recent_high:
-                score += 2
-            elif recent_low > 0 and spot < recent_low:
-                score -= 2
-
-            if avg_volume > 0 and volume > 1.5 * avg_volume:
-                score += 1
-            elif avg_volume > 0 and volume < 0.8 * avg_volume:
-                score -= 1
-
-            if atr > atr_ma and atr_ma > 0:
-                score += 1
-            elif atr_ma > 0:
-                score -= 1
-
-            if score >= 5:
-                option_type = "CE"
-            elif score <= -5:
-                option_type = "PE"
-            else:
+            if not all(observed_alignment):
+                self._no_vote("underlying_trend_conflict")
                 return None
 
-            position_manager = getattr(self, "position_manager", None)
-            if position_manager and callable(
-                getattr(position_manager, "has_open_position", None)
-            ):
-                if bool(position_manager.has_open_position()):
-                    return None
+            raw_return = context.get("spot_return_3min")
+            if raw_return is None:
+                raw_return = indicators.get("underlying_spot_return_3min")
+            if raw_return is not None:
+                try:
+                    if abs(float(raw_return)) > 0.006:
+                        self._no_vote("underlying_move_overextended")
+                        return None
+                except (TypeError, ValueError):
+                    pass
 
-            capital = float(getattr(self.account_state, "available_equity", 0.0) or 0.0)
-            if capital <= 0:
-                return None
+            score = 4.0
+            reasons = ["expiry_session", "underlying_direction_context"]
+            if price_alignment is True:
+                score += 2.0
+                reasons.append("underlying_vwap_alignment")
+            if ema_alignment is True:
+                score += 2.0
+                reasons.append("underlying_ema_alignment")
 
-            self.daily_realized_pnl = float(
-                getattr(self, "daily_realized_pnl", 0.0) or 0.0
+            futures = _mapping(indicators.get("futures_context"))
+            futures_volume = _positive_float(futures.get("volume"))
+            futures_avg_volume = _positive_float(futures.get("avg_volume"))
+            volume_expansion = bool(
+                futures_volume is not None
+                and futures_avg_volume is not None
+                and futures_volume >= 1.2 * futures_avg_volume
             )
-            if self.daily_realized_pnl <= -(capital * MAX_DAILY_RISK):
-                self.disable_trading_for_day()
+            if volume_expansion:
+                score += 1.0
+                reasons.append("futures_volume_expansion")
+
+            underlying_atr = _positive_float(context.get("atr"))
+            underlying_atr_ma = _positive_float(context.get("atr_ma"))
+            volatility_expansion = bool(
+                underlying_atr is not None
+                and underlying_atr_ma is not None
+                and underlying_atr > underlying_atr_ma
+            )
+            if volatility_expansion:
+                score += 1.0
+                reasons.append("underlying_volatility_expansion")
+
+            strategy_score = max(0.0, min(10.0, score))
+            setup_min = 6.0
+            if strategy_score < setup_min:
+                self._no_vote("expiry_gamma_quality_below_minimum")
                 return None
 
             atr_multiplier = max(float(self._config.atr_multiplier), 0.1)
             target_multiplier = max(float(self._config.target_multiplier), 0.1)
-            stop_distance = atr * atr_multiplier
-            target_distance = atr * target_multiplier
-            stop_loss = current_price - stop_distance
-            quantity = self.compute_position_size(entry=current_price, stop=stop_loss)
-            if quantity < NIFTY_LOT_SIZE:
-                return None
+            stop_distance = option_atr * atr_multiplier
+            target_distance = option_atr * target_multiplier
+            stop_loss = max(0.05, current_price - stop_distance)
+            target = current_price + target_distance
 
-            collision_reduce = False
-            orchestrator = getattr(self, "_orchestrator", None)
-            if orchestrator and callable(
-                getattr(orchestrator, "active_strategies_for_symbol", None)
-            ):
-                active = orchestrator.active_strategies_for_symbol(symbol)
-                if active:
-                    collision_reduce = True
-            if collision_reduce:
-                quantity = ((quantity // NIFTY_LOT_SIZE) // 2) * NIFTY_LOT_SIZE
-                if quantity < NIFTY_LOT_SIZE:
-                    return None
-
-            if quantity % NIFTY_LOT_SIZE != 0:
-                raise RuntimeError("Invalid lot size for NIFTY")
-
+            metadata = {
+                "strategy": "EliteTuesdayGammaBuyer",
+                "strategy_name": "EliteTuesdayGammaBuyer",
+                "role": "trigger",
+                "side": side,
+                "trade_side": side,
+                "contract_side": side,
+                "direction_bias": side,
+                "source_domain": "underlying_context_plus_option_premium_risk",
+                "underlying_context_source": context_source,
+                "underlying_reference_symbol": context.get("symbol"),
+                "underlying_reference_price": underlying_price,
+                "strategy_score": strategy_score,
+                "raw_setup_score": strategy_score,
+                "setup_score": strategy_score,
+                "setup_min": setup_min,
+                "setup_pass": True,
+                "setup_quality": strategy_score,
+                "setup_type": "expiry_gamma",
+                "preliminary_only": True,
+                "requires_runner_final_score": True,
+                "required_data_present": True,
+                "stale_data_used": bool(indicators.get("stale_data_used")),
+                "candidate_symbol": symbol,
+                "score_reasons": reasons,
+                "rejection_reasons": [],
+                "expiry_day": True,
+                "days_to_expiry": indicators.get("days_to_expiry"),
+                "gamma_mode_enabled": True,
+                "underlying_vwap_alignment": price_alignment,
+                "underlying_ema_alignment": ema_alignment,
+                "futures_volume_expansion": volume_expansion,
+                "volatility_expansion_confirmed": volatility_expansion,
+                "sizing_owner": "RiskManager",
+                "premium_stop_distance": stop_distance,
+                "premium_target_distance": target_distance,
+                "premium_target_rr": target_distance / max(stop_distance, 1e-9),
+                "bracket_type": "VIRTUAL",
+                "sl_mode": "ATR_TRAIL",
+                "enable_trailing": True,
+                "sl_atr_mult": atr_multiplier,
+                "trailing_atr_mult": atr_multiplier,
+                "tp2_atr_mult": target_multiplier,
+                "atr_multiplier": atr_multiplier,
+                "target_multiplier": target_multiplier,
+            }
+            LOGGER.info(
+                "STRATEGY_VOTE strategy=EliteTuesdayGammaBuyer side=%s score=%.2f source=%s",
+                side,
+                strategy_score,
+                context_source,
+            )
             return EliteSignal(
                 symbol=symbol,
                 signal="BUY",
-                confidence=min(0.99, max(0.5, score / 10.0)),
+                confidence=max(0.1, min(0.9, strategy_score / 10.0)),
                 entry_price=current_price,
                 stop_loss=stop_loss,
-                target=current_price + target_distance,
-                quantity=quantity,
+                target=target,
+                quantity=self._config.quantity or 1,
                 strategy_name="EliteTuesdayGammaBuyer",
-                metadata={
-                    "strategy": "EliteTuesdayGammaBuyer",
-                    "side": option_type,
-                    "direction_bias": option_type,
-                    "strategy_score": max(0.0, min(8.0, float(score))),
-                    "setup_quality": max(0.0, min(8.0, float(score))),
-                    "setup_type": "expiry_gamma",
-                    "required_data_present": True,
-                    "stale_data_used": bool(indicators.get("stale_data_used")),
-                    "candidate_symbol": symbol,
-                    "score_reasons": ["expiry_gamma_mode", "intraday_momentum_filter"],
-                    "rejection_reasons": [],
-                    "expiry_day": True,
-                    "days_to_expiry": indicators.get("days_to_expiry"),
-                    "gamma_mode_enabled": True,
-                    "premium_decay_risk": round(
-                        abs(float(indicators.get("theta") or 0.0))
-                        / max(current_price, 1.0),
-                        4,
-                    ),
-                    "volatility_expansion_confirmed": bool(atr > atr_ma and atr_ma > 0),
-                    "option_type": option_type,
-                    "bracket_type": "VIRTUAL",
-                    "sl_mode": "ATR_TRAIL",
-                    "enable_trailing": True,
-                    "sl_atr_mult": atr_multiplier,
-                    "trailing_atr_mult": atr_multiplier,
-                    "tp2_atr_mult": target_multiplier,
-                    "atr_multiplier": atr_multiplier,
-                    "target_multiplier": target_multiplier,
-                    "score": score,
-                },
+                metadata=metadata,
             )
-        except Exception as e:
+        except Exception as exc:
             LOGGER.error(
                 "Failure in EliteTuesdayGammaBuyer._evaluate_signal: %s",
-                e,
-                exc_info=e,
+                exc,
+                exc_info=exc,
             )
             return None
+
+
+__all__ = ["EliteTuesdayGammaBuyer"]
