@@ -44,6 +44,7 @@ def test_cost_basis_quarantine_persists_when_managed_positions_remain_empty(tmp_
 
     payload = json.loads(state_file.read_text(encoding="utf-8"))
     assert payload["quarantined_broker_exposures"][SYMBOL]["reason"] == "cost_basis_unresolved"
+    assert payload["cost_basis_unresolved_symbols"] == [SYMBOL]
 
     restored = PositionManager(str(state_file))
     exposure = restored.get_quarantined_broker_exposures()[SYMBOL]
@@ -69,6 +70,33 @@ def test_cost_basis_sync_preserves_stronger_external_quarantine(tmp_path):
     assert exposure["reason"] == "broker_state_unverified"
     assert exposure["source"] == "broker_order_ledger"
     assert manager.current_entry_protection_blocker(SYMBOL) == "broker_state_unverified"
+
+
+def test_masked_cost_basis_blocker_survives_clear_and_restart(tmp_path):
+    state_file = tmp_path / "positions.json"
+    manager = PositionManager(str(state_file))
+    manager._quarantined_broker_exposures[SYMBOL] = {
+        "symbol": SYMBOL,
+        "tradingsymbol": SYMBOL,
+        "quantity": 65,
+        "status": "BROKER_STATE_UNVERIFIED",
+        "reason": "broker_state_unverified",
+        "source": "broker_order_ledger",
+    }
+
+    manager.synchronize_with_broker([_unresolved_position()])
+    assert SYMBOL in manager._cost_basis_unresolved_symbols
+    assert manager.clear_quarantined_broker_exposure(SYMBOL) is True
+    assert manager.get_quarantined_broker_exposures() == {}
+    assert manager.current_entry_protection_blocker(SYMBOL) == "cost_basis_unresolved"
+
+    payload = json.loads(state_file.read_text(encoding="utf-8"))
+    assert payload["cost_basis_unresolved_symbols"] == [SYMBOL]
+
+    restored = PositionManager(str(state_file))
+    assert restored.get_quarantined_broker_exposures() == {}
+    assert SYMBOL in restored._cost_basis_unresolved_symbols
+    assert restored.current_entry_protection_blocker(SYMBOL) == "cost_basis_unresolved"
 
 
 def test_cost_basis_sync_removes_only_stale_cost_basis_rows(tmp_path):
