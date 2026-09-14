@@ -7,6 +7,7 @@ helpers while the remaining ordered patch stack is migrated incrementally.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from contextlib import suppress
 from typing import Any
 
@@ -86,6 +87,79 @@ def _prepared_row_symbol(row: Any) -> str:
     if not isinstance(row, dict):
         return ""
     return _canonical_key(row.get("symbol") or row.get("tradingsymbol"))
+
+
+def _quarantined_cost_basis_exposure(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Return one unmanaged exposure record for broker truth lacking cost basis."""
+
+    out = dict(row)
+    symbol = _canonical_key(out.get("symbol") or out.get("tradingsymbol"))
+    qty = _net_quantity(out)
+    out.update(
+        {
+            "symbol": symbol,
+            "tradingsymbol": symbol,
+            "quantity": abs(qty),
+            "signed_quantity": qty,
+            "side": "LONG" if qty > 0 else "SHORT" if qty < 0 else "FLAT",
+            "status": "BROKER_POSITION_QUARANTINED",
+            "reason": "cost_basis_unresolved",
+            "cost_basis_unresolved": True,
+            "managed_position": False,
+            "entry_accounting_allowed": False,
+            "realized_pnl_accounting_allowed": False,
+            "requires_history_recovery": True,
+            "source": "broker_position_sync",
+        }
+    )
+    return out
+
+
+def _build_cost_basis_exposures(
+    prepared: Any, unresolved: set[str]
+) -> dict[str, dict[str, Any]]:
+    """Build only the cost-basis rows owned by broker-position reconciliation."""
+
+    if not isinstance(prepared, list) or not unresolved:
+        return {}
+    exposures: dict[str, dict[str, Any]] = {}
+    for row in prepared:
+        if not isinstance(row, Mapping):
+            continue
+        symbol = _prepared_row_symbol(row)
+        if symbol and symbol in unresolved:
+            exposures[symbol] = _quarantined_cost_basis_exposure(row)
+    return exposures
+
+
+def _merge_cost_basis_exposures(
+    existing: Mapping[str, Any] | None,
+    fresh_cost_basis: Mapping[str, Any] | None,
+) -> dict[str, dict[str, Any]]:
+    """Refresh cost-basis rows without erasing stronger quarantine sources."""
+
+    fresh: dict[str, dict[str, Any]] = {}
+    for raw_key, row in (fresh_cost_basis or {}).items():
+        if not isinstance(row, Mapping):
+            continue
+        key = _canonical_key(raw_key) or _prepared_row_symbol(row)
+        if key:
+            fresh[key] = dict(row)
+
+    preserved: dict[str, dict[str, Any]] = {}
+    for raw_key, row in (existing or {}).items():
+        if not isinstance(row, Mapping):
+            continue
+        if str(row.get("reason") or "") == "cost_basis_unresolved":
+            continue
+        key = _canonical_key(raw_key) or _prepared_row_symbol(row)
+        if key:
+            preserved[key] = dict(row)
+
+    # Non-cost-basis rows win same-symbol collisions. They usually represent
+    # an active external order or broker-state uncertainty and are therefore
+    # stronger evidence than the generic missing-cost-basis condition.
+    return {**fresh, **preserved}
 
 
 def _prepare_broker_positions(
@@ -240,6 +314,9 @@ __all__ = [
     "_canonicalize_payload_symbol",
     "_canonicalize_broker_positions",
     "_prepared_row_symbol",
+    "_quarantined_cost_basis_exposure",
+    "_build_cost_basis_exposures",
+    "_merge_cost_basis_exposures",
     "_prepare_broker_positions",
     "_snapshot_owned_position_lifecycle",
     "_restore_owned_position_lifecycle",
