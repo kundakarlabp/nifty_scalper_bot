@@ -55,15 +55,11 @@ def _canonicalize_broker_positions(broker_positions: Any) -> Any:
             for key in ("net", "positions"):
                 value = cloned.get(key)
                 if isinstance(value, list):
-                    cloned[key] = [
-                        _canonicalize_payload_symbol(row) for row in value
-                    ]
+                    cloned[key] = [_canonicalize_payload_symbol(row) for row in value]
             return cloned
         return [_canonicalize_payload_symbol(broker_positions)]
     try:
-        return [
-            _canonicalize_payload_symbol(position) for position in broker_positions
-        ]
+        return [_canonicalize_payload_symbol(position) for position in broker_positions]
     except TypeError:
         return broker_positions
 
@@ -120,15 +116,11 @@ def _prepare_broker_positions(
         avg_price = _positive_float(cloned, _AVG_PRICE_FIELDS)
         existing = positions.get(symbol) if isinstance(positions, dict) else None
         existing_entry = (
-            float(getattr(existing, "entry_price", 0.0) or 0.0)
-            if existing
-            else 0.0
+            float(getattr(existing, "entry_price", 0.0) or 0.0) if existing else 0.0
         )
         existing_qty = int(getattr(existing, "quantity", 0) or 0) if existing else 0
         existing_side = (
-            str(getattr(existing, "side", "") or "").strip().upper()
-            if existing
-            else ""
+            str(getattr(existing, "side", "") or "").strip().upper() if existing else ""
         )
         owned_same_exposure = bool(
             existing

@@ -1,202 +1,40 @@
-"""Canonical PositionManager ingress patch for broker and pending-order paths.
+"""Compatibility overlay for remaining PositionManager ingress guards.
 
-Follow-up scope: broker reconciliation ownership and orphan protection are handled
-by the loaded runtime guards in this module.
+Broker-position reconciliation identity, cost-basis preparation, lifecycle
+preservation, and single-flight ownership now live natively in PositionManager.
 """
 
 from __future__ import annotations
 
 from contextlib import suppress
 import inspect
-import threading
 from typing import Any
 
 from nifty_scalper_bot.execution import live_safety_identity as _live_safety_identity
 from nifty_scalper_bot.execution import position_manager as _position_manager
+from nifty_scalper_bot.execution.position_reconciliation_identity import (
+    _canonical_key,
+    _canonicalize_broker_positions,
+    _canonicalize_payload_symbol,
+    _canonicalize_position_store,
+    _prepare_broker_positions,
+    _prepared_row_symbol,
+    _restore_owned_position_lifecycle,
+    _snapshot_owned_position_lifecycle,
+)
 from nifty_scalper_bot.execution.position_snapshot import (
     PositionSnapshotError,
     decode_position_snapshot,
 )
-from nifty_scalper_bot.utils.symbols import normalize_symbol
 
 _PATCH_APPLIED = False
 _ORIGINALS: dict[str, Any] = {}
-_SYMBOL_FIELDS = ("symbol", "tradingsymbol", "trading_symbol")
-_AVG_PRICE_FIELDS = ("average_price", "avg_price", "buy_price", "price")
-_QTY_FIELDS = ("quantity", "net_qty", "net_quantity", "netQuantity", "net")
-_QUARANTINE_INTENTS = {"", "UNKNOWN", "BROKER_IMPORTED_ORDER", "MANUAL_ORDER_QUARANTINED"}
-_LOCAL_LIFECYCLE_FIELDS = (
-    "entry_time",
-    "order_id",
-    "stop_loss",
-    "take_profit",
-    "trailing_stop_distance",
-    "state",
-)
-
-
-def _canonical_key(symbol: object) -> str:
-    return normalize_symbol(str(symbol or ""))
-
-
-def _canonicalize_payload_symbol(payload: Any) -> Any:
-    if not isinstance(payload, dict):
-        return payload
-    cloned = dict(payload)
-    for key in _SYMBOL_FIELDS:
-        value = cloned.get(key)
-        if isinstance(value, str) and value.strip():
-            cloned[key] = _canonical_key(value)
-    return cloned
-
-
-def _canonicalize_broker_positions(broker_positions: Any) -> Any:
-    if broker_positions is None:
-        return None
-    if isinstance(broker_positions, dict):
-        # Preserve canonical complete broker snapshot mappings such as Zerodha
-        # {"net": [...], "day": [...]} instead of wrapping them as one row.
-        if "net" in broker_positions or "positions" in broker_positions:
-            cloned = dict(broker_positions)
-            for key in ("net", "positions"):
-                value = cloned.get(key)
-                if isinstance(value, list):
-                    cloned[key] = [_canonicalize_payload_symbol(row) for row in value]
-            return cloned
-        return [_canonicalize_payload_symbol(broker_positions)]
-    try:
-        return [_canonicalize_payload_symbol(position) for position in broker_positions]
-    except TypeError:
-        return broker_positions
-
-
-def _positive_float(payload: dict[str, Any], keys: tuple[str, ...]) -> float:
-    for key in keys:
-        with suppress(Exception):
-            value = float(payload.get(key) or 0.0)
-            if value > 0.0:
-                return value
-    return 0.0
-
-
-def _net_quantity(payload: dict[str, Any]) -> int:
-    for key in _QTY_FIELDS:
-        if key not in payload:
-            continue
-        with suppress(Exception):
-            return int(float(payload.get(key) or 0))
-    return 0
-
-
-def _prepared_row_symbol(row: Any) -> str:
-    if not isinstance(row, dict):
-        return ""
-    return _canonical_key(row.get("symbol") or row.get("tradingsymbol"))
-
-
-def _prepare_broker_positions(manager: Any, broker_positions: Any) -> tuple[Any, set[str]]:
-    canonicalized = _canonicalize_broker_positions(broker_positions)
-    if isinstance(canonicalized, dict):
-        try:
-            snapshot = decode_position_snapshot(canonicalized)
-        except PositionSnapshotError:
-            return canonicalized, set()
-        canonicalized = snapshot.raw_rows()
-    if not isinstance(canonicalized, list):
-        return canonicalized, set()
-    positions = getattr(manager, "_positions", {})
-    unresolved: set[str] = set()
-    prepared: list[Any] = []
-    for row in canonicalized:
-        if not isinstance(row, dict):
-            prepared.append(row)
-            continue
-        cloned = dict(row)
-        symbol = _canonical_key(cloned.get("tradingsymbol") or cloned.get("symbol"))
-        if symbol:
-            cloned["tradingsymbol"] = symbol
-            cloned["symbol"] = symbol
-        net_qty = _net_quantity(cloned)
-        avg_price = _positive_float(cloned, _AVG_PRICE_FIELDS)
-        existing = positions.get(symbol) if isinstance(positions, dict) else None
-        existing_entry = (
-            float(getattr(existing, "entry_price", 0.0) or 0.0) if existing else 0.0
-        )
-        existing_qty = int(getattr(existing, "quantity", 0) or 0) if existing else 0
-        existing_side = str(getattr(existing, "side", "") or "").strip().upper()
-        owned_same_exposure = bool(
-            existing
-            and str(getattr(existing, "order_id", "") or "").strip()
-            and abs(net_qty) == existing_qty
-            and (
-                (net_qty > 0 and existing_side == "LONG")
-                or (net_qty < 0 and existing_side == "SHORT")
-            )
-        )
-        if net_qty != 0 and owned_same_exposure and existing_entry > 0.0:
-            # Zerodha's day-position average can span earlier closed trades in the
-            # same contract. Once this exact exposure is locally owned, the
-            # broker-confirmed order fill is the authoritative lifecycle basis.
-            cloned["average_price"] = existing_entry
-        elif net_qty != 0 and avg_price <= 0.0:
-            if existing_entry > 0.0:
-                cloned["average_price"] = existing_entry
-            else:
-                unresolved.add(symbol)
-        prepared.append(cloned)
-    return prepared, unresolved
-
-
-def _snapshot_owned_position_lifecycle(manager: Any) -> dict[str, dict[str, Any]]:
-    """Capture local-only lifecycle identity for positions already owned by the bot."""
-
-    positions = getattr(manager, "_positions", None)
-    if not isinstance(positions, dict):
-        return {}
-    snapshot: dict[str, dict[str, Any]] = {}
-    for raw_key, position in list(positions.items()):
-        order_id = str(getattr(position, "order_id", "") or "").strip()
-        if not order_id:
-            continue
-        symbol = _canonical_key(getattr(position, "symbol", raw_key))
-        if not symbol:
-            continue
-        values = {field: getattr(position, field, None) for field in _LOCAL_LIFECYCLE_FIELDS}
-        values["side"] = str(getattr(position, "side", "") or "").strip().upper()
-        snapshot[symbol] = values
-    return snapshot
-
-
-def _restore_owned_position_lifecycle(
-    manager: Any,
-    snapshot: dict[str, dict[str, Any]],
-) -> int:
-    """Restore local lifecycle fields only when broker truth still shows the same side."""
-
-    if not snapshot:
-        return 0
-    positions = getattr(manager, "_positions", None)
-    if not isinstance(positions, dict):
-        return 0
-    restored = 0
-    for symbol, values in snapshot.items():
-        position = positions.get(symbol)
-        if position is None:
-            continue
-        saved_side = str(values.get("side") or "").strip().upper()
-        current_side = str(getattr(position, "side", "") or "").strip().upper()
-        if saved_side and current_side and saved_side != current_side:
-            continue
-        try:
-            if int(getattr(position, "quantity", 0) or 0) == 0:
-                continue
-        except (TypeError, ValueError):
-            continue
-        for field in _LOCAL_LIFECYCLE_FIELDS:
-            with suppress(Exception):
-                setattr(position, field, values.get(field))
-        restored += 1
-    return restored
+_QUARANTINE_INTENTS = {
+    "",
+    "UNKNOWN",
+    "BROKER_IMPORTED_ORDER",
+    "MANUAL_ORDER_QUARANTINED",
+}
 
 
 def _install_position_ownership_property() -> None:
@@ -210,30 +48,6 @@ def _install_position_ownership_property() -> None:
         return "BotManaged" if str(getattr(position, "order_id", "") or "").strip() else ""
 
     position_cls.strategy_name = property(strategy_name)
-
-
-def _canonicalize_position_store(manager: Any) -> None:
-    positions = getattr(manager, "_positions", None)
-    if not isinstance(positions, dict):
-        return
-    canonical: dict[str, Any] = {}
-    for raw_key, position in list(positions.items()):
-        key = _canonical_key(getattr(position, "symbol", raw_key))
-        if not key:
-            key = str(raw_key).strip().upper()
-        with suppress(Exception):
-            position.symbol = key
-        existing = canonical.get(key)
-        if existing is None:
-            canonical[key] = position
-            continue
-        with suppress(Exception):
-            if abs(int(getattr(position, "quantity", 0) or 0)) > abs(
-                int(getattr(existing, "quantity", 0) or 0)
-            ):
-                canonical[key] = position
-    positions.clear()
-    positions.update(canonical)
 
 
 def _restore_persistent_state_methods(cls: Any) -> None:
@@ -319,12 +133,9 @@ def apply_patches() -> None:
     _restore_persistent_state_methods(cls)
 
     for name in (
-        "__init__",
         "_symbol_lifecycle_lock_for",
-        "reconcile_now",
         "add_pending_order",
         "get_pending_orders",
-        "synchronize_with_broker",
         "apply_broker_order_update",
         "current_entry_protection_blocker",
         "_handle_filled_order",
@@ -332,32 +143,11 @@ def apply_patches() -> None:
         if hasattr(cls, name):
             _ORIGINALS[f"PositionManager.{name}"] = getattr(cls, name)
 
-    def __init__(self: Any, *args: Any, **kwargs: Any) -> None:
-        _ORIGINALS["PositionManager.__init__"](self, *args, **kwargs)
-        self._single_reconcile_lock = threading.Lock()
-        self._single_reconcile_generation = 0
-        self._single_reconcile_coalesced = 0
-        self._cost_basis_unresolved_symbols = set()
-
     def _symbol_lifecycle_lock_for(self: Any, symbol: str) -> Any:
         return _ORIGINALS["PositionManager._symbol_lifecycle_lock_for"](
             self,
             _canonical_key(symbol),
         )
-
-    def reconcile_now(self: Any) -> bool:
-        lock = getattr(self, "_single_reconcile_lock", None)
-        if lock is None:
-            self._single_reconcile_lock = threading.Lock()
-            lock = self._single_reconcile_lock
-        if not lock.acquire(False):
-            self._single_reconcile_coalesced = int(getattr(self, "_single_reconcile_coalesced", 0)) + 1
-            return bool(getattr(self, "_last_reconcile_success_at", None))
-        try:
-            self._single_reconcile_generation = int(getattr(self, "_single_reconcile_generation", 0)) + 1
-            return bool(_ORIGINALS["PositionManager.reconcile_now"](self))
-        finally:
-            lock.release()
 
     def add_pending_order(
         self: Any,
@@ -386,26 +176,6 @@ def apply_patches() -> None:
             *args,
             **kwargs,
         )
-
-    def synchronize_with_broker(self: Any, broker_positions: Any) -> Any:
-        lifecycle_snapshot = _snapshot_owned_position_lifecycle(self)
-        prepared, unresolved = _prepare_broker_positions(self, broker_positions)
-        self._cost_basis_unresolved_symbols = set(unresolved)
-        if unresolved and isinstance(prepared, list):
-            prepared = [
-                row for row in prepared if _prepared_row_symbol(row) not in unresolved
-            ]
-        result = _ORIGINALS["PositionManager.synchronize_with_broker"](
-            self,
-            prepared,
-        )
-        _canonicalize_position_store(self)
-        restored = _restore_owned_position_lifecycle(self, lifecycle_snapshot)
-        if restored:
-            save_state = getattr(self, "save_state", None)
-            if callable(save_state):
-                save_state()
-        return result
 
     def apply_broker_order_update(
         self: Any,
@@ -545,18 +315,12 @@ def apply_patches() -> None:
                     )
         return result
 
-    if "PositionManager.__init__" in _ORIGINALS:
-        cls.__init__ = __init__
     if "PositionManager._symbol_lifecycle_lock_for" in _ORIGINALS:
         cls._symbol_lifecycle_lock_for = _symbol_lifecycle_lock_for
-    if "PositionManager.reconcile_now" in _ORIGINALS:
-        cls.reconcile_now = reconcile_now
     if "PositionManager.add_pending_order" in _ORIGINALS:
         cls.add_pending_order = add_pending_order
     if "PositionManager.get_pending_orders" in _ORIGINALS:
         cls.get_pending_orders = get_pending_orders
-    if "PositionManager.synchronize_with_broker" in _ORIGINALS:
-        cls.synchronize_with_broker = synchronize_with_broker
     if "PositionManager.apply_broker_order_update" in _ORIGINALS:
         cls.apply_broker_order_update = apply_broker_order_update
     if "PositionManager.current_entry_protection_blocker" in _ORIGINALS:

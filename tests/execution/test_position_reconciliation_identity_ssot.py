@@ -5,7 +5,6 @@ from pathlib import Path
 import nifty_scalper_bot.execution  # noqa: F401 - install remaining compatibility overlays
 from nifty_scalper_bot.execution.position_manager import PositionManager
 
-
 SYMBOL = "NFO:NIFTY24JAN100CE"
 
 
@@ -57,7 +56,9 @@ def test_native_sync_preserves_bot_owned_fill_basis_and_lifecycle(tmp_path) -> N
     assert position.take_profit == 120.0
 
 
-def test_native_single_flight_coalescing_contract_survives_outer_order_ledger(tmp_path) -> None:
+def test_native_single_flight_coalescing_contract_survives_outer_order_ledger(
+    tmp_path,
+) -> None:
     manager = PositionManager(str(tmp_path / "positions.json"))
     lock = manager._single_reconcile_lock
     lock.acquire()
