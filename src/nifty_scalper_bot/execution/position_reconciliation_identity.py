@@ -122,14 +122,22 @@ def _prepare_broker_positions(
         existing_side = (
             str(getattr(existing, "side", "") or "").strip().upper() if existing else ""
         )
+        same_side = bool(
+            (net_qty > 0 and existing_side == "LONG")
+            or (net_qty < 0 and existing_side == "SHORT")
+        )
         owned_same_exposure = bool(
             existing
             and str(getattr(existing, "order_id", "") or "").strip()
             and abs(net_qty) == existing_qty
-            and (
-                (net_qty > 0 and existing_side == "LONG")
-                or (net_qty < 0 and existing_side == "SHORT")
-            )
+            and same_side
+        )
+        safe_local_basis_reuse = bool(
+            existing
+            and existing_entry > 0.0
+            and existing_qty > 0
+            and same_side
+            and abs(net_qty) <= existing_qty
         )
         if net_qty != 0 and owned_same_exposure and existing_entry > 0.0:
             # Zerodha's day-position average can span earlier closed trades in the
@@ -137,7 +145,11 @@ def _prepare_broker_positions(
             # broker-confirmed order fill is the authoritative lifecycle basis.
             cloned["average_price"] = existing_entry
         elif net_qty != 0 and avg_price <= 0.0:
-            if existing_entry > 0.0:
+            # A local basis remains valid for an unchanged/reduced same-side
+            # exposure. A scale-up or side reversal introduces broker exposure
+            # whose acquisition basis is unknown, so fail closed instead of
+            # inheriting stale cost basis from the earlier lifecycle.
+            if safe_local_basis_reuse:
                 cloned["average_price"] = existing_entry
             else:
                 unresolved.add(symbol)
