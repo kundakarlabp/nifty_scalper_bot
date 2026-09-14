@@ -8,7 +8,7 @@ helpers while the remaining ordered patch stack is migrated incrementally.
 from __future__ import annotations
 
 from contextlib import suppress
-from typing import Any
+from typing import Any, Mapping
 
 from nifty_scalper_bot.execution.position_snapshot import (
     PositionSnapshotError,
@@ -73,7 +73,7 @@ def _positive_float(payload: dict[str, Any], keys: tuple[str, ...]) -> float:
     return 0.0
 
 
-def _net_quantity(payload: dict[str, Any]) -> int:
+def _net_quantity(payload: Mapping[str, Any]) -> int:
     for key in _QTY_FIELDS:
         if key not in payload:
             continue
@@ -155,6 +155,64 @@ def _prepare_broker_positions(
                 unresolved.add(symbol)
         prepared.append(cloned)
     return prepared, unresolved
+
+
+def _cost_basis_quarantine_exposure(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Build the canonical unmanaged exposure for one unresolved broker row."""
+
+    out = dict(row)
+    symbol = _canonical_key(out.get("symbol") or out.get("tradingsymbol"))
+    signed_qty = _net_quantity(out)
+    out.update(
+        {
+            "symbol": symbol,
+            "tradingsymbol": symbol,
+            "quantity": abs(signed_qty),
+            "signed_quantity": signed_qty,
+            "side": "LONG" if signed_qty > 0 else "SHORT" if signed_qty < 0 else "FLAT",
+            "status": "BROKER_POSITION_QUARANTINED",
+            "reason": "cost_basis_unresolved",
+            "cost_basis_unresolved": True,
+            "managed_position": False,
+            "entry_accounting_allowed": False,
+            "realized_pnl_accounting_allowed": False,
+            "requires_history_recovery": True,
+        }
+    )
+    return out
+
+
+def _merge_cost_basis_quarantine(
+    existing: Mapping[str, Mapping[str, Any]] | None,
+    prepared: Any,
+    unresolved: set[str],
+) -> dict[str, dict[str, Any]]:
+    """Refresh only cost-basis rows while preserving stronger quarantine sources."""
+
+    fresh: dict[str, dict[str, Any]] = {}
+    if isinstance(prepared, list) and unresolved:
+        for row in prepared:
+            if not isinstance(row, Mapping):
+                continue
+            symbol = _prepared_row_symbol(row)
+            if symbol in unresolved:
+                fresh[symbol] = _cost_basis_quarantine_exposure(row)
+
+    preserved: dict[str, dict[str, Any]] = {}
+    if isinstance(existing, Mapping):
+        for raw_symbol, exposure in existing.items():
+            if not isinstance(exposure, Mapping):
+                continue
+            if str(exposure.get("reason") or "") == "cost_basis_unresolved":
+                continue
+            symbol = _canonical_key(
+                exposure.get("symbol") or exposure.get("tradingsymbol") or raw_symbol
+            )
+            if symbol:
+                preserved[symbol] = dict(exposure)
+
+    # Stronger non-cost-basis ownership wins a same-symbol collision.
+    return {**fresh, **preserved}
 
 
 def _snapshot_owned_position_lifecycle(manager: Any) -> dict[str, dict[str, Any]]:
@@ -241,6 +299,8 @@ __all__ = [
     "_canonicalize_broker_positions",
     "_prepared_row_symbol",
     "_prepare_broker_positions",
+    "_cost_basis_quarantine_exposure",
+    "_merge_cost_basis_quarantine",
     "_snapshot_owned_position_lifecycle",
     "_restore_owned_position_lifecycle",
     "_canonicalize_position_store",
