@@ -1,16 +1,14 @@
-"""Durable broker-order ledger and deterministic reconciliation patch.
+"""Broker-order classification and deterministic reconciliation compatibility layer.
 
-Unknown broker orders are persisted, classified once, and exposed to entry gates
-without repeatedly replaying the same unmanaged broker state through fill
-accounting.
+PositionManager natively owns durable ledger/quarantine state and persistence.
+This module retains only broker-order normalization, classification, reconciliation,
+and the outer ledger blocker until those semantics are migrated natively.
 """
 
 from __future__ import annotations
 
 from contextlib import suppress
 from datetime import datetime, timezone
-import json
-from pathlib import Path
 from typing import Any, Mapping
 
 from nifty_scalper_bot.execution import position_identity_extension as _position_identity
@@ -76,7 +74,9 @@ def _to_float(value: Any, default: float = 0.0) -> float:
 
 def _status(row: Any) -> str:
     raw = str(_get(row, "status", "order_status", "state") or "UNKNOWN").strip().upper()
-    normalized = getattr(_position_manager, "normalize_broker_order_status", lambda value: value)(raw)
+    normalized = getattr(
+        _position_manager, "normalize_broker_order_status", lambda value: value
+    )(raw)
     token = str(normalized or raw or "UNKNOWN").strip().upper()
     return _STATUS_MAP.get(token, token)
 
@@ -88,11 +88,15 @@ def _order_id(row: Any) -> str:
 
 
 def _symbol(row: Any) -> str:
-    return _canonical(_get(row, "symbol", "tradingsymbol", "trading_symbol", "instrument"))
+    return _canonical(
+        _get(row, "symbol", "tradingsymbol", "trading_symbol", "instrument")
+    )
 
 
 def _side(row: Any) -> str:
-    raw = str(_get(row, "side", "transaction_type", "order_side") or "").strip().upper()
+    raw = str(
+        _get(row, "side", "transaction_type", "order_side") or ""
+    ).strip().upper()
     if raw in {"BUY", "B"}:
         return "BUY"
     if raw in {"SELL", "S"}:
@@ -101,11 +105,26 @@ def _side(row: Any) -> str:
 
 
 def _quantity(row: Any) -> int:
-    return abs(_to_int(_get(row, "quantity", "qty", "order_quantity", "filled_quantity", "filled")))
+    return abs(
+        _to_int(
+            _get(
+                row,
+                "quantity",
+                "qty",
+                "order_quantity",
+                "filled_quantity",
+                "filled",
+            )
+        )
+    )
 
 
 def _filled_quantity(row: Any) -> int:
-    return abs(_to_int(_get(row, "filled_quantity", "filled", "filled_qty", "filledQuantity")))
+    return abs(
+        _to_int(
+            _get(row, "filled_quantity", "filled", "filled_qty", "filledQuantity")
+        )
+    )
 
 
 def _average_price(row: Any) -> float:
@@ -118,7 +137,14 @@ def _product(row: Any) -> str:
 
 def _timestamp_key(row: Any) -> tuple[str, str]:
     ts = str(
-        _get(row, "exchange_timestamp", "order_timestamp", "timestamp", "created_at", "updated_at")
+        _get(
+            row,
+            "exchange_timestamp",
+            "order_timestamp",
+            "timestamp",
+            "created_at",
+            "updated_at",
+        )
         or ""
     )
     return ts, _order_id(row)
@@ -167,24 +193,6 @@ def _row_to_payload(row: Any) -> dict[str, Any]:
     return payload
 
 
-def _read_state(path: Path) -> dict[str, Any]:
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-    return payload if isinstance(payload, dict) else {}
-
-
-def _write_state(path: Path, updates: Mapping[str, Any]) -> None:
-    payload = _read_state(path)
-    payload.update(dict(updates))
-    _position_manager._atomic_write_json(path, payload)
-
-
-def _state_path(self: Any) -> Path:
-    return Path(getattr(self, "_state_path", "positions.json"))
-
-
 def _ledger_row(
     *,
     existing: Mapping[str, Any] | None,
@@ -197,7 +205,9 @@ def _ledger_row(
 ) -> dict[str, Any]:
     previous = dict(existing or {})
     order_id = str(broker_payload.get("order_id") or "").strip()
-    symbol = _canonical(broker_payload.get("symbol") or broker_payload.get("tradingsymbol"))
+    symbol = _canonical(
+        broker_payload.get("symbol") or broker_payload.get("tradingsymbol")
+    )
     now = _now_iso()
     return {
         **previous,
@@ -210,7 +220,9 @@ def _ledger_row(
         "filled_quantity": _to_int(broker_payload.get("filled_quantity")),
         "average_price": _to_float(broker_payload.get("average_price")),
         "product": str(broker_payload.get("product") or "MIS").strip().upper(),
-        "broker_status": str(broker_payload.get("status") or "UNKNOWN").strip().upper(),
+        "broker_status": str(
+            broker_payload.get("status") or "UNKNOWN"
+        ).strip().upper(),
         "classification": classification,
         "broker_position_state": broker_position_state,
         "broker_position_qty": broker_position_qty,
@@ -222,14 +234,24 @@ def _ledger_row(
     }
 
 
-def _classification_changed(previous: Mapping[str, Any] | None, current: Mapping[str, Any]) -> bool:
+def _classification_changed(
+    previous: Mapping[str, Any] | None, current: Mapping[str, Any]
+) -> bool:
     if not previous:
         return True
-    keys = ("broker_status", "classification", "broker_position_state", "broker_position_qty", "reason")
+    keys = (
+        "broker_status",
+        "classification",
+        "broker_position_state",
+        "broker_position_qty",
+        "reason",
+    )
     return any(previous.get(key) != current.get(key) for key in keys)
 
 
-def _active_external_exposure(row: Mapping[str, Any], reason: str) -> dict[str, Any]:
+def _active_external_exposure(
+    row: Mapping[str, Any], reason: str
+) -> dict[str, Any]:
     if reason == "active_external_order":
         status = "BROKER_EXTERNAL_ORDER_ACTIVE"
     elif reason == "broker_state_unverified":
@@ -239,7 +261,9 @@ def _active_external_exposure(row: Mapping[str, Any], reason: str) -> dict[str, 
     return {
         "symbol": row["symbol"],
         "tradingsymbol": row["symbol"],
-        "quantity": abs(_to_int(row.get("filled_quantity")) or _to_int(row.get("quantity"))),
+        "quantity": abs(
+            _to_int(row.get("filled_quantity")) or _to_int(row.get("quantity"))
+        ),
         "side": str(row.get("side") or "").strip().upper(),
         "product": str(row.get("product") or "MIS").strip().upper(),
         "average_price": _to_float(row.get("average_price")),
@@ -257,7 +281,11 @@ def _active_external_exposure(row: Mapping[str, Any], reason: str) -> dict[str, 
 
 
 def _resolve_broker_order_fetcher(manager: Any) -> Any | None:
-    broker = getattr(manager, "_broker_client", None) or getattr(manager, "broker_client", None) or getattr(manager, "broker", None)
+    broker = (
+        getattr(manager, "_broker_client", None)
+        or getattr(manager, "broker_client", None)
+        or getattr(manager, "broker", None)
+    )
     if broker is None:
         return None
     for name in ("get_orders", "list_orders", "orders", "fetch_orders"):
@@ -268,30 +296,24 @@ def _resolve_broker_order_fetcher(manager: Any) -> Any | None:
 
 
 def _record_ledger(self: Any, row: Mapping[str, Any]) -> None:
-    ledger = getattr(self, "_broker_order_ledger", None)
-    if not isinstance(ledger, dict):
-        ledger = {}
-    ledger[str(row["order_id"])] = dict(row)
-    self._broker_order_ledger = ledger
+    with self._lock:
+        self._broker_order_ledger[str(row["order_id"])] = dict(row)
 
 
 def _clear_exposure(self: Any, symbol: str) -> None:
-    exposures = getattr(self, "_quarantined_broker_exposures", None)
-    if isinstance(exposures, dict):
-        exposures.pop(_canonical(symbol), None)
-        self._quarantined_broker_exposures = exposures
+    with self._lock:
+        self._quarantined_broker_exposures.pop(_canonical(symbol), None)
 
 
 def _set_exposure(self: Any, row: Mapping[str, Any], reason: str) -> None:
-    exposures = getattr(self, "_quarantined_broker_exposures", None)
-    if not isinstance(exposures, dict):
-        exposures = {}
     exposure = _active_external_exposure(row, reason)
-    exposures[str(exposure["symbol"])] = exposure
-    self._quarantined_broker_exposures = exposures
+    with self._lock:
+        self._quarantined_broker_exposures[str(exposure["symbol"])] = exposure
 
 
-def _classify_unknown(self: Any, payload: Mapping[str, Any]) -> tuple[str, str | None, int | None, str | None]:
+def _classify_unknown(
+    self: Any, payload: Mapping[str, Any]
+) -> tuple[str, str | None, int | None, str | None]:
     status = str(payload.get("status") or "UNKNOWN").upper()
     symbol = str(payload.get("symbol") or "")
     filled_qty = _to_int(payload.get("filled_quantity"))
@@ -304,7 +326,12 @@ def _classify_unknown(self: Any, payload: Mapping[str, Any]) -> tuple[str, str |
         if state == "flat":
             return "resolved_external_flat", state, qty, None
         if state == "open":
-            return "broker_position_quarantined", state, qty, "broker_position_unowned_or_cost_basis_unresolved"
+            return (
+                "broker_position_quarantined",
+                state,
+                qty,
+                "broker_position_unowned_or_cost_basis_unresolved",
+            )
         return "broker_state_unverified", state, qty, "broker_state_unverified"
     return "active_external_order", None, None, "active_external_order"
 
@@ -320,22 +347,6 @@ def _ledger_blocker(row: Mapping[str, Any]) -> str | None:
     return None
 
 
-def _persist_extra_state(self: Any) -> None:
-    ledger = getattr(self, "_broker_order_ledger", {}) or {}
-    exposures = getattr(self, "_quarantined_broker_exposures", {}) or {}
-    _write_state(
-        _state_path(self),
-        {
-            "broker_order_ledger": dict(ledger) if isinstance(ledger, Mapping) else {},
-            "quarantined_broker_exposures": (
-                {key: dict(value) for key, value in exposures.items() if isinstance(value, Mapping)}
-                if isinstance(exposures, Mapping)
-                else {}
-            ),
-        },
-    )
-
-
 def apply_patches() -> None:
     global _PATCH_APPLIED
     if _PATCH_APPLIED:
@@ -346,9 +357,6 @@ def apply_patches() -> None:
         return
 
     for name in (
-        "__init__",
-        "save_state",
-        "load_state",
         "add_pending_order",
         "apply_broker_order_update",
         "current_entry_protection_blocker",
@@ -357,46 +365,13 @@ def apply_patches() -> None:
         if hasattr(cls, name):
             _ORIGINALS[f"PositionManager.{name}"] = getattr(cls, name)
 
-    def __init__(self: Any, *args: Any, **kwargs: Any) -> None:
-        _ORIGINALS["PositionManager.__init__"](self, *args, **kwargs)
-        extra = _read_state(_state_path(self))
-        ledger = extra.get("broker_order_ledger", {})
-        self._broker_order_ledger = dict(ledger) if isinstance(ledger, Mapping) else {}
-        exposures = extra.get("quarantined_broker_exposures")
-        if isinstance(exposures, Mapping):
-            self._quarantined_broker_exposures = {
-                _canonical(key): dict(value)
-                for key, value in exposures.items()
-                if isinstance(value, Mapping)
-            }
-
-    def load_state(self: Any) -> None:
-        _ORIGINALS["PositionManager.load_state"](self)
-        extra = _read_state(_state_path(self))
-        ledger = extra.get("broker_order_ledger", {})
-        self._broker_order_ledger = dict(ledger) if isinstance(ledger, Mapping) else {}
-        exposures = extra.get("quarantined_broker_exposures")
-        if isinstance(exposures, Mapping):
-            self._quarantined_broker_exposures = {
-                _canonical(key): dict(value)
-                for key, value in exposures.items()
-                if isinstance(value, Mapping)
-            }
-
-    def save_state(self: Any) -> None:
-        _ORIGINALS["PositionManager.save_state"](self)
-        try:
-            _persist_extra_state(self)
-        except Exception as exc:  # noqa: BLE001
-            log = getattr(getattr(self, "_logger", None), "error", None)
-            if callable(log):
-                log(
-                    "BROKER_ORDER_LEDGER_SAVE_FAILED error=%s",
-                    exc,
-                    extra={"event": "BROKER_ORDER_LEDGER_SAVE_FAILED", "error": str(exc)},
-                )
-
-    def add_pending_order(self: Any, order_id: str, symbol: str, *args: Any, **kwargs: Any) -> Any:
+    def add_pending_order(
+        self: Any,
+        order_id: str,
+        symbol: str,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
         result = _ORIGINALS["PositionManager.add_pending_order"](
             self,
             order_id,
@@ -404,8 +379,9 @@ def apply_patches() -> None:
             *args,
             **kwargs,
         )
-        orders = getattr(self, "_orders", {})
-        order = orders.get(str(order_id).strip()) if isinstance(orders, dict) else None
+        with self._lock:
+            order = self._orders.get(str(order_id).strip())
+            previous = self._broker_order_ledger.get(str(order_id).strip())
         if order is not None:
             broker_payload = {
                 "order_id": str(order_id).strip(),
@@ -413,12 +389,13 @@ def apply_patches() -> None:
                 "side": getattr(order, "side", None),
                 "quantity": getattr(order, "quantity", 0),
                 "filled_quantity": getattr(order, "filled_quantity", 0),
-                "average_price": getattr(order, "fill_price", None) or getattr(order, "price", 0.0),
+                "average_price": getattr(order, "fill_price", None)
+                or getattr(order, "price", 0.0),
                 "product": "MIS",
                 "status": getattr(order, "status", "PENDING"),
             }
             row = _ledger_row(
-                existing=(getattr(self, "_broker_order_ledger", {}) or {}).get(str(order_id).strip()),
+                existing=previous,
                 broker_payload=broker_payload,
                 classification="managed_order",
                 broker_position_state=None,
@@ -428,45 +405,45 @@ def apply_patches() -> None:
             )
             _record_ledger(self, row)
             with suppress(Exception):
-                save_state(self)
+                self.save_state()
         return result
 
-    def apply_broker_order_update(self: Any, order_id: str, broker_payload: Mapping[str, Any]) -> Any:
-        payload = _row_to_payload(dict(broker_payload or {}, order_id=str(order_id).strip()))
+    def apply_broker_order_update(
+        self: Any, order_id: str, broker_payload: Mapping[str, Any]
+    ) -> Any:
+        payload = _row_to_payload(
+            dict(broker_payload or {}, order_id=str(order_id).strip())
+        )
         oid = str(payload.get("order_id") or order_id or "").strip()
         if not oid:
             return None
         payload["order_id"] = oid
-        orders = getattr(self, "_orders", {})
-        managed = isinstance(orders, dict) and oid in orders
+        with self._lock:
+            managed = oid in self._orders
+            orders = self._orders
         tag = str(payload.get("tag") or "").strip()
-        if not managed and tag and isinstance(orders, dict) and tag in orders:
+        if not managed and tag and tag in orders:
             final_oid = oid
             binder = getattr(self, "bind_pending_order_id", None)
             if final_oid and final_oid != tag and callable(binder):
                 with suppress(Exception):
                     binder(tag, final_oid)
-            orders = getattr(self, "_orders", {})
-            if isinstance(orders, dict) and final_oid in orders:
-                oid = final_oid
-            else:
-                oid = tag
-                payload["order_id"] = oid
-            managed = True
+            with self._lock:
+                if final_oid in self._orders:
+                    oid = final_oid
+                else:
+                    oid = tag
+                    payload["order_id"] = oid
+                managed = True
         client_order_id = str(
             payload.get("client_order_id") or payload.get("clientOrderId") or ""
         ).strip()
-        if (
-            not managed
-            and client_order_id
-            and isinstance(orders, dict)
-            and client_order_id in orders
-        ):
-            oid = client_order_id
-            payload["order_id"] = oid
-            managed = True
-        ledger = getattr(self, "_broker_order_ledger", {}) or {}
-        previous = ledger.get(oid) if isinstance(ledger, Mapping) else None
+        with self._lock:
+            if not managed and client_order_id and client_order_id in self._orders:
+                oid = client_order_id
+                payload["order_id"] = oid
+                managed = True
+            previous = self._broker_order_ledger.get(oid)
 
         if managed:
             row = _ledger_row(
@@ -479,12 +456,15 @@ def apply_patches() -> None:
                 managed=True,
             )
             _record_ledger(self, row)
-            result = _ORIGINALS["PositionManager.apply_broker_order_update"](self, oid, payload)
-            with suppress(Exception):
-                save_state(self)
-            return result
+            # The native managed update persists the coherent state snapshot,
+            # which now already includes the ledger row recorded above.
+            return _ORIGINALS["PositionManager.apply_broker_order_update"](
+                self, oid, payload
+            )
 
-        classification, broker_state, broker_qty, reason = _classify_unknown(self, payload)
+        classification, broker_state, broker_qty, reason = _classify_unknown(
+            self, payload
+        )
         row = _ledger_row(
             existing=previous,
             broker_payload=payload,
@@ -515,7 +495,7 @@ def apply_patches() -> None:
                             "broker_status": row.get("broker_status"),
                         },
                     )
-            save_state(self)
+            self.save_state()
             return None
 
         blocker = _ledger_blocker(row) or str(reason or classification)
@@ -540,10 +520,12 @@ def apply_patches() -> None:
                         "broker_position_qty": broker_qty,
                     },
                 )
-        save_state(self)
+        self.save_state()
         return None
 
-    def reconcile_broker_orders(self: Any, broker_orders: Any | None = None) -> dict[str, int]:
+    def reconcile_broker_orders(
+        self: Any, broker_orders: Any | None = None
+    ) -> dict[str, int]:
         if broker_orders is None:
             fetcher = _resolve_broker_order_fetcher(self)
             if fetcher is None:
@@ -558,7 +540,8 @@ def apply_patches() -> None:
                 continue
             counts["seen"] += 1
             apply_broker_order_update(self, oid, payload)
-            ledger_row = (getattr(self, "_broker_order_ledger", {}) or {}).get(oid, {})
+            with self._lock:
+                ledger_row = dict(self._broker_order_ledger.get(oid, {}))
             classification = str(ledger_row.get("classification") or "")
             if classification == "managed_order":
                 counts["managed"] += 1
@@ -594,43 +577,44 @@ def apply_patches() -> None:
                 )
         return result
 
-    def current_entry_protection_blocker(self: Any, symbol: str | None = None) -> str | None:
-        ledger = getattr(self, "_broker_order_ledger", {}) or {}
+    def current_entry_protection_blocker(
+        self: Any, symbol: str | None = None
+    ) -> str | None:
         wanted = _canonical(symbol) if symbol else None
-        if isinstance(ledger, Mapping):
-            for row in ledger.values():
-                if not isinstance(row, Mapping):
-                    continue
-                if str(row.get("classification") or "") not in _ACTIVE_CLASSIFICATIONS:
-                    continue
-                row_symbol = _canonical(row.get("symbol") or row.get("tradingsymbol"))
-                if wanted is not None and row_symbol != wanted:
-                    continue
-                blocker = _ledger_blocker(row)
-                if blocker:
-                    return blocker
+        with self._lock:
+            rows = [dict(row) for row in self._broker_order_ledger.values()]
+        for row in rows:
+            if str(row.get("classification") or "") not in _ACTIVE_CLASSIFICATIONS:
+                continue
+            row_symbol = _canonical(row.get("symbol") or row.get("tradingsymbol"))
+            if wanted is not None and row_symbol != wanted:
+                continue
+            blocker = _ledger_blocker(row)
+            if blocker:
+                return blocker
         original = _ORIGINALS.get("PositionManager.current_entry_protection_blocker")
         if callable(original):
             return original(self, _canonical(symbol) if symbol else None)
         return None
 
-    def get_broker_order_ledger(self: Any, symbol: str | None = None) -> dict[str, dict[str, Any]]:
-        ledger = getattr(self, "_broker_order_ledger", {}) or {}
+    def get_broker_order_ledger(
+        self: Any, symbol: str | None = None
+    ) -> dict[str, dict[str, Any]]:
         wanted = _canonical(symbol) if symbol else None
-        out: dict[str, dict[str, Any]] = {}
-        if isinstance(ledger, Mapping):
-            for order_id, row in ledger.items():
-                if not isinstance(row, Mapping):
-                    continue
-                row_symbol = _canonical(row.get("symbol") or row.get("tradingsymbol"))
-                if wanted is not None and row_symbol != wanted:
-                    continue
-                out[str(order_id)] = dict(row)
-        return out
+        with self._lock:
+            rows = {
+                str(order_id): dict(row)
+                for order_id, row in self._broker_order_ledger.items()
+                if isinstance(row, Mapping)
+            }
+        if wanted is None:
+            return rows
+        return {
+            order_id: row
+            for order_id, row in rows.items()
+            if _canonical(row.get("symbol") or row.get("tradingsymbol")) == wanted
+        }
 
-    cls.__init__ = __init__
-    cls.load_state = load_state
-    cls.save_state = save_state
     cls.add_pending_order = add_pending_order
     cls.apply_broker_order_update = apply_broker_order_update
     cls.reconcile_broker_orders = reconcile_broker_orders
