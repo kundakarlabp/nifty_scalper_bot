@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from nifty_scalper_bot.execution.position_manager import PositionManager
 
 
@@ -128,6 +130,65 @@ def test_unknown_open_broker_order_blocks_until_resolved(tmp_path):
     )
 
     assert manager.get_broker_order_ledger()["broker-open"]["classification"] == "resolved_external_terminal"
+    assert manager.current_entry_protection_blocker(SYMBOL) is None
+
+
+@pytest.mark.parametrize("terminal_status", ["CANCELLED", "REJECTED", "EXPIRED"])
+def test_terminal_external_order_with_partial_fill_verifies_broker_exposure(
+    tmp_path, terminal_status: str
+):
+    broker = Broker(
+        positions={
+            "net": [
+                {
+                    "tradingsymbol": BROKER_SYMBOL,
+                    "quantity": 25,
+                    "average_price": 94.75,
+                }
+            ]
+        }
+    )
+    manager = PositionManager(state_file=str(tmp_path / "positions.json"))
+    manager.set_broker_client(broker)
+
+    manager.apply_broker_order_update(
+        "broker-terminal-partial",
+        {
+            **_open_order("broker-terminal-partial"),
+            "status": terminal_status,
+            "filled_quantity": 25,
+            "average_price": 94.75,
+        },
+    )
+
+    ledger = manager.get_broker_order_ledger()["broker-terminal-partial"]
+    assert broker.position_calls == 1
+    assert ledger["filled_quantity"] == 25
+    assert ledger["classification"] == "broker_position_quarantined"
+    assert ledger["broker_position_state"] == "open"
+    assert ledger["broker_position_qty"] == 25
+    assert manager.current_entry_protection_blocker(SYMBOL) == "broker_exposure_quarantined"
+
+
+def test_terminal_external_order_with_missing_fill_metadata_fails_closed_to_broker_truth(
+    tmp_path,
+):
+    broker = Broker(positions={"net": []})
+    manager = PositionManager(state_file=str(tmp_path / "positions.json"))
+    manager.set_broker_client(broker)
+    payload = {
+        **_open_order("broker-terminal-missing-fill"),
+        "status": "CANCELLED",
+        "average_price": 94.75,
+    }
+    payload.pop("filled_quantity")
+
+    manager.apply_broker_order_update("broker-terminal-missing-fill", payload)
+
+    ledger = manager.get_broker_order_ledger()["broker-terminal-missing-fill"]
+    assert broker.position_calls == 1
+    assert ledger["filled_quantity"] == 65
+    assert ledger["classification"] == "resolved_external_flat"
     assert manager.current_entry_protection_blocker(SYMBOL) is None
 
 
