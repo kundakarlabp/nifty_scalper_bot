@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import nifty_scalper_bot.execution  # noqa: F401 - install remaining compatibility overlays
 from nifty_scalper_bot.execution.position_manager import PositionManager
+from nifty_scalper_bot.execution.position_reconciliation_identity import (
+    _prepare_broker_positions,
+)
 
 SYMBOL = "NFO:NIFTY24JAN100CE"
 
@@ -68,3 +72,97 @@ def test_native_single_flight_coalescing_contract_survives_outer_order_ledger(
         lock.release()
 
     assert manager._single_reconcile_coalesced == 1
+
+
+def _local_position(*, side: str, quantity: int, entry_price: float = 100.0):
+    return SimpleNamespace(
+        symbol=SYMBOL,
+        side=side,
+        quantity=quantity,
+        entry_price=entry_price,
+        order_id="ENTRY-1",
+    )
+
+
+def _prepare_missing_average(*, side: str, local_qty: int, broker_qty: int):
+    manager = SimpleNamespace(
+        _positions={SYMBOL: _local_position(side=side, quantity=local_qty)}
+    )
+    return _prepare_broker_positions(
+        manager,
+        [
+            {
+                "tradingsymbol": "NIFTY24JAN100CE",
+                "quantity": broker_qty,
+                "average_price": 0,
+                "last_price": 110.0,
+                "product": "MIS",
+            }
+        ],
+    )
+
+
+def test_missing_average_same_side_reduction_reuses_owned_basis() -> None:
+    prepared, unresolved = _prepare_missing_average(
+        side="LONG",
+        local_qty=65,
+        broker_qty=30,
+    )
+
+    assert unresolved == set()
+    assert prepared[0]["average_price"] == 100.0
+
+
+def test_missing_average_same_side_scale_up_is_unresolved() -> None:
+    prepared, unresolved = _prepare_missing_average(
+        side="LONG",
+        local_qty=65,
+        broker_qty=130,
+    )
+
+    assert unresolved == {SYMBOL}
+    assert prepared[0]["average_price"] == 0
+
+
+def test_missing_average_side_reversal_is_unresolved() -> None:
+    prepared, unresolved = _prepare_missing_average(
+        side="LONG",
+        local_qty=65,
+        broker_qty=-65,
+    )
+
+    assert unresolved == {SYMBOL}
+    assert prepared[0]["average_price"] == 0
+
+
+def test_missing_average_short_reduction_reuses_owned_basis() -> None:
+    prepared, unresolved = _prepare_missing_average(
+        side="SHORT",
+        local_qty=65,
+        broker_qty=-30,
+    )
+
+    assert unresolved == set()
+    assert prepared[0]["average_price"] == 100.0
+
+
+def test_missing_average_short_scale_up_is_unresolved() -> None:
+    prepared, unresolved = _prepare_missing_average(
+        side="SHORT",
+        local_qty=65,
+        broker_qty=-130,
+    )
+
+    assert unresolved == {SYMBOL}
+    assert prepared[0]["average_price"] == 0
+
+
+def test_missing_average_short_to_long_reversal_is_unresolved() -> None:
+    prepared, unresolved = _prepare_missing_average(
+        side="SHORT",
+        local_qty=65,
+        broker_qty=65,
+    )
+
+    assert unresolved == {SYMBOL}
+    assert prepared[0]["average_price"] == 0
