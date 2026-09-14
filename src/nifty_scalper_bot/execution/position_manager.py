@@ -26,6 +26,13 @@ from typing import (
 from zoneinfo import ZoneInfo
 
 from nifty_scalper_bot.infra.metrics import METRICS
+from nifty_scalper_bot.execution.position_reconciliation_identity import (
+    _canonicalize_position_store,
+    _prepare_broker_positions,
+    _prepared_row_symbol,
+    _restore_owned_position_lifecycle,
+    _snapshot_owned_position_lifecycle,
+)
 from nifty_scalper_bot.execution.position_snapshot import (
     BrokerExposureState,
     PositionSnapshotError,
@@ -929,6 +936,10 @@ class PositionManager:
         self._persistent_state: PersistentStateManager | None = None
         self._broker_client: Any | None = None
         self._reconcile_timer: threading.Timer | None = None
+        self._single_reconcile_lock = threading.Lock()
+        self._single_reconcile_generation = 0
+        self._single_reconcile_coalesced = 0
+        self._cost_basis_unresolved_symbols: set[str] = set()
         self._reconcile_interval_s: float = 60.0
         self._reconcile_retry_interval_s: float = 10.0
         self._reconcile_listeners: list[Callable[[str, Mapping[str, object]], None]] = (
@@ -1316,6 +1327,25 @@ class PositionManager:
         self._notify_reconcile_event("position_reconcile_ok", event_payload)
 
     def reconcile_now(self) -> bool:
+        """Fetch and apply one authoritative broker-position snapshot, single-flight."""
+        lock = getattr(self, "_single_reconcile_lock", None)
+        if lock is None:
+            self._single_reconcile_lock = threading.Lock()
+            lock = self._single_reconcile_lock
+        if not lock.acquire(False):
+            self._single_reconcile_coalesced = int(
+                getattr(self, "_single_reconcile_coalesced", 0)
+            ) + 1
+            return bool(getattr(self, "_last_reconcile_success_at", None))
+        try:
+            self._single_reconcile_generation = int(
+                getattr(self, "_single_reconcile_generation", 0)
+            ) + 1
+            return bool(self._reconcile_positions_from_broker())
+        finally:
+            lock.release()
+
+    def _reconcile_positions_from_broker(self) -> bool:
         """Fetch and atomically apply one authoritative broker snapshot."""
         payload_count = 0
         fetcher = self._resolve_broker_position_fetcher()
@@ -2831,8 +2861,25 @@ class PositionManager:
             raise ValueError("broker position quantity field missing")
         raise ValueError("broker position quantity is null or invalid")
 
-    def synchronize_with_broker(
-        self, broker_positions: Sequence[Mapping[str, object]]
+    def synchronize_with_broker(self, broker_positions: Any) -> None:
+        """Canonicalize broker truth and preserve bot-owned lifecycle identity."""
+        lifecycle_snapshot = _snapshot_owned_position_lifecycle(self)
+        prepared, unresolved = _prepare_broker_positions(self, broker_positions)
+        self._cost_basis_unresolved_symbols = set(unresolved)
+        if unresolved and isinstance(prepared, list):
+            prepared = [
+                row
+                for row in prepared
+                if _prepared_row_symbol(row) not in unresolved
+            ]
+        self._synchronize_managed_positions_from_broker(prepared)
+        _canonicalize_position_store(self)
+        restored = _restore_owned_position_lifecycle(self, lifecycle_snapshot)
+        if restored:
+            self.save_state()
+
+    def _synchronize_managed_positions_from_broker(
+        self, broker_positions: Any
     ) -> None:
         """Validate and atomically replace managed positions from broker truth."""
         try:
