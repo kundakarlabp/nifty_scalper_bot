@@ -148,6 +148,9 @@ def _row_to_payload(row: Any) -> dict[str, Any]:
             for name in dir(row)
             if not name.startswith("_") and not callable(getattr(row, name, None))
         }
+    filled_value = _get(
+        payload, "filled_quantity", "filled", "filled_qty", "filledQuantity"
+    )
     symbol = _symbol(payload)
     if symbol:
         payload["symbol"] = symbol
@@ -156,7 +159,9 @@ def _row_to_payload(row: Any) -> dict[str, Any]:
     payload["status"] = _status(payload)
     payload["side"] = _side(payload)
     payload["quantity"] = _quantity(payload)
-    payload["filled_quantity"] = _filled_quantity(payload) or _quantity(payload)
+    payload["filled_quantity"] = (
+        _filled_quantity(payload) if filled_value is not None else _quantity(payload)
+    )
     payload["average_price"] = _average_price(payload)
     payload["product"] = _product(payload)
     return payload
@@ -290,7 +295,7 @@ def _classify_unknown(self: Any, payload: Mapping[str, Any]) -> tuple[str, str |
     status = str(payload.get("status") or "UNKNOWN").upper()
     symbol = str(payload.get("symbol") or "")
     filled_qty = _to_int(payload.get("filled_quantity"))
-    if status in {"CANCELLED", "REJECTED", "EXPIRED"}:
+    if status in {"CANCELLED", "REJECTED", "EXPIRED"} and filled_qty <= 0:
         return "resolved_external_terminal", "flat", 0, None
     if status in {"PENDING", "OPEN", "PARTIALLY_FILLED"}:
         return "active_external_order", None, None, "active_external_order"
