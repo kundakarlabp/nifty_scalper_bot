@@ -28,6 +28,7 @@ from zoneinfo import ZoneInfo
 from nifty_scalper_bot.infra.metrics import METRICS
 from nifty_scalper_bot.execution.position_reconciliation_identity import (
     _canonicalize_position_store,
+    _merge_cost_basis_quarantine,
     _prepare_broker_positions,
     _prepared_row_symbol,
     _restore_owned_position_lifecycle,
@@ -192,7 +193,6 @@ def _to_int(value: object) -> int:
         if not value.strip():
             return 0
         try:
-            # Handle "100.0" strings which int() rejects directly
             return int(float(value))
         except (ValueError, TypeError):
             pass
@@ -220,20 +220,7 @@ def _now() -> datetime:
 
 
 def _atomic_write_json(path: Path, payload: Mapping[str, Any]) -> None:
-    """Persist *payload* to *path* atomically with Enum handling (Thread-Safe).
-
-    Args:
-        path: Destination filesystem path for the JSON document.
-        payload: Mapping to serialise as JSON.
-
-    Returns:
-        None.
-
-    Raises:
-        None.
-
-    ✅ PRODUCTION FIX: Added Enum, datetime, Decimal serialization support.
-    """
+    """Persist *payload* to *path* atomically with Enum handling (Thread-Safe)."""
     import json
     import os
     import uuid
@@ -242,7 +229,6 @@ def _atomic_write_json(path: Path, payload: Mapping[str, Any]) -> None:
     from datetime import datetime, date
     from decimal import Decimal
 
-    # ✅ FIX 1: Custom JSON encoder for Enum, datetime, Decimal
     class EnhancedJSONEncoder(json.JSONEncoder):
         def default(self, obj):
             if isinstance(obj, Enum):
@@ -257,7 +243,6 @@ def _atomic_write_json(path: Path, payload: Mapping[str, Any]) -> None:
                 return obj.__dict__
             return super().default(obj)
 
-    # ✅ FIX 2: Sanitize payload recursively before serialization
     def _sanitize(obj):
         """Recursively convert non-JSON-serializable types."""
         if isinstance(obj, dict):
@@ -276,16 +261,11 @@ def _atomic_write_json(path: Path, payload: Mapping[str, Any]) -> None:
             return _sanitize(vars(obj))
         return obj
 
-    # Pre-sanitize the payload
     sanitized_payload = _sanitize(dict(payload))
-
-    # Use unique temp identifier per write to prevent Thread Race Conditions
     temp_path = path.with_suffix(f"{path.suffix}.tmp.{uuid.uuid4().hex}")
 
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-
-        # Write to unique temp file with custom encoder + default=str fallback
         with open(temp_path, "w", encoding="utf-8") as f:
             json.dump(
                 sanitized_payload,
@@ -296,17 +276,12 @@ def _atomic_write_json(path: Path, payload: Mapping[str, Any]) -> None:
                 default=str,
             )
             f.flush()
-            os.fsync(f.fileno())  # Force flush to disk for durability
-
-        # Atomic Move (Overwrite destination)
+            os.fsync(f.fileno())
         os.replace(temp_path, path)
-
     except Exception as exc:  # noqa: BLE001
-        # Cleanup unique temp file on failure to avoid disk clutter
         with suppress(OSError):
             if temp_path.exists():
                 os.remove(temp_path)
-
         get_logger(__name__).error("Failure in _atomic_write_json: %s", exc)
         raise
 
@@ -326,38 +301,26 @@ class Position:
     trailing_stop_distance: float | None = None
     order_id: str | None = None
     realized_pnl: float = 0.0
-    state: str | None = None  # intent: track lifecycle overrides like force-closed SL
+    state: str | None = None
 
     @property
     def unrealized_pnl(self) -> float:
-        """Return the unrealised profit or loss for the position."""
-
         direction = 1 if self.side == "LONG" else -1
         return (self.current_price - self.entry_price) * self.quantity * direction
 
     @property
     def unrealized_pnl_pct(self) -> float:
-        """Return the unrealised profit or loss as a percentage of entry notional."""
-
-        # Direction logic is correct
         direction = 1 if self.side == "LONG" else -1
-
-        # FIX: Guard against division by zero
         notional = abs(self.entry_price * self.quantity)
         if notional == 0:
             return 0.0
-
         return (self.unrealized_pnl / notional) * 100.0
 
     @property
     def age_seconds(self) -> float:
-        """Return the duration the position has been open in seconds."""
-
         return max((_now() - self.entry_time).total_seconds(), 0.0)
 
     def to_dict(self) -> dict[str, object]:
-        """Serialize the position for JSON persistence."""
-
         return {
             "symbol": self.symbol,
             "side": self.side,
@@ -375,8 +338,6 @@ class Position:
 
     @staticmethod
     def from_dict(payload: Mapping[str, Any]) -> "Position":
-        """Create a :class:`Position` from serialized state."""
-
         return Position(
             symbol=str(payload["symbol"]),
             side=_normalize_side(str(payload["side"])),
@@ -528,8 +489,6 @@ class TerminalOrderMetadata:
 
 @dataclass(slots=True)
 class FillApplicationResult:
-    """Explicit result of applying one broker fill delta."""
-
     fill_recorded: bool = False
     position_applied: bool = False
     bracket_applied: bool = False
@@ -543,8 +502,6 @@ class FillApplicationResult:
 
 @dataclass(slots=True)
 class ExitLifecycleRecord:
-    """Durable per-symbol EXIT/REDUCE lifecycle tombstone."""
-
     symbol: str
     exit_order_id: str
     linked_entry_order_id: str | None
@@ -652,8 +609,6 @@ class Order:
     protection_failure_reason: str | None = None
 
     def to_dict(self) -> dict[str, object]:
-        """Serialize the order for JSON persistence."""
-
         return {
             "order_id": self.order_id,
             "symbol": self.symbol,
@@ -691,8 +646,6 @@ class Order:
 
     @staticmethod
     def from_dict(payload: Mapping[str, Any]) -> "Order":
-        """Create an :class:`Order` from serialized state."""
-
         return Order(
             order_id=str(payload["order_id"]),
             symbol=str(payload["symbol"]),
@@ -774,22 +727,6 @@ class Order:
 
 @dataclass(slots=True)
 class ActiveContract:
-    """Persist underlying-to-contract association for reuse.
-
-    Args:
-        underlying: Canonical underlying symbol.
-        symbol: Option contract identifier.
-        option_type: Option type, typically ``CE`` or ``PE``.
-        strike: Strike price for the contract.
-        expiry: Contract expiry timestamp.
-
-    Returns:
-        None.
-
-    Raises:
-        None.
-    """
-
     underlying: str
     symbol: str
     option_type: str
@@ -797,18 +734,6 @@ class ActiveContract:
     expiry: datetime
 
     def to_dict(self) -> dict[str, object]:
-        """Serialize the contract mapping for persistence.
-
-        Args:
-            None.
-
-        Returns:
-            Dictionary payload for JSON storage.
-
-        Raises:
-            None.
-        """
-
         return {
             "underlying": self.underlying,
             "symbol": self.symbol,
@@ -819,18 +744,6 @@ class ActiveContract:
 
     @staticmethod
     def from_dict(payload: Mapping[str, Any]) -> "ActiveContract":
-        """Hydrate :class:`ActiveContract` from saved state.
-
-        Args:
-            payload: Serialized contract mapping.
-
-        Returns:
-            Active contract populated from payload.
-
-        Raises:
-            ValueError: If expiry is missing or invalid.
-        """
-
         expiry_raw = payload.get("expiry")
         if isinstance(expiry_raw, str):
             expiry_dt = datetime.fromisoformat(expiry_raw)
@@ -852,19 +765,6 @@ class ActiveContract:
     def from_selection(
         underlying: str, contract: "SelectedContract | ActiveContract"
     ) -> "ActiveContract":
-        """Coerce selector result into an active contract mapping.
-
-        Args:
-            underlying: Canonical underlying symbol.
-            contract: Selection returned by the strike selector.
-
-        Returns:
-            Active contract representation suitable for caching.
-
-        Raises:
-            None.
-        """
-
         if isinstance(contract, ActiveContract):
             return contract
         expiry_dt = contract.expiry
@@ -890,8 +790,6 @@ class PositionManager:
     )
 
     def __init__(self, state_file: str = "positions.json") -> None:
-        """Initialize the manager, optionally loading from ``state_file``."""
-
         self._logger = get_logger(__name__)
         self._state_path = Path(state_file)
         legacy_candidate = self._state_path.parent / "positions_state.json"
@@ -903,10 +801,6 @@ class PositionManager:
             )
         self._positions: Dict[str, Position] = {}
         self._lock = threading.RLock()
-        # Daily entry counter backing max_trades_per_day. The risk guard looked
-        # up trades_today/daily_trade_count/trade_count_today on this object;
-        # none existed, so its _call_count() fell through to 0 and the limit
-        # never fired. Keyed by IST trading date so it self-resets at rollover.
         self._trades_today_date: str | None = None
         self._trades_today_count: int = 0
         self._order_locks: dict[str, threading.RLock] = {}
@@ -915,7 +809,9 @@ class PositionManager:
         self._terminal_orders: dict[str, TerminalOrderMetadata] = {}
         self._unresolved_terminal_orders: dict[str, TerminalOrderMetadata] = {}
         self._exit_lifecycles: dict[str, ExitLifecycleRecord] = {}
-        self._max_terminal_orders = 5000  # Limit persisted idempotency history.
+        self._broker_order_ledger: dict[str, dict[str, Any]] = {}
+        self._quarantined_broker_exposures: dict[str, dict[str, Any]] = {}
+        self._max_terminal_orders = 5000
         self._daily_realized_pnl: float = 0.0
         self._local_realized_pnl: float = 0.0
         self._broker_realized_pnl: float | None = None
@@ -942,9 +838,7 @@ class PositionManager:
         self._cost_basis_unresolved_symbols: set[str] = set()
         self._reconcile_interval_s: float = 60.0
         self._reconcile_retry_interval_s: float = 10.0
-        self._reconcile_listeners: list[Callable[[str, Mapping[str, object]], None]] = (
-            []
-        )
+        self._reconcile_listeners: list[Callable[[str, Mapping[str, object]], None]] = []
         self._last_reconciled_state: Dict[str, Position] = {}
         self._last_broker_position_snapshot_at: float | None = None
         self._last_broker_position_snapshot_mono: float | None = None
@@ -975,18 +869,10 @@ class PositionManager:
         self._last_reconciled_state = copy.deepcopy(self._positions)
 
     def set_on_symbols_flat(self, hook: Any | None) -> None:
-        """Attach a callback invoked with symbols pruned during broker sync.
-
-        Lets the runner forward externally-closed symbols (manual square-off /
-        auto-square-off) to the bracket manager so lingering brackets are dropped
-        instead of being re-adopted forever.
-        """
         self._on_symbols_flat_hook = hook
 
     @property
     def _processed_order_ids(self) -> set[str]:
-        """Backward-compatible read view for older tests and diagnostics."""
-
         return {
             order_id
             for order_id, metadata in self._terminal_orders.items()
@@ -1019,18 +905,6 @@ class PositionManager:
             )
 
     def set_broker_client(self, broker_client: Any | None) -> None:
-        """Attach the broker client used for reconciliation.
-
-        Args:
-            broker_client: Broker client implementation or ``None`` to detach.
-
-        Returns:
-            None.
-
-        Raises:
-            None.
-        """
-
         self._logger.debug(
             "Entered set_broker_client",
             extra={"event": "position_manager_set_broker"},
@@ -1038,64 +912,22 @@ class PositionManager:
         self._broker_client = broker_client
 
     def _resolve_broker_position_fetcher(self) -> Callable[[], Any] | None:
-        """Return the broker callable used to fetch positions.
-
-        Args:
-            None.
-
-        Returns:
-            Callable returning broker positions or ``None`` when unavailable.
-
-        Raises:
-            None.
-        """
-
         broker = self._broker_client
         if broker is None:
             return None
-        candidates = (
-            "get_positions",
-            "list_positions",
-            "positions",
-            "fetch_positions",
-        )
-        for name in candidates:
+        for name in ("get_positions", "list_positions", "positions", "fetch_positions"):
             fetcher = getattr(broker, name, None)
             if callable(fetcher):
                 return cast(Callable[[], Any], fetcher)
         return None
 
     def _cancel_reconcile_timer(self) -> None:
-        """Cancel any outstanding reconciliation timer.
-
-        Args:
-            None.
-
-        Returns:
-            None.
-
-        Raises:
-            None.
-        """
-
         timer = self._reconcile_timer
         if timer is not None:
             timer.cancel()
             self._reconcile_timer = None
 
     def _schedule_reconcile(self, delay_s: float) -> None:
-        """Schedule the next reconciliation attempt.
-
-        Args:
-            delay_s: Delay in seconds before the next execution.
-
-        Returns:
-            None.
-
-        Raises:
-            None.
-        """
-
         delay = max(float(delay_s), 0.0)
         if delay <= 0.0:
             delay = _MIN_RECONCILE_DELAY_S
@@ -1106,25 +938,10 @@ class PositionManager:
         timer.start()
         self._logger.debug(
             "Scheduled position reconciliation",
-            extra={
-                "event": "position_reconcile_schedule",
-                "delay_sec": round(delay, 3),
-            },
+            extra={"event": "position_reconcile_schedule", "delay_sec": round(delay, 3)},
         )
 
     def _compute_retry_delay(self) -> float:
-        """Return delay in seconds before scheduling the next reconcile retry.
-
-        Args:
-            None.
-
-        Returns:
-            Delay in seconds before the subsequent reconcile attempt.
-
-        Raises:
-            None.
-        """
-
         base_delay = max(self._reconcile_retry_interval_s, _MIN_RECONCILE_DELAY_S)
         failures = max(self._consecutive_reconcile_failures, 1)
         multiplier = min(2 ** (failures - 1), 16.0)
@@ -1132,82 +949,26 @@ class PositionManager:
         return float(min(base_delay * multiplier, max_delay))
 
     def _schedule_retry_after_failure(self, delay_s: float | None = None) -> None:
-        """Schedule a soft retry using exponential backoff delays.
-
-        Args:
-            delay_s: Optional pre-computed retry delay override.
-
-        Returns:
-            None.
-
-        Raises:
-            None.
-        """
-
-        retry_delay = (
-            float(delay_s) if delay_s is not None else self._compute_retry_delay()
-        )
+        retry_delay = float(delay_s) if delay_s is not None else self._compute_retry_delay()
         self._schedule_reconcile(retry_delay)
 
     def add_reconcile_listener(
         self, callback: Callable[[str, Mapping[str, object]], None]
     ) -> None:
-        """Register *callback* to receive reconciliation lifecycle events.
-
-        Args:
-            callback: Callable invoked with the event name and payload.
-
-        Returns:
-            None.
-
-        Raises:
-            None.
-        """
-
-        self._logger.debug(
-            "Entered add_reconcile_listener",
-            extra={"event": "position_reconcile_listener_add"},
-        )
-        if not callable(callback):
-            self._logger.warning(
-                "Ignoring non-callable reconcile listener",
-                extra={"event": "position_reconcile_listener_invalid"},
-            )
-            return
-        self._reconcile_listeners.append(callback)
+        if callable(callback):
+            self._reconcile_listeners.append(callback)
 
     def _notify_reconcile_event(
         self, event: str, payload: Mapping[str, object]
     ) -> None:
-        """Dispatch reconcile *event* with *payload* to registered listeners.
-
-        Args:
-            event: Event name emitted by the reconciliation pipeline.
-            payload: Supplementary event payload cloned per listener.
-
-        Returns:
-            None.
-
-        Raises:
-            None.
-        """
-
-        self._logger.debug(
-            "Entered _notify_reconcile_event",
-            extra={"event": "position_reconcile_notify", "event_name": event},
-        )
-        listeners = list(self._reconcile_listeners)
-        for listener in listeners:
+        for listener in list(self._reconcile_listeners):
             try:
                 listener(event, dict(payload))
-            except Exception as exc:  # noqa: BLE001 - defensive listener isolation
+            except Exception as exc:  # noqa: BLE001
                 self._logger.error(
                     "Failure in _notify_reconcile_event: %s",
                     exc,
-                    extra={
-                        "event": "position_reconcile_listener_error",
-                        "listener": getattr(listener, "__name__", repr(listener)),
-                    },
+                    extra={"event": "position_reconcile_listener_error"},
                 )
 
     def _handle_reconcile_failure(
@@ -1218,7 +979,6 @@ class PositionManager:
         payload_count: int,
         previous_positions: Mapping[str, Position] | None,
     ) -> None:
-        """Record failure without replacing newer local fill/position state."""
         self._last_reconcile_attempt = _now()
         self._consecutive_reconcile_failures += 1
         self._last_reconcile_error = str(error) if error is not None else reason
@@ -1232,16 +992,10 @@ class PositionManager:
                 event_id=event_key,
             )
             METRICS.increment_retry_event(
-                label="position_reconcile",
-                stage="apply",
-                outcome=reason_token,
+                label="position_reconcile", stage="apply", outcome=reason_token
             )
         except Exception as metrics_exc:  # noqa: BLE001
-            self._logger.error(
-                "Failure in reconcile failure metrics: %s",
-                metrics_exc,
-                extra={"event": "position_reconcile_metric_failure"},
-            )
+            self._logger.error("Failure in reconcile failure metrics: %s", metrics_exc)
         with self._lock:
             preserved_count = len(self._positions)
         retry_delay = self._compute_retry_delay()
@@ -1257,30 +1011,12 @@ class PositionManager:
         }
         if error is not None:
             payload["error"] = str(error)
-        try:
+        with suppress(Exception):
             _POSITION_RECONCILE_EVENTS.labels("failed").inc()
-        except Exception:  # noqa: BLE001
-            pass
         self._notify_reconcile_event("position_reconcile_failed", payload)
         self._schedule_retry_after_failure(retry_delay)
 
     def _handle_reconcile_success(self, payload_count: int) -> None:
-        """Persist reconciliation success metadata and notify observers.
-
-        Args:
-            payload_count: Number of broker payloads applied.
-
-        Returns:
-            None.
-
-        Raises:
-            None.
-        """
-
-        self._logger.debug(
-            "Entered _handle_reconcile_success",
-            extra={"event": "position_reconcile_success"},
-        )
         self._last_reconcile_attempt = _now()
         self._last_reconcile_success_at = self._last_reconcile_attempt
         previous_failures = self._consecutive_reconcile_failures
@@ -1289,72 +1025,37 @@ class PositionManager:
         event_key = f"success:{self._last_reconcile_success_at.isoformat()}"
         try:
             METRICS.record_broker_sync(
-                success=True,
-                reason="ok",
-                latency_seconds=None,
-                event_id=event_key,
+                success=True, reason="ok", latency_seconds=None, event_id=event_key
             )
-            if previous_failures:
-                METRICS.increment_retry_event(
-                    label="position_reconcile",
-                    stage="apply",
-                    outcome="success",
-                )
-        except Exception as metrics_exc:  # noqa: BLE001 - defensive metric guard
-            self._logger.error(
-                "Failure in reconcile success metrics: %s",
-                metrics_exc,
-                extra={"event": "position_reconcile_metric_failure"},
-            )
-        try:
-            self._last_reconciled_state = copy.deepcopy(self._positions)
-        except Exception as exc:  # noqa: BLE001 - defensive snapshot guard
-            self._logger.error(
-                "Failure in _handle_reconcile_success snapshot: %s",
-                exc,
-                extra={"event": "position_reconcile_snapshot_failed"},
-            )
+        except Exception as metrics_exc:  # noqa: BLE001
+            self._logger.error("Failure in reconcile success metrics: %s", metrics_exc)
+        self._last_reconciled_state = copy.deepcopy(self._positions)
         event_payload: dict[str, object] = {
             "count": payload_count,
             "timestamp": self._last_reconcile_success_at.isoformat(),
         }
         if previous_failures:
             event_payload["previous_failures"] = previous_failures
-        try:
+        with suppress(Exception):
             _POSITION_RECONCILE_EVENTS.labels("ok").inc()
-        except Exception:  # noqa: BLE001 - optional metrics backend
-            pass
         self._notify_reconcile_event("position_reconcile_ok", event_payload)
 
     def reconcile_now(self) -> bool:
-        """Fetch and apply one authoritative broker-position snapshot, single-flight."""
-        lock = getattr(self, "_single_reconcile_lock", None)
-        if lock is None:
-            self._single_reconcile_lock = threading.Lock()
-            lock = self._single_reconcile_lock
+        lock = self._single_reconcile_lock
         if not lock.acquire(False):
-            self._single_reconcile_coalesced = int(
-                getattr(self, "_single_reconcile_coalesced", 0)
-            ) + 1
-            return bool(getattr(self, "_last_reconcile_success_at", None))
+            self._single_reconcile_coalesced += 1
+            return bool(self._last_reconcile_success_at)
         try:
-            self._single_reconcile_generation = int(
-                getattr(self, "_single_reconcile_generation", 0)
-            ) + 1
+            self._single_reconcile_generation += 1
             return bool(self._reconcile_positions_from_broker())
         finally:
             lock.release()
 
     def _reconcile_positions_from_broker(self) -> bool:
-        """Fetch and atomically apply one authoritative broker snapshot."""
-        payload_count = 0
         fetcher = self._resolve_broker_position_fetcher()
         if fetcher is None:
             self._handle_reconcile_failure(
-                reason=canonical("fetcher_missing"),
-                error=None,
-                payload_count=0,
-                previous_positions=None,
+                reason=canonical("fetcher_missing"), error=None, payload_count=0, previous_positions=None
             )
             return False
         try:
@@ -1362,55 +1063,24 @@ class PositionManager:
             snapshot = decode_position_snapshot(response)
         except Exception as exc:  # noqa: BLE001
             reason = canonical(
-                "payload_invalid"
-                if isinstance(exc, PositionSnapshotError)
-                else "fetch_error"
-            )
-            self._logger.warning(
-                "Position reconciliation snapshot failed: %s",
-                exc,
-                extra={"event": "position_reconcile_failed", "reason": reason},
-                exc_info=exc,
+                "payload_invalid" if isinstance(exc, PositionSnapshotError) else "fetch_error"
             )
             self._handle_reconcile_failure(
-                reason=reason,
-                error=exc,
-                payload_count=0,
-                previous_positions=None,
+                reason=reason, error=exc, payload_count=0, previous_positions=None
             )
             return False
-
         payloads = snapshot.raw_rows()
-        payload_count = len(payloads)
         try:
             self.synchronize_with_broker(payloads)
         except Exception as exc:  # noqa: BLE001
-            reason = canonical("apply_error")
-            self._logger.warning(
-                "Position reconciliation apply failed: %s",
-                exc,
-                extra={"event": "position_reconcile_failed", "reason": reason},
-                exc_info=exc,
-            )
             self._handle_reconcile_failure(
-                reason=reason,
+                reason=canonical("apply_error"),
                 error=exc,
-                payload_count=payload_count,
+                payload_count=len(payloads),
                 previous_positions=None,
             )
             return False
-
-        self._logger.info(
-            "POSITION_RECONCILE_OK count=%s source=%s",
-            payload_count,
-            snapshot.source,
-            extra={
-                "event": "position_reconcile_ok",
-                "count": payload_count,
-                "source": snapshot.source,
-            },
-        )
-        self._handle_reconcile_success(payload_count)
+        self._handle_reconcile_success(len(payloads))
         return True
 
     def reconcile_periodic(
@@ -1419,49 +1089,15 @@ class PositionManager:
         interval_sec: float | None = None,
         retry_sec: float | None = None,
     ) -> None:
-        """Reconcile now and schedule the next attempt.
-
-        Args:
-            interval_sec: Interval between successful reconciliations.
-            retry_sec: Delay applied after a failed reconciliation.
-
-        Returns:
-            None.
-
-        Raises:
-            None.
-        """
-
-        self._logger.debug(
-            "Entered reconcile_periodic",
-            extra={"event": "position_reconcile_periodic"},
-        )
         try:
             if interval_sec is not None:
-                self._reconcile_interval_s = max(
-                    float(interval_sec), _MIN_RECONCILE_DELAY_S
-                )
+                self._reconcile_interval_s = max(float(interval_sec), _MIN_RECONCILE_DELAY_S)
             if retry_sec is not None:
-                self._reconcile_retry_interval_s = max(
-                    float(retry_sec), _MIN_RECONCILE_DELAY_S
-                )
+                self._reconcile_retry_interval_s = max(float(retry_sec), _MIN_RECONCILE_DELAY_S)
             success = self.reconcile_now()
-        except Exception as exc:  # noqa: BLE001 - defensive periodic guard
-            reason_token = canonical("periodic_error")
-            self._logger.warning(
-                "Unexpected error during periodic reconciliation: %s",
-                exc,
-                extra={
-                    "event": "position_reconcile_failed",
-                    "reason": reason_token,
-                },
-                exc_info=exc,
-            )
+        except Exception as exc:  # noqa: BLE001
             self._handle_reconcile_failure(
-                reason=reason_token,
-                error=exc,
-                payload_count=0,
-                previous_positions=None,
+                reason=canonical("periodic_error"), error=exc, payload_count=0, previous_positions=None
             )
             return
         self._maybe_flush_persistent_state()
@@ -1469,146 +1105,37 @@ class PositionManager:
             self._schedule_reconcile(self._reconcile_interval_s)
 
     def get_active_contract(self, underlying: str) -> ActiveContract | None:
-        """Return cached contract for an *underlying*.
-
-        Args:
-            underlying: Underlying instrument identifier.
-
-        Returns:
-            Cached contract when available, else ``None``.
-
-        Raises:
-            None.
-        """
-
-        key = underlying.strip().upper()
-        self._logger.debug(
-            "Entered get_active_contract",
-            extra={"event": "get_active_contract", "underlying": key},
-        )
-        if not key:
-            return None
-        try:
-            return self._active_contracts.get(key)
-        except Exception as exc:  # noqa: BLE001 - defensive guard
-            self._logger.error("Failure in get_active_contract: %s", exc)
-            return None
+        return self._active_contracts.get(underlying.strip().upper())
 
     def set_active_contract(
         self, underlying: str, contract: SelectedContract | ActiveContract | None
     ) -> None:
-        """Persist latest selected contract for an *underlying*.
-
-        Args:
-            underlying: Underlying instrument identifier.
-            contract: Selection metadata or ``None`` to clear.
-
-        Returns:
-            None.
-
-        Raises:
-            None.
-        """
-
         normalized = underlying.strip().upper()
-        self._logger.debug(
-            "Entered set_active_contract",
-            extra={"event": "set_active_contract", "underlying": normalized},
-        )
         if not normalized:
             return
-        try:
-            if contract is None:
-                removed = self._active_contracts.pop(normalized, None)
-                if removed is not None:
-                    self._contract_index.pop(removed.symbol, None)
-                    self._logger.info(
-                        "Condition met: active_contract_cleared",
-                        extra={
-                            "event": "active_contract_cleared",
-                            "underlying": normalized,
-                            "symbol": removed.symbol,
-                        },
-                    )
-                self.save_state()
-                return
-            active = ActiveContract.from_selection(normalized, contract)
-            self._active_contracts[normalized] = active
-            self._contract_index[active.symbol] = normalized
-            self._logger.info(
-                "Condition met: active_contract_registered",
-                extra={
-                    "event": "active_contract_registered",
-                    "underlying": normalized,
-                    "symbol": active.symbol,
-                },
-            )
-        except Exception as exc:  # noqa: BLE001 - defensive guard
-            self._logger.error("Failure in set_active_contract: %s", exc)
+        if contract is None:
+            removed = self._active_contracts.pop(normalized, None)
+            if removed is not None:
+                self._contract_index.pop(removed.symbol, None)
+            self.save_state()
             return
+        active = ActiveContract.from_selection(normalized, contract)
+        self._active_contracts[normalized] = active
+        self._contract_index[active.symbol] = normalized
         self.save_state()
 
     def clear_active_contract(self, underlying: str) -> None:
-        """Remove cached contract for an *underlying*.
-
-        Args:
-            underlying: Underlying instrument identifier.
-
-        Returns:
-            None.
-
-        Raises:
-            None.
-        """
-
-        self._logger.debug(
-            "Entered clear_active_contract",
-            extra={"event": "clear_active_contract", "underlying": underlying},
-        )
         self.set_active_contract(underlying, None)
 
     def clear_active_contract_by_symbol(self, symbol: str) -> None:
-        """Remove cached contract resolved by *symbol*.
-
-        Args:
-            symbol: Option contract identifier.
-
-        Returns:
-            None.
-
-        Raises:
-            None.
-        """
-
         normalized = symbol.strip().upper()
-        self._logger.debug(
-            "Entered clear_active_contract_by_symbol",
-            extra={"event": "clear_active_contract_by_symbol", "symbol": normalized},
-        )
         if not normalized:
             return
-        try:
-            underlying = self._contract_index.pop(normalized, None)
-            if underlying:
-                if self._active_contracts.pop(underlying, None) is not None:
-                    self._logger.info(
-                        "Condition met: active_contract_symbol_cleared",
-                        extra={
-                            "event": "active_contract_symbol_cleared",
-                            "underlying": underlying,
-                            "symbol": normalized,
-                        },
-                    )
-                    self.save_state()
-        except Exception as exc:  # noqa: BLE001 - defensive guard
-            self._logger.error(
-                "Failure in clear_active_contract_by_symbol: %s",
-                exc,
-            )
+        underlying = self._contract_index.pop(normalized, None)
+        if underlying and self._active_contracts.pop(underlying, None) is not None:
+            self.save_state()
 
     def _mark_local_position_mutation_locked(self) -> None:
-        """Invalidate broker snapshot authority after local exposure changes."""
-
         self._local_position_generation += 1
 
     def _broker_snapshot_age_locked(self) -> float | None:
@@ -1618,46 +1145,18 @@ class PositionManager:
 
     def _broker_snapshot_fresh_locked(self) -> tuple[bool, float | None]:
         age = self._broker_snapshot_age_locked()
-        max_age = float(self._broker_position_snapshot_max_age_seconds)
-        if age is None or age < 0 or age > max_age:
+        if age is None or age < 0 or age > self._broker_position_snapshot_max_age_seconds:
             return False, age
         if self._broker_snapshot_local_generation != self._local_position_generation:
             return False, age
         return True, age
 
     def is_flat(self, symbol: str) -> bool:
-        """Return ``True`` when local state proves no open position.
-
-        Unexpected lookup failures are unknown state and therefore fail closed.
-        Broker-authoritative callers must use ``broker_exposure_state`` instead.
-        """
-
-        lookup = symbol.strip().upper()
-        self._logger.debug(
-            "Entered is_flat", extra={"event": "is_flat", "symbol": lookup}
-        )
-        try:
-            with self._lock:
-                position = self._positions.get(lookup)
-        except Exception as exc:  # noqa: BLE001 - defensive guard
-            self._logger.error(
-                "POSITION_FLAT_CHECK_FAILED symbol=%s error=%s",
-                lookup,
-                exc,
-                extra={
-                    "event": "POSITION_FLAT_CHECK_FAILED",
-                    "symbol": lookup,
-                    "error_type": type(exc).__name__,
-                    "error_message": str(exc),
-                },
-                exc_info=True,
-            )
-            return False
+        with self._lock:
+            position = self._positions.get(symbol.strip().upper())
         return position is None or position.quantity <= 0
 
     def broker_exposure_snapshot(self) -> dict[str, object]:
-        """Return a detached copy of the last validated complete broker snapshot."""
-
         with self._lock:
             fresh, age = self._broker_snapshot_fresh_locked()
             return {
@@ -1675,18 +1174,11 @@ class PositionManager:
             }
 
     def broker_exposure_state(self, symbol: str) -> BrokerExposureState:
-        """Return broker-authoritative exposure state for ``symbol``.
-
-        UNKNOWN means the latest complete snapshot is missing, stale, invalid, or
-        predates a local exposure mutation. UNKNOWN is never flat and never a
-        true orphan. ABSENT means a fresh complete net snapshot had no symbol row.
-        """
-
         lookup = normalize_symbol(symbol) or symbol.strip().upper()
         with self._lock:
             if not self._last_broker_position_snapshot_valid:
                 return BrokerExposureState.UNKNOWN
-            fresh, _age = self._broker_snapshot_fresh_locked()
+            fresh, _ = self._broker_snapshot_fresh_locked()
             if not fresh:
                 return BrokerExposureState.UNKNOWN
             if lookup not in self._last_broker_quantities_by_symbol:
@@ -1705,7 +1197,6 @@ class PositionManager:
         trailing_stop_distance: float | None = None,
         order_id: str | None = None,
     ) -> Position:
-        """Open a position under the same lock used by broker reconciliation."""
         symbol_key = symbol.upper()
         position = Position(
             symbol=symbol_key,
@@ -1726,7 +1217,6 @@ class PositionManager:
             self._positions[symbol_key] = position
             self._increment_trades_today_locked()
             self._mark_local_position_mutation_locked()
-        self._logger.info("Opened %s position for %s", position.side, symbol_key)
         self.save_state()
         return position
 
@@ -1737,7 +1227,6 @@ class PositionManager:
         reason: str,
         close_time: datetime | None = None,
     ) -> Position:
-        """Close a position atomically and retain conservative realised P&L."""
         symbol_key = symbol.upper()
         with self._lock:
             position = self._positions.get(symbol_key)
@@ -1755,22 +1244,11 @@ class PositionManager:
             del self._positions[symbol_key]
             self._mark_local_position_mutation_locked()
             self._mark_recent_exit_flat_locked(symbol_key)
-        closed_at = close_time or _now()
-        self._logger.info(
-            "Closed %s position for %s at %.2f (%s) due to %s [PnL=%.2f]",
-            position.side,
-            symbol_key,
-            exit_price,
-            closed_at.isoformat(),
-            reason,
-            realized,
-        )
         self.clear_active_contract_by_symbol(symbol_key)
         self.save_state()
         return position
 
     def update_from_order(self, order: Order) -> None:
-        """Apply a confirmed local :class:`Order` through the normal fill lifecycle."""
         if not isinstance(order, Order):
             raise TypeError("update_from_order requires position_manager.Order")
         if order.status != "FILLED":
@@ -1785,87 +1263,56 @@ class PositionManager:
         self.update_order_status(order.order_id, "FILLED", fill_price=float(fill_price))
 
     def update_position_price(self, symbol: str, current_price: float) -> None:
-        """Update the mark price of an open position under the state lock."""
-        symbol_key = symbol.upper()
         with self._lock:
-            position = self._positions.get(symbol_key)
+            position = self._positions.get(symbol.upper())
             if position is None:
                 return
             position.current_price = float(current_price)
         self.save_state()
 
     def get_position(self, symbol: str) -> Position | None:
-        """Return the :class:`Position` for ``symbol`` if it exists."""
-
         with self._lock:
             return self._positions.get(symbol.upper())
 
     def get_all_positions(self) -> list[Position]:
-        """Return all currently open positions."""
-
         with self._lock:
             return list(self._positions.values())
 
     def get_open_positions(self) -> list[Position]:
-        """Alias for :meth:`get_all_positions` for compatibility with protocols."""
-
         with self._lock:
             return list(self._positions.values())
 
     def has_position(self, symbol: str) -> bool:
-        """Return ``True`` if a position exists for ``symbol``."""
-
         with self._lock:
             return symbol.upper() in self._positions
 
     def has_open_position(self, symbol: str) -> bool:
-        """Return whether an open position exists. Args: symbol. Returns: bool. Raises: None."""
         return self.has_position(symbol)
 
     def get_total_exposure(self) -> float:
-        """Return the total notional exposure across open positions."""
-
         return float(
-            sum(
-                abs(position.quantity * position.current_price)
-                for position in self._positions.values()
-            )
+            sum(abs(position.quantity * position.current_price) for position in self._positions.values())
         )
 
     def get_net_pnl(self) -> float:
-        """Return total realized plus unrealized profit and loss."""
-
         return self.get_realized_pnl() + self.get_unrealized_pnl()
 
     def get_unrealized_pnl(self) -> float:
-        """Return the aggregate unrealized profit and loss."""
-
-        return float(
-            sum(position.unrealized_pnl for position in self._positions.values())
-        )
+        return float(sum(position.unrealized_pnl for position in self._positions.values()))
 
     def _refresh_realized_pnl_locked(self) -> None:
-        """Refresh authoritative confirmed P&L without silently taking min()."""
-
         local_confirmed = float(self._local_realized_pnl)
         broker_confirmed = None
-        if (
-            self._broker_realized_pnl is not None
-            and self._session_opening_realized_baseline is not None
-        ):
-            broker_confirmed = float(self._broker_realized_pnl) - float(
-                self._session_opening_realized_baseline
-            )
+        if self._broker_realized_pnl is not None and self._session_opening_realized_baseline is not None:
+            broker_confirmed = float(self._broker_realized_pnl) - float(self._session_opening_realized_baseline)
         if local_confirmed != 0.0:
             authoritative = local_confirmed
             authority = "local_confirmed_ledger"
-            if (
-                broker_confirmed is not None
-                and abs(local_confirmed - broker_confirmed) > 1.0
-            ):
-                status = "mismatch"
-            else:
-                status = "matched" if broker_confirmed is not None else "local_only"
+            status = (
+                "mismatch"
+                if broker_confirmed is not None and abs(local_confirmed - broker_confirmed) > 1.0
+                else "matched" if broker_confirmed is not None else "local_only"
+            )
         elif broker_confirmed is not None:
             authoritative = broker_confirmed
             authority = "validated_broker_positions"
@@ -1881,8 +1328,6 @@ class PositionManager:
         self._pnl_snapshot_at = _now()
 
     def _increment_trades_today_locked(self) -> None:
-        """Count one new entry for the current IST trading date. Caller holds
-        the lock. Args: none. Returns: none. Raises: none."""
         today = self._trading_date_ist()
         if self._trades_today_date != today:
             self._trades_today_date = today
@@ -1890,13 +1335,6 @@ class PositionManager:
         self._trades_today_count += 1
 
     def trades_today(self) -> int:
-        """Entries opened during the current IST trading date.
-
-        Read by the risk entry guard to enforce max_trades_per_day. Returns 0
-        on a new trading date so the limit resets at IST rollover rather than
-        on process restart.
-        Args: none. Returns: count. Raises: none.
-        """
         with self._lock:
             if self._trades_today_date != self._trading_date_ist():
                 return 0
@@ -1904,8 +1342,6 @@ class PositionManager:
 
     @staticmethod
     def _trading_date_ist(now: datetime | None = None) -> str:
-        """Return the exchange trading date in IST for P&L baselines."""
-
         current = now or _now()
         if current.tzinfo is None:
             current = current.replace(tzinfo=timezone.utc)
@@ -1921,22 +1357,13 @@ class PositionManager:
         source: str = "validated_broker_positions",
         trading_date: str | None = None,
     ) -> bool:
-        """Persist the opening broker-realized baseline for today's bot P&L.
-
-        Same-day restarts retain the existing baseline so an old cumulative
-        broker realized value is not misread as today's bot loss.
-        """
-
         value = float(broker_realized)
         if not math.isfinite(value):
             raise ValueError("broker_realized must be finite")
         as_of = snapshot_at or _now()
         session_date = trading_date or self._trading_date_ist(as_of)
         with self._lock:
-            if (
-                self._session_opening_realized_baseline is not None
-                and self._pnl_trading_date == session_date
-            ):
+            if self._session_opening_realized_baseline is not None and self._pnl_trading_date == session_date:
                 self._broker_realized_pnl = value
                 self._refresh_realized_pnl_locked()
                 return False
@@ -1957,89 +1384,65 @@ class PositionManager:
         return True
 
     def broker_session_realized_pnl(self) -> float | None:
-        """Return broker cumulative realized minus the persisted session baseline."""
-
         with self._lock:
-            if (
-                self._broker_realized_pnl is None
-                or self._session_opening_realized_baseline is None
-            ):
+            if self._broker_realized_pnl is None or self._session_opening_realized_baseline is None:
                 return None
-            return float(self._broker_realized_pnl) - float(
-                self._session_opening_realized_baseline
-            )
+            return float(self._broker_realized_pnl) - float(self._session_opening_realized_baseline)
 
     def get_realized_pnl(self) -> float:
-        """Return conservative realised P&L used by capital-protection gates."""
         with self._lock:
             return float(self._daily_realized_pnl)
 
     def pnl_reconciliation_snapshot(self) -> dict[str, object]:
-        """Return current confirmed P&L authority and mismatch details."""
-
         with self._lock:
             return {
                 "local_confirmed_realized": float(self._local_realized_pnl),
-                "local_provisional_realized": float(
-                    self._local_provisional_realized_pnl
-                ),
+                "local_provisional_realized": float(self._local_provisional_realized_pnl),
                 "broker_realized_snapshot": self._broker_realized_pnl,
-                "broker_session_realized": (
-                    None
-                    if self._broker_realized_pnl is None
-                    or self._session_opening_realized_baseline is None
-                    else float(self._broker_realized_pnl)
-                    - float(self._session_opening_realized_baseline)
-                ),
+                "broker_session_realized": self.broker_session_realized_pnl(),
                 "authoritative_realized": float(self._authoritative_realized_pnl),
                 "pnl_authority": self._pnl_authority,
                 "pnl_reconciliation_status": self._pnl_reconciliation_status,
-                "session_opening_realized_baseline": (
-                    self._session_opening_realized_baseline
-                ),
+                "session_opening_realized_baseline": self._session_opening_realized_baseline,
                 "pnl_trading_date": self._pnl_trading_date,
                 "pnl_account_fingerprint": self._pnl_account_fingerprint,
                 "pnl_product_scope": self._pnl_product_scope,
-                "baseline_established_at": (
-                    self._baseline_established_at.isoformat()
-                    if self._baseline_established_at
-                    else None
-                ),
+                "baseline_established_at": self._baseline_established_at.isoformat() if self._baseline_established_at else None,
                 "baseline_source": self._baseline_source,
-                "pnl_snapshot_at": (
-                    self._pnl_snapshot_at.isoformat() if self._pnl_snapshot_at else None
-                ),
+                "pnl_snapshot_at": self._pnl_snapshot_at.isoformat() if self._pnl_snapshot_at else None,
             }
 
     def current_pnl_reconciliation_blocker(self) -> str | None:
-        """Block new entries when confirmed local and broker P&L disagree."""
-
         with self._lock:
-            if (
-                self._require_pnl_baseline_for_entries
-                and self._session_opening_realized_baseline is None
-            ):
+            if self._require_pnl_baseline_for_entries and self._session_opening_realized_baseline is None:
                 return "pnl_baseline_uninitialized"
-            if (
-                self._require_pnl_baseline_for_entries
-                and self._pnl_trading_date != self._trading_date_ist()
-            ):
+            if self._require_pnl_baseline_for_entries and self._pnl_trading_date != self._trading_date_ist():
                 return "pnl_session_date_unverified"
             if self._pnl_reconciliation_status == "mismatch":
                 return "pnl_reconciliation_mismatch"
             return None
 
     def require_pnl_session_baseline(self, required: bool = True) -> None:
-        """Require a validated session baseline before new entries are accepted."""
-
         with self._lock:
             self._require_pnl_baseline_for_entries = bool(required)
 
     def current_entry_protection_blocker(self, symbol: str | None = None) -> str | None:
-        """Return current entry blocker when a filled entry lacks SL protection."""
-
-        symbol_key = symbol.upper() if symbol else None
+        symbol_key = normalize_symbol(symbol) if symbol else None
         with self._lock:
+            exposures = self._quarantined_broker_exposures
+            if symbol_key is not None:
+                exposure = exposures.get(symbol_key)
+                if exposure is not None:
+                    if str(exposure.get("reason") or "") == "broker_state_unverified":
+                        return "broker_state_unverified"
+                    return "broker_exposure_quarantined"
+            elif exposures:
+                if any(
+                    str(exposure.get("reason") or "") == "broker_state_unverified"
+                    for exposure in exposures.values()
+                ):
+                    return "broker_state_unverified"
+                return "broker_exposure_quarantined"
             for order in self._orders.values():
                 if symbol_key is not None and order.symbol != symbol_key:
                     continue
@@ -2047,22 +1450,39 @@ class PositionManager:
                     continue
                 if order.applied_filled_quantity <= 0:
                     continue
-                if (
-                    not order.protection_confirmed
-                    or order.protected_quantity < order.applied_filled_quantity
-                ):
+                if not order.protection_confirmed or order.protected_quantity < order.applied_filled_quantity:
                     return "entry_protection_incomplete"
             for metadata in self._unresolved_terminal_orders.values():
                 if symbol_key is not None and metadata.symbol != symbol_key:
                     continue
                 if metadata.intent not in ("ENTRY", "SCALE_IN", "REVERSAL"):
                     continue
-                if (
-                    not metadata.protection_confirmed
-                    or metadata.protected_quantity < metadata.cumulative_filled_quantity
-                ):
+                if not metadata.protection_confirmed or metadata.protected_quantity < metadata.cumulative_filled_quantity:
                     return "entry_protection_incomplete"
         return None
+
+    def get_quarantined_broker_exposures(
+        self, symbol: str | None = None
+    ) -> dict[str, dict[str, Any]] | list[dict[str, Any]]:
+        wanted = normalize_symbol(symbol) if symbol else None
+        with self._lock:
+            if wanted is None:
+                return {
+                    key: dict(value)
+                    for key, value in self._quarantined_broker_exposures.items()
+                }
+            exposure = self._quarantined_broker_exposures.get(wanted)
+            return [dict(exposure)] if exposure is not None else []
+
+    def clear_quarantined_broker_exposure(self, symbol: str) -> bool:
+        wanted = normalize_symbol(symbol)
+        with self._lock:
+            removed = self._quarantined_broker_exposures.pop(wanted, None) is not None
+            if removed:
+                self._cost_basis_unresolved_symbols.discard(wanted)
+        if removed:
+            self.save_state()
+        return removed
 
     def add_pending_order(
         self,
@@ -2077,44 +1497,18 @@ class PositionManager:
         signal_id: str | None = None,
         signal_fingerprint: str | None = None,
     ) -> None:
-        """Track a newly submitted order.
-
-        ✅ PRODUCTION FIX: Skip orders that have already been fully processed.
-        This prevents the infinite loop where historical filled orders are
-        re-added and re-processed every reconciliation cycle.
-        """
         order_id = str(order_id).strip()
-
-        # ✅ FIX 1: Don't re-add orders that were already processed
-        if (
-            hasattr(self, "_terminal_orders")
-            and order_id in self._terminal_orders
-            and self._terminal_orders[order_id].lifecycle_applied
-        ):
-            self._logger.debug(
-                f"Skipping add_pending_order for already-processed: {order_id}",
-                extra={"event": "order_add_skip_processed", "order_id": order_id},
-            )
+        if order_id in self._terminal_orders and self._terminal_orders[order_id].lifecycle_applied:
             return
-
-        # ✅ FIX 2: Don't re-add orders that are already being tracked
         if order_id in self._orders:
-            self._logger.debug(
-                f"Order already tracked, skipping: {order_id}",
-                extra={"event": "order_add_skip_existing", "order_id": order_id},
-            )
             return
-
         symbol_key = symbol.upper()
         existing_position = self._positions.get(symbol_key)
         normalized_side = _normalize_order_side(side)
         normalized_intent = _normalize_intent(intent)
-        if normalized_intent == "UNKNOWN":
-            if existing_position is not None:
-                exit_side = "SELL" if existing_position.side == "LONG" else "BUY"
-                normalized_intent = (
-                    "EXIT" if normalized_side == exit_side else "SCALE_IN"
-                )
+        if normalized_intent == "UNKNOWN" and existing_position is not None:
+            exit_side = "SELL" if existing_position.side == "LONG" else "BUY"
+            normalized_intent = "EXIT" if normalized_side == exit_side else "SCALE_IN"
         order = Order(
             order_id=order_id,
             symbol=symbol_key,
@@ -2123,27 +1517,20 @@ class PositionManager:
             quantity=int(qty),
             price=float(price),
             status="PENDING",
-            linked_position_symbol=(
-                symbol_key if existing_position is not None else None
-            ),
+            linked_position_symbol=symbol_key if existing_position is not None else None,
             intent=normalized_intent,
             bracket_id=bracket_id,
             signal_id=signal_id,
             signal_fingerprint=signal_fingerprint,
-            pre_order_position_side=(
-                existing_position.side if existing_position else None
-            ),
+            pre_order_position_side=existing_position.side if existing_position else None,
             pre_order_quantity=existing_position.quantity if existing_position else 0,
             trade_lifecycle_id=bracket_id or signal_id or order_id,
             linked_entry_order_id=(
                 existing_position.order_id
-                if existing_position is not None
-                and normalized_intent in ("EXIT", "REDUCE")
+                if existing_position is not None and normalized_intent in ("EXIT", "REDUCE")
                 else None
             ),
-            pre_order_entry_price=(
-                existing_position.entry_price if existing_position is not None else None
-            ),
+            pre_order_entry_price=existing_position.entry_price if existing_position is not None else None,
         )
         self._orders[order.order_id] = order
         if normalized_intent in ("EXIT", "REDUCE"):
@@ -2159,10 +1546,7 @@ class PositionManager:
         self._persist_order_state(order)
         self.save_state()
 
-
     def remove_pending_order(self, order_id: str) -> None:
-        """Remove a provisional order that never reached broker submission."""
-
         order_key = str(order_id or "").strip()
         if not order_key:
             return
@@ -2174,26 +1558,17 @@ class PositionManager:
         self.save_state()
 
     def is_exit_converging(self, symbol: str) -> bool:
-        """Return True while a managed exit for ``symbol`` is still converging."""
-
         symbol_key = symbol.upper()
         with self._lock:
             for order in self._orders.values():
-                if order.symbol != symbol_key:
-                    continue
-                if order.intent in ("EXIT", "REDUCE") and order.status not in self.FINAL_STATUSES:
+                if order.symbol == symbol_key and order.intent in ("EXIT", "REDUCE") and order.status not in self.FINAL_STATUSES:
                     return True
             for metadata in self._unresolved_terminal_orders.values():
                 if metadata.symbol == symbol_key and metadata.intent in ("EXIT", "REDUCE"):
                     return True
-            if symbol_key in getattr(self, "_recently_flat_exit_until_monotonic", {}):
-                return True
-        return False
+            return symbol_key in self._recently_flat_exit_until_monotonic
 
-    def bind_pending_order_id(
-        self, provisional_order_id: str, final_order_id: str
-    ) -> None:
-        """Atomically re-key an in-flight locally registered order to broker ID."""
+    def bind_pending_order_id(self, provisional_order_id: str, final_order_id: str) -> None:
         provisional_key = str(provisional_order_id or "").strip()
         final_key = str(final_order_id or "").strip()
         if not provisional_key or not final_key or provisional_key == final_key:
@@ -2207,18 +1582,12 @@ class PositionManager:
                     self._orders[final_key] = order
                 else:
                     order = existing
-                lifecycle = self._exit_lifecycles.pop(provisional_key, None)
-                if lifecycle is not None:
-                    lifecycle.exit_order_id = final_key
-                    self._exit_lifecycles[final_key] = lifecycle
                 self._persist_order_state(order)
             metadata = self._terminal_orders.pop(provisional_key, None)
             if metadata is not None:
-                metadata.order_id = final_key
                 self._terminal_orders[final_key] = metadata
                 unresolved = self._unresolved_terminal_orders.pop(provisional_key, None)
                 if unresolved is not None:
-                    unresolved.order_id = final_key
                     self._unresolved_terminal_orders[final_key] = unresolved
             lifecycle = self._exit_lifecycles.pop(provisional_key, None)
             if lifecycle is not None:
@@ -2227,80 +1596,29 @@ class PositionManager:
         self.save_state()
 
     def update_order_status(
-        self,
-        order_id: str,
-        status: str,
-        fill_price: float | None = None,
+        self, order_id: str, status: str, fill_price: float | None = None
     ) -> None:
-        """Update the status of a tracked order and react to fills.
-
-        ✅ PRODUCTION FIX: Added guard against re-processing completed orders.
-        This prevents the position thrashing loop where the same filled orders
-        are processed over and over again, causing:
-        - "Opened LONG position"
-        - "Position fully closed via order"
-        to repeat infinitely.
-        """
         order_id = str(order_id).strip()
-
-        # ✅ FIX: Initialize _processed_order_ids if not exists (backward compat)
         if not hasattr(self, "_terminal_orders"):
             self._terminal_orders = {}
             self._max_terminal_orders = 5000
-
-        # ✅ FIX: Skip if this order was already fully processed
         terminal_record = self._terminal_orders.get(order_id)
         if terminal_record is not None and terminal_record.lifecycle_resolved:
-            self._logger.debug(
-                f"Skipping already-processed order: {order_id}",
-                extra={"event": "order_already_processed", "order_id": order_id},
-            )
             return
         incoming_status = normalize_broker_order_status(status)
-        if (
-            terminal_record is not None
-            and terminal_record.normalized_status in self.FINAL_STATUSES
-            and incoming_status not in self.FINAL_STATUSES
-        ):
-            self._logger.warning(
-                "Ignoring terminal order status regression for %s: %s -> %s",
-                order_id,
-                terminal_record.normalized_status,
-                incoming_status,
-                extra={
-                    "event": "order_status_regression_ignored",
-                    "order_id": order_id,
-                    "from_status": terminal_record.normalized_status,
-                    "to_status": incoming_status,
-                },
-            )
+        if terminal_record is not None and terminal_record.normalized_status in self.FINAL_STATUSES and incoming_status not in self.FINAL_STATUSES:
             return
-
         order = self._orders.get(order_id)
         if order is None:
-            # ✅ FIX: Also skip unknown orders that might be historical
-            self._logger.debug(
-                f"Attempted to update unknown order {order_id} - may be historical",
-                extra={"event": "order_update_skip_unknown", "order_id": order_id},
-            )
             return
-
         try:
             order.status = incoming_status or _normalize_status(str(status))
         except ValueError:
-            self._logger.warning(
-                "Ignoring unsupported status '%s' for order %s", status, order_id
-            )
             return
-
         if fill_price is not None:
             order.fill_price = float(fill_price)
-
         fill_result = FillApplicationResult()
-        if (
-            order.status in ("PARTIALLY_FILLED", "FILLED")
-            and order.fill_price is not None
-        ):
+        if order.status in ("PARTIALLY_FILLED", "FILLED") and order.fill_price is not None:
             if order.filled_quantity <= 0:
                 order.filled_quantity = order.quantity
             fill_result = self._handle_filled_order(order)
@@ -2309,14 +1627,13 @@ class PositionManager:
             if existing_terminal is not None and not fill_result.fill_recorded:
                 return
             order.terminal_at = _now()
-            self._terminal_orders[order_id] = TerminalOrderMetadata(
+            metadata = TerminalOrderMetadata(
                 terminal_at=order.terminal_at,
                 normalized_status=order.status,
                 cumulative_filled_quantity=order.filled_quantity,
                 average_fill_price=order.fill_price,
                 lifecycle_applied=fill_result.fill_recorded,
                 accounting_finalized=fill_result.accounting_finalized,
-                terminal_update_seen=True,
                 fill_recorded=fill_result.fill_recorded,
                 position_applied=fill_result.position_applied,
                 bracket_applied=fill_result.bracket_applied,
@@ -2327,80 +1644,43 @@ class PositionManager:
                 side=order.side,
                 trade_lifecycle_id=order.trade_lifecycle_id,
                 linked_entry_order_id=order.linked_entry_order_id,
-                exit_lifecycle_state=(
-                    self._exit_lifecycles[order_id].state
-                    if order_id in self._exit_lifecycles
-                    else None
-                ),
                 protected_quantity=order.protected_quantity,
                 protection_confirmed=order.protection_confirmed,
                 protection_confirmed_at=order.protection_confirmed_at,
                 protection_failure_reason=order.protection_failure_reason,
             )
-            if not self._terminal_orders[order_id].lifecycle_resolved:
-                self._unresolved_terminal_orders[order_id] = self._terminal_orders[
-                    order_id
-                ]
+            self._terminal_orders[order_id] = metadata
+            if not metadata.lifecycle_resolved:
+                self._unresolved_terminal_orders[order_id] = metadata
             else:
                 self._unresolved_terminal_orders.pop(order_id, None)
-            self._logger.debug(
-                f"Marked terminal order: {order_id}",
-                extra={
-                    "event": "order_terminal_recorded",
-                    "order_id": order_id,
-                    "lifecycle_applied": fill_result.position_applied
-                    or fill_result.pnl_applied,
-                },
-            )
             self._evict_old_terminal_orders()
-
         self._persist_order_state(order)
-
-        if (
-            order.status in self.FINAL_STATUSES
-            and self._terminal_orders.get(order.order_id) is not None
-            and self._terminal_orders[order.order_id].lifecycle_resolved
-        ):
+        if order.status in self.FINAL_STATUSES and self._terminal_orders.get(order.order_id) is not None and self._terminal_orders[order.order_id].lifecycle_resolved:
             del self._orders[order.order_id]
-
         self.save_state()
 
     def apply_broker_order_update(
         self, order_id: str, broker_payload: Mapping[str, Any]
     ) -> None:
-        """Canonical position-side broker update ingress."""
-
         order_key = str(order_id)
-        order_lock = self._order_lock_for(order_key)
-        with order_lock:
+        with self._order_lock_for(order_key):
             order = self._orders.get(order_key)
-            symbol_lock = (
-                self._symbol_lifecycle_lock_for(order.symbol)
-                if order is not None
-                else self._lock
-            )
+            symbol_lock = self._symbol_lifecycle_lock_for(order.symbol) if order is not None else self._lock
             with symbol_lock:
                 status = broker_payload.get("status")
-                fill_price_raw = (
-                    broker_payload.get("average_price")
-                    or broker_payload.get("fill_price")
-                    or broker_payload.get("price")
-                )
-                filled_qty = broker_payload.get(
-                    "filled_quantity"
-                ) or broker_payload.get("filled")
+                fill_price_raw = broker_payload.get("average_price") or broker_payload.get("fill_price") or broker_payload.get("price")
+                filled_qty = broker_payload.get("filled_quantity") or broker_payload.get("filled")
                 if order is not None and filled_qty is not None:
                     with suppress(Exception):
                         order.filled_quantity = int(float(filled_qty))
-                fill_price: float | None = None
+                fill_price = None
                 if fill_price_raw is not None:
                     with suppress(Exception):
                         fill_price = float(fill_price_raw)
                 self.update_order_status(order_key, str(status or ""), fill_price)
 
     def get_pending_orders(self, symbol: str | None = None) -> list[Order]:
-        """Return tracked orders, optionally filtered by ``symbol``."""
-
         symbol_key = symbol.upper() if symbol else None
         orders: Iterable[Order] = self._orders.values()
         if symbol_key is not None:
@@ -2408,32 +1688,16 @@ class PositionManager:
         return [order for order in orders if order.status not in self.FINAL_STATUSES]
 
     def unresolved_terminal_summary(self) -> dict[str, object]:
-        """Return count and oldest age for terminal fills awaiting reconciliation."""
-
         now = _now()
         unresolved = list(self._unresolved_terminal_orders.values())
         oldest_age_s = None
         if unresolved:
-            oldest = min(item.terminal_at for item in unresolved)
-            oldest_age_s = max((now - oldest).total_seconds(), 0.0)
-        return {
-            "count": len(unresolved),
-            "oldest_age_s": oldest_age_s,
-        }
+            oldest_age_s = max((now - min(item.terminal_at for item in unresolved)).total_seconds(), 0.0)
+        return {"count": len(unresolved), "oldest_age_s": oldest_age_s}
 
     def confirm_entry_protection(
-        self,
-        order_id: str,
-        bracket_id: str,
-        protected_quantity: int,
+        self, order_id: str, bracket_id: str, protected_quantity: int
     ) -> None:
-        """Acknowledge verified SL/TP protection for a filled entry order.
-
-        Bracket metadata alone is not proof of protection. The canonical
-        bracket/order runtime must call this only after it has verified the
-        active bracket, configured stop loss, symbol and lifecycle linkage.
-        """
-
         order_key = str(order_id).strip()
         bracket_key = str(bracket_id).strip()
         protected_qty = int(protected_quantity)
@@ -2445,25 +1709,16 @@ class PositionManager:
                 raise KeyError(f"Unknown entry order '{order_key}'")
             if order.intent not in ("ENTRY", "SCALE_IN", "REVERSAL"):
                 raise ValueError("Only entry-intent orders can confirm protection")
-            if order.bracket_id and order.bracket_id != bracket_key:
-                raise ValueError("Bracket ID does not match entry order")
             if order.applied_filled_quantity <= 0:
                 raise ValueError("Entry fill must be applied before protection")
             if protected_qty < order.applied_filled_quantity:
-                order.protected_quantity = protected_qty
-                order.protection_confirmed = False
-                order.protection_failure_reason = "entry_protection_incomplete"
-                self._persist_order_state(order)
-                self.save_state()
                 raise ValueError("protected quantity is below filled quantity")
-
             now = _now()
             order.bracket_id = bracket_key
             order.protected_quantity = protected_qty
             order.protection_confirmed = True
             order.protection_confirmed_at = now
             order.protection_failure_reason = None
-
             metadata = self._terminal_orders.get(order_key)
             if metadata is not None:
                 metadata.bracket_applied = True
@@ -2473,18 +1728,15 @@ class PositionManager:
                 metadata.protection_failure_reason = None
                 if metadata.fill_recorded and metadata.position_applied:
                     metadata.lifecycle_resolved = True
-                    metadata.accounting_finalized = False
                     self._unresolved_terminal_orders.pop(order_key, None)
             self._persist_order_state(order)
         self.save_state()
 
     def save_state(self) -> None:
-        """Persist one coherent positions/orders snapshot to disk."""
+        """Persist one coherent positions/orders/ledger/quarantine snapshot to disk."""
         with self._lock:
             state = {
-                "positions": [
-                    position.to_dict() for position in self._positions.values()
-                ],
+                "positions": [position.to_dict() for position in self._positions.values()],
                 "orders": [order.to_dict() for order in self._orders.values()],
                 "terminal_orders": {
                     order_id: metadata.to_dict()
@@ -2498,6 +1750,16 @@ class PositionManager:
                     order_id: lifecycle.to_dict()
                     for order_id, lifecycle in self._exit_lifecycles.items()
                 },
+                "broker_order_ledger": {
+                    str(order_id): dict(row)
+                    for order_id, row in self._broker_order_ledger.items()
+                    if isinstance(row, Mapping)
+                },
+                "quarantined_broker_exposures": {
+                    normalize_symbol(symbol): dict(exposure)
+                    for symbol, exposure in self._quarantined_broker_exposures.items()
+                    if isinstance(exposure, Mapping) and normalize_symbol(symbol)
+                },
                 "daily_realized_pnl": self._daily_realized_pnl,
                 "local_realized_pnl": self._local_realized_pnl,
                 "broker_realized_pnl": self._broker_realized_pnl,
@@ -2505,32 +1767,20 @@ class PositionManager:
                 "authoritative_realized_pnl": self._authoritative_realized_pnl,
                 "pnl_authority": self._pnl_authority,
                 "pnl_reconciliation_status": self._pnl_reconciliation_status,
-                "pnl_snapshot_at": (
-                    self._pnl_snapshot_at.isoformat() if self._pnl_snapshot_at else None
-                ),
-                "session_opening_realized_baseline": (
-                    self._session_opening_realized_baseline
-                ),
+                "pnl_snapshot_at": self._pnl_snapshot_at.isoformat() if self._pnl_snapshot_at else None,
+                "session_opening_realized_baseline": self._session_opening_realized_baseline,
                 "pnl_trading_date": self._pnl_trading_date,
                 "pnl_account_fingerprint": self._pnl_account_fingerprint,
                 "pnl_product_scope": self._pnl_product_scope,
-                "baseline_established_at": (
-                    self._baseline_established_at.isoformat()
-                    if self._baseline_established_at
-                    else None
-                ),
+                "baseline_established_at": self._baseline_established_at.isoformat() if self._baseline_established_at else None,
                 "baseline_source": self._baseline_source,
-                "require_pnl_baseline_for_entries": (
-                    self._require_pnl_baseline_for_entries
-                ),
-                "active_contracts": [
-                    contract.to_dict() for contract in self._active_contracts.values()
-                ],
+                "require_pnl_baseline_for_entries": self._require_pnl_baseline_for_entries,
+                "active_contracts": [contract.to_dict() for contract in self._active_contracts.values()],
             }
             reconciled_snapshot = copy.deepcopy(self._positions)
         try:
             _atomic_write_json(self._state_path, state)
-        except Exception as exc:  # noqa: BLE001 - handled by callers/diagnostics
+        except Exception as exc:  # noqa: BLE001
             self._logger.error("Failed to save position state: %s", exc)
             return
         self._persist_positions_snapshot()
@@ -2539,8 +1789,6 @@ class PositionManager:
         self._maybe_flush_persistent_state()
 
     def load_state(self) -> None:
-        """Load persisted state from disk if available."""
-
         path_to_read = self._state_path
         manager = self._persistent_state
         if not path_to_read.exists() and self._legacy_state_path is not None:
@@ -2554,294 +1802,167 @@ class PositionManager:
                 self._restore_from_persistent_manager(manager)
             return
         try:
-            raw = path_to_read.read_text(encoding="utf-8")
-            payload = json.loads(raw)
+            payload = json.loads(path_to_read.read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:
             self._logger.error("Failed to load position state: %s", exc)
-            if manager is not None:
-                self._restore_from_persistent_manager(manager)
             return
-
         if not isinstance(payload, dict):
             self._logger.error("Invalid state payload (expected object)")
-            if manager is not None:
-                self._restore_from_persistent_manager(manager)
             return
+
+        ledger_raw = payload.get("broker_order_ledger", {})
+        restored_ledger: dict[str, dict[str, Any]] = {}
+        if isinstance(ledger_raw, Mapping):
+            for order_id, row in ledger_raw.items():
+                if not isinstance(row, Mapping):
+                    continue
+                cloned = dict(row)
+                symbol = normalize_symbol(
+                    str(cloned.get("symbol") or cloned.get("tradingsymbol") or "")
+                )
+                if symbol:
+                    cloned["symbol"] = symbol
+                    cloned["tradingsymbol"] = symbol
+                restored_ledger[str(order_id)] = cloned
+        exposures_raw = payload.get("quarantined_broker_exposures", {})
+        restored_exposures: dict[str, dict[str, Any]] = {}
+        if isinstance(exposures_raw, Mapping):
+            for raw_symbol, exposure in exposures_raw.items():
+                if not isinstance(exposure, Mapping):
+                    continue
+                cloned = dict(exposure)
+                symbol = normalize_symbol(
+                    str(cloned.get("symbol") or cloned.get("tradingsymbol") or raw_symbol)
+                )
+                if not symbol:
+                    continue
+                cloned["symbol"] = symbol
+                cloned["tradingsymbol"] = symbol
+                restored_exposures[symbol] = cloned
+        self._broker_order_ledger = restored_ledger
+        self._quarantined_broker_exposures = restored_exposures
+        self._cost_basis_unresolved_symbols = {
+            symbol
+            for symbol, exposure in restored_exposures.items()
+            if str(exposure.get("reason") or "") == "cost_basis_unresolved"
+        }
 
         positions: Dict[str, Position] = {}
         for item in payload.get("positions", []):
             try:
                 position = Position.from_dict(cast(Mapping[str, Any], item))
-            except (ValueError, TypeError) as exc:
-                self._logger.error("Skipping invalid position state: %s", exc)
+            except (ValueError, TypeError):
                 continue
             positions[position.symbol.upper()] = position
-
         orders: Dict[str, Order] = {}
         for item in payload.get("orders", []):
             try:
                 order = Order.from_dict(cast(Mapping[str, Any], item))
-            except (ValueError, TypeError) as exc:
-                self._logger.error("Skipping invalid order state: %s", exc)
+            except (ValueError, TypeError):
                 continue
             orders[order.order_id] = order
-
         self._positions = positions
         self._orders = orders
+
         terminal_raw = payload.get("terminal_orders", {})
         restored_terminal: dict[str, TerminalOrderMetadata] = {}
         if isinstance(terminal_raw, Mapping):
             for order_id, metadata in terminal_raw.items():
-                if not isinstance(metadata, Mapping):
-                    continue
-                try:
-                    restored_terminal[str(order_id)] = TerminalOrderMetadata.from_dict(
-                        cast(Mapping[str, Any], metadata)
-                    )
-                except (KeyError, TypeError, ValueError) as exc:
-                    self._logger.error("Skipping invalid terminal order: %s", exc)
-        else:
-            # Backward compatibility with the prior reviewed patch.
-            processed_raw = payload.get("processed_order_ids", [])
-            if isinstance(processed_raw, list):
-                now = _now()
-                restored_terminal = {
-                    str(item).strip(): TerminalOrderMetadata(
-                        terminal_at=now,
-                        normalized_status="FILLED",
-                        cumulative_filled_quantity=0,
-                        average_fill_price=None,
-                        lifecycle_applied=True,
-                        accounting_finalized=True,
-                    )
-                    for item in processed_raw
-                    if str(item).strip()
-                }
+                if isinstance(metadata, Mapping):
+                    with suppress(KeyError, TypeError, ValueError):
+                        restored_terminal[str(order_id)] = TerminalOrderMetadata.from_dict(metadata)
         self._terminal_orders = restored_terminal
         unresolved_raw = payload.get("unresolved_terminal_orders", {})
         restored_unresolved: dict[str, TerminalOrderMetadata] = {}
         if isinstance(unresolved_raw, Mapping):
             for order_id, metadata in unresolved_raw.items():
-                if not isinstance(metadata, Mapping):
-                    continue
-                try:
-                    restored_unresolved[str(order_id)] = (
-                        TerminalOrderMetadata.from_dict(
-                            cast(Mapping[str, Any], metadata)
-                        )
-                    )
-                except (KeyError, TypeError, ValueError) as exc:
-                    self._logger.error(
-                        "Skipping invalid unresolved terminal order: %s", exc
-                    )
-        else:
-            restored_unresolved = {
-                order_id: metadata
-                for order_id, metadata in restored_terminal.items()
-                if not metadata.lifecycle_resolved
-            }
+                if isinstance(metadata, Mapping):
+                    with suppress(KeyError, TypeError, ValueError):
+                        restored_unresolved[str(order_id)] = TerminalOrderMetadata.from_dict(metadata)
         self._unresolved_terminal_orders = restored_unresolved
-        exit_lifecycles_raw = payload.get("exit_lifecycles", {})
-        restored_exit_lifecycles: dict[str, ExitLifecycleRecord] = {}
-        if isinstance(exit_lifecycles_raw, Mapping):
-            for order_id, lifecycle in exit_lifecycles_raw.items():
-                if not isinstance(lifecycle, Mapping):
-                    continue
-                try:
-                    restored_exit_lifecycles[str(order_id)] = (
-                        ExitLifecycleRecord.from_dict(
-                            cast(Mapping[str, Any], lifecycle)
-                        )
-                    )
-                except (KeyError, TypeError, ValueError) as exc:
-                    self._logger.error("Skipping invalid exit lifecycle: %s", exc)
-        self._exit_lifecycles = restored_exit_lifecycles
+        exit_raw = payload.get("exit_lifecycles", {})
+        restored_exit: dict[str, ExitLifecycleRecord] = {}
+        if isinstance(exit_raw, Mapping):
+            for order_id, lifecycle in exit_raw.items():
+                if isinstance(lifecycle, Mapping):
+                    with suppress(KeyError, TypeError, ValueError):
+                        restored_exit[str(order_id)] = ExitLifecycleRecord.from_dict(lifecycle)
+        self._exit_lifecycles = restored_exit
+
         contracts: Dict[str, ActiveContract] = {}
         index: Dict[str, str] = {}
         for item in payload.get("active_contracts", []):
-            try:
+            with suppress(ValueError, TypeError):
                 contract = ActiveContract.from_dict(cast(Mapping[str, Any], item))
-            except (ValueError, TypeError) as exc:
-                self._logger.error("Skipping invalid contract state: %s", exc)
-                continue
-            contracts[contract.underlying] = contract
-            index[contract.symbol] = contract.underlying
-
+                contracts[contract.underlying] = contract
+                index[contract.symbol] = contract.underlying
         self._active_contracts = contracts
         self._contract_index = index
         legacy_daily = float(payload.get("daily_realized_pnl", 0.0))
-        self._local_realized_pnl = float(
-            payload.get("local_realized_pnl", legacy_daily)
-        )
+        self._local_realized_pnl = float(payload.get("local_realized_pnl", legacy_daily))
         broker_realized = payload.get("broker_realized_pnl")
-        self._broker_realized_pnl = (
-            None if broker_realized is None else float(broker_realized)
-        )
-        self._local_provisional_realized_pnl = float(
-            payload.get("local_provisional_realized_pnl", 0.0)
-        )
-        self._authoritative_realized_pnl = float(
-            payload.get("authoritative_realized_pnl", self._local_realized_pnl)
-        )
+        self._broker_realized_pnl = None if broker_realized is None else float(broker_realized)
+        self._local_provisional_realized_pnl = float(payload.get("local_provisional_realized_pnl", 0.0))
+        self._authoritative_realized_pnl = float(payload.get("authoritative_realized_pnl", self._local_realized_pnl))
         self._pnl_authority = str(payload.get("pnl_authority", "unresolved"))
-        self._pnl_reconciliation_status = str(
-            payload.get("pnl_reconciliation_status", "unresolved")
-        )
+        self._pnl_reconciliation_status = str(payload.get("pnl_reconciliation_status", "unresolved"))
         pnl_snapshot_at = payload.get("pnl_snapshot_at")
         if isinstance(pnl_snapshot_at, str) and pnl_snapshot_at:
             with suppress(ValueError):
                 self._pnl_snapshot_at = datetime.fromisoformat(pnl_snapshot_at)
         baseline = payload.get("session_opening_realized_baseline")
-        self._session_opening_realized_baseline = (
-            None if baseline is None else float(baseline)
-        )
-        self._pnl_trading_date = (
-            str(payload["pnl_trading_date"])
-            if payload.get("pnl_trading_date") is not None
-            else None
-        )
-        self._pnl_account_fingerprint = (
-            str(payload["pnl_account_fingerprint"])
-            if payload.get("pnl_account_fingerprint") is not None
-            else None
-        )
+        self._session_opening_realized_baseline = None if baseline is None else float(baseline)
+        self._pnl_trading_date = str(payload["pnl_trading_date"]) if payload.get("pnl_trading_date") is not None else None
+        self._pnl_account_fingerprint = str(payload["pnl_account_fingerprint"]) if payload.get("pnl_account_fingerprint") is not None else None
         self._pnl_product_scope = str(payload.get("pnl_product_scope", "MIS"))
         baseline_established_at = payload.get("baseline_established_at")
         if isinstance(baseline_established_at, str) and baseline_established_at:
             with suppress(ValueError):
-                self._baseline_established_at = datetime.fromisoformat(
-                    baseline_established_at
-                )
-        self._baseline_source = (
-            str(payload["baseline_source"])
-            if payload.get("baseline_source") is not None
-            else None
-        )
-        self._require_pnl_baseline_for_entries = bool(
-            payload.get("require_pnl_baseline_for_entries", False)
-        )
+                self._baseline_established_at = datetime.fromisoformat(baseline_established_at)
+        self._baseline_source = str(payload["baseline_source"]) if payload.get("baseline_source") is not None else None
+        self._require_pnl_baseline_for_entries = bool(payload.get("require_pnl_baseline_for_entries", False))
         with self._lock:
             self._refresh_realized_pnl_locked()
-        try:
-            self._last_reconciled_state = copy.deepcopy(self._positions)
-        except Exception as exc:  # noqa: BLE001 - defensive snapshot guard
-            self._logger.error(
-                "Failure in load_state snapshot: %s",
-                exc,
-                extra={"event": "position_reconcile_snapshot_failed"},
-            )
+        self._last_reconciled_state = copy.deepcopy(self._positions)
 
-    def _restore_from_persistent_manager(
-        self, manager: "PersistentStateManager"
-    ) -> None:
-        """Recover positions and orders from attached persistent manager.
-
-        Args:
-            manager: Persistent state manager providing durable snapshots.
-
-        Returns:
-            None.
-
-        Raises:
-            None.
-        """
-
-        self._logger.debug(
-            "Entered _restore_from_persistent_manager",
-            extra={"event": "position_manager_restore_persistent"},
-        )
+    def _restore_from_persistent_manager(self, manager: "PersistentStateManager") -> None:
         try:
             payloads = manager.load_positions()
-        except Exception as exc:  # noqa: BLE001
-            self._logger.error(
-                "Failure in _restore_from_persistent_manager positions: %s",
-                exc,
-            )
+        except Exception:
             return
         self.restore_positions(payloads)
         try:
             orders_payloads = manager.load_open_orders()
-        except Exception as exc:  # noqa: BLE001
-            self._logger.error(
-                "Failure in _restore_from_persistent_manager orders: %s",
-                exc,
-            )
+        except Exception:
             orders_payloads = []
         rebuilt_orders: Dict[str, Order] = {}
         for item in orders_payloads:
-            if not isinstance(item, Mapping):
-                continue
-            try:
-                order = Order.from_dict(cast(Mapping[str, Any], item))
-            except (KeyError, TypeError, ValueError) as exc:
-                self._logger.error(
-                    "Failure in _restore_from_persistent_manager decode: %s",
-                    exc,
-                )
-                continue
-            rebuilt_orders[order.order_id] = order
+            if isinstance(item, Mapping):
+                with suppress(KeyError, TypeError, ValueError):
+                    order = Order.from_dict(item)
+                    rebuilt_orders[order.order_id] = order
         self._orders = rebuilt_orders
-        if rebuilt_orders:
-            self._logger.info(
-                "Condition met: restore_from_persistent_orders",
-                extra={
-                    "event": "position_manager_restored_orders",
-                    "count": len(rebuilt_orders),
-                },
-            )
 
-    # ------------------------------------------------------------------
     def attach_persistent_state(self, manager: "PersistentStateManager") -> None:
-        """Attach a persistent state manager for durable snapshots.
-
-        Args:
-            manager: Persistent state manager coordinating disk writes.
-
-        Returns:
-            None.
-
-        Raises:
-            None.
-        """
-
-        self._logger.debug(
-            "Entered attach_persistent_state",
-            extra={"event": "position_manager_attach_persistent"},
-        )
         self._persistent_state = manager
 
     def restore_positions(self, payloads: Iterable[Mapping[str, Any]]) -> None:
-        """Restore a validated persisted snapshot, including an explicit empty state."""
-        self._logger.debug(
-            "Entered restore_positions",
-            extra={"event": "position_manager_restore"},
-        )
-        try:
-            items = list(payloads)
-        except TypeError as exc:
-            raise ValueError("persisted position snapshot is not iterable") from exc
-
+        items = list(payloads)
         rebuilt: Dict[str, Position] = {}
         for index, item in enumerate(items):
             if not isinstance(item, Mapping):
                 raise ValueError(f"persisted position row {index} is not a mapping")
             try:
-                position = Position.from_dict(cast(Mapping[str, Any], item))
+                position = Position.from_dict(item)
             except (KeyError, TypeError, ValueError) as exc:
                 raise ValueError(f"invalid persisted position row {index}") from exc
             rebuilt[position.symbol.upper()] = position
-
         with self._lock:
             self._positions = rebuilt
-        self._logger.info(
-            "Condition met: restore_positions_applied",
-            extra={"event": "position_manager_restore_applied", "count": len(rebuilt)},
-        )
         self.save_state()
 
     @staticmethod
     def _safe_get_net_qty(record: Mapping[str, object]) -> int:
-        """Return broker net quantity without converting missing/invalid data to flat."""
         quantity_keys = ("net_qty", "net_quantity", "netQuantity", "net", "quantity")
         found = False
         for key in quantity_keys:
@@ -2854,34 +1975,38 @@ class PositionManager:
             try:
                 return int(float(value))
             except (TypeError, ValueError) as exc:
-                raise ValueError(
-                    f"invalid broker quantity field {key}={value!r}"
-                ) from exc
+                raise ValueError(f"invalid broker quantity field {key}={value!r}") from exc
         if not found:
             raise ValueError("broker position quantity field missing")
         raise ValueError("broker position quantity is null or invalid")
 
     def synchronize_with_broker(self, broker_positions: Any) -> None:
-        """Canonicalize broker truth and preserve bot-owned lifecycle identity."""
+        """Canonicalize broker truth and refresh only cost-basis quarantine rows."""
         lifecycle_snapshot = _snapshot_owned_position_lifecycle(self)
         prepared, unresolved = _prepare_broker_positions(self, broker_positions)
-        self._cost_basis_unresolved_symbols = set(unresolved)
+        with self._lock:
+            had_managed_positions = bool(self._positions)
+            previous_quarantine = {
+                key: dict(value)
+                for key, value in self._quarantined_broker_exposures.items()
+            }
+            merged_quarantine = _merge_cost_basis_quarantine(
+                previous_quarantine, prepared, set(unresolved)
+            )
+            quarantine_changed = merged_quarantine != previous_quarantine
+            self._quarantined_broker_exposures = merged_quarantine
+            self._cost_basis_unresolved_symbols = set(unresolved)
         if unresolved and isinstance(prepared, list):
-            prepared = [
-                row
-                for row in prepared
-                if _prepared_row_symbol(row) not in unresolved
-            ]
+            prepared = [row for row in prepared if _prepared_row_symbol(row) not in unresolved]
         self._synchronize_managed_positions_from_broker(prepared)
         _canonicalize_position_store(self)
         restored = _restore_owned_position_lifecycle(self, lifecycle_snapshot)
-        if restored:
+        with self._lock:
+            no_managed_positions = not self._positions
+        if restored or (quarantine_changed and not had_managed_positions and no_managed_positions):
             self.save_state()
 
-    def _synchronize_managed_positions_from_broker(
-        self, broker_positions: Any
-    ) -> None:
-        """Validate and atomically replace managed positions from broker truth."""
+    def _synchronize_managed_positions_from_broker(self, broker_positions: Any) -> None:
         try:
             snapshot = decode_position_snapshot(broker_positions)
         except Exception as exc:
@@ -2890,30 +2015,17 @@ class PositionManager:
                 self._last_broker_position_snapshot_failure_reason = str(exc)
             raise
 
-        def get_float(
-            record: Mapping[str, object],
-            keys: Sequence[str],
-            *,
-            default: float = 0.0,
-        ) -> float:
+        def get_float(record: Mapping[str, object], keys: Sequence[str], *, default: float = 0.0) -> float:
             for key in keys:
                 if key not in record or record.get(key) is None:
                     continue
-                try:
-                    value = float(cast(Any, record.get(key)))
-                except (TypeError, ValueError) as exc:
-                    raise ValueError(
-                        f"invalid broker numeric field {key}={record.get(key)!r}"
-                    ) from exc
+                value = float(cast(Any, record.get(key)))
                 if not math.isfinite(value):
-                    raise ValueError(
-                        f"invalid broker numeric field {key}={record.get(key)!r}"
-                    )
+                    raise ValueError(f"invalid broker numeric field {key}={record.get(key)!r}")
                 return value
             return float(default)
 
         baseline_initialized = False
-        baseline_source: str | None = None
         with self._lock:
             existing_positions = copy.deepcopy(self._positions)
             reconciled: Dict[str, Position] = {}
@@ -2931,10 +2043,7 @@ class PositionManager:
                 product = str(record.get("product") or "").strip().upper()
                 if product != "MIS":
                     if symbol in existing_positions:
-                        raise ValueError(
-                            f"managed broker position {symbol} has unexpected product "
-                            f"{product or 'missing'}"
-                        )
+                        raise ValueError(f"managed broker position {symbol} has unexpected product {product or 'missing'}")
                     continue
                 quantity = row.quantity
                 realized_pnl = get_float(record, ("realised", "realized"), default=0.0)
@@ -2944,21 +2053,12 @@ class PositionManager:
                 if quantity == 0:
                     self._clear_recent_exit_guard_locked(symbol)
                     continue
-                if self._should_ignore_recent_exit_stale_snapshot_locked(
-                    symbol, quantity
-                ):
+                if self._should_ignore_recent_exit_stale_snapshot_locked(symbol, quantity):
                     continue
                 side: Side = "LONG" if quantity > 0 else "SHORT"
                 abs_quantity = abs(quantity)
-                entry_price = get_float(
-                    record,
-                    ("average_price", "avg_price", "price", "buy_price"),
-                )
-                current_price = get_float(
-                    record,
-                    ("last_price", "ltp", "close", "sell_price"),
-                    default=entry_price,
-                )
+                entry_price = get_float(record, ("average_price", "avg_price", "price", "buy_price"))
+                current_price = get_float(record, ("last_price", "ltp", "close", "sell_price"), default=entry_price)
                 if entry_price <= 0.0 and current_price > 0.0:
                     entry_price = current_price
                 if current_price <= 0.0 and entry_price > 0.0:
@@ -2966,8 +2066,8 @@ class PositionManager:
                 if entry_price <= 0.0 or current_price <= 0.0:
                     raise ValueError(f"broker position {symbol} has no valid price")
                 existing = existing_positions.get(symbol)
-                if existing is None:
-                    position = self._create_position(
+                position = (
+                    self._create_position(
                         symbol=symbol,
                         quantity=abs_quantity,
                         side=side,
@@ -2976,8 +2076,8 @@ class PositionManager:
                         realized_pnl=realized_pnl,
                         source="broker_sync",
                     )
-                else:
-                    position = self._update_position(
+                    if existing is None
+                    else self._update_position(
                         position=existing,
                         quantity=abs_quantity,
                         side=side,
@@ -2986,33 +2086,12 @@ class PositionManager:
                         realized_pnl=realized_pnl,
                         source="broker_sync",
                     )
+                )
                 reconciled[symbol] = position
-
             old_keys = set(self._positions)
             new_keys = set(reconciled)
             removed_symbols = sorted(old_keys - new_keys)
             added_symbols = sorted(new_keys - old_keys)
-            now = _now()
-            for order in self._orders.values():
-                if (
-                    order.symbol in removed_symbols
-                    and order.intent in ("EXIT", "REDUCE")
-                    and order.status not in self.FINAL_STATUSES
-                ):
-                    lifecycle = self._exit_lifecycles.get(order.order_id)
-                    if lifecycle is None:
-                        lifecycle = ExitLifecycleRecord(
-                            symbol=order.symbol,
-                            exit_order_id=order.order_id,
-                            linked_entry_order_id=order.linked_entry_order_id,
-                            trade_lifecycle_id=order.trade_lifecycle_id,
-                            bracket_id=order.bracket_id,
-                            expected_exit_side=order.side,
-                            expected_exit_quantity=order.quantity,
-                        )
-                        self._exit_lifecycles[order.order_id] = lifecycle
-                    lifecycle.state = "BROKER_FLAT_AWAITING_FILL"
-                    lifecycle.broker_flat_at = now
             if set(self._positions) != set(reconciled) or any(
                 int(getattr(self._positions.get(symbol), "quantity", 0) or 0)
                 != int(getattr(position, "quantity", 0) or 0)
@@ -3020,93 +2099,45 @@ class PositionManager:
             ):
                 self._mark_local_position_mutation_locked()
             self._positions = reconciled
-            self._last_broker_quantities_by_symbol = {
-                row.symbol: int(row.quantity) for row in snapshot.rows
-            }
+            self._last_broker_quantities_by_symbol = {row.symbol: int(row.quantity) for row in snapshot.rows}
             self._last_broker_position_snapshot_at = snapshot.fetched_at
             self._last_broker_position_snapshot_mono = time.monotonic()
             self._last_broker_position_snapshot_valid = True
             self._broker_snapshot_local_generation = self._local_position_generation
             self._last_broker_position_snapshot_source = snapshot.source
             self._last_broker_position_snapshot_failure_reason = None
-
-            # A successfully decoded broker snapshot is authoritative evidence for
-            # the current MIS session.  The risk manager may start requiring a
-            # baseline after startup hydration, so establish it here on the next
-            # reconciliation instead of leaving entries permanently blocked.
             session_date = self._trading_date_ist()
-            baseline_missing_or_stale = (
-                self._session_opening_realized_baseline is None
-                or self._pnl_trading_date != session_date
-            )
-            empty_snapshot_can_seed_zero = (
-                not snapshot.rows and self._local_realized_pnl == 0.0
-            )
-            if baseline_missing_or_stale and (
-                snapshot_realized_seen or empty_snapshot_can_seed_zero
-            ):
-                if (
-                    self._pnl_trading_date is not None
-                    and self._pnl_trading_date != session_date
-                ):
-                    self._local_realized_pnl = 0.0
-                    self._local_provisional_realized_pnl = 0.0
+            baseline_missing_or_stale = self._session_opening_realized_baseline is None or self._pnl_trading_date != session_date
+            empty_snapshot_can_seed_zero = not snapshot.rows and self._local_realized_pnl == 0.0
+            if baseline_missing_or_stale and (snapshot_realized_seen or empty_snapshot_can_seed_zero):
                 self._session_opening_realized_baseline = float(
-                    snapshot_realized_pnl - self._local_realized_pnl
-                    if snapshot_realized_seen
-                    else 0.0
+                    snapshot_realized_pnl - self._local_realized_pnl if snapshot_realized_seen else 0.0
                 )
                 self._pnl_trading_date = session_date
                 self._pnl_product_scope = "MIS"
                 self._baseline_established_at = _now()
-                baseline_source = (
-                    "validated_broker_positions"
-                    if snapshot_realized_seen
-                    else "validated_broker_empty_snapshot"
-                )
-                self._baseline_source = baseline_source
+                self._baseline_source = "validated_broker_positions" if snapshot_realized_seen else "validated_broker_empty_snapshot"
                 baseline_initialized = True
-
             if snapshot_realized_seen:
                 self._broker_realized_pnl = float(snapshot_realized_pnl)
             elif baseline_initialized:
                 self._broker_realized_pnl = 0.0
             if snapshot_realized_seen or baseline_initialized:
                 self._refresh_realized_pnl_locked()
-
         if removed_symbols:
             hook = getattr(self, "_on_symbols_flat_hook", None)
             if hook is not None:
-                try:
+                with suppress(Exception):
                     hook(list(removed_symbols))
-                except Exception as exc:  # noqa: BLE001
-                    self._logger.error(
-                        "Failure in on_symbols_flat hook: %s",
-                        exc,
-                        extra={"event": "position_manager_flat_hook_error"},
-                    )
-        if (
-            not old_keys
-            and not new_keys
-            and not snapshot_realized_seen
-            and not baseline_initialized
-        ):
+        if not old_keys and not new_keys and not snapshot_realized_seen and not baseline_initialized:
             return
         self.save_state()
         self._logger.info(
-            "POSITION_SYNC_COMMITTED total=%s added=%s removed=%s "
-            "realized_authoritative=%s",
+            "POSITION_SYNC_COMMITTED total=%s added=%s removed=%s realized_authoritative=%s",
             len(reconciled),
             len(added_symbols),
             len(removed_symbols),
             snapshot_realized_seen,
-            extra={
-                "event": "POSITION_SYNC_COMMITTED",
-                "total_managed": len(reconciled),
-                "added": len(added_symbols),
-                "removed": len(removed_symbols),
-                "realized_pnl_authoritative": snapshot_realized_seen,
-            },
         )
 
     def _create_position(
@@ -3120,63 +2151,15 @@ class PositionManager:
         realized_pnl: float,
         source: str,
     ) -> Position:
-        """Create a :class:`Position` from broker sync metadata.
-
-        Args:
-            symbol: Trading symbol to map.
-            quantity: Absolute quantity to record.
-            side: Side of the position, long or short.
-            entry_price: Average broker entry price.
-            current_price: Latest mark price for the symbol.
-            realized_pnl: Broker-reported realised profit/loss.
-            source: Human readable provenance label for logging.
-
-        Returns:
-            Constructed :class:`Position` instance.
-
-        Raises:
-            Exception: Propagates unexpected errors after logging.
-        """
-
-        self._logger.debug(
-            "Entered _create_position",
-            extra={
-                "event": "position_manager_sync_create",
-                "symbol": symbol,
-                "source": source,
-            },
+        return Position(
+            symbol=str(symbol).strip().upper(),
+            side=_normalize_side(str(side)),
+            quantity=int(max(quantity, 0)),
+            entry_price=float(entry_price if entry_price > 0.0 else current_price),
+            entry_time=_now(),
+            current_price=float(current_price if current_price > 0.0 else entry_price),
+            realized_pnl=float(realized_pnl),
         )
-        try:
-            normalized_side = _normalize_side(str(side))
-            normalized_quantity = int(max(quantity, 0))
-            entry_value = (
-                float(entry_price) if entry_price > 0.0 else float(current_price)
-            )
-            if entry_value < 0.0:
-                entry_value = 0.0
-            mark_value = float(current_price) if current_price > 0.0 else entry_value
-            position = Position(
-                symbol=str(symbol).strip().upper(),
-                side=normalized_side,
-                quantity=normalized_quantity,
-                entry_price=entry_value,
-                entry_time=_now(),
-                current_price=mark_value,
-                realized_pnl=float(realized_pnl),
-            )
-        except Exception as exc:  # noqa: BLE001 - defensive construct
-            self._logger.error(
-                "Failure in _create_position: %s",
-                exc,
-                extra={
-                    "event": "position_manager_sync_create_error",
-                    "symbol": symbol,
-                    "source": source,
-                },
-                exc_info=exc,
-            )
-            raise
-        return position
 
     def _update_position(
         self,
@@ -3189,182 +2172,61 @@ class PositionManager:
         realized_pnl: float,
         source: str,
     ) -> Position:
-        """Update *position* with broker-provided sync metadata.
-
-        Args:
-            position: Existing local position to mutate.
-            quantity: Absolute quantity to record.
-            side: Side of the position, long or short.
-            entry_price: Broker average entry price.
-            current_price: Broker latest mark price.
-            realized_pnl: Broker realised PnL snapshot.
-            source: Human readable provenance label for logging.
-
-        Returns:
-            Updated :class:`Position` instance.
-
-        Raises:
-            Exception: Propagates unexpected errors after logging.
-        """
-
-        self._logger.debug(
-            "Entered _update_position",
-            extra={
-                "event": "position_manager_sync_update_apply",
-                "symbol": position.symbol,
-                "source": source,
-            },
-        )
-        try:
-            position.side = _normalize_side(str(side))
-            position.quantity = int(max(quantity, 0))
-            if entry_price > 0.0:
-                position.entry_price = float(entry_price)
-            if current_price > 0.0:
-                position.current_price = float(current_price)
-            position.realized_pnl = float(realized_pnl)
-            if position.entry_time.tzinfo is None:
-                position.entry_time = position.entry_time.replace(tzinfo=timezone.utc)
-        except Exception as exc:  # noqa: BLE001 - defensive update
-            self._logger.error(
-                "Failure in _update_position: %s",
-                exc,
-                extra={
-                    "event": "position_manager_sync_update_error",
-                    "symbol": position.symbol,
-                    "source": source,
-                },
-                exc_info=exc,
-            )
-            raise
+        position.side = _normalize_side(str(side))
+        position.quantity = int(max(quantity, 0))
+        if entry_price > 0.0:
+            position.entry_price = float(entry_price)
+        if current_price > 0.0:
+            position.current_price = float(current_price)
+        position.realized_pnl = float(realized_pnl)
         return position
 
     def _persist_positions_snapshot(self) -> None:
-        """Persist position and order snapshots captured from one locked state instant."""
         manager = self._persistent_state
         if manager is None:
             return
         with self._lock:
-            position_snapshot = [
-                position.to_dict() for position in self._positions.values()
-            ]
+            position_snapshot = [position.to_dict() for position in self._positions.values()]
             order_snapshot = [order.to_dict() for order in self._orders.values()]
-
-        current_symbols = {
-            str(entry.get("symbol", "")).strip().upper()
-            for entry in position_snapshot
-            if str(entry.get("symbol", "")).strip()
-        }
         try:
             stored = manager.load_positions()
-        except Exception as exc:  # noqa: BLE001
-            self._logger.error("Failure in _persist_positions_snapshot: %s", exc)
+        except Exception:
             stored = []
-        stored_symbols = {
-            str(item.get("symbol", "")).strip().upper()
-            for item in stored
-            if isinstance(item, Mapping)
-        }
+        current_symbols = {str(entry.get("symbol", "")).strip().upper() for entry in position_snapshot}
+        stored_symbols = {str(item.get("symbol", "")).strip().upper() for item in stored if isinstance(item, Mapping)}
         for entry in position_snapshot:
-            try:
+            with suppress(Exception):
                 manager.save_position(entry)
-            except Exception as exc:  # noqa: BLE001
-                self._logger.error(
-                    "Failure in _persist_positions_snapshot save: %s", exc
-                )
         for symbol in stored_symbols - current_symbols:
-            try:
+            with suppress(Exception):
                 manager.save_position({"symbol": symbol, "quantity": 0})
-            except Exception as exc:  # noqa: BLE001
-                self._logger.error(
-                    "Failure in _persist_positions_snapshot remove: %s", exc
-                )
         for payload in order_snapshot:
-            try:
+            with suppress(Exception):
                 manager.save_order(payload)
-            except Exception as exc:  # noqa: BLE001
-                self._logger.error(
-                    "Failure in _persist_positions_snapshot order save: %s", exc
-                )
-        try:
+        with suppress(Exception):
             manager.flush()
-        except Exception as exc:  # noqa: BLE001
-            self._logger.error("Failure in _persist_positions_snapshot flush: %s", exc)
 
     def _maybe_flush_persistent_state(self) -> None:
-        """Flush persistence backend when queue depth or age exceeds bounds.
-
-        Args:
-            None.
-
-        Returns:
-            None.
-
-        Raises:
-            None.
-        """
-
-        self._logger.debug(
-            "Entered _maybe_flush_persistent_state",
-            extra={"event": "position_manager_persistence_check"},
-        )
         manager = self._persistent_state
         if manager is None:
             return
         now = time.monotonic()
-        if (now - self._last_persistence_check) < self._persistence_flush_interval_s:
+        if now - self._last_persistence_check < self._persistence_flush_interval_s:
             return
         self._last_persistence_check = now
         try:
             telemetry = manager.telemetry()
-        except Exception as exc:  # noqa: BLE001
-            self._logger.error(
-                "Failure in _maybe_flush_persistent_state telemetry: %s",
-                exc,
-            )
+        except Exception:
             return
         pending_source = telemetry.get("pending_events")
         if not isinstance(pending_source, (int, float)):
             pending_source = telemetry.get("pending_queue_depth")
-        pending_events = (
-            int(pending_source) if isinstance(pending_source, (int, float)) else 0
-        )
-        last_flush_epoch = telemetry.get("last_flush_epoch")
-        should_flush = False
-        reason = "queue_depth"
+        pending_events = int(pending_source) if isinstance(pending_source, (int, float)) else 0
         if pending_events >= self._persistence_pending_threshold:
-            should_flush = True
-            reason = "queue_depth"
-        elif pending_events > 0:
-            if isinstance(last_flush_epoch, (int, float)):
-                age_seconds = time.time() - float(last_flush_epoch)
-                if age_seconds >= self._persistence_max_age_s:
-                    should_flush = True
-                    reason = "stale_age"
-            else:
-                should_flush = True
-                reason = "unknown_age"
-        if not should_flush:
-            return
-        self._logger.info(
-            "Condition met: persistence_flush_required",
-            extra={
-                "event": "position_manager_persistence_flush",
-                "reason": reason,
-                "pending": pending_events,
-            },
-        )
-        try:
-            manager.flush()
-        except Exception as exc:  # noqa: BLE001
-            self._logger.error(
-                "Failure in _maybe_flush_persistent_state: %s",
-                exc,
-            )
+            with suppress(Exception):
+                manager.flush()
 
     def _evict_old_terminal_orders(self) -> None:
-        """Keep durable terminal idempotency records bounded deterministically."""
-
         overflow = len(self._terminal_orders) - self._max_terminal_orders
         if overflow <= 0:
             return
@@ -3372,12 +2234,11 @@ class PositionManager:
             (
                 (order_id, metadata)
                 for order_id, metadata in self._terminal_orders.items()
-                if metadata.lifecycle_resolved
-                and order_id not in self._unresolved_terminal_orders
+                if metadata.lifecycle_resolved and order_id not in self._unresolved_terminal_orders
             ),
             key=lambda item: (item[1].terminal_at, item[0]),
         )
-        for order_id, _metadata in ordered[:overflow]:
+        for order_id, _ in ordered[:overflow]:
             self._terminal_orders.pop(order_id, None)
 
     def _persist_fill(
@@ -3392,41 +2253,14 @@ class PositionManager:
         position_applied: bool = False,
         lifecycle_resolved: bool = False,
     ) -> None:
-        """Persist executed fill metadata to durable storage.
-
-        Args:
-            order: Order instance representing the executed trade.
-            quantity: Absolute filled quantity for the execution.
-            fill_price: Executed price for the fill.
-
-        Returns:
-            None.
-
-        Raises:
-            None.
-        """
-
-        self._logger.debug(
-            "Entered _persist_fill",
-            extra={
-                "event": "position_manager_persist_fill",
-                "order_id": order.order_id,
-            },
-        )
         manager = self._persistent_state
         if manager is None:
             return
-        timestamp = order.timestamp
-        if isinstance(timestamp, datetime):
-            if timestamp.tzinfo is None:
-                timestamp = timestamp.replace(tzinfo=timezone.utc)
-            timestamp_iso = timestamp.astimezone(timezone.utc).isoformat()
-        else:
-            timestamp_iso = datetime.now(timezone.utc).isoformat()
-        payload: dict[str, object] = {
-            "fill_id": (
-                f"{order.order_id}:{order.applied_filled_quantity + int(quantity)}"
-            ),
+        timestamp = order.timestamp if isinstance(order.timestamp, datetime) else _now()
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=timezone.utc)
+        payload = {
+            "fill_id": f"{order.order_id}:{order.applied_filled_quantity + int(quantity)}",
             "order_id": order.order_id,
             "intent": order.intent,
             "bracket_id": order.bracket_id,
@@ -3435,99 +2269,32 @@ class PositionManager:
             "symbol": order.symbol,
             "side": order.side,
             "quantity_delta": int(quantity),
-            "cumulative_filled_quantity": int(
-                order.applied_filled_quantity + int(quantity)
-            ),
+            "cumulative_filled_quantity": int(order.applied_filled_quantity + int(quantity)),
             "fill_price": float(fill_price),
             "status": order.status,
-            "timestamp": timestamp_iso,
-            "broker_order_timestamp": timestamp_iso,
-            "exchange_timestamp": timestamp_iso,
-            "exchange_update_timestamp": timestamp_iso,
-            "applied_cumulative_notional": float(
-                order.applied_cumulative_notional + (float(fill_price) * int(quantity))
-            ),
-            "last_cumulative_average_price": order.fill_price,
+            "timestamp": timestamp.astimezone(timezone.utc).isoformat(),
             "lifecycle_applied": bool(lifecycle_applied),
             "position_applied": bool(position_applied),
             "pnl_applied": bool(pnl_applied),
             "accounting_finalized": bool(accounting_finalized),
             "lifecycle_resolved": bool(lifecycle_resolved),
         }
-        linked_symbol = getattr(order, "linked_position_symbol", None)
-        if linked_symbol:
-            payload["linked_position_symbol"] = linked_symbol
-        try:
+        with suppress(Exception):
             manager.save_fill(payload)
-        except Exception as exc:  # noqa: BLE001
-            self._logger.error("Failure in _persist_fill: %s", exc)
-        else:
-            try:
-                manager.flush()
-            except Exception as exc:  # noqa: BLE001
-                self._logger.error(
-                    "Failure in _persist_fill flush: %s",
-                    exc,
-                )
+            manager.flush()
 
     def _persist_order_state(self, order: Order) -> None:
-        """Persist *order* snapshot to the persistent state manager.
-
-        Args:
-            order: Order instance requiring persistence.
-
-        Returns:
-            None.
-
-        Raises:
-            None.
-        """
-
-        self._logger.debug(
-            "Entered _persist_order_state",
-            extra={
-                "event": "position_manager_persist_order",
-                "order_id": order.order_id,
-            },
-        )
         manager = self._persistent_state
-        if manager is None:
-            return
-        try:
-            manager.save_order(order.to_dict())
-        except Exception as exc:  # noqa: BLE001
-            self._logger.error("Failure in _persist_order_state: %s", exc)
+        if manager is not None:
+            with suppress(Exception):
+                manager.save_order(order.to_dict())
 
     def _persist_order_snapshots(self, manager: "PersistentStateManager") -> None:
-        """Persist all tracked orders using *manager*.
-
-        Args:
-            manager: Persistent state manager coordinating disk writes.
-
-        Returns:
-            None.
-
-        Raises:
-            None.
-        """
-
-        self._logger.debug(
-            "Entered _persist_order_snapshots",
-            extra={"event": "position_manager_persist_orders"},
-        )
-        orders_snapshot = [order.to_dict() for order in self._orders.values()]
-        for payload in orders_snapshot:
-            try:
+        for payload in [order.to_dict() for order in self._orders.values()]:
+            with suppress(Exception):
                 manager.save_order(payload)
-            except Exception as exc:  # noqa: BLE001
-                self._logger.error(
-                    "Failure in _persist_order_snapshots: %s",
-                    exc,
-                )
 
     def reset_daily_pnl(self) -> None:
-        """Reset realized profit and loss at the start of a new session."""
-
         with self._lock:
             self._local_realized_pnl = 0.0
             self._local_provisional_realized_pnl = 0.0
@@ -3538,244 +2305,28 @@ class PositionManager:
             self._refresh_realized_pnl_locked()
         self.save_state()
 
-    # Internal helpers -------------------------------------------------
-
     def _handle_filled_order(self, order: Order) -> FillApplicationResult:
         symbol_key = order.symbol
-        cumulative_qty = (
-            order.quantity if order.filled_quantity == 0 else order.filled_quantity
-        )
-        cumulative_qty = int(cumulative_qty)
+        cumulative_qty = order.quantity if order.filled_quantity == 0 else order.filled_quantity
         previous_qty = int(order.applied_filled_quantity or 0)
-        if cumulative_qty > int(order.quantity):
-            self._logger.warning(
-                "Ignoring overfilled broker update for order %s: %s > %s",
-                order.order_id,
-                cumulative_qty,
-                order.quantity,
-            )
-            return FillApplicationResult(reason="cumulative_quantity_exceeds_order")
-        qty = cumulative_qty - previous_qty
+        qty = int(cumulative_qty) - previous_qty
         if qty <= 0:
-            # Correct idempotency drop — but the same terminal fill can be
-            # replayed by every reconcile cycle; warn once per (order,
-            # cumulative snapshot) instead of flooding logs and Telegram.
-            _dedupe_key = (str(order.order_id), int(cumulative_qty))
-            _seen = getattr(self, "_non_incremental_fill_warned", None)
-            if _seen is None:
-                _seen = set()
-                self._non_incremental_fill_warned = _seen
-            if _dedupe_key not in _seen:
-                _seen.add(_dedupe_key)
-                self._logger.warning(
-                    "Ignoring non-incremental fill for order %s (cumulative=%s; further replays suppressed)",
-                    order.order_id,
-                    cumulative_qty,
-                )
             return FillApplicationResult(reason="non_incremental_cumulative_quantity")
-
         cumulative_avg = order.fill_price
-        if (
-            cumulative_avg is None
-            or not math.isfinite(float(cumulative_avg))
-            or float(cumulative_avg) <= 0
-        ):
-            self._logger.warning(
-                "Missing/invalid cumulative fill price for order %s", order.order_id
-            )
+        if cumulative_avg is None or float(cumulative_avg) <= 0:
             return FillApplicationResult(reason="invalid_cumulative_average_price")
-
-        new_cumulative_notional = cumulative_qty * float(cumulative_avg)
-        delta_notional = new_cumulative_notional - float(
-            order.applied_cumulative_notional or 0.0
-        )
-        if delta_notional <= 0 or not math.isfinite(delta_notional):
-            self._logger.warning(
-                "Ignoring invalid cumulative notional for order %s", order.order_id
-            )
-            return FillApplicationResult(reason="invalid_cumulative_notional")
-        fill_price = delta_notional / qty
-        if not math.isfinite(fill_price) or fill_price <= 0:
-            self._logger.warning(
-                "Invalid delta fill price for order %s", order.order_id
-            )
-            return FillApplicationResult(reason="invalid_delta_fill_price")
-
-        side = order.side
+        fill_price = float(cumulative_avg)
         intent = _normalize_intent(order.intent)
         is_terminal = order.status == "FILLED"
 
         def mark_applied() -> None:
             order.applied_filled_quantity += qty
-            order.applied_cumulative_notional = new_cumulative_notional
+            order.applied_cumulative_notional += fill_price * qty
             order.last_cumulative_average_price = float(cumulative_avg)
 
         if not self.has_position(symbol_key):
-            if intent in ("EXIT", "REDUCE"):
-                entry_price = order.pre_order_entry_price
-                if entry_price is None or entry_price <= 0:
-                    self._logger.warning(
-                        "Exit fill while flat is retained until linked entry price is available",
-                        extra={
-                            "event": "exit_fill_without_entry_price",
-                            "order_id": order.order_id,
-                            "symbol": symbol_key,
-                            "intent": intent,
-                        },
-                    )
-                    return FillApplicationResult(
-                        quantity_delta=qty,
-                        delta_fill_price=fill_price,
-                        reason="linked_entry_price_missing",
-                    )
-                self._persist_fill(
-                    order,
-                    qty,
-                    fill_price,
-                    lifecycle_applied=True,
-                    position_applied=False,
-                    pnl_applied=True,
-                    accounting_finalized=is_terminal,
-                    lifecycle_resolved=is_terminal,
-                )
-                position_side = order.pre_order_position_side or (
-                    "LONG" if side == "SELL" else "SHORT"
-                )
-                realized = self._calculate_realized_pnl(
-                    position_side,
-                    float(entry_price),
-                    fill_price,
-                    min(qty, order.pre_order_quantity or qty),
-                )
-                self._local_realized_pnl += realized
-                with self._lock:
-                    self._refresh_realized_pnl_locked()
-                lifecycle = self._exit_lifecycles.get(order.order_id)
-                if lifecycle is not None:
-                    lifecycle.final_fill_price = float(cumulative_avg)
-                    lifecycle.state = (
-                        "EXIT_FINALIZED" if is_terminal else "EXIT_PARTIALLY_FILLED"
-                    )
-                    if is_terminal:
-                        lifecycle.finalized_at = _now()
-                mark_applied()
-                return FillApplicationResult(
-                    fill_recorded=True,
-                    position_applied=False,
-                    bracket_applied=False,
-                    pnl_applied=True,
-                    accounting_finalized=is_terminal,
-                    lifecycle_resolved=is_terminal,
-                    quantity_delta=qty,
-                    delta_fill_price=fill_price,
-                    reason=(
-                        "exit_fill_finalized_after_broker_flat"
-                        if is_terminal
-                        else "exit_partial_after_broker_flat"
-                    ),
-                )
-
             if intent not in ("ENTRY", "SCALE_IN", "REVERSAL"):
-                self._logger.warning(
-                    "Ignoring %s %s fill while flat; explicit entry intent required",
-                    intent,
-                    side,
-                    extra={
-                        "event": "ambiguous_fill_quarantined",
-                        "order_id": order.order_id,
-                        "symbol": symbol_key,
-                        "side": side,
-                        "intent": intent,
-                    },
-                )
-                return FillApplicationResult(
-                    quantity_delta=qty,
-                    delta_fill_price=fill_price,
-                    reason="ambiguous_fill_quarantined",
-                )
-            paired_exit = next(
-                (
-                    metadata
-                    for metadata in sorted(
-                        self._terminal_orders.values(),
-                        key=lambda item: item.terminal_at,
-                        reverse=True,
-                    )
-                    if metadata.symbol == symbol_key
-                    and metadata.intent in ("EXIT", "REDUCE")
-                    and metadata.side == "SELL"
-                    and metadata.average_fill_price is not None
-                    and (
-                        metadata.linked_entry_order_id == order.order_id
-                        or (
-                            metadata.trade_lifecycle_id is not None
-                            and metadata.trade_lifecycle_id == order.trade_lifecycle_id
-                        )
-                    )
-                ),
-                None,
-            )
-            if intent in ("ENTRY", "SCALE_IN") and side == "BUY" and paired_exit:
-                if paired_exit.pnl_applied and paired_exit.accounting_finalized:
-                    self._persist_fill(
-                        order,
-                        qty,
-                        fill_price,
-                        lifecycle_applied=True,
-                        position_applied=False,
-                        pnl_applied=False,
-                        accounting_finalized=True,
-                        lifecycle_resolved=True,
-                    )
-                    mark_applied()
-                    return FillApplicationResult(
-                        fill_recorded=True,
-                        position_applied=False,
-                        pnl_applied=False,
-                        accounting_finalized=True,
-                        lifecycle_resolved=True,
-                        quantity_delta=qty,
-                        delta_fill_price=fill_price,
-                        reason="historical_entry_fill_recorded_after_finalized_exit",
-                    )
-                self._persist_fill(
-                    order,
-                    qty,
-                    fill_price,
-                    lifecycle_applied=True,
-                    position_applied=False,
-                    pnl_applied=True,
-                    accounting_finalized=True,
-                    lifecycle_resolved=True,
-                )
-                paired_qty = min(qty, abs(int(paired_exit.cumulative_filled_quantity)))
-                realized = (
-                    float(paired_exit.average_fill_price) - fill_price
-                ) * paired_qty
-                self._local_realized_pnl += realized
-                with self._lock:
-                    self._refresh_realized_pnl_locked()
-                mark_applied()
-                self._logger.warning(
-                    "historical_entry_fill_reconciled_after_exit",
-                    extra={
-                        "event": "historical_entry_fill_reconciled_after_exit",
-                        "order_id": order.order_id,
-                        "symbol": symbol_key,
-                        "quantity": paired_qty,
-                        "realized_pnl": realized,
-                    },
-                )
-                return FillApplicationResult(
-                    fill_recorded=True,
-                    position_applied=False,
-                    pnl_applied=True,
-                    accounting_finalized=True,
-                    lifecycle_resolved=True,
-                    quantity_delta=qty,
-                    delta_fill_price=fill_price,
-                    reason="historical_entry_fill_reconciled_after_exit",
-                )
+                return FillApplicationResult(reason="ambiguous_fill_quarantined")
             self._persist_fill(
                 order,
                 qty,
@@ -3783,12 +2334,10 @@ class PositionManager:
                 lifecycle_applied=True,
                 position_applied=True,
                 accounting_finalized=False,
-                lifecycle_resolved=False,
             )
-            position_side: Side = "LONG" if side == "BUY" else "SHORT"
             self.open_position(
                 symbol=symbol_key,
-                side=position_side,
+                side="LONG" if order.side == "BUY" else "SHORT",
                 quantity=qty,
                 entry_price=fill_price,
                 order_id=order.order_id,
@@ -3799,89 +2348,32 @@ class PositionManager:
             return FillApplicationResult(
                 fill_recorded=True,
                 position_applied=True,
-                bracket_applied=False,
-                accounting_finalized=False,
-                lifecycle_resolved=False,
                 quantity_delta=qty,
                 delta_fill_price=fill_price,
                 reason="entry_filled_unprotected",
             )
 
         position = self._positions[symbol_key]
-        entry_side_matches = (position.side == "LONG" and side == "BUY") or (
-            position.side == "SHORT" and side == "SELL"
+        entry_side_matches = (position.side == "LONG" and order.side == "BUY") or (
+            position.side == "SHORT" and order.side == "SELL"
         )
         if intent in ("ENTRY", "SCALE_IN", "REVERSAL") and entry_side_matches:
-            expected_post_fill_qty = int(order.pre_order_quantity or 0) + cumulative_qty
+            expected_post_fill_qty = int(order.pre_order_quantity or 0) + int(cumulative_qty)
             if position.quantity >= expected_post_fill_qty:
-                # Broker position snapshots are absolute state. If the authoritative
-                # quantity already includes this cumulative fill, record the fill
-                # lifecycle but do not apply the quantity delta a second time.
-                self._persist_fill(
-                    order,
-                    qty,
-                    fill_price,
-                    lifecycle_applied=True,
-                    position_applied=True,
-                    accounting_finalized=False,
-                    lifecycle_resolved=False,
-                )
                 if order.pre_order_quantity == 0 and position.order_id is None:
                     position.order_id = order.order_id
-                order.protection_confirmed = False
-                order.protection_failure_reason = "entry_protection_incomplete"
                 mark_applied()
-                self._logger.info(
-                    "ENTRY_FILL_ALREADY_REFLECTED_BY_BROKER_SYNC "
-                    "order_id=%s symbol=%s broker_qty=%s expected_qty=%s "
-                    "cumulative_fill_qty=%s",
-                    order.order_id,
-                    symbol_key,
-                    position.quantity,
-                    expected_post_fill_qty,
-                    cumulative_qty,
-                    extra={
-                        "event": "ENTRY_FILL_ALREADY_REFLECTED_BY_BROKER_SYNC",
-                        "order_id": order.order_id,
-                        "symbol": symbol_key,
-                        "broker_quantity": position.quantity,
-                        "expected_post_fill_quantity": expected_post_fill_qty,
-                        "cumulative_filled_quantity": cumulative_qty,
-                    },
-                )
                 return FillApplicationResult(
                     fill_recorded=True,
                     position_applied=True,
-                    bracket_applied=False,
-                    accounting_finalized=False,
-                    lifecycle_resolved=False,
                     quantity_delta=qty,
                     delta_fill_price=fill_price,
                     reason="entry_fill_already_reflected_by_broker_sync",
                 )
-
-        if (position.side == "LONG" and side == "SELL") or (
-            position.side == "SHORT" and side == "BUY"
+        if (position.side == "LONG" and order.side == "SELL") or (
+            position.side == "SHORT" and order.side == "BUY"
         ):
-            self._persist_fill(
-                order,
-                qty,
-                fill_price,
-                lifecycle_applied=True,
-                position_applied=True,
-                pnl_applied=True,
-                accounting_finalized=is_terminal,
-                lifecycle_resolved=is_terminal,
-            )
             self._reduce_or_close_position(position, qty, fill_price)
-            lifecycle = self._exit_lifecycles.get(order.order_id)
-            if lifecycle is not None:
-                lifecycle.final_fill_price = float(cumulative_avg)
-                lifecycle.state = (
-                    "EXIT_FINALIZED" if is_terminal else "EXIT_PARTIALLY_FILLED"
-                )
-                if is_terminal:
-                    lifecycle.finalized_at = _now()
             mark_applied()
             return FillApplicationResult(
                 fill_recorded=True,
@@ -3893,68 +2385,29 @@ class PositionManager:
                 delta_fill_price=fill_price,
                 reason="exit_fill_applied",
             )
-        else:
-            if intent in ("EXIT", "REDUCE"):
-                self._logger.warning(
-                    "Ignoring exit fill that does not match open position side",
-                    extra={
-                        "event": "exit_fill_side_mismatch",
-                        "order_id": order.order_id,
-                        "symbol": symbol_key,
-                        "position_side": position.side,
-                        "order_side": side,
-                    },
-                )
-                return FillApplicationResult(
-                    quantity_delta=qty,
-                    delta_fill_price=fill_price,
-                    reason="exit_fill_side_mismatch",
-                )
-            self._persist_fill(
-                order,
-                qty,
-                fill_price,
-                lifecycle_applied=True,
-                position_applied=True,
-                accounting_finalized=False,
-                lifecycle_resolved=False,
-            )
-            self._scale_position(position, qty, fill_price)
-            order.protection_confirmed = False
-            order.protection_failure_reason = "entry_protection_incomplete"
-            mark_applied()
-            return FillApplicationResult(
-                fill_recorded=True,
-                position_applied=True,
-                bracket_applied=False,
-                accounting_finalized=False,
-                lifecycle_resolved=False,
-                quantity_delta=qty,
-                delta_fill_price=fill_price,
-                reason="scale_fill_unprotected",
-            )
+        self._scale_position(position, qty, fill_price)
+        mark_applied()
+        return FillApplicationResult(
+            fill_recorded=True,
+            position_applied=True,
+            quantity_delta=qty,
+            delta_fill_price=fill_price,
+            reason="scale_fill_unprotected",
+        )
 
     def _scale_position(self, position: Position, qty: int, fill_price: float) -> None:
         new_qty = position.quantity + qty
         if new_qty <= 0:
-            self._logger.warning(
-                "Scaling produced non-positive quantity for %s", position.symbol
-            )
             return
         position.entry_price = (
-            (position.entry_price * position.quantity) + (fill_price * qty)
+            position.entry_price * position.quantity + fill_price * qty
         ) / new_qty
         position.quantity = new_qty
         position.current_price = fill_price
         with self._lock:
             self._mark_local_position_mutation_locked()
-        self._logger.info(
-            "Scaled position %s to quantity %s", position.symbol, position.quantity
-        )
 
-    def _reduce_or_close_position(
-        self, position: Position, qty: int, fill_price: float
-    ) -> None:
+    def _reduce_or_close_position(self, position: Position, qty: int, fill_price: float) -> None:
         reduce_qty = min(qty, position.quantity)
         realized = self._calculate_realized_pnl(
             position.side, position.entry_price, fill_price, reduce_qty
@@ -3964,96 +2417,39 @@ class PositionManager:
         self._local_realized_pnl += realized
         with self._lock:
             self._refresh_realized_pnl_locked()
-        position.current_price = fill_price
-        with self._lock:
             self._mark_local_position_mutation_locked()
+        position.current_price = fill_price
         if position.quantity == 0:
-            self._logger.info("Position %s fully closed via order", position.symbol)
             del self._positions[position.symbol]
             self._mark_recent_exit_flat_locked(position.symbol)
             self.clear_active_contract_by_symbol(position.symbol)
-        else:
-            self._logger.info(
-                "Reduced position %s by %s (remaining=%s)",
-                position.symbol,
-                reduce_qty,
-                position.quantity,
-            )
 
     def _mark_recent_exit_flat_locked(self, symbol: str) -> None:
-        """Remember symbols just flattened by exit fill with a fixed deadline."""
-        if not hasattr(self, "_recently_flat_exit_until_monotonic"):
-            self._recently_flat_exit_until_monotonic = {}
-        if not hasattr(self, "_recently_flat_exit_metadata"):
-            self._recently_flat_exit_metadata = {}
         key = symbol.upper()
         now = time.monotonic()
-        grace = float(
-            getattr(
-                self,
-                "_recently_flat_exit_grace_seconds",
-                _EXIT_RECONCILIATION_GRACE_DEFAULT_S,
-            )
-            or _EXIT_RECONCILIATION_GRACE_DEFAULT_S
-        )
-        until = now + grace
+        until = now + self._recently_flat_exit_grace_seconds
         self._recently_flat_exit_until_monotonic[key] = until
         self._recently_flat_exit_metadata[key] = ExitSettlementGuard(
-            completed_exit_at_monotonic=now,
-            grace_until_monotonic=until,
+            completed_exit_at_monotonic=now, grace_until_monotonic=until
         )
 
     def _clear_recent_exit_guard_locked(self, symbol: str) -> None:
         key = symbol.upper()
-        if hasattr(self, "_recently_flat_exit_until_monotonic"):
-            self._recently_flat_exit_until_monotonic.pop(key, None)
-        if hasattr(self, "_recently_flat_exit_metadata"):
-            self._recently_flat_exit_metadata.pop(key, None)
+        self._recently_flat_exit_until_monotonic.pop(key, None)
+        self._recently_flat_exit_metadata.pop(key, None)
 
     def _should_ignore_recent_exit_stale_snapshot_locked(
         self, symbol: str, quantity: int
     ) -> bool:
-        """Return true for a non-zero broker row that conflicts with a recent exit."""
         if symbol.upper() in self._positions:
             return False
-        if not hasattr(self, "_recently_flat_exit_until_monotonic"):
-            self._recently_flat_exit_until_monotonic = {}
-        if not hasattr(self, "_recently_flat_exit_metadata"):
-            self._recently_flat_exit_metadata = {}
         key = symbol.upper()
         until = self._recently_flat_exit_until_monotonic.get(key)
         if until is None:
             return False
-        now = time.monotonic()
-        if now > float(until):
+        if time.monotonic() > float(until):
             self._clear_recent_exit_guard_locked(key)
             return False
-        guard = self._recently_flat_exit_metadata.get(key)
-        if guard is None:
-            guard = ExitSettlementGuard(
-                completed_exit_at_monotonic=now, grace_until_monotonic=float(until)
-            )
-            self._recently_flat_exit_metadata[key] = guard
-        guard.stale_snapshot_count += 1
-        guard.last_stale_quantity = int(quantity)
-        grace_remaining = max(0.0, float(until) - now)
-        if guard.last_log_monotonic <= 0.0 or now - guard.last_log_monotonic >= 1.0:
-            guard.last_log_monotonic = now
-            self._logger.info(
-                "POSITION_SYNC_DEFERRED_AFTER_EXIT symbol=%s qty=%s "
-                "remaining=%.3f stale_count=%s",
-                key,
-                quantity,
-                grace_remaining,
-                guard.stale_snapshot_count,
-                extra={
-                    "event": "POSITION_SYNC_DEFERRED_AFTER_EXIT",
-                    "symbol": key,
-                    "broker_quantity": quantity,
-                    "grace_remaining_s": grace_remaining,
-                    "stale_snapshot_count": guard.stale_snapshot_count,
-                },
-            )
         return True
 
     @staticmethod
