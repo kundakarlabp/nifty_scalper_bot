@@ -13,12 +13,16 @@ Operational constraints:
 
 from __future__ import annotations
 
+import inspect
 import os
 from contextlib import suppress
 from types import SimpleNamespace
 from typing import Any, Callable, Mapping
 
 from nifty_scalper_bot.execution import order_manager_core as _core
+from nifty_scalper_bot.execution.entry_geometry import (
+    release_prebroker_entry_reservation,
+)
 from nifty_scalper_bot.execution.entry_recovery import (
     _finalize_partial_entry,
     _recover_submit,
@@ -35,6 +39,87 @@ from nifty_scalper_bot.risk.net_rr_gate import minimum_target_for_net_rr
 from nifty_scalper_bot.strategies.signal_identity import order_setup_context
 
 _EXIT_IDENTITY_KWARGS = {"linked_entry_order_id", "trade_lifecycle_id", "bracket_id"}
+_CORE_PLACE_ORDER_SIGNATURE = inspect.signature(_core.OrderManager.place_order)
+_EXIT_TAG_PREFIXES = ("EXIT", "EXIT_", "SL_", "TP_", "EOD_")
+_REDUCE_TAG_PREFIXES = ("FLATTEN", "EXIT_FLATTEN", "SQUAREOFF", "PANIC")
+
+
+def _truthy_check_risk_disabled(value: Any) -> bool:
+    return value is False or str(value).strip().lower() in {"0", "false", "no", "off"}
+
+
+def _normalise_protective_intent_kwargs(
+    kwargs: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Add explicit intent only for proven risk-bypassed protective orders."""
+    cleaned = dict(kwargs)
+    current_intent = str(cleaned.get("intent") or "").strip().upper()
+    if current_intent:
+        cleaned["intent"] = current_intent
+        return cleaned
+
+    tag = str(cleaned.get("tag") or "").strip().upper()
+    if not tag or not _truthy_check_risk_disabled(cleaned.get("check_risk", True)):
+        return cleaned
+
+    if tag.startswith(_REDUCE_TAG_PREFIXES):
+        cleaned["intent"] = "REDUCE"
+        cleaned.setdefault("strategy_name", "operator_flatten")
+    elif tag.startswith(_EXIT_TAG_PREFIXES):
+        cleaned["intent"] = "EXIT"
+        cleaned.setdefault("strategy_name", "protective_exit")
+    return cleaned
+
+
+def _bind_place_order(
+    args: tuple[Any, ...], kwargs: Mapping[str, Any]
+) -> dict[str, Any] | None:
+    try:
+        bound = _CORE_PLACE_ORDER_SIGNATURE.bind_partial(None, *args, **dict(kwargs))
+        return {key: value for key, value in bound.arguments.items() if key != "self"}
+    except Exception:
+        return None
+
+
+def _release_failed_prebroker_entry_reservation(
+    manager: Any, kwargs: Mapping[str, Any]
+) -> bool:
+    """Release only a proven, normally returned pre-broker entry rejection."""
+    try:
+        released = release_prebroker_entry_reservation(manager, kwargs)
+    except Exception:
+        return False
+    if not released:
+        return False
+    logger = getattr(manager, "_logger", None)
+    log = getattr(logger, "info", None)
+    if callable(log):
+        log(
+            "PREBROKER_ENTRY_RESERVATION_RELEASED symbol=%s reason=%s",
+            kwargs.get("symbol"),
+            (getattr(manager, "_last_order_decision", {}) or {}).get("block_reason"),
+            extra={
+                "event": "PREBROKER_ENTRY_RESERVATION_RELEASED",
+                "symbol": kwargs.get("symbol"),
+                "block_reason": (
+                    getattr(manager, "_last_order_decision", {}) or {}
+                ).get("block_reason"),
+            },
+        )
+    return True
+
+
+def _place_order_with_prebroker_reservation_cleanup(
+    manager: Any,
+    place_order: Callable[..., Any],
+    *args: Any,
+    **kwargs: Any,
+) -> Any:
+    """Call native placement and clean up only a normal local rejection."""
+    result = place_order(*args, **kwargs)
+    if result is None:
+        _release_failed_prebroker_entry_reservation(manager, kwargs)
+    return result
 
 
 def _strip_exit_identity_kwargs(
@@ -458,6 +543,38 @@ class RuntimeOrderManager(_core.OrderManager):
         return super().place_managed_order(*args, **kwargs)
 
     def place_order(self, *args: Any, **kwargs: Any) -> Any:
+        values = _bind_place_order(args, kwargs)
+        if values is None:
+            effective_args = args
+            effective_kwargs = _normalise_protective_intent_kwargs(kwargs)
+        else:
+            effective_args = ()
+            effective_kwargs = _normalise_protective_intent_kwargs(values)
+        if effective_kwargs != (values if values is not None else dict(kwargs)):
+            logger = getattr(self, "_logger", None)
+            log = getattr(logger, "info", None)
+            if callable(log):
+                with suppress(Exception):
+                    log(
+                        "PROTECTIVE_ORDER_INTENT_NORMALISED symbol=%s tag=%s intent=%s",
+                        effective_kwargs.get("symbol"),
+                        effective_kwargs.get("tag"),
+                        effective_kwargs.get("intent"),
+                        extra={
+                            "event": "PROTECTIVE_ORDER_INTENT_NORMALISED",
+                            "symbol": effective_kwargs.get("symbol"),
+                            "tag": effective_kwargs.get("tag"),
+                            "intent": effective_kwargs.get("intent"),
+                        },
+                    )
+        return _place_order_with_prebroker_reservation_cleanup(
+            self,
+            self._place_order_native,
+            *effective_args,
+            **effective_kwargs,
+        )
+
+    def _place_order_native(self, *args: Any, **kwargs: Any) -> Any:
         effective_kwargs = dict(kwargs)
         managed_strategy = getattr(self, "_managed_strategy_name", None)
         current_strategy = str(effective_kwargs.get("strategy_name") or "").strip().lower()
@@ -563,6 +680,8 @@ class RuntimeOrderManager(_core.OrderManager):
 
 __all__ = [
     "RuntimeOrderManager",
+    "_normalise_protective_intent_kwargs",
+    "_place_order_with_prebroker_reservation_cleanup",
     "_cost_adjust_entry_target",
     "_enrich_trade_plan_exit_provenance",
     "_strip_exit_identity_kwargs",

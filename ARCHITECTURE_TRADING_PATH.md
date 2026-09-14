@@ -32,6 +32,9 @@
    - Core engine: `execution/order_manager_core.py`
    - Runtime owner: `execution/runtime_order_manager.py::RuntimeOrderManager`
    - Internal policy helper: `execution/options_policy.py`
+   - `RuntimeOrderManager.place_order()` is the single final broker-order choke
+     point. Protective-intent normalization and pre-broker reservation cleanup
+     are native stages of that method, not import-time wrappers.
    - Responsibilities:
      - preflight, spread, margin and risk validation;
      - broker submission and acknowledgement reconciliation;
