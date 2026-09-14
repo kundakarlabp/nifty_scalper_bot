@@ -1,7 +1,7 @@
 """Canonical persistence owner for broker-order and quarantine registries.
 
 PositionManager remains the lifecycle/accounting implementation.  This module is
-installed once after the legacy position/risk wrappers and before broker-order
+installed explicitly after the legacy position/risk wrappers and before broker-order
 classification overlays.  It owns the durable broker-order ledger and
 quarantine registry as part of the same atomic positions.json snapshot, avoiding
 the prior read/merge/second-write persistence race.
@@ -19,6 +19,10 @@ from nifty_scalper_bot.execution.position_reconciliation_identity import (
     _build_cost_basis_exposures,
     _merge_cost_basis_exposures,
     _prepare_broker_positions,
+)
+from nifty_scalper_bot.execution.position_risk_state_patch import (
+    _restore_risk_state,
+    _risk_state_snapshot,
 )
 from nifty_scalper_bot.utils.symbols import normalize_symbol
 
@@ -175,6 +179,7 @@ def apply_patches() -> None:
                 "cost_basis_unresolved_symbols": sorted(
                     set(self._cost_basis_unresolved_symbols)
                 ),
+                "_risk_runtime": _risk_state_snapshot(self),
                 "daily_realized_pnl": self._daily_realized_pnl,
                 "local_realized_pnl": self._local_realized_pnl,
                 "broker_realized_pnl": self._broker_realized_pnl,
@@ -224,7 +229,9 @@ def apply_patches() -> None:
         # Preserve the reviewed native recovery semantics for positions/orders/P&L,
         # then hydrate the extra registries from the same canonical state file.
         _ORIGINALS["PositionManager.load_state"](self)
-        _hydrate_registry_state(self, _read_state(self))
+        payload = _read_state(self)
+        _hydrate_registry_state(self, payload)
+        _restore_risk_state(self, payload.get("_risk_runtime"))
 
     def synchronize_with_broker(self: Any, broker_positions: Any) -> Any:
         prepared, unresolved = _prepare_broker_positions(self, broker_positions)
@@ -326,7 +333,5 @@ def apply_patches() -> None:
     cls._canonical_registry_state_owner_name = __name__
     _PATCH_APPLIED = True
 
-
-apply_patches()
 
 __all__ = ["apply_patches"]
