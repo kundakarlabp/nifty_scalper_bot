@@ -14,14 +14,11 @@ Protective/reducing orders remain outside the entry-only guard.
 
 from __future__ import annotations
 
-import json
 import os
 import re
-import tempfile
 import time
 from collections.abc import Mapping, Sequence
 from contextlib import suppress
-from pathlib import Path
 from typing import Any
 
 from nifty_scalper_bot.execution.position_snapshot import decode_position_snapshot
@@ -32,7 +29,6 @@ from nifty_scalper_bot.utils.symbols import is_strategy_instrument
 _STOP_REASON_RE = re.compile(r"(?<![A-Z0-9])SL(?![A-Z0-9])|STOP[_ ]?LOSS")
 _PATCH_APPLIED = False
 _ORIGINAL_INIT: Any = None
-_ORIGINAL_SAVE_STATE: Any = None
 _ORIGINAL_CLOSE_POSITION: Any = None
 _ORIGINAL_REFRESH_REALIZED_PNL: Any = None
 _ORIGINAL_SYNCHRONIZE_WITH_BROKER: Any = None
@@ -63,49 +59,21 @@ def _cooldown_seconds() -> float:
     return 300.0
 
 
-def _read_state(path: Path) -> dict[str, Any]:
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError):
-        return {}
-    return payload if isinstance(payload, dict) else {}
-
-
-def _write_risk_state(owner: Any) -> None:
-    path = Path(getattr(owner, "_state_path", ""))
-    if not str(path) or not path.exists():
-        return
-    payload = _read_state(path)
-    if not payload:
-        return
+def _risk_state_snapshot(owner: Any) -> dict[str, Any]:
+    """Return the risk runtime fragment for the canonical atomic state writer."""
     stopped = getattr(owner, "_recent_stop_thesis", None)
     circuit = getattr(owner, "_risk_circuit_state", None)
-    payload[_RISK_KEY] = {
+    return {
         "trades_today_date": getattr(owner, "_trades_today_date", None),
         "trades_today_count": int(getattr(owner, "_trades_today_count", 0) or 0),
         "recent_stop_thesis": dict(stopped) if isinstance(stopped, dict) else None,
         "risk_circuit": dict(circuit) if isinstance(circuit, dict) else None,
     }
-    tmp_name: str | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            "w", encoding="utf-8", dir=path.parent, delete=False
-        ) as handle:
-            json.dump(payload, handle, separators=(",", ":"), default=str)
-            handle.flush()
-            os.fsync(handle.fileno())
-            tmp_name = handle.name
-        os.replace(tmp_name, path)
-    except OSError:
-        if tmp_name:
-            with suppress(OSError):
-                os.unlink(tmp_name)
 
 
-def _restore_risk_state(owner: Any) -> None:
-    path = Path(getattr(owner, "_state_path", ""))
-    state = _read_state(path).get(_RISK_KEY, {})
-    if not isinstance(state, dict):
+def _restore_risk_state(owner: Any, state: Any) -> None:
+    """Hydrate risk runtime from the already-read canonical state document."""
+    if not isinstance(state, Mapping):
         return
     today = owner._trading_date_ist()
     if state.get("trades_today_date") == today:
@@ -115,10 +83,10 @@ def _restore_risk_state(owner: Any) -> None:
                 0, int(state.get("trades_today_count", 0) or 0)
             )
     circuit = state.get("risk_circuit")
-    if isinstance(circuit, dict) and str(circuit.get("trading_date") or "") == today:
+    if isinstance(circuit, Mapping) and str(circuit.get("trading_date") or "") == today:
         owner._risk_circuit_state = dict(circuit)
     stopped = state.get("recent_stop_thesis")
-    if isinstance(stopped, dict):
+    if isinstance(stopped, Mapping):
         with suppress(TypeError, ValueError):
             expires_epoch = float(stopped.get("expires_epoch", 0.0) or 0.0)
             if expires_epoch > time.time():
@@ -126,19 +94,11 @@ def _restore_risk_state(owner: Any) -> None:
 
 
 def _patched_init(self: Any, *args: Any, **kwargs: Any) -> None:
-    _ORIGINAL_INIT(self, *args, **kwargs)
+    # The canonical load wrapper runs inside native __init__, so initialize
+    # these fields before delegating and let that single reader hydrate them.
     self._recent_stop_thesis = None
     self._risk_circuit_state = {}
-    with getattr(self, "_lock"):
-        _restore_risk_state(self)
-
-
-def _patched_save_state(self: Any, *args: Any, **kwargs: Any) -> Any:
-    result = _ORIGINAL_SAVE_STATE(self, *args, **kwargs)
-    with getattr(self, "_lock"):
-        _write_risk_state(self)
-    return result
-
+    _ORIGINAL_INIT(self, *args, **kwargs)
 
 def _materialize_broker_positions(payload: Any) -> Any:
     """Materialize one-shot iterables while preserving broker mapping payloads."""
@@ -394,7 +354,7 @@ def stop_reentry_block_reason(self: Any, signal: Any) -> str | None:
 
 def apply_patches() -> None:
     global _PATCH_APPLIED
-    global _ORIGINAL_INIT, _ORIGINAL_SAVE_STATE, _ORIGINAL_CLOSE_POSITION
+    global _ORIGINAL_INIT, _ORIGINAL_CLOSE_POSITION
     global _ORIGINAL_REFRESH_REALIZED_PNL, _ORIGINAL_SYNCHRONIZE_WITH_BROKER
     if _PATCH_APPLIED:
         return
@@ -404,12 +364,10 @@ def apply_patches() -> None:
         _PATCH_APPLIED = True
         return
     _ORIGINAL_INIT = PositionManager.__init__
-    _ORIGINAL_SAVE_STATE = PositionManager.save_state
     _ORIGINAL_CLOSE_POSITION = PositionManager.close_position
     _ORIGINAL_REFRESH_REALIZED_PNL = PositionManager._refresh_realized_pnl_locked
     _ORIGINAL_SYNCHRONIZE_WITH_BROKER = PositionManager.synchronize_with_broker
     PositionManager.__init__ = _patched_init
-    PositionManager.save_state = _patched_save_state
     PositionManager.close_position = _patched_close_position
     PositionManager.synchronize_with_broker = _patched_synchronize_with_broker
     PositionManager.stop_reentry_block_reason = stop_reentry_block_reason
@@ -426,4 +384,6 @@ __all__ = [
     "persist_risk_circuit_state",
     "_option_thesis",
     "_snapshot_has_authoritative_realized",
+    "_risk_state_snapshot",
+    "_restore_risk_state",
 ]
