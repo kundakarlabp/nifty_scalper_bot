@@ -1,8 +1,8 @@
-"""Broker exposure quarantine extension.
+"""Compatibility overlay for manual broker-fill quarantine handling.
 
-Unresolved broker positions should be visible as quarantined exposures instead
-of being represented only by an entry blocker. They remain excluded from normal
-position/P&L accounting until cost basis is recovered.
+Broker-position cost-basis quarantine ownership, persistence, getters and entry
+blocking live natively in PositionManager.  This overlay remains only for the
+manual/unknown fill orchestration that has not yet been migrated.
 """
 
 from __future__ import annotations
@@ -11,7 +11,6 @@ from contextlib import suppress
 import time
 from typing import Any
 
-from nifty_scalper_bot.execution import position_identity_extension as _position_identity
 from nifty_scalper_bot.execution import position_manager as _position_manager
 from nifty_scalper_bot.utils.symbols import normalize_symbol
 
@@ -24,29 +23,16 @@ def _canonical(symbol: object) -> str:
     return normalize_symbol(str(symbol or ""))
 
 
-def _net_quantity(row: dict[str, Any]) -> int:
-    for key in ("quantity", "net_qty", "net_quantity", "netQuantity", "net"):
-        if key not in row:
-            continue
-        try:
-            return int(float(row.get(key) or 0))
-        except Exception:
-            continue
-    return 0
-
-
-def _row_symbol(row: Any) -> str:
-    if not isinstance(row, dict):
-        return ""
-    return _canonical(row.get("symbol") or row.get("tradingsymbol"))
-
-
 def _order_symbol(order: Any) -> str:
-    return _canonical(getattr(order, "symbol", "") or getattr(order, "tradingsymbol", ""))
+    return _canonical(
+        getattr(order, "symbol", "") or getattr(order, "tradingsymbol", "")
+    )
 
 
 def _order_side(order: Any) -> str:
-    return str(getattr(order, "side", "") or getattr(order, "transaction_type", "")).strip().upper()
+    return str(
+        getattr(order, "side", "") or getattr(order, "transaction_type", "")
+    ).strip().upper()
 
 
 def _order_quantity(order: Any) -> int:
@@ -94,30 +80,6 @@ def _is_manual_reduction_order(manager: Any, order: Any) -> bool:
     return False
 
 
-def _quarantined_exposure(row: dict[str, Any], reason: str) -> dict[str, Any]:
-    symbol = _row_symbol(row)
-    qty = _net_quantity(row)
-    side = "LONG" if qty > 0 else "SHORT" if qty < 0 else "FLAT"
-    out = dict(row)
-    out.update(
-        {
-            "symbol": symbol,
-            "tradingsymbol": symbol,
-            "quantity": abs(qty),
-            "signed_quantity": qty,
-            "side": side,
-            "status": "BROKER_POSITION_QUARANTINED",
-            "reason": reason,
-            "cost_basis_unresolved": True,
-            "managed_position": False,
-            "entry_accounting_allowed": False,
-            "realized_pnl_accounting_allowed": False,
-            "requires_history_recovery": True,
-        }
-    )
-    return out
-
-
 def _manual_order_exposure(order: Any, intent: str) -> dict[str, Any] | None:
     symbol = _order_symbol(order)
     if not symbol:
@@ -153,19 +115,6 @@ def _manual_order_exposure(order: Any, intent: str) -> dict[str, Any] | None:
     }
 
 
-def _build_exposures(prepared: Any, unresolved: set[str]) -> dict[str, dict[str, Any]]:
-    if not isinstance(prepared, list) or not unresolved:
-        return {}
-    exposures: dict[str, dict[str, Any]] = {}
-    for row in prepared:
-        if not isinstance(row, dict):
-            continue
-        symbol = _row_symbol(row)
-        if symbol in unresolved:
-            exposures[symbol] = _quarantined_exposure(row, "cost_basis_unresolved")
-    return exposures
-
-
 def apply_patches() -> None:
     global _PATCH_APPLIED
     if _PATCH_APPLIED:
@@ -174,57 +123,8 @@ def apply_patches() -> None:
     if cls is None or getattr(cls, "_broker_exposure_quarantine_patch", False):
         _PATCH_APPLIED = True
         return
-    _ORIGINALS["PositionManager.__init__"] = cls.__init__
-    _ORIGINALS["PositionManager.synchronize_with_broker"] = cls.synchronize_with_broker
-    if hasattr(cls, "current_entry_protection_blocker"):
-        _ORIGINALS["PositionManager.current_entry_protection_blocker"] = cls.current_entry_protection_blocker
     if hasattr(cls, "_handle_filled_order"):
         _ORIGINALS["PositionManager._handle_filled_order"] = cls._handle_filled_order
-
-    def __init__(self: Any, *args: Any, **kwargs: Any) -> None:
-        _ORIGINALS["PositionManager.__init__"](self, *args, **kwargs)
-        self._quarantined_broker_exposures = {}
-
-    def synchronize_with_broker(self: Any, broker_positions: Any) -> Any:
-        prepared, unresolved = _position_identity._prepare_broker_positions(self, broker_positions)
-        self._quarantined_broker_exposures = _build_exposures(prepared, set(unresolved))
-        return _ORIGINALS["PositionManager.synchronize_with_broker"](self, broker_positions)
-
-    def current_entry_protection_blocker(self: Any, symbol: str | None = None) -> str | None:
-        exposures = getattr(self, "_quarantined_broker_exposures", {}) or {}
-        if isinstance(exposures, dict) and exposures:
-            if symbol is not None:
-                exposure = exposures.get(_canonical(symbol))
-                if exposure is not None:
-                    reason = str(exposure.get("reason") or "")
-                    if reason == "broker_state_unverified":
-                        return "broker_state_unverified"
-                    return "broker_exposure_quarantined"
-            else:
-                if any(
-                    str(exposure.get("reason") or "") == "broker_state_unverified"
-                    for exposure in exposures.values()
-                    if isinstance(exposure, dict)
-                ):
-                    return "broker_state_unverified"
-                return "broker_exposure_quarantined"
-        original = _ORIGINALS.get("PositionManager.current_entry_protection_blocker")
-        if callable(original):
-            return original(self, symbol)
-        return None
-
-    def get_quarantined_broker_exposures(self: Any, symbol: str | None = None) -> dict[str, dict[str, Any]] | list[dict[str, Any]]:
-        exposures = dict(getattr(self, "_quarantined_broker_exposures", {}) or {})
-        if symbol is None:
-            return {key: dict(value) for key, value in exposures.items()}
-        exposure = exposures.get(_canonical(symbol))
-        return [dict(exposure)] if exposure is not None else []
-
-    def clear_quarantined_broker_exposure(self: Any, symbol: str) -> bool:
-        exposures = getattr(self, "_quarantined_broker_exposures", {})
-        if not isinstance(exposures, dict):
-            return False
-        return exposures.pop(_canonical(symbol), None) is not None
 
     def _handle_filled_order(self: Any, order: Any) -> Any:
         intent = str(getattr(order, "intent", "UNKNOWN") or "UNKNOWN").strip().upper()
@@ -234,9 +134,15 @@ def apply_patches() -> None:
                 setattr(order, "intent", "REDUCE")
             result = original(self, order)
             symbol = _order_symbol(order)
-            exposures = dict(getattr(self, "_quarantined_broker_exposures", {}) or {})
-            exposures.pop(symbol, None)
-            self._quarantined_broker_exposures = exposures
+            with getattr(self, "_lock"):
+                exposures = dict(
+                    getattr(self, "_quarantined_broker_exposures", {}) or {}
+                )
+                exposures.pop(symbol, None)
+                self._quarantined_broker_exposures = exposures
+                unresolved = getattr(self, "_cost_basis_unresolved_symbols", None)
+                if isinstance(unresolved, set):
+                    unresolved.discard(symbol)
             logger = getattr(self, "_logger", None)
             log = getattr(logger, "warning", None)
             if callable(log):
@@ -261,31 +167,31 @@ def apply_patches() -> None:
         if intent in _MANUAL_INTENTS:
             symbol = _order_symbol(order)
             result_reason = str(getattr(result, "reason", "") or "")
-            exposures = dict(getattr(self, "_quarantined_broker_exposures", {}) or {})
-            if result_reason == "broker_flat_confirmed_unknown_order":
-                exposures.pop(symbol, None)
-                self._quarantined_broker_exposures = exposures
-                return result
-            exposure = _manual_order_exposure(order, intent)
-            if exposure is not None:
-                if result_reason == "broker_state_unverified":
-                    exposure["status"] = "BROKER_STATE_UNVERIFIED"
-                    exposure["reason"] = "broker_state_unverified"
-                    exposure["requires_history_recovery"] = False
-                elif result_reason:
-                    exposure["reason"] = result_reason
-                exposures[exposure["symbol"]] = exposure
-                self._quarantined_broker_exposures = exposures
+            with getattr(self, "_lock"):
+                exposures = dict(
+                    getattr(self, "_quarantined_broker_exposures", {}) or {}
+                )
+                if result_reason == "broker_flat_confirmed_unknown_order":
+                    exposures.pop(symbol, None)
+                    self._quarantined_broker_exposures = exposures
+                    unresolved = getattr(self, "_cost_basis_unresolved_symbols", None)
+                    if isinstance(unresolved, set):
+                        unresolved.discard(symbol)
+                    return result
+                exposure = _manual_order_exposure(order, intent)
+                if exposure is not None:
+                    if result_reason == "broker_state_unverified":
+                        exposure["status"] = "BROKER_STATE_UNVERIFIED"
+                        exposure["reason"] = "broker_state_unverified"
+                        exposure["requires_history_recovery"] = False
+                    elif result_reason:
+                        exposure["reason"] = result_reason
+                    exposures[exposure["symbol"]] = exposure
+                    self._quarantined_broker_exposures = exposures
         return result
 
-    cls.__init__ = __init__
-    cls.synchronize_with_broker = synchronize_with_broker
-    if "PositionManager.current_entry_protection_blocker" in _ORIGINALS:
-        cls.current_entry_protection_blocker = current_entry_protection_blocker
     if "PositionManager._handle_filled_order" in _ORIGINALS:
         cls._handle_filled_order = _handle_filled_order
-    cls.get_quarantined_broker_exposures = get_quarantined_broker_exposures
-    cls.clear_quarantined_broker_exposure = clear_quarantined_broker_exposure
     cls._broker_exposure_quarantine_patch = True
     _PATCH_APPLIED = True
 
@@ -294,8 +200,6 @@ apply_patches()
 
 __all__ = [
     "apply_patches",
-    "_build_exposures",
     "_manual_order_exposure",
-    "_quarantined_exposure",
     "_is_manual_reduction_order",
 ]
