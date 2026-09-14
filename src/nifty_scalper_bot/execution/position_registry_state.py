@@ -71,14 +71,24 @@ def _hydrate_registry_state(self: Any, payload: Mapping[str, Any]) -> None:
             if key:
                 exposures[key] = dict(row)
 
+    persisted_unresolved_raw = payload.get("cost_basis_unresolved_symbols", [])
+    persisted_unresolved = {
+        _canonical(symbol)
+        for symbol in persisted_unresolved_raw
+        if _canonical(symbol)
+    } if isinstance(persisted_unresolved_raw, (list, tuple, set)) else set()
+    exposure_unresolved = {
+        symbol
+        for symbol, row in exposures.items()
+        if str(row.get("reason") or "") == "cost_basis_unresolved"
+    }
+
     with self._lock:
         self._broker_order_ledger = ledger
         self._quarantined_broker_exposures = exposures
-        self._cost_basis_unresolved_symbols = {
-            symbol
-            for symbol, row in exposures.items()
-            if str(row.get("reason") or "") == "cost_basis_unresolved"
-        }
+        self._cost_basis_unresolved_symbols = (
+            persisted_unresolved | exposure_unresolved
+        )
 
 
 def _registry_snapshot_locked(self: Any) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -162,6 +172,9 @@ def apply_patches() -> None:
                 },
                 "broker_order_ledger": ledger,
                 "quarantined_broker_exposures": exposures,
+                "cost_basis_unresolved_symbols": sorted(
+                    set(self._cost_basis_unresolved_symbols)
+                ),
                 "daily_realized_pnl": self._daily_realized_pnl,
                 "local_realized_pnl": self._local_realized_pnl,
                 "broker_realized_pnl": self._broker_realized_pnl,
@@ -217,11 +230,13 @@ def apply_patches() -> None:
         prepared, unresolved = _prepare_broker_positions(self, broker_positions)
         fresh_cost_basis = _build_cost_basis_exposures(prepared, set(unresolved))
         with self._lock:
+            previous_unresolved = set(self._cost_basis_unresolved_symbols)
             merged = _merge_cost_basis_exposures(
                 self._quarantined_broker_exposures,
                 fresh_cost_basis,
             )
             quarantine_changed = merged != self._quarantined_broker_exposures
+            unresolved_changed = previous_unresolved != set(unresolved)
             self._quarantined_broker_exposures = merged
             before_write_generation = int(
                 getattr(self, "_registry_state_write_generation", 0)
@@ -231,7 +246,7 @@ def apply_patches() -> None:
             self, broker_positions
         )
 
-        if quarantine_changed:
+        if quarantine_changed or unresolved_changed:
             with self._lock:
                 write_generation = int(
                     getattr(self, "_registry_state_write_generation", 0)
@@ -294,7 +309,8 @@ def apply_patches() -> None:
             removed = self._quarantined_broker_exposures.pop(wanted, None)
             if removed is None:
                 return False
-            self._cost_basis_unresolved_symbols.discard(wanted)
+            if str(removed.get("reason") or "") == "cost_basis_unresolved":
+                self._cost_basis_unresolved_symbols.discard(wanted)
         self.save_state()
         return True
 
