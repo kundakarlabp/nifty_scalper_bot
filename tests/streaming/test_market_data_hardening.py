@@ -29,6 +29,18 @@ class _BadCloseTicker:
         raise RuntimeError("close failed")
 
 
+class _TradingDayDateTime(datetime):
+    @classmethod
+    def now(cls, tz=None):
+        return cls(2026, 9, 15, 11, 0, tzinfo=tz)
+
+
+class _GaneshChaturthiDateTime(datetime):
+    @classmethod
+    def now(cls, tz=None):
+        return cls(2026, 9, 14, 11, 0, tzinfo=tz)
+
+
 def test_ws_batch_ingress_suppresses_legacy_callback_when_mdm_present() -> None:
     install_websocket_market_data_hardening(WebSocketManager)
     callback_ticks: list[dict] = []
@@ -120,8 +132,16 @@ async def test_reconnect_cleanup_continues_after_existing_ticker_close_error(mon
     assert calls == ["reconnect"]
 
 
-def test_trading_window_uses_configured_timezone_object() -> None:
+def test_trading_window_uses_configured_timezone_object(monkeypatch) -> None:
     install_websocket_market_data_hardening(WebSocketManager)
+    monkeypatch.setattr(
+        "nifty_scalper_bot.streaming.market_data_hardening.datetime",
+        _TradingDayDateTime,
+    )
+    monkeypatch.setattr(
+        "nifty_scalper_bot.utils.runtime_session_guards.datetime",
+        _TradingDayDateTime,
+    )
     manager = WebSocketManager(
         "api_key",
         "access_token",
@@ -132,5 +152,26 @@ def test_trading_window_uses_configured_timezone_object() -> None:
     )
 
     assert str(manager._trading_tz) == str(ZoneInfo("Asia/Kolkata"))
-    if datetime.now(ZoneInfo("Asia/Kolkata")).weekday() < 5:
-        assert manager._is_within_trading_window() is True
+    assert manager._is_within_trading_window() is True
+
+
+def test_market_data_hardening_preserves_nse_holiday_guard(monkeypatch) -> None:
+    install_websocket_market_data_hardening(WebSocketManager)
+    monkeypatch.setattr(
+        "nifty_scalper_bot.streaming.market_data_hardening.datetime",
+        _GaneshChaturthiDateTime,
+    )
+    monkeypatch.setattr(
+        "nifty_scalper_bot.utils.runtime_session_guards.datetime",
+        _GaneshChaturthiDateTime,
+    )
+    manager = WebSocketManager(
+        "api_key",
+        "access_token",
+        trading_window_enabled=True,
+        trading_window_tz="Asia/Kolkata",
+        trading_start=dtime(0, 0),
+        trading_end=dtime(23, 59),
+    )
+
+    assert manager._is_within_trading_window() is False
