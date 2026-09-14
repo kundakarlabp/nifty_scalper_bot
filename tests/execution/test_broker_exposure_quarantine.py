@@ -94,6 +94,9 @@ def test_cost_basis_sync_removes_only_stale_cost_basis_rows(tmp_path):
     assert exposures[other]["reason"] == "broker_state_unverified"
 
 
-def test_position_manager_owns_state_serialization_after_runtime_patches() -> None:
-    assert PositionManager.save_state.__module__ == "nifty_scalper_bot.execution.position_manager"
-    assert PositionManager.load_state.__module__ == "nifty_scalper_bot.execution.position_manager"
+def test_registry_state_owner_serializes_after_runtime_patches() -> None:
+    owner = "nifty_scalper_bot.execution.position_registry_state"
+    assert PositionManager.save_state.__module__ == owner
+    assert PositionManager.load_state.__module__ == owner
+    assert PositionManager.synchronize_with_broker.__module__ == owner
+    assert PositionManager._canonical_registry_state_owner is True
