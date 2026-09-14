@@ -36,7 +36,6 @@ _apply_operator_control_patches()
 _apply_position_risk_state_patches()
 _apply_stop_rearm_contract_patches()
 _quote_identity_extension.apply_patches()
-_position_registry_state.apply_patches()
 _broker_exposure_quarantine_extension.apply_patches()
 _broker_order_ledger_patch.apply_patches()
 _bracket_ownership_extension.apply_patches()
@@ -44,6 +43,7 @@ _trade_plan_identity_guard.apply_patches()
 _apply_broker_pnl_authority_patches()
 _apply_pnl_session_rollover_patches()
 _apply_pnl_nonblocking_patches()
+_position_registry_state.apply_patches()
 
 CanonicalBracketManager = BracketManager
 _COMPAT_BRACKET_ALIASES = {
