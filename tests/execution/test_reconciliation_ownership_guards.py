@@ -33,7 +33,12 @@ def test_broker_sync_missing_average_price_is_unresolved_not_ltp_cost_basis():
 def test_broker_sync_uses_existing_local_entry_when_average_price_missing():
     manager = SimpleNamespace(
         _positions={
-            "NFO:NIFTY2670724250PE": SimpleNamespace(entry_price=75.0),
+            "NFO:NIFTY2670724250PE": SimpleNamespace(
+                side="LONG",
+                quantity=65,
+                entry_price=75.0,
+                order_id=None,
+            ),
         }
     )
     prepared, unresolved = position_owner._prepare_broker_positions(
