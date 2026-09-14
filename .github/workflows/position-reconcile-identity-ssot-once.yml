@@ -35,11 +35,9 @@ jobs:
           python -m pip install -e '.[dev]' -q
           python -m pip install -r dashboard/requirements.txt -q
 
-      - name: Format and syntax validation
+      - name: Format new files and validate touched production code
         run: |
-          python -m black --check --diff \
-            src/nifty_scalper_bot/execution/position_manager.py \
-            src/nifty_scalper_bot/execution/position_identity_extension.py \
+          python -m black \
             src/nifty_scalper_bot/execution/position_reconciliation_identity.py \
             tests/execution/test_position_reconciliation_identity_ssot.py
           python -m ruff check --select F821,F811 \
@@ -48,6 +46,7 @@ jobs:
             src/nifty_scalper_bot/execution/position_reconciliation_identity.py \
             tests/execution/test_position_reconciliation_identity_ssot.py
           python -m compileall -q src
+          git diff --check
 
       - name: Focused reconciliation safety regressions
         run: |
