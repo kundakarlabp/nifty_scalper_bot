@@ -29,6 +29,36 @@ jobs:
       - name: Apply exact-match SSOT migration
         run: python scripts/migrate_position_reconcile_identity_ssot.py
 
+      - name: Preserve existing Position ownership diagnostic
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("src/nifty_scalper_bot/execution/position_identity_extension.py")
+          text = path.read_text(encoding="utf-8")
+          if "def _install_position_ownership_property()" in text:
+              raise SystemExit("ownership property unexpectedly retained by migration")
+          marker = "\n\ndef _restore_persistent_state_methods(cls: Any) -> None:\n"
+          if text.count(marker) != 1:
+              raise SystemExit("persistent-state anchor changed")
+          ownership = '''
+
+          def _install_position_ownership_property() -> None:
+              """Expose durable bot ownership to existing orphan/capital diagnostics."""
+
+              position_cls = getattr(_position_manager, "Position", None)
+              if position_cls is None or hasattr(position_cls, "strategy_name"):
+                  return
+
+              def strategy_name(position: Any) -> str:
+                  return "BotManaged" if str(getattr(position, "order_id", "") or "").strip() else ""
+
+              position_cls.strategy_name = property(strategy_name)
+          '''
+          text = text.replace(marker, ownership + marker, 1)
+          path.write_text(text, encoding="utf-8")
+          PY
+
       - name: Install project and test dependencies
         run: |
           python -m pip install --upgrade pip -q
