@@ -1,7 +1,8 @@
 """Compatibility overlay for remaining PositionManager ingress guards.
 
 Broker-position reconciliation identity, cost-basis preparation, lifecycle
-preservation, and single-flight ownership now live natively in PositionManager.
+preservation, entry blocking, and single-flight ownership now live natively in
+PositionManager.
 """
 
 from __future__ import annotations
@@ -14,13 +15,7 @@ from nifty_scalper_bot.execution import live_safety_identity as _live_safety_ide
 from nifty_scalper_bot.execution import position_manager as _position_manager
 from nifty_scalper_bot.execution.position_reconciliation_identity import (
     _canonical_key,
-    _canonicalize_broker_positions,
     _canonicalize_payload_symbol,
-    _canonicalize_position_store,
-    _prepare_broker_positions,
-    _prepared_row_symbol,
-    _restore_owned_position_lifecycle,
-    _snapshot_owned_position_lifecycle,
 )
 from nifty_scalper_bot.execution.position_snapshot import (
     PositionSnapshotError,
@@ -110,14 +105,16 @@ def _broker_position_quantity(manager: Any, symbol: str) -> tuple[str, int, str 
 
 
 def _clear_symbol_quarantine(manager: Any, symbol: str) -> None:
-    exposures = getattr(manager, "_quarantined_broker_exposures", None)
-    if isinstance(exposures, dict):
-        exposures.pop(symbol, None)
-        with suppress(Exception):
-            manager._quarantined_broker_exposures = exposures
-    unresolved = getattr(manager, "_cost_basis_unresolved_symbols", None)
-    if isinstance(unresolved, set):
-        unresolved.discard(symbol)
+    lock = getattr(manager, "_lock", None)
+    if lock is None:
+        return
+    with lock:
+        exposures = getattr(manager, "_quarantined_broker_exposures", None)
+        if isinstance(exposures, dict):
+            exposures.pop(symbol, None)
+        unresolved = getattr(manager, "_cost_basis_unresolved_symbols", None)
+        if isinstance(unresolved, set):
+            unresolved.discard(symbol)
 
 
 def apply_patches() -> None:
@@ -137,7 +134,6 @@ def apply_patches() -> None:
         "add_pending_order",
         "get_pending_orders",
         "apply_broker_order_update",
-        "current_entry_protection_blocker",
         "_handle_filled_order",
     ):
         if hasattr(cls, name):
@@ -187,19 +183,6 @@ def apply_patches() -> None:
             order_id,
             _canonicalize_payload_symbol(broker_payload),
         )
-
-    def current_entry_protection_blocker(
-        self: Any, symbol: str | None = None
-    ) -> str | None:
-        unresolved = set(
-            getattr(self, "_cost_basis_unresolved_symbols", set()) or set()
-        )
-        if unresolved and (symbol is None or _canonical_key(symbol) in unresolved):
-            return "cost_basis_unresolved"
-        original = _ORIGINALS.get("PositionManager.current_entry_protection_blocker")
-        if callable(original):
-            return original(self, _canonical_key(symbol) if symbol else None)
-        return None
 
     def _handle_filled_order(self: Any, order: Any) -> Any:
         intent = str(getattr(order, "intent", "UNKNOWN") or "UNKNOWN").strip().upper()
@@ -323,8 +306,6 @@ def apply_patches() -> None:
         cls.get_pending_orders = get_pending_orders
     if "PositionManager.apply_broker_order_update" in _ORIGINALS:
         cls.apply_broker_order_update = apply_broker_order_update
-    if "PositionManager.current_entry_protection_blocker" in _ORIGINALS:
-        cls.current_entry_protection_blocker = current_entry_protection_blocker
     if "PositionManager._handle_filled_order" in _ORIGINALS:
         cls._handle_filled_order = _handle_filled_order
     cls._canonical_position_ingress_patch = True
