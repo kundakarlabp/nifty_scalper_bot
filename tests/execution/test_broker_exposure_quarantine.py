@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 
 import nifty_scalper_bot.execution  # noqa: F401 - applies runtime safety patches
 from nifty_scalper_bot.execution.position_manager import PositionManager
@@ -128,3 +129,34 @@ def test_registry_state_owner_serializes_after_runtime_patches() -> None:
     assert PositionManager.load_state.__module__ == owner
     assert PositionManager.synchronize_with_broker.__module__ == owner
     assert PositionManager._canonical_registry_state_owner is True
+
+
+def test_canonical_writer_persists_and_restores_risk_runtime_atomically(tmp_path):
+    state_file = tmp_path / "positions.json"
+    manager = PositionManager(str(state_file))
+    today = manager._trading_date_ist()
+    manager._trades_today_date = today
+    manager._trades_today_count = 3
+    manager._recent_stop_thesis = {
+        "underlying": "NIFTY",
+        "option_side": "CE",
+        "symbol": SYMBOL,
+        "expires_epoch": time.time() + 300,
+    }
+    manager._risk_circuit_state = {
+        "trading_date": today,
+        "reason": "daily_loss_limit",
+    }
+
+    manager.save_state()
+
+    payload = json.loads(state_file.read_text(encoding="utf-8"))
+    assert payload["_risk_runtime"]["trades_today_count"] == 3
+    assert payload["_risk_runtime"]["risk_circuit"]["reason"] == "daily_loss_limit"
+    assert payload["broker_order_ledger"] == {}
+    assert payload["quarantined_broker_exposures"] == {}
+
+    restored = PositionManager(str(state_file))
+    assert restored.trades_today() == 3
+    assert restored._recent_stop_thesis["symbol"] == SYMBOL
+    assert restored.get_risk_circuit_state()["reason"] == "daily_loss_limit"
