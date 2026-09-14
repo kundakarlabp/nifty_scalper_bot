@@ -8,6 +8,7 @@ import time
 from typing import Any
 
 from nifty_scalper_bot.streaming.websocket_manager import ConnectionState
+from nifty_scalper_bot.utils.smart_symbol import is_nse_trading_day
 
 _INSTALLED_ATTR = "_market_data_hardening_installed"
 _ORIGINAL_BUILD_ATTR = "_market_data_hardening_original_build_ticker"
@@ -108,12 +109,12 @@ def _wrap_ticker_close(manager: Any, ticker: Any) -> None:
 
 
 def _is_within_trading_window_hardened(self: Any) -> bool:
-    """Use the configured trading timezone instead of a hard-coded IST object."""
+    """Use configured timezone while retaining canonical NSE trading-day gating."""
     if not self._trading_window_enabled:
         return True
 
     now = datetime.now(self._trading_tz)
-    if now.weekday() >= 5:
+    if not is_nse_trading_day(now.date()):
         return False
 
     now_time = now.time().replace(tzinfo=None)
