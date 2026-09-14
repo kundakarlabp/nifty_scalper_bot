@@ -24,6 +24,7 @@ from nifty_scalper_bot.execution.broker_pnl_authority_patch import apply_patches
 from nifty_scalper_bot.execution.pnl_session_rollover_patch import apply_patches as _apply_pnl_session_rollover_patches
 from nifty_scalper_bot.execution.pnl_nonblocking_patch import apply_patches as _apply_pnl_nonblocking_patches
 import nifty_scalper_bot.data.quote_identity_extension as _quote_identity_extension
+import nifty_scalper_bot.execution.position_registry_state as _position_registry_state
 import nifty_scalper_bot.execution.bracket_ownership_extension as _bracket_ownership_extension
 import nifty_scalper_bot.execution.broker_exposure_quarantine_extension as _broker_exposure_quarantine_extension
 import nifty_scalper_bot.execution.broker_order_ledger_patch as _broker_order_ledger_patch
@@ -35,6 +36,7 @@ _apply_operator_control_patches()
 _apply_position_risk_state_patches()
 _apply_stop_rearm_contract_patches()
 _quote_identity_extension.apply_patches()
+_position_registry_state.apply_patches()
 _broker_exposure_quarantine_extension.apply_patches()
 _broker_order_ledger_patch.apply_patches()
 _bracket_ownership_extension.apply_patches()
