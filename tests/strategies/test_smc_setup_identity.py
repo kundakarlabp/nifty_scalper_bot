@@ -83,3 +83,51 @@ def test_recovered_sweep_has_same_identity_as_uninterrupted_evaluation(monkeypat
     assert recovered.metadata["sweep_recovered_from_history"] is True
     assert uninterrupted.metadata["sweep_recovered_from_history"] is False
     assert uninterrupted.deterministic_id == recovered.deterministic_id
+
+
+def test_confirmed_setup_remains_reusable_until_exact_entry_is_accepted(
+    monkeypatch,
+):
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    rows = _base_rows()
+    sweep = _bar(30, open_=23988, high=23991, low=23974, close=23984, volume=2500)
+    confirm = _bar(31, open_=23984, high=24000, low=23982, close=23998, volume=2200)
+    rows.extend([sweep, confirm])
+    strategy = SMCStrategy(SMCStrategyConfig(min_confidence=0.0), _Engine(rows))
+    indicators = _indicators(confirm["timestamp"])
+
+    first = strategy.generate_signal(CE, indicators, 103.0)
+    second = strategy.generate_signal(CE, indicators, 103.0)
+
+    assert first is not None
+    assert second is not None
+    assert second.metadata["setup_id"] == first.metadata["setup_id"]
+    assert second.deterministic_id == first.deterministic_id
+
+    strategy.notify_entry_accepted(
+        "CE",
+        setup_id=first.metadata["setup_id"],
+    )
+
+    assert strategy.generate_signal(CE, indicators, 103.0) is None
+    assert strategy.last_no_vote_reason == "smc_duplicate_confirmation_bar"
+
+
+def test_accepting_stale_setup_id_cannot_consume_current_smc_setup(
+    monkeypatch,
+):
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    rows = _base_rows()
+    sweep = _bar(30, open_=23988, high=23991, low=23974, close=23984, volume=2500)
+    confirm = _bar(31, open_=23984, high=24000, low=23982, close=23998, volume=2200)
+    rows.extend([sweep, confirm])
+    strategy = SMCStrategy(SMCStrategyConfig(min_confidence=0.0), _Engine(rows))
+    indicators = _indicators(confirm["timestamp"])
+    first = strategy.generate_signal(CE, indicators, 103.0)
+    assert first is not None
+
+    strategy.notify_entry_accepted("CE", setup_id="smcv2:stale")
+
+    repeated = strategy.generate_signal(CE, indicators, 103.0)
+    assert repeated is not None
+    assert repeated.metadata["setup_id"] == first.metadata["setup_id"]

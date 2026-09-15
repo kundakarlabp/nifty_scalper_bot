@@ -21110,7 +21110,14 @@ class StrategyRunner:
                 )
                 if callable(notify_entry_accepted):
                     try:
-                        notify_entry_accepted(strategy_name, option_side)
+                        notify_entry_accepted(
+                            strategy_name,
+                            option_side,
+                            setup_id=(
+                                str(metadata.get("setup_id") or "").strip()
+                                or None
+                            ),
+                        )
                     except Exception as exc:  # noqa: BLE001 - order is accepted
                         self._logger.error(
                             "STRATEGY_ENTRY_ACCEPTED_HOOK_FAILED "
