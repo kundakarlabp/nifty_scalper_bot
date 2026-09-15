@@ -516,3 +516,74 @@ async def test_context_confirmation_applies_regime_weight_exactly_once(
     assert result.metadata["context_confirmation_score_min"] == 7.0
     assert result.metadata["context_bonus"] == 0.675
     assert result.metadata["final_trade_score"] == 9.475
+
+
+async def test_range_smc_setup_reaches_strong_context_before_runner_quality(
+    monkeypatch,
+) -> None:
+    """A canonical SMC setup must not be rejected twice by regime weighting."""
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    monkeypatch.delenv("STRATEGY_ALLOW_SINGLE_VOTE_SCALP", raising=False)
+    monkeypatch.delenv("STRATEGY_ALLOW_SELECTED_OPTION_SINGLE_VOTE", raising=False)
+    monkeypatch.delenv("STRATEGY_ALLOW_HIGH_CONVICTION_SINGLE_VOTE", raising=False)
+    manager = _manager_probe()
+    trigger = _signal_vote(strategy="SMC", raw_score=7.0, weighted_score=5.95)
+    trigger[0].metadata.update(
+        {
+            "setup_pass": True,
+            "setup_min": 6.5,
+            "preliminary_only": True,
+            "requires_orderflow_confirmation": True,
+            "requires_runner_final_score": True,
+        }
+    )
+    context = _context_vote(score=8.0, confidence=0.80)
+
+    result = manager._combine_strategy_votes(
+        symbol="NFO:NIFTY2670724050CE",
+        signals=[trigger, context],
+        indicators=_valid_entry_context(),
+    )
+
+    assert result is not None
+    assert result.metadata["approval_path"] == "single_trigger_context_confirmed"
+    assert result.metadata["raw_setup_score"] == 7.0
+    assert result.metadata["regime_weighted_score"] == 5.95
+    assert result.metadata["manager_context_score_reference_pass"] is False
+    assert result.metadata["quality_gate_owner"] == "runner_final_execution_score"
+
+
+async def test_range_smc_setup_still_rejects_weak_orderflow_context(
+    monkeypatch,
+) -> None:
+    """Removing the duplicate score gate must not weaken confirmation quality."""
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    monkeypatch.delenv("STRATEGY_ALLOW_SINGLE_VOTE_SCALP", raising=False)
+    monkeypatch.delenv("STRATEGY_ALLOW_SELECTED_OPTION_SINGLE_VOTE", raising=False)
+    monkeypatch.delenv("STRATEGY_ALLOW_HIGH_CONVICTION_SINGLE_VOTE", raising=False)
+    manager = _manager_probe()
+    trigger = _signal_vote(strategy="SMC", raw_score=7.0, weighted_score=5.95)
+    trigger[0].metadata.update(
+        {
+            "setup_pass": True,
+            "setup_min": 6.5,
+            "preliminary_only": True,
+            "requires_orderflow_confirmation": True,
+            "requires_runner_final_score": True,
+        }
+    )
+    context = _context_vote(score=6.0, confidence=0.60)
+
+    result = manager._combine_strategy_votes(
+        symbol="NFO:NIFTY2670724050CE",
+        signals=[trigger, context],
+        indicators=_valid_entry_context(),
+    )
+
+    assert result is None
+    decision = manager._last_no_signal_decision_by_symbol[
+        "NFO:NIFTY2670724050CE"
+    ]
+    assert decision.reason == "single_trigger_context_confirmation_invalid"
