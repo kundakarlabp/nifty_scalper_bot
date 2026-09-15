@@ -1,0 +1,129 @@
+# Canonical pull-request/main validation for the NIFTY scalper.
+# Keep fast static checks, the normal non-slow suite, and broker-free E2E simulation
+# in one workflow without executing the same marked E2E tests twice.
+
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  BRACKET_AUTO_RESTORE: "false"
+  ALLOW_NETWORK: "false"
+  ALLOW_REAL_BROKER: "false"
+
+jobs:
+  changed-code-quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 50
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install development dependencies
+        run: |
+          python -m pip install --upgrade pip -q
+          python -m pip install -e '.[dev]' -q
+          python -m pip install -r dashboard/requirements.txt -q
+      - name: Compile production, dashboard and tooling
+        run: python -m compileall -q src dashboard scripts
+      - name: Resolve changed Python files
+        id: changed
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            git fetch --no-tags origin "${{ github.base_ref }}" --depth=50
+            base="origin/${{ github.base_ref }}"
+          else
+            base="HEAD^"
+          fi
+          mapfile -t files < <(git diff --diff-filter=ACMR --name-only "$base"...HEAD -- '*.py' \
+            | grep -E '^(src|dashboard|scripts|tests)/' || true)
+          printf '%s\n' "${files[@]}" > /tmp/changed-python.txt
+          if ((${#files[@]})); then
+            echo "has_python=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_python=false" >> "$GITHUB_OUTPUT"
+          fi
+          printf 'Changed Python files:\n'
+          cat /tmp/changed-python.txt
+      - name: Ruff changed Python
+        if: steps.changed.outputs.has_python == 'true'
+        run: xargs -r python -m ruff check < /tmp/changed-python.txt
+      - name: Black changed Python
+        if: steps.changed.outputs.has_python == 'true'
+        run: xargs -r python -m black --check --diff < /tmp/changed-python.txt
+      - name: Mypy changed production Python
+        if: steps.changed.outputs.has_python == 'true'
+        shell: bash
+        run: |
+          grep '^src/nifty_scalper_bot/.*\.py$' /tmp/changed-python.txt > /tmp/changed-production.txt || true
+          if [[ -s /tmp/changed-production.txt ]]; then
+            xargs -r python -m mypy --follow-imports=skip < /tmp/changed-production.txt
+          fi
+
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install project and test dependencies
+        run: |
+          python -m pip install --upgrade pip -q
+          python -m pip install -e '.[dev]' -q
+          python -m pip install -r dashboard/requirements.txt -q
+      - name: Run normal suite excluding separately validated E2E markers
+        run: >-
+          python -m pytest -q
+          -m "not slow and not simulation_component and not live_runtime_e2e and not e2e_live_sim"
+
+  e2e-simulation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      BROKER_SIMULATION: "true"
+      EXECUTION_MODE: LIVE_SIMULATION
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install project and test dependencies
+        run: |
+          python -m pip install --upgrade pip -q
+          python -m pip install -e '.[dev]' -q
+      - name: Run deterministic broker-free E2E suites once
+        run: >-
+          python -m pytest -q tests/e2e/live_sim
+          -m "simulation_component or live_runtime_e2e or e2e_live_sim"
+      - name: Upload E2E artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-simulation-artifacts-${{ github.run_id }}
+          path: |
+            e2e_event_timeline.json
+            e2e_orders.json
+            e2e_positions.json
+            e2e_candles.json
+          if-no-files-found: ignore
+          retention-days: 3
