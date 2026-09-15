@@ -51,9 +51,7 @@ def test_critical_configuration_files_have_descriptive_comment_headers() -> None
 
 
 def test_file_header_editing_rule_is_documented() -> None:
-    standard = (ROOT / "docs" / "FILE_HEADER_STANDARD.md").read_text(
-        encoding="utf-8"
-    )
+    standard = (ROOT / "docs" / "FILE_HEADER_STANDARD.md").read_text(encoding="utf-8")
     for label in REQUIRED_LABELS:
         assert label in standard
     assert "When a listed canonical BO or deployment file is edited" in standard
