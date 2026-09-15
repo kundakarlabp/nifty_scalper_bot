@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""File purpose: Build a focused validation plan for repository changes.
-Key responsibilities: Classify changed files, select existing tests, and keep the full suite mandatory.
-Operational constraints: Produce commands only; never execute broker or runtime code.
+"""File purpose: Build or execute a focused validation plan for repository changes.
+Key responsibilities: Classify changed files, select existing tests, and keep the full suite mandatory before merge.
+Operational constraints: Never execute broker or runtime entry points; run only generated compile/test commands.
 """
 
 from __future__ import annotations
@@ -10,6 +10,7 @@ import argparse
 from dataclasses import asdict, dataclass
 import json
 from pathlib import Path
+import shlex
 import subprocess
 import sys
 from typing import Sequence
@@ -50,6 +51,8 @@ RULES = (
             ".agents/",
             "copilot-instructions.md",
             "repo_map.md",
+            "agent_start_here.md",
+            "ai_optimization_workflow.md",
             "scripts/agent_",
         ),
         (
@@ -142,6 +145,42 @@ def build(root: Path, files: Sequence[str]) -> Plan:
     )
 
 
+def commands_for_run(plan: Plan, scope: str) -> tuple[str, ...]:
+    """Return the generated validation ring requested by the caller."""
+    if scope == "focused":
+        return plan.commands[:-1]
+    if scope == "full":
+        return plan.commands
+    raise ValueError(f"Unsupported validation scope: {scope}")
+
+
+def run_plan(root: Path, plan: Plan, scope: str) -> int:
+    """Execute generated compile/test commands without invoking runtime entry points."""
+    for command in commands_for_run(plan, scope):
+        argv = shlex.split(command)
+        if argv and argv[0] == "python":
+            argv[0] = sys.executable
+        print(f"+ {command}", file=sys.stderr)
+        try:
+            result = subprocess.run(
+                argv,
+                cwd=root,
+                check=False,
+                stdout=sys.stderr,
+                stderr=sys.stderr,
+            )
+        except OSError as exc:
+            print(f"ERROR: failed to execute {command!r}: {exc}", file=sys.stderr)
+            return 2
+        if result.returncode != 0:
+            print(
+                f"ERROR: validation failed with exit code {result.returncode}: {command}",
+                file=sys.stderr,
+            )
+            return result.returncode
+    return 0
+
+
 def markdown(plan: Plan) -> str:
     lines = ["# Agent Validation Plan", "", "## Changed files", ""]
     lines.extend(f"- `{item}`" for item in plan.changed_files)
@@ -170,7 +209,7 @@ def markdown(plan: Plan) -> str:
             *plan.commands,
             "```",
             "",
-            "> Focused checks accelerate feedback; the complete suite and final-head CI remain mandatory before squash merge.",
+            "> Use `--run focused` for the fast feedback ring. Use `--run full` before merge when the environment supports the complete suite.",
             "",
         ]
     )
@@ -184,6 +223,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--files", nargs="*")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--format", choices=("markdown", "json"), default="markdown")
+    parser.add_argument(
+        "--run",
+        choices=("focused", "full"),
+        help="Execute the generated focused ring or the focused ring plus full suite.",
+    )
     return parser.parse_args(argv)
 
 
@@ -204,6 +248,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.output.write_text(output.rstrip() + "\n", encoding="utf-8")
     else:
         print(output)
+    if args.run:
+        return run_plan(root, plan, args.run)
     return 0
 
 
