@@ -23,24 +23,37 @@ Read `docs/AGENT_START_HERE.md` and `docs/REPO_MAP.md`. For non-trivial work, ge
 
 Use a skill automatically when the request matches its description, or invoke it explicitly by name in compatible tools.
 
-## Typical sequence
+## Routing policy
+
+Load the **minimum applicable skill set**. Do not run all skills for every non-trivial task.
 
 ```text
-grill-trading-plan
-→ domain-modeling-trading
-→ to-prd-trading-change
-→ to-issues-trading-change
-→ diagnosing-trading-bugs when bug-driven
+runtime symptom / failed test
+→ diagnosing-trading-bugs
+→ add runtime-contract-validation only for a boundary/schema issue
+→ add codebase-design only for ownership/interface defects
+
+well-scoped behavior change
 → tdd-trading-changes
-→ codebase-design when an ownership decision is required
-→ runtime-contract-validation when touching boundaries/contracts
+→ add runtime-contract-validation or codebase-design only when actually needed
+
+fuzzy or high-risk feature
+→ grill-trading-plan
+→ domain-modeling-trading only if vocabulary/state ownership is unclear
+→ to-prd-trading-change / to-issues-trading-change only when durable specification or multi-PR planning is useful
+
+PR review
 → pre-merge-trading-review
+
+handoff
 → session-worklog
 ```
 
+This routing keeps specialist procedures available without paying the context and decision cost of a mandatory ten-skill chain.
+
 ## Relationship to repository instructions
 
-`AGENTS.md` remains authoritative for architecture, trading safety, validation, and merge rules. The skill files provide detailed procedures and should be loaded only when relevant.
+`AGENTS.md` remains authoritative for architecture, trading safety, validation, and merge rules. Skill files provide detailed procedures and should be loaded only when relevant. `docs/AGENT_START_HERE.md` is the canonical task router.
 
 ## Source and adaptation
 
