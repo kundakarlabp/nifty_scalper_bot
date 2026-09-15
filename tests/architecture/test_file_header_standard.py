@@ -24,7 +24,7 @@ PYTHON_FILES = (
 COMMENT_HEADER_FILES = (
     "Dockerfile",
     "railway.toml",
-    ".github/workflows/live-exit-safety-ci.yml",
+    ".github/workflows/ci.yml",
 )
 
 
