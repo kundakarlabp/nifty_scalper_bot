@@ -1,3 +1,68 @@
 # Agent start here
 
-Read `docs/REPO_MAP.md` and use `scripts/agent_context.py` to rank relevant files and tests before editing. Preserve the canonical runtime path and require final-head CI before squash merge.
+Use the smallest amount of repository context that can safely answer the task.
+
+## Fast path
+
+1. Read `docs/REPO_MAP.md`.
+2. Rank relevant files and tests before broad browsing:
+
+   ```bash
+   python scripts/agent_context.py --query "exact error, symbol, class, function, or behavior"
+   ```
+
+3. Load **one primary skill** for the task. Add a secondary skill only when the task actually crosses that concern.
+4. Read full `AGENTS.md` before editing a high-risk runtime path.
+5. Validate the changed surface first, then require full validation and final-head CI before merge.
+
+## Minimal skill routing
+
+| Task | Primary skill | Add only when needed |
+|---|---|---|
+| Runtime bug, failed test, stale data, wrong signal, duplicate order, unexplained no-trade state | `diagnosing-trading-bugs` | `runtime-contract-validation` for boundary payloads; `codebase-design` for ownership/seam defects |
+| Well-scoped behavior change with known owner | `tdd-trading-changes` | `runtime-contract-validation` or `codebase-design` only if the change crosses those concerns |
+| Ownership, SSOT, module/interface or duplicate-path change | `codebase-design` | `tdd-trading-changes` once the design is resolved |
+| External/broker/config/cross-module payload change | `runtime-contract-validation` | `tdd-trading-changes` for implementation |
+| Fuzzy or safety-critical proposal | `grill-trading-plan` | `domain-modeling-trading` only when terminology/state ownership is genuinely unclear |
+| Durable requirements or multi-PR decomposition explicitly needed | `to-prd-trading-change` / `to-issues-trading-change` | Do not use for a narrow bug fix |
+| PR/diff review | `pre-merge-trading-review` | none by default |
+| End-of-session handoff | `session-worklog` | none |
+
+**Do not automatically run the full skill chain.** Skills are selective procedures, not mandatory phases. Repository architecture and safety invariants remain authoritative in `AGENTS.md`.
+
+## Pre-edit contract
+
+For non-trivial edits, establish only what is needed to constrain the change:
+
+```text
+Objective:
+Owner module:
+Observable behavior:
+Safety invariant:
+Non-goals:
+Focused validation:
+```
+
+Add rollback, interface, state-transition, or deployment details only when the change requires them.
+
+## Validation
+
+Generate a focused validation plan:
+
+```bash
+python scripts/agent_check.py --files path/to/changed.py
+```
+
+Execute the fast validation ring:
+
+```bash
+python scripts/agent_check.py --files path/to/changed.py --run focused
+```
+
+Execute focused checks plus the complete suite before merge when the environment supports it:
+
+```bash
+python scripts/agent_check.py --files path/to/changed.py --run full
+```
+
+Preserve the canonical runtime path. Never weaken risk, execution, instrument, or readiness safeguards merely to make a test or trade pass.
