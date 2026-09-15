@@ -15,8 +15,6 @@ jobs:
       BRACKET_AUTO_RESTORE: "false"
       ALLOW_NETWORK: "false"
       ALLOW_REAL_BROKER: "false"
-      BROKER_SIMULATION: "true"
-      EXECUTION_MODE: LIVE_SIMULATION
     steps:
       - uses: actions/checkout@v4
         with:
@@ -43,4 +41,7 @@ jobs:
       - name: Normal repository suite
         run: python -m pytest -q -m "not slow and not simulation_component and not live_runtime_e2e and not e2e_live_sim"
       - name: Deterministic E2E suite
+        env:
+          BROKER_SIMULATION: "true"
+          EXECUTION_MODE: LIVE_SIMULATION
         run: python -m pytest -q tests/e2e/live_sim -m "simulation_component or live_runtime_e2e or e2e_live_sim"
