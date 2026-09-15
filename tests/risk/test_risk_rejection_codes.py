@@ -180,7 +180,10 @@ def test_final_order_gate_blocks_stop_risk_above_remaining_daily_budget(
     allowed, reason = risk.check_order(signal, live_enabled=True)
 
     assert allowed is False
-    assert reason == "remaining daily loss budget insufficient: 300.00/250.00"
+    assert reason == (
+        "daily stop-risk cap exceeded: required=300.00 available=250.00 "
+        "day_loss=750.00 cap=1000.00"
+    )
     assert risk._last_rejection == "DAILY_RISK_BUDGET"
     assert risk._breaker_tripped is False
 
