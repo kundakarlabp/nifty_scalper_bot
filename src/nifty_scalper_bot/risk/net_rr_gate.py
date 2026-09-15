@@ -88,6 +88,16 @@ def estimate_half_spread(signal: Any, entry: float) -> float:
     return entry * 0.0025
 
 
+def _cost_model_half_spread(signal: Any, entry: float, half_spread: float) -> float:
+    """Avoid charging an entry crossing already embedded in executable ask."""
+    spread = max(0.0, float(half_spread))
+    if spread <= 0.0:
+        return 0.0
+    metadata = _metadata(signal)
+    ask = _positive(metadata.get("ask") or metadata.get("best_ask"))
+    return spread / 2.0 if ask is not None and entry + 1e-9 >= ask else spread
+
+
 def _minimum_net_rr() -> float:
     """Compatibility wrapper for the canonical cost-model threshold owner."""
 
@@ -147,12 +157,13 @@ def evaluate_final_net_rr(signal: Any) -> NetRRResult | None:
         return None
 
     half_spread = estimate_half_spread(signal, entry)
+    cost_half_spread = _cost_model_half_spread(signal, entry, half_spread)
     economics = evaluate_net_reward_risk(
         entry_price=entry,
         stop_price=stop,
         target_price=target,
         quantity=quantity,
-        half_spread=half_spread,
+        half_spread=cost_half_spread,
     )
     return NetRRResult(
         allowed=economics.allowed,
@@ -213,11 +224,12 @@ def minimum_target_for_net_rr(signal: Any, *, tick_size: float = 0.05) -> float 
         return None
 
     half_spread = estimate_half_spread(signal, entry)
+    cost_half_spread = _cost_model_half_spread(signal, entry, half_spread)
     stop_cost = estimate_round_trip_cost(
         entry_price=entry,
         exit_price=stop,
         quantity=quantity,
-        half_spread=half_spread,
+        half_spread=cost_half_spread,
     ).total
     net_risk = (entry - stop) * quantity + stop_cost
     minimum = _minimum_net_rr()
