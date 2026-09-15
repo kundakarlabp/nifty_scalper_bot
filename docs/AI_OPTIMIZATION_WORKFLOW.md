@@ -1,12 +1,12 @@
 # AI Optimization Workflow for NIFTY Scalper Bot
 
-This document defines the safe, sequential workflow for ChatGPT, Codex, Copilot, Claude Code, and human reviewers working on this repository.
+This document defines the safe workflow for ChatGPT, Codex, Copilot, Claude Code, and human reviewers working on this repository.
 
-The goal is **slow, evidence-based optimization** of the NIFTY options scalper, not broad refactoring or speculative profit optimization.
+The goal is evidence-based optimization of the NIFTY options scalper without broad refactoring, duplicated ownership, or speculative profit optimization.
 
 ## Core principle
 
-Every change must improve one of these in order:
+Every change should improve the earliest unstable layer first:
 
 1. Repository guardrails and validation
 2. Live option data correctness
@@ -20,43 +20,39 @@ Every change must improve one of these in order:
 10. Strategy scoring
 11. Profit optimization
 
-Do not jump to later layers before earlier layers are stable.
+Do not jump to later layers while an earlier layer is the verified bottleneck.
 
-## Skill chain
+## Minimal-context workflow
 
-Use this chain for non-trivial work:
+For non-trivial work:
 
 ```text
-grill-trading-plan
-→ domain-modeling-trading
-→ to-prd-trading-change
-→ to-issues-trading-change
-→ diagnosing-trading-bugs when bug-driven
-→ tdd-trading-changes
-→ codebase-design when an ownership/interface decision is required
-→ runtime-contract-validation
-→ pre-merge-trading-review
-→ session-worklog
+rank context with scripts/agent_context.py
+→ identify the owner and one primary skill
+→ reproduce or define one observable behavior
+→ make the smallest coherent change
+→ run focused validation
+→ run full validation/final-head CI before merge
 ```
 
-## When to use each skill
+Do **not** automatically load or execute the full skill catalog. Skills are selective procedures.
 
-| Skill | Use when | Output |
+### Primary routing
+
+| Task | Primary skill | Optional secondary skill |
 |---|---|---|
-| `grill-trading-plan` | The request is fuzzy, high-risk, or could affect live behavior | Clarified objective, non-goals, constraints, accepted risks |
-| `domain-modeling-trading` | Terms or ownership are unclear | Canonical glossary and domain invariants |
-| `to-prd-trading-change` | A change needs a durable spec before implementation | PRD with problem, solution, user stories, tests, out-of-scope items |
-| `to-issues-trading-change` | A PRD or plan must become small implementation tasks | Vertical-slice issue breakdown |
-| `diagnosing-trading-bugs` | Runtime symptom, failed test, wrong signal, duplicate order, data issue | Reproduction, hypotheses, root cause |
-| `tdd-trading-changes` | Any behavior change | RED/GREEN/REFACTOR slice |
-| `codebase-design` | Ownership, interface, seam, or module design is unclear | Small design choice with rejected alternatives |
-| `runtime-contract-validation` | External data or cross-module payloads are involved | Boundary contract and invalid-input behavior |
-| `pre-merge-trading-review` | Before merge | Verdict with blockers, validation, and residual risk |
-| `session-worklog` | End of session or handoff | Durable state of work and next action |
+| Runtime symptom, failed test, stale data, wrong signal, duplicate order, no-trade state | `diagnosing-trading-bugs` | `runtime-contract-validation` for payload/boundary issues; `codebase-design` for ownership defects |
+| Well-scoped behavior change | `tdd-trading-changes` | `runtime-contract-validation` or `codebase-design` only when needed |
+| Ownership, SSOT, interface, seam, or duplicate-path change | `codebase-design` | `tdd-trading-changes` for implementation |
+| Broker/config/external/cross-module contract change | `runtime-contract-validation` | `tdd-trading-changes` for implementation |
+| Fuzzy or safety-critical feature | `grill-trading-plan` | `domain-modeling-trading` only if terminology/state ownership is unclear |
+| Durable feature specification or multi-PR decomposition | `to-prd-trading-change`, then `to-issues-trading-change` if needed | Use only when the task is large enough to benefit |
+| PR/diff review | `pre-merge-trading-review` | none by default |
+| Handoff or context reset | `session-worklog` | none |
 
 ## Sequential optimization policy
 
-Agents must prefer one small PR at a time.
+Prefer one small PR at a time.
 
 Allowed PR scope examples:
 
@@ -80,20 +76,18 @@ large refactor + bug fix
 
 ## Pre-edit contract
 
-Before editing code, write this mini-contract in the task notes or PR body:
+For non-trivial edits, record the minimum contract required to constrain the change:
 
 ```text
 Objective:
-Non-goals:
-Affected runtime layer:
 Owner module:
-Public interface under test:
+Observable behavior:
 Safety invariant:
-Files likely touched:
-Files explicitly not touched:
+Non-goals:
 Focused validation:
-Rollback:
 ```
+
+Add public-interface, rollback, state-transition, deployment, or compatibility details only when the change requires them.
 
 ## Runtime layer ownership
 
@@ -149,18 +143,29 @@ backtest/replay input
 
 Invalid input must become a safe rejection, readiness blocker, risk blocker, operator diagnostic, or bounded retry. It must not be silently coerced into tradable data.
 
-## Required validation
+## Validation
 
-Minimum validation for code changes:
+Generate the validation plan for changed files:
 
 ```bash
-python -m compileall -q src dashboard
-python -m pytest -q
+python scripts/agent_check.py --files path/to/changed.py
 ```
 
-Focused tests must also be run for affected areas where available.
+Fast iteration ring:
 
-For documentation-only changes, validate by reviewing changed paths and ensuring no production files are touched.
+```bash
+python scripts/agent_check.py --files path/to/changed.py --run focused
+```
+
+Pre-merge ring:
+
+```bash
+python scripts/agent_check.py --files path/to/changed.py --run full
+```
+
+`focused` runs compilation plus the selected affected-area tests. `full` also runs the complete repository suite. Final-head CI remains authoritative before merge.
+
+For documentation-only changes, review the changed paths and ensure no production trading files are touched.
 
 ## Merge policy
 
@@ -170,8 +175,9 @@ A PR is mergeable only when:
 scope is narrow
 changed files match the stated objective
 no production trading behavior changes unless intentionally specified
-tests/validation are run or exact blockers are documented
-pre-merge-trading-review has no blocking findings
+focused validation is green
+full validation/final-head CI is green or an exact external blocker is documented
+pre-merge review has no blocking findings
 residual risk is explicit
 ```
 
