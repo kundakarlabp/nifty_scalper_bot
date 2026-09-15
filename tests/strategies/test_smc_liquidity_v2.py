@@ -334,7 +334,7 @@ def test_bearish_underlying_sweep_confirms_long_pe(monkeypatch) -> None:
     assert signal.metadata["underlying_invalidation_level"] > 24027.0
 
 
-def test_same_underlying_confirmation_bar_cannot_emit_duplicate_vote(monkeypatch) -> None:
+def test_same_confirmation_bar_reuses_identity_until_entry_is_accepted(monkeypatch) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
     rows = _base_rows()
     engine = FakeIndicatorEngine({FUTURES: rows})
@@ -346,6 +346,13 @@ def test_same_underlying_confirmation_bar_cannot_emit_duplicate_vote(monkeypatch
     rows.append(confirm)
     indicators = _indicators(latest_bar_ts=confirm["timestamp"])
 
-    assert strategy.generate_signal(CE, indicators, 103.0) is not None
+    first = strategy.generate_signal(CE, indicators, 103.0)
+    repeated = strategy.generate_signal(CE, indicators, 103.0)
+    assert first is not None
+    assert repeated is not None
+    assert repeated.deterministic_id == first.deterministic_id
+
+    strategy.notify_entry_accepted("CE", setup_id=first.metadata["setup_id"])
+
     assert strategy.generate_signal(CE, indicators, 103.0) is None
     assert strategy.last_no_vote_reason == "smc_duplicate_confirmation_bar"

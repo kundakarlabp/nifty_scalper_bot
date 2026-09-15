@@ -542,9 +542,11 @@ class EliteStrategy(Strategy):
         del elite_signal
         return False
 
-    def notify_entry_accepted(self, side: str) -> None:
+    def notify_entry_accepted(
+        self, side: str, *, setup_id: str | None = None
+    ) -> None:
         """Compatibility hook; order lifecycle is owned by the runner."""
-        del side
+        del side, setup_id
 
     def _no_vote(self, reason: str) -> None:
         """Record a single no-vote reason. Args: reason. Returns: None. Raises: none."""

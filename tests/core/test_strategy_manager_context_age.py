@@ -263,3 +263,22 @@ def test_temporary_direction_tie_expires_fail_closed(monkeypatch) -> None:
         role="spot_context",
     )
     assert manager._latest_context_snapshots["spot_context"]["direction_bias"] is None
+
+
+def test_entry_acceptance_forwards_exact_setup_identity_to_strategy() -> None:
+    observed: list[tuple[str, str | None]] = []
+
+    class _Strategy:
+        name = "SMC"
+
+        def notify_entry_accepted(
+            self, side: str, *, setup_id: str | None = None
+        ) -> None:
+            observed.append((side, setup_id))
+
+    manager = object.__new__(StrategyManager)
+    manager._strategies = [_Strategy()]
+
+    manager.notify_entry_accepted("SMC", "PE", setup_id="smcv2:nifty:PE:1")
+
+    assert observed == [("PE", "smcv2:nifty:PE:1")]

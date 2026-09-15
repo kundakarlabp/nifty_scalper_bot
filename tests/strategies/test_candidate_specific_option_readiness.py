@@ -222,10 +222,12 @@ def _execution_runner(monkeypatch, *, ce_ok=True, pe_ok=False):
     runner._position_manager = None
     runner._orchestrator = None
     accepted_notifications = []
+
+    def notify_entry_accepted(strategy, side, setup_id=None):
+        accepted_notifications.append((strategy, side, setup_id))
+
     runner._strategy_manager = SimpleNamespace(
-        notify_entry_accepted=lambda strategy, side: accepted_notifications.append(
-            (strategy, side)
-        )
+        notify_entry_accepted=notify_entry_accepted
     )
     runner._accepted_strategy_notifications = accepted_notifications
     runner._active_atm_strike = 25000
@@ -304,7 +306,11 @@ def _signal(symbol: str) -> Signal:
         "test",
         90.0,
         120.0,
-        metadata={"strategy_name": "test", "final_score": 10.0},
+        metadata={
+            "strategy_name": "test",
+            "final_score": 10.0,
+            "setup_id": "test:CE:setup-1",
+        },
     )
 
 
@@ -325,7 +331,9 @@ def test_entry_path_allows_ready_ce_candidate_and_submits_order(
     assert result.accepted is True
     assert len(runner._order_manager.plans) == 1
     assert runner._order_manager.plans[0].symbol == "NFO:CE"
-    assert runner._accepted_strategy_notifications == [("test", "CE")]
+    assert runner._accepted_strategy_notifications == [
+        ("test", "CE", "test:CE:setup-1")
+    ]
 
 
 def test_entry_remains_accepted_when_strategy_notification_fails(

@@ -32,6 +32,9 @@
      last conclusive side for a bounded grace period, while opposite structure
      must persist before a source reverses. Spot/futures disagreement is still
      arbitrated independently and remains fail-closed.
+   - SMC setup generation is non-consuming: the same structural `setup_id`
+     remains available while mandatory OrderFlow evidence is pending. Only an
+     exact broker-accepted entry, structural invalidation, or expiry consumes it.
 
 5. **Entry execution authority**
    - Public facade: `execution/order_manager.py`

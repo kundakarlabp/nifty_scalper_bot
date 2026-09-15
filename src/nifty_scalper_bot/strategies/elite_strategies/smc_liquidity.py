@@ -497,6 +497,37 @@ class SMCStrategy(EliteStrategy):
             "recovered_from_history": bool(recovered_from_history),
         }
 
+    @staticmethod
+    def _setup_id(
+        underlying_symbol: str, side: str, sweep_ts: datetime
+    ) -> str:
+        return f"smcv2:{underlying_symbol}:{side}:{sweep_ts.isoformat()}"
+
+    def notify_entry_accepted(
+        self, side: str, *, setup_id: str | None = None
+    ) -> None:
+        """Consume only the exact SMC setup whose entry reached broker acceptance."""
+        resolved_side = str(side or "").strip().upper()
+        resolved_setup_id = str(setup_id or "").strip()
+        if resolved_side not in {"CE", "PE"} or not resolved_setup_id:
+            return
+        for event_key, event in tuple(self._events.items()):
+            underlying_symbol, event_side = event_key
+            if event_side != resolved_side:
+                continue
+            event_setup_id = self._setup_id(
+                underlying_symbol,
+                event_side,
+                event["sweep_ts"],
+            )
+            if event_setup_id != resolved_setup_id:
+                continue
+            self._events.pop(event_key, None)
+            confirmation_ts = event.get("confirmation_ts")
+            if isinstance(confirmation_ts, datetime):
+                self._last_emitted_bar[event_key] = confirmation_ts
+            return
+
     def _event_consumed_or_invalidated_before_current(
         self,
         rows: list[dict[str, Any]],
@@ -874,9 +905,10 @@ class SMCStrategy(EliteStrategy):
                     "structure_symbol": underlying_symbol,
                     # Identity belongs to the underlying sweep, not option swings
                     # or the later confirmation bar; history recovery preserves it.
-                    "setup_id": (
-                        f"smcv2:{underlying_symbol}:{contract_side}:"
-                        f"{event['sweep_ts'].isoformat()}"
+                    "setup_id": self._setup_id(
+                        underlying_symbol,
+                        contract_side,
+                        event["sweep_ts"],
                     ),
                     "preliminary_only": True,
                     "requires_runner_final_score": True,
@@ -944,8 +976,10 @@ class SMCStrategy(EliteStrategy):
                         event.get("recovered_from_history")
                     ),
                 }
-                self._events.pop(event_key, None)
-                self._last_emitted_bar[event_key] = current_ts
+                # Generating a preliminary vote must not consume the structural
+                # setup. StrategyManager may still be waiting for asynchronous
+                # OrderFlow confirmation. Broker-accepted entry owns consumption.
+                event["confirmation_ts"] = current_ts
                 LOGGER.info(
                     "STRATEGY_VOTE strategy=SMC side=%s score=%.2f source=%s "
                     "sweep_depth_atr=%.3f displacement_atr=%.3f",
