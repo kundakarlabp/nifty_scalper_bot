@@ -44,6 +44,12 @@ def _exit_identity_kwargs(bracket: Any | None, bracket_id: str | None) -> dict[s
     }
 
 
+def _exit_product(bracket: Any | None) -> str:
+    """Resolve protective-exit product from the entry bracket."""
+    product = str(getattr(bracket, "product", "") or "").strip().upper()
+    return product if product in {"MIS", "NRML"} else "MIS"
+
+
 def _canonical_key(symbol: object) -> str:
     return normalize_symbol(str(symbol or ""))
 
@@ -185,6 +191,7 @@ def _patch_bracket_manager() -> None:
             },
         )
         try:
+            product = _exit_product(bracket)
             kwargs: dict[str, Any] = {
                 "symbol": normalized_symbol,
                 "side": side,
@@ -192,7 +199,7 @@ def _patch_bracket_manager() -> None:
                 "order_type": order_type,
                 "tag": correlation_tag or f"exit_{reason[:3]}_{bracket_id[:8]}",
                 "check_risk": False,
-                "product": "MIS",
+                "product": product,
                 **_exit_identity_kwargs(bracket, bracket_id),
             }
             if price is not None:
@@ -208,6 +215,7 @@ def _patch_bracket_manager() -> None:
                         "order_id": str(order_id),
                         "order_type": order_type,
                         "side": side,
+                        "product": product,
                         "intent": "EXIT",
                         "linked_entry_order_id": kwargs.get("linked_entry_order_id"),
                         "trade_lifecycle_id": kwargs.get("trade_lifecycle_id"),
@@ -323,6 +331,7 @@ def _patch_bracket_manager() -> None:
             if not symbol or qty <= 0:
                 return
             try:
+                product = _exit_product(bracket)
                 order_id = self.order_manager.place_order(
                     symbol=symbol,
                     side=side,
@@ -330,7 +339,7 @@ def _patch_bracket_manager() -> None:
                     order_type="MARKET",
                     tag=f"EXIT_MKT_{bracket.bracket_id[:8]}",
                     check_risk=False,
-                    product="MIS",
+                    product=product,
                     **_exit_identity_kwargs(bracket, bracket.bracket_id),
                 )
             except Exception as exc:  # noqa: BLE001

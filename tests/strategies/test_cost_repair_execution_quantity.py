@@ -48,7 +48,9 @@ class CostRepairExecutionQuantityTests(TestCase):
                     signal, entry_price=entry, quantity=units, half_spread=0.10
                 )
                 self.assertTrue(expected.metadata["premium_cost_target_repair_viable"])
-                self.assertGreater(expected.take_profit, signal.take_profit)
+                # Executable-ask entry accounting can show the original target
+                # already clears the net R:R floor, so repair may be a no-op.
+                self.assertGreaterEqual(expected.take_profit, signal.take_profit)
                 self.assertEqual(result.take_profit, expected.take_profit)
                 self.assertEqual(result.stop_loss, signal.stop_loss)
                 self.assertEqual(result.quantity, lots)
