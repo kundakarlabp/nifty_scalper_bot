@@ -748,8 +748,9 @@ class RiskManager:
             and stop_risk > remaining
         ):
             reason = (
-                "remaining daily loss budget insufficient: "
-                f"{stop_risk:.2f}/{remaining:.2f}"
+                "daily stop-risk cap exceeded: "
+                f"required={stop_risk:.2f} available={remaining:.2f} "
+                f"day_loss={current_loss:.2f} cap={daily_cap:.2f}"
             )
             return self._final_order_block(
                 signal,
