@@ -1,6 +1,6 @@
-# Canonical pull-request/main validation for the NIFTY scalper.
-# Keep fast static checks, the normal non-slow suite, and broker-free E2E simulation
-# in one workflow without executing the same marked E2E tests twice.
+# File purpose: Canonical pull-request/main validation for the NIFTY scalper.
+# Key responsibilities: Run changed-code quality, the normal non-slow suite, and deterministic E2E validation once each.
+# Operational constraints: Read-only CI; no broker/network access; do not duplicate marked E2E tests in the normal suite.
 
 name: CI
 
