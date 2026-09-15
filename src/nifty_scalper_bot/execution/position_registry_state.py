@@ -109,19 +109,31 @@ def _registry_snapshot_locked(self: Any) -> tuple[dict[str, Any], dict[str, Any]
     return ledger, exposures
 
 
-def _ledger_blocks_symbol(self: Any, symbol: str) -> bool:
-    wanted = _canonical(symbol)
+def _ledger_blocker_for_symbol(self: Any, symbol: str | None) -> str | None:
+    """Preserve the broker-ledger block reason before generic quarantine state."""
+    wanted = _canonical(symbol) if symbol else None
     with self._lock:
         rows = list(self._broker_order_ledger.values())
     for row in rows:
         if not isinstance(row, Mapping):
             continue
-        if str(row.get("classification") or "") not in _ACTIVE_LEDGER_CLASSIFICATIONS:
+        classification = str(row.get("classification") or "")
+        if classification not in _ACTIVE_LEDGER_CLASSIFICATIONS:
             continue
         row_symbol = _canonical(row.get("symbol") or row.get("tradingsymbol"))
-        if row_symbol == wanted:
-            return True
-    return False
+        if wanted is not None and row_symbol != wanted:
+            continue
+        if classification == "active_external_order":
+            return "active_external_order"
+        if classification == "broker_state_unverified":
+            return "broker_state_unverified"
+        if classification == "broker_position_quarantined":
+            return "broker_exposure_quarantined"
+    return None
+
+
+def _ledger_blocks_symbol(self: Any, symbol: str) -> bool:
+    return _ledger_blocker_for_symbol(self, symbol) is not None
 
 
 def apply_patches() -> None:
@@ -266,6 +278,10 @@ def apply_patches() -> None:
         self: Any, symbol: str | None = None
     ) -> str | None:
         wanted = _canonical(symbol) if symbol else None
+        ledger_blocker = _ledger_blocker_for_symbol(self, wanted)
+        if ledger_blocker is not None:
+            return ledger_blocker
+
         with self._lock:
             exposures = dict(self._quarantined_broker_exposures)
             unresolved = set(self._cost_basis_unresolved_symbols)
