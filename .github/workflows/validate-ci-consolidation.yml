@@ -20,7 +20,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: e996c01d5514149a89c4b840661fe3f387cfb67c
+          ref: 6c6e0258bfe32c2f835b8e12b19468ba9dc74f1e
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -32,12 +32,14 @@ jobs:
           python -m pip install -r dashboard/requirements.txt -q
       - name: Compile
         run: python -m compileall -q src dashboard scripts
-      - name: CI catalog regression
-        run: python -m pytest -q tests/architecture/test_ci_workflow_catalog.py
-      - name: Ruff and Black new architecture test
+      - name: CI architecture regressions
         run: |
-          python -m ruff check tests/architecture/test_ci_workflow_catalog.py
-          python -m black --check --diff tests/architecture/test_ci_workflow_catalog.py
+          python -m pytest -q tests/architecture/test_ci_workflow_catalog.py
+          python -m pytest -q tests/architecture/test_file_header_standard.py
+      - name: Ruff and Black changed architecture tests
+        run: |
+          python -m ruff check tests/architecture/test_ci_workflow_catalog.py tests/architecture/test_file_header_standard.py
+          python -m black --check --diff tests/architecture/test_ci_workflow_catalog.py tests/architecture/test_file_header_standard.py
       - name: Normal repository suite
         run: python -m pytest -q -m "not slow and not simulation_component and not live_runtime_e2e and not e2e_live_sim"
       - name: Deterministic E2E suite
