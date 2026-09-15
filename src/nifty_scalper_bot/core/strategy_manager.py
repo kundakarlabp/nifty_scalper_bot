@@ -2300,6 +2300,16 @@ class StrategyManager(_BaseStrategyManager):
             direction_inputs,
             role=role,
         )
+        stabilised = self._stabilize_context_direction(
+            symbol=symbol,
+            role=role,
+            direction=derived_direction,
+            confidence=derived_confidence,
+            reasons=derived_reasons,
+        )
+        derived_direction = stabilised["direction"]
+        derived_confidence = stabilised["confidence"]
+        derived_reasons = stabilised["reasons"]
         snapshot = {
             "symbol": symbol, "role": role, "context_kind": context_kind, "timestamp": time.time(),
             "ltp": _num("ltp", "close", "price"), "close": _num("close", "ltp", "price"),
@@ -2320,6 +2330,10 @@ class StrategyManager(_BaseStrategyManager):
             "regime": indicators.get("regime") or indicators.get("market_regime"),
             "futures_volume_ratio_source": futures_volume_ratio_source,
             "vwap_slope_source": vwap_slope_source,
+            "direction_last_conclusive_at": stabilised["last_conclusive_at"],
+            "direction_reversal_candidate": stabilised["reversal_candidate"],
+            "direction_reversal_since": stabilised["reversal_since"],
+            "direction_reversal_observations": stabilised["reversal_observations"],
         }
         self._latest_context_snapshots[role] = snapshot
         direction_available = derived_direction in {"CE", "PE"}
@@ -2339,6 +2353,119 @@ class StrategyManager(_BaseStrategyManager):
                 "direction": derived_direction,
             },
         )
+
+    def _stabilize_context_direction(
+        self,
+        *,
+        symbol: str,
+        role: str,
+        direction: str | None,
+        confidence: float,
+        reasons: list[str],
+    ) -> dict[str, t.Any]:
+        """Keep each underlying source stable while preserving fail-closed expiry."""
+        now_ts = time.time()
+        previous = getattr(self, "_latest_context_snapshots", {}).get(role, {})
+        if str(previous.get("symbol") or "") != symbol:
+            previous = {}
+        previous_direction = str(previous.get("direction_bias") or "").upper()
+        if previous_direction not in {"CE", "PE"}:
+            previous_direction = ""
+        candidate = str(direction or "").upper()
+        if candidate not in {"CE", "PE"}:
+            candidate = ""
+        try:
+            previous_confidence = float(
+                previous.get("underlying_direction_confidence") or 0.0
+            )
+        except (TypeError, ValueError):
+            previous_confidence = 0.0
+        try:
+            last_conclusive_at = float(
+                previous.get("direction_last_conclusive_at") or now_ts
+            )
+        except (TypeError, ValueError):
+            last_conclusive_at = now_ts
+
+        stable = {
+            "direction": direction,
+            "confidence": confidence,
+            "reasons": list(reasons),
+            "last_conclusive_at": now_ts if candidate else last_conclusive_at,
+            "reversal_candidate": None,
+            "reversal_since": None,
+            "reversal_observations": 0,
+        }
+        if not previous_direction:
+            return stable
+        if candidate == previous_direction:
+            return stable
+        if not candidate:
+            tie_grace_seconds = max(
+                0.0,
+                self._env_float("STRATEGY_CONTEXT_TIE_GRACE_SECONDS", 5.0),
+            )
+            stable["last_conclusive_at"] = last_conclusive_at
+            if now_ts - last_conclusive_at <= tie_grace_seconds:
+                stable.update(
+                    direction=previous_direction,
+                    confidence=min(previous_confidence, max(0.50, confidence)),
+                    reasons=[*reasons, "direction_tie_hysteresis"],
+                )
+            return stable
+
+        prior_candidate = str(
+            previous.get("direction_reversal_candidate") or ""
+        ).upper()
+        try:
+            prior_since = float(previous.get("direction_reversal_since") or now_ts)
+        except (TypeError, ValueError):
+            prior_since = now_ts
+        try:
+            prior_observations = int(
+                previous.get("direction_reversal_observations") or 0
+            )
+        except (TypeError, ValueError):
+            prior_observations = 0
+        reversal_since = prior_since if prior_candidate == candidate else now_ts
+        reversal_observations = (
+            prior_observations + 1 if prior_candidate == candidate else 1
+        )
+        confirm_seconds = max(
+            0.0,
+            self._env_float("STRATEGY_CONTEXT_REVERSAL_CONFIRM_SECONDS", 5.0),
+        )
+        try:
+            min_observations = max(
+                1,
+                int(
+                    float(
+                        os.getenv(
+                            "STRATEGY_CONTEXT_REVERSAL_MIN_OBSERVATIONS", "3"
+                        )
+                        or "3"
+                    )
+                ),
+            )
+        except (TypeError, ValueError):
+            min_observations = 3
+        if (
+            now_ts - reversal_since >= confirm_seconds
+            and reversal_observations >= min_observations
+        ):
+            stable["reasons"] = [*reasons, "direction_reversal_confirmed"]
+            return stable
+
+        stable.update(
+            direction=previous_direction,
+            confidence=min(previous_confidence, confidence, 0.60),
+            reasons=[*reasons, "direction_reversal_pending"],
+            last_conclusive_at=last_conclusive_at,
+            reversal_candidate=candidate,
+            reversal_since=reversal_since,
+            reversal_observations=reversal_observations,
+        )
+        return stable
 
     def _derive_context_direction(
         self, indicators: t.Mapping[str, t.Any], *, role: str
@@ -2403,12 +2530,13 @@ class StrategyManager(_BaseStrategyManager):
                 pe_score += 0.7
                 reasons.append("ltp_below_open")
         delta_signal = recent_ltp_delta if recent_ltp_delta not in (None, 0.0) else tick_slope
+        tick_side: str | None = None
         if delta_signal is not None:
             if delta_signal > 0:
-                ce_score += 0.6
+                tick_side = "CE"
                 reasons.append("tick_slope_positive")
             elif delta_signal < 0:
-                pe_score += 0.6
+                tick_side = "PE"
                 reasons.append("tick_slope_negative")
         if (
             ce_score + pe_score <= 0
@@ -2421,15 +2549,13 @@ class StrategyManager(_BaseStrategyManager):
                 "STRATEGY_CONTEXT_MIN_LTP_CLOSE_DELTA_PCT", 0.03
             )
             if ltp_close_delta_pct >= min_delta_pct:
-                ce_score += 0.5
                 reasons.append("ltp_above_close_fallback")
             elif ltp_close_delta_pct <= -min_delta_pct:
-                pe_score += 0.5
                 reasons.append("ltp_below_close_fallback")
                 
         total = ce_score + pe_score
         if total <= 0:
-            return None, 0.0, ["direction_unavailable"]
+            return None, 0.0, [*reasons, "direction_unavailable"]
         margin = abs(ce_score - pe_score)
         if margin < 0.5:
             return None, min(0.55, total / 4.0), reasons + ["direction_tie"]
@@ -2452,6 +2578,10 @@ class StrategyManager(_BaseStrategyManager):
             confidence = min(0.95, max(0.50, raw_confidence))
         else:
             confidence = min(0.70, max(0.55, raw_confidence))
+        if tick_side == side:
+            confidence = min(0.95, confidence + 0.03)
+        elif tick_side is not None:
+            confidence = max(0.50, confidence - 0.05)
         return side, confidence, reasons
 
     @staticmethod

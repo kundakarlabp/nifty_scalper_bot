@@ -1,4 +1,48 @@
+import importlib
+
 from nifty_scalper_bot.core.strategy_manager import StrategyManager
+
+STRATEGY_MANAGER_MODULE = importlib.import_module(
+    "nifty_scalper_bot.core.strategy_manager"
+)
+
+
+def _direction_manager() -> StrategyManager:
+    manager = object.__new__(StrategyManager)
+    manager._latest_context_snapshots = {}
+    return manager
+
+
+def _direction_inputs(side: str | None) -> dict[str, float]:
+    if side == "PE":
+        return {
+            "close": 99.0,
+            "vwap": 100.0,
+            "ema_fast": 99.0,
+            "ema_slow": 100.0,
+            "ema_50": 100.0,
+            "vwap_slope": -0.1,
+            "ema_slope": -0.1,
+        }
+    if side == "CE":
+        return {
+            "close": 101.0,
+            "vwap": 100.0,
+            "ema_fast": 101.0,
+            "ema_slow": 100.0,
+            "ema_50": 100.0,
+            "vwap_slope": 0.1,
+            "ema_slope": 0.1,
+        }
+    return {
+        "close": 100.0,
+        "vwap": 100.0,
+        "ema_fast": 100.0,
+        "ema_slow": 100.0,
+        "ema_50": 100.0,
+        "vwap_slope": 0.0,
+        "ema_slope": 0.0,
+    }
 
 
 def test_strategy_manager_context_age_uses_canonical_quote_age_schema() -> None:
@@ -117,3 +161,105 @@ def test_futures_context_derives_current_vwap_slope_from_hydrated_history() -> N
     assert snapshot["vwap_slope"] > 0
     assert snapshot["vwap_slope_source"] == "indicator_engine_history"
     assert "vwap_slope_positive" in snapshot["direction_context_reasons"]
+
+
+def test_transient_tick_reversal_cannot_flip_authoritative_source_direction(
+    monkeypatch,
+) -> None:
+    now = [1_000.0]
+    monkeypatch.setattr(STRATEGY_MANAGER_MODULE.time, "time", lambda: now[0])
+    manager = _direction_manager()
+    manager._update_context_snapshot(
+        symbol="NFO:NIFTY26SEPFUT",
+        indicators={**_direction_inputs("PE"), "recent_ltp_delta": -1.0},
+        role="futures_context",
+    )
+
+    now[0] += 1.0
+    manager._update_context_snapshot(
+        symbol="NFO:NIFTY26SEPFUT",
+        indicators={**_direction_inputs(None), "recent_ltp_delta": 1.0},
+        role="futures_context",
+    )
+
+    snapshot = manager._latest_context_snapshots["futures_context"]
+    assert snapshot["direction_bias"] == "PE"
+    assert "direction_tie_hysteresis" in snapshot["direction_context_reasons"]
+
+
+def test_tick_movement_cannot_manufacture_source_direction() -> None:
+    manager = _direction_manager()
+    manager._update_context_snapshot(
+        symbol="NSE:NIFTY",
+        indicators={**_direction_inputs(None), "recent_ltp_delta": 1.0},
+        role="spot_context",
+    )
+
+    snapshot = manager._latest_context_snapshots["spot_context"]
+    assert snapshot["direction_bias"] is None
+    assert "tick_slope_positive" in snapshot["direction_context_reasons"]
+
+
+def test_source_direction_switch_requires_persistent_contrary_structure(
+    monkeypatch,
+) -> None:
+    now = [2_000.0]
+    monkeypatch.setenv("STRATEGY_CONTEXT_REVERSAL_CONFIRM_SECONDS", "5")
+    monkeypatch.setenv("STRATEGY_CONTEXT_REVERSAL_MIN_OBSERVATIONS", "3")
+    monkeypatch.setattr(STRATEGY_MANAGER_MODULE.time, "time", lambda: now[0])
+    manager = _direction_manager()
+    manager._update_context_snapshot(
+        symbol="NFO:NIFTY26SEPFUT",
+        indicators=_direction_inputs("PE"),
+        role="futures_context",
+    )
+
+    for timestamp in (2_001.0, 2_003.0):
+        now[0] = timestamp
+        manager._update_context_snapshot(
+            symbol="NFO:NIFTY26SEPFUT",
+            indicators=_direction_inputs("CE"),
+            role="futures_context",
+        )
+        assert (
+            manager._latest_context_snapshots["futures_context"]["direction_bias"]
+            == "PE"
+        )
+
+    now[0] = 2_006.0
+    manager._update_context_snapshot(
+        symbol="NFO:NIFTY26SEPFUT",
+        indicators=_direction_inputs("CE"),
+        role="futures_context",
+    )
+    snapshot = manager._latest_context_snapshots["futures_context"]
+    assert snapshot["direction_bias"] == "CE"
+    assert "direction_reversal_confirmed" in snapshot["direction_context_reasons"]
+
+
+def test_temporary_direction_tie_expires_fail_closed(monkeypatch) -> None:
+    now = [3_000.0]
+    monkeypatch.setenv("STRATEGY_CONTEXT_TIE_GRACE_SECONDS", "5")
+    monkeypatch.setattr(STRATEGY_MANAGER_MODULE.time, "time", lambda: now[0])
+    manager = _direction_manager()
+    manager._update_context_snapshot(
+        symbol="NSE:NIFTY",
+        indicators=_direction_inputs("PE"),
+        role="spot_context",
+    )
+
+    now[0] = 3_002.0
+    manager._update_context_snapshot(
+        symbol="NSE:NIFTY",
+        indicators=_direction_inputs(None),
+        role="spot_context",
+    )
+    assert manager._latest_context_snapshots["spot_context"]["direction_bias"] == "PE"
+
+    now[0] = 3_006.0
+    manager._update_context_snapshot(
+        symbol="NSE:NIFTY",
+        indicators=_direction_inputs(None),
+        role="spot_context",
+    )
+    assert manager._latest_context_snapshots["spot_context"]["direction_bias"] is None

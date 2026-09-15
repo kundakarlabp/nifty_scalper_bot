@@ -26,6 +26,12 @@
    - `StrategyRunner` validates strategy state and creates an immutable `TradePlan`.
    - The runner submits only through `OrderManager.submit_trade_plan_result()`.
    - It must not call `place_order()` or any retired executor/processor directly.
+   - `core/strategy_manager.py` derives spot and futures direction separately.
+     Bar-structure evidence owns each source side; tick movement may adjust
+     confidence but cannot create or reverse the side. Brief ties retain the
+     last conclusive side for a bounded grace period, while opposite structure
+     must persist before a source reverses. Spot/futures disagreement is still
+     arbitrated independently and remains fail-closed.
 
 5. **Entry execution authority**
    - Public facade: `execution/order_manager.py`
