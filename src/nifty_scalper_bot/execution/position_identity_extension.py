@@ -17,6 +17,8 @@ from nifty_scalper_bot.execution.position_reconciliation_identity import (
     _canonical_key,
     _canonicalize_payload_symbol,
     _prepare_broker_positions,
+    _restore_owned_position_lifecycle,
+    _snapshot_owned_position_lifecycle,
 )
 from nifty_scalper_bot.execution.position_snapshot import (
     PositionSnapshotError,
@@ -315,4 +317,9 @@ def apply_patches() -> None:
 
 apply_patches()
 
-__all__ = ["apply_patches", "_prepare_broker_positions"]
+__all__ = [
+    "apply_patches",
+    "_prepare_broker_positions",
+    "_restore_owned_position_lifecycle",
+    "_snapshot_owned_position_lifecycle",
+]
