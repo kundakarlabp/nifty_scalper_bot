@@ -4417,6 +4417,16 @@ class StrategyManager(_BaseStrategyManager):
                 and selected_ok
                 and not vetoed
             )
+            setup_min = _safe_float_value(metadata.get("setup_min"))
+            canonical_smc_setup_pass = bool(
+                str(best_vote.strategy or "").strip().lower() == "smc"
+                and metadata.get("setup_pass") is True
+                and metadata.get("preliminary_only") is True
+                and metadata.get("requires_orderflow_confirmation") is True
+                and metadata.get("requires_runner_final_score") is True
+                and setup_min is not None
+                and raw_trigger_score >= setup_min
+            )
             # STRATEGY_ALLOW_SINGLE_VOTE_SCALP=false is the master default block
             # for an unconfirmed lone trigger. High-conviction/selected-option
             # overrides remain explicit; context-confirmed triggers use the
@@ -4519,12 +4529,20 @@ class StrategyManager(_BaseStrategyManager):
                     - context_penalty,
                 ),
             )
+            manager_context_score_reference_pass = bool(
+                context_confirmed_final_score >= context_confirmed_final_min
+            )
             context_confirmed_single_allowed = bool(
                 mode_profile.get("allow_single_vote", True)
-                and threshold_passed
+                and (threshold_passed or canonical_smc_setup_pass)
+                and best_vote.confidence >= conf_min
                 and selected_option
+                and not vetoed
                 and qualifying_context_votes
-                and context_confirmed_final_score >= context_confirmed_final_min
+                and (
+                    manager_context_score_reference_pass
+                    or canonical_smc_setup_pass
+                )
             )
             if qualifying_context_votes:
                 log.info(
@@ -4583,7 +4601,7 @@ class StrategyManager(_BaseStrategyManager):
             )
             blocked_reason = None
             if not final_allowed:
-                if not score_ok:
+                if not score_ok and not canonical_smc_setup_pass:
                     blocked_reason = "regime_weighted_score_below_min"
                 elif not conf_ok:
                     blocked_reason = "confidence_below_min"
@@ -4591,12 +4609,17 @@ class StrategyManager(_BaseStrategyManager):
                     blocked_reason = "not_selected_or_near_atm"
                 elif vetoed:
                     blocked_reason = "hard_context_veto"
+                elif (
+                    canonical_smc_setup_pass
+                    and not qualifying_context_votes
+                ):
+                    blocked_reason = "single_trigger_context_confirmation_invalid"
                 elif same_side_context and not qualifying_context_votes:
                     blocked_reason = "single_trigger_context_confirmation_invalid"
                 elif (
                     qualifying_context_votes
-                    and context_confirmed_final_score
-                    < context_confirmed_final_min
+                    and not manager_context_score_reference_pass
+                    and not canonical_smc_setup_pass
                 ):
                     blocked_reason = "single_trigger_context_score_below_min"
                 elif threshold_passed and not allow_scalp_single:
@@ -4679,6 +4702,10 @@ class StrategyManager(_BaseStrategyManager):
                 metadata["context_confirmation_score_min"] = round(
                     context_confirmed_final_min, 3
                 )
+                metadata["manager_context_score_reference_pass"] = (
+                    manager_context_score_reference_pass
+                )
+                metadata["canonical_smc_setup_pass"] = canonical_smc_setup_pass
             elif scalp_fallback_allowed:
                 metadata_stage = "single_vote_scalp_controlled"
                 approval_path = approval_path_single or "single_vote_fallback"
@@ -4710,7 +4737,7 @@ class StrategyManager(_BaseStrategyManager):
                     metadata["candidate_switch_requested"] = True
                     metadata["candidate_switch_reason"] = "high_score_nearby_option_candidate"
                 else:
-                    if not score_ok:
+                    if not score_ok and not canonical_smc_setup_pass:
                         blocked_reason = "regime_weighted_score_below_min"
                     elif not conf_ok:
                         blocked_reason = "confidence_below_min"
@@ -4720,12 +4747,17 @@ class StrategyManager(_BaseStrategyManager):
                         blocked_reason = "quote_depth_invalid"
                     elif vetoed:
                         blocked_reason = "hard_context_veto"
+                    elif (
+                        canonical_smc_setup_pass
+                        and not qualifying_context_votes
+                    ):
+                        blocked_reason = "single_trigger_context_confirmation_invalid"
                     elif same_side_context and not qualifying_context_votes:
                         blocked_reason = "single_trigger_context_confirmation_invalid"
                     elif (
                         qualifying_context_votes
-                        and context_confirmed_final_score
-                        < context_confirmed_final_min
+                        and not manager_context_score_reference_pass
+                        and not canonical_smc_setup_pass
                     ):
                         blocked_reason = "single_trigger_context_score_below_min"
                     elif not allow_scalp_single:
