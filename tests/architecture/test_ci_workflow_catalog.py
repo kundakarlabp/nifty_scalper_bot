@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from pathlib import Path
 
 
@@ -28,8 +26,8 @@ def test_ci_is_read_only_and_deduplicates_e2e_markers() -> None:
     assert "e2e-simulation:" in text
 
     normal_suite = (
-        'not slow and not simulation_component and not live_runtime_e2e '
-        'and not e2e_live_sim'
+        "not slow and not simulation_component and not live_runtime_e2e "
+        "and not e2e_live_sim"
     )
     e2e_suite = "simulation_component or live_runtime_e2e or e2e_live_sim"
     assert normal_suite in text
