@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import time
+
 import nifty_scalper_bot.execution  # noqa: F401 - applies runtime safety patches
 from nifty_scalper_bot.execution.position_manager import PositionManager
 
@@ -7,20 +10,20 @@ from nifty_scalper_bot.execution.position_manager import PositionManager
 SYMBOL = "NFO:NIFTY24JAN100CE"
 
 
+def _unresolved_position() -> dict[str, object]:
+    return {
+        "tradingsymbol": "NIFTY24JAN100CE",
+        "quantity": 65,
+        "average_price": 0,
+        "last_price": 88.55,
+        "product": "MIS",
+    }
+
+
 def test_unresolved_broker_position_is_quarantined(tmp_path):
     manager = PositionManager(str(tmp_path / "positions.json"))
 
-    manager.synchronize_with_broker(
-        [
-            {
-                "tradingsymbol": "NIFTY24JAN100CE",
-                "quantity": 65,
-                "average_price": 0,
-                "last_price": 88.55,
-                "product": "MIS",
-            }
-        ]
-    )
+    manager.synchronize_with_broker([_unresolved_position()])
 
     exposures = manager.get_quarantined_broker_exposures()
     assert list(exposures) == [SYMBOL]
@@ -32,3 +35,128 @@ def test_unresolved_broker_position_is_quarantined(tmp_path):
     assert exposure["requires_history_recovery"] is True
     assert manager.current_entry_protection_blocker(SYMBOL) == "broker_exposure_quarantined"
     assert manager.get_position(SYMBOL) is None
+
+
+def test_cost_basis_quarantine_persists_when_managed_positions_remain_empty(tmp_path):
+    state_file = tmp_path / "positions.json"
+    manager = PositionManager(str(state_file))
+
+    manager.synchronize_with_broker([_unresolved_position()])
+
+    payload = json.loads(state_file.read_text(encoding="utf-8"))
+    assert payload["quarantined_broker_exposures"][SYMBOL]["reason"] == "cost_basis_unresolved"
+    assert payload["cost_basis_unresolved_symbols"] == [SYMBOL]
+
+    restored = PositionManager(str(state_file))
+    exposure = restored.get_quarantined_broker_exposures()[SYMBOL]
+    assert exposure["reason"] == "cost_basis_unresolved"
+    assert restored.current_entry_protection_blocker(SYMBOL) == "broker_exposure_quarantined"
+    assert SYMBOL in restored._cost_basis_unresolved_symbols
+
+
+def test_cost_basis_sync_preserves_stronger_external_quarantine(tmp_path):
+    manager = PositionManager(str(tmp_path / "positions.json"))
+    manager._quarantined_broker_exposures[SYMBOL] = {
+        "symbol": SYMBOL,
+        "tradingsymbol": SYMBOL,
+        "quantity": 65,
+        "status": "BROKER_STATE_UNVERIFIED",
+        "reason": "broker_state_unverified",
+        "source": "broker_order_ledger",
+    }
+
+    manager.synchronize_with_broker([_unresolved_position()])
+
+    exposure = manager.get_quarantined_broker_exposures()[SYMBOL]
+    assert exposure["reason"] == "broker_state_unverified"
+    assert exposure["source"] == "broker_order_ledger"
+    assert manager.current_entry_protection_blocker(SYMBOL) == "broker_state_unverified"
+
+
+def test_masked_cost_basis_blocker_survives_clear_and_restart(tmp_path):
+    state_file = tmp_path / "positions.json"
+    manager = PositionManager(str(state_file))
+    manager._quarantined_broker_exposures[SYMBOL] = {
+        "symbol": SYMBOL,
+        "tradingsymbol": SYMBOL,
+        "quantity": 65,
+        "status": "BROKER_STATE_UNVERIFIED",
+        "reason": "broker_state_unverified",
+        "source": "broker_order_ledger",
+    }
+
+    manager.synchronize_with_broker([_unresolved_position()])
+    assert SYMBOL in manager._cost_basis_unresolved_symbols
+    assert manager.clear_quarantined_broker_exposure(SYMBOL) is True
+    assert manager.get_quarantined_broker_exposures() == {}
+    assert manager.current_entry_protection_blocker(SYMBOL) == "cost_basis_unresolved"
+
+    payload = json.loads(state_file.read_text(encoding="utf-8"))
+    assert payload["cost_basis_unresolved_symbols"] == [SYMBOL]
+
+    restored = PositionManager(str(state_file))
+    assert restored.get_quarantined_broker_exposures() == {}
+    assert SYMBOL in restored._cost_basis_unresolved_symbols
+    assert restored.current_entry_protection_blocker(SYMBOL) == "cost_basis_unresolved"
+
+
+def test_cost_basis_sync_removes_only_stale_cost_basis_rows(tmp_path):
+    manager = PositionManager(str(tmp_path / "positions.json"))
+    other = "NFO:NIFTY24JAN200CE"
+    manager._quarantined_broker_exposures = {
+        SYMBOL: {
+            "symbol": SYMBOL,
+            "reason": "cost_basis_unresolved",
+            "source": "broker_position_sync",
+        },
+        other: {
+            "symbol": other,
+            "reason": "broker_state_unverified",
+            "source": "broker_order_ledger",
+        },
+    }
+
+    manager.synchronize_with_broker([])
+
+    exposures = manager.get_quarantined_broker_exposures()
+    assert SYMBOL not in exposures
+    assert exposures[other]["reason"] == "broker_state_unverified"
+
+
+def test_registry_state_owner_serializes_after_runtime_patches() -> None:
+    owner = "nifty_scalper_bot.execution.position_registry_state"
+    assert PositionManager.save_state.__module__ == owner
+    assert PositionManager.load_state.__module__ == owner
+    assert PositionManager.synchronize_with_broker.__module__ == owner
+    assert PositionManager._canonical_registry_state_owner is True
+
+
+def test_canonical_writer_persists_and_restores_risk_runtime_atomically(tmp_path):
+    state_file = tmp_path / "positions.json"
+    manager = PositionManager(str(state_file))
+    today = manager._trading_date_ist()
+    manager._trades_today_date = today
+    manager._trades_today_count = 3
+    manager._recent_stop_thesis = {
+        "underlying": "NIFTY",
+        "option_side": "CE",
+        "symbol": SYMBOL,
+        "expires_epoch": time.time() + 300,
+    }
+    manager._risk_circuit_state = {
+        "trading_date": today,
+        "reason": "daily_loss_limit",
+    }
+
+    manager.save_state()
+
+    payload = json.loads(state_file.read_text(encoding="utf-8"))
+    assert payload["_risk_runtime"]["trades_today_count"] == 3
+    assert payload["_risk_runtime"]["risk_circuit"]["reason"] == "daily_loss_limit"
+    assert payload["broker_order_ledger"] == {}
+    assert payload["quarantined_broker_exposures"] == {}
+
+    restored = PositionManager(str(state_file))
+    assert restored.trades_today() == 3
+    assert restored._recent_stop_thesis["symbol"] == SYMBOL
+    assert restored.get_risk_circuit_state()["reason"] == "daily_loss_limit"
