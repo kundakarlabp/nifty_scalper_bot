@@ -1,14 +1,34 @@
-"""Production ASGI wrapper with release verification and low-resource off-hours mode.
+"""Production ASGI wrapper with release verification and off-hours quiet mode.
 
-Release freshness is always enforced before either the full trading application
-or the lightweight admin-only application binds the production port.
+File purpose:
+    Select either the canonical trading application or a lightweight admin-only
+    application after release verification.
+
+Key responsibilities:
+    - Enforce release freshness before binding the production port.
+    - Load the trading stack only when the operating policy requires it.
+    - Keep admin and operating-mode controls reachable while the engine is quiet.
+
+Operational constraints:
+    - Trading code must not be imported in QUIET/off-hours AUTO mode.
+    - Release verification remains mandatory in every operating mode.
+    - Operating-mode transitions restart the service rather than mutating a live
+      trading engine in place.
 """
 from __future__ import annotations
 
 from fastapi import FastAPI
 
-from nifty_scalper_bot.core.release_guard import enforce_release_freshness, start_release_watchdog_thread
-from nifty_scalper_bot.operating_control import engine_should_run, operating_mode, router as operating_router, start_transition_watchdog
+from nifty_scalper_bot.core.release_guard import (
+    enforce_release_freshness,
+    start_release_watchdog_thread,
+)
+from nifty_scalper_bot.operating_control import (
+    engine_should_run,
+    operating_mode,
+    start_transition_watchdog,
+)
+from nifty_scalper_bot.operating_control import router as operating_router
 
 _RELEASE = enforce_release_freshness()
 _RELEASE_WATCHDOG = start_release_watchdog_thread(_RELEASE)
@@ -18,7 +38,7 @@ if _ENGINE_EXPECTED:
     # Import trading code only when the configured operating profile requires it.
     from nifty_scalper_bot.main import app  # noqa: E402
 else:
-    # Keep a tiny management plane reachable while the expensive trading stack is asleep.
+    # Keep the management plane reachable while the trading stack is asleep.
     from nifty_scalper_bot.admin_dashboard import router as admin_router
 
     app = FastAPI(title="Nifty Scalper Quiet Control")
@@ -26,11 +46,22 @@ else:
 
     @app.get("/")
     def quiet_root() -> dict[str, object]:
-        return {"status": "online", "operating_mode": operating_mode(), "engine_loaded": False, "quiet": True}
+        return {
+            "status": "online",
+            "operating_mode": operating_mode(),
+            "engine_loaded": False,
+            "quiet": True,
+        }
 
     @app.get("/livez")
     def quiet_livez() -> dict[str, object]:
-        return {"status": "alive", "bot_loaded": False, "engine_http_responsive": True, "operating_mode": operating_mode(), "quiet": True}
+        return {
+            "status": "alive",
+            "bot_loaded": False,
+            "engine_http_responsive": True,
+            "operating_mode": operating_mode(),
+            "quiet": True,
+        }
 
 app.include_router(operating_router)
 app.state.release = _RELEASE.as_dict()
