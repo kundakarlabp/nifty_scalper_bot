@@ -8,10 +8,11 @@ itself change the fixed Lightsail bundle price.
 
 from __future__ import annotations
 
+import html
 import os
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from datetime import time as dt_time
 from zoneinfo import ZoneInfo
 
@@ -59,20 +60,45 @@ def _clock(name: str, default: dt_time) -> dt_time:
 
 def auto_window_active(now: datetime | None = None) -> bool:
     """Return whether the weekday engine warm/run window is active."""
-    now = now or datetime.now(IST)
-    local = now.astimezone(IST)
+    local = (now or datetime.now(IST)).astimezone(IST)
     if local.weekday() >= 5:
         return False
     clock = local.time().replace(tzinfo=None)
-    start = _clock("BOT_AUTO_START_IST", DEFAULT_START)
-    stop = _clock("BOT_AUTO_STOP_IST", DEFAULT_STOP)
-    return start <= clock < stop
+    return (
+        _clock("BOT_AUTO_START_IST", DEFAULT_START)
+        <= clock
+        < _clock("BOT_AUTO_STOP_IST", DEFAULT_STOP)
+    )
 
 
 def engine_should_run(now: datetime | None = None) -> bool:
     """Return whether the full trading engine should be loaded."""
     mode = operating_mode()
     return mode == "ACTIVE" or (mode == "AUTO" and auto_window_active(now))
+
+
+def next_auto_transition(now: datetime | None = None) -> str:
+    """Return a concise IST label for the next AUTO start/stop transition."""
+    local = (now or datetime.now(IST)).astimezone(IST)
+    start = _clock("BOT_AUTO_START_IST", DEFAULT_START)
+    stop = _clock("BOT_AUTO_STOP_IST", DEFAULT_STOP)
+    if local.weekday() < 5 and auto_window_active(local):
+        return f"Today {stop.strftime('%H:%M')} IST → QUIET"
+    candidate = local
+    for offset in range(0, 8):
+        day = (local + timedelta(days=offset)).date()
+        if day.weekday() >= 5:
+            continue
+        candidate = datetime.combine(day, start, tzinfo=IST)
+        if candidate > local:
+            if offset == 0:
+                label = "Today"
+            elif offset == 1:
+                label = "Tomorrow"
+            else:
+                label = candidate.strftime("%a %d %b")
+            return f"{label} {start.strftime('%H:%M')} IST → ACTIVE"
+    return candidate.strftime("%a %d %b %H:%M IST")
 
 
 def start_transition_watchdog(
@@ -101,48 +127,92 @@ def start_transition_watchdog(
     return thread
 
 
-def _mode_page(mode: str, running: bool) -> str:
-    state = "FULL ENGINE ACTIVE" if running else "QUIET — ADMIN ONLY"
-    buttons = []
-    choices = (
-        ("AUTO", "AUTO (recommended)"),
-        ("ACTIVE", "ACTIVE"),
-        ("QUIET", "QUIET"),
-    )
+def _mode_controls(mode: str, *, return_to: str = "/admin") -> str:
+    buttons: list[str] = []
+    choices = (("AUTO", "AUTO"), ("ACTIVE", "ACTIVE"), ("QUIET", "QUIET"))
+    safe_return = html.escape(return_to, quote=True)
     for value, label in choices:
         disabled = " disabled" if mode == value else ""
+        css = "gray" if value == "QUIET" else "blu" if value == "ACTIVE" else ""
         buttons.append(
-            '<form method="post" action="/power/mode">'
+            '<form method="post" action="/power/mode" style="display:inline">'
             f'<input type="hidden" name="mode" value="{value}">'
-            f"<button{disabled}>{label}</button></form>"
+            f'<input type="hidden" name="return_to" value="{safe_return}">'
+            f'<button class="{css}" type="submit"{disabled}>'
+            f"{label}</button></form>"
         )
-    controls = "".join(buttons)
-    return f"""<!doctype html>
-<html>
-<head>
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Nifty Bot Power</title>
-<style>
-body{{font-family:system-ui;background:#0a0e14;color:#e6edf3;
-max-width:720px;margin:40px auto;padding:16px}}
-.card{{background:#141b24;border:1px solid #263241;border-radius:14px;padding:22px}}
-button{{padding:12px 16px;margin:6px;border:0;border-radius:9px;
-background:#1f6feb;color:white;font-weight:700}}
-button:disabled{{background:#2ea043}}form{{display:inline}}
-a{{color:#58a6ff}}.muted{{color:#8b97a6}}
-</style>
-</head>
-<body><div class="card">
-<h2>Bot Operating Mode</h2><h3>{state}</h3>
-<p><b>Configured:</b> {mode}</p>
-<p class="muted">AUTO: full engine 08:55–15:40 IST Monday–Friday; outside that
-window only the lightweight API/admin process remains. ACTIVE overrides the
-schedule. QUIET immediately unloads trading activity after restart.</p>
-{controls}
-<p><a href="/admin">Admin dashboard</a> · <a href="/livez">Health</a></p>
-<p class="muted">Quiet mode reduces CPU/network work but does not remove the
-fixed Lightsail instance charge.</p>
-</div></body></html>"""
+    return "".join(buttons)
+
+
+def admin_power_card() -> str:
+    """Render operating controls inside the existing admin dashboard."""
+    mode = operating_mode()
+    running = engine_should_run()
+    state = "FULL ENGINE ACTIVE" if running else "QUIET — ADMIN ONLY"
+    state_class = "on" if running else "off"
+    start = _clock("BOT_AUTO_START_IST", DEFAULT_START).strftime("%H:%M")
+    stop = _clock("BOT_AUTO_STOP_IST", DEFAULT_STOP).strftime("%H:%M")
+    transition = next_auto_transition()
+    controls = _mode_controls(mode)
+    return (
+        '<div class="card session">'
+        "<h2>Operating Mode &amp; Off-hours Power</h2>"
+        f'<p><span class="pill {state_class}">● {state}</span> '
+        f"&nbsp; Configured: <b>{mode}</b></p>"
+        f"<p><b>AUTO (recommended)</b> runs the full trading engine "
+        f"{start}–{stop} IST on weekdays and keeps only the lightweight "
+        "admin/API process outside that window.</p>"
+        f'<div class="row">{controls}</div>'
+        '<p class="muted" style="margin-top:12px">'
+        f"Next AUTO transition: <b>{transition}</b>. ACTIVE is a manual "
+        "always-on override; QUIET is a manual sleep override. Changing "
+        "mode restarts the bot service once.</p></div>"
+    )
+
+
+def install_admin_power_card() -> None:
+    """Inject the operating card into the existing admin page."""
+    from nifty_scalper_bot import admin_dashboard
+
+    if getattr(admin_dashboard, "_OPERATING_CARD_INSTALLED", False):
+        return
+    original_page = admin_dashboard._page
+
+    def page_with_operating_card(body: str) -> str:
+        marker = "<div class=wrap>"
+        if marker in body:
+            body = body.replace(marker, marker + admin_power_card(), 1)
+        return original_page(body)
+
+    admin_dashboard._page = page_with_operating_card
+    admin_dashboard._OPERATING_CARD_INSTALLED = True
+
+
+def _mode_page(mode: str, running: bool) -> str:
+    state = "FULL ENGINE ACTIVE" if running else "QUIET — ADMIN ONLY"
+    controls = _mode_controls(mode, return_to="/power")
+    transition = next_auto_transition()
+    return (
+        "<!doctype html><html><head>"
+        '<meta name="viewport" content="width=device-width,initial-scale=1">'
+        "<title>Nifty Bot Power</title><style>"
+        "body{font-family:system-ui;background:#0a0e14;color:#e6edf3;"
+        "max-width:720px;margin:40px auto;padding:16px}"
+        ".card{background:#141b24;border:1px solid #263241;"
+        "border-radius:14px;padding:22px}"
+        "button{padding:12px 16px;margin:6px;border:0;border-radius:9px;"
+        "background:#1f6feb;color:white;font-weight:700}"
+        "button:disabled{background:#2ea043}form{display:inline}"
+        "a{color:#58a6ff}.muted{color:#8b97a6}</style></head>"
+        '<body><div class="card"><h2>Bot Operating Mode</h2>'
+        f"<h3>{state}</h3><p><b>Configured:</b> {mode}</p>"
+        '<p class="muted">AUTO: full engine 08:55–15:40 IST '
+        "Monday–Friday; ACTIVE overrides the schedule; QUIET keeps only "
+        "admin/API alive.</p>"
+        f"{controls}<p><b>Next AUTO transition:</b> {transition}</p>"
+        '<p><a href="/admin">Admin dashboard</a> · '
+        '<a href="/livez">Health</a></p></div></body></html>'
+    )
 
 
 @router.get("/power", response_class=HTMLResponse)
@@ -156,12 +226,14 @@ def power_page(request: Request) -> HTMLResponse:
 def set_operating_mode(
     request: Request,
     mode: str = Form(...),
+    return_to: str = Form("/admin"),
 ) -> RedirectResponse:
     """Persist a validated operating mode and restart the service."""
     _check_auth(request)
     selected = mode.strip().upper()
+    target = return_to if return_to in {"/admin", "/power"} else "/admin"
     if selected not in VALID_MODES:
-        return RedirectResponse("/power", status_code=303)
+        return RedirectResponse(target, status_code=303)
     _write_env(
         {
             "BOT_OPERATING_MODE": selected,
@@ -170,4 +242,4 @@ def set_operating_mode(
         }
     )
     _restart_service()
-    return RedirectResponse("/power", status_code=303)
+    return RedirectResponse(target, status_code=303)
