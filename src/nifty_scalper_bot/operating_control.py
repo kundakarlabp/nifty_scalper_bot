@@ -44,7 +44,11 @@ def operating_mode() -> str:
 
 
 def _clock(name: str, default: dt_time) -> dt_time:
-    raw = (_read_env().get(name) or os.getenv(name) or default.strftime("%H:%M")).strip()
+    raw = (
+        _read_env().get(name)
+        or os.getenv(name)
+        or default.strftime("%H:%M")
+    ).strip()
     try:
         hour, minute = (int(part) for part in raw.split(":", 1))
         return dt_time(hour, minute)
@@ -83,13 +87,22 @@ def next_auto_transition(now: datetime | None = None) -> str:
             continue
         candidate = datetime.combine(day, start, tzinfo=IST)
         if candidate > local:
-            label = "Today" if offset == 0 else "Tomorrow" if offset == 1 else candidate.strftime("%a %d %b")
+            if offset == 0:
+                label = "Today"
+            elif offset == 1:
+                label = "Tomorrow"
+            else:
+                label = candidate.strftime("%a %d %b")
             return f"{label} {start.strftime('%H:%M')} IST → ACTIVE"
     return candidate.strftime("%a %d %b %H:%M IST")
 
 
-def start_transition_watchdog(initial_should_run: bool, interval_seconds: int = 30) -> threading.Thread:
+def start_transition_watchdog(
+    initial_should_run: bool,
+    interval_seconds: int = 30,
+) -> threading.Thread:
     """Restart the service only when AUTO crosses an active/quiet boundary."""
+
     def watch() -> None:
         expected = initial_should_run
         while True:
@@ -101,7 +114,11 @@ def start_transition_watchdog(initial_should_run: bool, interval_seconds: int = 
                 _restart_service()
                 return
 
-    thread = threading.Thread(target=watch, name="operating-mode-watchdog", daemon=True)
+    thread = threading.Thread(
+        target=watch,
+        name="operating-mode-watchdog",
+        daemon=True,
+    )
     thread.start()
     return thread
 
@@ -109,36 +126,48 @@ def start_transition_watchdog(initial_should_run: bool, interval_seconds: int = 
 def _mode_controls(mode: str, *, return_to: str = "/admin") -> str:
     buttons: list[str] = []
     choices = (("AUTO", "AUTO"), ("ACTIVE", "ACTIVE"), ("QUIET", "QUIET"))
+    safe_return = html.escape(return_to, quote=True)
     for value, label in choices:
         disabled = " disabled" if mode == value else ""
         css = "gray" if value == "QUIET" else "blu" if value == "ACTIVE" else ""
         buttons.append(
             '<form method="post" action="/power/mode" style="display:inline">'
             f'<input type="hidden" name="mode" value="{value}">'
-            f'<input type="hidden" name="return_to" value="{html.escape(return_to, quote=True)}">'
-            f'<button class="{css}" type="submit"{disabled}>{label}</button></form>'
+            f'<input type="hidden" name="return_to" value="{safe_return}">'
+            f'<button class="{css}" type="submit"{disabled}>'
+            f"{label}</button></form>"
         )
     return "".join(buttons)
 
 
 def admin_power_card() -> str:
-    """Render the canonical operating-mode card for the existing admin dashboard."""
+    """Render operating controls inside the existing admin dashboard."""
     mode = operating_mode()
     running = engine_should_run()
     state = "FULL ENGINE ACTIVE" if running else "QUIET — ADMIN ONLY"
     state_class = "on" if running else "off"
     start = _clock("BOT_AUTO_START_IST", DEFAULT_START).strftime("%H:%M")
     stop = _clock("BOT_AUTO_STOP_IST", DEFAULT_STOP).strftime("%H:%M")
-    return f"""<div class="card session"><h2>Operating Mode &amp; Off-hours Power</h2>
-    <p><span class="pill {state_class}">● {state}</span> &nbsp; Configured: <b>{mode}</b></p>
-    <p><b>AUTO (recommended)</b> runs the full trading engine {start}–{stop} IST on weekdays and keeps only the lightweight admin/API process outside that window.</p>
-    <div class="row">{_mode_controls(mode)}</div>
-    <p class="muted" style="margin-top:12px">Next AUTO transition: <b>{next_auto_transition()}</b>. ACTIVE is a manual always-on override; QUIET is a manual sleep override. Changing mode restarts the bot service once.</p>
-    </div>"""
+    transition = next_auto_transition()
+    controls = _mode_controls(mode)
+    return (
+        '<div class="card session">'
+        "<h2>Operating Mode &amp; Off-hours Power</h2>"
+        f'<p><span class="pill {state_class}">● {state}</span> '
+        f"&nbsp; Configured: <b>{mode}</b></p>"
+        f"<p><b>AUTO (recommended)</b> runs the full trading engine "
+        f"{start}–{stop} IST on weekdays and keeps only the lightweight "
+        "admin/API process outside that window.</p>"
+        f'<div class="row">{controls}</div>'
+        '<p class="muted" style="margin-top:12px">'
+        f"Next AUTO transition: <b>{transition}</b>. ACTIVE is a manual "
+        "always-on override; QUIET is a manual sleep override. Changing "
+        "mode restarts the bot service once.</p></div>"
+    )
 
 
 def install_admin_power_card() -> None:
-    """Inject the operating card into the legacy admin page without duplicating its routes."""
+    """Inject the operating card into the existing admin page."""
     from nifty_scalper_bot import admin_dashboard
 
     if getattr(admin_dashboard, "_OPERATING_CARD_INSTALLED", False):
@@ -157,12 +186,29 @@ def install_admin_power_card() -> None:
 
 def _mode_page(mode: str, running: bool) -> str:
     state = "FULL ENGINE ACTIVE" if running else "QUIET — ADMIN ONLY"
-    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Nifty Bot Power</title><style>body{{font-family:system-ui;background:#0a0e14;color:#e6edf3;max-width:720px;margin:40px auto;padding:16px}}.card{{background:#141b24;border:1px solid #263241;border-radius:14px;padding:22px}}button{{padding:12px 16px;margin:6px;border:0;border-radius:9px;background:#1f6feb;color:white;font-weight:700}}button:disabled{{background:#2ea043}}form{{display:inline}}a{{color:#58a6ff}}.muted{{color:#8b97a6}}</style></head>
-<body><div class="card"><h2>Bot Operating Mode</h2><h3>{state}</h3><p><b>Configured:</b> {mode}</p>
-<p class="muted">AUTO: full engine 08:55–15:40 IST Monday–Friday; ACTIVE overrides the schedule; QUIET keeps only admin/API alive.</p>
-{_mode_controls(mode, return_to='/power')}<p><b>Next AUTO transition:</b> {next_auto_transition()}</p>
-<p><a href="/admin">Admin dashboard</a> · <a href="/livez">Health</a></p></div></body></html>"""
+    controls = _mode_controls(mode, return_to="/power")
+    transition = next_auto_transition()
+    return (
+        "<!doctype html><html><head>"
+        '<meta name="viewport" content="width=device-width,initial-scale=1">'
+        "<title>Nifty Bot Power</title><style>"
+        "body{font-family:system-ui;background:#0a0e14;color:#e6edf3;"
+        "max-width:720px;margin:40px auto;padding:16px}"
+        ".card{background:#141b24;border:1px solid #263241;"
+        "border-radius:14px;padding:22px}"
+        "button{padding:12px 16px;margin:6px;border:0;border-radius:9px;"
+        "background:#1f6feb;color:white;font-weight:700}"
+        "button:disabled{background:#2ea043}form{display:inline}"
+        "a{color:#58a6ff}.muted{color:#8b97a6}</style></head>"
+        '<body><div class="card"><h2>Bot Operating Mode</h2>'
+        f"<h3>{state}</h3><p><b>Configured:</b> {mode}</p>"
+        '<p class="muted">AUTO: full engine 08:55–15:40 IST '
+        "Monday–Friday; ACTIVE overrides the schedule; QUIET keeps only "
+        "admin/API alive.</p>"
+        f"{controls}<p><b>Next AUTO transition:</b> {transition}</p>"
+        '<p><a href="/admin">Admin dashboard</a> · '
+        '<a href="/livez">Health</a></p></div></body></html>'
+    )
 
 
 @router.get("/power", response_class=HTMLResponse)
@@ -184,10 +230,12 @@ def set_operating_mode(
     target = return_to if return_to in {"/admin", "/power"} else "/admin"
     if selected not in VALID_MODES:
         return RedirectResponse(target, status_code=303)
-    _write_env({
-        "BOT_OPERATING_MODE": selected,
-        "BOT_AUTO_START_IST": "08:55",
-        "BOT_AUTO_STOP_IST": "15:40",
-    })
+    _write_env(
+        {
+            "BOT_OPERATING_MODE": selected,
+            "BOT_AUTO_START_IST": "08:55",
+            "BOT_AUTO_STOP_IST": "15:40",
+        }
+    )
     _restart_service()
     return RedirectResponse(target, status_code=303)
