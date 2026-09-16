@@ -64,8 +64,10 @@ def auto_window_active(now: datetime | None = None) -> bool:
     if local.weekday() >= 5:
         return False
     clock = local.time().replace(tzinfo=None)
-    return _clock("BOT_AUTO_START_IST", DEFAULT_START) <= clock < _clock(
-        "BOT_AUTO_STOP_IST", DEFAULT_STOP
+    return (
+        _clock("BOT_AUTO_START_IST", DEFAULT_START)
+        <= clock
+        < _clock("BOT_AUTO_STOP_IST", DEFAULT_STOP)
     )
 
 
@@ -177,7 +179,7 @@ def install_admin_power_card() -> None:
     original_page = admin_dashboard._page
 
     def page_with_operating_card(body: str) -> str:
-        marker = '<div class=wrap>'
+        marker = "<div class=wrap>"
         if marker in body:
             body = body.replace(marker, marker + admin_power_card(), 1)
         return original_page(body)
