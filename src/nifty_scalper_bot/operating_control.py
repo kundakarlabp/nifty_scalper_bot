@@ -36,18 +36,20 @@ router = APIRouter()
 def operating_mode() -> str:
     """Return canonical configured operating mode."""
     value = (
-        _read_env().get("BOT_OPERATING_MODE")
-        or os.getenv("BOT_OPERATING_MODE")
-        or "AUTO"
-    ).strip().upper()
+        (
+            _read_env().get("BOT_OPERATING_MODE")
+            or os.getenv("BOT_OPERATING_MODE")
+            or "AUTO"
+        )
+        .strip()
+        .upper()
+    )
     return value if value in VALID_MODES else "AUTO"
 
 
 def _clock(name: str, default: dt_time) -> dt_time:
     raw = (
-        _read_env().get(name)
-        or os.getenv(name)
-        or default.strftime("%H:%M")
+        _read_env().get(name) or os.getenv(name) or default.strftime("%H:%M")
     ).strip()
     try:
         hour, minute = (int(part) for part in raw.split(":", 1))
