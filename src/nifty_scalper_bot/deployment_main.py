@@ -15,6 +15,7 @@ Operational constraints:
     - Operating-mode transitions restart the service rather than mutating a live
       trading engine in place.
 """
+
 from __future__ import annotations
 
 from fastapi import FastAPI
@@ -62,6 +63,7 @@ else:
             "operating_mode": operating_mode(),
             "quiet": True,
         }
+
 
 app.include_router(operating_router)
 app.state.release = _RELEASE.as_dict()
