@@ -5,6 +5,8 @@ from typing import cast
 
 from nifty_scalper_bot.core import app
 
+# The previous selected pair remains authoritative until both new delivery edges are proven.
+
 
 def _ctx(old_ce: str, old_pe: str) -> SimpleNamespace:
     return SimpleNamespace(
