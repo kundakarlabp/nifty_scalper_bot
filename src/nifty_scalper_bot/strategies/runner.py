@@ -899,6 +899,10 @@ class StrategyRunner:
         self._last_same_bar_eval_ts_by_symbol: dict[str, float] = {}
         self._last_periodic_eval_at_by_symbol: dict[str, float] = {}
         self._last_eval_bar_key_by_symbol: dict[str, Any] = {}
+        self._last_eval_direction_generation_by_symbol: dict[
+            str, tuple[tuple[str, int, str], ...]
+        ] = {}
+        self._last_strategy_eval_wall_ts_by_symbol: dict[str, float] = {}
         self._last_pregate_log_at_by_symbol_reason: dict[tuple[str, str], float] = {}
         self._last_eval_price_by_symbol: dict[str, float] = {}
         self._last_same_bar_eval_block_reason_by_symbol: dict[str, str] = {}
@@ -12138,15 +12142,38 @@ class StrategyRunner:
             "quote_update_version": self._quote_update_version_for_eval(symbol_norm),
             "data_phase": (getattr(self, "_data_phase", {}) or {}).get(symbol_norm),
         }
+        direction_retry = self._direction_context_retry_due(symbol_norm)
+        details.update(direction_retry)
         if (
             last_bar_key == current_bar_key
             and last_eval_at > 0
             and elapsed is not None
             and elapsed < interval
+            and not direction_retry["direction_context_retry_due"]
         ):
             details["pregate_reason"] = "same_bar_periodic_eval_throttled"
             self._bump_cpu_metric("skipped_by_eval_throttle")
             return True, "same_bar_periodic_eval_throttled", details
+        if (
+            last_bar_key == current_bar_key
+            and last_eval_at > 0
+            and elapsed is not None
+            and elapsed < interval
+            and direction_retry["direction_context_retry_due"]
+        ):
+            self._logger.info(
+                "RUNNER_CONTEXT_GENERATION_REEVALUATION symbol=%s "
+                "previous_reason=%s previous_generation=%s current_generation=%s",
+                symbol_norm,
+                direction_retry.get("previous_context_block_reason"),
+                direction_retry.get("last_eval_direction_context_generation"),
+                direction_retry.get("direction_context_generation"),
+                extra={
+                    "event": "RUNNER_CONTEXT_GENERATION_REEVALUATION",
+                    "symbol": symbol_norm,
+                    **direction_retry,
+                },
+            )
         # CPU shortcut: during the midday pause with no open positions there is
         # nothing a full strategy evaluation could lead to (entries blocked),
         # so skip it entirely. Exit management and data health are untouched.
@@ -12168,6 +12195,89 @@ class StrategyRunner:
             return True, "eval_capped_far_strike", details
         self._bump_cpu_metric("evaluated_symbols")
         return False, "ok", details
+
+    def _current_direction_context_generation(
+        self,
+    ) -> tuple[tuple[str, int, str], ...]:
+        """Return the completed-bar identity of authoritative context sources."""
+        versions = getattr(self, "_candle_versions", {}) or {}
+        last_bars = getattr(self, "_last_bar_ts", {}) or {}
+        generation: list[tuple[str, int, str]] = []
+        for context_symbol in sorted(getattr(self, "_active_symbols", set()) or set()):
+            if self._symbol_role_for_runner(context_symbol) not in {
+                "spot_context",
+                "futures_context",
+            }:
+                continue
+            raw_bar = last_bars.get(context_symbol)
+            bar_identity = (
+                raw_bar.isoformat()
+                if hasattr(raw_bar, "isoformat")
+                else str(raw_bar or "")
+            )
+            generation.append(
+                (
+                    context_symbol,
+                    int(versions.get(context_symbol, 0) or 0),
+                    bar_identity,
+                )
+            )
+        return tuple(generation)
+
+    def _direction_context_retry_due(self, symbol: str) -> dict[str, Any]:
+        """Allow one prompt retry after a context-only direction rejection."""
+        symbol_norm = normalize_symbol(symbol)
+        current_generation = self._current_direction_context_generation()
+        last_generation = (
+            getattr(self, "_last_eval_direction_generation_by_symbol", {}) or {}
+        ).get(symbol_norm, ())
+        details = {
+            "direction_context_generation": current_generation,
+            "last_eval_direction_context_generation": last_generation,
+            "direction_context_retry_due": False,
+        }
+        if (
+            self._symbol_role_for_runner(symbol_norm) != "tradable_option"
+            or current_generation == last_generation
+        ):
+            return details
+        decision_getter = getattr(
+            getattr(self, "_strategy_manager", None),
+            "get_last_no_signal_decision",
+            None,
+        )
+        if not callable(decision_getter):
+            return details
+        decision = decision_getter(symbol_norm)
+        if decision is None:
+            return details
+        reason = str(
+            getattr(decision, "final_block_reason", None)
+            or getattr(decision, "reason", "")
+            or ""
+        )
+        if reason not in {
+            "underlying_direction_conflict",
+            "underlying_direction_unresolved",
+            "direction_context_missing_live",
+            "direction_context_not_ready",
+        }:
+            return details
+        try:
+            decision_created_ts = float(getattr(decision, "created_ts", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return details
+        last_eval_wall_ts = float(
+            (getattr(self, "_last_strategy_eval_wall_ts_by_symbol", {}) or {}).get(
+                symbol_norm, 0.0
+            )
+            or 0.0
+        )
+        if decision_created_ts < last_eval_wall_ts:
+            return details
+        details["direction_context_retry_due"] = True
+        details["previous_context_block_reason"] = reason
+        return details
 
     def _compute_eval_option_whitelist(
         self,
@@ -12279,7 +12389,15 @@ class StrategyRunner:
             self._last_periodic_eval_at_by_symbol = {}
         if not hasattr(self, "_last_eval_bar_key_by_symbol"):
             self._last_eval_bar_key_by_symbol = {}
+        if not hasattr(self, "_last_eval_direction_generation_by_symbol"):
+            self._last_eval_direction_generation_by_symbol = {}
+        if not hasattr(self, "_last_strategy_eval_wall_ts_by_symbol"):
+            self._last_strategy_eval_wall_ts_by_symbol = {}
         self._last_periodic_eval_at_by_symbol[symbol_norm] = time.monotonic()
+        self._last_strategy_eval_wall_ts_by_symbol[symbol_norm] = time.time()
+        self._last_eval_direction_generation_by_symbol[symbol_norm] = (
+            self._current_direction_context_generation()
+        )
         self._last_eval_bar_key_by_symbol[symbol_norm] = (
             bar_key
             if bar_key is not None
