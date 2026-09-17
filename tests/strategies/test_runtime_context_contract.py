@@ -116,6 +116,41 @@ def test_resolve_context_age_seconds_uses_canonical_safe_default() -> None:
     assert resolve_context_age_seconds({}) == 999.0
 
 
+def test_resolve_context_age_seconds_uses_source_age_provenance() -> None:
+    assert resolve_context_age_seconds({"spot_age_seconds": 0.02}) == 0.02
+    assert resolve_context_age_seconds({"futures_tick_age_s": 0.03}) == 0.03
+    assert (
+        resolve_context_age_seconds(
+            {"spot_age_seconds": 0.02, "futures_age_seconds": 0.04}
+        )
+        == 0.04
+    )
+    assert (
+        resolve_context_age_seconds(
+            {
+                "context_age_seconds": "invalid",
+                "spot_tick_age_s": 0.01,
+                "futures_tick_age_s": 0.02,
+            }
+        )
+        == 0.02
+    )
+
+
+def test_normalise_derives_canonical_context_age_from_source_ages() -> None:
+    preserved = normalise_live_direction_context(
+        {
+            "spot_age_seconds": 0.01,
+            "futures_age_seconds": 0.02,
+        }
+    )
+
+    assert preserved["context_age_seconds"] == 0.02
+    assert preserved["spot_fresh"] is True
+    assert preserved["fut_fresh"] is True
+    assert preserved["live_direction_context_proof"] is True
+
+
 def test_normalise_current_age_overrides_stale_cached_false_freshness() -> None:
     preserved = normalise_live_direction_context(
         {

@@ -100,16 +100,36 @@ def _coerce_age_seconds(value: Any) -> float | None:
     return age
 
 
+def _source_context_age_seconds(context: Mapping[str, Any]) -> float | None:
+    """Return conservative current age from canonical spot/futures age evidence."""
+    source_ages: list[float] = []
+    for keys in (
+        ("spot_age_seconds", "spot_tick_age_s"),
+        ("futures_age_seconds", "futures_tick_age_s"),
+    ):
+        for key in keys:
+            age = _coerce_age_seconds(context.get(key))
+            if age is not None:
+                source_ages.append(age)
+                break
+    if not source_ages:
+        return None
+    # When both underlying sources participate, the older one is the safe
+    # composite age. A single available source remains valid provenance.
+    return max(source_ages)
+
+
 def resolve_context_age_seconds(
     context: Mapping[str, Any], default: float = 999.0
 ) -> float:
-    """Return normalized context age, failing closed for missing/invalid values."""
-    age = (
-        _coerce_age_seconds(context.get("context_age_seconds"))
-        if isinstance(context, Mapping)
-        else None
-    )
-    return age if age is not None else float(default)
+    """Return normalized context age, failing closed only without age evidence."""
+    if not isinstance(context, Mapping):
+        return float(default)
+    explicit_age = _coerce_age_seconds(context.get("context_age_seconds"))
+    if explicit_age is not None:
+        return explicit_age
+    source_age = _source_context_age_seconds(context)
+    return source_age if source_age is not None else float(default)
 
 
 def _coerce_timestamp(value: Any) -> datetime | None:
@@ -180,6 +200,8 @@ def live_direction_context_has_proof(
     if fut_fresh is None:
         fut_fresh = derived_fut
     context_age = _coerce_age_seconds(context.get("context_age_seconds"))
+    if context_age is None:
+        context_age = _source_context_age_seconds(context)
     context_age_ok = context_age is None or context_age <= max_age
     return bool(context_age_ok and (spot_fresh or fut_fresh))
 
@@ -238,6 +260,11 @@ def normalise_live_direction_context(context: Mapping[str, Any]) -> dict[str, An
                     0.0, time.time() - ts.timestamp()
                 )
                 break
+        else:
+            source_age = _source_context_age_seconds(context)
+            if source_age is not None:
+                preserved["context_age_seconds"] = source_age
+
     preserved["live_direction_context_proof"] = live_direction_context_has_proof(
         preserved, max_age_seconds=max_age
     )
