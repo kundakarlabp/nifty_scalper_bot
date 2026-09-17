@@ -6,22 +6,12 @@ from nifty_scalper_bot.core.underlying_direction import (
 )
 
 
-def _obs(
-    bias: str,
-    *,
-    source: str,
-    age: float,
-    confidence: float = 0.8,
-    reversal_candidate: str | None = None,
-    reversal_observations: int = 0,
-):
+def _obs(bias: str, *, source: str, age: float, confidence: float = 0.8):
     return UnderlyingDirectionObservation(
         bias=bias,
         confidence=confidence,
         age_seconds=age,
         source=source,
-        reversal_candidate=reversal_candidate,
-        reversal_observations=reversal_observations,
     )
 
 
@@ -70,35 +60,32 @@ def test_materially_stronger_futures_can_override_weak_spot() -> None:
     assert resolved.confirming_source == "spot_context:weak_disagreement"
 
 
-def test_transition_candidate_alignment_does_not_false_conflict() -> None:
-    futures = _obs("CE", source="futures_context", age=0.1, confidence=0.75)
-    spot = _obs(
-        "PE",
-        source="spot_context",
-        age=0.2,
-        confidence=0.60,
-        reversal_candidate="CE",
-        reversal_observations=1,
+def test_confirmed_leader_resolves_weak_transition_hysteresis_band() -> None:
+    resolved = arbitrate_underlying_direction(
+        _obs("PE", source="spot_context", age=0.2, confidence=0.60),
+        _obs("CE", source="futures_context", age=0.1, confidence=0.75),
     )
 
-    resolved = arbitrate_underlying_direction(spot, futures)
-
     assert resolved.conflict is False
-    assert resolved.observation is futures
-    assert resolved.confirming_source == "spot_context:transition_candidate"
+    assert resolved.observation is not None
+    assert resolved.observation.bias == "CE"
+    assert resolved.confirming_source == "spot_context:weak_transition"
 
 
-def test_transition_candidate_does_not_override_credible_opposition() -> None:
+def test_transition_band_does_not_override_credible_opposition() -> None:
     resolved = arbitrate_underlying_direction(
-        _obs(
-            "PE",
-            source="spot_context",
-            age=0.2,
-            confidence=0.66,
-            reversal_candidate="CE",
-            reversal_observations=2,
-        ),
-        _obs("CE", source="futures_context", age=0.1, confidence=0.78),
+        _obs("PE", source="spot_context", age=0.2, confidence=0.61),
+        _obs("CE", source="futures_context", age=0.1, confidence=0.75),
+    )
+
+    assert resolved.conflict is True
+    assert resolved.observation is None
+
+
+def test_transition_band_requires_confirmed_leader() -> None:
+    resolved = arbitrate_underlying_direction(
+        _obs("PE", source="spot_context", age=0.2, confidence=0.60),
+        _obs("CE", source="futures_context", age=0.1, confidence=0.74),
     )
 
     assert resolved.conflict is True
