@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import logging
+from types import SimpleNamespace
 
 from nifty_scalper_bot.strategies.runner import StrategyRunner, StrategyRunnerConfig
-
 
 OPTION = "NFO:NIFTY26JUN23800CE"
 SPOT = "NSE:NIFTY"
@@ -31,6 +31,8 @@ def _runner(*, cfg: StrategyRunnerConfig | None = None) -> StrategyRunner:
     r._last_tick = {}
     r._last_periodic_eval_at_by_symbol = {}
     r._last_eval_bar_key_by_symbol = {}
+    r._last_eval_direction_generation_by_symbol = {}
+    r._last_strategy_eval_wall_ts_by_symbol = {}
     r._last_pregate_log_at_by_symbol_reason = {}
     r._quote_update_versions = {OPTION: 7}
     r._candle_versions = {OPTION: 1, SPOT: 1, FUT: 1}
@@ -46,6 +48,14 @@ def _runner(*, cfg: StrategyRunnerConfig | None = None) -> StrategyRunner:
     return r
 
 
+class DirectionAwareStrategyManager:
+    def __init__(self) -> None:
+        self.decision = None
+
+    def get_last_no_signal_decision(self, symbol: str):  # noqa: ANN201, ARG002
+        return self.decision
+
+
 def _run_eval_if_allowed(
     runner: StrategyRunner,
     evaluator: EvalCounter,
@@ -53,7 +63,9 @@ def _run_eval_if_allowed(
     *,
     bar_key="bar-1",
 ) -> str:
-    skipped, reason, details = runner._should_skip_symbol_eval(symbol, {"ltp": 100.0}, bar_key=bar_key)
+    skipped, reason, details = runner._should_skip_symbol_eval(
+        symbol, {"ltp": 100.0}, bar_key=bar_key
+    )
     if skipped:
         return reason
     runner._mark_symbol_eval_allowed(symbol, bar_key=details.get("bar_key"))
@@ -61,15 +73,22 @@ def _run_eval_if_allowed(
     return reason
 
 
-def test_same_bar_tick_within_5_seconds_does_not_call_strategy_again(monkeypatch) -> None:
+def test_same_bar_tick_within_5_seconds_does_not_call_strategy_again(
+    monkeypatch,
+) -> None:
     runner = _runner()
     evaluator = EvalCounter()
     clock = [100.0]
-    monkeypatch.setattr("nifty_scalper_bot.strategies.runner.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        "nifty_scalper_bot.strategies.runner.time.monotonic", lambda: clock[0]
+    )
 
     assert _run_eval_if_allowed(runner, evaluator, bar_key="bar-1") == "ok"
     clock[0] = 102.0
-    assert _run_eval_if_allowed(runner, evaluator, bar_key="bar-1") == "same_bar_periodic_eval_throttled"
+    assert (
+        _run_eval_if_allowed(runner, evaluator, bar_key="bar-1")
+        == "same_bar_periodic_eval_throttled"
+    )
     assert evaluator.calls == 1
 
 
@@ -77,7 +96,9 @@ def test_same_bar_tick_after_5_seconds_allows_periodic_evaluation(monkeypatch) -
     runner = _runner()
     evaluator = EvalCounter()
     clock = [100.0]
-    monkeypatch.setattr("nifty_scalper_bot.strategies.runner.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        "nifty_scalper_bot.strategies.runner.time.monotonic", lambda: clock[0]
+    )
 
     assert _run_eval_if_allowed(runner, evaluator, bar_key="bar-1") == "ok"
     clock[0] = 105.1
@@ -89,7 +110,9 @@ def test_new_candle_allows_evaluation_immediately(monkeypatch) -> None:
     runner = _runner()
     evaluator = EvalCounter()
     clock = [100.0]
-    monkeypatch.setattr("nifty_scalper_bot.strategies.runner.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        "nifty_scalper_bot.strategies.runner.time.monotonic", lambda: clock[0]
+    )
 
     assert _run_eval_if_allowed(runner, evaluator, bar_key="bar-1") == "ok"
     clock[0] = 101.0
@@ -106,11 +129,15 @@ def test_context_symbols_are_not_blocked_by_option_quality_gates() -> None:
     assert evaluator.calls == 2
 
 
-def test_same_bar_skip_does_not_affect_hydration_active_basket_or_subscriptions(monkeypatch) -> None:
+def test_same_bar_skip_does_not_affect_hydration_active_basket_or_subscriptions(
+    monkeypatch,
+) -> None:
     runner = _runner()
     evaluator = EvalCounter()
     clock = [100.0]
-    monkeypatch.setattr("nifty_scalper_bot.strategies.runner.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        "nifty_scalper_bot.strategies.runner.time.monotonic", lambda: clock[0]
+    )
     assert _run_eval_if_allowed(runner, evaluator, bar_key="bar-1") == "ok"
 
     before_phase = dict(runner._data_phase)
@@ -120,7 +147,9 @@ def test_same_bar_skip_does_not_affect_hydration_active_basket_or_subscriptions(
     before_subscribed = set(runner._subscribed_tokens)
     clock[0] = 102.0
 
-    skipped, reason, _details = runner._should_skip_symbol_eval(OPTION, {}, bar_key="bar-1")
+    skipped, reason, _details = runner._should_skip_symbol_eval(
+        OPTION, {}, bar_key="bar-1"
+    )
 
     assert skipped is True
     assert reason == "same_bar_periodic_eval_throttled"
@@ -131,20 +160,30 @@ def test_same_bar_skip_does_not_affect_hydration_active_basket_or_subscriptions(
     assert runner._subscribed_tokens == before_subscribed
 
 
-def test_same_bar_skip_log_includes_bar_key_elapsed_interval_and_quote_version(caplog, monkeypatch) -> None:
+def test_same_bar_skip_log_includes_bar_key_elapsed_interval_and_quote_version(
+    caplog, monkeypatch
+) -> None:
     runner = _runner()
     evaluator = EvalCounter()
     clock = [100.0]
-    monkeypatch.setattr("nifty_scalper_bot.strategies.runner.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        "nifty_scalper_bot.strategies.runner.time.monotonic", lambda: clock[0]
+    )
     assert _run_eval_if_allowed(runner, evaluator, bar_key="bar-1") == "ok"
     clock[0] = 102.0
-    skipped, reason, details = runner._should_skip_symbol_eval(OPTION, {}, bar_key="bar-1")
+    skipped, reason, details = runner._should_skip_symbol_eval(
+        OPTION, {}, bar_key="bar-1"
+    )
 
     with caplog.at_level(logging.INFO, logger="same-bar-pregate-test"):
         runner._log_eval_pregate_skip(OPTION, reason, details)
 
     assert skipped is True
-    record = next(rec for rec in caplog.records if getattr(rec, "event", "") == "RUNNER_EVAL_PREGATE_SKIPPED")
+    record = next(
+        rec
+        for rec in caplog.records
+        if getattr(rec, "event", "") == "RUNNER_EVAL_PREGATE_SKIPPED"
+    )
     assert record.reason == "same_bar_periodic_eval_throttled"
     assert record.bar_key == "bar-1"
     assert record.same_bar_elapsed_s == 2.0
@@ -156,11 +195,115 @@ def test_runtime_same_bar_interval_has_three_second_lower_bound(monkeypatch) -> 
     runner = _runner(cfg=StrategyRunnerConfig(same_bar_periodic_eval_seconds=1.0))
     evaluator = EvalCounter()
     clock = [100.0]
-    monkeypatch.setattr("nifty_scalper_bot.strategies.runner.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        "nifty_scalper_bot.strategies.runner.time.monotonic", lambda: clock[0]
+    )
 
     assert _run_eval_if_allowed(runner, evaluator, bar_key="bar-1") == "ok"
     clock[0] = 102.5
-    assert _run_eval_if_allowed(runner, evaluator, bar_key="bar-1") == "same_bar_periodic_eval_throttled"
+    assert (
+        _run_eval_if_allowed(runner, evaluator, bar_key="bar-1")
+        == "same_bar_periodic_eval_throttled"
+    )
     clock[0] = 103.1
     assert _run_eval_if_allowed(runner, evaluator, bar_key="bar-1") == "ok"
     assert evaluator.calls == 2
+
+
+def test_new_direction_generation_retries_context_rejection_within_same_bar(
+    monkeypatch, caplog
+) -> None:
+    runner = _runner()
+    manager = DirectionAwareStrategyManager()
+    runner._strategy_manager = manager
+    evaluator = EvalCounter()
+    mono_clock = [100.0]
+    wall_clock = [1_000.0]
+    monkeypatch.setattr(
+        "nifty_scalper_bot.strategies.runner.time.monotonic", lambda: mono_clock[0]
+    )
+    monkeypatch.setattr(
+        "nifty_scalper_bot.strategies.runner.time.time", lambda: wall_clock[0]
+    )
+    caplog.set_level(logging.INFO, logger="same-bar-pregate-test")
+
+    assert _run_eval_if_allowed(runner, evaluator, bar_key="bar-1") == "ok"
+    manager.decision = SimpleNamespace(
+        final_block_reason="underlying_direction_conflict",
+        reason="underlying_direction_conflict",
+        created_ts=1_000.1,
+    )
+    runner._candle_versions[SPOT] = 2
+    mono_clock[0] = 101.0
+    wall_clock[0] = 1_001.0
+
+    assert _run_eval_if_allowed(runner, evaluator, bar_key="bar-1") == "ok"
+    assert evaluator.calls == 2
+    assert any(
+        getattr(record, "event", "") == "RUNNER_CONTEXT_GENERATION_REEVALUATION"
+        for record in caplog.records
+    )
+
+
+def test_new_direction_generation_does_not_retry_non_context_rejection(
+    monkeypatch,
+) -> None:
+    runner = _runner()
+    manager = DirectionAwareStrategyManager()
+    runner._strategy_manager = manager
+    evaluator = EvalCounter()
+    mono_clock = [100.0]
+    wall_clock = [1_000.0]
+    monkeypatch.setattr(
+        "nifty_scalper_bot.strategies.runner.time.monotonic", lambda: mono_clock[0]
+    )
+    monkeypatch.setattr(
+        "nifty_scalper_bot.strategies.runner.time.time", lambda: wall_clock[0]
+    )
+
+    assert _run_eval_if_allowed(runner, evaluator, bar_key="bar-1") == "ok"
+    manager.decision = SimpleNamespace(
+        final_block_reason="single_trigger_context_score_below_min",
+        reason="single_trigger_context_score_below_min",
+        created_ts=1_000.1,
+    )
+    runner._candle_versions[SPOT] = 2
+    mono_clock[0] = 101.0
+    wall_clock[0] = 1_001.0
+
+    assert (
+        _run_eval_if_allowed(runner, evaluator, bar_key="bar-1")
+        == "same_bar_periodic_eval_throttled"
+    )
+    assert evaluator.calls == 1
+
+
+def test_stale_context_rejection_cannot_bypass_same_bar_throttle(monkeypatch) -> None:
+    runner = _runner()
+    manager = DirectionAwareStrategyManager()
+    runner._strategy_manager = manager
+    evaluator = EvalCounter()
+    mono_clock = [100.0]
+    wall_clock = [1_000.0]
+    monkeypatch.setattr(
+        "nifty_scalper_bot.strategies.runner.time.monotonic", lambda: mono_clock[0]
+    )
+    monkeypatch.setattr(
+        "nifty_scalper_bot.strategies.runner.time.time", lambda: wall_clock[0]
+    )
+
+    manager.decision = SimpleNamespace(
+        final_block_reason="underlying_direction_unresolved",
+        reason="underlying_direction_unresolved",
+        created_ts=999.0,
+    )
+    assert _run_eval_if_allowed(runner, evaluator, bar_key="bar-1") == "ok"
+    runner._candle_versions[SPOT] = 2
+    mono_clock[0] = 101.0
+    wall_clock[0] = 1_001.0
+
+    assert (
+        _run_eval_if_allowed(runner, evaluator, bar_key="bar-1")
+        == "same_bar_periodic_eval_throttled"
+    )
+    assert evaluator.calls == 1
