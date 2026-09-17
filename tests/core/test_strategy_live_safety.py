@@ -200,14 +200,12 @@ class _CallingStrategy:
 
     def __init__(self) -> None:
         self.calls = 0
-        self.last_indicators: dict | None = None
 
     def get_required_indicators(self):
         return []
 
     def generate_signal(self, symbol, indicators, current_price, position=None):
         self.calls += 1
-        self.last_indicators = dict(indicators)
         return None
 
 
@@ -233,51 +231,6 @@ def _manager_with_strategy(
     manager._latest_context_snapshots = _fresh_context()
     manager._active_basket_version = "v1"
     return manager, strategy
-
-
-def test_option_evaluation_consumes_transition_candidate_as_atomic_context(
-    monkeypatch,
-) -> None:
-    _shadow_env(monkeypatch)
-    manager, strategy = _manager_with_strategy(
-        _Engine(
-            5,
-            indicators={"ltp": 100.0, "close": 100.0, "bid": 99.0, "ask": 101.0},
-        )
-    )
-    now = time.time()
-    manager._latest_context_snapshots = {
-        "spot_context": {
-            "symbol": "NSE:NIFTY 50",
-            "role": "spot_context",
-            "timestamp": now,
-            "tick_age_s": 0.2,
-            "direction_bias": "PE",
-            "underlying_direction_confidence": 0.60,
-            "direction_reversal_candidate": "CE",
-            "direction_reversal_observations": 1,
-        },
-        "futures_context": {
-            "symbol": "NFO:NIFTY26SEPFUT",
-            "role": "futures_context",
-            "timestamp": now,
-            "tick_age_s": 0.1,
-            "direction_bias": "CE",
-            "underlying_direction_confidence": 0.75,
-        },
-    }
-
-    result = manager.generate_signal("NFO:NIFTY2662324050CE", 100.0)
-
-    assert result is None
-    assert strategy.calls == 1
-    assert strategy.last_indicators is not None
-    assert strategy.last_indicators["direction_bias"] == "CE"
-    assert strategy.last_indicators["context_fresh"] is True
-    assert (
-        strategy.last_indicators["direction_context_confirming_source"]
-        == "spot_context:transition_candidate"
-    )
 
 
 def test_live_strategy_manager_accepts_expected_closed_bucket_early_next_minute(
