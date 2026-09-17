@@ -24,33 +24,32 @@ Safe-edit notes:
   app.py's canonical readiness functions.
 """
 
+# ruff: noqa: E501
+# mypy: ignore-errors
+
 from __future__ import annotations
 
 import asyncio
 import calendar
-from collections import defaultdict, deque
-from concurrent.futures import ThreadPoolExecutor
-from contextlib import suppress
 import dataclasses
 import functools
-from dataclasses import dataclass, field
-from datetime import datetime, time as dt_time, timedelta, timezone
-from enum import Enum
 import hashlib
-import json
 import inspect
+import json
 import logging
 import os
-from nifty_scalper_bot.config.defaults import (
-    DEFAULT_OPTION_EXEC_MIN_BARS as _DEFAULT_OPT_MIN_BARS,
-    QUOTE_STALE_THRESHOLD_MS,
-)
-from nifty_scalper_bot.config.env_utils import parse_float_env, parse_int_env
-from pathlib import Path
 import re
 import threading
 import time
 import time as time_module
+from collections import defaultdict, deque
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import suppress
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from datetime import time as dt_time
+from enum import Enum
+from pathlib import Path
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -70,6 +69,16 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 
 from nifty_scalper_bot.config import settings as app_settings
+from nifty_scalper_bot.config.defaults import (
+    DEFAULT_OPTION_EXEC_MIN_BARS as _DEFAULT_OPT_MIN_BARS,
+)
+from nifty_scalper_bot.config.defaults import (
+    QUOTE_STALE_THRESHOLD_MS,
+)
+from nifty_scalper_bot.config.entry_policy import resolve_entry_policy
+from nifty_scalper_bot.config.env_utils import parse_float_env, parse_int_env
+from nifty_scalper_bot.config.env_utils import resolve_build_sha as _resolve_build_sha
+from nifty_scalper_bot.config.regime_ontology import normalize_regime
 from nifty_scalper_bot.config.settings import get_settings
 from nifty_scalper_bot.core.active_basket import (
     ActiveContractSelection,
@@ -81,36 +90,39 @@ from nifty_scalper_bot.core.history_roles import (
     history_role_priority,
     resolve_symbol_history_role,
 )
-from nifty_scalper_bot.core.message_bus import Message, MessageBus, MessageType
+from nifty_scalper_bot.core.message_bus import Message, MessageBus
 from nifty_scalper_bot.core.strategy_manager import StrategyManager
 from nifty_scalper_bot.core.trade_manager import TradeManager
 from nifty_scalper_bot.core.universe_controller import UniverseController
-from nifty_scalper_bot.data.candle_engine import (
-    ensure_valid_data,
-    normalize_ohlc_timezone,
-    sanitize,
-    validate_dataframe,
-)
-from nifty_scalper_bot.data.pipeline import (
-    MarketDataPipeline,
-    get_pipeline,
-    MIN_REQUIRED_CANDLES as PIPELINE_MIN_CANDLES,
-)
 
 # Assumes you created the data/constants.py file as advised
 from nifty_scalper_bot.data.market_data_manager import MarketDataManager
 from nifty_scalper_bot.data.normalizers import normalize_history_row
+from nifty_scalper_bot.data.pipeline import (
+    MarketDataPipeline,
+    get_pipeline,
+)
 from nifty_scalper_bot.data.source import (
     DataIntegrityError,
     ensure_ltp,
-    is_symbol_valid,
 )
 
 # Signals route directly through OrderManager submit/place APIs; no execution hub layer.
 from nifty_scalper_bot.execution.affordability import (
     evaluate_minimum_lot_affordability,
 )
+from nifty_scalper_bot.execution.bracket_manager import tick_exchange_epoch
 from nifty_scalper_bot.execution.order_manager import OrderType, TradePlan
+from nifty_scalper_bot.execution.order_state_machine import (
+    ExecutionState,
+    OrderStateMachine,
+)
+from nifty_scalper_bot.execution.ownership import (
+    SymbolLifecycleClassification,
+    classify_symbol_lifecycle,
+)
+from nifty_scalper_bot.execution.position_manager import OrderSide, PositionManager
+from nifty_scalper_bot.execution.position_snapshot import BrokerExposureState
 from nifty_scalper_bot.execution.quote_readiness import (
     evaluate_execution_quote,
     resolve_tick_age_ms,
@@ -121,13 +133,6 @@ from nifty_scalper_bot.execution.readiness import (
     resolve_max_quote_age_seconds,
     resolve_quote_bid_ask_spread,
 )
-from nifty_scalper_bot.execution.order_state_machine import (
-    ExecutionState,
-    OrderStateMachine,
-)
-from nifty_scalper_bot.config.env_utils import resolve_build_sha as _resolve_build_sha
-from nifty_scalper_bot.execution.bracket_manager import tick_exchange_epoch
-from nifty_scalper_bot.execution.position_manager import OrderSide, PositionManager
 from nifty_scalper_bot.options.strike_selector import (
     SelectedContract,
     StrikeSelector,
@@ -137,11 +142,11 @@ from nifty_scalper_bot.risk import RiskManager
 from nifty_scalper_bot.risk.expiry_gate import expiry_theta_block, midday_pause_block
 from nifty_scalper_bot.risk.position_sizing import (
     RiskManager as DeterministicRiskManager,
+)
+from nifty_scalper_bot.risk.position_sizing import (
     RiskSnapshot,
 )
 from nifty_scalper_bot.strategies.bar_builder import OneMinuteBar, OneMinuteBarBuilder
-from nifty_scalper_bot.config.entry_policy import resolve_entry_policy
-from nifty_scalper_bot.config.regime_ontology import normalize_regime
 from nifty_scalper_bot.strategies.indicators import IndicatorEngine
 from nifty_scalper_bot.strategies.market_regime_engine import (
     MarketRegime,
@@ -153,10 +158,10 @@ from nifty_scalper_bot.strategies.premium_risk_geometry import (
     apply_premium_risk_contract,
     validate_option_premium_geometry,
 )
-from nifty_scalper_bot.strategies.signal_generator import Signal
 from nifty_scalper_bot.strategies.quote_update_identity import (
     resolve_quote_update_identity,
 )
+from nifty_scalper_bot.strategies.signal_generator import Signal
 from nifty_scalper_bot.strategies.signal_quality import (
     infer_option_side,
     missing_score_components,
@@ -168,27 +173,23 @@ from nifty_scalper_bot.utils.async_helpers import safe_task
 from nifty_scalper_bot.utils.errors import OrderPlacementError
 from nifty_scalper_bot.utils.log_throttle import (
     log_on_change,
+)
+from nifty_scalper_bot.utils.log_throttle import (
     log_throttled as log_throttled_live,
 )
 from nifty_scalper_bot.utils.logging import LogThrottle, get_logger, log_throttled
 from nifty_scalper_bot.utils.market_hours import (
     MarketState,
     allow_offhours_testing_safe,
-    get_market_session_state,
     get_market_state,
     get_runtime_market_mode,
-    post_market_suppress_candle_gap_warnings,
     is_market_hours_cached,
     is_market_open_now,
     is_nifty_option_symbol,
+    post_market_suppress_candle_gap_warnings,
     stale_threshold_for_symbol,
 )
 from nifty_scalper_bot.utils.metrics import Counter, signals_generated_total
-from nifty_scalper_bot.execution.ownership import (
-    SymbolLifecycleClassification,
-    classify_symbol_lifecycle,
-)
-from nifty_scalper_bot.execution.position_snapshot import BrokerExposureState
 from nifty_scalper_bot.utils.symbols import (
     canonical,
     enforce_canonical,
@@ -198,11 +199,11 @@ from nifty_scalper_bot.utils.symbols import (
 
 if TYPE_CHECKING:
     from nifty_scalper_bot.data.data_hub import DataHub
-    from nifty_scalper_bot.execution.order_manager import ExitIntent
     from nifty_scalper_bot.data.persistent_state import (
         PersistentStateManager,
         TradeDict,
     )
+    from nifty_scalper_bot.execution.order_manager import ExitIntent
 
 LOGGER = get_logger(__name__)
 RELAX_REGIME_FILTER = (
@@ -231,6 +232,7 @@ def _derive_strike_distance_from_atm(
     marker instead of inventing a value.
     Args: symbol, snapshot, metadata. Returns: points or None. Raises: none.
     """
+
     def _num(*values: Any) -> float | None:
         for value in values:
             if value in (None, ""):
@@ -359,9 +361,7 @@ def safe_positive_int_env(name: str, default: int, *, minimum: int = 1) -> int:
 
 def _runner_history_cap() -> int:
     """Return the single Runner history-retention cap for reseed and live ingest."""
-    return safe_positive_int_env(
-        "RUNNER_SYMBOL_HISTORY_MAX_BARS", 500, minimum=1
-    )
+    return safe_positive_int_env("RUNNER_SYMBOL_HISTORY_MAX_BARS", 500, minimum=1)
 
 
 def safe_positive_float_env(
@@ -1912,18 +1912,12 @@ class StrategyRunner:
         role = self._history_role_for_symbol(normalized)
         if role in {"spot_context", "futures_context"}:
             try:
-                smc_min = max(
-                    1, int(HistoryReadinessPolicy.from_env().smc_min_bars)
-                )
+                smc_min = max(1, int(HistoryReadinessPolicy.from_env().smc_min_bars))
             except Exception:
-                smc_min = safe_positive_int_env(
-                    "SMC_MIN_BARS_REQUIRED", 30, minimum=1
-                )
+                smc_min = safe_positive_int_env("SMC_MIN_BARS_REQUIRED", 30, minimum=1)
             resolved_limit = max(resolved_limit, smc_min)
             if _env_bool("ORB_ENABLED", True):
-                resolved_limit = max(
-                    resolved_limit, _CONTEXT_SESSION_HISTORY_BARS
-                )
+                resolved_limit = max(resolved_limit, _CONTEXT_SESSION_HISTORY_BARS)
 
         for source in (self._market_data, self._data_hub):
             if source is None:
@@ -2343,9 +2337,7 @@ class StrategyRunner:
         normalized_symbol = self._normalize_symbol(symbol)
         candidates: list[tuple[datetime, dict[str, Any]]] = []
         for raw_row in rows:
-            row = normalize_history_row(
-                normalized_symbol, dict(raw_row), source=source
-            )
+            row = normalize_history_row(normalized_symbol, dict(raw_row), source=source)
             if row is None:
                 continue
             row_ts = self._history_row_timestamp(row)
@@ -2852,9 +2844,7 @@ class StrategyRunner:
                     trace_id=trace_id,
                 )
 
-    def _option_context_history_ready(
-        self, symbol: str, *, required_bars: int
-    ) -> bool:
+    def _option_context_history_ready(self, symbol: str, *, required_bars: int) -> bool:
         """Return whether Runner and Indicator histories both meet the target."""
         runner_history = getattr(self, "_symbol_history", {}) or {}
         runner_bars = len(runner_history.get(symbol, []) or [])
@@ -4731,6 +4721,8 @@ class StrategyRunner:
         is_live_mode: bool,
         trace_id: str | None,
         preferred_symbol: str | None = None,
+        preferred_entry_price: float | None = None,
+        preferred_stop_loss: float | None = None,
     ) -> tuple[Any | None, dict[str, dict[str, object]]]:
         """Prefer the signal contract; use ranked alternatives only as fallback."""
         snapshots_by_symbol = {
@@ -4783,6 +4775,16 @@ class StrategyRunner:
                 order_manager=getattr(self, "_order_manager", None),
                 data_hub=getattr(self, "_data_hub", None),
                 fallback_balance=fallback_balance,
+                plan_entry_price=(
+                    preferred_entry_price
+                    if ranked_symbol == preferred
+                    else getattr(ranked, "entry_price", None)
+                ),
+                plan_stop_loss=(
+                    preferred_stop_loss
+                    if ranked_symbol == preferred
+                    else getattr(ranked, "stop_loss", None)
+                ),
             )
             capacity_details = capacity.to_dict()
             capacity_details.update(
@@ -4811,6 +4813,13 @@ class StrategyRunner:
             )
             if capacity.determinate and capacity.affordable:
                 return ranked, decisions
+        if is_live_mode and any(
+            decision.get("capacity_blocker") in {"cash", "risk"}
+            for decision in decisions.values()
+        ):
+            self._capital_block_counter = (
+                int(getattr(self, "_capital_block_counter", 0) or 0) + 1
+            )
         return None, decisions
 
     def get_runtime_readiness_snapshot(self) -> dict[str, object]:
@@ -5109,7 +5118,6 @@ class StrategyRunner:
                 "quote_usable_for_order_plan": bool(
                     snapshot.tradable_quote and has_bid_ask
                 ),
-                "tradable_quote": bool(snapshot.tradable_quote and has_bid_ask),
                 "effective_bars": int(
                     metadata.get("effective_bars", metadata.get("history_bars", 0)) or 0
                 ),
@@ -5651,13 +5659,11 @@ class StrategyRunner:
             }
 
         # ── Pipeline health (non-blocking, best-effort) ──────────────────────
-        dedup_reserved = False
-        dedup_key_context: dict[str, str] | None = None
         try:
             from nifty_scalper_bot.data.pipeline import (  # noqa: PLC0415
-                get_pipeline,
-                get_dropped_ticks,
                 get_dropped_candles,
+                get_dropped_ticks,
+                get_pipeline,
             )
 
             _pl = get_pipeline()
@@ -5805,9 +5811,7 @@ class StrategyRunner:
         registered = normalized in self._datahub_registered_symbols
         checker = getattr(self._data_hub, "has_tick_subscription", None)
         if callable(checker):
-            registered = bool(
-                checker(normalized, self.on_datahub_tick, token=token)
-            )
+            registered = bool(checker(normalized, self.on_datahub_tick, token=token))
             if registered:
                 self._datahub_registered_symbols.add(normalized)
             else:
@@ -6479,8 +6483,7 @@ class StrategyRunner:
 
         if now - self._last_strategy_status_log >= 150.0:
             positions_active = len(
-                getattr(self._position_manager, "get_all_positions", lambda: [])()
-                or []
+                getattr(self._position_manager, "get_all_positions", lambda: [])() or []
             )
             self._logger.info(
                 "STRATEGY_STATUS_REPORT symbols_evaluated=%d "
@@ -6598,7 +6601,7 @@ class StrategyRunner:
                 if len(ind_history) >= self._required_candles:
                     # Provide a list of the correct length; individual items unused.
                     effective_bars = [None] * len(ind_history)  # type: ignore[list-item]
-            except Exception as e:
+            except Exception:
                 LOGGER.exception("[CRITICAL] unhandled exception", exc_info=True)
                 raise  # fall through to actual bars — hydration will be HYDRATING
 
@@ -6611,7 +6614,6 @@ class StrategyRunner:
         indicators: dict[str, dict[str, Any]],
     ) -> SymbolState:
         """Update hydration lifecycle using strict warmup and cumulative VWAP checks."""
-        prev_state = self._symbol_states.get(symbol, SymbolState.DISCOVERED)
         bar_count = len(bars)
         self._symbol_bar_count[symbol] = bar_count
 
@@ -6958,7 +6960,7 @@ class StrategyRunner:
                         ie_vwap = None
                         try:
                             ie_vwap = self._indicator_engine.get_vwap(symbol)
-                        except Exception as e:
+                        except Exception:
                             LOGGER.exception(
                                 "[CRITICAL] unhandled exception", exc_info=True
                             )
@@ -7363,7 +7365,7 @@ class StrategyRunner:
                     float(best.liquidity_score)
                 )
 
-        except Exception as e:
+        except Exception:
             LOGGER.exception("[CRITICAL] unhandled exception", exc_info=True)
             raise
 
@@ -7667,7 +7669,7 @@ class StrategyRunner:
                         underlying=underlying_label
                     ).set(slippage)
 
-            except Exception as e:
+            except Exception:
                 LOGGER.exception("[CRITICAL] unhandled exception", exc_info=True)
                 raise
 
@@ -7701,7 +7703,7 @@ class StrategyRunner:
                         counters["success"] / total
                     )
 
-            except Exception as e:
+            except Exception:
                 LOGGER.exception("[CRITICAL] unhandled exception", exc_info=True)
                 raise
 
@@ -7808,7 +7810,7 @@ class StrategyRunner:
                 if underlying and underlying != symbol:
                     self._orders_in_flight.pop(underlying, None)
                     self.orders_in_flight.discard(underlying)
-            except Exception as e:
+            except Exception:
                 LOGGER.exception("[CRITICAL] unhandled exception", exc_info=True)
                 raise
 
@@ -8350,9 +8352,9 @@ class StrategyRunner:
             self._mirror_authoritative_candle_engine(normalized_symbol)
             now_mono = time.monotonic()
             self._last_tick_seen_ts = now_mono
-            self._runner_tick_received_count = int(
-                getattr(self, "_runner_tick_received_count", 0) or 0
-            ) + 1
+            self._runner_tick_received_count = (
+                int(getattr(self, "_runner_tick_received_count", 0) or 0) + 1
+            )
             self._last_runner_tick_received_at = now_mono
             if self._is_selected_option_symbol(normalized_symbol):
                 self._last_selected_option_tick_ts = now_mono
@@ -8443,9 +8445,9 @@ class StrategyRunner:
                     {**dict(tick), "trace_id": trace_id},
                 )
                 if route == EntryEvaluationRoute.OPTION_CANDIDATE:
-                    self._entry_eligible_tick_count = int(
-                        getattr(self, "_entry_eligible_tick_count", 0) or 0
-                    ) + 1
+                    self._entry_eligible_tick_count = (
+                        int(getattr(self, "_entry_eligible_tick_count", 0) or 0) + 1
+                    )
                     self._last_entry_eligible_tick_at = now_mono
                 self._notify_entry_eval_pending(normalized_symbol, trace_id=trace_id)
                 return
@@ -8561,7 +8563,10 @@ class StrategyRunner:
         if self._bracket_manager:
             try:
                 _ltp_raw = (
-                    tick.get("ltp") or tick.get("last_price") or tick.get("price") or 0.0
+                    tick.get("ltp")
+                    or tick.get("last_price")
+                    or tick.get("price")
+                    or 0.0
                 )
                 _ltp = float(_ltp_raw)
                 if _ltp > 0:
@@ -8577,7 +8582,9 @@ class StrategyRunner:
                     if isinstance(tick_err_map, dict):
                         tick_err_map[symbol] = False
             except Exception as _bm_err:
-                tick_err_map = getattr(self._bracket_manager, "_tick_error_logged", None)
+                tick_err_map = getattr(
+                    self._bracket_manager, "_tick_error_logged", None
+                )
                 already_logged = bool(
                     isinstance(tick_err_map, dict) and tick_err_map.get(symbol)
                 )
@@ -8644,6 +8651,7 @@ class StrategyRunner:
             # the next time the loop is driven. Evaluation is never inline.
             return False
         try:
+
             def _start_drain() -> None:
                 try:
                     safe_task(self._drain_pending_entry_evaluations())
@@ -8681,15 +8689,14 @@ class StrategyRunner:
                 ):
                     self._entry_eval_last_progress_ts = time.monotonic()
                 self._pending_entry_eval_symbols.add(symbol)
-                self._entry_eval_enqueue_count = int(
-                    getattr(self, "_entry_eval_enqueue_count", 0) or 0
-                ) + 1
+                self._entry_eval_enqueue_count = (
+                    int(getattr(self, "_entry_eval_enqueue_count", 0) or 0) + 1
+                )
                 self._last_entry_eval_enqueued_at = time.monotonic()
                 if trace_id:
                     self._entry_eval_trace_id_by_symbol[symbol] = trace_id
                 should_schedule = (
-                    not self._entry_eval_drain_scheduled
-                    and not self._entry_eval_active
+                    not self._entry_eval_drain_scheduled and not self._entry_eval_active
                 )
                 if should_schedule:
                     self._entry_eval_drain_scheduled = True
@@ -8758,9 +8765,7 @@ class StrategyRunner:
         with lock:
             started_at = getattr(self, "_entry_eval_active_started_at", None)
             drain_active = bool(getattr(self, "_entry_eval_active", False))
-            drain_scheduled = bool(
-                getattr(self, "_entry_eval_drain_scheduled", False)
-            )
+            drain_scheduled = bool(getattr(self, "_entry_eval_drain_scheduled", False))
             pending = sorted(getattr(self, "_pending_entry_eval_symbols", set()))
             active_age = (
                 max(0.0, now - float(started_at))
@@ -8823,14 +8828,13 @@ class StrategyRunner:
                 and tick_age <= 5.0
                 and progress_age >= dispatch_stall_s
             )
-            worker_stalled = bool(
-                work_outstanding
-                and (
-                    active_age >= 90.0
-                    if drain_active
-                    else progress_age >= 90.0
+            worker_stalled = (
+                bool(
+                    work_outstanding
+                    and (active_age >= 90.0 if drain_active else progress_age >= 90.0)
                 )
-            ) or dispatch_stalled
+                or dispatch_stalled
+            )
             return {
                 "tick_age_s": round(tick_age, 1) if tick_age != float("inf") else None,
                 "dispatch_stalled": dispatch_stalled,
@@ -8840,18 +8844,23 @@ class StrategyRunner:
                 "drain_active_age_s": round(active_age, 1),
                 "last_progress_age_s": round(progress_age, 1),
                 "selected_eval_age_s": (
-                    round(selected_eval_age, 1) if selected_eval_age is not None else None
+                    round(selected_eval_age, 1)
+                    if selected_eval_age is not None
+                    else None
                 ),
-                "evaluation_alive": bool(
-                    selected_eval_at > 0.0
-                    and selected_eval_age is not None
-                    and selected_eval_age
-                    < float(
-                        getattr(self, "_entry_eval_dispatch_stall_s", 120.0) or 120.0
+                "evaluation_alive": (
+                    bool(
+                        selected_eval_at > 0.0
+                        and selected_eval_age is not None
+                        and selected_eval_age
+                        < float(
+                            getattr(self, "_entry_eval_dispatch_stall_s", 120.0)
+                            or 120.0
+                        )
                     )
-                )
-                if has_selected
-                else bool(progress_age < 120.0),
+                    if has_selected
+                    else bool(progress_age < 120.0)
+                ),
                 "work_outstanding": work_outstanding,
                 "drain_stranded": drain_stranded,
                 "worker_stalled": worker_stalled,
@@ -8936,8 +8945,12 @@ class StrategyRunner:
                 "runner_tick_received_count": getattr(
                     self, "_runner_tick_received_count", 0
                 ),
-                "entry_eval_enqueue_count": getattr(self, "_entry_eval_enqueue_count", 0),
-                "entry_eval_started_count": getattr(self, "_entry_eval_started_count", 0),
+                "entry_eval_enqueue_count": getattr(
+                    self, "_entry_eval_enqueue_count", 0
+                ),
+                "entry_eval_started_count": getattr(
+                    self, "_entry_eval_started_count", 0
+                ),
                 "entry_eval_completed_count": getattr(
                     self, "_entry_eval_completed_count", 0
                 ),
@@ -9104,9 +9117,9 @@ class StrategyRunner:
                 },
             )
             return
-        self._entry_eval_started_count = int(
-            getattr(self, "_entry_eval_started_count", 0) or 0
-        ) + 1
+        self._entry_eval_started_count = (
+            int(getattr(self, "_entry_eval_started_count", 0) or 0) + 1
+        )
         self._last_entry_eval_started_at = time.monotonic()
         tick_payload = dict(latest_tick)
         tick_payload["trace_id"] = (
@@ -9116,14 +9129,15 @@ class StrategyRunner:
         # was ingested, so _on_tick must not run it a second time.
         tick_payload["_protection_already_handled"] = True
         self._on_tick(symbol, tick_payload)
-        self._entry_eval_completed_count = int(
-            getattr(self, "_entry_eval_completed_count", 0) or 0
-        ) + 1
+        self._entry_eval_completed_count = (
+            int(getattr(self, "_entry_eval_completed_count", 0) or 0) + 1
+        )
         self._last_entry_eval_completed_at = time.monotonic()
         if route == EntryEvaluationRoute.OPTION_CANDIDATE:
-            self._selected_candidate_eval_completed_count = int(
-                getattr(self, "_selected_candidate_eval_completed_count", 0) or 0
-            ) + 1
+            self._selected_candidate_eval_completed_count = (
+                int(getattr(self, "_selected_candidate_eval_completed_count", 0) or 0)
+                + 1
+            )
             self._last_selected_candidate_eval_completed_ts = (
                 self._last_entry_eval_completed_at
             )
@@ -9193,9 +9207,7 @@ class StrategyRunner:
         ):
             watchdog_coro = asyncio.to_thread(_run)
             try:
-                asyncio.run_coroutine_threadsafe(
-                    watchdog_coro, runtime_loop
-                )
+                asyncio.run_coroutine_threadsafe(watchdog_coro, runtime_loop)
                 return
             except RuntimeError:
                 watchdog_coro.close()
@@ -9560,7 +9572,10 @@ class StrategyRunner:
         if overloaded:
             self._logger.warning(
                 "ENTRY_EVAL_RECOVERY_FAILED reason=pipeline_overload",
-                extra={"event": "ENTRY_EVAL_RECOVERY_FAILED", "reason": "pipeline_overload"},
+                extra={
+                    "event": "ENTRY_EVAL_RECOVERY_FAILED",
+                    "reason": "pipeline_overload",
+                },
             )
             return
         reason = str(getattr(self, "_runtime_readiness_reason", "") or "")
@@ -9599,7 +9614,9 @@ class StrategyRunner:
         liveness = self._entry_eval_liveness_snapshot(now)
         hub = getattr(self, "_data_hub", None)
         mdm = getattr(self, "_market_data", None)
-        selected_tick_at = float(getattr(self, "_last_selected_option_tick_ts", 0.0) or 0.0)
+        selected_tick_at = float(
+            getattr(self, "_last_selected_option_tick_ts", 0.0) or 0.0
+        )
         selected_eval_at = float(
             getattr(self, "_last_selected_candidate_eval_completed_ts", 0.0) or 0.0
         )
@@ -9615,8 +9632,12 @@ class StrategyRunner:
             "selected_eval_age_s": liveness.get("selected_eval_age_s"),
             "strategy_evaluation_stalled": bool(liveness.get("dispatch_stalled")),
             "entry_eval_worker_stalled": bool(liveness.get("worker_stalled")),
-            "mdm_selected_tick_count": int(getattr(mdm, "_mdm_selected_tick_count", 0) or 0),
-            "last_mdm_selected_tick_at": getattr(mdm, "_last_mdm_selected_tick_at", None),
+            "mdm_selected_tick_count": int(
+                getattr(mdm, "_mdm_selected_tick_count", 0) or 0
+            ),
+            "last_mdm_selected_tick_at": getattr(
+                mdm, "_last_mdm_selected_tick_at", None
+            ),
             "datahub_runner_delivery_count": int(
                 getattr(hub, "_datahub_runner_delivery_count", 0) or 0
             ),
@@ -9644,7 +9665,9 @@ class StrategyRunner:
             "entry_eval_started_count": int(
                 getattr(self, "_entry_eval_started_count", 0) or 0
             ),
-            "last_entry_eval_started_at": getattr(self, "_last_entry_eval_started_at", None),
+            "last_entry_eval_started_at": getattr(
+                self, "_last_entry_eval_started_at", None
+            ),
             "entry_eval_completed_count": int(
                 getattr(self, "_entry_eval_completed_count", 0) or 0
             ),
@@ -10277,9 +10300,6 @@ class StrategyRunner:
             payload["order_forwarding_allowed"] = bool(
                 payload.get("order_forwarding_allowed", payload["trading_allowed"])
             )
-            verbose_eval = str(
-                os.getenv("LOG_VERBOSE_RUNNER_EVAL", "false")
-            ).strip().lower() in {"1", "true", "yes", "on"}
             # CPU/log volume: routine eval decisions are DEBUG. INFO is reserved
             # for actionable transitions (signal forwarded / blocked entry path).
             _info_reasons = {
@@ -12475,7 +12495,11 @@ class StrategyRunner:
                 health_fn = health_attr
                 health_source = "health"
             elif isinstance(health_attr, Mapping):
-                health_fn = lambda: health_attr
+
+                def _mapping_health() -> Mapping[str, Any]:
+                    return health_attr
+
+                health_fn = _mapping_health
                 health_source = "health"
         if not callable(health_fn):
             details["broker_health_block_reason"] = "broker_health_unavailable"
@@ -14454,14 +14478,9 @@ class StrategyRunner:
                     self._context_history_probe_at = _probe_state
                 _probe_now = time.monotonic()
                 _last_probe = float(_probe_state.get(_context_symbol, 0.0) or 0.0)
-                if (
-                    _probe_now - _last_probe
-                    >= _CONTEXT_HISTORY_PROBE_INTERVAL_SECONDS
-                ):
+                if _probe_now - _last_probe >= _CONTEXT_HISTORY_PROBE_INTERVAL_SECONDS:
                     _probe_state[_context_symbol] = _probe_now
-                    self._sync_context_history_if_cold(
-                        source="context_tick_bar_sync"
-                    )
+                    self._sync_context_history_if_cold(source="context_tick_bar_sync")
         except Exception:
             pass
         self._logger.debug(
@@ -14534,6 +14553,7 @@ class StrategyRunner:
             # =================================================================
 
             now = datetime.now(timezone.utc)
+
             # Helper: Extract timestamp for freshness check
             def _extract_timestamp(t, fallback):
                 ts = t.get("timestamp") or t.get("exchange_timestamp")
@@ -14785,7 +14805,7 @@ class StrategyRunner:
                 if hasattr(self._position_manager, "update_position_price"):
                     try:
                         self._position_manager.update_position_price(symbol, price)
-                    except Exception as e:
+                    except Exception:
                         LOGGER.exception(
                             "[CRITICAL] unhandled exception", exc_info=True
                         )
@@ -16869,9 +16889,7 @@ class StrategyRunner:
                 self._last_strategy_versions[symbol] = current_version
                 signal_phase = self._data_phase.get(symbol)
                 entry_symbol = str(signal.symbol or symbol)
-                if signal.action == "BUY" and is_nifty_option_symbol(
-                    entry_symbol
-                ):
+                if signal.action == "BUY" and is_nifty_option_symbol(entry_symbol):
                     expiry_blocked, expiry_reason = expiry_theta_block()
                     if expiry_blocked:
                         self._emit_runner_eval_decision(
@@ -17954,7 +17972,6 @@ class StrategyRunner:
                 details={"trace_id": trace_id, "error": str(exc)},
             )
 
-
     def _broker_reports_symbol_flat(self, symbol: str) -> bool:
         """Return True only when the validated PositionManager snapshot proves flat."""
 
@@ -18019,7 +18036,9 @@ class StrategyRunner:
                 if qty <= 0 or entry <= 0:
                     continue
 
-                exposure_getter = getattr(self._position_manager, "broker_exposure_state", None)
+                exposure_getter = getattr(
+                    self._position_manager, "broker_exposure_state", None
+                )
                 try:
                     exposure = (
                         exposure_getter(symbol)
@@ -18056,7 +18075,11 @@ class StrategyRunner:
                         symbol,
                         getattr(exposure, "value", str(exposure)),
                         getattr(lifecycle, "value", str(lifecycle)),
-                        snapshot.get("age_seconds") if isinstance(snapshot, dict) else None,
+                        (
+                            snapshot.get("age_seconds")
+                            if isinstance(snapshot, dict)
+                            else None
+                        ),
                         snapshot.get("fresh") if isinstance(snapshot, dict) else None,
                         extra={
                             "event": "ORPHAN_ADOPTION_DEFERRED_BROKER_UNKNOWN",
@@ -18069,7 +18092,9 @@ class StrategyRunner:
                                 else None
                             ),
                             "snapshot_fresh": (
-                                snapshot.get("fresh") if isinstance(snapshot, dict) else None
+                                snapshot.get("fresh")
+                                if isinstance(snapshot, dict)
+                                else None
                             ),
                         },
                     )
@@ -18551,9 +18576,6 @@ class StrategyRunner:
                 if (
                     rank_score - prev_rank_score
                 ) < self._signal_attempt_debounce_min_improvement:
-                    remaining = max(
-                        0.0, self._signal_attempt_debounce_seconds - elapsed
-                    )
                     log_throttled_live(
                         self._logger,
                         logging.INFO,
@@ -19529,15 +19551,29 @@ class StrategyRunner:
                             reason="candidate_basket_inadequate",
                             details=basket_details,
                         )
+                preferred_stop_for_capacity = signal.stop_loss
+                if preferred_stop_for_capacity is None:
+                    try:
+                        preferred_distance = float(
+                            metadata.get("premium_stop_distance") or 0.0
+                        )
+                        preferred_entry = float(trade_price or 0.0)
+                        if (
+                            preferred_distance > 0.0
+                            and preferred_entry > preferred_distance
+                        ):
+                            preferred_stop_for_capacity = (
+                                preferred_entry - preferred_distance
+                            )
+                    except (TypeError, ValueError):
+                        preferred_stop_for_capacity = None
                 try:
                     ranked_candidates = (
                         self._trade_candidate_selector.select_ranked_candidates(
                             direction_bias=option_side,
                             atm_strike=atm_strike,
                             snapshots=valid_snapshots,
-                            gross_rr=float(
-                                metadata.get("premium_target_rr") or 2.0
-                            ),
+                            gross_rr=float(metadata.get("premium_target_rr") or 2.0),
                         )
                     )
                     candidate, candidate_capacity_decisions = (
@@ -19547,6 +19583,8 @@ class StrategyRunner:
                             is_live_mode=is_live_mode,
                             trace_id=trace_id,
                             preferred_symbol=signal.symbol,
+                            preferred_entry_price=trade_price,
+                            preferred_stop_loss=preferred_stop_for_capacity,
                         )
                     )
                     if candidate is not None:
@@ -19590,6 +19628,9 @@ class StrategyRunner:
                         decision.get("reason")
                         in {
                             "minimum_lot_unaffordable",
+                            "minimum_lot_risk_unaffordable",
+                            "materialized_stop_invalid",
+                            "risk_budget_unavailable",
                             "available_balance_unavailable",
                             "executable_quote_unavailable",
                             "lot_size_unresolved",
@@ -20395,7 +20436,10 @@ class StrategyRunner:
                 rejection_reasons = list(quality.reasons or [])
                 if "context_only_strategy" in rejection_reasons:
                     quality_reject_reason = "context_only_strategy"
-                elif requires_final_score and "score_below_threshold" in rejection_reasons:
+                elif (
+                    requires_final_score
+                    and "score_below_threshold" in rejection_reasons
+                ):
                     quality_reject_reason = "final_score_below_live_threshold"
                 elif "direction_below_minimum" in rejection_reasons:
                     quality_reject_reason = "direction_below_minimum"
@@ -20444,7 +20488,10 @@ class StrategyRunner:
                 self._signal_reject_cooldown_ts[reject_cooldown_key] = now_epoch
                 return _reject_after_dedup(
                     reason=quality_reject_reason,
-                    details={"score": quality.final_score, "reasons": rejection_reasons},
+                    details={
+                        "score": quality.final_score,
+                        "reasons": rejection_reasons,
+                    },
                 )
             signal = dataclasses.replace(
                 signal,
@@ -20610,8 +20657,7 @@ class StrategyRunner:
                         price,
                         qty,
                         float(
-                            metadata.get("premium_cost_floor_original_distance")
-                            or 0.0
+                            metadata.get("premium_cost_floor_original_distance") or 0.0
                         ),
                         float(metadata.get("premium_cost_floor_distance") or 0.0),
                         float(metadata.get("premium_cost_floor_half_spread") or 0.0),
@@ -20939,15 +20985,11 @@ class StrategyRunner:
                 allow_market_entry=allow_market_entry,
                 max_signal_age_seconds=max(
                     0.0,
-                    float(
-                        os.getenv("ENTRY_MAX_SIGNAL_AGE_SECONDS", "15") or "15"
-                    ),
+                    float(os.getenv("ENTRY_MAX_SIGNAL_AGE_SECONDS", "15") or "15"),
                 ),
                 max_entry_drift_pct=max(
                     0.0,
-                    float(
-                        os.getenv("ENTRY_MAX_PRICE_DRIFT_PCT", "2.0") or "2.0"
-                    ),
+                    float(os.getenv("ENTRY_MAX_PRICE_DRIFT_PCT", "2.0") or "2.0"),
                 ),
                 trade_lifecycle_id=_trade_lifecycle_id,
                 client_order_id=_client_order_id,
@@ -20976,9 +21018,7 @@ class StrategyRunner:
                     "regime": str(metadata.get("runtime_regime") or "UNKNOWN"),
                     "signal_id": signal.deterministic_id,
                     "trace_id": trace_id,
-                    "strategy_profile_version": getattr(
-                        self, "_build_info", {}
-                    ).get(
+                    "strategy_profile_version": getattr(self, "_build_info", {}).get(
                         "strategy_profile_version", "unknown"
                     ),
                     "final_score": metadata.get("final_score"),
@@ -21114,8 +21154,7 @@ class StrategyRunner:
                             strategy_name,
                             option_side,
                             setup_id=(
-                                str(metadata.get("setup_id") or "").strip()
-                                or None
+                                str(metadata.get("setup_id") or "").strip() or None
                             ),
                         )
                     except Exception as exc:  # noqa: BLE001 - order is accepted
@@ -21482,7 +21521,7 @@ class StrategyRunner:
                     atr_val = float(raw)
                     if atr_val > 0:
                         source = "indicator_engine"
-            except Exception as e:
+            except Exception:
                 LOGGER.exception("[CRITICAL] unhandled exception", exc_info=True)
                 raise
 

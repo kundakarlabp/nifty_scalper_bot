@@ -13,6 +13,8 @@ from contextlib import suppress
 from dataclasses import asdict, dataclass
 from typing import Any, Mapping
 
+from nifty_scalper_bot.risk.cost_model import estimate_round_trip_cost
+
 
 @dataclass(frozen=True, slots=True)
 class MinimumLotAffordability:
@@ -36,6 +38,9 @@ class MinimumLotAffordability:
     one_lot_minimum_risk: float | None = None
     cash_affordable: bool | None = None
     risk_floor_affordable: bool | None = None
+    plan_stop_distance: float | None = None
+    plan_cost_inclusive_risk: float | None = None
+    plan_risk_affordable: bool | None = None
     capacity_blocker: str | None = None
 
     def to_dict(self) -> dict[str, object]:
@@ -104,9 +109,7 @@ def _risk_budget_snapshot(
     if balance is None or balance <= 0.0:
         balance = _finite_float(getattr(manager, "account_balance", None), minimum=0.0)
     settings = getattr(manager, "settings", None)
-    risk_pct = _finite_float(
-        getattr(settings, "per_trade_risk_pct", None), minimum=0.0
-    )
+    risk_pct = _finite_float(getattr(settings, "per_trade_risk_pct", None), minimum=0.0)
     per_trade = (
         balance * risk_pct / 100.0
         if balance is not None and balance > 0.0 and risk_pct is not None
@@ -133,9 +136,7 @@ def _risk_budget_snapshot(
     budgets = [value for value in (per_trade, remaining) if value is not None]
     effective = min(budgets) if budgets else None
     max_stop_distance = (
-        effective / float(lot_size)
-        if effective is not None and lot_size > 0
-        else None
+        effective / float(lot_size) if effective is not None and lot_size > 0 else None
     )
     return per_trade, remaining, effective, max_stop_distance
 
@@ -147,12 +148,15 @@ def evaluate_minimum_lot_affordability(
     order_manager: Any | None,
     data_hub: Any | None = None,
     fallback_balance: Any | None = None,
+    plan_entry_price: Any | None = None,
+    plan_stop_loss: Any | None = None,
 ) -> MinimumLotAffordability:
     """Evaluate whether one supplied BUY option lot is cash executable.
 
     Readiness mirrors the MarginEngine cash-capacity path: ask premium × lot
     size × margin factor, with the configured margin buffer reducing executable
-    cash.  Risk-budget fields remain diagnostic only.  In particular,
+    cash. Risk-budget fields remain diagnostic unless the caller supplies the
+    materialized entry and stop. In particular,
     ``candidate_min_risk_distance`` is a transaction-cost/net-R:R modelling
     quantity, not an actual strategy stop, so it must never veto a contract.
     The final materialized stop is still enforced by MarginEngine and
@@ -258,22 +262,69 @@ def evaluate_minimum_lot_affordability(
         else None
     )
     risk_floor_affordable: bool | None = None
-    if (
-        one_lot_minimum_risk is not None
-        and effective_one_lot_risk_budget is not None
-    ):
+    if one_lot_minimum_risk is not None and effective_one_lot_risk_budget is not None:
         risk_floor_affordable = bool(
             one_lot_minimum_risk <= effective_one_lot_risk_budget + 1e-9
         )
 
-    affordable = bool(cash_affordable)
-    capacity_blocker = None if cash_affordable else "cash"
+    plan_entry = _finite_float(plan_entry_price, minimum=0.0)
+    plan_stop = _finite_float(plan_stop_loss, minimum=0.0)
+    plan_requested = plan_entry_price is not None or plan_stop_loss is not None
+    plan_stop_distance: float | None = None
+    plan_cost_inclusive_risk: float | None = None
+    plan_risk_affordable: bool | None = None
+    if plan_entry is not None and plan_stop is not None and plan_entry > plan_stop:
+        plan_stop_distance = plan_entry - plan_stop
+        # Mirror OrderManager's protected BUY price and distance reanchoring so
+        # candidate selection cannot understate final one-lot loss exposure.
+        tick_size = _finite_float(_field(quote, "tick_size"), minimum=0.0) or 0.05
+        protected_entry = ask + tick_size
+        protected_stop = max(0.0, protected_entry - plan_stop_distance)
+        bid = _finite_float(_field(quote, "bid", "best_bid"), minimum=0.0)
+        observed_half_spread = (
+            max(0.0, (ask - bid) / 2.0) if bid is not None and ask >= bid else 0.0
+        )
+        # The protected entry is already at the executable ask. The canonical
+        # final gate therefore reserves only the future SELL crossing.
+        cost_model_half_spread = observed_half_spread / 2.0
+        stop_cost = estimate_round_trip_cost(
+            entry_price=protected_entry,
+            exit_price=protected_stop,
+            quantity=lot_size,
+            half_spread=cost_model_half_spread,
+        ).total
+        plan_cost_inclusive_risk = plan_stop_distance * lot_size + stop_cost
+        if effective_one_lot_risk_budget is not None:
+            plan_risk_affordable = bool(
+                plan_cost_inclusive_risk <= effective_one_lot_risk_budget + 1e-9
+            )
+
+    if not cash_affordable:
+        affordable = False
+        reason = "minimum_lot_unaffordable"
+        capacity_blocker = "cash"
+    elif plan_requested and plan_stop_distance is None:
+        affordable = False
+        reason = "materialized_stop_invalid"
+        capacity_blocker = "risk"
+    elif plan_requested and plan_risk_affordable is not True:
+        affordable = False
+        reason = (
+            "minimum_lot_risk_unaffordable"
+            if plan_risk_affordable is False
+            else "risk_budget_unavailable"
+        )
+        capacity_blocker = "risk"
+    else:
+        affordable = True
+        reason = "affordable"
+        capacity_blocker = None
 
     return MinimumLotAffordability(
         normalized_symbol,
         affordable,
         True,
-        "affordable" if affordable else "minimum_lot_unaffordable",
+        reason,
         available,
         required,
         executable_capacity,
@@ -290,6 +341,9 @@ def evaluate_minimum_lot_affordability(
         one_lot_minimum_risk=one_lot_minimum_risk,
         cash_affordable=cash_affordable,
         risk_floor_affordable=risk_floor_affordable,
+        plan_stop_distance=plan_stop_distance,
+        plan_cost_inclusive_risk=plan_cost_inclusive_risk,
+        plan_risk_affordable=plan_risk_affordable,
         capacity_blocker=capacity_blocker,
     )
 
