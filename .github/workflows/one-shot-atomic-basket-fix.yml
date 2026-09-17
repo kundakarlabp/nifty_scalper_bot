@@ -1,0 +1,149 @@
+name: one-shot atomic basket fix
+
+on:
+  push:
+    branches:
+      - fix/canonical-live-entry-blockers-20260917
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.event.head_commit.message == 'ops: apply atomic basket patch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/canonical-live-entry-blockers-20260917
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Apply exact source correction
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('src/nifty_scalper_bot/core/app.py')
+          text = path.read_text(encoding='utf-8')
+          old = '''    if current_options and (not selected_ce or not selected_pe):
+              LOGGER.warning(
+                  "ACTIVE_DYNAMIC_BASKET_DEFERRED reason=selected_option_resolution_failed option_count=%d selected_ce=%s selected_pe=%s",
+                  len(current_options),
+                  selected_ce,
+                  selected_pe,
+                  extra={
+                      "event": "ACTIVE_DYNAMIC_BASKET_DEFERRED",
+                      "reason": "selected_option_resolution_failed",
+                      "option_count": len(current_options),
+                      "selected_ce": selected_ce,
+                      "selected_pe": selected_pe,
+                  },
+              )
+              return cast(str | None, old_ce), cast(str | None, old_pe)
+          ctx.selected_ce = str(selected_ce) if selected_ce else None
+          ctx.selected_pe = str(selected_pe) if selected_pe else None
+          '''
+          # Normalize indentation from the embedded YAML block before matching.
+          old = '\n'.join(line[10:] if line.startswith('          ') else line for line in old.splitlines()) + '\n'
+          new = '''    if current_options and (not selected_ce or not selected_pe):
+              LOGGER.warning(
+                  "ACTIVE_DYNAMIC_BASKET_DEFERRED reason=selected_option_resolution_failed option_count=%d selected_ce=%s selected_pe=%s",
+                  len(current_options),
+                  selected_ce,
+                  selected_pe,
+                  extra={
+                      "event": "ACTIVE_DYNAMIC_BASKET_DEFERRED",
+                      "reason": "selected_option_resolution_failed",
+                      "option_count": len(current_options),
+                      "selected_ce": selected_ce,
+                      "selected_pe": selected_pe,
+                  },
+              )
+              return cast(str | None, old_ce), cast(str | None, old_pe)
+
+          # Selection authority changes only after the selected pair has proven
+          # live Runner/DataHub delivery.  Candidate symbols may be wired before
+          # commit, but the previous selected pair remains authoritative until
+          # both new edges are ready.
+          previous_token_map = dict(getattr(ctx, "active_symbol_tokens", {}) or {})
+          candidate_token_map = dict(basket.get("token_by_symbol") or {})
+          if not candidate_token_map:
+              candidate_token_map = resolve_active_basket_tokens(
+                  ctx,
+                  list(
+                      dict.fromkeys(
+                          [
+                              *current_symbols,
+                              *current_options,
+                              *[s for s in (selected_ce, selected_pe) if s],
+                          ]
+                      )
+                  ),
+                  selected_ce,
+                  selected_pe,
+              )
+          runtime_delivery_enforceable = bool(
+              getattr(ctx, "strategy_runner", None) is not None
+              and getattr(ctx, "data_hub", None) is not None
+              and getattr(ctx, "market_data_manager", None) is not None
+          )
+          if runtime_delivery_enforceable and selected_ce and selected_pe:
+              if not (
+                  candidate_token_map.get(selected_ce)
+                  and candidate_token_map.get(selected_pe)
+              ):
+                  LOGGER.warning(
+                      "ACTIVE_DYNAMIC_BASKET_DEFERRED reason=selected_option_token_missing selected_ce=%s selected_pe=%s",
+                      selected_ce,
+                      selected_pe,
+                      extra={
+                          "event": "ACTIVE_DYNAMIC_BASKET_DEFERRED",
+                          "reason": "selected_option_token_missing",
+                          "selected_ce": selected_ce,
+                          "selected_pe": selected_pe,
+                      },
+                  )
+                  return cast(str | None, old_ce), cast(str | None, old_pe)
+              ctx.active_symbol_tokens = candidate_token_map
+              delivery = _ensure_selected_option_runtime_delivery(
+                  ctx,
+                  selected_ce=selected_ce,
+                  selected_pe=selected_pe,
+                  reason="dynamic_basket_precommit",
+              )
+              if not (delivery.get(selected_ce) and delivery.get(selected_pe)):
+                  ctx.active_symbol_tokens = previous_token_map
+                  LOGGER.warning(
+                      "ACTIVE_DYNAMIC_BASKET_DEFERRED reason=selected_option_runner_delivery_missing selected_ce=%s selected_pe=%s delivery=%s",
+                      selected_ce,
+                      selected_pe,
+                      delivery,
+                      extra={
+                          "event": "ACTIVE_DYNAMIC_BASKET_DEFERRED",
+                          "reason": "selected_option_runner_delivery_missing",
+                          "selected_ce": selected_ce,
+                          "selected_pe": selected_pe,
+                          "delivery": dict(delivery),
+                      },
+                  )
+                  return cast(str | None, old_ce), cast(str | None, old_pe)
+
+          ctx.selected_ce = str(selected_ce) if selected_ce else None
+          ctx.selected_pe = str(selected_pe) if selected_pe else None
+          '''
+          new = '\n'.join(line[10:] if line.startswith('          ') else line for line in new.splitlines()) + '\n'
+          if old not in text:
+              raise SystemExit('exact basket-commit target not found; refusing broad edit')
+          text = text.replace(old, new, 1)
+          path.write_text(text, encoding='utf-8')
+          PY
+      - name: Remove one-shot workflow and commit correction
+        run: |
+          rm .github/workflows/one-shot-atomic-basket-fix.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/nifty_scalper_bot/core/app.py .github/workflows/one-shot-atomic-basket-fix.yml
+          git commit -m "fix(core): make selected basket commit delivery-atomic"
+          git push origin HEAD:fix/canonical-live-entry-blockers-20260917
