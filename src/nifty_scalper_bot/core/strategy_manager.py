@@ -3257,22 +3257,11 @@ class StrategyManager(_BaseStrategyManager):
                     confidence_value = float(confidence or 0.0)
                 except (TypeError, ValueError):
                     confidence_value = 0.0
-                try:
-                    reversal_observations = int(
-                        ctx.get("direction_reversal_observations") or 0
-                    )
-                except (TypeError, ValueError):
-                    reversal_observations = 0
                 return UnderlyingDirectionObservation(
                     bias=bias_norm,
                     confidence=confidence_value,
                     age_seconds=max(0.0, float(age_s)),
                     source=source,
-                    reversal_candidate=str(
-                        ctx.get("direction_reversal_candidate") or ""
-                    ).upper()
-                    or None,
-                    reversal_observations=reversal_observations,
                 )
 
             # Discard any option-local direction before resolving the underlying.
