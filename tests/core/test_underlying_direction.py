@@ -6,12 +6,22 @@ from nifty_scalper_bot.core.underlying_direction import (
 )
 
 
-def _obs(bias: str, *, source: str, age: float, confidence: float = 0.8):
+def _obs(
+    bias: str,
+    *,
+    source: str,
+    age: float,
+    confidence: float = 0.8,
+    reversal_candidate: str | None = None,
+    reversal_observations: int = 0,
+):
     return UnderlyingDirectionObservation(
         bias=bias,
         confidence=confidence,
         age_seconds=age,
         source=source,
+        reversal_candidate=reversal_candidate,
+        reversal_observations=reversal_observations,
     )
 
 
@@ -26,6 +36,7 @@ def test_agreement_uses_futures_as_price_discovery_authority() -> None:
     assert resolved.observation.age_seconds == 0.2
     assert resolved.observation.confidence == 0.91
     assert resolved.confirming_source == "spot_context"
+    assert resolved.decision == "agreement_futures_primary"
 
 
 def test_comparable_disagreement_fails_closed_even_when_futures_is_primary() -> None:
@@ -36,6 +47,7 @@ def test_comparable_disagreement_fails_closed_even_when_futures_is_primary() -> 
 
     assert resolved.conflict is True
     assert resolved.observation is None
+    assert resolved.decision == "conflict_comparable"
 
 
 def test_materially_stronger_spot_can_override_weak_futures() -> None:
@@ -47,6 +59,7 @@ def test_materially_stronger_spot_can_override_weak_futures() -> None:
     assert resolved.conflict is False
     assert resolved.observation is spot
     assert resolved.confirming_source == "futures_context:weak_disagreement"
+    assert resolved.decision == "weak_disagreement_override"
 
 
 def test_materially_stronger_futures_can_override_weak_spot() -> None:
@@ -58,6 +71,60 @@ def test_materially_stronger_futures_can_override_weak_spot() -> None:
     assert resolved.conflict is False
     assert resolved.observation is futures
     assert resolved.confirming_source == "spot_context:weak_disagreement"
+    assert resolved.decision == "weak_disagreement_override"
+
+
+def test_transition_candidate_alignment_does_not_false_conflict() -> None:
+    futures = _obs("CE", source="futures_context", age=0.1, confidence=0.75)
+    spot = _obs(
+        "PE",
+        source="spot_context",
+        age=0.2,
+        confidence=0.60,
+        reversal_candidate="CE",
+        reversal_observations=1,
+    )
+
+    resolved = arbitrate_underlying_direction(spot, futures)
+
+    assert resolved.conflict is False
+    assert resolved.observation is futures
+    assert resolved.confirming_source == "spot_context:transition_candidate"
+    assert resolved.decision == "transition_candidate_alignment"
+
+
+def test_transition_candidate_must_match_opposite_confirmed_side() -> None:
+    resolved = arbitrate_underlying_direction(
+        _obs(
+            "PE",
+            source="spot_context",
+            age=0.2,
+            confidence=0.60,
+            reversal_candidate="PE",
+            reversal_observations=2,
+        ),
+        _obs("CE", source="futures_context", age=0.1, confidence=0.75),
+    )
+
+    assert resolved.conflict is True
+    assert resolved.observation is None
+
+
+def test_transition_candidate_does_not_override_credible_opposition() -> None:
+    resolved = arbitrate_underlying_direction(
+        _obs(
+            "PE",
+            source="spot_context",
+            age=0.2,
+            confidence=0.66,
+            reversal_candidate="CE",
+            reversal_observations=2,
+        ),
+        _obs("CE", source="futures_context", age=0.1, confidence=0.78),
+    )
+
+    assert resolved.conflict is True
+    assert resolved.observation is None
 
 
 def test_credible_opposition_is_transition_and_fails_closed_despite_large_gap() -> None:
@@ -98,6 +165,7 @@ def test_single_resolved_source_is_accepted_without_cross_source_age() -> None:
     assert resolved.conflict is False
     assert resolved.observation is futures
     assert resolved.observation.age_seconds == 1.7
+    assert resolved.decision == "single_futures"
 
 
 def test_direction_observation_rejects_non_directional_values() -> None:
@@ -116,4 +184,4 @@ def test_strategy_manager_documents_and_uses_underlying_only_authority() -> None
     assert "OPTION PREMIUM DATA MUST NEVER AUTHORIZE UNDERLYING DIRECTION" in source
     assert "arbitrate_underlying_direction" in source
     assert 'direction_bias = (indicators.get("direction_bias")' not in source
-    assert 'DIRECTION_CONTEXT_CONFLICT_FAIL_CLOSED' in source
+    assert "DIRECTION_CONTEXT_CONFLICT_FAIL_CLOSED" in source
