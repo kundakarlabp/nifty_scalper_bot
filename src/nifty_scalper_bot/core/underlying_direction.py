@@ -4,8 +4,9 @@ Option-premium data may trigger a setup but must never authorize NIFTY direction
 Only fresh spot/futures observations participate. Futures is the primary
 price-discovery source when both underlying sources agree; spot is confirmation.
 Disagreement remains fail-closed unless one source is materially stronger and
-the opposing source is genuinely weak. This treats two credible opposing views
-as a transition/reversal warning instead of forcing a CE/PE decision.
+the opposing source is genuinely weak. A published old side that is already
+carrying the confirmed side as its own reversal candidate is hysteresis lag,
+not an independent contradiction.
 """
 
 from __future__ import annotations
@@ -26,6 +27,8 @@ class UnderlyingDirectionObservation:
     confidence: float
     age_seconds: float
     source: str
+    reversal_candidate: str | None = None
+    reversal_observations: int = 0
 
     def __post_init__(self) -> None:
         bias = str(self.bias or "").upper()
@@ -33,10 +36,21 @@ class UnderlyingDirectionObservation:
             raise ValueError(f"invalid underlying direction: {self.bias!r}")
         if self.age_seconds < 0:
             raise ValueError("direction observation age cannot be negative")
+        candidate = str(self.reversal_candidate or "").upper()
+        if candidate not in _VALID_DIRECTIONS:
+            candidate = ""
         object.__setattr__(self, "bias", bias)
-        object.__setattr__(self, "confidence", max(0.0, min(1.0, float(self.confidence))))
+        object.__setattr__(
+            self, "confidence", max(0.0, min(1.0, float(self.confidence)))
+        )
         object.__setattr__(self, "age_seconds", float(self.age_seconds))
         object.__setattr__(self, "source", str(self.source or "unknown"))
+        object.__setattr__(self, "reversal_candidate", candidate or None)
+        object.__setattr__(
+            self,
+            "reversal_observations",
+            max(0, int(self.reversal_observations or 0)),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,6 +60,29 @@ class UnderlyingDirectionResolution:
     observation: UnderlyingDirectionObservation | None
     conflict: bool = False
     confirming_source: str | None = None
+
+
+def _transition_candidate_alignment(
+    first: UnderlyingDirectionObservation,
+    second: UnderlyingDirectionObservation,
+) -> UnderlyingDirectionResolution | None:
+    """Resolve explicit per-source hysteresis lag without weakening conflicts."""
+    for leading, lagging in ((first, second), (second, first)):
+        if leading.bias == lagging.bias:
+            continue
+        if leading.confidence < _MIN_DOMINANT_CONFIDENCE:
+            continue
+        if lagging.confidence > _MAX_WEAK_DISAGREEMENT_CONFIDENCE:
+            continue
+        if lagging.reversal_candidate != leading.bias:
+            continue
+        if lagging.reversal_observations < 1:
+            continue
+        return UnderlyingDirectionResolution(
+            observation=leading,
+            confirming_source=f"{lagging.source}:transition_candidate",
+        )
+    return None
 
 
 def arbitrate_underlying_direction(
@@ -68,6 +105,10 @@ def arbitrate_underlying_direction(
                 observation=futures,
                 confirming_source=spot.source,
             )
+
+        transition = _transition_candidate_alignment(spot, futures)
+        if transition is not None:
+            return transition
 
         confidence_gap = abs(spot.confidence - futures.confidence)
         if confidence_gap < _DOMINANCE_GAP:
