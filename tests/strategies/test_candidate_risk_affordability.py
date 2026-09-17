@@ -7,6 +7,8 @@ import pytest
 from nifty_scalper_bot.execution.affordability import (
     evaluate_minimum_lot_affordability,
 )
+from nifty_scalper_bot.risk.net_rr_gate import evaluate_final_net_rr
+from nifty_scalper_bot.risk.risk_manager import OrderSignal
 from nifty_scalper_bot.strategies.runner import StrategyRunner
 from nifty_scalper_bot.strategies.trade_selector import TradeCandidateSelector
 
@@ -67,7 +69,9 @@ def test_affordability_keeps_theoretical_cost_floor_diagnostic_only() -> None:
     assert decision.capacity_blocker is None
 
 
-def test_candidate_capacity_keeps_preferred_cash_affordable_contract() -> None:
+def test_candidate_capacity_keeps_preferred_cash_affordable_contract_without_plan() -> (
+    None
+):
     runner = object.__new__(StrategyRunner)
     runner._logger = _Logger()
     runner._order_manager = _order_manager()
@@ -76,8 +80,8 @@ def test_candidate_capacity_keeps_preferred_cash_affordable_contract() -> None:
     )
     runner._risk_manager = SimpleNamespace(available_balance=15_000.0)
     runner._is_symbol_execution_ready = lambda _symbol: True
-    runner._ensure_symbol_execution_ready_for_order = (
-        lambda _symbol, trace_id=None: True
+    runner._ensure_symbol_execution_ready_for_order = lambda _symbol, trace_id=None: (
+        True
     )
 
     preferred = SimpleNamespace(symbol="NFO:NIFTY2691523500PE")
@@ -112,6 +116,126 @@ def test_candidate_capacity_keeps_preferred_cash_affordable_contract() -> None:
     assert decisions[preferred.symbol]["risk_floor_affordable"] is False
     assert decisions[preferred.symbol]["capacity_blocker"] is None
     assert decisions[preferred.symbol]["affordable"] is True
+
+
+def test_candidate_capacity_uses_materialized_stop_and_selects_risk_safe_fallback() -> (
+    None
+):
+    runner = object.__new__(StrategyRunner)
+    runner._logger = _Logger()
+    runner._order_manager = _order_manager(balance=15_000.0)
+    runner._data_hub = SimpleNamespace(
+        get_available_balance=lambda force=False: 15_000.0
+    )
+    runner._risk_manager = SimpleNamespace(available_balance=15_000.0)
+    runner._is_symbol_execution_ready = lambda _symbol: True
+    runner._ensure_symbol_execution_ready_for_order = lambda _symbol, trace_id=None: (
+        True
+    )
+
+    preferred = SimpleNamespace(
+        symbol="NFO:NIFTY2691523500PE",
+        entry_price=114.00,
+        stop_loss=110.00,
+    )
+    fallback = SimpleNamespace(
+        symbol="NFO:NIFTY2691523450PE",
+        entry_price=80.00,
+        stop_loss=77.00,
+    )
+    snapshots = [
+        {
+            "symbol": preferred.symbol,
+            "bid": 113.90,
+            "ask": 114.00,
+        },
+        {
+            "symbol": fallback.symbol,
+            "bid": 79.90,
+            "ask": 80.00,
+        },
+    ]
+
+    selected, decisions = runner._select_capital_eligible_candidate(
+        ranked_candidates=[fallback, preferred],
+        candidate_snapshots=snapshots,
+        is_live_mode=True,
+        trace_id="cost-inclusive-fallback",
+        preferred_symbol=preferred.symbol,
+        preferred_entry_price=114.00,
+        preferred_stop_loss=110.00,
+    )
+
+    assert selected is fallback
+    assert decisions[preferred.symbol]["cash_affordable"] is True
+    assert decisions[preferred.symbol]["plan_risk_affordable"] is False
+    assert decisions[preferred.symbol]["capacity_blocker"] == "risk"
+    assert decisions[preferred.symbol]["reason"] == "minimum_lot_risk_unaffordable"
+    assert decisions[fallback.symbol]["plan_risk_affordable"] is True
+    assert decisions[fallback.symbol]["affordable"] is True
+
+
+def test_plan_affordability_matches_final_cost_inclusive_risk_authority() -> None:
+    quote = {"bid": 113.90, "ask": 114.00}
+    decision = evaluate_minimum_lot_affordability(
+        symbol="NFO:NIFTY2691523500PE",
+        quote=quote,
+        order_manager=_order_manager(balance=15_000.0),
+        data_hub=SimpleNamespace(get_available_balance=lambda force=False: 15_000.0),
+        plan_entry_price=114.00,
+        plan_stop_loss=110.00,
+    )
+    final = evaluate_final_net_rr(
+        OrderSignal(
+            symbol="NFO:NIFTY2691523500PE",
+            side="BUY",
+            quantity=65,
+            price=114.05,
+            stop_loss=110.05,
+            take_profit=122.05,
+            metadata=quote,
+        )
+    )
+
+    assert final is not None
+    assert decision.plan_cost_inclusive_risk == pytest.approx(final.net_risk)
+    assert decision.plan_risk_affordable is False
+
+
+def test_exhausted_risk_capacity_increments_engine_capital_block_counter() -> None:
+    runner = object.__new__(StrategyRunner)
+    runner._logger = _Logger()
+    runner._order_manager = _order_manager(balance=15_000.0)
+    runner._data_hub = SimpleNamespace(
+        get_available_balance=lambda force=False: 15_000.0
+    )
+    runner._risk_manager = SimpleNamespace(available_balance=15_000.0)
+    runner._capital_block_counter = 0
+    runner._is_symbol_execution_ready = lambda _symbol: True
+    runner._ensure_symbol_execution_ready_for_order = lambda _symbol, trace_id=None: (
+        True
+    )
+    candidate = SimpleNamespace(
+        symbol="NFO:NIFTY2691523500PE",
+        entry_price=114.00,
+        stop_loss=110.00,
+    )
+
+    selected, decisions = runner._select_capital_eligible_candidate(
+        ranked_candidates=[candidate],
+        candidate_snapshots=[
+            {"symbol": candidate.symbol, "bid": 113.90, "ask": 114.00}
+        ],
+        is_live_mode=True,
+        trace_id="risk-exhausted",
+        preferred_symbol=candidate.symbol,
+        preferred_entry_price=114.00,
+        preferred_stop_loss=110.00,
+    )
+
+    assert selected is None
+    assert decisions[candidate.symbol]["capacity_blocker"] == "risk"
+    assert runner._capital_block_counter == 1
 
 
 def test_trade_selector_exposes_cost_floor_as_diagnostic_metadata(
