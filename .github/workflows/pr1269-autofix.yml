@@ -1,0 +1,148 @@
+name: PR1269 targeted integration patch
+
+on:
+  push:
+    branches:
+      - fix/canonical-live-entry-blockers-20260917
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/canonical-live-entry-blockers-20260917
+          fetch-depth: 0
+      - name: Apply exact targeted replacements
+        shell: python
+        run: |
+          from pathlib import Path
+
+          strategy = Path("src/nifty_scalper_bot/core/strategy_manager.py")
+          text = strategy.read_text()
+
+          old = '''                return UnderlyingDirectionObservation(
+                    bias=bias_norm,
+                    confidence=confidence_value,
+                    age_seconds=max(0.0, float(age_s)),
+                    source=source,
+                )
+'''
+          new = '''                return UnderlyingDirectionObservation(
+                    bias=bias_norm,
+                    confidence=confidence_value,
+                    age_seconds=max(0.0, float(age_s)),
+                    source=source,
+                    reversal_candidate=(
+                        str(ctx.get("direction_reversal_candidate") or "") or None
+                    ),
+                    reversal_observations=int(
+                        ctx.get("direction_reversal_observations") or 0
+                    ),
+                )
+'''
+          if old not in text:
+              raise SystemExit("observation constructor target not found")
+          text = text.replace(old, new, 1)
+
+          old = '''            resolution = arbitrate_underlying_direction(
+                spot_observation,
+                futures_observation,
+            )
+            context_resolved = False
+'''
+          new = '''            resolution = arbitrate_underlying_direction(
+                spot_observation,
+                futures_observation,
+            )
+            indicators["direction_arbitration_decision"] = resolution.decision
+            context_resolved = False
+'''
+          if old not in text:
+              raise SystemExit("arbitration call target not found")
+          text = text.replace(old, new, 1)
+
+          old = '''                    extra={
+                        "event": "DIRECTION_CONTEXT_CONFLICT_FAIL_CLOSED",
+                        "symbol": symbol,
+                        "spot_bias": spot_observation.bias if spot_observation else None,
+                        "futures_bias": futures_observation.bias if futures_observation else None,
+                    },
+'''
+          new = '''                    extra={
+                        "event": "DIRECTION_CONTEXT_CONFLICT_FAIL_CLOSED",
+                        "symbol": symbol,
+                        "spot_bias": spot_observation.bias if spot_observation else None,
+                        "futures_bias": (
+                            futures_observation.bias if futures_observation else None
+                        ),
+                        "spot_confidence": (
+                            spot_observation.confidence if spot_observation else None
+                        ),
+                        "futures_confidence": (
+                            futures_observation.confidence
+                            if futures_observation
+                            else None
+                        ),
+                        "spot_reversal_candidate": (
+                            spot_observation.reversal_candidate
+                            if spot_observation
+                            else None
+                        ),
+                        "futures_reversal_candidate": (
+                            futures_observation.reversal_candidate
+                            if futures_observation
+                            else None
+                        ),
+                        "arbitration_decision": resolution.decision,
+                    },
+'''
+          if old not in text:
+              raise SystemExit("conflict telemetry target not found")
+          text = text.replace(old, new, 1)
+          strategy.write_text(text)
+
+          app = Path("src/nifty_scalper_bot/core/app.py")
+          text = app.read_text()
+          old = '''            LOGGER.warning(
+                "ACTIVE_DYNAMIC_BASKET_DEFERRED reason=selected_option_token_missing selected_ce=%s selected_pe=%s",
+'''
+          new = '''            LOGGER.warning(
+                (
+                    "ACTIVE_DYNAMIC_BASKET_DEFERRED "
+                    "reason=selected_option_token_missing "
+                    "selected_ce=%s selected_pe=%s"
+                ),
+'''
+          if old not in text:
+              raise SystemExit("token log target not found")
+          text = text.replace(old, new, 1)
+
+          old = '''            LOGGER.warning(
+                "ACTIVE_DYNAMIC_BASKET_DEFERRED reason=selected_option_runner_delivery_missing selected_ce=%s selected_pe=%s delivery=%s",
+'''
+          new = '''            LOGGER.warning(
+                (
+                    "ACTIVE_DYNAMIC_BASKET_DEFERRED "
+                    "reason=selected_option_runner_delivery_missing "
+                    "selected_ce=%s selected_pe=%s delivery=%s"
+                ),
+'''
+          if old not in text:
+              raise SystemExit("delivery log target not found")
+          text = text.replace(old, new, 1)
+          app.write_text(text)
+
+          workflow = Path(".github/workflows/pr1269-autofix.yml")
+          workflow.unlink()
+      - name: Commit targeted patch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/nifty_scalper_bot/core/strategy_manager.py src/nifty_scalper_bot/core/app.py .github/workflows/pr1269-autofix.yml
+          git commit -m "fix: integrate transition arbitration and clear quality gate"
+          git push origin HEAD:fix/canonical-live-entry-blockers-20260917
