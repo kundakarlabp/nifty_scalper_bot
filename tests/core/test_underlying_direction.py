@@ -60,6 +60,38 @@ def test_materially_stronger_futures_can_override_weak_spot() -> None:
     assert resolved.confirming_source == "spot_context:weak_disagreement"
 
 
+def test_confirmed_leader_resolves_weak_transition_hysteresis_band() -> None:
+    resolved = arbitrate_underlying_direction(
+        _obs("PE", source="spot_context", age=0.2, confidence=0.60),
+        _obs("CE", source="futures_context", age=0.1, confidence=0.75),
+    )
+
+    assert resolved.conflict is False
+    assert resolved.observation is not None
+    assert resolved.observation.bias == "CE"
+    assert resolved.confirming_source == "spot_context:weak_transition"
+
+
+def test_transition_band_does_not_override_credible_opposition() -> None:
+    resolved = arbitrate_underlying_direction(
+        _obs("PE", source="spot_context", age=0.2, confidence=0.61),
+        _obs("CE", source="futures_context", age=0.1, confidence=0.75),
+    )
+
+    assert resolved.conflict is True
+    assert resolved.observation is None
+
+
+def test_transition_band_requires_confirmed_leader() -> None:
+    resolved = arbitrate_underlying_direction(
+        _obs("PE", source="spot_context", age=0.2, confidence=0.60),
+        _obs("CE", source="futures_context", age=0.1, confidence=0.74),
+    )
+
+    assert resolved.conflict is True
+    assert resolved.observation is None
+
+
 def test_credible_opposition_is_transition_and_fails_closed_despite_large_gap() -> None:
     resolved = arbitrate_underlying_direction(
         _obs("PE", source="spot_context", age=0.2, confidence=0.69),
@@ -116,4 +148,4 @@ def test_strategy_manager_documents_and_uses_underlying_only_authority() -> None
     assert "OPTION PREMIUM DATA MUST NEVER AUTHORIZE UNDERLYING DIRECTION" in source
     assert "arbitrate_underlying_direction" in source
     assert 'direction_bias = (indicators.get("direction_bias")' not in source
-    assert 'DIRECTION_CONTEXT_CONFLICT_FAIL_CLOSED' in source
+    assert "DIRECTION_CONTEXT_CONFLICT_FAIL_CLOSED" in source

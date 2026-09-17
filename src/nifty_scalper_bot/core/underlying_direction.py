@@ -16,6 +16,8 @@ _VALID_DIRECTIONS = {"CE", "PE"}
 _DOMINANCE_GAP = 0.20
 _MIN_DOMINANT_CONFIDENCE = 0.70
 _MAX_WEAK_DISAGREEMENT_CONFIDENCE = 0.60
+_MIN_TRANSITION_LEADER_CONFIDENCE = 0.75
+_MIN_TRANSITION_GAP = 0.10
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,7 +36,9 @@ class UnderlyingDirectionObservation:
         if self.age_seconds < 0:
             raise ValueError("direction observation age cannot be negative")
         object.__setattr__(self, "bias", bias)
-        object.__setattr__(self, "confidence", max(0.0, min(1.0, float(self.confidence))))
+        object.__setattr__(
+            self, "confidence", max(0.0, min(1.0, float(self.confidence)))
+        )
         object.__setattr__(self, "age_seconds", float(self.age_seconds))
         object.__setattr__(self, "source", str(self.source or "unknown"))
 
@@ -70,11 +74,21 @@ def arbitrate_underlying_direction(
             )
 
         confidence_gap = abs(spot.confidence - futures.confidence)
+        stronger = spot if spot.confidence > futures.confidence else futures
+        weaker = futures if stronger is spot else spot
+        if (
+            confidence_gap < _DOMINANCE_GAP
+            and stronger.confidence >= _MIN_TRANSITION_LEADER_CONFIDENCE
+            and weaker.confidence <= _MAX_WEAK_DISAGREEMENT_CONFIDENCE
+            and confidence_gap >= _MIN_TRANSITION_GAP
+        ):
+            return UnderlyingDirectionResolution(
+                observation=stronger,
+                confirming_source=f"{weaker.source}:weak_transition",
+            )
         if confidence_gap < _DOMINANCE_GAP:
             return UnderlyingDirectionResolution(observation=None, conflict=True)
 
-        stronger = spot if spot.confidence > futures.confidence else futures
-        weaker = futures if stronger is spot else spot
         if stronger.confidence < _MIN_DOMINANT_CONFIDENCE:
             return UnderlyingDirectionResolution(observation=None, conflict=True)
         if weaker.confidence > _MAX_WEAK_DISAGREEMENT_CONFIDENCE:
