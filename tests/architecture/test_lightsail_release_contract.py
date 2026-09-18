@@ -1,3 +1,5 @@
+# fmt: off
+# ruff: noqa: E501
 """Architecture checks for the AWS Lightsail release and secret boundary."""
 from __future__ import annotations
 
