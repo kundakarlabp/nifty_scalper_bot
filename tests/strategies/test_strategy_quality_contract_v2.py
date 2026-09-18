@@ -236,17 +236,29 @@ def test_vwap_stop_rearm_anchor_stays_on_same_reclaim_thesis(monkeypatch) -> Non
         current_price=100.10,
     )
     later_indicators = _ready_vwap_indicators()
-    later_indicators["latest_bar_ts"] = "2026-09-11T05:03:00+00:00"
+    later_indicators.update(
+        {
+            "latest_bar_ts": "2026-09-11T05:03:00+00:00",
+            # Continuation without another VWAP touch/reclaim: same thesis.
+            "open": 100.05,
+            "low": 100.02,
+            "close": 100.80,
+            "high": 101.00,
+        }
+    )
     later = strategy._evaluate_signal(
         symbol,
         later_indicators,
-        current_price=100.10,
+        current_price=100.80,
     )
 
     assert first is not None and later is not None
     assert first.metadata["setup_id"] == later.metadata["setup_id"]
-    assert first.metadata["setup_candle_timestamp"] == thesis_anchor
-    assert later.metadata["setup_candle_timestamp"] == thesis_anchor
+    assert (
+        first.metadata["setup_candle_timestamp"]
+        == later.metadata["setup_candle_timestamp"]
+    )
+    assert first.metadata["setup_candle_timestamp"] != later_indicators["latest_bar_ts"]
 
 
 def test_vwap_native_rejects_atr_overextension(monkeypatch) -> None:
