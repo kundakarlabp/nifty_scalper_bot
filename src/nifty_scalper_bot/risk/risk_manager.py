@@ -1327,7 +1327,7 @@ class RiskManager:
     def validate_close_position(
         self, *, symbol: str, exit_price: float | None = None
     ) -> tuple[bool, str]:  # pragma: no cover
-        """Allow closing positions unless a breaker is active."""
+        """Allow position-closing validation even when entry risk is halted."""
         self._reset_daily_if_needed()
         self._refresh_realized_pnl()
         # Closing/reducing exposure must remain available after an entry
