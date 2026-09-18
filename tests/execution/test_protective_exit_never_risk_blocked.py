@@ -1,4 +1,5 @@
-# fmt: skip
+# fmt: off
+# ruff: noqa: E501,I001,F841
 """Protective exits must survive a tripped risk breaker (P1)."""
 
 from __future__ import annotations
@@ -58,3 +59,5 @@ def test_legacy_safety_bracket_uses_explicit_reducing_intent() -> None:
     assert source.count('intent="EXIT"') >= 2
     assert source.count("check_risk=False") >= 2
     assert source.count('strategy_name="protective_exit"') >= 2
+
+# fmt: on
