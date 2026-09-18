@@ -175,6 +175,36 @@ def test_record_stop_exit_latches_without_close_position(monkeypatch, tmp_path) 
     )
 
 
+def test_profitable_stop_skips_timer_but_still_requires_new_setup(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("STOP_LOSS_REENTRY_COOLDOWN_SECONDS", "300")
+    pm = PositionManager(state_file=str(tmp_path / "positions.json"))
+    symbol = "NFO:NIFTY2680424400PE"
+
+    assert pm.record_stop_exit(
+        symbol,
+        "HARD_SL_BREACH",
+        net_pnl=50.0,
+    )
+    stopped_at = float(pm._recent_stop_thesis["stopped_at_epoch"])
+    assert pm._recent_stop_thesis["profitable_stop"] is True
+    assert float(pm._recent_stop_thesis["expires_epoch"]) <= time.time()
+
+    assert (
+        pm.stop_reentry_block_reason(
+            _signal(symbol, setup_candle_timestamp=stopped_at)
+        )
+        == "stop-loss thesis setup not rearmed"
+    )
+    assert (
+        pm.stop_reentry_block_reason(
+            _signal(symbol, setup_candle_timestamp=stopped_at + 60)
+        )
+        is None
+    )
+
+
 def test_record_stop_exit_ignores_non_stop_exits(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("STOP_LOSS_REENTRY_COOLDOWN_SECONDS", "1")
     pm = PositionManager(state_file=str(tmp_path / "positions.json"))
@@ -207,9 +237,15 @@ def test_bracket_exit_complete_latches_structural_stop(monkeypatch, tmp_path) ->
     StrategyRunner._on_bracket_exit_complete(
         runner,
         symbol,
-        outcome={"symbol": symbol, "exit_reason": "SL Hit (91.4 <= 92.00)"},
+        outcome={
+            "symbol": symbol,
+            "exit_reason": "SL Hit (91.4 <= 92.00)",
+            "net_pnl": 50.0,
+        },
     )
 
     assert pm._recent_stop_thesis is not None
     assert pm._recent_stop_thesis["option_side"] == "PE"
     assert pm._recent_stop_thesis["rearm_required"] is True
+    assert pm._recent_stop_thesis["profitable_stop"] is True
+    assert float(pm._recent_stop_thesis["expires_epoch"]) <= time.time()
