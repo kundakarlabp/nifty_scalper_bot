@@ -1,3 +1,4 @@
+# fmt: skip
 """Protective exits must survive a tripped risk breaker (P1)."""
 
 from __future__ import annotations
