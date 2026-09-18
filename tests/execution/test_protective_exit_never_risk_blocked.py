@@ -36,12 +36,12 @@ def test_reducing_intent_disables_the_risk_check_structurally() -> None:
     assert "SQUARE_OFF" in order_manager_core._REDUCING_ORDER_INTENTS
 
 
-def test_validate_close_position_remains_available_after_breaker() -> None:
+def test_validate_close_position_remains_available_after_breaker(monkeypatch) -> None:
     manager = RiskManager.__new__(RiskManager)
     manager._breaker_tripped = True
     manager._breaker_reason = "daily loss"
-    manager._reset_daily_if_needed = lambda: None
-    manager._refresh_realized_pnl = lambda: None
+    monkeypatch.setattr(RiskManager, "_reset_daily_if_needed", lambda self: None)
+    monkeypatch.setattr(RiskManager, "_refresh_realized_pnl", lambda self: None)
 
     allowed, reason = manager.validate_close_position(
         symbol="NFO:NIFTY24JUL24000CE",
