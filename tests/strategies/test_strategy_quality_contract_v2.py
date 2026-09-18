@@ -354,7 +354,10 @@ def test_vwap_independent_setup_excludes_underlying_slope_bonus(monkeypatch) -> 
 
     assert aligned_signal is not None
     assert neutral_signal is not None
-    assert aligned_signal.metadata["strategy_score"] > neutral_signal.metadata["strategy_score"]
+    assert (
+        aligned_signal.metadata["strategy_score"]
+        > neutral_signal.metadata["strategy_score"]
+    )
     assert aligned_signal.metadata["independent_setup_score"] == 6.0
     assert (
         neutral_signal.metadata["independent_setup_score"]
