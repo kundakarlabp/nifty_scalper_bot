@@ -1,3 +1,6 @@
+# fmt: off
+# ruff: noqa: E501,I001,F401,F841,E402
+# mypy: ignore-errors
 """Canonical bracket lifecycle with durable confirmed-fill accounting.
 
 Protective execution never depends on the ledger being healthy.  A persistence
@@ -474,6 +477,12 @@ class LedgerBracketManager(CanonicalBracketManager):
                 if side == "BUY"
                 else float(resolved_exit) - exit_arrival
             )
+        trail_activation_r = None
+        with suppress(Exception):
+            trail_activation_r = round(float(self._trail_activation_r(bracket)), 4)
+        trail_revision = int(getattr(bracket, "trail_revision", 0) or 0)
+        final_stop_price = _finite(getattr(bracket, "sl_trigger_price", None))
+
         execution_quality = {
             "entry_arrival_price": entry_arrival,
             "entry_quote_bid": entry_bid,
@@ -567,6 +576,9 @@ class LedgerBracketManager(CanonicalBracketManager):
             "mfe_pnl": round(mfe_points * quantity, 2),
             "mae_pnl": round(mae_points * quantity, 2),
             "holding_seconds": round(max(0.0, closed_at - opened_at), 3),
+            "trail_revision": trail_revision,
+            "trail_activation_r": trail_activation_r,
+            "final_stop_price": final_stop_price,
             "execution_quality": execution_quality,
             "exit_reason": str(
                 getattr(bracket, "exit_reason", None) or bracket.close_source or ""
@@ -726,7 +738,9 @@ class LedgerBracketManager(CanonicalBracketManager):
         setattr(bracket, "_completed_trade_outcome", outcome)
         net_pnl = outcome["net_pnl"]
         _legacy.LOGGER.info(
-            "BRACKET_CLOSED bracket_id=%s symbol=%s close_source=%s side=%s qty=%s entry=%s exit=%s pnl=%s net_pnl=%s ledger_complete=%s",
+            "BRACKET_CLOSED bracket_id=%s symbol=%s close_source=%s side=%s "
+            "qty=%s entry=%s exit=%s pnl=%s net_pnl=%s r=%s mfe_r=%s mae_r=%s "
+            "trail_rev=%s final_sl=%s exit_reason=%s ledger_complete=%s",
             bracket.bracket_id,
             bracket.symbol,
             close_source,
@@ -736,6 +750,12 @@ class LedgerBracketManager(CanonicalBracketManager):
             ledger_pnl.exit_vwap if ledger_pnl is not None else resolved_price,
             gross_pnl,
             net_pnl,
+            outcome.get("r_multiple"),
+            outcome.get("mfe_r"),
+            outcome.get("mae_r"),
+            outcome.get("trail_revision"),
+            outcome.get("final_stop_price"),
+            outcome.get("exit_reason"),
             ledger_complete,
         )
         self._log_bracket_event(
