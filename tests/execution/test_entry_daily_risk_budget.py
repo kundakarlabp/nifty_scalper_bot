@@ -2,6 +2,10 @@ from types import SimpleNamespace
 
 import pytest
 
+from nifty_scalper_bot.config.env_utils import (
+    LIVE_DAILY_LOSS_PCT,
+    LIVE_PER_TRADE_RISK_PCT,
+)
 from nifty_scalper_bot.execution.affordability import evaluate_minimum_lot_affordability
 from nifty_scalper_bot.execution.margin_engine import MarginEngine
 from nifty_scalper_bot.execution.order_manager_core import OrderManager, TradePlan
@@ -123,7 +127,9 @@ def test_no_configured_daily_cap_preserves_existing_per_trade_risk_policy():
     assert decision.quantity == 65
 
 
-def test_affordability_telemetry_exposes_risk_capacity_without_changing_cash_readiness():
+def test_affordability_telemetry_exposes_risk_capacity_without_changing_cash_readiness() -> (
+    None
+):
     manager = _order_manager(max_day_loss=319.09)
     manager._margin_factor = 1.1
     manager._margin_buffer = 0.9
@@ -140,3 +146,30 @@ def test_affordability_telemetry_exposes_risk_capacity_without_changing_cash_rea
     assert decision.per_trade_risk_budget == pytest.approx(797.73)
     assert decision.effective_one_lot_risk_budget == pytest.approx(319.09)
     assert decision.max_stop_distance_one_lot == pytest.approx(319.09 / 65.0)
+
+
+@pytest.mark.parametrize(
+    "day_loss, affordable", [(0.0, True), (500.0, False), (741.465, False)]
+)
+def test_live_risk_envelope_admits_observed_stop_but_preserves_daily_cap(
+    day_loss, affordable
+):
+    balance = 14_829.30
+    manager = _order_manager(
+        max_day_loss=balance * float(LIVE_DAILY_LOSS_PCT) / 100.0,
+        day_loss=day_loss,
+    )
+    manager._risk_manager.account_balance = balance
+    manager._risk_manager.settings.per_trade_risk_pct = float(LIVE_PER_TRADE_RISK_PCT)
+    decision = evaluate_minimum_lot_affordability(
+        symbol="NFO:NIFTY2692223300CE",
+        quote={"bid": 119.55, "ask": 119.80},
+        order_manager=manager,
+        fallback_balance=balance,
+        plan_entry_price=119.80,
+        plan_stop_loss=115.25,
+    )
+    assert decision.per_trade_risk_budget == pytest.approx(741.465)
+    assert decision.remaining_daily_risk_budget == pytest.approx(741.465 - day_loss)
+    assert decision.plan_cost_inclusive_risk > 4.55 * 65
+    assert decision.affordable is affordable
