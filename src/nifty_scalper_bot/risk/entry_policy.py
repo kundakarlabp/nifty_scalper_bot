@@ -1,3 +1,4 @@
+# fmt: off
 """Pure policy helpers for native final risk admission."""
 
 from __future__ import annotations
@@ -194,3 +195,5 @@ __all__ = [
     "_signal_stop_risk",
     "_stop_reentry_block_reason",
 ]
+
+# fmt: on
