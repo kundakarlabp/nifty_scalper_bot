@@ -597,7 +597,9 @@ def test_completed_trade_outcome_reports_r_normalised_excursions() -> None:
         entry_price=100.0,
         entry_fill_price=100.0,
         initial_sl_trigger_price=96.0,
-        sl_trigger_price=96.0,
+        sl_trigger_price=103.0,
+        trailing_config={},
+        trail_revision=3,
         highest_ltp=108.0,
         lowest_ltp=98.0,
         close_source="broker_fill",
@@ -622,6 +624,9 @@ def test_completed_trade_outcome_reports_r_normalised_excursions() -> None:
     assert outcome["mae_r"] == 0.5
     assert outcome["r_multiple"] is not None
     assert outcome["r_multiple"] < 2.0  # net of costs
+    assert outcome["trail_revision"] == 3
+    assert outcome["trail_activation_r"] == 0.75
+    assert outcome["final_stop_price"] == 103.0
 
 
 def _quote_tick(symbol: str, ltp: float, bid: float, ask: float) -> dict:
