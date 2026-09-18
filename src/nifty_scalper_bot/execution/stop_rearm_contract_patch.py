@@ -163,9 +163,7 @@ def _patched_close_position(
     reason: str,
     close_time: Any = None,
 ) -> Any:
-    result = _ORIGINAL_CLOSE(
-        self, symbol, exit_price, reason, close_time=close_time
-    )
+    result = _ORIGINAL_CLOSE(self, symbol, exit_price, reason, close_time=close_time)
     record_stop_exit(self, symbol, reason)
     return result
 
