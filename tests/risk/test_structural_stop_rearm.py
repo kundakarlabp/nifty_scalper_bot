@@ -124,6 +124,70 @@ def test_runtime_setup_context_rearms_only_after_minimum_cooldown(
     assert pm._recent_stop_thesis is None
 
 
+
+def test_same_structural_setup_id_cannot_rearm_on_later_bar(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("STOP_LOSS_REENTRY_COOLDOWN_SECONDS", "1")
+    pm = PositionManager(state_file=str(tmp_path / "positions.json"))
+    symbol = "NFO:NIFTY2680424400PE"
+    stopped_setup = "vwap:PE:reclaim-1"
+    assert pm.record_stop_exit(
+        symbol,
+        "STOP_LOSS",
+        net_pnl=-100.0,
+        setup_id=stopped_setup,
+        setup_candle_timestamp=time.time() - 60.0,
+    )
+    stopped_at = float(pm._recent_stop_thesis["stopped_at_epoch"])
+    pm._recent_stop_thesis["expires_epoch"] = time.time() - 1
+
+    reason = pm.stop_reentry_block_reason(
+        _signal(
+            "NFO:NIFTY2680424350PE",
+            setup_id=stopped_setup,
+            setup_candle_timestamp=stopped_at + 60.0,
+        )
+    )
+
+    assert reason == "stop-loss thesis setup not rearmed"
+
+
+def test_new_structural_setup_id_rearms_only_with_post_stop_anchor(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("STOP_LOSS_REENTRY_COOLDOWN_SECONDS", "1")
+    pm = PositionManager(state_file=str(tmp_path / "positions.json"))
+    symbol = "NFO:NIFTY2680424400PE"
+    assert pm.record_stop_exit(
+        symbol,
+        "STOP_LOSS",
+        net_pnl=-100.0,
+        setup_id="vwap:PE:reclaim-1",
+        setup_candle_timestamp=time.time() - 60.0,
+    )
+    stopped_at = float(pm._recent_stop_thesis["stopped_at_epoch"])
+    pm._recent_stop_thesis["expires_epoch"] = time.time() - 1
+
+    stale_reason = pm.stop_reentry_block_reason(
+        _signal(
+            "NFO:NIFTY2680424350PE",
+            setup_id="vwap:PE:reclaim-2",
+            setup_candle_timestamp=stopped_at - 1.0,
+        )
+    )
+    assert stale_reason == "stop-loss thesis setup not rearmed"
+
+    fresh_reason = pm.stop_reentry_block_reason(
+        _signal(
+            "NFO:NIFTY2680424350PE",
+            setup_id="vwap:PE:reclaim-2",
+            setup_candle_timestamp=stopped_at + 60.0,
+        )
+    )
+    assert fresh_reason is None
+    assert pm._recent_stop_thesis is None
+
 def test_opposite_option_side_is_not_blocked(monkeypatch, tmp_path) -> None:
     pm = _stopped_manager(monkeypatch, tmp_path)
 
@@ -237,6 +301,8 @@ def test_bracket_exit_complete_latches_structural_stop(monkeypatch, tmp_path) ->
             "symbol": symbol,
             "exit_reason": "SL Hit (91.4 <= 92.00)",
             "net_pnl": 50.0,
+            "setup_id": "vwap:PE:reclaim-1",
+            "setup_candle_timestamp": "2026-08-11T09:46:00+05:30",
         },
     )
 
@@ -244,6 +310,8 @@ def test_bracket_exit_complete_latches_structural_stop(monkeypatch, tmp_path) ->
     assert pm._recent_stop_thesis["option_side"] == "PE"
     assert pm._recent_stop_thesis["rearm_required"] is True
     assert pm._recent_stop_thesis["profitable_stop"] is True
+    assert pm._recent_stop_thesis["setup_id"] == "vwap:PE:reclaim-1"
+    assert pm._recent_stop_thesis["setup_epoch"] is not None
     assert float(pm._recent_stop_thesis["expires_epoch"]) <= time.time()
 
 # fmt: on
