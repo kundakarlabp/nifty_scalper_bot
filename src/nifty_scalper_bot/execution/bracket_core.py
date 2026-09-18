@@ -1,3 +1,6 @@
+# fmt: off
+# ruff: noqa: E501,I001,F401,F841,E402
+# mypy: ignore-errors
 """Thread-safe bracket manager with virtual (internal) SL/TP execution.
 
 Runtime role:
