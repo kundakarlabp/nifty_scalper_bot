@@ -1418,6 +1418,10 @@ class StrategyRunner:
                             outcome.get("symbol") or symbol,
                             outcome.get("exit_reason"),
                             net_pnl=outcome.get("net_pnl"),
+                            setup_id=outcome.get("setup_id"),
+                            setup_candle_timestamp=outcome.get(
+                                "setup_candle_timestamp"
+                            ),
                         ):
                             logger.warning(
                                 "STOP_REARM_LATCHED symbol=%s exit_reason=%s",

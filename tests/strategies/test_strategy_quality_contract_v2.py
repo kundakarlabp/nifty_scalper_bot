@@ -219,6 +219,48 @@ def test_vwap_native_consumes_proximity_config(monkeypatch) -> None:
     assert signal.metadata["setup_score"] == signal.metadata["strategy_score"]
 
 
+
+
+def test_vwap_stop_rearm_anchor_stays_on_same_reclaim_thesis(monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    strategy = VWAPProStrategy(
+        VWAPProStrategyConfig(proximity_pct=0.15), indicator_engine=None
+    )
+    symbol = "NFO:NIFTY26SEP25000CE"
+    thesis_anchor = "2026-09-11T04:59:00+00:00"
+    strategy._thesis_anchor_by_scope[(symbol, "2026-09-11")] = thesis_anchor
+
+    first = strategy._evaluate_signal(
+        symbol,
+        _ready_vwap_indicators(),
+        current_price=100.10,
+    )
+    later_indicators = _ready_vwap_indicators()
+    later_indicators.update(
+        {
+            "latest_bar_ts": "2026-09-11T05:03:00+00:00",
+            # Continuation without another VWAP touch/reclaim: same thesis.
+            "open": 100.05,
+            "low": 100.02,
+            "close": 100.80,
+            "high": 101.00,
+        }
+    )
+    later = strategy._evaluate_signal(
+        symbol,
+        later_indicators,
+        current_price=100.80,
+    )
+
+    assert first is not None and later is not None
+    assert first.metadata["setup_id"] == later.metadata["setup_id"]
+    assert (
+        first.metadata["setup_candle_timestamp"]
+        == later.metadata["setup_candle_timestamp"]
+    )
+    assert first.metadata["setup_candle_timestamp"] != later_indicators["latest_bar_ts"]
+
+
 def test_vwap_native_rejects_atr_overextension(monkeypatch) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     strategy = VWAPProStrategy(
