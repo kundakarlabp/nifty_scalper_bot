@@ -587,3 +587,25 @@ async def test_range_smc_setup_still_rejects_weak_orderflow_context(
         "NFO:NIFTY2670724050CE"
     ]
     assert decision.reason == "single_trigger_context_confirmation_invalid"
+
+
+async def test_weak_underlying_disagreement_cannot_promote_single_trigger(monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    monkeypatch.delenv("STRATEGY_ALLOW_SINGLE_VOTE_SCALP", raising=False)
+    monkeypatch.delenv("STRATEGY_ALLOW_SELECTED_OPTION_SINGLE_VOTE", raising=False)
+    manager = _manager_probe()
+    trigger = _signal_vote(strategy="VWAPPro", raw_score=8.0, weighted_score=6.4)
+    context = _context_vote(score=10.0, confidence=0.85)
+    indicators = _valid_entry_context()
+    indicators["direction_context_confirming_source"] = "spot_context:weak_disagreement"
+
+    result = manager._combine_strategy_votes(
+        symbol="NFO:NIFTY2670724050CE",
+        signals=[trigger, context],
+        indicators=indicators,
+    )
+
+    assert result is None
+    decision = manager._last_no_signal_decision_by_symbol["NFO:NIFTY2670724050CE"]
+    assert decision.reason == "single_trigger_context_confirmation_invalid"
