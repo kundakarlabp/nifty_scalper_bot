@@ -504,7 +504,10 @@ async def test_regime_downweighted_context_cannot_unlock_single_trigger(
     monkeypatch.delenv("STRATEGY_ALLOW_SELECTED_OPTION_SINGLE_VOTE", raising=False)
     manager = _manager_probe()
     trigger = _signal_vote(
-        strategy="VWAPPro", raw_score=7.5, weighted_score=6.0
+        strategy="VWAPPro",
+        raw_score=7.5,
+        weighted_score=6.0,
+        regime_name="TREND",
     )
     context_signal, context_vote = _context_vote(score=10.0, confidence=0.85)
     context_vote.score = 2.5
