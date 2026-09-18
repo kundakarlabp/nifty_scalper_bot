@@ -1,4 +1,4 @@
-# ruff: noqa: E501
+# ruff: noqa: E501,I001,F841
 from __future__ import annotations
 
 import time
