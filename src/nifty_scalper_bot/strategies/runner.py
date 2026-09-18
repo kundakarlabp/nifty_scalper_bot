@@ -1414,6 +1414,7 @@ class StrategyRunner:
                         if recorder(
                             outcome.get("symbol") or symbol,
                             outcome.get("exit_reason"),
+                            net_pnl=outcome.get("net_pnl"),
                         ):
                             logger.warning(
                                 "STOP_REARM_LATCHED symbol=%s exit_reason=%s",
