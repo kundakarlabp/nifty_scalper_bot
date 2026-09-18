@@ -1,5 +1,5 @@
 # fmt: off
-# ruff: noqa: E501,I001,F841
+# ruff: noqa: E501,I001,F841,E701,E702
 # mypy: ignore-errors
 """Strategy scoring and dynamic allocation manager.
 
