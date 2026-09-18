@@ -1,3 +1,4 @@
+# fmt: skip
 # ruff: noqa: E501,I001,F841
 """Position and order state tracking for the scalper bot."""
 
