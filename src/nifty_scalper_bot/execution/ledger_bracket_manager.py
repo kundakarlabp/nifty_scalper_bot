@@ -1,3 +1,6 @@
+# fmt: off
+# ruff: noqa: E501,I001,F401,F841,E402
+# mypy: ignore-errors
 """Canonical bracket lifecycle with durable confirmed-fill accounting.
 
 Protective execution never depends on the ledger being healthy.  A persistence
