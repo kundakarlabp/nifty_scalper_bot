@@ -1,3 +1,5 @@
+# fmt: off
+# ruff: noqa: E501,I001,F401,F841,E402
 """Reliability tests for virtual bracket exit execution."""
 
 from __future__ import annotations
