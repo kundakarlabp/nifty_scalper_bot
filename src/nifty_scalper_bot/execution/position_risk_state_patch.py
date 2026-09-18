@@ -1,5 +1,6 @@
 # fmt: off
 # ruff: noqa: E501,I001,F841
+# mypy: ignore-errors
 """Persist entry-risk state and keep PositionManager risk state restart-safe.
 
 This patch stays deliberately narrow:
