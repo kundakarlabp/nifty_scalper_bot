@@ -1,3 +1,5 @@
+# fmt: off
+# ruff: noqa: E501,I001
 from pathlib import Path
 
 from nifty_scalper_bot.strategies.signal_quality import score_signal_quality
