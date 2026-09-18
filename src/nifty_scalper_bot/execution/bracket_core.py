@@ -2987,7 +2987,12 @@ class BracketManager:
         if new_sl is None:
             return False
 
-        new_sl = self._apply_min_profit_floor(bracket, new_sl, ltp)
+        new_sl = self._apply_min_profit_floor(
+            bracket,
+            new_sl,
+            ltp,
+            high_water=high_water,
+        )
         if new_sl is None:
             return False
 
@@ -3139,14 +3144,20 @@ class BracketManager:
         return float(cached)
 
     def _apply_min_profit_floor(
-        self, bracket: BracketState, candidate: float, ltp: float
+        self,
+        bracket: BracketState,
+        candidate: float,
+        ltp: float,
+        *,
+        high_water: float | None = None,
     ) -> float | None:
         """Raise a trail candidate to clear costs plus a minimum locked profit.
 
-        Once the trade has earned its activation progress, a stop that merely
-        scratches is not worth holding: the floor is round-trip costs plus
-        TRAIL_MIN_LOCKED_PROFIT_R of initial risk. Returns None when the floor
-        cannot be placed with room below price (it would be a hair-trigger).
+        Activation is owned by the best executable excursion already achieved,
+        not by the current retraced price. Once executable MFE crosses the
+        activation threshold, later pullbacks must not make the lifecycle
+        "forget" that trailing was activated. Returns None when the floor cannot
+        be placed with room below price (it would be a hair-trigger).
         """
         entry = float(bracket.entry_price or 0.0)
         initial_sl = float(
@@ -3155,15 +3166,21 @@ class BracketManager:
         initial_risk = abs(entry - initial_sl)
         if entry <= 0 or initial_risk <= 0:
             return candidate
-        profit_points = (ltp - entry) if bracket.side == "BUY" else (entry - ltp)
-        tier_metric = profit_points / initial_risk
-        if tier_metric < self._trail_activation_r(bracket):
+
+        watermark = float(high_water) if high_water is not None else float(ltp)
+        if bracket.side == "BUY":
+            mfe_points = max(0.0, watermark - entry)
+        else:
+            mfe_points = max(0.0, entry - watermark)
+        mfe_r = mfe_points / initial_risk
+        if mfe_r < self._trail_activation_r(bracket):
             return candidate
+
         cost = self._breakeven_cost_per_unit(bracket)
         # The positive-profit component starts only after real progress (0.75R);
         # before that only costs are cleared, so an early cost-adjusted breakeven
         # is not converted into a noise-sensitive profit stop.
-        locked_r = self._min_locked_profit_r() if tier_metric >= 0.75 else 0.0
+        locked_r = self._min_locked_profit_r() if mfe_r >= 0.75 else 0.0
         locked = cost + (initial_risk * locked_r)
         room = max(cost, 0.05)
         if bracket.side == "BUY":
@@ -3206,11 +3223,11 @@ class BracketManager:
         )
 
         # Use instance-cached thresholds (set at __init__) — not os.getenv on every tick.
-        # Canonical metric is R (open profit / initial risk); the premium-percent
-        # ladder is the fallback when initial risk is unknown.
-        profit_points = (ltp - entry) if bracket.side == "BUY" else (entry - ltp)
+        # Canonical metric is achieved executable MFE in R. Using current open
+        # profit here made trailing activation/tier selection regress after a
+        # pullback even though the executable watermark had already advanced.
         if initial_risk > 0:
-            tier_metric = profit_points / initial_risk
+            tier_metric = max(0.0, mfe) / initial_risk
             tier1_threshold = activation_r
             tier2_threshold = self._trail_tier2_r
             tier3_threshold = self._trail_tier3_r
