@@ -34,3 +34,26 @@ def test_reducing_intent_disables_the_risk_check_structurally() -> None:
     assert guard < risk_call
     assert "EXIT" in order_manager_core._REDUCING_ORDER_INTENTS
     assert "SQUARE_OFF" in order_manager_core._REDUCING_ORDER_INTENTS
+
+
+def test_validate_close_position_remains_available_after_breaker() -> None:
+    manager = RiskManager.__new__(RiskManager)
+    manager._breaker_tripped = True
+    manager._breaker_reason = "daily loss"
+    manager._reset_daily_if_needed = lambda: None
+    manager._refresh_realized_pnl = lambda: None
+
+    allowed, reason = manager.validate_close_position(
+        symbol="NFO:NIFTY24JUL24000CE",
+        exit_price=95.0,
+    )
+
+    assert allowed is True
+    assert reason == ""
+
+
+def test_legacy_safety_bracket_uses_explicit_reducing_intent() -> None:
+    source = inspect.getsource(order_manager_core.OrderManager._ensure_safety_bracket)
+    assert source.count('intent="EXIT"') >= 2
+    assert source.count("check_risk=False") >= 2
+    assert source.count('strategy_name="protective_exit"') >= 2
