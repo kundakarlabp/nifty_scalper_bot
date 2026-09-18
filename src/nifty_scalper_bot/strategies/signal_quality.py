@@ -295,6 +295,10 @@ def score_signal_quality(
         + 0.15 * data
         + 0.10 * rr
     )
+    # Direction + native setup quality are the alpha evidence. Option
+    # microstructure, data readiness and R:R validate executability but must
+    # not rescue a weak directional thesis into an entry.
+    alpha_score = 0.55 * direction + 0.45 * strategy
     normalized_strategy_name = normalize_strategy_name(strategy_name)
     threshold = trigger_threshold(strategy_name=normalized_strategy_name)
     context_only = normalized_strategy_name in CONTEXT_ONLY_STRATEGIES
@@ -303,6 +307,8 @@ def score_signal_quality(
         reasons.append("context_only_strategy")
     if final < threshold:
         reasons.append("score_below_threshold")
+    if alpha_score < threshold:
+        reasons.append("alpha_below_threshold")
     if direction < 6.0:
         reasons.append("direction_below_minimum")
     return SignalQualityScore(
@@ -312,7 +318,12 @@ def score_signal_quality(
         option_score=option,
         data_score=data,
         rr_score=rr,
-        allowed=(not context_only and final >= threshold and direction >= 6.0),
+        allowed=(
+            not context_only
+            and final >= threshold
+            and alpha_score >= threshold
+            and direction >= 6.0
+        ),
         reasons=reasons,
         components={
             "direction_score": direction,
@@ -321,6 +332,7 @@ def score_signal_quality(
             "data_score": data,
             "rr_score": rr,
             "final_score": round(final, 3),
+            "alpha_score": round(alpha_score, 3),
             "threshold": threshold,
             "strategy_name": strategy_name or "",
             "normalized_strategy_name": normalized_strategy_name,
