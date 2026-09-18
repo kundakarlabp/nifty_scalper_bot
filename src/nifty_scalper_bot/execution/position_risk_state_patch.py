@@ -85,10 +85,9 @@ def _restore_risk_state(owner: Any, state: Any) -> None:
         owner._risk_circuit_state = dict(circuit)
     stopped = state.get("recent_stop_thesis")
     if isinstance(stopped, Mapping):
-        with suppress(TypeError, ValueError):
-            expires_epoch = float(stopped.get("expires_epoch", 0.0) or 0.0)
-            if expires_epoch > time.time():
-                owner._recent_stop_thesis = dict(stopped)
+        stored_date = str(stopped.get("trading_date") or "")
+        if not stored_date or stored_date == today:
+            owner._recent_stop_thesis = dict(stopped)
 
 
 def _patched_init(self: Any, *args: Any, **kwargs: Any) -> None:
