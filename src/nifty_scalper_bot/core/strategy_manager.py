@@ -4681,11 +4681,15 @@ class StrategyManager(_BaseStrategyManager):
                 and trigger_regime_name != MarketRegime.TREND.value
             ):
                 qualifying_context_votes = []
-                log.info(
+                log_throttled(
+                    log,
+                    f"vwap_context_promotion_blocked:{symbol_norm}:{trigger_regime_name}",
                     "VWAP_CONTEXT_PROMOTION_BLOCKED symbol=%s regime=%s "
                     "reason=non_trend_regime_requires_independent_trigger",
                     symbol_norm,
                     trigger_regime_name,
+                    interval_sec=30.0,
+                    level=logging.INFO,
                     extra={
                         "event": "VWAP_CONTEXT_PROMOTION_BLOCKED",
                         "symbol": symbol_norm,
