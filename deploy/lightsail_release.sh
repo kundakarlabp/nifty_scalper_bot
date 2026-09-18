@@ -108,8 +108,16 @@ validate_environment() {
 service_healthy() {
   local live_json
   live_json="$(curl -fsS --max-time 3 "http://127.0.0.1:${PORT}/livez" 2>/dev/null || true)"
-  grep -Eq '"bot_loaded"[[:space:]]*:[[:space:]]*true' <<<"$live_json" || return 1
   grep -Eq '"engine_http_responsive"[[:space:]]*:[[:space:]]*true' <<<"$live_json" || return 1
+  if grep -Eq '"bot_loaded"[[:space:]]*:[[:space:]]*true' <<<"$live_json"; then
+    return 0
+  fi
+  # deployment_main intentionally unloads the trading stack outside the AUTO
+  # window.  That explicit quiet control plane is healthy even though
+  # bot_loaded=false; accepting no other unloaded shape keeps fail-closed
+  # semantics for accidental partial startups.
+  grep -Eq '"quiet"[[:space:]]*:[[:space:]]*true' <<<"$live_json" || return 1
+  grep -Eq '"bot_loaded"[[:space:]]*:[[:space:]]*false' <<<"$live_json" || return 1
 }
 
 wait_for_service() {
