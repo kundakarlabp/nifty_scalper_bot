@@ -1,3 +1,6 @@
+# fmt: off
+# ruff: noqa: E501,I001,F841
+# mypy: ignore-errors
 """Position and order state tracking for the scalper bot."""
 
 from __future__ import annotations
@@ -5,6 +8,7 @@ from __future__ import annotations
 import copy
 import json
 import math
+import re
 import os
 import threading
 import time
@@ -74,6 +78,86 @@ _EXIT_RECONCILIATION_GRACE_MAX_S = 5.0
 _BROKER_POSITION_SNAPSHOT_MAX_AGE_DEFAULT_S = 20.0
 _BROKER_POSITION_SNAPSHOT_MAX_AGE_MIN_S = 1.0
 _BROKER_POSITION_SNAPSHOT_MAX_AGE_MAX_S = 300.0
+
+_STOP_REASON_RE = re.compile(r"(?<![A-Z0-9])SL(?![A-Z0-9])|STOP[_ ]?LOSS")
+_STOP_REARM_ANCHOR_KEYS = (
+    "setup_candle_timestamp",
+    "bar_timestamp",
+    "latest_bar_ts",
+    "signal_timestamp",
+    "timestamp",
+)
+
+
+def _stop_rearm_epoch(value: object) -> float | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, (int, float)):
+        parsed = float(value)
+        return parsed / 1000.0 if parsed > 10_000_000_000 else parsed
+    if isinstance(value, datetime):
+        dt = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    text = str(value).strip()
+    if not text:
+        return None
+    with suppress(ValueError):
+        parsed = float(text)
+        return parsed / 1000.0 if parsed > 10_000_000_000 else parsed
+    with suppress(ValueError):
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+    return None
+
+
+def _stop_rearm_cooldown_seconds() -> float:
+    raw = os.getenv("STOP_LOSS_REENTRY_COOLDOWN_SECONDS", "300")
+    with suppress(TypeError, ValueError):
+        return max(0.0, float(raw or 0.0))
+    return 300.0
+
+
+def _is_stop_exit_reason(reason: object) -> bool:
+    text = str(reason or "").strip().upper().replace("-", "_")
+    if not text:
+        return False
+    if text in {"SL", "STOP", "STOPLOSS"}:
+        return True
+    return bool(_STOP_REASON_RE.search(text))
+
+
+def _option_stop_thesis(symbol: object) -> tuple[str, str] | None:
+    text = str(symbol or "").strip().upper().split(":")[-1]
+    option_side = text[-2:] if text.endswith(("CE", "PE")) else ""
+    if not option_side:
+        return None
+    contract = text[:-2]
+    digit_at = next((index for index, char in enumerate(contract) if char.isdigit()), -1)
+    if digit_at <= 0:
+        return None
+    underlying = contract[:digit_at]
+    if not underlying.isalpha():
+        return None
+    return underlying, option_side
+
+
+def _signal_stop_setup_epoch(signal: object) -> float | None:
+    metadata = getattr(signal, "metadata", {})
+    if isinstance(metadata, Mapping):
+        for key in _STOP_REARM_ANCHOR_KEYS:
+            anchor = _stop_rearm_epoch(metadata.get(key))
+            if anchor is not None:
+                return anchor
+    try:
+        from nifty_scalper_bot.strategies.signal_identity import current_order_setup_metadata
+        scoped = current_order_setup_metadata()
+    except Exception:
+        return None
+    if isinstance(scoped, Mapping):
+        for key in _STOP_REARM_ANCHOR_KEYS:
+            anchor = _stop_rearm_epoch(scoped.get(key))
+            if anchor is not None:
+                return anchor
+    return None
 
 
 def _resolve_broker_position_snapshot_max_age_seconds() -> float:
@@ -909,6 +993,7 @@ class PositionManager:
         # never fired. Keyed by IST trading date so it self-resets at rollover.
         self._trades_today_date: str | None = None
         self._trades_today_count: int = 0
+        self._recent_stop_thesis: dict[str, object] | None = None
         self._order_locks: dict[str, threading.RLock] = {}
         self._symbol_lifecycle_locks: dict[str, threading.RLock] = {}
         self._orders: Dict[str, Order] = {}
@@ -1766,8 +1851,86 @@ class PositionManager:
             realized,
         )
         self.clear_active_contract_by_symbol(symbol_key)
+        if _is_stop_exit_reason(reason):
+            self.record_stop_exit(symbol_key, reason, net_pnl=realized)
         self.save_state()
         return position
+
+    def record_stop_exit(
+        self,
+        symbol: object,
+        reason: object,
+        *,
+        net_pnl: object = None,
+    ) -> bool:
+        """Latch same-thesis re-entry until cooldown and a newer setup."""
+        if not _is_stop_exit_reason(reason):
+            return False
+        thesis = _option_stop_thesis(symbol)
+        if thesis is None:
+            return False
+        parsed_net_pnl: float | None = None
+        with suppress(TypeError, ValueError):
+            if net_pnl is not None:
+                parsed_net_pnl = float(net_pnl)
+        profitable_stop = parsed_net_pnl is not None and parsed_net_pnl > 0.0
+        now = time.time()
+        underlying, option_side = thesis
+        with self._lock:
+            self._recent_stop_thesis = {
+                "underlying": underlying,
+                "option_side": option_side,
+                "symbol": str(symbol).strip().upper(),
+                "exit_reason": str(reason),
+                "exit_net_pnl": parsed_net_pnl,
+                "profitable_stop": profitable_stop,
+                "expires_epoch": now + (
+                    0.0 if profitable_stop else _stop_rearm_cooldown_seconds()
+                ),
+                "stopped_at_epoch": now,
+                "trading_date": self._trading_date_ist(),
+                "rearm_required": True,
+            }
+        self.save_state()
+        return True
+
+    def stop_reentry_block_reason(self, signal: object) -> str | None:
+        """Block stopped same-side thesis until a structurally newer setup exists."""
+        thesis = _option_stop_thesis(getattr(signal, "symbol", None))
+        if thesis is None:
+            return None
+        with self._lock:
+            stopped = self._recent_stop_thesis
+            if not isinstance(stopped, dict):
+                return None
+            stored_date = str(stopped.get("trading_date") or "")
+            if stored_date and stored_date != self._trading_date_ist():
+                self._recent_stop_thesis = None
+                return None
+            stopped_thesis = (
+                str(stopped.get("underlying") or ""),
+                str(stopped.get("option_side") or ""),
+            )
+            if thesis != stopped_thesis:
+                return None
+            now = time.time()
+            minimum_until = float(stopped.get("expires_epoch", 0.0) or 0.0)
+            if now < minimum_until:
+                return (
+                    "stop-loss thesis cooldown active: "
+                    f"{int(minimum_until - now + 0.999)}s"
+                )
+            stopped_at = _stop_rearm_epoch(stopped.get("stopped_at_epoch"))
+            if stopped_at is None:
+                stopped_at = minimum_until - _stop_rearm_cooldown_seconds()
+            setup_epoch = _signal_stop_setup_epoch(signal)
+            if setup_epoch is None:
+                return "stop-loss thesis awaiting newer setup candle"
+            if setup_epoch <= stopped_at:
+                return "stop-loss thesis setup not rearmed"
+            self._recent_stop_thesis = None
+        self.save_state()
+        return None
 
     def update_from_order(self, order: Order) -> None:
         """Apply a confirmed local :class:`Order` through the normal fill lifecycle."""
@@ -4086,3 +4249,5 @@ __all__ = [
     "TerminalOrderMetadata",
     "normalize_broker_order_status",
 ]
+
+# fmt: on

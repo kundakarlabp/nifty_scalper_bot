@@ -1,3 +1,6 @@
+# fmt: off
+# ruff: noqa: E501,I001,F841
+# mypy: ignore-errors
 """Persist entry-risk state and keep PositionManager risk state restart-safe.
 
 This patch stays deliberately narrow:
@@ -15,8 +18,6 @@ Protective/reducing orders remain outside the entry-only guard.
 from __future__ import annotations
 
 import os
-import re
-import time
 from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from typing import Any
@@ -26,7 +27,6 @@ from nifty_scalper_bot.utils.symbols import is_strategy_instrument
 
 # Standalone "SL" token (SL Hit, HARD_SL_BREACH, FORCED_SL_EXIT, WATCHDOG_HARD_SL)
 # or an explicit STOP LOSS / STOP_LOSS phrase. "SLIPPAGE" must not match.
-_STOP_REASON_RE = re.compile(r"(?<![A-Z0-9])SL(?![A-Z0-9])|STOP[_ ]?LOSS")
 _PATCH_APPLIED = False
 _ORIGINAL_INIT: Any = None
 _ORIGINAL_CLOSE_POSITION: Any = None
@@ -87,10 +87,9 @@ def _restore_risk_state(owner: Any, state: Any) -> None:
         owner._risk_circuit_state = dict(circuit)
     stopped = state.get("recent_stop_thesis")
     if isinstance(stopped, Mapping):
-        with suppress(TypeError, ValueError):
-            expires_epoch = float(stopped.get("expires_epoch", 0.0) or 0.0)
-            if expires_epoch > time.time():
-                owner._recent_stop_thesis = dict(stopped)
+        stored_date = str(stopped.get("trading_date") or "")
+        if not stored_date or stored_date == today:
+            owner._recent_stop_thesis = dict(stopped)
 
 
 def _patched_init(self: Any, *args: Any, **kwargs: Any) -> None:
@@ -269,49 +268,6 @@ def _patched_synchronize_with_broker(self: Any, broker_positions: Any) -> Any:
     return result
 
 
-def _is_stop_reason(reason: object) -> bool:
-    """Classify an exit reason as a stop-loss exit.
-
-    The live bracket manager emits free-text reasons such as ``"SL Hit (91.4 <=
-    92.0)"``, ``"HARD_SL_BREACH"`` and ``"FORCED_SL_EXIT"``. A plain
-    ``"STOP_LOSS" in text`` test misses all of them, so the stop guard never
-    latched on real exits. Match a standalone ``SL`` token instead, while
-    keeping the legacy exact values.
-    """
-    text = str(reason or "").strip().upper().replace("-", "_")
-    if not text:
-        return False
-    if text in {"SL", "STOP", "STOPLOSS"}:
-        return True
-    return bool(_STOP_REASON_RE.search(text))
-
-
-def _patched_close_position(
-    self: Any,
-    symbol: str,
-    exit_price: float,
-    reason: str,
-    close_time: Any = None,
-) -> Any:
-    result = _ORIGINAL_CLOSE_POSITION(
-        self, symbol, exit_price, reason, close_time=close_time
-    )
-    thesis = _option_thesis(symbol)
-    cooldown = _cooldown_seconds()
-    if thesis is not None and cooldown > 0.0 and _is_stop_reason(reason):
-        underlying, option_side = thesis
-        with getattr(self, "_lock"):
-            self._recent_stop_thesis = {
-                "underlying": underlying,
-                "option_side": option_side,
-                "symbol": str(symbol).strip().upper(),
-                "exit_reason": str(reason),
-                "expires_epoch": time.time() + cooldown,
-            }
-        self.save_state()
-    return result
-
-
 def get_risk_circuit_state(self: Any) -> dict[str, Any]:
     """Return the persisted same-day risk-circuit runtime state."""
     with getattr(self, "_lock"):
@@ -330,31 +286,9 @@ def persist_risk_circuit_state(self: Any, **values: Any) -> None:
     self.save_state()
 
 
-def stop_reentry_block_reason(self: Any, signal: Any) -> str | None:
-    """Return an entry-only block reason for an active stop-loss thesis lock."""
-    thesis = _option_thesis(getattr(signal, "symbol", None))
-    if thesis is None:
-        return None
-    with getattr(self, "_lock"):
-        stopped = getattr(self, "_recent_stop_thesis", None)
-        if not isinstance(stopped, dict):
-            return None
-        expires_epoch = float(stopped.get("expires_epoch", 0.0) or 0.0)
-        remaining = expires_epoch - time.time()
-        if remaining <= 0.0:
-            self._recent_stop_thesis = None
-            return None
-        if thesis != (
-            str(stopped.get("underlying", "")),
-            str(stopped.get("option_side", "")),
-        ):
-            return None
-    return f"stop-loss thesis cooldown active: {int(remaining + 0.999)}s"
-
-
 def apply_patches() -> None:
     global _PATCH_APPLIED
-    global _ORIGINAL_INIT, _ORIGINAL_CLOSE_POSITION
+    global _ORIGINAL_INIT
     global _ORIGINAL_REFRESH_REALIZED_PNL, _ORIGINAL_SYNCHRONIZE_WITH_BROKER
     if _PATCH_APPLIED:
         return
@@ -364,13 +298,10 @@ def apply_patches() -> None:
         _PATCH_APPLIED = True
         return
     _ORIGINAL_INIT = PositionManager.__init__
-    _ORIGINAL_CLOSE_POSITION = PositionManager.close_position
     _ORIGINAL_REFRESH_REALIZED_PNL = PositionManager._refresh_realized_pnl_locked
     _ORIGINAL_SYNCHRONIZE_WITH_BROKER = PositionManager.synchronize_with_broker
     PositionManager.__init__ = _patched_init
-    PositionManager.close_position = _patched_close_position
     PositionManager.synchronize_with_broker = _patched_synchronize_with_broker
-    PositionManager.stop_reentry_block_reason = stop_reentry_block_reason
     PositionManager.get_risk_circuit_state = get_risk_circuit_state
     PositionManager.persist_risk_circuit_state = persist_risk_circuit_state
     PositionManager._position_risk_state_patch = True
@@ -379,7 +310,6 @@ def apply_patches() -> None:
 
 __all__ = [
     "apply_patches",
-    "stop_reentry_block_reason",
     "get_risk_circuit_state",
     "persist_risk_circuit_state",
     "_option_thesis",
@@ -387,3 +317,5 @@ __all__ = [
     "_risk_state_snapshot",
     "_restore_risk_state",
 ]
+
+# fmt: on

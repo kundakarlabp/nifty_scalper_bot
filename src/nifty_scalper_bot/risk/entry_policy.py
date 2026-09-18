@@ -1,3 +1,4 @@
+# fmt: off
 """Pure policy helpers for native final risk admission."""
 
 from __future__ import annotations
@@ -117,7 +118,10 @@ def _daily_limit_block_reason(manager: Any) -> tuple[str, str] | None:
 
 
 def _daily_limit_should_trip_breaker(manager: Any, code: str) -> bool:
-    if not str(code or "").startswith("MAX_OPEN:"):
+    normalized = str(code or "")
+    if normalized.startswith("MAX_TRADES:"):
+        return False
+    if not normalized.startswith("MAX_OPEN:"):
         return True
     max_open = int(
         getattr(getattr(manager, "settings", None), "max_open_positions", 0) or 0
@@ -191,3 +195,5 @@ __all__ = [
     "_signal_stop_risk",
     "_stop_reentry_block_reason",
 ]
+
+# fmt: on

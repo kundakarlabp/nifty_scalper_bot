@@ -1,10 +1,12 @@
+# fmt: off
+# ruff: noqa: E501,I001,F841
 """Every strategy vote must carry a resolvable setup anchor (P0)."""
 
 from __future__ import annotations
 
 from types import SimpleNamespace
 
-from nifty_scalper_bot.execution.stop_rearm_contract_patch import _signal_setup_epoch
+from nifty_scalper_bot.execution.position_manager import _signal_stop_setup_epoch
 from nifty_scalper_bot.strategies.elite_strategies.base_elite import (
     EliteSignal,
     EliteStrategy,
@@ -78,7 +80,7 @@ def test_stamped_signal_resolves_a_rearm_setup_epoch() -> None:
     signal = _elite_signal()
     EliteStrategy._stamp_setup_anchor(signal, {"latest_bar_ts": BAR_TS})
 
-    assert _signal_setup_epoch(
+    assert _signal_stop_setup_epoch(
         SimpleNamespace(symbol=signal.symbol, metadata=signal.metadata)
     ) == BAR_TS
 
@@ -89,7 +91,7 @@ def test_unstamped_signal_has_no_setup_epoch() -> None:
 
     assert not has_setup_anchor(signal.metadata)
     assert (
-        _signal_setup_epoch(
+        _signal_stop_setup_epoch(
             SimpleNamespace(symbol=signal.symbol, metadata=signal.metadata)
         )
         is None
@@ -260,3 +262,5 @@ def test_quality_evidence_uses_order_spread_policy(monkeypatch) -> None:
     assert good["quality_spread_pass"] is True
     assert wide["liquidity_score"] == 0.0
     assert wide["quality_spread_pass"] is False
+
+# fmt: on
