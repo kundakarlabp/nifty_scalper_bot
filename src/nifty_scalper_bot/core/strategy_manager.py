@@ -4645,6 +4645,19 @@ class StrategyManager(_BaseStrategyManager):
                     and context_quote_ready
                 ):
                     qualifying_context_votes.append(context_vote)
+            # A weakly disagreeing underlying source is useful provenance,
+            # not positive confirmation. Preserve the canonical arbitration
+            # result, but do not let microstructure context add conviction
+            # while spot/futures are in transition.
+            confirming_source = str(
+                indicator_map.get("direction_context_confirming_source") or ""
+            ).lower()
+            ambiguous_underlying = (
+                "weak_disagreement" in confirming_source
+                or "weak_transition" in confirming_source
+            )
+            if ambiguous_underlying:
+                qualifying_context_votes = []
             confirmed_raw_context_score = sum(
                 self._extract_raw_context_score(vote)
                 for vote in qualifying_context_votes

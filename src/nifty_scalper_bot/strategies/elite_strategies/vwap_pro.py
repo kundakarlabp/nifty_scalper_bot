@@ -751,7 +751,13 @@ class VWAPProStrategy(EliteStrategy):
                 "regime_required": True,
                 "strategy_family": "vwap_continuation_pullback",
                 "context_required": False,
-                "direction_score": strategy_score,
+                # Direction quality comes only from the canonical underlying
+                # context. Premium VWAP quality remains the strategy score.
+                "direction_score": (
+                    round(10.0 * underlying_direction_confidence, 3)
+                    if trend_alignment and context_fresh
+                    else 0.0
+                ),
                 "strategy_score": strategy_score,
                 "data_score": 8.0 if not stale_data else 3.0,
                 "score_reasons": reasons,

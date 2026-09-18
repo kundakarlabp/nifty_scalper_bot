@@ -64,3 +64,33 @@ def test_signal_quality_allowed_owns_threshold_and_direction(monkeypatch) -> Non
     )
     assert context_only.allowed is False
     assert "context_only_strategy" in context_only.reasons
+
+
+def test_execution_quality_cannot_rescue_weak_directional_alpha(monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    quality = score_signal_quality(
+        direction_score=7.8,
+        strategy_score=6.4,
+        option_score=10.0,
+        data_score=10.0,
+        rr_score=10.0,
+        strategy_name="VWAPPro",
+    )
+    assert quality.final_score > quality.components["threshold"]
+    assert quality.components["alpha_score"] < quality.components["threshold"]
+    assert quality.allowed is False
+    assert "alpha_below_threshold" in quality.reasons
+
+
+def test_strong_alpha_with_good_execution_remains_tradable(monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    quality = score_signal_quality(
+        direction_score=8.5,
+        strategy_score=8.0,
+        option_score=9.0,
+        data_score=9.0,
+        rr_score=8.0,
+        strategy_name="VWAPPro",
+    )
+    assert quality.components["alpha_score"] >= quality.components["threshold"]
+    assert quality.allowed is True
