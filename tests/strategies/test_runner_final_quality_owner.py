@@ -100,6 +100,7 @@ def test_strong_alpha_with_good_execution_remains_tradable(monkeypatch) -> None:
 
 def test_vwap_runner_uses_independent_alpha_for_quality_and_confidence() -> None:
     source = _RUNNER.read_text(encoding="utf-8")
-    assert 'metadata.get("independent_setup_score"' in source
+    assert '"independent_setup_score"' in source
+    assert "strategy_score_for_quality" in source
     assert 'quality.components.get("alpha_score", quality.final_score)' in source
     assert '"alpha_score": alpha_score' in source
