@@ -754,6 +754,10 @@ class VWAPProStrategy(EliteStrategy):
                 "side": contract_side,
                 "contract_side": contract_side,
                 "setup_id": f"vwap:{contract_side}:{thesis_anchor}:{session_scope}:{symbol_scope}",
+                # Stop rearm is structural, not merely a later evaluation bar.
+                # Keep the exact VWAP reclaim/reset anchor so the same thesis
+                # cannot re-enter after a stop just because one minute elapsed.
+                "setup_candle_timestamp": thesis_anchor,
                 "premium_above_vwap": premium_above_vwap,
                 "direction_bias": direction if direction in {"CE", "PE"} else None,
                 "underlying_direction_bias": (
