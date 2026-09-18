@@ -302,12 +302,13 @@ def score_signal_quality(
     normalized_strategy_name = normalize_strategy_name(strategy_name)
     threshold = trigger_threshold(strategy_name=normalized_strategy_name)
     context_only = normalized_strategy_name in CONTEXT_ONLY_STRATEGIES
+    alpha_floor_required = normalized_strategy_name == "vwap_pro"
     reasons: list[str] = []
     if context_only:
         reasons.append("context_only_strategy")
     if final < threshold:
         reasons.append("score_below_threshold")
-    if alpha_score < threshold:
+    if alpha_floor_required and alpha_score < threshold:
         reasons.append("alpha_below_threshold")
     if direction < 6.0:
         reasons.append("direction_below_minimum")
@@ -321,7 +322,7 @@ def score_signal_quality(
         allowed=(
             not context_only
             and final >= threshold
-            and alpha_score >= threshold
+            and (not alpha_floor_required or alpha_score >= threshold)
             and direction >= 6.0
         ),
         reasons=reasons,
@@ -333,6 +334,7 @@ def score_signal_quality(
             "rr_score": rr,
             "final_score": round(final, 3),
             "alpha_score": round(alpha_score, 3),
+            "alpha_floor_required": alpha_floor_required,
             "threshold": threshold,
             "strategy_name": strategy_name or "",
             "normalized_strategy_name": normalized_strategy_name,
