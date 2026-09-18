@@ -1,4 +1,4 @@
-# fmt: skip
+# fmt: off
 # ruff: noqa: E501,I001,F841
 """Every strategy vote must carry a resolvable setup anchor (P0)."""
 
@@ -262,3 +262,5 @@ def test_quality_evidence_uses_order_spread_policy(monkeypatch) -> None:
     assert good["quality_spread_pass"] is True
     assert wide["liquidity_score"] == 0.0
     assert wide["quality_spread_pass"] is False
+
+# fmt: on
