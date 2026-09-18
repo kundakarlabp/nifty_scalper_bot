@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 """Persist entry-risk state and keep PositionManager risk state restart-safe.
 
 This patch stays deliberately narrow:
@@ -15,7 +16,6 @@ Protective/reducing orders remain outside the entry-only guard.
 from __future__ import annotations
 
 import os
-import time
 from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from typing import Any
