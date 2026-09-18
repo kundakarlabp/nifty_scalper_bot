@@ -1,4 +1,4 @@
-# fmt: skip
+# fmt: off
 # ruff: noqa: E501,I001,F841
 """Persist entry-risk state and keep PositionManager risk state restart-safe.
 
@@ -316,3 +316,5 @@ __all__ = [
     "_risk_state_snapshot",
     "_restore_risk_state",
 ]
+
+# fmt: on
