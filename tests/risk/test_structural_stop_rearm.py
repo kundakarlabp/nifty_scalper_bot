@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import time
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from nifty_scalper_bot.execution.position_manager import PositionManager
@@ -70,7 +70,9 @@ def test_reused_setup_anchor_remains_blocked(monkeypatch, tmp_path) -> None:
     assert reason == "stop-loss thesis setup not rearmed"
 
 
-def test_newer_setup_candle_rearms_after_minimum_cooldown(monkeypatch, tmp_path) -> None:
+def test_newer_setup_candle_rearms_after_minimum_cooldown(
+    monkeypatch, tmp_path
+) -> None:
     pm = _stopped_manager(monkeypatch, tmp_path)
     stopped_at = float(pm._recent_stop_thesis["stopped_at_epoch"])
     pm._recent_stop_thesis["expires_epoch"] = time.time() - 1
