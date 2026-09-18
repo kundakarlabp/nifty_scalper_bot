@@ -32,7 +32,12 @@ def _trail(manager, bracket, *, ltp, profit_pct, high_water, atr=0.0):
     )
     if candidate is None:
         return None
-    return manager._apply_min_profit_floor(bracket, candidate, ltp)
+    return manager._apply_min_profit_floor(
+        bracket,
+        candidate,
+        ltp,
+        high_water=high_water,
+    )
 
 
 def _bracket(*, side: str, entry: float, sl: float, high: float, low: float):
@@ -113,3 +118,39 @@ def test_floor_is_rejected_when_execution_room_is_insufficient(monkeypatch) -> N
     )
 
     assert candidate is None
+
+
+def test_achieved_executable_mfe_keeps_buy_trail_activated_after_pullback(
+    monkeypatch,
+) -> None:
+    manager = _manager(monkeypatch, cost_points=1.0)
+    bracket = _bracket(side="BUY", entry=100.0, sl=90.0, high=108.0, low=100.0)
+
+    candidate = _trail(
+        manager,
+        bracket,
+        ltp=106.0,
+        profit_pct=6.0,
+        high_water=108.0,
+        atr=0.0,
+    )
+
+    assert candidate == pytest.approx(102.0)
+
+
+def test_achieved_executable_mfe_keeps_sell_trail_activated_after_pullback(
+    monkeypatch,
+) -> None:
+    manager = _manager(monkeypatch, cost_points=1.0)
+    bracket = _bracket(side="SELL", entry=100.0, sl=110.0, high=100.0, low=92.0)
+
+    candidate = _trail(
+        manager,
+        bracket,
+        ltp=94.0,
+        profit_pct=6.0,
+        high_water=92.0,
+        atr=0.0,
+    )
+
+    assert candidate == pytest.approx(98.0)
