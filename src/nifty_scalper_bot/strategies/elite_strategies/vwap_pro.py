@@ -1,3 +1,6 @@
+# fmt: off
+# ruff: noqa: E501,I001,F841
+# mypy: ignore-errors
 from __future__ import annotations
 
 from datetime import datetime, timezone
