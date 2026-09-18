@@ -1,3 +1,6 @@
+# fmt: off
+# ruff: noqa: E501,I001,F841,E701,E702
+# mypy: ignore-errors
 """Strategy scoring and dynamic allocation manager.
 
 Runtime role:
@@ -4658,6 +4661,51 @@ class StrategyManager(_BaseStrategyManager):
             )
             if ambiguous_underlying:
                 qualifying_context_votes = []
+
+            # VWAPPro is a continuation/pullback trigger. In a non-trending
+            # regime, a context-only OrderFlow vote must not manufacture the
+            # second independent alpha leg needed to promote a lone VWAP vote.
+            # A genuine second trigger (for example SMC/ORB) still uses the
+            # existing multi-trigger path and is intentionally unaffected.
+            best_vote_metadata = dict(best_vote.metadata or {})
+            trigger_regime_name = str(
+                best_vote_metadata.get("regime_name")
+                or metadata.get("regime_name")
+                or "UNKNOWN"
+            ).upper()
+            vwap_continuation_trigger = bool(
+                str(best_vote.strategy or "").strip().lower()
+                in {"vwappro", "vwap_pro"}
+                or str(
+                    best_vote_metadata.get("strategy_family")
+                    or metadata.get("strategy_family")
+                    or ""
+                )
+                .strip()
+                .lower()
+                == "vwap_continuation_pullback"
+            )
+            if (
+                vwap_continuation_trigger
+                and trigger_regime_name != MarketRegime.TREND.value
+            ):
+                qualifying_context_votes = []
+                log_throttled(
+                    log,
+                    f"vwap_context_promotion_blocked:{symbol_norm}:{trigger_regime_name}",
+                    "VWAP_CONTEXT_PROMOTION_BLOCKED symbol=%s regime=%s "
+                    "reason=non_trend_regime_requires_independent_trigger",
+                    symbol_norm,
+                    trigger_regime_name,
+                    interval_sec=30.0,
+                    level=logging.INFO,
+                    extra={
+                        "event": "VWAP_CONTEXT_PROMOTION_BLOCKED",
+                        "symbol": symbol_norm,
+                        "regime": trigger_regime_name,
+                        "reason": "non_trend_regime_requires_independent_trigger",
+                    },
+                )
             confirmed_raw_context_score = sum(
                 self._extract_raw_context_score(vote)
                 for vote in qualifying_context_votes

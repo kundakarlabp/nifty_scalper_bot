@@ -1,3 +1,5 @@
+# fmt: off
+# ruff: noqa: E501,I001
 from pathlib import Path
 
 from nifty_scalper_bot.strategies.signal_quality import score_signal_quality
@@ -94,3 +96,11 @@ def test_strong_alpha_with_good_execution_remains_tradable(monkeypatch) -> None:
     )
     assert quality.components["alpha_score"] >= quality.components["threshold"]
     assert quality.allowed is True
+
+
+def test_vwap_runner_uses_independent_alpha_for_quality_and_confidence() -> None:
+    source = _RUNNER.read_text(encoding="utf-8")
+    assert '"independent_setup_score"' in source
+    assert "strategy_score_for_quality" in source
+    assert 'quality.components.get("alpha_score", quality.final_score)' in source
+    assert '"alpha_score": alpha_score' in source

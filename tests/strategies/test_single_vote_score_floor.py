@@ -1,3 +1,5 @@
+# fmt: off
+# ruff: noqa: E501,I001
 """Selected-option single-vote scalps require a high score floor (default 9.0).
 
 A lone vote remains disabled by default. A selected-option trigger may pass only
@@ -121,7 +123,13 @@ def _manager_probe():
     return manager
 
 
-def _signal_vote(*, strategy: str, raw_score: float, weighted_score: float):
+def _signal_vote(
+    *,
+    strategy: str,
+    raw_score: float,
+    weighted_score: float,
+    regime_name: str | None = None,
+):
     from nifty_scalper_bot.core.strategy_manager import Signal, StrategyVote
 
     signal = Signal(
@@ -151,6 +159,7 @@ def _signal_vote(*, strategy: str, raw_score: float, weighted_score: float):
             "raw_vote_score": raw_score,
             "regime_weight": weighted_score / raw_score,
             "regime_weighted_vote_score": weighted_score,
+            "regime_name": regime_name,
         },
     )
     return signal, vote
@@ -305,11 +314,11 @@ async def test_selected_smc_trigger_uses_fresh_same_side_orderflow_confirmation(
     assert result.metadata["final_trade_score"] >= 9.0
 
 
-async def test_range_vwap_trigger_uses_separate_context_confirmed_floor(
+async def test_range_vwap_trigger_cannot_use_orderflow_as_only_confirmation(
     monkeypatch,
     caplog,
 ) -> None:
-    """A valid context-confirmed trigger must not reuse the unconfirmed 9.0 floor."""
+    """A RANGE continuation trigger needs another true trigger, not context alone."""
     caplog.set_level(logging.INFO)
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     monkeypatch.setenv("ENABLE_LIVE", "true")
@@ -318,7 +327,10 @@ async def test_range_vwap_trigger_uses_separate_context_confirmed_floor(
     monkeypatch.delenv("STRATEGY_SINGLE_TRIGGER_CONTEXT_FINAL_MIN", raising=False)
     manager = _manager_probe()
     trigger = _signal_vote(
-        strategy="VWAPPro", raw_score=7.5, weighted_score=6.0
+        strategy="VWAPPro",
+        raw_score=7.5,
+        weighted_score=6.0,
+        regime_name="RANGE",
     )
     context_signal, context_vote = _context_vote(score=8.0, confidence=0.80)
     context_vote.metadata["context_bonus_score"] = 4.0
@@ -329,18 +341,40 @@ async def test_range_vwap_trigger_uses_separate_context_confirmed_floor(
         indicators=_valid_entry_context(),
     )
 
+    assert result is None
+    decision = manager._last_no_signal_decision_by_symbol["NFO:NIFTY2670724050CE"]
+    assert decision.reason == "single_trigger_context_confirmation_invalid"
+    assert any(
+        "VWAP_CONTEXT_PROMOTION_BLOCKED" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+async def test_trend_vwap_trigger_can_use_fresh_orderflow_confirmation(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    monkeypatch.delenv("STRATEGY_ALLOW_SINGLE_VOTE_SCALP", raising=False)
+    monkeypatch.delenv("STRATEGY_ALLOW_SELECTED_OPTION_SINGLE_VOTE", raising=False)
+    manager = _manager_probe()
+    trigger = _signal_vote(
+        strategy="VWAPPro",
+        raw_score=7.5,
+        weighted_score=9.0,
+        regime_name="TREND",
+    )
+    context = _context_vote(score=8.0, confidence=0.80)
+
+    result = manager._combine_strategy_votes(
+        symbol="NFO:NIFTY2670724050CE",
+        signals=[trigger, context],
+        indicators=_valid_entry_context(),
+    )
+
     assert result is not None
     assert result.metadata["approval_path"] == "single_trigger_context_confirmed"
-    assert result.metadata["context_confirmation_score_min"] == 7.0
-    assert result.metadata["final_trade_score"] == 7.5
-    approvals = [
-        record
-        for record in caplog.records
-        if getattr(record, "event", None) == "SIGNAL_APPROVED"
-    ]
-    assert len(approvals) == 1
-    assert approvals[0].symbol == "NFO:NIFTY2670724050CE"
-    assert approvals[0].approval_path == "single_trigger_context_confirmed"
+    assert result.metadata["regime_weight"] == 1.2
 
 
 async def test_weak_range_vwap_trigger_stays_blocked_with_context(
@@ -470,7 +504,10 @@ async def test_regime_downweighted_context_cannot_unlock_single_trigger(
     monkeypatch.delenv("STRATEGY_ALLOW_SELECTED_OPTION_SINGLE_VOTE", raising=False)
     manager = _manager_probe()
     trigger = _signal_vote(
-        strategy="VWAPPro", raw_score=7.5, weighted_score=6.0
+        strategy="VWAPPro",
+        raw_score=7.5,
+        weighted_score=6.0,
+        regime_name="TREND",
     )
     context_signal, context_vote = _context_vote(score=10.0, confidence=0.85)
     context_vote.score = 2.5

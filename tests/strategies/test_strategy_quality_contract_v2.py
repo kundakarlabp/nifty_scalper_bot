@@ -1,3 +1,5 @@
+# fmt: off
+# ruff: noqa: E501,I001
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
@@ -324,3 +326,45 @@ def test_vwap_direction_score_comes_from_underlying_confidence(monkeypatch) -> N
     assert signal is not None
     assert signal.metadata["direction_score"] == 7.8
     assert signal.metadata["strategy_score"] != signal.metadata["direction_score"]
+
+
+def test_vwap_independent_setup_excludes_underlying_slope_bonus(monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    symbol = "NFO:NIFTY26SEP25000CE"
+
+    aligned = VWAPProStrategy(
+        VWAPProStrategyConfig(proximity_pct=0.15), indicator_engine=None
+    )
+    aligned._thesis_anchor_by_scope[(symbol, "2026-09-11")] = (
+        "2026-09-11T04:59:00+00:00"
+    )
+    aligned_signal = aligned._evaluate_signal(
+        symbol, _ready_vwap_indicators(), current_price=100.10
+    )
+
+    neutral_slope = VWAPProStrategy(
+        VWAPProStrategyConfig(proximity_pct=0.15), indicator_engine=None
+    )
+    neutral_slope._thesis_anchor_by_scope[(symbol, "2026-09-11")] = (
+        "2026-09-11T04:59:00+00:00"
+    )
+    neutral_indicators = _ready_vwap_indicators()
+    neutral_indicators["futures_vwap_slope"] = 0.0
+    neutral_signal = neutral_slope._evaluate_signal(
+        symbol, neutral_indicators, current_price=100.10
+    )
+
+    assert aligned_signal is not None
+    assert neutral_signal is not None
+    assert (
+        aligned_signal.metadata["strategy_score"]
+        > neutral_signal.metadata["strategy_score"]
+    )
+    assert aligned_signal.metadata["independent_setup_score"] == 6.0
+    assert (
+        neutral_signal.metadata["independent_setup_score"]
+        == aligned_signal.metadata["independent_setup_score"]
+    )
+    assert "futures_slope_alignment" not in aligned_signal.metadata[
+        "independent_setup_reasons"
+    ]
