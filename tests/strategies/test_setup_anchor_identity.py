@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 """Every strategy vote must carry a resolvable setup anchor (P0)."""
 
 from __future__ import annotations
