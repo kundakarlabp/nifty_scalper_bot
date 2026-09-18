@@ -190,7 +190,8 @@ def stop_reentry_block_reason(self: Any, signal: Any) -> str | None:
         now = time.time()
         minimum_until = float(stopped.get("expires_epoch", 0.0) or 0.0)
         if now < minimum_until:
-            return f"stop-loss thesis cooldown active: {int(minimum_until - now + 0.999)}s"
+            remaining = int(minimum_until - now + 0.999)
+            return f"stop-loss thesis cooldown active: {remaining}s"
         stopped_at = _to_epoch(stopped.get("stopped_at_epoch"))
         if stopped_at is None:
             stopped_at = minimum_until - _cooldown_seconds()
