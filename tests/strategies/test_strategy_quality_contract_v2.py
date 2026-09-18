@@ -1,3 +1,5 @@
+# fmt: off
+# ruff: noqa: E501,I001
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
