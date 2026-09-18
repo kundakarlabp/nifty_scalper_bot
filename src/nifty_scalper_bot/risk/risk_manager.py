@@ -1294,9 +1294,21 @@ class RiskManager:
         trades_today = int(getattr(self.position_manager, "trades_today", lambda: 0)() if callable(getattr(self.position_manager, "trades_today", None)) else 0)
         open_positions = len(getattr(self.position_manager, "get_open_positions", lambda: [])() or [])
         if max_trades > 0 and trades_today >= max_trades:
-            self._trip_breaker(f"max_trades_per_day breached: {trades_today}/{max_trades}")
+            # A daily entry-count cap is an entry-capacity limit, not a loss
+            # circuit.  Latching the global breaker here also disarms unrelated
+            # reducing/protective workflows and leaves the runtime in risk_halt
+            # after exposure is flat.  Preserve the configured cap, but do not
+            # promote an expected capacity condition into a nuclear breaker.
             self._last_rejection = f"MAX_TRADES:{trades_today}/{max_trades}"
-            self._logger.critical("risk_failsafe_triggered", extra={"event": "risk_failsafe_triggered", "kind": "max_trades_per_day"})
+            self._logger.info(
+                "risk_capacity_reached",
+                extra={
+                    "event": "risk_capacity_reached",
+                    "kind": "max_trades_per_day",
+                    "trades_today": trades_today,
+                    "max_trades": max_trades,
+                },
+            )
             return False
         if max_open > 0 and open_positions >= max_open:
             self._last_rejection = f"MAX_OPEN:{open_positions}/{max_open}"
@@ -1315,11 +1327,12 @@ class RiskManager:
     def validate_close_position(
         self, *, symbol: str, exit_price: float | None = None
     ) -> tuple[bool, str]:  # pragma: no cover
-        """Allow closing positions unless a breaker is active."""
+        """Allow position-closing validation even when entry risk is halted."""
         self._reset_daily_if_needed()
         self._refresh_realized_pnl()
-        if self._breaker_tripped:
-            return False, self._breaker_reason or "BREAKER"
+        # Closing/reducing exposure must remain available after an entry
+        # breaker trips.  Entry risk is enforced in check_order(); this helper
+        # must never turn a risk halt into a position-exit veto.
         return True, ""
 
     # ------------------------------------------------------------------

@@ -14843,6 +14843,9 @@ class OrderManager:
                 trigger_price=trigger_price,  # ✅ Trigger Price
                 tag="safety_sl_hard",
                 variety="regular",
+                check_risk=False,
+                intent="EXIT",
+                strategy_name="protective_exit",
             )
             self._logger.info(
                 f"✅ Hard SL Placed: Trigger {trigger_price}, Limit {limit_price}"
@@ -14860,6 +14863,9 @@ class OrderManager:
                 price=tp_price,
                 tag="safety_tp_wide",
                 variety="regular",
+                check_risk=False,
+                intent="EXIT",
+                strategy_name="protective_exit",
             )
             self._logger.info(f"✅ Wide TP Placed: {tp_price}")
         except Exception as e:

@@ -29,7 +29,7 @@ def test_check_order_enforces_max_trades_per_day_at_final_gate(monkeypatch):
     assert allowed is False
     assert reason == "max_trades_per_day breached: 3/3"
     assert manager._last_rejection == "MAX_TRADES:3/3"
-    assert trips == ["max_trades_per_day breached: 3/3"]
+    assert trips == []
 
 
 def test_check_order_enforces_max_open_positions_at_final_gate(monkeypatch):
