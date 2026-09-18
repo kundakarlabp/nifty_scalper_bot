@@ -48,9 +48,7 @@ def test_time_alone_does_not_rearm_stopped_thesis(monkeypatch, tmp_path) -> None
     pm = _stopped_manager(monkeypatch, tmp_path)
     pm._recent_stop_thesis["expires_epoch"] = time.time() - 1
 
-    reason = pm.stop_reentry_block_reason(
-        _signal("NFO:NIFTY2680424350PE")
-    )
+    reason = pm.stop_reentry_block_reason(_signal("NFO:NIFTY2680424350PE"))
 
     assert reason == "stop-loss thesis awaiting newer setup candle"
 
@@ -127,12 +125,7 @@ def test_runtime_setup_context_rearms_only_after_minimum_cooldown(
 def test_opposite_option_side_is_not_blocked(monkeypatch, tmp_path) -> None:
     pm = _stopped_manager(monkeypatch, tmp_path)
 
-    assert (
-        pm.stop_reentry_block_reason(
-            _signal("NFO:NIFTY2680424400CE")
-        )
-        is None
-    )
+    assert pm.stop_reentry_block_reason(_signal("NFO:NIFTY2680424400CE")) is None
 
 
 def test_structural_lock_survives_restart_after_timer(monkeypatch, tmp_path) -> None:
@@ -143,9 +136,10 @@ def test_structural_lock_survives_restart_after_timer(monkeypatch, tmp_path) -> 
     restarted = PositionManager(state_file=str(tmp_path / "positions.json"))
 
     assert restarted._recent_stop_thesis is not None
-    assert restarted.stop_reentry_block_reason(
-        _signal("NFO:NIFTY2680424350PE")
-    ) == "stop-loss thesis awaiting newer setup candle"
+    assert (
+        restarted.stop_reentry_block_reason(_signal("NFO:NIFTY2680424350PE"))
+        == "stop-loss thesis awaiting newer setup candle"
+    )
 
 
 def test_live_bracket_sl_reason_is_classified_as_stop() -> None:
@@ -194,9 +188,7 @@ def test_profitable_stop_skips_timer_but_still_requires_new_setup(
     assert float(pm._recent_stop_thesis["expires_epoch"]) <= time.time()
 
     assert (
-        pm.stop_reentry_block_reason(
-            _signal(symbol, setup_candle_timestamp=stopped_at)
-        )
+        pm.stop_reentry_block_reason(_signal(symbol, setup_candle_timestamp=stopped_at))
         == "stop-loss thesis setup not rearmed"
     )
     assert (
