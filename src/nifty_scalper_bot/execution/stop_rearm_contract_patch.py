@@ -111,12 +111,18 @@ def _patched_init(self: Any, *args: Any, **kwargs: Any) -> None:
         self._recent_stop_thesis = persisted
 
 
-def record_stop_exit(self: Any, symbol: Any, reason: Any) -> bool:
-    """Latch the structural stop-loss rearm requirement for a stopped thesis.
+def record_stop_exit(
+    self: Any,
+    symbol: Any,
+    reason: Any,
+    *,
+    net_pnl: Any = None,
+) -> bool:
+    """Latch structural rearm after a stop-classified exit.
 
-    Canonical single implementation. ``PositionManager.close_position`` is only
-    reached on session square-off, so the live bracket stop-loss exit callback
-    must call this directly or the guard never arms.
+    Losing/unknown stop exits retain the configured minimum cooldown. A
+    profitable trailing-stop exit skips only that timer; it still requires a
+    genuinely newer setup before same-thesis re-entry.
     """
     if not _is_stop_reason(reason):
         return False
@@ -125,13 +131,22 @@ def record_stop_exit(self: Any, symbol: Any, reason: Any) -> bool:
         return False
     underlying, option_side = thesis
     now = time.time()
+    profitable_stop = False
+    parsed_net_pnl: float | None = None
+    if net_pnl is not None:
+        with suppress(TypeError, ValueError):
+            parsed_net_pnl = float(net_pnl)
+            profitable_stop = parsed_net_pnl > 0.0
+    minimum_cooldown = 0.0 if profitable_stop else _cooldown_seconds()
     with getattr(self, "_lock"):
         self._recent_stop_thesis = {
             "underlying": underlying,
             "option_side": option_side,
             "symbol": str(symbol).strip().upper(),
             "exit_reason": str(reason),
-            "expires_epoch": now + _cooldown_seconds(),
+            "exit_net_pnl": parsed_net_pnl,
+            "profitable_stop": profitable_stop,
+            "expires_epoch": now + minimum_cooldown,
             "stopped_at_epoch": now,
             "trading_date": self._trading_date_ist(),
             "rearm_required": True,
