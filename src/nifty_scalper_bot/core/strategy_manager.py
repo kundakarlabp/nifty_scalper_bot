@@ -4667,13 +4667,22 @@ class StrategyManager(_BaseStrategyManager):
             # second independent alpha leg needed to promote a lone VWAP vote.
             # A genuine second trigger (for example SMC/ORB) still uses the
             # existing multi-trigger path and is intentionally unaffected.
+            best_vote_metadata = dict(best_vote.metadata or {})
             trigger_regime_name = str(
-                metadata.get("regime_name") or "UNKNOWN"
+                best_vote_metadata.get("regime_name")
+                or metadata.get("regime_name")
+                or "UNKNOWN"
             ).upper()
             vwap_continuation_trigger = bool(
                 str(best_vote.strategy or "").strip().lower()
                 in {"vwappro", "vwap_pro"}
-                or str(metadata.get("strategy_family") or "").strip().lower()
+                or str(
+                    best_vote_metadata.get("strategy_family")
+                    or metadata.get("strategy_family")
+                    or ""
+                )
+                .strip()
+                .lower()
                 == "vwap_continuation_pullback"
             )
             if (
