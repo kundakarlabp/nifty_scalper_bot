@@ -143,19 +143,19 @@ def test_structural_lock_survives_restart_after_timer(monkeypatch, tmp_path) -> 
 
 
 def test_live_bracket_sl_reason_is_classified_as_stop() -> None:
-    from nifty_scalper_bot.execution.position_risk_state_patch import _is_stop_reason
+    from nifty_scalper_bot.execution.position_manager import _is_stop_exit_reason
 
-    assert _is_stop_reason("SL Hit (91.4 <= 92.00)") is True
-    assert _is_stop_reason("HARD_SL_BREACH") is True
-    assert _is_stop_reason("WATCHDOG_HARD_SL") is True
-    assert _is_stop_reason("FORCED_SL_EXIT") is True
-    assert _is_stop_reason("STOP_LOSS") is True
-    assert _is_stop_reason("TP1 Hit (95.0)") is False
-    assert _is_stop_reason("FINAL TP Hit (95.0)") is False
-    assert _is_stop_reason("External/Manual Exit Detected") is False
-    assert _is_stop_reason("EOD_FLATTEN") is False
-    assert _is_stop_reason("SLIPPAGE_GUARD") is False
-    assert _is_stop_reason("") is False
+    assert _is_stop_exit_reason("SL Hit (91.4 <= 92.00)") is True
+    assert _is_stop_exit_reason("HARD_SL_BREACH") is True
+    assert _is_stop_exit_reason("WATCHDOG_HARD_SL") is True
+    assert _is_stop_exit_reason("FORCED_SL_EXIT") is True
+    assert _is_stop_exit_reason("STOP_LOSS") is True
+    assert _is_stop_exit_reason("TP1 Hit (95.0)") is False
+    assert _is_stop_exit_reason("FINAL TP Hit (95.0)") is False
+    assert _is_stop_exit_reason("External/Manual Exit Detected") is False
+    assert _is_stop_exit_reason("EOD_FLATTEN") is False
+    assert _is_stop_exit_reason("SLIPPAGE_GUARD") is False
+    assert _is_stop_exit_reason("") is False
 
 
 def test_record_stop_exit_latches_without_close_position(monkeypatch, tmp_path) -> None:
