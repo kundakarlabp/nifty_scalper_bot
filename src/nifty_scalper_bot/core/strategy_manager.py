@@ -2945,11 +2945,6 @@ class StrategyManager(_BaseStrategyManager):
             try:
                 opt_quote = _get_cached_quote_for_eval(self._data_hub, symbol)
                 if opt_quote:
-                    # DataHub returns the canonical stamped quote. Preserve its
-                    # freshness/version/depth provenance in the same strategy
-                    # snapshot that consumes bid/ask; otherwise OrderFlow sees
-                    # a tradable quote with no tick age and must fail closed.
-                    indicators = _enrich_option_quote_context(indicators, opt_quote)
                     _exch_vwap = self._extract_float(
                         opt_quote, ("vwap", "average_price")
                     )
@@ -4635,8 +4630,9 @@ class StrategyManager(_BaseStrategyManager):
             qualifying_context_votes: list[StrategyVote] = []
             for context_vote in same_side_context:
                 context_metadata = dict(context_vote.metadata or {})
-                context_quality_eligible = (
-                    context_metadata.get("context_quality_eligible") is True
+                context_quote_ready = bool(
+                    context_metadata.get("quote_depth_valid")
+                    or context_metadata.get("tradable_quote")
                 )
                 if (
                     context_vote.strategy.strip().lower()
@@ -4646,7 +4642,7 @@ class StrategyManager(_BaseStrategyManager):
                     >= context_confirm_min_score
                     and float(context_vote.confidence)
                     >= context_confirm_min_confidence
-                    and context_quality_eligible
+                    and context_quote_ready
                 ):
                     qualifying_context_votes.append(context_vote)
             confirmed_raw_context_score = sum(
@@ -6253,42 +6249,6 @@ __all__ = [
     "RegimeState",
     "RegimePerformanceBucket",
 ]
-_OPTION_QUOTE_CONTEXT_KEYS = (
-    "timestamp_quality",
-    "last_tick_ts_ms",
-    "tick_age_ms",
-    "quote_age_ms",
-    "last_tick_age_ms",
-    "market_data_age_ms",
-    "quote_age_s",
-    "last_tick_age_s",
-    "market_data_age_s",
-    "quote_update_version",
-    "real_ticks_last_60s",
-    "tick_count_60s",
-    "recent_real_tick_count",
-    "depth",
-    "depth_available",
-    "quote_depth_valid",
-    "tradable_quote",
-)
-
-
-def _enrich_option_quote_context(
-    indicators: t.Mapping[str, t.Any],
-    quote: t.Mapping[str, t.Any],
-) -> dict[str, t.Any]:
-    """Overlay canonical live-quote provenance used by execution-quality gates."""
-    enriched = dict(indicators or {})
-    if not isinstance(quote, t.Mapping):
-        return enriched
-    for key in _OPTION_QUOTE_CONTEXT_KEYS:
-        value = quote.get(key)
-        if value is not None:
-            enriched[key] = value
-    return enriched
-
-
 def _get_cached_quote_for_eval(hub: t.Any, symbol: str) -> t.Mapping[str, t.Any] | None:
     if hub is None:
         return None
