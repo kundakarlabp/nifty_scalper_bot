@@ -1,4 +1,4 @@
-# fmt: skip
+# fmt: off
 # ruff: noqa: E501,I001,F841
 """Canonical execution package exports.
 
@@ -69,3 +69,5 @@ __all__ = [
     "OrderManager",
     "RuntimeOrderManager",
 ]
+
+# fmt: on
