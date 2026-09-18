@@ -127,9 +127,7 @@ def test_no_configured_daily_cap_preserves_existing_per_trade_risk_policy():
     assert decision.quantity == 65
 
 
-def test_affordability_telemetry_exposes_risk_capacity_without_changing_cash_readiness() -> (
-    None
-):
+def test_affordability_reports_risk_without_changing_cash_readiness() -> None:
     manager = _order_manager(max_day_loss=319.09)
     manager._margin_factor = 1.1
     manager._margin_buffer = 0.9
