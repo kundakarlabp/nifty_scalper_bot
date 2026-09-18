@@ -140,24 +140,42 @@ def _option_stop_thesis(symbol: object) -> tuple[str, str] | None:
     return underlying, option_side
 
 
-def _signal_stop_setup_epoch(signal: object) -> float | None:
+def _signal_stop_setup_metadata(signal: object) -> tuple[str | None, float | None]:
+    """Return stable setup identity plus its structural timestamp when available."""
+    payloads: list[Mapping[str, object]] = []
     metadata = getattr(signal, "metadata", {})
     if isinstance(metadata, Mapping):
-        for key in _STOP_REARM_ANCHOR_KEYS:
-            anchor = _stop_rearm_epoch(metadata.get(key))
-            if anchor is not None:
-                return anchor
+        payloads.append(metadata)
     try:
         from nifty_scalper_bot.strategies.signal_identity import current_order_setup_metadata
+
         scoped = current_order_setup_metadata()
     except Exception:
-        return None
+        scoped = {}
     if isinstance(scoped, Mapping):
-        for key in _STOP_REARM_ANCHOR_KEYS:
-            anchor = _stop_rearm_epoch(scoped.get(key))
-            if anchor is not None:
-                return anchor
-    return None
+        payloads.append(scoped)
+
+    setup_id: str | None = None
+    setup_epoch: float | None = None
+    for payload in payloads:
+        if setup_id is None:
+            raw_id = payload.get("setup_id")
+            if raw_id not in (None, ""):
+                setup_id = str(raw_id).strip() or None
+        if setup_epoch is None:
+            for key in _STOP_REARM_ANCHOR_KEYS:
+                anchor = _stop_rearm_epoch(payload.get(key))
+                if anchor is not None:
+                    setup_epoch = anchor
+                    break
+        if setup_id is not None and setup_epoch is not None:
+            break
+    return setup_id, setup_epoch
+
+
+def _signal_stop_setup_epoch(signal: object) -> float | None:
+    """Compatibility accessor for the canonical stop-rearm setup timestamp."""
+    return _signal_stop_setup_metadata(signal)[1]
 
 
 def _resolve_broker_position_snapshot_max_age_seconds() -> float:
@@ -1862,6 +1880,8 @@ class PositionManager:
         reason: object,
         *,
         net_pnl: object = None,
+        setup_id: object = None,
+        setup_candle_timestamp: object = None,
     ) -> bool:
         """Latch same-thesis re-entry until cooldown and a newer setup."""
         if not _is_stop_exit_reason(reason):
@@ -1874,6 +1894,10 @@ class PositionManager:
             if net_pnl is not None:
                 parsed_net_pnl = float(net_pnl)
         profitable_stop = parsed_net_pnl is not None and parsed_net_pnl > 0.0
+        stopped_setup_id = (
+            str(setup_id).strip() if setup_id not in (None, "") else None
+        )
+        stopped_setup_epoch = _stop_rearm_epoch(setup_candle_timestamp)
         now = time.time()
         underlying, option_side = thesis
         with self._lock:
@@ -1884,6 +1908,8 @@ class PositionManager:
                 "exit_reason": str(reason),
                 "exit_net_pnl": parsed_net_pnl,
                 "profitable_stop": profitable_stop,
+                "setup_id": stopped_setup_id,
+                "setup_epoch": stopped_setup_epoch,
                 "expires_epoch": now + (
                     0.0 if profitable_stop else _stop_rearm_cooldown_seconds()
                 ),
@@ -1923,7 +1949,13 @@ class PositionManager:
             stopped_at = _stop_rearm_epoch(stopped.get("stopped_at_epoch"))
             if stopped_at is None:
                 stopped_at = minimum_until - _stop_rearm_cooldown_seconds()
-            setup_epoch = _signal_stop_setup_epoch(signal)
+            setup_id, setup_epoch = _signal_stop_setup_metadata(signal)
+            stopped_setup_id = str(stopped.get("setup_id") or "").strip() or None
+            if stopped_setup_id is not None:
+                if setup_id is None:
+                    return "stop-loss thesis awaiting newer setup identity"
+                if setup_id == stopped_setup_id:
+                    return "stop-loss thesis setup not rearmed"
             if setup_epoch is None:
                 return "stop-loss thesis awaiting newer setup candle"
             if setup_epoch <= stopped_at:
