@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import time
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from nifty_scalper_bot.execution.position_manager import PositionManager
@@ -48,9 +48,7 @@ def test_time_alone_does_not_rearm_stopped_thesis(monkeypatch, tmp_path) -> None
     pm = _stopped_manager(monkeypatch, tmp_path)
     pm._recent_stop_thesis["expires_epoch"] = time.time() - 1
 
-    reason = pm.stop_reentry_block_reason(
-        _signal("NFO:NIFTY2680424350PE")
-    )
+    reason = pm.stop_reentry_block_reason(_signal("NFO:NIFTY2680424350PE"))
 
     assert reason == "stop-loss thesis awaiting newer setup candle"
 
@@ -70,7 +68,9 @@ def test_reused_setup_anchor_remains_blocked(monkeypatch, tmp_path) -> None:
     assert reason == "stop-loss thesis setup not rearmed"
 
 
-def test_newer_setup_candle_rearms_after_minimum_cooldown(monkeypatch, tmp_path) -> None:
+def test_newer_setup_candle_rearms_after_minimum_cooldown(
+    monkeypatch, tmp_path
+) -> None:
     pm = _stopped_manager(monkeypatch, tmp_path)
     stopped_at = float(pm._recent_stop_thesis["stopped_at_epoch"])
     pm._recent_stop_thesis["expires_epoch"] = time.time() - 1
@@ -125,12 +125,7 @@ def test_runtime_setup_context_rearms_only_after_minimum_cooldown(
 def test_opposite_option_side_is_not_blocked(monkeypatch, tmp_path) -> None:
     pm = _stopped_manager(monkeypatch, tmp_path)
 
-    assert (
-        pm.stop_reentry_block_reason(
-            _signal("NFO:NIFTY2680424400CE")
-        )
-        is None
-    )
+    assert pm.stop_reentry_block_reason(_signal("NFO:NIFTY2680424400CE")) is None
 
 
 def test_structural_lock_survives_restart_after_timer(monkeypatch, tmp_path) -> None:
@@ -141,9 +136,10 @@ def test_structural_lock_survives_restart_after_timer(monkeypatch, tmp_path) -> 
     restarted = PositionManager(state_file=str(tmp_path / "positions.json"))
 
     assert restarted._recent_stop_thesis is not None
-    assert restarted.stop_reentry_block_reason(
-        _signal("NFO:NIFTY2680424350PE")
-    ) == "stop-loss thesis awaiting newer setup candle"
+    assert (
+        restarted.stop_reentry_block_reason(_signal("NFO:NIFTY2680424350PE"))
+        == "stop-loss thesis awaiting newer setup candle"
+    )
 
 
 def test_live_bracket_sl_reason_is_classified_as_stop() -> None:
@@ -172,6 +168,34 @@ def test_record_stop_exit_latches_without_close_position(monkeypatch, tmp_path) 
     assert (
         pm.stop_reentry_block_reason(_signal("NFO:NIFTY2680424350PE"))
         == "stop-loss thesis awaiting newer setup candle"
+    )
+
+
+def test_profitable_stop_skips_timer_but_still_requires_new_setup(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("STOP_LOSS_REENTRY_COOLDOWN_SECONDS", "300")
+    pm = PositionManager(state_file=str(tmp_path / "positions.json"))
+    symbol = "NFO:NIFTY2680424400PE"
+
+    assert pm.record_stop_exit(
+        symbol,
+        "HARD_SL_BREACH",
+        net_pnl=50.0,
+    )
+    stopped_at = float(pm._recent_stop_thesis["stopped_at_epoch"])
+    assert pm._recent_stop_thesis["profitable_stop"] is True
+    assert float(pm._recent_stop_thesis["expires_epoch"]) <= time.time()
+
+    assert (
+        pm.stop_reentry_block_reason(_signal(symbol, setup_candle_timestamp=stopped_at))
+        == "stop-loss thesis setup not rearmed"
+    )
+    assert (
+        pm.stop_reentry_block_reason(
+            _signal(symbol, setup_candle_timestamp=stopped_at + 60)
+        )
+        is None
     )
 
 
@@ -207,9 +231,15 @@ def test_bracket_exit_complete_latches_structural_stop(monkeypatch, tmp_path) ->
     StrategyRunner._on_bracket_exit_complete(
         runner,
         symbol,
-        outcome={"symbol": symbol, "exit_reason": "SL Hit (91.4 <= 92.00)"},
+        outcome={
+            "symbol": symbol,
+            "exit_reason": "SL Hit (91.4 <= 92.00)",
+            "net_pnl": 50.0,
+        },
     )
 
     assert pm._recent_stop_thesis is not None
     assert pm._recent_stop_thesis["option_side"] == "PE"
     assert pm._recent_stop_thesis["rearm_required"] is True
+    assert pm._recent_stop_thesis["profitable_stop"] is True
+    assert float(pm._recent_stop_thesis["expires_epoch"]) <= time.time()

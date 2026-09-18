@@ -1414,6 +1414,7 @@ class StrategyRunner:
                         if recorder(
                             outcome.get("symbol") or symbol,
                             outcome.get("exit_reason"),
+                            net_pnl=outcome.get("net_pnl"),
                         ):
                             logger.warning(
                                 "STOP_REARM_LATCHED symbol=%s exit_reason=%s",
@@ -12039,6 +12040,58 @@ class StrategyRunner:
                     return payload
         return None
 
+    def _runtime_quote_age_seconds(
+        self,
+        symbol: str,
+        quote: Mapping[str, Any],
+        tick: Mapping[str, Any],
+    ) -> float | None:
+        """Resolve strategy quote age from the live WebSocket authority first."""
+        normalized = normalize_symbol(symbol)
+        live_mode = False
+        try:
+            live_mode = bool(self._resolve_execution_mode_snapshot().is_live_mode)
+        except Exception:
+            live_mode = False
+
+        if live_mode:
+            mdm = getattr(self, "_market_data", None)
+            live_ws_age = getattr(mdm, "time_since_last_live_ws_tick", None)
+            if callable(live_ws_age):
+                try:
+                    age = live_ws_age(normalized)
+                except (TypeError, ValueError, RuntimeError):
+                    return None
+                if age is None:
+                    return None
+                try:
+                    return max(0.0, float(age))
+                except (TypeError, ValueError):
+                    return None
+
+        for payload in (quote, tick):
+            age = resolve_tick_age_seconds(payload)
+            if age is not None:
+                return age
+
+        for source in (
+            getattr(self, "_market_data", None),
+            getattr(self, "_data_hub", None),
+        ):
+            time_since_tick = getattr(source, "time_since_last_tick", None)
+            if not callable(time_since_tick):
+                continue
+            try:
+                age = time_since_tick(normalized)
+            except (TypeError, ValueError, RuntimeError):
+                continue
+            if age is not None:
+                try:
+                    return max(0.0, float(age))
+                except (TypeError, ValueError):
+                    continue
+        return None
+
     def _current_eval_bar_key(
         self, symbol: str, tick: Mapping[str, Any] | None = None
     ) -> Any:
@@ -16491,6 +16544,11 @@ class StrategyRunner:
                             and ask_f is not None
                         ):
                             tradable_quote = ask_f > bid_f
+                        quote_age_s = self._runtime_quote_age_seconds(
+                            symbol,
+                            quote_map,
+                            tick_map,
+                        )
                         quote_update_version, quote_update_version_source = (
                             resolve_quote_update_identity(
                                 ("datahub_quote", quote_map),
@@ -16532,11 +16590,13 @@ class StrategyRunner:
                                 or "runner_context",
                                 "tick_direction": quote_map.get("tick_direction")
                                 or tick_map.get("tick_direction"),
-                                "data_age_seconds": quote_map.get("data_age_seconds")
-                                or tick_map.get("data_age_seconds"),
-                                "quote_age_s": quote_map.get("quote_age_s")
-                                or quote_map.get("data_age_seconds")
-                                or tick_map.get("data_age_seconds"),
+                                "data_age_seconds": quote_age_s,
+                                "tick_age_ms": (
+                                    quote_age_s * 1000.0
+                                    if quote_age_s is not None
+                                    else None
+                                ),
+                                "quote_age_s": quote_age_s,
                                 "quote_update_version": quote_update_version,
                                 "quote_update_version_source": quote_update_version_source,
                             }
