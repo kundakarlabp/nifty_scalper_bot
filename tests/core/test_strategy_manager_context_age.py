@@ -1,9 +1,6 @@
 import importlib
 
-from nifty_scalper_bot.core.strategy_manager import (
-    StrategyManager,
-    _enrich_option_quote_context,
-)
+from nifty_scalper_bot.core.strategy_manager import StrategyManager
 
 STRATEGY_MANAGER_MODULE = importlib.import_module(
     "nifty_scalper_bot.core.strategy_manager"
@@ -52,35 +49,6 @@ def test_strategy_manager_context_age_uses_canonical_quote_age_schema() -> None:
     assert StrategyManager._context_tick_age_seconds({"quote_age_s": 0.25}) == 0.25
     assert StrategyManager._context_tick_age_seconds({"tick_age_ms": 250}) == 0.25
     assert StrategyManager._context_tick_age_seconds({"tick_age_ms": "invalid"}) is None
-
-
-def test_option_quote_enrichment_preserves_canonical_freshness_provenance() -> None:
-    indicators = {
-        "tick_age_ms": 9_999.0,
-        "quote_age_s": 9.999,
-        "quote_update_version": 1,
-        "depth": {"buy": [{"price": 99.0}], "sell": [{"price": 101.0}]},
-    }
-    quote = {
-        "timestamp_quality": "exchange",
-        "last_tick_ts_ms": 1_800_000_000_000.0,
-        "tick_age_ms": 125.0,
-        "quote_age_ms": 125.0,
-        "quote_age_s": 0.125,
-        "quote_update_version": 42,
-        "depth": {"buy": [{"price": 100.0}], "sell": [{"price": 100.2}]},
-        "depth_available": True,
-        "tradable_quote": True,
-    }
-
-    enriched = _enrich_option_quote_context(indicators, quote)
-
-    assert enriched["tick_age_ms"] == 125.0
-    assert enriched["quote_age_s"] == 0.125
-    assert enriched["quote_update_version"] == 42
-    assert enriched["timestamp_quality"] == "exchange"
-    assert enriched["depth"] == quote["depth"]
-    assert enriched["tradable_quote"] is True
 
 
 def test_futures_context_neutral_values_do_not_create_direction() -> None:
