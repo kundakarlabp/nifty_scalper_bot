@@ -1,3 +1,4 @@
+# fmt: skip
 # ruff: noqa: E501,I001,F841
 """Every strategy vote must carry a resolvable setup anchor (P0)."""
 
