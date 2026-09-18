@@ -1,4 +1,4 @@
-# fmt: skip
+# fmt: off
 # ruff: noqa: E501,I001,F841
 from __future__ import annotations
 
@@ -245,3 +245,5 @@ def test_bracket_exit_complete_latches_structural_stop(monkeypatch, tmp_path) ->
     assert pm._recent_stop_thesis["rearm_required"] is True
     assert pm._recent_stop_thesis["profitable_stop"] is True
     assert float(pm._recent_stop_thesis["expires_epoch"]) <= time.time()
+
+# fmt: on
