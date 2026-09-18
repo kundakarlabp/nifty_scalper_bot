@@ -306,3 +306,21 @@ def test_orb_native_opening_range_quality_controls_admission(monkeypatch) -> Non
     assert accepted.metadata["opening_range_balanced"] is True
     assert accepted.metadata["strategy_score"] == 6.0
     assert accepted.metadata["setup_min"] == 6.0
+
+
+def test_vwap_direction_score_comes_from_underlying_confidence(monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    strategy = VWAPProStrategy(VWAPProStrategyConfig(proximity_pct=0.15), indicator_engine=None)
+    strategy._thesis_anchor_by_scope[
+        ("NFO:NIFTY26SEP25000CE", "2026-09-11")
+    ] = "2026-09-11T04:59:00+00:00"
+    indicators = _ready_vwap_indicators()
+    indicators["underlying_direction_confidence"] = 0.78
+
+    signal = strategy._evaluate_signal(
+        "NFO:NIFTY26SEP25000CE", indicators, current_price=100.10
+    )
+
+    assert signal is not None
+    assert signal.metadata["direction_score"] == 7.8
+    assert signal.metadata["strategy_score"] != signal.metadata["direction_score"]
