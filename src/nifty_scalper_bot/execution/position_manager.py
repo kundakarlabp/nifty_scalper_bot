@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 """Position and order state tracking for the scalper bot."""
 
 from __future__ import annotations
