@@ -273,6 +273,7 @@ def _context_vote(
             "vote_timestamp": time.time() - age_s,
             "quote_depth_valid": True,
             "tradable_quote": True,
+            "context_quality_eligible": True,
             "trigger_conditions_met": False,
             "trigger_block_reason": "context_only_role",
         },
@@ -364,6 +365,34 @@ async def test_weak_range_vwap_trigger_stays_blocked_with_context(
     assert result is None
     decision = manager._last_no_signal_decision_by_symbol["NFO:NIFTY2670724050CE"]
     assert decision.reason == "regime_weighted_score_below_min"
+
+
+async def test_orderflow_without_execution_quality_cannot_unlock_single_trigger(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    monkeypatch.delenv("STRATEGY_ALLOW_SINGLE_VOTE_SCALP", raising=False)
+    monkeypatch.delenv("STRATEGY_ALLOW_SELECTED_OPTION_SINGLE_VOTE", raising=False)
+    manager = _manager_probe()
+    trigger = _signal_vote(
+        strategy="VWAPPro", raw_score=8.5, weighted_score=6.8
+    )
+    context_signal, context_vote = _context_vote(score=8.0, confidence=0.80)
+    context_vote.metadata["context_quality_eligible"] = False
+    context_vote.metadata["context_bonus_score"] = 0.0
+
+    result = manager._combine_strategy_votes(
+        symbol="NFO:NIFTY2670724050CE",
+        signals=[trigger, (context_signal, context_vote)],
+        indicators=_valid_entry_context(),
+    )
+
+    assert result is None
+    decision = manager._last_no_signal_decision_by_symbol[
+        "NFO:NIFTY2670724050CE"
+    ]
+    assert decision.reason == "single_trigger_context_confirmation_invalid"
 
 
 async def test_stale_orderflow_context_cannot_unlock_single_trigger(
