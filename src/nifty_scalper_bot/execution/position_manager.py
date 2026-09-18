@@ -1,4 +1,4 @@
-# fmt: skip
+# fmt: off
 # ruff: noqa: E501,I001,F841
 """Position and order state tracking for the scalper bot."""
 
@@ -4248,3 +4248,5 @@ __all__ = [
     "TerminalOrderMetadata",
     "normalize_broker_order_status",
 ]
+
+# fmt: on
