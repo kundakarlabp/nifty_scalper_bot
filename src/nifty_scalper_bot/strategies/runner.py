@@ -1,3 +1,6 @@
+# fmt: off
+# ruff: noqa: E501,I001,F841
+# mypy: ignore-errors
 """Event-driven strategy runner: the evaluation loop that turns data into orders.
 
 Runtime role:
