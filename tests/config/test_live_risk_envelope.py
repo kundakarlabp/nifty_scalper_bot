@@ -19,31 +19,34 @@ def _not_production_migration(monkeypatch):
     monkeypatch.delenv("PRODUCTION_DEFAULT_LIVE", raising=False)
 
 
-def test_live_mode_restores_canonical_two_percent_risk_envelope(monkeypatch) -> None:
+@pytest.mark.parametrize("previous_limit", ["2.0", "7.0"])
+def test_live_mode_restores_canonical_five_percent_risk_envelope(
+    monkeypatch, previous_limit
+) -> None:
     monkeypatch.setenv("ENABLE_LIVE", "true")
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
-    monkeypatch.setenv("RISK__PER_TRADE_RISK_PCT", "7.0")
-    monkeypatch.setenv("RISK_PER_TRADE_PCT", "7.0")
-    monkeypatch.setenv("RISK_DAILY_LOSS_PCT", "7.0")
-    monkeypatch.setenv("RISK_DAILY_PNL_CAP_PCT", "7.0")
-    monkeypatch.setenv("RISK_MAX_DAILY_LOSS_PCT", "7.0")
-    monkeypatch.setenv("DAILY_PNL_CAP_PCT", "7.0")
+    monkeypatch.setenv("RISK__PER_TRADE_RISK_PCT", previous_limit)
+    monkeypatch.setenv("RISK_PER_TRADE_PCT", previous_limit)
+    monkeypatch.setenv("RISK_DAILY_LOSS_PCT", previous_limit)
+    monkeypatch.setenv("RISK_DAILY_PNL_CAP_PCT", previous_limit)
+    monkeypatch.setenv("RISK_MAX_DAILY_LOSS_PCT", previous_limit)
+    monkeypatch.setenv("DAILY_PNL_CAP_PCT", previous_limit)
 
     normalise_live_env_defaults()
 
-    assert LIVE_PER_TRADE_RISK_PCT == "2.0"
-    assert LIVE_DAILY_LOSS_PCT == "2.0"
-    assert os.environ["RISK__PER_TRADE_RISK_PCT"] == "2.0"
-    assert os.environ["RISK_PER_TRADE_PCT"] == "2.0"
-    assert os.environ["RISK_DAILY_LOSS_PCT"] == "2.0"
-    assert os.environ["RISK_DAILY_PNL_CAP_PCT"] == "2.0"
-    assert os.environ["RISK_MAX_DAILY_LOSS_PCT"] == "2.0"
-    assert os.environ["DAILY_PNL_CAP_PCT"] == "2.0"
+    assert LIVE_PER_TRADE_RISK_PCT == "5.0"
+    assert LIVE_DAILY_LOSS_PCT == "5.0"
+    assert os.environ["RISK__PER_TRADE_RISK_PCT"] == "5.0"
+    assert os.environ["RISK_PER_TRADE_PCT"] == "5.0"
+    assert os.environ["RISK_DAILY_LOSS_PCT"] == "5.0"
+    assert os.environ["RISK_DAILY_PNL_CAP_PCT"] == "5.0"
+    assert os.environ["RISK_MAX_DAILY_LOSS_PCT"] == "5.0"
+    assert os.environ["DAILY_PNL_CAP_PCT"] == "5.0"
 
     settings = _build_risk_settings()
-    assert settings.per_trade_risk_pct == pytest.approx(2.0)
-    assert settings.daily_loss_pct == pytest.approx(2.0)
-    assert settings.daily_pnl_cap_pct == pytest.approx(2.0)
+    assert settings.per_trade_risk_pct == pytest.approx(5.0)
+    assert settings.daily_loss_pct == pytest.approx(5.0)
+    assert settings.daily_pnl_cap_pct == pytest.approx(5.0)
 
 
 def test_non_live_mode_does_not_relax_explicit_risk_limits(monkeypatch) -> None:

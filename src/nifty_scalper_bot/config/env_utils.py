@@ -7,11 +7,11 @@ import os
 from pathlib import Path
 
 LOGGER = logging.getLogger(__name__)
-LIVE_PER_TRADE_RISK_PCT = "2.0"
+LIVE_PER_TRADE_RISK_PCT = "5.0"
 # Daily loss is an independent portfolio-level circuit breaker. An indivisible
 # lot that cannot fit the per-trade risk budget is skipped rather than widening
 # either limit at runtime.
-LIVE_DAILY_LOSS_PCT = "2.0"
+LIVE_DAILY_LOSS_PCT = "5.0"
 PRODUCTION_LIVE_DEFAULT_INITIALIZED = "PRODUCTION_LIVE_DEFAULT_INITIALIZED"
 
 
@@ -48,7 +48,9 @@ def parse_float_env(value: object, default: float) -> float:
     try:
         return float(cleaned)
     except (TypeError, ValueError):
-        LOGGER.warning("parse_float_env: invalid value %r, using default %s", value, default)
+        LOGGER.warning(
+            "parse_float_env: invalid value %r, using default %s", value, default
+        )
         return default
 
 
@@ -66,7 +68,9 @@ def parse_int_env(value: object, default: int) -> int:
     try:
         return int(float(cleaned))
     except (TypeError, ValueError):
-        LOGGER.warning("parse_int_env: invalid value %r, using default %s", value, default)
+        LOGGER.warning(
+            "parse_int_env: invalid value %r, using default %s", value, default
+        )
         return default
 
 
@@ -93,7 +97,7 @@ def truthy(value: str | None) -> bool:
     """Parse truthy env flags. Args: value. Returns: bool. Raises: none."""
     if value is None:
         return False
-    return value.strip().lower() in {'1', 'true', 'yes', 'on'}
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def setdefault_env(key: str, value: str) -> None:
@@ -103,7 +107,7 @@ def setdefault_env(key: str, value: str) -> None:
 
 
 def _is_lightsail_production() -> bool:
-    return (os.getenv('DEPLOYMENT_PLATFORM') or '').strip().lower() == 'aws_lightsail'
+    return (os.getenv("DEPLOYMENT_PLATFORM") or "").strip().lower() == "aws_lightsail"
 
 
 def _production_live_default_enabled() -> bool:
@@ -112,7 +116,7 @@ def _production_live_default_enabled() -> bool:
         return False
     if truthy(os.getenv(PRODUCTION_LIVE_DEFAULT_INITIALIZED)):
         return False
-    preference = os.getenv('PRODUCTION_DEFAULT_LIVE')
+    preference = os.getenv("PRODUCTION_DEFAULT_LIVE")
     if preference is not None and preference.strip() and not truthy(preference):
         return False
     return True
@@ -120,7 +124,7 @@ def _production_live_default_enabled() -> bool:
 
 def _persist_production_live_defaults(defaults: dict[str, str]) -> None:
     """Persist the one-time Lightsail LIVE migration without touching secrets."""
-    env_path = (os.getenv('BOT_ENV_FILE') or '').strip()
+    env_path = (os.getenv("BOT_ENV_FILE") or "").strip()
     if not env_path:
         return
     path = Path(env_path).expanduser()
@@ -128,34 +132,34 @@ def _persist_production_live_defaults(defaults: dict[str, str]) -> None:
         return
 
     updates = dict(defaults)
-    updates[PRODUCTION_LIVE_DEFAULT_INITIALIZED] = 'true'
-    existing = path.read_text(encoding='utf-8').splitlines()
+    updates[PRODUCTION_LIVE_DEFAULT_INITIALIZED] = "true"
+    existing = path.read_text(encoding="utf-8").splitlines()
     seen: set[str] = set()
     out: list[str] = []
     for line in existing:
         stripped = line.strip()
-        if not stripped or stripped.startswith('#') or '=' not in stripped:
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
             out.append(line)
             continue
-        key = stripped.split('=', 1)[0].strip()
+        key = stripped.split("=", 1)[0].strip()
         if key in updates:
             if key not in seen:
-                out.append(f'{key}={updates[key]}')
+                out.append(f"{key}={updates[key]}")
                 seen.add(key)
             continue
         out.append(line)
     for key, value in updates.items():
         if key not in seen:
-            out.append(f'{key}={value}')
+            out.append(f"{key}={value}")
 
-    tmp = path.with_name(f'.{path.name}.live-default.tmp')
+    tmp = path.with_name(f".{path.name}.live-default.tmp")
     try:
-        tmp.write_text('\n'.join(out).rstrip() + '\n', encoding='utf-8')
+        tmp.write_text("\n".join(out).rstrip() + "\n", encoding="utf-8")
         os.chmod(tmp, 0o600)
         os.replace(tmp, path)
-        os.environ[PRODUCTION_LIVE_DEFAULT_INITIALIZED] = 'true'
+        os.environ[PRODUCTION_LIVE_DEFAULT_INITIALIZED] = "true"
     except OSError as exc:
-        LOGGER.warning('Could not persist Lightsail LIVE default migration: %s', exc)
+        LOGGER.warning("Could not persist Lightsail LIVE default migration: %s", exc)
         try:
             tmp.unlink(missing_ok=True)
         except OSError:
@@ -164,31 +168,33 @@ def _persist_production_live_defaults(defaults: dict[str, str]) -> None:
 
 def normalise_live_env_defaults() -> None:
     """Derive live/paper env defaults. Args: none. Returns: None. Raises: none."""
-    enable_live = truthy(os.getenv('ENABLE_LIVE'))
-    execution_mode = (os.getenv('EXECUTION_MODE') or '').strip().upper()
+    enable_live = truthy(os.getenv("ENABLE_LIVE"))
+    execution_mode = (os.getenv("EXECUTION_MODE") or "").strip().upper()
     production_default_live = _production_live_default_enabled()
-    live_requested = production_default_live or enable_live or execution_mode == 'LIVE'
+    live_requested = production_default_live or enable_live or execution_mode == "LIVE"
 
     if live_requested:
         defaults = {
-            'ENABLE_LIVE': 'true',
-            'ENABLE_LIVE_TRADING': 'true',
-            'EXECUTION_MODE': 'LIVE',
-            'ORDERS__ENABLE_LIVE': 'true',
-            'PAPER__ENABLED': 'false',
-            'PAPER_MODE': 'false',
-            'SHADOW_MODE': 'false',
+            "ENABLE_LIVE": "true",
+            "ENABLE_LIVE_TRADING": "true",
+            "EXECUTION_MODE": "LIVE",
+            "ORDERS__ENABLE_LIVE": "true",
+            "PAPER__ENABLED": "false",
+            "PAPER_MODE": "false",
+            "SHADOW_MODE": "false",
         }
     else:
-        non_live_mode = execution_mode if execution_mode in {'SHADOW', 'PAPER'} else 'PAPER'
+        non_live_mode = (
+            execution_mode if execution_mode in {"SHADOW", "PAPER"} else "PAPER"
+        )
         defaults = {
-            'ENABLE_LIVE': 'false',
-            'ENABLE_LIVE_TRADING': 'false',
-            'EXECUTION_MODE': non_live_mode,
-            'ORDERS__ENABLE_LIVE': 'false',
-            'PAPER__ENABLED': 'true',
-            'PAPER_MODE': 'true',
-            'SHADOW_MODE': 'true',
+            "ENABLE_LIVE": "false",
+            "ENABLE_LIVE_TRADING": "false",
+            "EXECUTION_MODE": non_live_mode,
+            "ORDERS__ENABLE_LIVE": "false",
+            "PAPER__ENABLED": "true",
+            "PAPER_MODE": "true",
+            "SHADOW_MODE": "true",
         }
 
     production_initialized = _is_lightsail_production() and truthy(
@@ -211,12 +217,12 @@ def normalise_live_env_defaults() -> None:
         # Canonical live risk envelope. Accepted aliases are synchronized here
         # so stale deployment values cannot silently change per-trade risk.
         # Existing sizing clamps and final RiskManager breakers remain unchanged.
-        os.environ['RISK__PER_TRADE_RISK_PCT'] = LIVE_PER_TRADE_RISK_PCT
-        os.environ['RISK_PER_TRADE_PCT'] = LIVE_PER_TRADE_RISK_PCT
-        os.environ['RISK_DAILY_LOSS_PCT'] = LIVE_DAILY_LOSS_PCT
-        os.environ['RISK_DAILY_PNL_CAP_PCT'] = LIVE_DAILY_LOSS_PCT
-        os.environ['RISK_MAX_DAILY_LOSS_PCT'] = LIVE_DAILY_LOSS_PCT
-        os.environ['DAILY_PNL_CAP_PCT'] = LIVE_DAILY_LOSS_PCT
+        os.environ["RISK__PER_TRADE_RISK_PCT"] = LIVE_PER_TRADE_RISK_PCT
+        os.environ["RISK_PER_TRADE_PCT"] = LIVE_PER_TRADE_RISK_PCT
+        os.environ["RISK_DAILY_LOSS_PCT"] = LIVE_DAILY_LOSS_PCT
+        os.environ["RISK_DAILY_PNL_CAP_PCT"] = LIVE_DAILY_LOSS_PCT
+        os.environ["RISK_MAX_DAILY_LOSS_PCT"] = LIVE_DAILY_LOSS_PCT
+        os.environ["DAILY_PNL_CAP_PCT"] = LIVE_DAILY_LOSS_PCT
 
 
 def resolve_build_sha() -> str:
