@@ -1,3 +1,5 @@
+# fmt: off
+# ruff: noqa: E501,I001
 """Selected-option single-vote scalps require a high score floor (default 9.0).
 
 A lone vote remains disabled by default. A selected-option trigger may pass only
