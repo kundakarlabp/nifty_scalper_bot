@@ -65,11 +65,28 @@ def _resolve_broker_realized_pnl(
     *,
     force: bool = False,
 ) -> float | None:
-    """Return fresh broker account realised P&L when available."""
+    """Return broker realised P&L only when its diagnostic agrees with strategy truth."""
     refresh = getattr(position_manager, "refresh_broker_pnl_diagnostic", None)
-    if force and callable(refresh):
-        with suppress(Exception):
-            refresh(force=True)
+    diagnostic: Mapping[str, Any] | None = None
+    if callable(refresh):
+        try:
+            refreshed = refresh(force=force)
+        except TypeError:
+            with suppress(Exception):
+                refreshed = refresh()
+        except Exception:
+            refreshed = None
+        if isinstance(refreshed, Mapping):
+            diagnostic = refreshed
+
+    # The dedicated broker-P&L layer explicitly marks account P&L as diagnostic
+    # only.  A mismatch must never overwrite the local confirmed strategy ledger
+    # used for live risk accounting; otherwise an intraday restart can erase
+    # gross trade P&L while retaining only transaction-cost deductions.
+    if diagnostic and bool(diagnostic.get("diagnostic_only")):
+        status = str(diagnostic.get("status") or "").strip().lower()
+        if status != "matched":
+            return None
 
     getter = getattr(position_manager, "get_broker_account_realized_pnl", None)
     if not callable(getter):
