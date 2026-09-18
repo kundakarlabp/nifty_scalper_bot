@@ -1,3 +1,4 @@
+# fmt: skip
 # ruff: noqa: E501,I001,F841
 """Persist entry-risk state and keep PositionManager risk state restart-safe.
 
