@@ -20579,20 +20579,44 @@ class StrategyRunner:
                 or getattr(signal, "reason", None)
                 or reason_key
             )
+            resolved_strategy_key = (
+                str(resolved_strategy_name or "").strip().lower().replace(" ", "_")
+            )
+            strategy_score_for_quality = float(
+                (
+                    metadata.get(
+                        "independent_setup_score",
+                        metadata.get("strategy_score", 0.0),
+                    )
+                    if resolved_strategy_key in {"vwappro", "vwap_pro"}
+                    else metadata.get("strategy_score", 0.0)
+                )
+                or 0.0
+            )
             quality = score_signal_quality(
                 direction_score=float(metadata.get("direction_score", 0.0) or 0.0),
-                strategy_score=float(metadata.get("strategy_score", 0.0) or 0.0),
+                strategy_score=strategy_score_for_quality,
                 option_score=float(metadata.get("option_score", 0.0) or 0.0),
                 data_score=float(metadata.get("data_score", 0.0) or 0.0),
                 rr_score=float(metadata.get("rr_score", 0.0) or 0.0),
                 strategy_name=str(resolved_strategy_name or ""),
             )
-            final_confidence = max(0.0, min(1.0, quality.final_score / 10.0))
+            alpha_score = float(
+                quality.components.get("alpha_score", quality.final_score)
+                or quality.final_score
+            )
+            confidence_score = (
+                alpha_score
+                if bool(quality.components.get("alpha_floor_required"))
+                else quality.final_score
+            )
+            final_confidence = max(0.0, min(1.0, confidence_score / 10.0))
             self._logger.info(
-                "SIGNAL_SCORE strategy_name=%s threshold=%.2f final=%.2f direction=%.2f strategy=%.2f option=%.2f data=%.2f rr=%.2f confidence=%.2f allowed=%s reasons=%s trace_id=%s",
+                "SIGNAL_SCORE strategy_name=%s threshold=%.2f final=%.2f alpha=%.2f direction=%.2f strategy=%.2f option=%.2f data=%.2f rr=%.2f confidence=%.2f allowed=%s reasons=%s trace_id=%s",
                 str(quality.components.get("strategy_name", "")),
                 float(quality.components.get("threshold", 0.0) or 0.0),
                 quality.final_score,
+                alpha_score,
                 quality.direction_score,
                 quality.strategy_score,
                 quality.option_score,
@@ -20608,12 +20632,19 @@ class StrategyRunner:
                     "trace_id": trace_id,
                     "allowed": quality.allowed,
                     "final_score": quality.final_score,
+                    "alpha_score": alpha_score,
+                    "confidence_score": confidence_score,
                 },
             )
             if not quality.allowed:
                 rejection_reasons = list(quality.reasons or [])
                 if "context_only_strategy" in rejection_reasons:
                     quality_reject_reason = "context_only_strategy"
+                elif (
+                    "alpha_below_threshold" in rejection_reasons
+                    and "score_below_threshold" not in rejection_reasons
+                ):
+                    quality_reject_reason = "alpha_below_threshold"
                 elif (
                     requires_final_score
                     and "score_below_threshold" in rejection_reasons
