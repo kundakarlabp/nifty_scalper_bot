@@ -82,6 +82,44 @@ def test_new_strategy_instance_recovers_same_contract_same_session_thesis(monkey
     assert "2026-09-08 04:31:00+00:00" in signal.metadata["setup_id"]
 
 
+def test_default_recovery_scans_all_available_same_session_history(monkeypatch):
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.delenv("VWAP_THESIS_RECOVERY_LOOKBACK_BARS", raising=False)
+    history = [
+        _bar(
+            "2026-09-08T10:00:00",
+            open_=101.0,
+            high=101.2,
+            low=99.0,
+            close=99.5,
+        )
+    ]
+    history.extend(
+        _bar(
+            f"2026-09-08T10:{minute:02d}:00",
+            open_=105.0,
+            high=106.0,
+            low=104.5,
+            close=105.5,
+        )
+        for minute in range(1, 40)
+    )
+    strategy = VWAPProStrategy(VWAPProStrategyConfig(), _HistoryEngine(history))
+
+    signal = strategy._evaluate_signal(
+        "NFO:NIFTY2690823650CE",
+        _indicators(
+            session_date="2026-09-08",
+            latest_bar_ts="2026-09-08T10:40:00+05:30",
+        ),
+        103.0,
+    )
+
+    assert signal is not None
+    assert signal.metadata["thesis_recovered_from_history"] is True
+    assert "2026-09-08 04:30:00+00:00" in signal.metadata["setup_id"]
+
+
 def test_recovery_never_uses_prior_session_history(monkeypatch):
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     history = [
