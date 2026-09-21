@@ -104,10 +104,10 @@ def test_default_recovery_scans_all_available_same_session_history(monkeypatch):
     history.extend(
         _bar(
             f"2026-09-08T10:{minute:02d}:00",
-            open_=105.0,
-            high=106.0,
-            low=104.5,
-            close=105.5,
+            open_=110.0,
+            high=110.0,
+            low=110.0,
+            close=110.0,
         )
         for minute in range(1, 40)
     )
