@@ -5,7 +5,9 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from nifty_scalper_bot.strategies.elite_strategies.config_models import VWAPProStrategyConfig
+from nifty_scalper_bot.strategies.elite_strategies.config_models import (
+    VWAPProStrategyConfig,
+)
 from nifty_scalper_bot.strategies.elite_strategies.vwap_pro import VWAPProStrategy
 from nifty_scalper_bot.strategies.signal_identity import deterministic_signal_id
 
@@ -29,7 +31,9 @@ def _bar(
     volume: float = 1000.0,
 ):
     return {
-        "timestamp": datetime.fromisoformat(ts).replace(tzinfo=ZoneInfo("Asia/Kolkata")),
+        "timestamp": datetime.fromisoformat(ts).replace(
+            tzinfo=ZoneInfo("Asia/Kolkata")
+        ),
         "open": open_,
         "high": high,
         "low": low,
@@ -72,7 +76,10 @@ def test_new_strategy_instance_recovers_same_contract_same_session_thesis(monkey
 
     signal = strategy._evaluate_signal(
         "NFO:NIFTY2690823650CE",
-        _indicators(session_date="2026-09-08", latest_bar_ts="2026-09-08T10:02:00+05:30"),
+        _indicators(
+            session_date="2026-09-08",
+            latest_bar_ts="2026-09-08T10:02:00+05:30",
+        ),
         103.0,
     )
 
@@ -129,7 +136,10 @@ def test_recovery_never_uses_prior_session_history(monkeypatch):
 
     signal = strategy._evaluate_signal(
         "NFO:NIFTY2690823650CE",
-        _indicators(session_date="2026-09-08", latest_bar_ts="2026-09-08T10:02:00+05:30"),
+        _indicators(
+            session_date="2026-09-08",
+            latest_bar_ts="2026-09-08T10:02:00+05:30",
+        ),
         103.0,
     )
 
@@ -144,7 +154,10 @@ def test_recovery_never_uses_another_contract(monkeypatch):
 
     signal = strategy._evaluate_signal(
         "NFO:NIFTY2690823650CE",
-        _indicators(session_date="2026-09-08", latest_bar_ts="2026-09-08T10:02:00+05:30"),
+        _indicators(
+            session_date="2026-09-08",
+            latest_bar_ts="2026-09-08T10:02:00+05:30",
+        ),
         103.0,
     )
 
