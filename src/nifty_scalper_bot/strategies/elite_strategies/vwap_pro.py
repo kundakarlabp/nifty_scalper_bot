@@ -190,13 +190,15 @@ class VWAPProStrategy(EliteStrategy):
             return None
         if not rows:
             return None
-        try:
-            lookback = int(
-                float(os.getenv("VWAP_THESIS_RECOVERY_LOOKBACK_BARS", "30") or 30)
-            )
-        except (TypeError, ValueError):
-            lookback = 30
-        lookback = max(5, min(120, lookback))
+        raw_lookback = os.getenv("VWAP_THESIS_RECOVERY_LOOKBACK_BARS")
+        lookback: int | None = None
+        if raw_lookback not in (None, ""):
+            try:
+                lookback = int(float(raw_lookback))
+            except (TypeError, ValueError):
+                lookback = None
+            if lookback is not None:
+                lookback = max(5, min(120, lookback))
         session_rows: list[tuple[Any, float, float, float, float]] = []
         cumulative_turnover = 0.0
         cumulative_volume = 0.0
@@ -235,8 +237,9 @@ class VWAPProStrategy(EliteStrategy):
                     cumulative_turnover / cumulative_volume,
                 )
             )
+        recovery_rows = session_rows if lookback is None else session_rows[-lookback:]
         for timestamp, row_open, row_low, row_close, row_vwap in reversed(
-            session_rows[-lookback:]
+            recovery_rows
         ):
             if (
                 row_close < row_vwap
