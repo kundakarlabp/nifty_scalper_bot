@@ -350,6 +350,35 @@ async def test_range_vwap_trigger_cannot_use_orderflow_as_only_confirmation(
     )
 
 
+async def test_strong_range_vwap_trigger_can_use_strong_orderflow_confirmation(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    monkeypatch.delenv("STRATEGY_ALLOW_SINGLE_VOTE_SCALP", raising=False)
+    monkeypatch.delenv("STRATEGY_ALLOW_SELECTED_OPTION_SINGLE_VOTE", raising=False)
+    manager = _manager_probe()
+    trigger = _signal_vote(
+        strategy="VWAPPro",
+        raw_score=8.0,
+        weighted_score=6.4,
+        regime_name="RANGE",
+    )
+    context = _context_vote(score=8.0, confidence=0.80)
+
+    result = manager._combine_strategy_votes(
+        symbol="NFO:NIFTY2670724050CE",
+        signals=[trigger, context],
+        indicators=_valid_entry_context(),
+    )
+
+    assert result is not None
+    assert result.metadata["approval_path"] == "single_trigger_context_confirmed"
+    assert result.metadata["context_confirmation_strategies"] == ["OrderFlow"]
+    assert result.metadata["regime_weight"] == 0.8
+    assert result.metadata["final_trade_score"] >= 7.0
+
+
 async def test_trend_vwap_trigger_can_use_fresh_orderflow_confirmation(
     monkeypatch,
 ) -> None:
