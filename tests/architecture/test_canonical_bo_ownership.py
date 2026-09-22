@@ -9,11 +9,14 @@ from nifty_scalper_bot.execution.adaptive_trailing import AdaptiveTrailingContro
 from nifty_scalper_bot.execution.adaptive_trailing_core import (
     AdaptiveTrailingController as CoreAdaptiveTrailingController,
 )
-from nifty_scalper_bot.execution.bracket_core import BracketManager as CoreBracketManager
+from nifty_scalper_bot.execution.bracket_core import (
+    BracketManager as CoreBracketManager,
+)
 from nifty_scalper_bot.execution.bracket_manager import BracketManager
 from nifty_scalper_bot.execution.order_manager import OrderManager
-from nifty_scalper_bot.execution.order_manager_core import OrderManager as CoreOrderManager
-
+from nifty_scalper_bot.execution.order_manager_core import (
+    OrderManager as CoreOrderManager,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src" / "nifty_scalper_bot"
@@ -35,7 +38,10 @@ def _strategy_runner_execute_order_calls() -> set[str]:
     path = SRC / "strategies" / "runner.py"
     tree = ast.parse(path.read_text(encoding="utf-8"))
     for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "_execute_order":
+        if (
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == "_execute_order"
+        ):
             return {
                 call.func.attr
                 for call in ast.walk(node)
@@ -45,7 +51,9 @@ def _strategy_runner_execute_order_calls() -> set[str]:
 
 
 def test_public_runtime_has_one_owner_per_lifecycle_domain() -> None:
-    assert OrderManager.__module__ == "nifty_scalper_bot.execution.runtime_order_manager"
+    assert (
+        OrderManager.__module__ == "nifty_scalper_bot.execution.runtime_order_manager"
+    )
     assert BracketManager.__module__ == "nifty_scalper_bot.execution.ownership"
     assert AdaptiveTrailingController.__module__ == (
         "nifty_scalper_bot.execution.hardened_adaptive_trailing"
@@ -134,6 +142,10 @@ def test_core_modules_are_imported_only_by_canonical_facades() -> None:
         "nifty_scalper_bot.execution.bracket_core": {
             "bracket_manager.py",
             "ownership.py",
+            "hardened_bracket_manager.py",
+            "canonical_bracket_manager.py",
+            "ledger_bracket_manager.py",
+            "runtime_bracket_manager.py",
         },
         "nifty_scalper_bot.execution.adaptive_trailing_core": {
             "adaptive_trailing.py",
@@ -165,8 +177,12 @@ def test_retired_duplicate_bo_modules_are_absent() -> None:
 
 
 def test_startup_compatibility_adapters_do_not_own_execution_logic() -> None:
-    safe_tree = ast.parse((EXECUTION / "safe_order_manager.py").read_text(encoding="utf-8"))
-    lifecycle_tree = ast.parse((EXECUTION / "lifecycle_manager.py").read_text(encoding="utf-8"))
+    safe_tree = ast.parse(
+        (EXECUTION / "safe_order_manager.py").read_text(encoding="utf-8")
+    )
+    lifecycle_tree = ast.parse(
+        (EXECUTION / "lifecycle_manager.py").read_text(encoding="utf-8")
+    )
     safe_methods = {
         node.name
         for node in ast.walk(safe_tree)
@@ -195,4 +211,6 @@ def test_live_capable_strategies_do_not_bypass_trade_plan_execution() -> None:
         if path.name == "premium_decay.py" and "LIVE_CAPABLE = False" in source:
             continue
         offenders.append(str(path.relative_to(ROOT)))
-    assert not offenders, f"Live-capable strategy bypasses canonical TradePlan path: {offenders}"
+    assert (
+        not offenders
+    ), f"Live-capable strategy bypasses canonical TradePlan path: {offenders}"

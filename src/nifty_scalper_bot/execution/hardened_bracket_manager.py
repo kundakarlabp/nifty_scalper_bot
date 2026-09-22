@@ -1,22 +1,23 @@
 """Deterministic live-money hardening for the virtual bracket manager.
 
-The legacy manager remains the implementation owner. This subclass tightens its
+The core manager remains the implementation owner. This subclass tightens its
 state transitions, rescues stale protective orders without duplicate exposure,
 and installs a final unresolved-exit guard on the attached OrderManager.
 """
 
 from __future__ import annotations
 
-from contextlib import suppress
 import functools
 import math
 import os
 import time
+from contextlib import suppress
 from typing import Any, Mapping
 
-from nifty_scalper_bot.execution import bracket_manager as _legacy
-
-_LegacyBracketManager = _legacy.BracketManager
+from nifty_scalper_bot.execution import bracket_core as _legacy
+from nifty_scalper_bot.execution.bracket_core import (
+    BracketManager as _LegacyBracketManager,
+)
 
 
 class HardenedBracketManager(_LegacyBracketManager):
@@ -152,21 +153,19 @@ class HardenedBracketManager(_LegacyBracketManager):
             if not callable(original):
                 continue
 
-            @functools.wraps(original)
-            def guarded(
-                *args: Any,
-                __original: Any = original,
-                __method_name: str = method_name,
-                **method_kwargs: Any,
-            ) -> Any:
-                if is_protective_call(__method_name, method_kwargs):
-                    return __original(*args, **method_kwargs)
-                details = blocked_details()
-                if details is not None:
-                    return rejection_for(__method_name, details)
-                return __original(*args, **method_kwargs)
+            def guard(original: Any, name: str) -> Any:
+                @functools.wraps(original)
+                def guarded(*args: Any, **method_kwargs: Any) -> Any:
+                    if is_protective_call(name, method_kwargs):
+                        return original(*args, **method_kwargs)
+                    details = blocked_details()
+                    if details is not None:
+                        return rejection_for(name, details)
+                    return original(*args, **method_kwargs)
 
-            setattr(order_manager, method_name, guarded)
+                return guarded
+
+            setattr(order_manager, method_name, guard(original, method_name))
 
         setattr(order_manager, "_unresolved_exit_guard_installed", True)
         _legacy.LOGGER.info(
@@ -381,7 +380,8 @@ class HardenedBracketManager(_LegacyBracketManager):
             self._exit_rescue_attempts[bracket.bracket_id] = attempts + 1
 
         _legacy.LOGGER.critical(
-            "EXIT_STALE_ORDER_RESCUE bracket_id=%s order_id=%s status=%s qty=%s rescue_attempt=%s",
+            "EXIT_STALE_ORDER_RESCUE bracket_id=%s "
+            "order_id=%s status=%s qty=%s rescue_attempt=%s",
             bracket.bracket_id,
             order_id,
             status,
@@ -466,7 +466,8 @@ class HardenedBracketManager(_LegacyBracketManager):
                 bracket.escalated_at = None
                 self._exit_order_open_since[new_order_id] = time.time()
                 _legacy.LOGGER.critical(
-                    "EXIT_RESCUE_ORDER_SUBMITTED bracket_id=%s prior_order_id=%s new_order_id=%s attempt=%s qty=%s",
+                    "EXIT_RESCUE_ORDER_SUBMITTED bracket_id=%s "
+                    "prior_order_id=%s new_order_id=%s attempt=%s qty=%s",
                     bracket.bracket_id,
                     prior_order_id,
                     new_order_id,
