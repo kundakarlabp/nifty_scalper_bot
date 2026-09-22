@@ -17,7 +17,6 @@ from nifty_scalper_bot.data.data_hub import (
     _is_canonical_runtime_tick,
     _runtime_tick_timestamp_ms,
 )
-
 from nifty_scalper_bot.utils.logging import get_logger, log_throttled
 from nifty_scalper_bot.utils.symbols import normalize_symbol
 
