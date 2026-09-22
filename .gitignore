@@ -9,11 +9,16 @@ build/
 .env
 .venv/
 
-# Runtime artifacts (sqlite state created at bot startup)
+# Runtime artifacts (sqlite/state created at bot startup)
 data/*.db
 data/*.db-journal
 data/*.db-wal
 data/*.db-shm
+positions.json
+positions_state.json
+
+# One-off source-rewrite staging artifacts
+scripts/p0p1_chunks/
 
 compileall.log
 *.log
