@@ -130,14 +130,10 @@ class CanonicalBracketManager(HardenedBracketManager):
             bracket.exit_executed = False
             bracket.active = True
             bracket.position_flat_confirmed = False
-            bracket.exit_state = (
-                _core.BracketExitLifecycle.EXIT_PARTIALLY_FILLED.value
-            )
+            bracket.exit_state = _core.BracketExitLifecycle.EXIT_PARTIALLY_FILLED.value
             bracket.entry_status = bracket.exit_state
             residual_label = (
-                residual_quantity
-                if residual_quantity is not None
-                else "unknown"
+                residual_quantity if residual_quantity is not None else "unknown"
             )
             bracket.last_exit_error = (
                 f"{self._FILLED_SYNC_PREFIX}:residual={residual_label}"
@@ -270,9 +266,7 @@ class CanonicalBracketManager(HardenedBracketManager):
             bracket.exit_executed = False
             bracket.active = True
             bracket.position_flat_confirmed = False
-            bracket.exit_state = (
-                _core.BracketExitLifecycle.EXIT_FAILED_ESCALATED.value
-            )
+            bracket.exit_state = _core.BracketExitLifecycle.EXIT_FAILED_ESCALATED.value
             bracket.entry_status = bracket.exit_state
             bracket.last_exit_error = error
             bracket.escalated_at = bracket.escalated_at or now
@@ -352,13 +346,10 @@ class CanonicalBracketManager(HardenedBracketManager):
                     bracket.flat_nonterminal_since_monotonic = None
                     bracket.flat_nonterminal_since_utc = None
                 strict_live = bool(getattr(self, "_is_live_execution", lambda: True)())
-                if (
-                    strict_live
-                    and flat_evidence.state not in {
-                        BrokerPositionState.FLAT_CONFIRMED,
-                        BrokerPositionState.NON_FLAT_CONFIRMED,
-                    }
-                ):
+                if strict_live and flat_evidence.state not in {
+                    BrokerPositionState.FLAT_CONFIRMED,
+                    BrokerPositionState.NON_FLAT_CONFIRMED,
+                }:
                     with self._lock:
                         bracket.exit_pending = True
                         bracket.exit_in_progress = False

@@ -43,6 +43,6 @@ def test_bracket_layers_depend_on_core_not_public_facade() -> None:
             and any(alias.name == "bracket_core" for alias in node.names)
             for node in ast.walk(tree)
         )
-        assert relative_core_import, (
-            f"{name} must import bracket_core directly, not through the public facade"
-        )
+        assert (
+            relative_core_import
+        ), f"{name} must import bracket_core directly, not through the public facade"
