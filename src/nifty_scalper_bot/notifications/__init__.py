@@ -102,7 +102,7 @@ __all__ = [
 
 def __getattr__(name: str):
     if name == "TelegramEnhancedNotifier":
-        from .telegram_webhook_enhanced import TelegramEnhancedNotifier
+        from .telegram_enhanced import TelegramEnhancedNotifier
 
         return TelegramEnhancedNotifier
 

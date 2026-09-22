@@ -9,7 +9,7 @@ from typing import Any, Deque, Dict, Iterable, Mapping, MutableMapping
 
 from nifty_scalper_bot.config.settings import REGIME_FILTER_BYPASS
 from nifty_scalper_bot.data.market_data_manager import MarketDataManager
-from nifty_scalper_bot.core.market_regime import (
+from nifty_scalper_bot.data.market_regime import (
     MarketRegimeDetector,
     RegimeParameters,
     RegimeSnapshot,
