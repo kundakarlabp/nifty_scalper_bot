@@ -86,6 +86,8 @@ async def test_futures_stale_below_primary_priority_forces_recovery(
                 "lagging": False,
                 "futures_fresh": True,
                 "options_fresh": True,
+                "required_symbol_recovery_active": True,
+                "stale_required_symbols": ["NFO:NIFTY26AUGFUT"],
             },
             data_age_ms=lambda: 100.0,
         ),
