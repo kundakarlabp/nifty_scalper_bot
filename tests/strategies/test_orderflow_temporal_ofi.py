@@ -16,7 +16,10 @@ def _strategy() -> order_flow.OrderFlowStrategy:
     )
 
 
-def _depth(buy: float, sell: float) -> tuple[list[dict[str, float]], list[dict[str, float]]]:
+def _depth(
+    buy: float,
+    sell: float,
+) -> tuple[list[dict[str, float]], list[dict[str, float]]]:
     return ([{"quantity": buy}], [{"quantity": sell}])
 
 
