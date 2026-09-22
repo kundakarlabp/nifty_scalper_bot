@@ -23,7 +23,6 @@ _RUNTIME_HARDENING_REQUIRED = (
     "market_data_hardening",
     "dynamic_universe",
     "live_ws_tick_receipts",
-    "runtime_reliability",
     "runner_candle_cache",
     "strategy_context_fast_path",
     "off_market_controller",
@@ -210,11 +209,7 @@ def _boot_readiness_installation_complete(app_module: Any) -> bool:
     return all(checks)
 
 
-def _runtime_hardening_install_proof(
-    app_module: Any,
-    *,
-    runtime_reliability_state: Any,
-) -> dict[str, bool]:
+def _runtime_hardening_install_proof(app_module: Any) -> dict[str, bool]:
     """Return explicit proof that replay and LIVE share all runtime adapters."""
     from nifty_scalper_bot.core.strategy_manager import StrategyManager
     from nifty_scalper_bot.core.universe_controller import UniverseController
@@ -224,11 +219,6 @@ def _runtime_hardening_install_proof(
     from nifty_scalper_bot.strategies.runner import StrategyRunner
     from nifty_scalper_bot.streaming.websocket_manager import WebSocketManager
 
-    reliability = (
-        isinstance(runtime_reliability_state, dict)
-        and bool(runtime_reliability_state)
-        and all(bool(value) for value in runtime_reliability_state.values())
-    )
     market_data = all(
         (
             bool(getattr(CandleEngine, "_candle_state_hardening_installed", False)),
@@ -258,7 +248,6 @@ def _runtime_hardening_install_proof(
         "live_ws_tick_receipts": bool(
             getattr(MarketDataManager, "_live_ws_tick_receipt_patch_installed", False)
         ),
-        "runtime_reliability": reliability,
         "runner_candle_cache": bool(
             getattr(
                 StrategyRunner,
@@ -304,9 +293,6 @@ def _apply_app_runtime_patches(app_module: Any) -> dict[str, bool]:
     from nifty_scalper_bot.core.polling_failover_runtime import (
         apply_app_patch as _polling_adapter,
     )
-    from nifty_scalper_bot.core.runtime_reliability_hardening import (
-        apply_patches as _runtime_reliability_adapter,
-    )
     from nifty_scalper_bot.core.session_boundary_rearm import (
         apply_app_patch as _session_boundary_adapter,
     )
@@ -319,7 +305,6 @@ def _apply_app_runtime_patches(app_module: Any) -> dict[str, bool]:
 
     _dynamic_universe_adapter()
     _live_ws_receipt_adapter()
-    runtime_reliability_state = _runtime_reliability_adapter()
     _install_runner_candle_engine_cache_patch()
     _strategy_context_fast_path_adapter()
     _off_market_controller_adapter()
@@ -328,10 +313,7 @@ def _apply_app_runtime_patches(app_module: Any) -> dict[str, bool]:
     _ready_adapter(app_module)
     _polling_adapter(app_module)
 
-    proof = _runtime_hardening_install_proof(
-        app_module,
-        runtime_reliability_state=runtime_reliability_state,
-    )
+    proof = _runtime_hardening_install_proof(app_module)
     missing = [name for name in _RUNTIME_HARDENING_REQUIRED if not proof.get(name)]
     if missing:
         _LOGGER.error(
