@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import ast
-from pathlib import Path
+import pathlib
 
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = pathlib.Path(__file__).resolve().parents[2]
 EXECUTION = ROOT / "src" / "nifty_scalper_bot" / "execution"
 
 IMPLEMENTATION_FILES = (

@@ -21,7 +21,6 @@ from contextlib import suppress
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
-from . import bracket_core as _core
 from nifty_scalper_bot.execution.broker_position_evidence import (
     BrokerPositionEvidence,
     BrokerPositionState,
@@ -34,6 +33,8 @@ from nifty_scalper_bot.execution.order_state import (
     DomainOrderState,
     map_broker_order_status,
 )
+
+from . import bracket_core as _core
 
 
 class CanonicalBracketManager(HardenedBracketManager):

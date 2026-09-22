@@ -20,7 +20,6 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Mapping
 
-from . import bracket_core as _core
 from nifty_scalper_bot.execution.canonical_bracket_manager import (
     CanonicalBracketManager,
 )
@@ -51,6 +50,7 @@ class _LedgerReleaseStore:
                 """
             )
 
+from . import bracket_core as _core
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.db_path, timeout=30.0)
         connection.execute("PRAGMA journal_mode=WAL")

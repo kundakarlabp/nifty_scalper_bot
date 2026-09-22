@@ -12,8 +12,9 @@ import time
 from contextlib import suppress
 from typing import Any, Mapping
 
-from . import bracket_core as _core
 from nifty_scalper_bot.execution.ledger_bracket_manager import LedgerBracketManager
+
+from . import bracket_core as _core
 
 
 class RuntimeBracketManager(LedgerBracketManager):
