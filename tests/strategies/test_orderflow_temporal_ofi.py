@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from nifty_scalper_bot.strategies.elite_strategies import order_flow
 
 
