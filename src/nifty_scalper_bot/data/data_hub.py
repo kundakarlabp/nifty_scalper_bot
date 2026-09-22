@@ -113,7 +113,7 @@ def _quote_timestamp_ms(payload: Mapping[str, Any]) -> float | None:
         value = payload.get(key)
         if key == "timestamp_ms":
             try:
-                parsed = float(value)
+                parsed = float(value) if value is not None else None
             except (TypeError, ValueError):
                 parsed = None
             if parsed is not None and parsed > 0:
@@ -145,8 +145,10 @@ def _is_canonical_runtime_tick(payload: Mapping[str, Any]) -> bool:
     token = payload.get("instrument_token") or payload.get("token")
     price = payload.get("ltp") or payload.get("last_price")
     timestamp_ms = _runtime_tick_timestamp_ms(payload)
+    if token is None or price is None or timestamp_ms is None:
+        return False
     try:
-        if int(token) <= 0 or float(price) <= 0 or timestamp_ms is None:
+        if int(token) <= 0 or float(price) <= 0:
             return False
     except (TypeError, ValueError):
         return False
@@ -885,7 +887,7 @@ class DataHub:
         return position["symbol"]
 
     def _normalize_position(self, position: dict[str, Any]) -> dict[str, Any] | None:
-        symbol = self._position_symbol(position.get("symbol"))
+        symbol = self._position_symbol(str(position.get("symbol") or ""))
         if not symbol or not self._position_allowed(symbol):
             return None
         try:
@@ -948,7 +950,7 @@ class DataHub:
             return None
         normalized = dict(order)
         normalized["order_id"] = order_id
-        normalized["symbol"] = self._position_symbol(order.get("symbol"))
+        normalized["symbol"] = self._position_symbol(str(order.get("symbol") or ""))
         normalized["side"] = str(order.get("side") or "").strip().lower() or None
         normalized["status"] = str(order.get("status") or "").strip().lower()
         try:
@@ -971,8 +973,12 @@ class DataHub:
                     normalized[field] = None
         timestamp = order.get("timestamp")
         try:
-            ts = float(timestamp)
-            normalized["ts"] = ts / 1000.0 if ts > 1e11 else ts
+            ts = float(timestamp) if timestamp is not None else None
+            normalized["ts"] = (
+                self._now()
+                if ts is None
+                else (ts / 1000.0 if ts > 1e11 else ts)
+            )
         except (TypeError, ValueError):
             normalized["ts"] = self._now()
         return normalized
@@ -1300,9 +1306,14 @@ class DataHub:
         )
 
     def _ingest_tick_impl(self, tick: Tick) -> None:
-        tick = self._canonicalize_tick_payload(tick) if isinstance(tick, Mapping) else None
-        if tick is None:
+        canonical_tick = (
+            self._canonicalize_tick_payload(tick)
+            if isinstance(tick, Mapping)
+            else None
+        )
+        if canonical_tick is None:
             return
+        tick = canonical_tick
         symbol = self._normalize_tick_symbol(tick)
         if not symbol:
             return
@@ -1450,7 +1461,7 @@ class DataHub:
             first_seen_bus = False
             if symbol:
                 if not hasattr(self, "_first_bus_ingested_symbols"):
-                    self._first_bus_ingested_symbols = set()
+                    self._first_bus_ingested_symbols: set[str] = set()
                 first_seen_bus = symbol not in self._first_bus_ingested_symbols
                 if first_seen_bus:
                     self._first_bus_ingested_symbols.add(symbol)
@@ -2115,7 +2126,11 @@ class DataHub:
                 self._ticks.pop(token, None)
                 self._token_quotes.pop(token, None)
             for symbol in list(normalized_symbols):
-                token = self._token_by_symbol.pop(symbol, None)
+                token = (
+                    self._token_by_symbol.pop(symbol)
+                    if symbol in self._token_by_symbol
+                    else None
+                )
                 if token is not None:
                     normalized_tokens.add(int(token))
                     self._symbol_by_token.pop(int(token), None)
@@ -2367,7 +2382,11 @@ class DataHub:
                 for sym, _ in ordered[:-max_size]:
                     warm_cache.pop(sym, None)
         except Exception as exc:
-            self._logger.error('Failure in _touch_warm_symbol_cache: %s', exc, exc_info=exc)
+            LOGGER.error(
+                "Failure in _touch_warm_symbol_cache: %s",
+                exc,
+                exc_info=exc,
+            )
 
     async def hydrate_symbol_history(
         self,
