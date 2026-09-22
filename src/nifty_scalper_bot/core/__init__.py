@@ -250,7 +250,9 @@ def _runtime_hardening_install_proof(
         ),
         "boot_readiness": _boot_readiness_installation_complete(app_module),
         "polling_failover": (
-            callable(getattr(app_module, "_polling_failover_supervisor_iteration", None))
+            callable(
+                getattr(app_module, "_polling_failover_supervisor_iteration", None)
+            )
             and getattr(
                 app_module._polling_failover_supervisor_iteration,
                 "__module__",
