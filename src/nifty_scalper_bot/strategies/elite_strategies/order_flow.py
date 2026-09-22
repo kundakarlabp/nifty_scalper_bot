@@ -514,13 +514,11 @@ class OrderFlowStrategy(EliteStrategy):
                 option_premium_domain
                 and quote_depth_valid
                 and depth_available
+                and depth_imbalance <= -0.10
                 and (
                     ofi_conflicts_side
                     if ofi_directional
-                    else (
-                        depth_imbalance <= -0.10
-                        and tick_direction not in {"UP", "BUY"}
-                    )
+                    else tick_direction not in {"UP", "BUY"}
                 )
             )
             if clear_adverse_flow:
