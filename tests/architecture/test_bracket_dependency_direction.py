@@ -3,7 +3,6 @@ from __future__ import annotations
 import ast
 import pathlib
 
-
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 EXECUTION = ROOT / "src" / "nifty_scalper_bot" / "execution"
 
