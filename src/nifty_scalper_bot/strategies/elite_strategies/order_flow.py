@@ -214,22 +214,6 @@ class OrderFlowStrategy(EliteStrategy):
             depth = indicators.get("depth") or {}
             tick_direction = str(indicators.get("tick_direction") or "").upper()
             direction = str(indicators.get("direction_bias") or "").upper()
-            ofi_1s = _safe_float_value(indicators.get("ofi_1s"))
-            ofi_3s = _safe_float_value(indicators.get("ofi_3s"))
-            ofi_1s_normalized = _safe_float_value(
-                indicators.get("ofi_1s_normalized")
-            )
-            ofi_3s_normalized = _safe_float_value(
-                indicators.get("ofi_3s_normalized")
-            )
-            raw_ofi_updates = _safe_float_value(indicators.get("ofi_update_count_1s"))
-            ofi_updates_1s = int(raw_ofi_updates or 0.0)
-            ofi_ready = bool(indicators.get("ofi_ready")) and (
-                ofi_1s_normalized is not None and ofi_updates_1s >= 2
-            )
-            ofi_threshold = max(
-                0.01, safe_float_env("ORDERFLOW_OFI_NORMALIZED_MIN", 0.10)
-            )
             contract_side, option_premium_domain, _ = resolve_signal_domain(
                 symbol, indicators
             )
@@ -487,39 +471,12 @@ class OrderFlowStrategy(EliteStrategy):
                 if option_premium_domain
                 else ("CE" if depth_imbalance > 0 else "PE")
             )
-            ofi_directional = bool(
-                ofi_ready
-                and ofi_1s_normalized is not None
-                and abs(ofi_1s_normalized) >= ofi_threshold
-            )
-            ofi_supports_side = bool(
-                ofi_directional
-                and _depth_supports_side(
-                    float(ofi_1s_normalized),
-                    side=side,
-                    option_premium_domain=option_premium_domain,
-                    threshold=ofi_threshold,
-                )
-            )
-            ofi_conflicts_side = bool(
-                ofi_directional
-                and _depth_supports_side(
-                    -float(ofi_1s_normalized),
-                    side=side,
-                    option_premium_domain=option_premium_domain,
-                    threshold=ofi_threshold,
-                )
-            )
             clear_adverse_flow = bool(
                 option_premium_domain
                 and quote_depth_valid
                 and depth_available
                 and depth_imbalance <= -0.10
-                and (
-                    ofi_conflicts_side
-                    if ofi_directional
-                    else tick_direction not in {"UP", "BUY"}
-                )
+                and tick_direction not in {"UP", "BUY"}
             )
             if clear_adverse_flow:
                 self._no_vote("negative_premium_flow")
@@ -569,20 +526,10 @@ class OrderFlowStrategy(EliteStrategy):
                     or (side == "PE" and tick_direction in {"DOWN", "SELL"})
                 )
             )
-            flow_confirmation_source = (
-                "temporal_ofi" if ofi_directional else "tick_direction"
-            )
-            flow_supports = ofi_supports_side if ofi_directional else tick_supports
-            tick_score = 2.0 if flow_supports else 0.0
-            if flow_supports:
+            tick_score = 2.0 if tick_supports else 0.0
+            if tick_supports:
                 score += tick_score
-                reasons.append(
-                    "temporal_ofi_alignment"
-                    if ofi_directional
-                    else "tick_direction_alignment"
-                )
-            elif ofi_directional and ofi_conflicts_side:
-                reasons.append("temporal_ofi_conflict")
+                reasons.append("tick_direction_alignment")
             side_aligns = direction in {"CE", "PE"} and direction == side
             direction_score = 1.0 if side_aligns else 0.0
             if side_aligns:
@@ -608,7 +555,7 @@ class OrderFlowStrategy(EliteStrategy):
                 threshold=min_reversal_imbalance,
             )
             raw_microstructure_confirms_side = bool(
-                flow_supports and depth_available and imbalance_confirms
+                tick_supports and depth_available and imbalance_confirms
             )
             reversal_persistence_confirmed = False
             if bias_conflict and raw_microstructure_confirms_side:
@@ -624,9 +571,6 @@ class OrderFlowStrategy(EliteStrategy):
                             round(total_bid, 2),
                             round(total_ask, 2),
                             tick_direction,
-                            round(ofi_1s_normalized, 4)
-                            if ofi_1s_normalized is not None
-                            else None,
                         ),
                     )
                 )
@@ -650,9 +594,6 @@ class OrderFlowStrategy(EliteStrategy):
                 "BUY",
                 "SELL",
             }
-            flow_direction_missing = bool(
-                not ofi_directional and tick_direction_missing
-            )
             direction_context_missing = direction not in {"CE", "PE"}
             allow_without_direction_live = str(
                 os.getenv("ORDERFLOW_ALLOW_TRIGGER_WITHOUT_DIRECTION_LIVE", "false")
@@ -732,7 +673,7 @@ class OrderFlowStrategy(EliteStrategy):
                 and side_alignment_ok
                 and direction_context_ok
                 and context_age_ok
-                and flow_supports
+                and tick_supports
                 and quote_readiness.allowed
                 and tick_age_ms is not None
                 and tick_age_ms <= max_tick_age_ms
@@ -748,7 +689,7 @@ class OrderFlowStrategy(EliteStrategy):
                 and bool(depth_available)
                 and spread_pct <= trigger_max_spread_pct
                 and bool(context_age_ok)
-                and bool(flow_supports)
+                and bool(tick_supports)
                 and tick_age_ms is not None
                 and tick_age_ms <= max_tick_age_ms
                 and bool(selected_or_near_atm)
@@ -799,7 +740,7 @@ class OrderFlowStrategy(EliteStrategy):
                 trigger_block_reason = "tradable_quote_false"
             elif tick_age_ms is None or tick_age_ms > max_tick_age_ms:
                 trigger_block_reason = "tick_stale"
-            elif flow_direction_missing:
+            elif tick_direction_missing:
                 trigger_block_reason = "tick_direction_missing_or_neutral"
             elif not direction_context_ok:
                 trigger_block_reason = "direction_context_missing_live"
@@ -841,7 +782,7 @@ class OrderFlowStrategy(EliteStrategy):
                     if is_live_mode
                     else "score_below_trigger_min"
                 )
-            elif not flow_supports:
+            elif not tick_supports:
                 trigger_block_reason = "negative_premium_flow"
 
             context_evidence_score, context_confirmation_score = (
@@ -858,8 +799,7 @@ class OrderFlowStrategy(EliteStrategy):
                 and (not is_live_mode or context_age_ok)
             )
             effective_context_alignment = bool(
-                (side_aligns or bias_invalidated_by_microstructure)
-                and not ofi_conflicts_side
+                side_aligns or bias_invalidated_by_microstructure
             )
             effective_context_conflict = bool(
                 direction in {"CE", "PE"}
@@ -902,26 +842,6 @@ class OrderFlowStrategy(EliteStrategy):
                     self._cfg.large_order_threshold_pct
                 ),
                 "tick_direction": tick_direction,
-                "ofi_ready": ofi_ready,
-                "ofi_event": _safe_float_value(indicators.get("ofi_event")),
-                "ofi_1s": ofi_1s,
-                "ofi_3s": ofi_3s,
-                "ofi_1s_normalized": ofi_1s_normalized,
-                "ofi_3s_normalized": ofi_3s_normalized,
-                "ofi_update_count_1s": ofi_updates_1s,
-                "ofi_update_count_3s": int(
-                    _safe_float_value(indicators.get("ofi_update_count_3s")) or 0.0
-                ),
-                "ofi_source": indicators.get("ofi_source"),
-                "ofi_threshold": ofi_threshold,
-                "ofi_directional": ofi_directional,
-                "ofi_supports_side": ofi_supports_side,
-                "ofi_conflicts_side": ofi_conflicts_side,
-                "flow_confirmation_source": flow_confirmation_source,
-                "flow_supports_side": flow_supports,
-                "queue_imbalance_top": _safe_float_value(
-                    indicators.get("queue_imbalance_top")
-                ),
                 "liquidity_ok": spread_pct <= context_spread_limit,
                 "premium_stop_distance": max(
                     0.8 * atr, current_price * 0.02, 1.0
@@ -942,7 +862,6 @@ class OrderFlowStrategy(EliteStrategy):
                 "spread_score": spread_score,
                 "depth_score": depth_score,
                 "tick_score": tick_score,
-                "flow_score": tick_score,
                 "direction_alignment_score": direction_score,
                 "freshness_score": freshness_score,
                 "tradable_quote": tradable_quote,
