@@ -66,31 +66,6 @@ from nifty_scalper_bot.strategies.runtime_context_contract import resolve_contex
 
 log = get_logger(__name__)
 
-_ORDERFLOW_QUOTE_CONTEXT_KEYS = (
-    "ofi_ready",
-    "ofi_event",
-    "ofi_1s",
-    "ofi_3s",
-    "ofi_1s_normalized",
-    "ofi_3s_normalized",
-    "ofi_update_count_1s",
-    "ofi_update_count_3s",
-    "ofi_source",
-    "queue_imbalance_top",
-)
-
-
-def _merge_orderflow_quote_context(
-    indicators: dict[str, t.Any], quote: t.Mapping[str, t.Any] | None
-) -> None:
-    """Copy canonical MDM/DataHub OFI fields into strategy evaluation context."""
-    if not isinstance(quote, t.Mapping):
-        return
-    for key in _ORDERFLOW_QUOTE_CONTEXT_KEYS:
-        value = quote.get(key)
-        if value is not None:
-            indicators[key] = value
-
 
 def classify_symbol_role(symbol: str) -> str:
     """Classify symbols for strategy routing."""
@@ -2711,17 +2686,6 @@ class StrategyManager(_BaseStrategyManager):
             )
         symbol_role = classify_symbol_role(symbol)
         indicators["symbol_role"] = symbol_role
-        if self._data_hub is not None and symbol_role == "tradable_option":
-            try:
-                quote = self._data_hub.get_quote(symbol, allow_pull=False)
-            except Exception as exc:  # quote context is optional confirmation
-                log.debug(
-                    "ORDERFLOW_QUOTE_CONTEXT_UNAVAILABLE symbol=%s error=%s",
-                    symbol,
-                    exc,
-                )
-            else:
-                _merge_orderflow_quote_context(indicators, quote)
         history_ctx = build_strategy_history_context(
             symbol=symbol,
             indicator_engine=self._indicator_engine,
