@@ -3,14 +3,16 @@ from __future__ import annotations
 from nifty_scalper_bot.strategies.elite_strategies.config_models import (
     OrderFlowStrategyConfig,
 )
-from nifty_scalper_bot.strategies.elite_strategies import order_flow
+from nifty_scalper_bot.strategies.elite_strategies.order_flow import (
+    OrderFlowStrategy,
+)
 
 
 SYMBOL = "NFO:NIFTY26SEP25000CE"
 
 
-def _strategy() -> order_flow.OrderFlowStrategy:
-    return order_flow.OrderFlowStrategy(
+def _strategy() -> OrderFlowStrategy:
+    return OrderFlowStrategy(
         OrderFlowStrategyConfig(enabled=True, quantity=1),
         indicator_engine=None,
     )
@@ -24,12 +26,15 @@ def _depth(
 
 
 def _prime_ofi(
-    strategy: order_flow.OrderFlowStrategy,
+    strategy: OrderFlowStrategy,
     monkeypatch,
     quantities: tuple[tuple[float, float], ...],
 ) -> dict[str, object]:
     clock = [1000.0]
-    monkeypatch.setattr(order_flow.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        "nifty_scalper_bot.strategies.elite_strategies.order_flow.time.monotonic",
+        lambda: clock[0],
+    )
     snapshot: dict[str, object] = {}
     for version, (buy, sell) in enumerate(quantities, start=1):
         bids, asks = _depth(buy, sell)
