@@ -31,6 +31,8 @@ from nifty_scalper_bot.execution.fill_ledger import (
 )
 from nifty_scalper_bot.risk.cost_model import estimate_round_trip_cost
 
+from . import bracket_core as _core
+
 
 class _LedgerReleaseStore:
     """Persist entry-freeze markers independently of in-memory bracket state."""
@@ -50,7 +52,6 @@ class _LedgerReleaseStore:
                 """
             )
 
-from . import bracket_core as _core
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.db_path, timeout=30.0)
         connection.execute("PRAGMA journal_mode=WAL")
