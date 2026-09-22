@@ -556,6 +556,22 @@ async def _start_polling_fallback_safely(
         )
 
 
+def _polling_health_bool(
+    payload: Mapping[str, Any], key: str, default: bool = True
+) -> bool:
+    """Read a boolean health field without treating missing data as stale."""
+    value = payload.get(key, default)
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _resolve_market_open_callable(ctx: Any) -> Any:
+    """Prefer a context-specific market-session hook when one is supplied."""
+    ctx_hook = getattr(ctx, "is_market_open_now", None)
+    return ctx_hook if ctx_hook is not None else is_market_open_now
+
+
 _FUTURES_STALE_BLOCKER = "futures_live_tick_stale"
 
 
@@ -616,7 +632,11 @@ async def _polling_failover_supervisor_iteration(
     """Run one polling failover supervisor iteration. Returns updated hysteresis timestamps."""
 
     market_open = bool(
-        _safe_supervisor_call("is_market_open_now", is_market_open_now, default=False)
+        _safe_supervisor_call(
+            "is_market_open_now",
+            _resolve_market_open_callable(ctx),
+            default=False,
+        )
     )
     now_mono = time_module.monotonic()
     if not market_open:
@@ -684,20 +704,23 @@ async def _polling_failover_supervisor_iteration(
     if _futures_live_tick_stale(ctx):
         feed_health = dict(feed_health)
         feed_health["required_symbol_recovery_active"] = True
-    futures_fresh = bool(feed_health.get("futures_fresh"))
-    options_fresh = bool(feed_health.get("options_fresh"))
-    spot_fresh = bool(feed_health.get("spot_fresh"))
+    futures_fresh = _polling_health_bool(feed_health, "futures_fresh", True)
+    options_fresh = _polling_health_bool(feed_health, "options_fresh", True)
+    spot_fresh = _polling_health_bool(feed_health, "spot_fresh", True)
     spot_symbol = str(feed_health.get("spot_symbol") or "NSE:NIFTY")
     spot_age_ms = feed_health.get("spot_age_ms")
     auth_tick_age_ms = _safe_supervisor_call(
         "market_data_manager.data_age_ms",
         getattr(mdm, "data_age_ms", None),
-        default=quote_stale_ms + 1,
+        default=None,
     )
     try:
-        age_lagging = float(auth_tick_age_ms) > float(quote_stale_ms)
+        age_lagging = (
+            auth_tick_age_ms is not None
+            and float(auth_tick_age_ms) > float(quote_stale_ms)
+        )
     except (TypeError, ValueError):
-        age_lagging = True
+        age_lagging = False
     lagging = bool(
         age_lagging
         or feed_health.get("lagging")
