@@ -6,8 +6,11 @@ import types
 from unittest.mock import MagicMock
 
 from nifty_scalper_bot.core.app import _reconciliation_sleep_seconds
+from nifty_scalper_bot.core.runtime_reliability_hardening import (
+    _is_canonical_runtime_tick,
+)
 from nifty_scalper_bot.core.strategy_manager import Signal, StrategyManager, StrategyVote
-from nifty_scalper_bot.data.data_hub import DataHub, _is_canonical_runtime_tick
+from nifty_scalper_bot.data.data_hub import DataHub
 from nifty_scalper_bot.data.market_data_manager import MarketDataManager
 from nifty_scalper_bot.strategies.runner import StrategyRunner
 
@@ -311,7 +314,8 @@ def test_runner_datahub_latency_telemetry_is_native(monkeypatch) -> None:
     runner.on_tick_event = lambda _tick: time.sleep(0.051)
     captured: list[dict[str, object]] = []
 
-    def _capture(_logger, _key, _message, **kwargs):
+    def _capture(_logger, _key, _message, *args, **kwargs):
+        _ = args
         captured.append(dict(kwargs.get("extra") or {}))
 
     monkeypatch.setattr(runner_module, "log_throttled", _capture)
