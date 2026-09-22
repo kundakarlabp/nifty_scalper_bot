@@ -91,6 +91,20 @@ def _black_check(path: Path) -> bool:
     return result.returncode == 0
 
 
+def _black_diff(path: Path) -> str:
+    result = _run(
+        sys.executable,
+        "-m",
+        "black",
+        "--check",
+        "--diff",
+        "--config",
+        "pyproject.toml",
+        str(path),
+    )
+    return (result.stdout or result.stderr).strip()
+
+
 def _black_formatted_text(path: Path) -> str:
     with tempfile.TemporaryDirectory(prefix="changed-black-") as tmp_dir:
         candidate = Path(tmp_dir) / path.name
@@ -152,11 +166,12 @@ def check_file(base: str, path: Path) -> tuple[bool, str]:
     base_path = _base_file(base, path)
     if base_path is None:
         clean = _black_check(path)
-        return clean, (
-            f"PASS {path}: new file is Black-clean"
-            if clean
-            else f"FAIL {path}: new file is not Black-clean"
-        )
+        if clean:
+            return True, f"PASS {path}: new file is Black-clean"
+        diff = _black_diff(path)
+        if diff:
+            print(diff)
+        return False, f"FAIL {path}: new file is not Black-clean"
 
     try:
         if _black_check(base_path):
