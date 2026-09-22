@@ -44,6 +44,8 @@ async def test_futures_live_tick_stale_readiness_forces_existing_recovery_path()
                 "lagging": False,
                 "futures_fresh": True,
                 "options_fresh": True,
+                "required_symbol_recovery_active": True,
+                "stale_required_symbols": ["NFO:NIFTY26AUGFUT"],
             },
             data_age_ms=lambda: 100.0,
         ),
