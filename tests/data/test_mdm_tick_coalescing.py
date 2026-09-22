@@ -1582,6 +1582,89 @@ def test_symbol_recovery_attempts_are_cooldown_bounded(monkeypatch):
     assert requests == [stale]
 
 
+def test_current_generation_readiness_rejects_stale_market_event() -> None:
+    mdm = MarketDataManager(kite=None)
+    mapping = _wire_symbols(mdm)
+    symbol = "NFO:NIFTY26JUNFUT"
+    token = mapping[4]
+    generation = mdm._subscription_generation
+    mdm._desired_tokens.add(token)
+    mdm._dispatched_subscriptions.add(token)
+    mdm._confirmed_subscriptions.add(token)
+    mdm._symbol_subscription_generation[symbol] = generation
+    mdm._symbol_first_tick_generation[symbol] = generation
+    mdm._last_valid_live_tick_mono[symbol] = time.monotonic()
+    mdm._latest_ticks[symbol] = {
+        "symbol": symbol,
+        "instrument_token": token,
+        "ltp": 25_000.0,
+        "timestamp": time.time() - 120.0,
+        "received_at": time.time(),
+        "source": "ws_full",
+    }
+
+    readiness = mdm.classify_live_tick_readiness(
+        symbol,
+        token,
+        max_age_s=60.0,
+    )
+
+    assert readiness["tick_age_s"] < 1.0
+    assert readiness["market_event_age_s"] >= 119.0
+    assert readiness["fresh"] is False
+    assert readiness["ready"] is False
+    assert readiness["reason"] == "market_event_stale"
+
+
+def test_feed_health_exposes_fresh_arrival_stale_event_for_recovery() -> None:
+    mdm = MarketDataManager(kite=None)
+    mapping = _wire_symbols(mdm)
+    mdm.set_readiness_requirements(
+        spot_symbol="NSE:NIFTY",
+        futures_symbol="NFO:NIFTY26JUNFUT",
+        atm_ce_symbol="NFO:NIFTY26JUN24000CE",
+        atm_pe_symbol="NFO:NIFTY26JUN24000PE",
+        option_symbols=[
+            "NFO:NIFTY26JUN24000CE",
+            "NFO:NIFTY26JUN24000PE",
+        ],
+    )
+    now_wall = time.time()
+    now_mono = time.monotonic()
+    generation = mdm._subscription_generation
+    token_by_symbol = {symbol: token for token, symbol in mapping.items()}
+    for symbol in mdm._required_live_symbols():
+        token = token_by_symbol[symbol]
+        mdm._desired_tokens.add(token)
+        mdm._dispatched_subscriptions.add(token)
+        mdm._confirmed_subscriptions.add(token)
+        mdm._symbol_subscription_generation[symbol] = generation
+        mdm._symbol_first_tick_generation[symbol] = generation
+        mdm._last_valid_live_tick_mono[symbol] = now_mono
+        mdm._last_quote_ts_ms[symbol] = now_wall * 1000.0
+        mdm._latest_ticks[symbol] = {
+            "symbol": symbol,
+            "instrument_token": token,
+            "ltp": 100.0,
+            "timestamp": now_wall,
+            "received_at": now_wall,
+            "source": "ws_full",
+        }
+
+    futures_symbol = "NFO:NIFTY26JUNFUT"
+    mdm._latest_ticks[futures_symbol]["timestamp"] = now_wall - 120.0
+
+    health = mdm.trading_feed_health(max_age_ms=60_000)
+
+    assert health["futures_age_ms"] < 1_000
+    assert health["required_symbol_recovery_active"] is True
+    assert futures_symbol in health["stale_required_symbols"]
+    assert (
+        health["required_symbol_readiness"][futures_symbol]["reason"]
+        == "market_event_stale"
+    )
+
+
 def test_trading_feed_health_exposes_required_symbol_recovery():
     mdm = MarketDataManager(kite=None)
     _wire_symbols(mdm)
