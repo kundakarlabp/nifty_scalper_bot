@@ -5,15 +5,19 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import date, datetime
-from zoneinfo import ZoneInfo
 import calendar
 import re
+from dataclasses import dataclass
+from datetime import date, datetime
 from typing import Any, Iterable, Mapping, Sequence
+from zoneinfo import ZoneInfo
+
+from nifty_scalper_bot.utils.smart_symbol import get_nifty_monthly_expiry_date
 
 NIFTY_FUT_RE = re.compile(r"^NIFTY(?P<yy>\d{2})(?P<mon>[A-Z]{3})FUT$")
-NIFTY_OPT_RE = re.compile(r"^NIFTY(?P<yy>\d{2})(?P<mon>[A-Z]{3})(?P<strike>\d{4,6})(?P<side>CE|PE)$")
+NIFTY_OPT_RE = re.compile(
+    r"^NIFTY(?P<yy>\d{2})(?P<mon>[A-Z]{3})(?P<strike>\d{4,6})(?P<side>CE|PE)$"
+)
 MONTH_ABBR_TO_NUM = {m.upper(): i for i, m in enumerate(calendar.month_abbr) if m}
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -67,13 +71,6 @@ def canonical_nifty_option_symbol(symbol: Any) -> str | None:
     return f"NFO:{tradingsymbol}"
 
 
-def _last_thursday(year: int, month: int) -> date:
-    d = date(year, month, calendar.monthrange(year, month)[1])
-    while d.weekday() != 3:
-        d = date.fromordinal(d.toordinal() - 1)
-    return d
-
-
 def parse_nifty_future_expiry(symbol: Any) -> date | None:
     canonical = canonical_nifty_future_symbol(symbol)
     if not canonical:
@@ -83,7 +80,7 @@ def parse_nifty_future_expiry(symbol: Any) -> date | None:
         return None
     year = 2000 + int(match.group("yy"))
     month = MONTH_ABBR_TO_NUM.get(match.group("mon"))
-    return _last_thursday(year, month) if month else None
+    return get_nifty_monthly_expiry_date(year, month) if month else None
 
 
 def parse_instrument_expiry(value: Any) -> date | None:
@@ -107,7 +104,11 @@ def parse_instrument_expiry(value: Any) -> date | None:
         return None
 
 
-def is_nifty_future_expired(symbol: Any, *, now: datetime | date | None = None) -> bool:
+def is_nifty_future_expired(
+    symbol: Any,
+    *,
+    now: datetime | date | None = None,
+) -> bool:
     expiry = parse_nifty_future_expiry(symbol)
     if expiry is None:
         return False
@@ -117,12 +118,24 @@ def is_nifty_future_expired(symbol: Any, *, now: datetime | date | None = None) 
 def _is_nifty_future_row(row: Mapping[str, Any]) -> bool:
     tradingsymbol = str(row.get("tradingsymbol") or row.get("symbol") or "").upper()
     name = str(row.get("name") or "").upper()
-    instrument_type = str(row.get("instrument_type") or row.get("segment") or "").upper()
+    instrument_type = str(
+        row.get("instrument_type") or row.get("segment") or ""
+    ).upper()
     exchange = str(row.get("exchange") or "NFO").upper()
-    return exchange == "NFO" and (name == "NIFTY" or tradingsymbol.startswith("NIFTY")) and tradingsymbol.endswith("FUT") and "FUT" in instrument_type and bool(NIFTY_FUT_RE.fullmatch(tradingsymbol))
+    return (
+        exchange == "NFO"
+        and (name == "NIFTY" or tradingsymbol.startswith("NIFTY"))
+        and tradingsymbol.endswith("FUT")
+        and "FUT" in instrument_type
+        and bool(NIFTY_FUT_RE.fullmatch(tradingsymbol))
+    )
 
 
-def resolve_active_nifty_future_from_instruments(instruments: Iterable[Mapping[str, Any]], *, now: datetime | date | None = None) -> ActiveFutureResolution:
+def resolve_active_nifty_future_from_instruments(
+    instruments: Iterable[Mapping[str, Any]],
+    *,
+    now: datetime | date | None = None,
+) -> ActiveFutureResolution:
     today = _trading_date(now)
     best_symbol: str | None = None
     best_expiry: date | None = None
@@ -130,30 +143,55 @@ def resolve_active_nifty_future_from_instruments(instruments: Iterable[Mapping[s
         if not isinstance(row, Mapping) or not _is_nifty_future_row(row):
             continue
         tradingsymbol = str(row.get("tradingsymbol") or row.get("symbol") or "").upper()
-        expiry = parse_instrument_expiry(row.get("expiry")) or parse_nifty_future_expiry(f"NFO:{tradingsymbol}")
+        expiry = parse_instrument_expiry(
+            row.get("expiry")
+        ) or parse_nifty_future_expiry(f"NFO:{tradingsymbol}")
         if expiry is None or expiry < today:
             continue
         if best_expiry is None or expiry < best_expiry:
             best_expiry = expiry
             best_symbol = f"NFO:{tradingsymbol}"
-    return ActiveFutureResolution(best_symbol, "instrument_master", reason=None if best_symbol else "no_unexpired_nifty_future_found")
+    return ActiveFutureResolution(
+        best_symbol,
+        "instrument_master",
+        reason=None if best_symbol else "no_unexpired_nifty_future_found",
+    )
 
 
-def derive_nifty_future_from_selected_options(selected_option_symbols: Sequence[Any] | None, *, now: datetime | date | None = None) -> ActiveFutureResolution:
+def derive_nifty_future_from_selected_options(
+    selected_option_symbols: Sequence[Any] | None,
+    *,
+    now: datetime | date | None = None,
+) -> ActiveFutureResolution:
     import os
+
     if os.getenv("EXECUTION_MODE", os.getenv("MODE", "")).strip().upper() == "LIVE":
-        raise RuntimeError("derive_nifty_future_from_selected_options is diagnostic only; live runtime must use InstrumentManager")
-    symbols = [canonical_nifty_option_symbol(s) for s in (selected_option_symbols or [])]
+        raise RuntimeError(
+            "derive_nifty_future_from_selected_options is diagnostic only; "
+            "live runtime must use InstrumentManager"
+        )
+    symbols = [
+        canonical_nifty_option_symbol(s) for s in (selected_option_symbols or [])
+    ]
     months = set()
     for symbol in [s for s in symbols if s]:
         match = NIFTY_OPT_RE.fullmatch(symbol.split(":", 1)[1])
         if match:
             months.add(f"{match.group('yy')}{match.group('mon')}")
     if len(months) != 1:
-        return ActiveFutureResolution(None, "selected_options", reason="ambiguous_or_missing_option_month")
+        return ActiveFutureResolution(
+            None,
+            "selected_options",
+            reason="ambiguous_or_missing_option_month",
+        )
     candidate = f"NFO:NIFTY{next(iter(months))}FUT"
     if is_nifty_future_expired(candidate, now=now):
-        return ActiveFutureResolution(None, "selected_options", expired_input=True, reason="derived_future_expired")
+        return ActiveFutureResolution(
+            None,
+            "selected_options",
+            expired_input=True,
+            reason="derived_future_expired",
+        )
     return ActiveFutureResolution(candidate, "selected_options")
 
 
@@ -170,7 +208,10 @@ def resolve_active_nifty_future(
         if resolved.symbol:
             return resolved
     if allow_selected_option_fallback:
-        selected = derive_nifty_future_from_selected_options(selected_option_symbols, now=now)
+        selected = derive_nifty_future_from_selected_options(
+            selected_option_symbols,
+            now=now,
+        )
         if selected.symbol:
             return selected
     configured = canonical_nifty_future_symbol(configured_symbol)
@@ -206,8 +247,14 @@ def cap_option_universe(
             capped.append(item)
             seen.add(sel)
     remaining = [item for item in option_items if item[0] not in seen]
-    ce_ranked = sorted((i for i in remaining if i[3] == "CE"), key=lambda i: abs(i[2] - atm_strike))
-    pe_ranked = sorted((i for i in remaining if i[3] == "PE"), key=lambda i: abs(i[2] - atm_strike))
+    ce_ranked = sorted(
+        (i for i in remaining if i[3] == "CE"),
+        key=lambda i: abs(i[2] - atm_strike),
+    )
+    pe_ranked = sorted(
+        (i for i in remaining if i[3] == "PE"),
+        key=lambda i: abs(i[2] - atm_strike),
+    )
     take_ce = True
     while len(capped) < max_options and (ce_ranked or pe_ranked):
         bucket = ce_ranked if (take_ce and ce_ranked) or not pe_ranked else pe_ranked
