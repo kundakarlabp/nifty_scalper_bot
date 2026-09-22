@@ -76,8 +76,10 @@ def _install_mdm_overload_patch() -> bool:
                 self._pipeline_overloaded = True
                 self._overload_since_mono = time.monotonic()
                 self._logger.warning(
-                    "DATA_PIPELINE_OVERLOAD_ENTER pending_ticks=%d oldest_pending_age_ms=%.0f "
-                    "critical_oldest_pending_age_ms=%.0f enter_pending=%d enter_oldest_ms=%.0f",
+                    "DATA_PIPELINE_OVERLOAD_ENTER pending_ticks=%d "
+                    "oldest_pending_age_ms=%.0f "
+                    "critical_oldest_pending_age_ms=%.0f "
+                    "enter_pending=%d enter_oldest_ms=%.0f",
                     pending,
                     total_oldest_ms,
                     critical_oldest_ms,
@@ -102,7 +104,8 @@ def _install_mdm_overload_patch() -> bool:
             self._pipeline_overloaded = False
             self._overload_since_mono = None
             self._logger.warning(
-                "DATA_PIPELINE_OVERLOAD_RECOVERED pending_ticks=%d oldest_pending_age_ms=%.0f "
+                "DATA_PIPELINE_OVERLOAD_RECOVERED pending_ticks=%d "
+                "oldest_pending_age_ms=%.0f "
                 "critical_oldest_pending_age_ms=%.0f overloaded_for_s=%.1f",
                 pending,
                 total_oldest_ms,
