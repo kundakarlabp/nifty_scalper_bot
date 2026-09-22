@@ -3,7 +3,6 @@ from nifty_scalper_bot.strategies.elite_strategies.order_flow import (
     OrderFlowStrategyConfig,
 )
 
-
 SYMBOL = "NFO:NIFTY26SEP25000CE"
 
 
