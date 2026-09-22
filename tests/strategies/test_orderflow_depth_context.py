@@ -158,6 +158,7 @@ def test_orderflow_prefers_temporal_ofi_over_candle_tick_direction() -> None:
     assert signal.metadata["ofi_conflicts_side"] is True
     assert signal.metadata["ofi_supports_side"] is False
     assert signal.metadata["tick_score"] == 0.0
+    assert signal.metadata["context_bonus_score"] == 0.0
     assert "temporal_ofi_conflict" in signal.metadata["score_reasons"]
 
 
