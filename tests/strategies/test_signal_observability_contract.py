@@ -242,7 +242,7 @@ def test_orderflow_prefers_existing_quote_version(monkeypatch) -> None:
     assert result.metadata["quote_update_version_source"] == "quote_update_version"
 
 
-def test_runner_distinguishes_generated_candidates_from_final_quality_approvals() -> None:
+def test_runner_reports_candidate_and_final_approval_counts() -> None:
     import threading
 
     from nifty_scalper_bot.strategies.runner import StrategyRunner
@@ -253,6 +253,7 @@ def test_runner_distinguishes_generated_candidates_from_final_quality_approvals(
     runner._running = True
     runner._trading_paused = False
     runner._runner_state = "TEST"
+    runner._active_symbols = set()
     runner._candidate_counter = 3
     runner._final_quality_approved_counter = 1
     runner._eval_counter = 9
