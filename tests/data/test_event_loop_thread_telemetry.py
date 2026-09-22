@@ -44,13 +44,15 @@ _SEQ = [0]
 
 
 def _emit_slow(mdm: MarketDataManager) -> None:
-    # Unique symbol per emission: _log_slow_tick_stage throttles by key, so a
-    # shared symbol would suppress later tests' records.
+    # Give every emission a unique callback identity. Production has one
+    # long-lived MDM instance, but tests create short-lived instances whose
+    # Python object ids can be reused by the global log-throttle cache.
     _SEQ[0] += 1
     mdm._log_slow_tick_stage(
         stage="one_tick",
         symbol=f"NFO:NIFTY26JUN{24000 + _SEQ[0]}CE",
         duration_ms=999.0,
+        callback=f"test_emit_{_SEQ[0]}",
     )
 
 
