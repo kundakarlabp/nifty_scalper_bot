@@ -36,7 +36,7 @@ class _Fallback:
 async def test_futures_live_tick_stale_readiness_forces_existing_recovery_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Fresh packet arrivals must not suppress recovery of a stale market event."""
+    """MDM-required recovery must override otherwise fresh packet ages."""
     monkeypatch.setattr(app, "is_market_open_now", lambda: True)
     ctx = SimpleNamespace(
         live_block_reason="execution_not_armed:futures_live_tick_stale",
@@ -46,6 +46,8 @@ async def test_futures_live_tick_stale_readiness_forces_existing_recovery_path(
                 "lagging": False,
                 "futures_fresh": True,
                 "options_fresh": True,
+                "required_symbol_recovery_active": True,
+                "stale_required_symbols": ["NFO:NIFTY26AUGFUT"],
             },
             data_age_ms=lambda: 100.0,
         ),
@@ -69,12 +71,7 @@ async def test_futures_live_tick_stale_readiness_forces_existing_recovery_path(
 async def test_futures_stale_below_primary_priority_forces_recovery(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A higher-priority blocker must not hide stale futures from recovery.
-
-    ``_READINESS_PRIORITY`` ranks twenty blockers above ``futures_live_tick_stale``,
-    so the formatted primary-blocker string silently stops naming it whenever one
-    of them co-occurs. Recovery authority must key on the structured blocker set.
-    """
+    """Unrelated app blockers must not hide MDM-owned symbol recovery state."""
     monkeypatch.setattr(app, "is_market_open_now", lambda: True)
     ctx = SimpleNamespace(
         live_block_reason="execution_not_armed:position_reconciliation_failed",
