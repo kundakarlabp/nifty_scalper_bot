@@ -168,7 +168,11 @@ def _run_one_poll_cycle(
     poller._fetch_ticks = fetch
 
     monkeypatch.setattr(polling_module, "get_market_state", lambda: MarketState.OPEN)
-    monkeypatch.setattr(polling_module.time, "sleep", lambda _seconds: poller._stop.set())
+    monkeypatch.setattr(
+        polling_module.time,
+        "sleep",
+        lambda _seconds: poller._stop.set(),
+    )
 
     poller._run()
     return fetch
