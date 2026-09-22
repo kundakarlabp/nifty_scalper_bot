@@ -20678,7 +20678,7 @@ class StrategyRunner:
                 )
                 if requires_final_score:
                     self._logger.info(
-                        "TRADE_DECISION_TRACE symbol=%s strategy=%s side=%s allowed=%s blocked_at=%s blocked_reason=%s final_score=%.2f threshold=%.2f reasons=%s trace_id=%s",
+                        "TRADE_DECISION_TRACE symbol=%s strategy=%s side=%s allowed=%s blocked_at=%s blocked_reason=%s final_score=%.2f alpha_score=%.2f threshold=%.2f reasons=%s trace_id=%s",
                         base_symbol,
                         str(quality.components.get("strategy_name", "")),
                         infer_option_side(signal.symbol, metadata),
@@ -20686,6 +20686,7 @@ class StrategyRunner:
                         "runner_final_score",
                         quality_reject_reason,
                         quality.final_score,
+                        alpha_score,
                         threshold,
                         rejection_reasons,
                         trace_id,
@@ -20694,6 +20695,7 @@ class StrategyRunner:
                             "symbol": base_symbol,
                             "trace_id": trace_id,
                             "final_score": quality.final_score,
+                            "alpha_score": alpha_score,
                             "threshold": threshold,
                             "allowed": False,
                             "blocked_at": "runner_final_score",
