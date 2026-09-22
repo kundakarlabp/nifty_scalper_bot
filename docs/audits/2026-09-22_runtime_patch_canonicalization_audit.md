@@ -31,10 +31,12 @@ Canonical action:
   market-event timestamp age;
 - classify fresh-arrival/stale-event data as `market_event_stale`;
 - let existing `trading_feed_health()` expose that required-symbol recovery;
-- leave the native `core/app.py` polling supervisor unchanged;
+- make `core/app.py` the only polling supervisor owner while preserving the
+  deployed hysteresis, sync/async-safe fallback lifecycle, and change-based
+  decision logging;
 - delete the runtime replacement module;
-- keep `polling_failover_runtime_patch_installed=false` as compatibility
-  observability and add `polling_failover_native=true` as the positive proof.
+- replace the patch-installed health marker with
+  `polling_failover_native_owner=true` as the positive proof.
 
 ### 2. Runner CandleEngine mirror cache
 
