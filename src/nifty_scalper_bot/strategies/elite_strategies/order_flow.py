@@ -514,8 +514,14 @@ class OrderFlowStrategy(EliteStrategy):
                 option_premium_domain
                 and quote_depth_valid
                 and depth_available
-                and depth_imbalance <= -0.10
-                and tick_direction not in {"UP", "BUY"}
+                and (
+                    ofi_conflicts_side
+                    if ofi_directional
+                    else (
+                        depth_imbalance <= -0.10
+                        and tick_direction not in {"UP", "BUY"}
+                    )
+                )
             )
             if clear_adverse_flow:
                 self._no_vote("negative_premium_flow")
@@ -854,7 +860,8 @@ class OrderFlowStrategy(EliteStrategy):
                 and (not is_live_mode or context_age_ok)
             )
             effective_context_alignment = bool(
-                side_aligns or bias_invalidated_by_microstructure
+                (side_aligns or bias_invalidated_by_microstructure)
+                and not ofi_conflicts_side
             )
             effective_context_conflict = bool(
                 direction in {"CE", "PE"}
