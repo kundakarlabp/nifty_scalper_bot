@@ -101,6 +101,7 @@ from nifty_scalper_bot.core.universe_controller import UniverseController
 # Assumes you created the data/constants.py file as advised
 from nifty_scalper_bot.data.market_data_manager import MarketDataManager
 from nifty_scalper_bot.data.normalizers import normalize_history_row
+from nifty_scalper_bot.strategies.order_flow_evidence import TemporalOfiAccumulator
 from nifty_scalper_bot.data.pipeline import (
     MarketDataPipeline,
     get_pipeline,
@@ -1211,6 +1212,7 @@ class StrategyRunner:
         self._runtime_indicators: dict[str, dict[str, Any]] = {}
         self._last_direction_context: dict[str, Any] | None = None
         self._last_tick: dict[str, dict[str, Any]] = {}
+        self._temporal_ofi = TemporalOfiAccumulator()
         self._symbol_locks: defaultdict[str, threading.Lock] = defaultdict(
             threading.Lock
         )
@@ -8261,6 +8263,32 @@ class StrategyRunner:
         """Args: tick; Returns: none; Raises: none."""
         self.on_tick_event(tick)
 
+    def _with_temporal_ofi(
+        self,
+        symbol: str,
+        tick: Mapping[str, Any],
+        *,
+        observed_at: float,
+    ) -> dict[str, Any]:
+        """Attach derived OFI evidence without mutating canonical market data."""
+        payload = dict(tick)
+        try:
+            payload.update(
+                self._temporal_ofi.update(
+                    symbol,
+                    payload,
+                    update_version=payload.get("quote_update_version"),
+                    observed_at=observed_at,
+                )
+            )
+        except Exception as exc:
+            self._logger.debug(
+                "TEMPORAL_OFI_UPDATE_FAILED symbol=%s error=%s",
+                symbol,
+                exc,
+            )
+        return payload
+
     def _on_tick_safe(self, tick: Mapping[str, Any]) -> None:
         """Safe wrapper for _on_tick to handle exceptions."""
         symbol = tick.get("symbol")
@@ -8337,17 +8365,13 @@ class StrategyRunner:
                 )
             except Exception:  # pragma: no cover - defensive
                 pass
+            now_mono = time.monotonic()
             self._last_tick_time_by_symbol[normalized_symbol] = time.time()
-            try:
-                self._last_tick[normalized_symbol] = dict(tick)
-            except Exception:
-                self._last_tick[normalized_symbol] = {
-                    "symbol": normalized_symbol,
-                    "ltp": tick.get("ltp")
-                    or tick.get("last_price")
-                    or tick.get("price"),
-                    "timestamp": tick.get("timestamp"),
-                }
+            self._last_tick[normalized_symbol] = self._with_temporal_ofi(
+                normalized_symbol,
+                tick,
+                observed_at=now_mono,
+            )
             if not hasattr(self, "_first_tick_ingested_symbols"):
                 self._first_tick_ingested_symbols = set()
             if normalized_symbol not in self._first_tick_ingested_symbols:
@@ -8366,7 +8390,6 @@ class StrategyRunner:
                     },
                 )
             self._mirror_authoritative_candle_engine(normalized_symbol)
-            now_mono = time.monotonic()
             self._last_tick_seen_ts = now_mono
             self._runner_tick_received_count = (
                 int(getattr(self, "_runner_tick_received_count", 0) or 0) + 1
@@ -16615,6 +16638,20 @@ class StrategyRunner:
                                 "quote_update_version_source": quote_update_version_source,
                             }
                         )
+                        for key in (
+                            "ofi_ready",
+                            "ofi_event",
+                            "ofi_1s",
+                            "ofi_3s",
+                            "ofi_1s_normalized",
+                            "ofi_3s_normalized",
+                            "ofi_update_count_1s",
+                            "ofi_update_count_3s",
+                            "ofi_source",
+                            "queue_imbalance_top",
+                        ):
+                            if key in tick_map:
+                                runtime_ctx[key] = tick_map[key]
                         indicators_ctx.update(runtime_ctx)
                         if hasattr(self._indicator_engine, "set_runtime_context"):
                             self._indicator_engine.set_runtime_context(
