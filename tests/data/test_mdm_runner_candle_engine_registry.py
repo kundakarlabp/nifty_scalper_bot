@@ -6,7 +6,6 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
 
-from nifty_scalper_bot.core import _install_runner_candle_engine_cache_patch
 from nifty_scalper_bot.data.candle_engine import CandleEngine
 from nifty_scalper_bot.data.market_data_manager import MarketDataManager
 from nifty_scalper_bot.strategies.runner import StrategyRunner
@@ -90,7 +89,6 @@ def test_runner_resolves_same_authoritative_engine_as_mdm() -> None:
 
 def test_runner_reuses_mirrored_engine_without_reentering_mdm_registry() -> None:
     """Steady-state ticks must not reacquire registry locks for the same engine."""
-    _install_runner_candle_engine_cache_patch()
     mdm = _mdm()
     runner = _runner(mdm)
     calls = 0
@@ -108,6 +106,20 @@ def test_runner_reuses_mirrored_engine_without_reentering_mdm_registry() -> None
 
     assert first is second
     assert calls == 1
+
+
+def test_runner_candle_cache_is_native_not_core_runtime_patch() -> None:
+    import inspect
+
+    import nifty_scalper_bot.core as core
+    from nifty_scalper_bot.strategies.runner import StrategyRunner
+
+    core_source = inspect.getsource(core)
+    method_source = inspect.getsource(StrategyRunner._mirror_authoritative_candle_engine)
+
+    assert "_install_runner_candle_engine_cache_patch" not in core_source
+    assert "_candle_engines" in method_source
+    assert "cached" in method_source
 
 
 def test_history_imported_through_mdm_is_visible_to_runner_engine() -> None:
