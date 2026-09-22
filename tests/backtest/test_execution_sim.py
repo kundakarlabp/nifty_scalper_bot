@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from nifty_scalper_bot.backtest.execution_sim import ExecutionSimulator
+from nifty_scalper_bot.execution.execution_simulator import ExecutionSimulator
 
 
 def test_wider_spread_results_in_worse_fill() -> None:
