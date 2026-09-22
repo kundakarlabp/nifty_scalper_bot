@@ -2,7 +2,7 @@ import time
 
 from nifty_scalper_bot.core.market_regime import RegimeSnapshot
 from nifty_scalper_bot.core.market_regime_manager import MarketRegimeManager
-from nifty_scalper_bot.data.market_regime import MarketRegimeDetector
+from nifty_scalper_bot.core.market_regime import MarketRegimeDetector
 
 
 def _make_snapshot(regime: str, confidence: float) -> RegimeSnapshot:

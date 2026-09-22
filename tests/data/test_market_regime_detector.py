@@ -1,4 +1,4 @@
-from nifty_scalper_bot.data.market_regime import MarketRegimeDetector, RegimeParameters
+from nifty_scalper_bot.core.market_regime import MarketRegimeDetector, RegimeParameters
 
 
 def test_market_regime_detector_identifies_trend() -> None:
