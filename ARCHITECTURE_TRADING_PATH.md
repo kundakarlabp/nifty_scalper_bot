@@ -20,14 +20,13 @@
 3. **Market data and routing**
    - `data/market_data_manager.py`
    - `data/data_hub.py`
-   - Accepted FULL-depth WebSocket quotes are the sole source for temporal
-     order-flow imbalance (OFI). `MarketDataManager` derives short-window OFI
-     from consecutive best-bid/best-ask price and quantity updates before
-     publishing the canonical tick. Poll/REST fallback quotes never create OFI.
-   - OFI is transported through DataHub/Runner/IndicatorEngine as strategy
-     context only. It may strengthen or suppress OrderFlow confirmation but
-     cannot create or reverse CE/PE direction; fresh NIFTY spot/futures context
-     remains the sole direction authority.
+   - OrderFlow derives short-window order-flow imbalance (OFI) only from
+     distinct canonical quote versions already delivered through this path.
+     Its 1-second/3-second event state is strategy-local derived evidence, not
+     a second quote cache or market-data owner.
+   - OFI is context only. It may strengthen or suppress OrderFlow confirmation
+     but cannot create or reverse CE/PE direction; fresh NIFTY spot/futures
+     context remains the sole direction authority.
 
 4. **Signal generation**
    - `strategies/runner.py`
