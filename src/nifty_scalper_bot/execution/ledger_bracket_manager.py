@@ -20,7 +20,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Mapping
 
-from nifty_scalper_bot.execution import bracket_manager as _legacy
+from nifty_scalper_bot.execution import bracket_core as _legacy
 from nifty_scalper_bot.execution.canonical_bracket_manager import (
     CanonicalBracketManager,
 )
@@ -203,7 +203,8 @@ class LedgerBracketManager(CanonicalBracketManager):
             raise FillLedgerError("fill ledger is unavailable")
         inserted = self._fill_ledger.record_fill(leg)
         _legacy.LOGGER.info(
-            "FILL_LEDGER_RECORDED bracket_id=%s fill_id=%s kind=%s side=%s qty=%s price=%.2f inserted=%s",
+            "FILL_LEDGER_RECORDED bracket_id=%s fill_id=%s "
+            "kind=%s side=%s qty=%s price=%.2f inserted=%s",
             leg.bracket_id,
             leg.fill_id,
             leg.kind,

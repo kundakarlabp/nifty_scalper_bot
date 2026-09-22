@@ -15,20 +15,20 @@ class replacement.
 
 from __future__ import annotations
 
-from contextlib import suppress
 import os
 import time
+from contextlib import suppress
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
-from nifty_scalper_bot.execution import bracket_manager as _legacy
-from nifty_scalper_bot.execution.hardened_bracket_manager import (
-    HardenedBracketManager,
-)
+from nifty_scalper_bot.execution import bracket_core as _legacy
 from nifty_scalper_bot.execution.broker_position_evidence import (
     BrokerPositionEvidence,
     BrokerPositionState,
     normalize_authoritative_quantity,
+)
+from nifty_scalper_bot.execution.hardened_bracket_manager import (
+    HardenedBracketManager,
 )
 from nifty_scalper_bot.execution.order_state import (
     DomainOrderState,
@@ -133,14 +133,13 @@ class CanonicalBracketManager(HardenedBracketManager):
                 _legacy.BracketExitLifecycle.EXIT_PARTIALLY_FILLED.value
             )
             bracket.entry_status = bracket.exit_state
-            bracket.last_exit_error = (
-                f"{self._FILLED_SYNC_PREFIX}:"
-                f"residual={residual_quantity if residual_quantity is not None else 'unknown'}"
-            )
+            residual = residual_quantity if residual_quantity is not None else "unknown"
+            bracket.last_exit_error = f"{self._FILLED_SYNC_PREFIX}:residual={residual}"
             bracket.updated_at = time.time()
 
         _legacy.LOGGER.warning(
-            "EXIT_FILLED_POSITION_SYNC_PENDING bracket_id=%s symbol=%s order_id=%s residual_qty=%s requested_by=%s grace_seconds=%.2f",
+            "EXIT_FILLED_POSITION_SYNC_PENDING bracket_id=%s symbol=%s "
+            "order_id=%s residual_qty=%s requested_by=%s grace_seconds=%.2f",
             bracket.bracket_id,
             bracket.symbol,
             order_id,
@@ -208,7 +207,8 @@ class CanonicalBracketManager(HardenedBracketManager):
         with suppress(Exception):
             self.save_state()
         _legacy.LOGGER.info(
-            "PARTIAL_EXIT_CONFIRMED_RESIDUAL_PROTECTED bracket_id=%s symbol=%s target=%s filled_qty=%s remaining_qty=%s fill_price=%s requested_by=%s",
+            "PARTIAL_EXIT_CONFIRMED_RESIDUAL_PROTECTED bracket_id=%s symbol=%s "
+            "target=%s filled_qty=%s remaining_qty=%s fill_price=%s requested_by=%s",
             bracket.bracket_id,
             bracket.symbol,
             target.name,
@@ -250,10 +250,8 @@ class CanonicalBracketManager(HardenedBracketManager):
         requested_by: str,
     ) -> None:
         now = time.time()
-        error = (
-            f"{self._FILLED_NONFLAT_PREFIX}:"
-            f"residual={residual_quantity if residual_quantity is not None else 'unknown'}"
-        )
+        residual = residual_quantity if residual_quantity is not None else "unknown"
+        error = f"{self._FILLED_NONFLAT_PREFIX}:residual={residual}"
         with self._lock:
             if residual_quantity is not None and residual_quantity > 0:
                 bracket.remaining_quantity = residual_quantity
@@ -278,7 +276,8 @@ class CanonicalBracketManager(HardenedBracketManager):
         with suppress(Exception):
             self.save_state()
         _legacy.LOGGER.critical(
-            "EXIT_FILLED_POSITION_MISMATCH bracket_id=%s symbol=%s order_id=%s residual_qty=%s requested_by=%s",
+            "EXIT_FILLED_POSITION_MISMATCH bracket_id=%s "
+            "symbol=%s order_id=%s residual_qty=%s requested_by=%s",
             bracket.bracket_id,
             bracket.symbol,
             order_id,
@@ -300,7 +299,10 @@ class CanonicalBracketManager(HardenedBracketManager):
                     "symbol": bracket.symbol,
                     "order_id": order_id,
                     "remaining_qty": residual_quantity,
-                    "message": "Exit order filled but broker position remains. New entries are blocked pending reconciliation.",
+                    "message": (
+                        "Exit order filled but broker position remains. "
+                        "New entries are blocked pending reconciliation."
+                    ),
                 },
             )
 
@@ -377,7 +379,8 @@ class CanonicalBracketManager(HardenedBracketManager):
                             bracket._market_escalation_fired = True
                         bracket.updated_at = time.time()
                     _legacy.LOGGER.warning(
-                        "EXIT_RECONCILE_DEFERRED_BROKER_POSITION_UNKNOWN bracket_id=%s symbol=%s order_id=%s state=%s",
+                        "EXIT_RECONCILE_DEFERRED_BROKER_POSITION_UNKNOWN "
+                        "bracket_id=%s symbol=%s order_id=%s state=%s",
                         bracket.bracket_id,
                         bracket.symbol,
                         order_id,
@@ -418,7 +421,9 @@ class CanonicalBracketManager(HardenedBracketManager):
                         else _legacy.LOGGER.warning
                     )
                     log(
-                        "EXIT_FLAT_BUT_ORDER_NOT_TERMINAL bracket_id=%s symbol=%s order_id=%s order_status=%s age_seconds=%.3f grace_seconds=%.3f close_deferred=True",
+                        "EXIT_FLAT_BUT_ORDER_NOT_TERMINAL bracket_id=%s "
+                        "symbol=%s order_id=%s order_status=%s age_seconds=%.3f "
+                        "grace_seconds=%.3f close_deferred=True",
                         bracket.bracket_id,
                         bracket.symbol,
                         order_id,
@@ -593,7 +598,8 @@ class CanonicalBracketManager(HardenedBracketManager):
                 bracket.last_exit_error = f"broker_position_{flat_evidence.state.value}"
                 bracket.updated_at = time.time()
             _legacy.LOGGER.warning(
-                "EXIT_RESCUE_DEFERRED_BROKER_POSITION_UNKNOWN bracket_id=%s symbol=%s order_id=%s state=%s",
+                "EXIT_RESCUE_DEFERRED_BROKER_POSITION_UNKNOWN "
+                "bracket_id=%s symbol=%s order_id=%s state=%s",
                 bracket.bracket_id,
                 bracket.symbol,
                 order_id,
@@ -629,7 +635,8 @@ class CanonicalBracketManager(HardenedBracketManager):
                 # churn ('Skipping cancel: Already FILLED', 2026-07-10);
                 # the reconcile loop confirms and closes within the grace.
                 _legacy.LOGGER.info(
-                    "EXIT_RESCUE_SKIPPED_FLAT_LATENCY bracket_id=%s order_id=%s status=%s",
+                    "EXIT_RESCUE_SKIPPED_FLAT_LATENCY "
+                    "bracket_id=%s order_id=%s status=%s",
                     bracket.bracket_id,
                     order_id,
                     status,
@@ -651,7 +658,8 @@ class CanonicalBracketManager(HardenedBracketManager):
             self._exit_rescue_attempts[bracket.bracket_id] = attempts + 1
 
         _legacy.LOGGER.critical(
-            "EXIT_STALE_ORDER_RESCUE bracket_id=%s order_id=%s status=%s qty=%s rescue_attempt=%s",
+            "EXIT_STALE_ORDER_RESCUE bracket_id=%s "
+            "order_id=%s status=%s qty=%s rescue_attempt=%s",
             bracket.bracket_id,
             order_id,
             status,
