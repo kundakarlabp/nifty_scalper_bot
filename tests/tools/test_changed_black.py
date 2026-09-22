@@ -31,3 +31,47 @@ def test_formatting_spans_identify_modified_source_lines() -> None:
 def test_range_intersection_distinguishes_legacy_from_new_debt() -> None:
     assert ranges_intersect([(20, 25)], [(23, 23)]) is True
     assert ranges_intersect([(1, 5)], [(10, 12)]) is False
+
+
+def test_legacy_black_debt_outside_changed_lines_passes(
+    tmp_path: Path, monkeypatch
+) -> None:
+    current = tmp_path / "legacy.py"
+    current.write_text("bad  = 1\nkept = 2\nchanged = 3\n", encoding="utf-8")
+    base = tmp_path / "base.py"
+    base.write_text(current.read_text(encoding="utf-8"), encoding="utf-8")
+
+    monkeypatch.setattr(_MODULE, "_base_file", lambda _base, _path: base)
+    monkeypatch.setattr(_MODULE, "_black_check", lambda _path: False)
+    monkeypatch.setattr(
+        _MODULE,
+        "_black_formatted_text",
+        lambda _path: "bad = 1\nkept = 2\nchanged = 3\n",
+    )
+    monkeypatch.setattr(_MODULE, "_git_changed_ranges", lambda _base, _path: [(3, 3)])
+
+    ok, message = _MODULE.check_file("origin/main", current)
+
+    assert ok is True
+    assert "only pre-existing Black debt remains" in message
+
+
+def test_black_debt_on_changed_lines_fails(tmp_path: Path, monkeypatch) -> None:
+    current = tmp_path / "legacy.py"
+    current.write_text("kept = 1\nbad  = 2\n", encoding="utf-8")
+    base = tmp_path / "base.py"
+    base.write_text(current.read_text(encoding="utf-8"), encoding="utf-8")
+
+    monkeypatch.setattr(_MODULE, "_base_file", lambda _base, _path: base)
+    monkeypatch.setattr(_MODULE, "_black_check", lambda _path: False)
+    monkeypatch.setattr(
+        _MODULE,
+        "_black_formatted_text",
+        lambda _path: "kept = 1\nbad = 2\n",
+    )
+    monkeypatch.setattr(_MODULE, "_git_changed_ranges", lambda _base, _path: [(2, 2)])
+
+    ok, message = _MODULE.check_file("origin/main", current)
+
+    assert ok is False
+    assert "Black would modify newly changed lines" in message
