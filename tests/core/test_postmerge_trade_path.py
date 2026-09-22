@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import time
 
-from nifty_scalper_bot.core.strategy_manager import Signal, StrategyManager, StrategyVote
+from nifty_scalper_bot.core.strategy_manager import (
+    Signal,
+    StrategyManager,
+    StrategyVote,
+)
 from nifty_scalper_bot.data.market_data_manager import MarketDataManager
-
+from nifty_scalper_bot.strategies.signal_quality import score_signal_metadata
 
 _SYMBOL = "NFO:NIFTY2670724050CE"
 
@@ -17,6 +21,7 @@ def _signal_vote(
     weighted_score: float,
     confidence: float,
     role: str = "trigger",
+    regime_name: str | None = None,
 ) -> tuple[Signal, StrategyVote]:
     signal = Signal(
         action="BUY",
@@ -44,6 +49,8 @@ def _signal_vote(
         "tradable_quote": True,
         "spread_pct": 0.2,
     }
+    if regime_name is not None:
+        metadata["regime_name"] = regime_name
     if role == "trigger" and strategy == "VWAPPro":
         # Reproduce the 14:20 live-quality shape: 6.83 before independent
         # trigger confirmation (2.833 setup + 2 direction + 1 freshness +
@@ -85,19 +92,17 @@ def _live_indicators() -> dict[str, object]:
     }
 
 
-def test_aligned_independent_trigger_can_clear_unchanged_live_quality_floor(monkeypatch) -> None:
-    """A second independent trigger is bounded quality evidence, not a lower floor."""
+def test_aligned_independent_trigger_can_clear_unchanged_live_quality_floor(
+    monkeypatch,
+) -> None:
+    """A second independent trigger is bounded evidence, not a lower floor."""
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     monkeypatch.setenv("ENABLE_LIVE", "true")
     manager = StrategyManager.__new__(StrategyManager)
     manager._last_no_signal_decision_by_symbol = {}
 
-    vwap = _signal_vote(
-        "VWAPPro", raw_score=8.5, weighted_score=6.8, confidence=0.85
-    )
-    orb = _signal_vote(
-        "ORBPro", raw_score=7.0, weighted_score=5.6, confidence=0.70
-    )
+    vwap = _signal_vote("VWAPPro", raw_score=8.5, weighted_score=6.8, confidence=0.85)
+    orb = _signal_vote("ORBPro", raw_score=7.0, weighted_score=5.6, confidence=0.70)
     orderflow = _signal_vote(
         "OrderFlow",
         raw_score=8.0,
@@ -114,7 +119,10 @@ def test_aligned_independent_trigger_can_clear_unchanged_live_quality_floor(monk
 
     assert result is not None
     assert result.metadata["quality_min_required"] == 7.0
-    assert result.metadata["trade_quality_components"]["independent_trigger_confirmation"] == 0.5
+    assert (
+        result.metadata["trade_quality_components"]["independent_trigger_confirmation"]
+        == 0.5
+    )
     assert result.metadata["trade_quality_score"] >= 7.0
     assert result.metadata["approval_path"] == "aligned_two_trigger_consensus"
 
@@ -125,9 +133,7 @@ def test_opposite_trigger_does_not_receive_quality_confirmation(monkeypatch) -> 
     manager = StrategyManager.__new__(StrategyManager)
     manager._last_no_signal_decision_by_symbol = {}
 
-    vwap = _signal_vote(
-        "VWAPPro", raw_score=8.5, weighted_score=6.8, confidence=0.85
-    )
+    vwap = _signal_vote("VWAPPro", raw_score=8.5, weighted_score=6.8, confidence=0.85)
     opposite_orb = _signal_vote(
         "ORBPro", side="PE", raw_score=7.0, weighted_score=5.6, confidence=0.70
     )
@@ -149,6 +155,97 @@ def test_opposite_trigger_does_not_receive_quality_confirmation(monkeypatch) -> 
     decision = manager._last_no_signal_decision_by_symbol[_SYMBOL]
     assert decision.blocked_at == "trigger_direction_gate"
     assert decision.reason == "conflicting_trigger_direction"
+
+
+def _range_vwap_context_candidate(
+    manager: StrategyManager,
+    *,
+    direction_score: float,
+    independent_setup_score: float,
+) -> Signal:
+    vwap = _signal_vote(
+        "VWAPPro",
+        raw_score=8.0,
+        weighted_score=6.4,
+        confidence=0.80,
+        regime_name="RANGE",
+    )
+    vwap[0].metadata.update(
+        {
+            "strategy_name": "VWAPPro",
+            "direction_score": direction_score,
+            "strategy_score": 8.0,
+            "independent_setup_score": independent_setup_score,
+            "option_score": 9.0,
+            "data_score": 9.0,
+            "rr_score": 9.0,
+        }
+    )
+    orderflow = _signal_vote(
+        "OrderFlow",
+        raw_score=8.0,
+        weighted_score=8.0,
+        confidence=0.80,
+        role="context",
+    )
+    result = manager._combine_strategy_votes(
+        symbol=_SYMBOL,
+        signals=[vwap, orderflow],
+        indicators=_live_indicators(),
+    )
+    assert result is not None
+    assert result.metadata["approval_path"] == "single_trigger_context_confirmed"
+    return result
+
+
+def test_context_confirmed_range_vwap_still_fails_closed_on_weak_independent_alpha(
+    monkeypatch,
+) -> None:
+    """Manager qualification must never bypass Runner's independent VWAP alpha floor."""
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    manager = StrategyManager.__new__(StrategyManager)
+    manager._last_no_signal_decision_by_symbol = {}
+    manager._compute_trade_quality_score = lambda *args, **kwargs: (10.0, {})
+
+    candidate = _range_vwap_context_candidate(
+        manager,
+        direction_score=8.0,
+        independent_setup_score=6.0,
+    )
+    quality = score_signal_metadata(
+        candidate.metadata,
+        strategy_name="VWAPPro",
+    )
+
+    assert quality.final_score >= quality.components["threshold"]
+    assert quality.components["alpha_score"] < quality.components["threshold"]
+    assert quality.allowed is False
+    assert "alpha_below_threshold" in quality.reasons
+
+
+def test_context_confirmed_range_vwap_can_clear_runner_with_strong_independent_alpha(
+    monkeypatch,
+) -> None:
+    """The RANGE confirmation path remains reachable without weakening quality."""
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    manager = StrategyManager.__new__(StrategyManager)
+    manager._last_no_signal_decision_by_symbol = {}
+    manager._compute_trade_quality_score = lambda *args, **kwargs: (10.0, {})
+
+    candidate = _range_vwap_context_candidate(
+        manager,
+        direction_score=9.0,
+        independent_setup_score=6.0,
+    )
+    quality = score_signal_metadata(
+        candidate.metadata,
+        strategy_name="VWAPPro",
+    )
+
+    assert quality.components["alpha_score"] >= quality.components["threshold"]
+    assert quality.allowed is True
 
 
 def _wired_mdm() -> tuple[MarketDataManager, str, str]:
@@ -235,7 +332,9 @@ def test_unknown_normal_queue_remains_fail_closed() -> None:
     assert mdm.pipeline_overloaded is True
 
 
-def test_manager_quality_reference_is_diagnostic_runner_owns_final_score(monkeypatch) -> None:
+def test_manager_quality_reference_is_diagnostic_runner_owns_final_score(
+    monkeypatch,
+) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     monkeypatch.setenv("ENABLE_LIVE", "true")
     manager = StrategyManager.__new__(StrategyManager)
@@ -251,12 +350,8 @@ def test_manager_quality_reference_is_diagnostic_runner_owns_final_score(monkeyp
             "strategy_block_reason": None,
         },
     )
-    vwap = _signal_vote(
-        "VWAPPro", raw_score=8.5, weighted_score=8.5, confidence=0.90
-    )
-    orb = _signal_vote(
-        "ORBPro", raw_score=8.0, weighted_score=8.0, confidence=0.85
-    )
+    vwap = _signal_vote("VWAPPro", raw_score=8.5, weighted_score=8.5, confidence=0.90)
+    orb = _signal_vote("ORBPro", raw_score=8.0, weighted_score=8.0, confidence=0.85)
 
     result = manager._combine_strategy_votes(
         symbol=_SYMBOL,
@@ -286,12 +381,8 @@ def test_structural_strategy_invalid_state_remains_a_hard_block(monkeypatch) -> 
             "strategy_block_reason": None,
         },
     )
-    vwap = _signal_vote(
-        "VWAPPro", raw_score=8.5, weighted_score=8.5, confidence=0.90
-    )
-    orb = _signal_vote(
-        "ORBPro", raw_score=8.0, weighted_score=8.0, confidence=0.85
-    )
+    vwap = _signal_vote("VWAPPro", raw_score=8.5, weighted_score=8.5, confidence=0.90)
+    orb = _signal_vote("ORBPro", raw_score=8.0, weighted_score=8.0, confidence=0.85)
 
     result = manager._combine_strategy_votes(
         symbol=_SYMBOL,
@@ -304,19 +395,17 @@ def test_structural_strategy_invalid_state_remains_a_hard_block(monkeypatch) -> 
     assert decision.blocked_at == "strategy_explicit_block"
 
 
-def test_manager_final_trade_score_is_reference_only_runner_owns_numeric_quality(monkeypatch) -> None:
+def test_manager_final_trade_score_is_reference_only_runner_owns_numeric_quality(
+    monkeypatch,
+) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     monkeypatch.setenv("ENABLE_LIVE", "true")
     monkeypatch.setenv("STRATEGY_TRIGGER_MIN_SCORE", "4.5")
     manager = StrategyManager.__new__(StrategyManager)
     manager._last_no_signal_decision_by_symbol = {}
 
-    vwap = _signal_vote(
-        "VWAPPro", raw_score=8.5, weighted_score=5.5, confidence=0.90
-    )
-    orb = _signal_vote(
-        "ORBPro", raw_score=8.0, weighted_score=5.0, confidence=0.85
-    )
+    vwap = _signal_vote("VWAPPro", raw_score=8.5, weighted_score=5.5, confidence=0.90)
+    orb = _signal_vote("ORBPro", raw_score=8.0, weighted_score=5.0, confidence=0.85)
     opposing_context = _signal_vote(
         "OrderFlow",
         side="PE",
