@@ -115,7 +115,9 @@ def test_runner_candle_cache_is_native_not_core_runtime_patch() -> None:
     from nifty_scalper_bot.strategies.runner import StrategyRunner
 
     core_source = inspect.getsource(core)
-    method_source = inspect.getsource(StrategyRunner._mirror_authoritative_candle_engine)
+    method_source = inspect.getsource(
+        StrategyRunner._mirror_authoritative_candle_engine
+    )
 
     assert "_install_runner_candle_engine_cache_patch" not in core_source
     assert "_candle_engines" in method_source
