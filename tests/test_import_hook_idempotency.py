@@ -13,13 +13,17 @@ def _hook_count(attr: str) -> int:
 
 def _reset_core_modules() -> None:
     for name in list(sys.modules):
-        if name == "nifty_scalper_bot.core" or name.startswith("nifty_scalper_bot.core.app"):
+        if name == "nifty_scalper_bot.core" or name.startswith(
+            "nifty_scalper_bot.core.app"
+        ):
             sys.modules.pop(name, None)
 
 
 def _reset_data_modules() -> None:
     for name in list(sys.modules):
-        if name == "nifty_scalper_bot.data" or name.startswith("nifty_scalper_bot.data.data_hub"):
+        if name == "nifty_scalper_bot.data" or name.startswith(
+            "nifty_scalper_bot.data.data_hub"
+        ):
             sys.modules.pop(name, None)
 
 
@@ -85,4 +89,11 @@ def test_direct_datahub_import_reuses_single_hook_and_still_patches_datahub() ->
     datahub_module = importlib.import_module("nifty_scalper_bot.data.data_hub")
 
     assert _hook_count(DATA_HOOK_ATTR) == hook_count == 1
-    assert getattr(datahub_module.DataHub, "_synthetic_timestamp_guard_installed", False) is True
+    assert (
+        getattr(
+            datahub_module.DataHub,
+            "_synthetic_timestamp_guard_installed",
+            False,
+        )
+        is True
+    )
