@@ -106,7 +106,7 @@ def test_runtime_install_proof_accepts_native_datahub_without_import_hook(
     import types
 
     app_mod = types.ModuleType("nifty_scalper_bot.core.app")
-    app_mod._polling_failover_runtime_patch_installed = True
+    app_mod._polling_failover_supervisor_iteration = _native_polling_supervisor
     monkeypatch.setitem(sys.modules, "nifty_scalper_bot.core.app", app_mod)
     monkeypatch.setattr(sys, "meta_path", [_CoreHook()])
     ctx = SimpleNamespace(
@@ -122,6 +122,7 @@ def test_runtime_install_proof_accepts_native_datahub_without_import_hook(
     assert proof["datahub_native_guard_loaded"] is True
     assert proof["datahub_hardening_satisfied"] is True
     assert proof["datahub_hardening_mode"] == "native"
+    assert proof["polling_failover_native_owner"] is True
     assert proof["all_required_installed"] is True
 
 
