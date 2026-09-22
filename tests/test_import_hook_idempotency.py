@@ -51,8 +51,10 @@ def test_core_app_direct_import_reuses_single_hook_and_still_patches_app() -> No
     app_module = importlib.import_module("nifty_scalper_bot.core.app")
 
     assert _hook_count(CORE_HOOK_ATTR) == hook_count == 1
-    assert getattr(app_module, "_polling_failover_runtime_patch_installed", False) is True
-    assert callable(getattr(app_module, "_polling_failover_supervisor_iteration", None))
+    supervisor = getattr(app_module, "_polling_failover_supervisor_iteration", None)
+    assert callable(supervisor)
+    assert getattr(supervisor, "__module__", None) == "nifty_scalper_bot.core.app"
+    assert not hasattr(app_module, "_polling_failover_runtime_patch_installed")
 
 
 def test_datahub_import_hook_is_not_duplicated_by_repeated_imports() -> None:
