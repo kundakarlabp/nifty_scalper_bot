@@ -1,4 +1,5 @@
 """Architecture checks for the AWS Lightsail release and secret boundary."""
+
 from __future__ import annotations
 
 import re
@@ -41,7 +42,7 @@ def test_lightsail_uses_external_environment_file() -> None:
 
 def test_release_runner_validates_and_rolls_back() -> None:
     release = _text("deploy/lightsail_release.sh")
-    assert 'flock -n 9' in release
+    assert "flock -n 9" in release
     assert "git worktree add" in release
     assert "compileall" in release
     assert "pytest" in release
@@ -55,10 +56,10 @@ def test_release_runner_validates_and_rolls_back() -> None:
     assert '"engine_http_responsive"[[:space:]]*:[[:space:]]*true' in release
     assert '"quiet"[[:space:]]*:[[:space:]]*true' in release
     assert '"bot_loaded"[[:space:]]*:[[:space:]]*false' in release
-    assert 'http://127.0.0.1:${PORT}/livez' in release
-    health_block = release.split("service_healthy", 1)[1].split(
-        "wait_for_service", 1
-    )[0]
+    assert "http://127.0.0.1:${PORT}/livez" in release
+    health_block = release.split("service_healthy", 1)[1].split("wait_for_service", 1)[
+        0
+    ]
     assert "/readyz" not in health_block
     assert 'git reset --hard --quiet "$BEFORE"' in release
     assert 'sudo systemctl restart "$SERVICE"' in release
@@ -111,7 +112,7 @@ def test_lightsail_release_migrates_autodeploy_entrypoint_to_bash() -> None:
 def test_lightsail_migration_forces_restart_before_healthy_no_change_exit() -> None:
     release = _text("deploy/lightsail_release.sh")
     migration_call = release.index("migrate_systemd_entrypoint")
-    force_restart = release.index('FORCE_RESTART=true', migration_call)
+    force_restart = release.index("FORCE_RESTART=true", migration_call)
     healthy_no_change = release.index('if [ "$BEFORE" = "$AFTER" ]', force_restart)
     assert migration_call < force_restart < healthy_no_change
     candidate_index = release.index("CANDIDATE=", healthy_no_change)
@@ -161,5 +162,5 @@ def test_release_runner_publishes_exact_runtime_build_sha() -> None:
     healthy_no_change = release.index('if [ "$BEFORE" = "$AFTER" ]')
     candidate = release.index("CANDIDATE=", healthy_no_change)
     no_change_block = release[healthy_no_change:candidate]
-    assert 'current_runtime_sha' in no_change_block
-    assert 'FORCE_RESTART=true' in no_change_block
+    assert "current_runtime_sha" in no_change_block
+    assert "FORCE_RESTART=true" in no_change_block
