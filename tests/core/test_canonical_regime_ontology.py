@@ -1,5 +1,3 @@
-import pytest
-
 from nifty_scalper_bot.config.regime_ontology import (
     MarketRegime,
     normalize_regime,
@@ -46,9 +44,8 @@ def test_risk_regime_sizing_labels_are_canonical() -> None:
         assert normalize_regime(member.value).value in CANONICAL
 
 
-@pytest.mark.parametrize(
-    ("raw", "expected"),
-    [
+def test_legacy_labels_normalise_to_canonical() -> None:
+    cases = (
         ("TREND_UP", MarketRegime.TREND),
         ("TREND_DOWN", MarketRegime.TREND),
         ("trending", MarketRegime.TREND),
@@ -59,18 +56,14 @@ def test_risk_regime_sizing_labels_are_canonical() -> None:
         ("HIGHVOL", MarketRegime.VOLATILE),
         ("LOW_VOLATILITY", MarketRegime.LOW_ACTIVITY),
         ("event", MarketRegime.EVENT),
-    ],
-)
-def test_legacy_labels_normalise_to_canonical(
-    raw: str,
-    expected: MarketRegime,
-) -> None:
-    assert normalize_regime(raw) is expected
+    )
+    for raw, expected in cases:
+        assert normalize_regime(raw) is expected
 
 
-@pytest.mark.parametrize("raw", [None, "", "   ", "gibberish", 17, object()])
-def test_unresolvable_labels_fail_closed_as_unknown(raw: object) -> None:
-    assert normalize_regime(raw) is MarketRegime.UNKNOWN
+def test_unresolvable_labels_fail_closed_as_unknown() -> None:
+    for raw in (None, "", "   ", "gibberish", 17, object()):
+        assert normalize_regime(raw) is MarketRegime.UNKNOWN
 
 
 def test_enum_and_snapshot_inputs_are_accepted() -> None:
