@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from nifty_scalper_bot.core import polling_failover_runtime as runtime
+from nifty_scalper_bot.core import app
 from nifty_scalper_bot.data.market_data_manager import MarketDataManager
 from nifty_scalper_bot.streaming import polling_streamer as polling_module
 from nifty_scalper_bot.streaming.polling_streamer import PollingStreamer
@@ -36,6 +36,7 @@ class _Fallback:
 async def test_futures_live_tick_stale_readiness_forces_existing_recovery_path() -> None:
     """Fresh packet arrivals must not suppress recovery of a stale market event."""
     ctx = SimpleNamespace(
+        is_market_open_now=lambda: True,
         live_block_reason="execution_not_armed:futures_live_tick_stale",
         websocket_manager=SimpleNamespace(is_connected=lambda: True),
         market_data_manager=SimpleNamespace(
@@ -49,14 +50,13 @@ async def test_futures_live_tick_stale_readiness_forces_existing_recovery_path()
     )
     fallback = _Fallback()
 
-    await runtime._polling_failover_supervisor_iteration(
+    await app._polling_failover_supervisor_iteration(
         ctx,
         fallback,
         quote_stale_ms=120_000.0,
         degraded_since=0.0,
         recovered_since=None,
         activate_after=0.0,
-        _app_module=SimpleNamespace(is_market_open_now=lambda: True),
     )
 
     assert fallback.mode_calls == [False]
@@ -72,6 +72,7 @@ async def test_futures_stale_below_primary_priority_forces_recovery() -> None:
     of them co-occurs. Recovery authority must key on the structured blocker set.
     """
     ctx = SimpleNamespace(
+        is_market_open_now=lambda: True,
         live_block_reason="execution_not_armed:position_reconciliation_failed",
         readiness_blockers=(
             "position_reconciliation_failed",
@@ -90,14 +91,13 @@ async def test_futures_stale_below_primary_priority_forces_recovery() -> None:
     )
     fallback = _Fallback()
 
-    await runtime._polling_failover_supervisor_iteration(
+    await app._polling_failover_supervisor_iteration(
         ctx,
         fallback,
         quote_stale_ms=120_000.0,
         degraded_since=0.0,
         recovered_since=None,
         activate_after=0.0,
-        _app_module=SimpleNamespace(is_market_open_now=lambda: True),
     )
 
     assert fallback.starts == 1
@@ -107,6 +107,7 @@ async def test_futures_stale_below_primary_priority_forces_recovery() -> None:
 async def test_healthy_feed_without_futures_blocker_does_not_force_recovery() -> None:
     """Unrelated blockers must not start REST recovery on a healthy feed."""
     ctx = SimpleNamespace(
+        is_market_open_now=lambda: True,
         live_block_reason="execution_not_armed:strategy_not_ready",
         readiness_blockers=("strategy_not_ready", "context_exec_not_ready"),
         websocket_manager=SimpleNamespace(is_connected=lambda: True),
@@ -121,14 +122,13 @@ async def test_healthy_feed_without_futures_blocker_does_not_force_recovery() ->
     )
     fallback = _Fallback()
 
-    await runtime._polling_failover_supervisor_iteration(
+    await app._polling_failover_supervisor_iteration(
         ctx,
         fallback,
         quote_stale_ms=120_000.0,
         degraded_since=0.0,
         recovered_since=None,
         activate_after=0.0,
-        _app_module=SimpleNamespace(is_market_open_now=lambda: True),
     )
 
     assert fallback.starts == 0
