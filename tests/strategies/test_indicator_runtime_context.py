@@ -23,3 +23,31 @@ def test_indicator_runtime_context_is_merged_without_overwrite() -> None:
     assert indicators['atm_strike'] == 24200
     assert indicators['is_selected_option'] is True
     assert indicators['close'] == 124.0
+
+def test_indicator_runtime_context_preserves_temporal_orderflow_fields() -> None:
+    engine = IndicatorEngine()
+    symbol = "NFO:NIFTY26SEP25000CE"
+    engine.set_runtime_context(
+        symbol,
+        {
+            "ofi_ready": True,
+            "ofi_event": 25.0,
+            "ofi_1s": 80.0,
+            "ofi_3s": 120.0,
+            "ofi_1s_normalized": 0.32,
+            "ofi_3s_normalized": 0.24,
+            "ofi_update_count_1s": 4,
+            "ofi_update_count_3s": 9,
+            "ofi_source": "ws_full_depth",
+            "queue_imbalance_top": 0.15,
+        },
+    )
+
+    context = engine.get_runtime_context(symbol)
+
+    assert context["ofi_ready"] is True
+    assert context["ofi_1s_normalized"] == 0.32
+    assert context["ofi_update_count_1s"] == 4
+    assert context["ofi_source"] == "ws_full_depth"
+    assert context["queue_imbalance_top"] == 0.15
+
