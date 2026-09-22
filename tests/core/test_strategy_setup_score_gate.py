@@ -206,6 +206,11 @@ def test_setup_policy_is_native_not_import_time_patched() -> None:
     setup_module = Path(
         "src/nifty_scalper_bot/core/strategy_setup_score_gate.py"
     ).read_text(encoding="utf-8")
+    reliability = Path(
+        "src/nifty_scalper_bot/core/runtime_reliability_hardening.py"
+    ).read_text(encoding="utf-8")
+
     assert "_apply_strategy_setup_score_gate" not in core_init
     assert "def apply_patches" not in setup_module
-    assert "runtime_reliability_hardening" not in core_init
+    assert "_install_trade_quality_patch" not in reliability
+    assert "_install_strategy_reason_patch" not in reliability
