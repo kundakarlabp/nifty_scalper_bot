@@ -484,6 +484,92 @@ def _polling_fallback_degraded(
     ).activate
 
 
+async def _maybe_await_polling(value: Any) -> Any:
+    """Await async polling controls while preserving synchronous implementations."""
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
+async def _stop_polling_fallback_safely(fallback: Any, *, reason: str) -> None:
+    """Stop polling fallback without destabilizing the WebSocket supervisor."""
+    try:
+        running_fn = getattr(fallback, "is_running", None)
+        running = (
+            bool(running_fn())
+            if callable(running_fn)
+            else bool(getattr(fallback, "_running", False))
+        )
+        if not running:
+            return
+        mode_fn = getattr(fallback, "set_websocket_mode", None)
+        if callable(mode_fn):
+            await _maybe_await_polling(mode_fn(True))
+        stop_fn = getattr(fallback, "stop", None)
+        if callable(stop_fn):
+            await _maybe_await_polling(stop_fn())
+    except Exception as exc:  # noqa: BLE001 - supervisor must remain non-fatal
+        LOGGER.warning(
+            "POLLING_FALLBACK_STOP_FAILED reason=%s error_type=%s error=%s",
+            reason,
+            type(exc).__name__,
+            exc,
+            extra={
+                "event": "POLLING_FALLBACK_STOP_FAILED",
+                "reason": reason,
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+            },
+        )
+
+
+async def _start_polling_fallback_safely(
+    fallback: Any, *, decision_reason: str | None
+) -> None:
+    """Start polling fallback without destabilizing the WebSocket supervisor."""
+    try:
+        mode_fn = getattr(fallback, "set_websocket_mode", None)
+        if callable(mode_fn):
+            await _maybe_await_polling(mode_fn(False))
+        running_fn = getattr(fallback, "is_running", None)
+        running = (
+            bool(running_fn())
+            if callable(running_fn)
+            else bool(getattr(fallback, "_running", False))
+        )
+        if not running:
+            start_fn = getattr(fallback, "start", None)
+            if callable(start_fn):
+                await _maybe_await_polling(start_fn())
+    except Exception as exc:  # noqa: BLE001 - supervisor must remain non-fatal
+        LOGGER.warning(
+            "POLLING_FALLBACK_START_FAILED reason=%s error_type=%s error=%s",
+            decision_reason,
+            type(exc).__name__,
+            exc,
+            extra={
+                "event": "POLLING_FALLBACK_START_FAILED",
+                "reason": decision_reason,
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+            },
+        )
+
+
+_FUTURES_STALE_BLOCKER = "futures_live_tick_stale"
+
+
+def _futures_live_tick_stale(ctx: Any) -> bool:
+    """Return whether readiness reports a stale futures market event."""
+    blockers = getattr(ctx, "readiness_blockers", None)
+    if isinstance(blockers, (list, tuple, set, frozenset)):
+        if any(_FUTURES_STALE_BLOCKER == str(item) for item in blockers):
+            return True
+    return _FUTURES_STALE_BLOCKER in str(
+        getattr(ctx, "live_block_reason", "") or ""
+    )
+
+
 def _safe_supervisor_call(
     name: str, fn: Any, *args: Any, default: Any = None, **kwargs: Any
 ) -> Any:
@@ -546,22 +632,11 @@ async def _polling_failover_supervisor_iteration(
                 "age_ms": None,
             },
         )
-        if bool(
-            _safe_supervisor_call(
-                "polling_fallback.is_running",
-                getattr(polling_fallback, "is_running", None),
-                default=False,
-            )
-        ):
-            _safe_supervisor_call(
-                "polling_fallback.set_websocket_mode",
-                getattr(polling_fallback, "set_websocket_mode", None),
-                True,
-            )
-            _safe_supervisor_call(
-                "polling_fallback.stop", getattr(polling_fallback, "stop", None)
-            )
-        return None, recovered_since
+        await _stop_polling_fallback_safely(
+            polling_fallback,
+            reason="market_closed",
+        )
+        return None, now_mono
 
     ws_ok = bool(
         _safe_supervisor_call(
@@ -606,6 +681,9 @@ async def _polling_failover_supervisor_iteration(
         feed_health = {}
     if not isinstance(feed_health, Mapping):
         feed_health = {}
+    if _futures_live_tick_stale(ctx):
+        feed_health = dict(feed_health)
+        feed_health["required_symbol_recovery_active"] = True
     futures_fresh = bool(feed_health.get("futures_fresh"))
     options_fresh = bool(feed_health.get("options_fresh"))
     spot_fresh = bool(feed_health.get("spot_fresh"))
@@ -617,9 +695,15 @@ async def _polling_failover_supervisor_iteration(
         default=quote_stale_ms + 1,
     )
     try:
-        lagging = float(auth_tick_age_ms) > float(quote_stale_ms)
+        age_lagging = float(auth_tick_age_ms) > float(quote_stale_ms)
     except (TypeError, ValueError):
-        lagging = True
+        age_lagging = True
+    lagging = bool(
+        age_lagging
+        or feed_health.get("lagging")
+        or feed_health.get("event_loop_lagging")
+        or getattr(ctx, "event_loop_lagging", False)
+    )
     try:
         decision_data_age_ms = (
             float(auth_tick_age_ms) if auth_tick_age_ms is not None else None
@@ -634,6 +718,37 @@ async def _polling_failover_supervisor_iteration(
         quote_stale_ms=quote_stale_ms,
         feed_health=feed_health,
         data_age_ms=decision_data_age_ms,
+    )
+    log_state_change(
+        LOGGER,
+        "POLLING_FALLBACK_DECISION",
+        (
+            decision.activate,
+            decision.reason,
+            decision.ws_ok,
+            decision.lagging,
+            decision.futures_fresh,
+            decision.options_fresh,
+            decision.required_symbol_recovery_active,
+            decision.stale_required_symbols,
+        ),
+        level=logging.INFO,
+        msg=(
+            "POLLING_FALLBACK_DECISION activate=%s reason=%s ws_ok=%s "
+            "lagging=%s futures_fresh=%s options_fresh=%s max_age_ms=%s "
+            "threshold_ms=%s"
+        )
+        % (
+            decision.activate,
+            decision.reason,
+            decision.ws_ok,
+            decision.lagging,
+            decision.futures_fresh,
+            decision.options_fresh,
+            decision.max_age_ms,
+            decision.threshold_ms,
+        ),
+        extra=decision.as_log_extra(),
     )
     if decision.activate:
         recovered_since = None
@@ -668,26 +783,10 @@ async def _polling_failover_supervisor_iteration(
                     "authoritative_age_ms": auth_tick_age_ms,
                 },
             )
-            try:
-                mode_fn = getattr(polling_fallback, "set_websocket_mode", None)
-                if callable(mode_fn):
-                    mode_fn(False)
-                start_fn = getattr(polling_fallback, "start", None)
-                if callable(start_fn):
-                    start_fn()
-            except Exception as exc:
-                LOGGER.warning(
-                    "POLLING_FALLBACK_START_FAILED reason=%s error_type=%s error=%s",
-                    decision.reason,
-                    type(exc).__name__,
-                    exc,
-                    extra={
-                        "event": "POLLING_FALLBACK_START_FAILED",
-                        "reason": decision.reason,
-                        "error_type": type(exc).__name__,
-                        "error": str(exc),
-                    },
-                )
+            await _start_polling_fallback_safely(
+                polling_fallback,
+                decision_reason=decision.reason,
+            )
         return degraded_since, recovered_since
 
     if not spot_fresh:
@@ -729,13 +828,9 @@ async def _polling_failover_supervisor_iteration(
             "Polling fallback deactivate (supervisor) after ws recovery cooldown",
             extra={"event": "polling_fallback_deactivated"},
         )
-        _safe_supervisor_call(
-            "polling_fallback.set_websocket_mode",
-            getattr(polling_fallback, "set_websocket_mode", None),
-            True,
-        )
-        _safe_supervisor_call(
-            "polling_fallback.stop", getattr(polling_fallback, "stop", None)
+        await _stop_polling_fallback_safely(
+            polling_fallback,
+            reason="feed_recovered",
         )
     return degraded_since, recovered_since
 
