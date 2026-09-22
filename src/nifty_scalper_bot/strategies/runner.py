@@ -16608,23 +16608,6 @@ class StrategyRunner:
                                 "quote_update_version_source": quote_update_version_source,
                             }
                         )
-                        for microstructure_key in (
-                            "ofi_ready",
-                            "ofi_event",
-                            "ofi_1s",
-                            "ofi_3s",
-                            "ofi_1s_normalized",
-                            "ofi_3s_normalized",
-                            "ofi_update_count_1s",
-                            "ofi_update_count_3s",
-                            "ofi_source",
-                            "queue_imbalance_top",
-                        ):
-                            microstructure_value = quote_map.get(microstructure_key)
-                            if microstructure_value is None:
-                                microstructure_value = tick_map.get(microstructure_key)
-                            if microstructure_value is not None:
-                                runtime_ctx[microstructure_key] = microstructure_value
                         indicators_ctx.update(runtime_ctx)
                         if hasattr(self._indicator_engine, "set_runtime_context"):
                             self._indicator_engine.set_runtime_context(
