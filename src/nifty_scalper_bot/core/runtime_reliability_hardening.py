@@ -8,13 +8,12 @@ diagnostics while preserving fail-closed behavior for entry-critical queues.
 
 from __future__ import annotations
 
+import time
 from datetime import datetime
 from functools import wraps
-import logging
-import time
 from typing import Any, Mapping
 
-from nifty_scalper_bot.utils.logging import get_logger, log_throttled
+from nifty_scalper_bot.utils.logging import get_logger
 from nifty_scalper_bot.utils.symbols import normalize_symbol
 
 _LOG = get_logger(__name__)
