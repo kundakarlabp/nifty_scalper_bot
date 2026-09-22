@@ -1,4 +1,4 @@
-from nifty_scalper_bot.strategies.elite_strategies import order_flow
+import nifty_scalper_bot.strategies.elite_strategies.order_flow as order_flow
 
 
 SYMBOL = "NFO:NIFTY26SEP25000CE"
