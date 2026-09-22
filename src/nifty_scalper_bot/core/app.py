@@ -692,6 +692,9 @@ async def _polling_failover_supervisor_iteration(
     mdm = getattr(ctx, "market_data_manager", None)
     feed_health = _safe_feed_health(mdm)
     data_age_ms = _safe_data_age_ms(mdm)
+    if _futures_live_tick_stale(ctx):
+        feed_health = dict(feed_health)
+        feed_health["required_symbol_recovery_active"] = True
 
     lagging = bool(
         feed_health.get("lagging")
