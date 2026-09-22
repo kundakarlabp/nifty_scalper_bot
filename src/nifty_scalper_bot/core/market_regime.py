@@ -490,7 +490,10 @@ class MarketRegimeDetector:
             raise
 
     def get_snapshot(self, symbol: str) -> RegimeSnapshot | None:
-        """Return cached regime snapshot for *symbol*. Args: symbol. Returns: snapshot. Raises: None."""
+        """Return cached regime snapshot for *symbol*.
+
+        Args: symbol. Returns: snapshot. Raises: None.
+        """
         self._logger.debug(
             "Entered MarketRegimeDetector.get_snapshot",
             extra={"event": "regime_get_snapshot", "symbol": symbol},

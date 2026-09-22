@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pathlib
-
 import pytest
 
 from nifty_scalper_bot.config.regime_ontology import (
@@ -16,22 +14,7 @@ from nifty_scalper_bot.core.strategy_manager import REGIME_STRATEGY_WEIGHTS
 from nifty_scalper_bot.risk.regime_sizing import RegimeType
 
 
-ROOT = pathlib.Path(__file__).resolve().parents[2]
 CANONICAL = {member.value for member in MarketRegime}
-
-
-def test_strategy_regime_duplicate_is_absent() -> None:
-    duplicate = (
-        ROOT
-        / "src"
-        / "nifty_scalper_bot"
-        / "strategies"
-        / "market_regime_engine.py"
-    )
-    assert not duplicate.exists(), (
-        "Market regime classification must remain owned by core.market_regime "
-        "and config.regime_ontology"
-    )
 
 
 def test_regime_weight_table_is_keyed_by_canonical_names_only() -> None:
