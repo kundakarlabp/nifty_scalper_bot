@@ -71,7 +71,8 @@ class RuntimeBracketManager(LedgerBracketManager):
                 quantity = self._broker_position_quantity(symbol)
             except Exception as exc:  # noqa: BLE001 - unknown remains blocked
                 _core.LOGGER.error(
-                    "FILL_LEDGER_ORPHAN_POSITION_CHECK_FAILED bracket_id=%s symbol=%s error=%s",
+                    "FILL_LEDGER_ORPHAN_POSITION_CHECK_FAILED bracket_id=%s symbol=%s "
+                    "error=%s",
                     bracket_id,
                     symbol,
                     exc,
@@ -92,7 +93,8 @@ class RuntimeBracketManager(LedgerBracketManager):
 
         if flat is not True:
             _core.LOGGER.warning(
-                "FILL_LEDGER_ORPHAN_BLOCK_RETAINED bracket_id=%s symbol=%s broker_flat=%s",
+                "FILL_LEDGER_ORPHAN_BLOCK_RETAINED bracket_id=%s symbol=%s "
+                "broker_flat=%s",
                 bracket_id,
                 symbol or "unknown",
                 flat,
@@ -197,7 +199,8 @@ class RuntimeBracketManager(LedgerBracketManager):
         with suppress(Exception):
             self.save_state()
         _core.LOGGER.critical(
-            "PARTIAL_ENTRY_PROTECTED order_id=%s symbol=%s planned_qty=%s filled_qty=%s fill_price=%.2f",
+            "PARTIAL_ENTRY_PROTECTED order_id=%s symbol=%s planned_qty=%s "
+            "filled_qty=%s fill_price=%.2f",
             order_id,
             bracket.symbol,
             planned_quantity,
@@ -356,7 +359,8 @@ class RuntimeBracketManager(LedgerBracketManager):
         with suppress(Exception):
             self.save_state()
         _core.LOGGER.info(
-            "EXIT_ORDER_CORRELATED bracket_id=%s order_id=%s symbol=%s source=%s reason=%s qty=%s fill_price=%s",
+            "EXIT_ORDER_CORRELATED bracket_id=%s order_id=%s symbol=%s source=%s "
+            "reason=%s qty=%s fill_price=%s",
             bracket.bracket_id,
             order_id,
             symbol,
@@ -507,7 +511,11 @@ class RuntimeBracketManager(LedgerBracketManager):
         realized_pnl = ledger_pnl.gross_pnl if ledger_pnl is not None else None
         if realized_pnl is None:
             try:
-                if entry_px is not None and final_exit_px is not None and filled_qty > 0:
+                if (
+                    entry_px is not None
+                    and final_exit_px is not None
+                    and filled_qty > 0
+                ):
                     if bracket.side == "BUY":
                         realized_pnl = round(
                             (float(final_exit_px) - float(entry_px)) * filled_qty,
@@ -539,7 +547,8 @@ class RuntimeBracketManager(LedgerBracketManager):
         )
         setattr(bracket, "_completed_trade_outcome", outcome)
         _core.LOGGER.info(
-            "BRACKET_CLOSED bracket_id=%s symbol=%s close_source=%s side=%s qty=%s entry=%s exit=%s pnl=%s",
+            "BRACKET_CLOSED bracket_id=%s symbol=%s close_source=%s side=%s "
+            "qty=%s entry=%s exit=%s pnl=%s",
             bracket.bracket_id,
             bracket.symbol,
             close_source,

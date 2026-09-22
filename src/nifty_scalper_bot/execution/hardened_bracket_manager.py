@@ -7,11 +7,11 @@ and installs a final unresolved-exit guard on the attached OrderManager.
 
 from __future__ import annotations
 
-from contextlib import suppress
 import functools
 import math
 import os
 import time
+from contextlib import suppress
 from typing import Any, Mapping
 
 import nifty_scalper_bot.execution.bracket_core as _core
@@ -381,7 +381,8 @@ class HardenedBracketManager(_CoreBracketManager):
             self._exit_rescue_attempts[bracket.bracket_id] = attempts + 1
 
         _core.LOGGER.critical(
-            "EXIT_STALE_ORDER_RESCUE bracket_id=%s order_id=%s status=%s qty=%s rescue_attempt=%s",
+            "EXIT_STALE_ORDER_RESCUE bracket_id=%s order_id=%s status=%s "
+            "qty=%s rescue_attempt=%s",
             bracket.bracket_id,
             order_id,
             status,
@@ -466,7 +467,8 @@ class HardenedBracketManager(_CoreBracketManager):
                 bracket.escalated_at = None
                 self._exit_order_open_since[new_order_id] = time.time()
                 _core.LOGGER.critical(
-                    "EXIT_RESCUE_ORDER_SUBMITTED bracket_id=%s prior_order_id=%s new_order_id=%s attempt=%s qty=%s",
+                    "EXIT_RESCUE_ORDER_SUBMITTED bracket_id=%s prior_order_id=%s "
+                    "new_order_id=%s attempt=%s qty=%s",
                     bracket.bracket_id,
                     prior_order_id,
                     new_order_id,
