@@ -1,0 +1,129 @@
+def test_regime_weight_table_is_keyed_by_canonical_names_only() -> None:
+    from nifty_scalper_bot.config.regime_ontology import MarketRegime
+    from nifty_scalper_bot.core.strategy_manager import REGIME_STRATEGY_WEIGHTS
+
+    canonical = {member.value for member in MarketRegime}
+    unknown_keys = set(REGIME_STRATEGY_WEIGHTS) - canonical
+    assert unknown_keys == set(), f"non-canonical weight rows: {sorted(unknown_keys)}"
+
+
+def test_core_detector_regimes_normalise_to_canonical_names() -> None:
+    from nifty_scalper_bot.config.regime_ontology import (
+        MarketRegime,
+        normalize_regime,
+    )
+
+    canonical = {member.value for member in MarketRegime}
+    for emitted in ("trend", "range", "volatile", "event"):
+        assert normalize_regime(emitted) is not MarketRegime.UNKNOWN
+        assert normalize_regime(emitted).value in canonical
+
+
+def test_detector_classify_outputs_are_canonical() -> None:
+    from nifty_scalper_bot.config.regime_ontology import (
+        MarketRegime,
+        normalize_regime,
+    )
+    from nifty_scalper_bot.core.market_regime import MarketRegimeDetector
+
+    detector = MarketRegimeDetector()
+    features = {
+        "adx": 32.0,
+        "atr": 14.0,
+        "price_momentum": 0.02,
+        "ema_fast": 102.0,
+        "ema_slow": 100.0,
+        "close": 100.0,
+        "price": 100.0,
+        "volume_ratio": 1.1,
+    }
+    snapshot = detector.evaluate("NSE:NIFTY", features)
+    assert snapshot is not None
+    assert normalize_regime(snapshot.regime) is not MarketRegime.UNKNOWN
+
+
+def test_risk_regime_sizing_labels_are_canonical() -> None:
+    from nifty_scalper_bot.config.regime_ontology import (
+        MarketRegime,
+        normalize_regime,
+    )
+    from nifty_scalper_bot.risk.regime_sizing import RegimeType
+
+    canonical = {member.value for member in MarketRegime}
+    for member in RegimeType:
+        assert normalize_regime(member.value).value in canonical
+
+
+def test_legacy_labels_normalise_to_canonical() -> None:
+    from nifty_scalper_bot.config.regime_ontology import (
+        MarketRegime,
+        normalize_regime,
+    )
+
+    cases = (
+        ("TREND_UP", MarketRegime.TREND),
+        ("TREND_DOWN", MarketRegime.TREND),
+        ("trending", MarketRegime.TREND),
+        ("CHOPPY", MarketRegime.RANGE),
+        ("NORMAL", MarketRegime.RANGE),
+        ("ranging", MarketRegime.RANGE),
+        ("HIGH_VOLATILITY", MarketRegime.VOLATILE),
+        ("HIGHVOL", MarketRegime.VOLATILE),
+        ("LOW_VOLATILITY", MarketRegime.LOW_ACTIVITY),
+        ("event", MarketRegime.EVENT),
+    )
+    for raw, expected in cases:
+        assert normalize_regime(raw) is expected
+
+
+def test_unresolvable_labels_fail_closed_as_unknown() -> None:
+    from nifty_scalper_bot.config.regime_ontology import (
+        MarketRegime,
+        normalize_regime,
+    )
+
+    for raw in (None, "", "   ", "gibberish", 17, object()):
+        assert normalize_regime(raw) is MarketRegime.UNKNOWN
+
+
+def test_enum_and_snapshot_inputs_are_accepted() -> None:
+    from nifty_scalper_bot.config.regime_ontology import (
+        MarketRegime,
+        normalize_regime,
+        regime_label,
+    )
+
+    class _Snapshot:
+        regime = "volatile"
+
+    assert normalize_regime(MarketRegime.EVENT) is MarketRegime.EVENT
+    assert normalize_regime(_Snapshot()) is MarketRegime.VOLATILE
+    assert regime_label("trend_up") == "TREND"
+
+
+def test_trend_regime_now_receives_its_configured_weight() -> None:
+    from nifty_scalper_bot.config.regime_ontology import (
+        MarketRegime,
+        normalize_regime,
+    )
+    from nifty_scalper_bot.core.strategy_manager import REGIME_STRATEGY_WEIGHTS
+
+    trend_row = REGIME_STRATEGY_WEIGHTS[MarketRegime.TREND.value]
+    assert trend_row["SMC"] > 1.0
+    assert (
+        REGIME_STRATEGY_WEIGHTS[normalize_regime("trend").value]["SMC"]
+        == trend_row["SMC"]
+    )
+
+
+def test_defensive_regimes_damp_directional_triggers() -> None:
+    from nifty_scalper_bot.config.regime_ontology import MarketRegime
+    from nifty_scalper_bot.core.strategy_manager import REGIME_STRATEGY_WEIGHTS
+
+    for regime in (
+        MarketRegime.VOLATILE,
+        MarketRegime.EVENT,
+        MarketRegime.LOW_ACTIVITY,
+    ):
+        row = REGIME_STRATEGY_WEIGHTS[regime.value]
+        assert row["SMC"] < 1.0

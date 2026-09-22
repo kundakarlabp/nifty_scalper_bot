@@ -81,7 +81,7 @@ from nifty_scalper_bot.config.defaults import (
 from nifty_scalper_bot.config.entry_policy import resolve_entry_policy
 from nifty_scalper_bot.config.env_utils import parse_float_env, parse_int_env
 from nifty_scalper_bot.config.env_utils import resolve_build_sha as _resolve_build_sha
-from nifty_scalper_bot.config.regime_ontology import normalize_regime
+from nifty_scalper_bot.config.regime_ontology import MarketRegime, normalize_regime
 from nifty_scalper_bot.config.settings import get_settings
 from nifty_scalper_bot.core.active_basket import (
     ActiveContractSelection,
@@ -93,6 +93,7 @@ from nifty_scalper_bot.core.history_roles import (
     history_role_priority,
     resolve_symbol_history_role,
 )
+from nifty_scalper_bot.core.market_regime import classify_runner_regime
 from nifty_scalper_bot.core.message_bus import Message, MessageBus
 from nifty_scalper_bot.core.strategy_manager import StrategyManager
 from nifty_scalper_bot.core.trade_manager import TradeManager
@@ -151,10 +152,6 @@ from nifty_scalper_bot.risk.position_sizing import (
 )
 from nifty_scalper_bot.strategies.bar_builder import OneMinuteBar, OneMinuteBarBuilder
 from nifty_scalper_bot.strategies.indicators import IndicatorEngine
-from nifty_scalper_bot.strategies.market_regime_engine import (
-    MarketRegime,
-    MarketRegimeEngine,
-)
 from nifty_scalper_bot.strategies.premium_risk_geometry import (
     anchor_option_geometry_to_execution,
     apply_cost_aware_risk_floor,
@@ -1365,7 +1362,6 @@ class StrategyRunner:
             os.getenv("GLOBAL_MIN_SIGNAL_CONFIDENCE", "0.45")
         )
         self._max_nifty_positions = int(os.getenv("MAX_NIFTY_POSITIONS", "1"))
-        self._market_regime_engine = MarketRegimeEngine()
         self._last_regime_by_symbol: dict[str, MarketRegime] = {}
         self._last_regime_inputs_by_symbol: dict[str, dict[str, Any]] = {}
         self._build_info = {
@@ -9918,7 +9914,7 @@ class StrategyRunner:
             history_tail = history[-3:] if history else []
             reference = sum(float(v) for v in history_tail) / max(len(history_tail), 1)
             vwap_slope = (current_vwap - reference) if reference > 0 else 0.0
-            snapshot = self._market_regime_engine.classify(
+            regime = classify_runner_regime(
                 {
                     "adx": indicators.get("adx"),
                     "atr": indicators.get("atr"),
@@ -9937,8 +9933,8 @@ class StrategyRunner:
                 "volume_expansion": volume_expansion,
                 "vwap": current_vwap,
             }
-            self._last_regime_by_symbol[symbol] = snapshot.regime
-            return snapshot.regime
+            self._last_regime_by_symbol[symbol] = regime
+            return regime
         except Exception as exc:
             self._logger.error(
                 "Failure in StrategyRunner._compute_regime_snapshot: %s", exc
