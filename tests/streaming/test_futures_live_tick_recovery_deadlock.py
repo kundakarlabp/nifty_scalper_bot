@@ -33,7 +33,8 @@ class _Fallback:
 
 
 @pytest.mark.asyncio
-async def test_futures_live_tick_stale_readiness_forces_existing_recovery_path() -> None:
+async def test_futures_live_tick_stale_readiness_forces_existing_recovery_path(
+) -> None:
     """Fresh packet arrivals must not suppress recovery of a stale market event."""
     ctx = SimpleNamespace(
         is_market_open_now=lambda: True,
@@ -165,7 +166,11 @@ def _run_one_poll_cycle(
     poller._fetch_ticks = fetch
 
     monkeypatch.setattr(polling_module, "get_market_state", lambda: MarketState.OPEN)
-    monkeypatch.setattr(polling_module.time, "sleep", lambda _seconds: poller._stop.set())
+    monkeypatch.setattr(
+        polling_module.time,
+        "sleep",
+        lambda _seconds: poller._stop.set(),
+    )
 
     poller._run()
     return fetch
