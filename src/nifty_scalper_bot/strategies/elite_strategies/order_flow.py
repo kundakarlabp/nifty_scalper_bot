@@ -67,7 +67,9 @@ def _depth_supports_side(
     )
 
 
-def _normalised_depth_thresholds(config: OrderFlowStrategyConfig) -> tuple[float, float]:
+def _normalised_depth_thresholds(
+    config: OrderFlowStrategyConfig,
+) -> tuple[float, float]:
     """Return canonical support/strong-support thresholds from strategy config."""
     support = max(0.05, min(0.50, float(config.large_order_threshold_pct) / 100.0))
     ratio = max(1.0, float(config.imbalance_ratio_min))
@@ -142,6 +144,7 @@ class OrderFlowStrategy(EliteStrategy):
         super().__init__(config=config, indicator_engine=indicator_engine)
         self._cfg = config
         self._reversal_confirmation: dict[str, dict[str, Any]] = {}
+        self._ofi_state: dict[str, dict[str, Any]] = {}
 
     def get_required_indicators(self) -> set[str]:
         """Args: none. Returns: indicator keys. Raises: Exception."""
@@ -156,6 +159,133 @@ class OrderFlowStrategy(EliteStrategy):
             "spread_pct",
             "atr",
         }
+
+    def _temporal_ofi_snapshot(
+        self,
+        *,
+        symbol: str,
+        bid: float,
+        ask: float,
+        bids: list[Any],
+        asks: list[Any],
+        update_version: object | None,
+    ) -> dict[str, Any]:
+        """Aggregate best-book OFI across distinct strategy quote updates."""
+        if not bids or not asks:
+            return {}
+        bid_qty = _safe_float_value(
+            bids[0].get("quantity") if isinstance(bids[0], Mapping) else None
+        )
+        ask_qty = _safe_float_value(
+            asks[0].get("quantity") if isinstance(asks[0], Mapping) else None
+        )
+        if (
+            bid <= 0.0
+            or ask <= bid
+            or bid_qty is None
+            or ask_qty is None
+            or bid_qty <= 0.0
+            or ask_qty <= 0.0
+        ):
+            return {}
+
+        version = update_version
+        if version in (None, "", 0, 0.0):
+            version = (
+                round(bid, 4),
+                round(ask, 4),
+                round(bid_qty, 2),
+                round(ask_qty, 2),
+            )
+        now = time.monotonic()
+        state = self._ofi_state.get(symbol)
+        if state is not None and state.get("version") == version:
+            return dict(state.get("snapshot") or {})
+
+        current = {
+            "bid": float(bid),
+            "ask": float(ask),
+            "bid_qty": float(bid_qty),
+            "ask_qty": float(ask_qty),
+            "observed_at": now,
+        }
+        previous = state.get("last") if isinstance(state, Mapping) else None
+        previous_at = (
+            _safe_float_value(previous.get("observed_at"))
+            if isinstance(previous, Mapping)
+            else None
+        )
+        if (
+            not isinstance(previous, Mapping)
+            or previous_at is None
+            or now <= previous_at
+            or now - previous_at > 5.0
+        ):
+            snapshot = {
+                "ofi_ready": False,
+                "ofi_event": 0.0,
+                "ofi_1s": 0.0,
+                "ofi_3s": 0.0,
+                "ofi_1s_normalized": 0.0,
+                "ofi_3s_normalized": 0.0,
+                "ofi_update_count_1s": 0,
+                "ofi_update_count_3s": 0,
+                "ofi_source": "strategy_quote_updates",
+                "queue_imbalance_top": (bid_qty - ask_qty)
+                / max(bid_qty + ask_qty, 1.0),
+            }
+            self._ofi_state[symbol] = {
+                "version": version,
+                "last": current,
+                "events": [],
+                "snapshot": snapshot,
+            }
+            return dict(snapshot)
+
+        prev_bid = float(previous["bid"])
+        prev_ask = float(previous["ask"])
+        prev_bid_qty = float(previous["bid_qty"])
+        prev_ask_qty = float(previous["ask_qty"])
+        ofi_event = (
+            (bid_qty if bid >= prev_bid else 0.0)
+            - (prev_bid_qty if bid <= prev_bid else 0.0)
+            - (ask_qty if ask <= prev_ask else 0.0)
+            + (prev_ask_qty if ask >= prev_ask else 0.0)
+        )
+        depth_scale = max((bid_qty + ask_qty) / 2.0, 1.0)
+        events = list(state.get("events") or []) if isinstance(state, Mapping) else []
+        events.append((now, float(ofi_event), float(depth_scale)))
+        events = [event for event in events if now - float(event[0]) <= 3.0]
+
+        def _window(seconds: float) -> tuple[float, float, int]:
+            window = [event for event in events if now - float(event[0]) <= seconds]
+            if not window:
+                return 0.0, 0.0, 0
+            total = sum(float(event[1]) for event in window)
+            mean_depth = sum(float(event[2]) for event in window) / len(window)
+            return total, total / max(mean_depth, 1.0), len(window)
+
+        ofi_1s, ofi_1s_normalized, count_1s = _window(1.0)
+        ofi_3s, ofi_3s_normalized, count_3s = _window(3.0)
+        snapshot = {
+            "ofi_ready": count_1s >= 2,
+            "ofi_event": float(ofi_event),
+            "ofi_1s": ofi_1s,
+            "ofi_3s": ofi_3s,
+            "ofi_1s_normalized": ofi_1s_normalized,
+            "ofi_3s_normalized": ofi_3s_normalized,
+            "ofi_update_count_1s": count_1s,
+            "ofi_update_count_3s": count_3s,
+            "ofi_source": "strategy_quote_updates",
+            "queue_imbalance_top": (bid_qty - ask_qty) / max(bid_qty + ask_qty, 1.0),
+        }
+        self._ofi_state[symbol] = {
+            "version": version,
+            "last": current,
+            "events": events,
+            "snapshot": snapshot,
+        }
+        return dict(snapshot)
 
     def _reversal_persistence_confirmed(
         self,
@@ -205,7 +335,7 @@ class OrderFlowStrategy(EliteStrategy):
         current_price: float,
         position: Any | None = None,
     ) -> EliteSignal | None:
-        """Args: symbol, indicators, current_price, position. Returns: EliteSignal|None. Raises: Exception."""
+        """Evaluate the current quote and return OrderFlow context when usable."""
         del position
         try:
             self._no_vote("stale_or_invalid_data")
@@ -217,12 +347,10 @@ class OrderFlowStrategy(EliteStrategy):
             contract_side, option_premium_domain, _ = resolve_signal_domain(
                 symbol, indicators
             )
-            atr = max(
-                float(indicators.get("atr") or 0.0), current_price * 0.01, 1.0
+            atr = max(float(indicators.get("atr") or 0.0), current_price * 0.01, 1.0)
+            execution_mode = (
+                str(os.getenv("EXECUTION_MODE", "SHADOW") or "SHADOW").strip().upper()
             )
-            execution_mode = str(
-                os.getenv("EXECUTION_MODE", "SHADOW") or "SHADOW"
-            ).strip().upper()
             is_live_mode = execution_mode == "LIVE"
 
             # ROLE (structural, not configurable): OrderFlow is CONTEXT ONLY.
@@ -252,9 +380,7 @@ class OrderFlowStrategy(EliteStrategy):
             quote_depth_valid = False
             tick_age_ms: float | None = None
             quote_update_version: object | None = None
-            max_tick_age_ms = float(
-                os.getenv("LIVE_MAX_TICK_AGE_MS", "2500") or "2500"
-            )
+            max_tick_age_ms = float(os.getenv("LIVE_MAX_TICK_AGE_MS", "2500") or "2500")
 
             if bid <= 0 or ask <= 0 or ask <= bid:
                 self._no_vote("ltp_only_no_depth" if not depth else "missing_bid_ask")
@@ -307,6 +433,14 @@ class OrderFlowStrategy(EliteStrategy):
             quote_depth_valid = quote_readiness.depth_available
             tick_age_ms = quote_readiness.tick_age_ms
             quote_update_version = quote_readiness.quote_update_version
+            ofi_snapshot = self._temporal_ofi_snapshot(
+                symbol=symbol,
+                bid=bid,
+                ask=ask,
+                bids=bids,
+                asks=asks,
+                update_version=quote_update_version,
+            )
 
             if total_bid + total_ask <= 0:
                 allow_fallback = str(
@@ -401,9 +535,7 @@ class OrderFlowStrategy(EliteStrategy):
                     "side": side,
                     "trade_side": side,
                     "contract_side": side,
-                    "direction_bias": direction
-                    if direction in {"CE", "PE"}
-                    else None,
+                    "direction_bias": direction if direction in {"CE", "PE"} else None,
                     "strategy_score": strategy_score,
                     "setup_quality": strategy_score,
                     "spread_pct": round(spread_pct, 3),
@@ -416,18 +548,18 @@ class OrderFlowStrategy(EliteStrategy):
                     "trigger_block_reason": trigger_block_reason,
                     "quote_depth_valid": False,
                     "can_trigger": bool(trigger_conditions_met),
-                    "spread_score": 2.0
-                    if spread_pct <= trigger_max_spread_pct
-                    else 0.0,
+                    "spread_score": (
+                        2.0 if spread_pct <= trigger_max_spread_pct else 0.0
+                    ),
                     "depth_score": 0.0,
                     "tick_score": 2.0 if tick_supports else 0.0,
-                    "direction_alignment_score": 1.0
-                    if (direction in {"CE", "PE"} and direction == side)
-                    else 0.0,
-                    "freshness_score": 0.0,
-                    "premium_stop_distance": max(
-                        0.8 * atr, current_price * 0.02, 1.0
+                    "direction_alignment_score": (
+                        1.0
+                        if (direction in {"CE", "PE"} and direction == side)
+                        else 0.0
                     ),
+                    "freshness_score": 0.0,
+                    "premium_stop_distance": max(0.8 * atr, current_price * 0.02, 1.0),
                     "premium_target_rr": 1.8,
                     "tradable_quote": tradable_quote,
                     "depth_available": depth_available,
@@ -439,16 +571,20 @@ class OrderFlowStrategy(EliteStrategy):
                     "context_role": "confirmation",
                     "vote_timestamp": time.time(),
                     "context_evidence_score": context_evidence_score,
-                    "context_bonus_score": context_confirmation_score
-                    if context_quality_eligible and side_aligns
-                    else 0.0,
-                    "context_veto_score": strategy_score
-                    if (
-                        context_quality_eligible
-                        and direction in {"CE", "PE"}
-                        and direction != side
-                    )
-                    else 0.0,
+                    "context_bonus_score": (
+                        context_confirmation_score
+                        if context_quality_eligible and side_aligns
+                        else 0.0
+                    ),
+                    "context_veto_score": (
+                        strategy_score
+                        if (
+                            context_quality_eligible
+                            and direction in {"CE", "PE"}
+                            and direction != side
+                        )
+                        else 0.0
+                    ),
                     "tick_supports_direction": tick_supports,
                 }
                 return EliteSignal(
@@ -463,20 +599,50 @@ class OrderFlowStrategy(EliteStrategy):
                     metadata=metadata,
                 )
 
-            depth_imbalance = (total_bid - total_ask) / max(
-                total_bid + total_ask, 1.0
-            )
+            depth_imbalance = (total_bid - total_ask) / max(total_bid + total_ask, 1.0)
             side = (
                 contract_side
                 if option_premium_domain
                 else ("CE" if depth_imbalance > 0 else "PE")
+            )
+            ofi_1s_normalized = _safe_float_value(ofi_snapshot.get("ofi_1s_normalized"))
+            ofi_threshold = max(
+                0.01, safe_float_env("ORDERFLOW_OFI_NORMALIZED_MIN", 0.10)
+            )
+            ofi_directional = bool(
+                ofi_snapshot.get("ofi_ready")
+                and ofi_1s_normalized is not None
+                and abs(ofi_1s_normalized) >= ofi_threshold
+            )
+            ofi_value = ofi_1s_normalized if ofi_1s_normalized is not None else 0.0
+            ofi_supports_side = bool(
+                ofi_directional
+                and _depth_supports_side(
+                    ofi_value,
+                    side=side,
+                    option_premium_domain=option_premium_domain,
+                    threshold=ofi_threshold,
+                )
+            )
+            ofi_conflicts_side = bool(
+                ofi_directional
+                and _depth_supports_side(
+                    -ofi_value,
+                    side=side,
+                    option_premium_domain=option_premium_domain,
+                    threshold=ofi_threshold,
+                )
             )
             clear_adverse_flow = bool(
                 option_premium_domain
                 and quote_depth_valid
                 and depth_available
                 and depth_imbalance <= -0.10
-                and tick_direction not in {"UP", "BUY"}
+                and (
+                    ofi_conflicts_side
+                    if ofi_directional
+                    else tick_direction not in {"UP", "BUY"}
+                )
             )
             if clear_adverse_flow:
                 self._no_vote("negative_premium_flow")
@@ -484,9 +650,7 @@ class OrderFlowStrategy(EliteStrategy):
 
             score = 0.0
             reasons: list[str] = []
-            context_spread_limit = (
-                trigger_max_spread_pct if is_live_mode else 12.0
-            )
+            context_spread_limit = trigger_max_spread_pct if is_live_mode else 12.0
             spread_score = 0.0
             if spread_pct <= context_spread_limit:
                 spread_score = 2.0
@@ -526,16 +690,28 @@ class OrderFlowStrategy(EliteStrategy):
                     or (side == "PE" and tick_direction in {"DOWN", "SELL"})
                 )
             )
-            tick_score = 2.0 if tick_supports else 0.0
-            if tick_supports:
+            flow_confirmation_source = (
+                "temporal_ofi" if ofi_directional else "tick_direction"
+            )
+            flow_supports = ofi_supports_side if ofi_directional else tick_supports
+            tick_score = 2.0 if flow_supports else 0.0
+            if flow_supports:
                 score += tick_score
-                reasons.append("tick_direction_alignment")
+                reasons.append(
+                    "temporal_ofi_alignment"
+                    if ofi_directional
+                    else "tick_direction_alignment"
+                )
+            elif ofi_directional and ofi_conflicts_side:
+                reasons.append("temporal_ofi_conflict")
             side_aligns = direction in {"CE", "PE"} and direction == side
             direction_score = 1.0 if side_aligns else 0.0
             if side_aligns:
                 score += direction_score
                 reasons.append("direction_context_alignment")
-            freshness_score = 1.0 if not bool(indicators.get("stale_data_used")) else 0.0
+            freshness_score = (
+                1.0 if not bool(indicators.get("stale_data_used")) else 0.0
+            )
             if freshness_score:
                 score += freshness_score
                 reasons.append("fresh_context")
@@ -555,7 +731,7 @@ class OrderFlowStrategy(EliteStrategy):
                 threshold=min_reversal_imbalance,
             )
             raw_microstructure_confirms_side = bool(
-                tick_supports and depth_available and imbalance_confirms
+                flow_supports and depth_available and imbalance_confirms
             )
             reversal_persistence_confirmed = False
             if bias_conflict and raw_microstructure_confirms_side:
@@ -594,6 +770,9 @@ class OrderFlowStrategy(EliteStrategy):
                 "BUY",
                 "SELL",
             }
+            flow_direction_missing = bool(
+                not ofi_directional and tick_direction_missing
+            )
             direction_context_missing = direction not in {"CE", "PE"}
             allow_without_direction_live = str(
                 os.getenv("ORDERFLOW_ALLOW_TRIGGER_WITHOUT_DIRECTION_LIVE", "false")
@@ -603,13 +782,9 @@ class OrderFlowStrategy(EliteStrategy):
                 or (not is_live_mode)
                 or allow_without_direction_live
             )
-            max_context_age = safe_float_env(
-                "ORDERFLOW_MAX_CONTEXT_AGE_SECONDS", 5.0
-            )
+            max_context_age = safe_float_env("ORDERFLOW_MAX_CONTEXT_AGE_SECONDS", 5.0)
             age_raw = indicators.get("context_age_seconds")
-            context_age_ok = (
-                resolve_context_age_seconds(indicators) <= max_context_age
-            )
+            context_age_ok = resolve_context_age_seconds(indicators) <= max_context_age
             if bias_invalidated_by_microstructure:
                 LOGGER.info(
                     "ORDERFLOW_STALE_BIAS_INVALIDATED symbol=%s side=%s stale_bias=%s "
@@ -644,17 +819,11 @@ class OrderFlowStrategy(EliteStrategy):
                 )
             )
             selected_or_near_atm = bool(indicators.get("is_selected_option"))
-            if (
-                not selected_or_near_atm
-                and indicators.get("strike_distance_from_atm") is not None
-            ):
-                try:
-                    selected_or_near_atm = (
-                        float(indicators.get("strike_distance_from_atm"))
-                        <= near_atm_threshold
-                    )
-                except (TypeError, ValueError):
-                    selected_or_near_atm = False
+            strike_distance_from_atm = _safe_float_value(
+                indicators.get("strike_distance_from_atm")
+            )
+            if not selected_or_near_atm and strike_distance_from_atm is not None:
+                selected_or_near_atm = strike_distance_from_atm <= near_atm_threshold
             if is_live_mode and not selected_meta_available:
                 selected_or_near_atm = False
 
@@ -662,8 +831,7 @@ class OrderFlowStrategy(EliteStrategy):
                 allow_orderflow_trigger
                 and quote_depth_valid
                 and (
-                    tradable_quote
-                    or not (is_live_mode and require_tradable_quote_live)
+                    tradable_quote or not (is_live_mode and require_tradable_quote_live)
                 )
                 and bid > 0.0
                 and ask > 0.0
@@ -673,7 +841,7 @@ class OrderFlowStrategy(EliteStrategy):
                 and side_alignment_ok
                 and direction_context_ok
                 and context_age_ok
-                and tick_supports
+                and flow_supports
                 and quote_readiness.allowed
                 and tick_age_ms is not None
                 and tick_age_ms <= max_tick_age_ms
@@ -689,7 +857,7 @@ class OrderFlowStrategy(EliteStrategy):
                 and bool(depth_available)
                 and spread_pct <= trigger_max_spread_pct
                 and bool(context_age_ok)
-                and bool(tick_supports)
+                and bool(flow_supports)
                 and tick_age_ms is not None
                 and tick_age_ms <= max_tick_age_ms
                 and bool(selected_or_near_atm)
@@ -709,7 +877,8 @@ class OrderFlowStrategy(EliteStrategy):
                 conflict_override_applied = bool(trigger_conditions_met)
                 if conflict_override_applied:
                     LOGGER.info(
-                        "ORDERFLOW_HIGH_CONVICTION_OVERRIDE symbol=%s side=%s score=%.2f spread_pct=%.2f context_age=%s",
+                        "ORDERFLOW_HIGH_CONVICTION_OVERRIDE symbol=%s side=%s "
+                        "score=%.2f spread_pct=%.2f context_age=%s",
                         symbol,
                         side,
                         strategy_score,
@@ -732,15 +901,11 @@ class OrderFlowStrategy(EliteStrategy):
                 trigger_block_reason = quote_readiness.reason
             elif not quote_depth_valid or not depth_available:
                 trigger_block_reason = "quote_depth_missing"
-            elif (
-                is_live_mode
-                and require_tradable_quote_live
-                and not tradable_quote
-            ):
+            elif is_live_mode and require_tradable_quote_live and not tradable_quote:
                 trigger_block_reason = "tradable_quote_false"
             elif tick_age_ms is None or tick_age_ms > max_tick_age_ms:
                 trigger_block_reason = "tick_stale"
-            elif tick_direction_missing:
+            elif flow_direction_missing:
                 trigger_block_reason = "tick_direction_missing_or_neutral"
             elif not direction_context_ok:
                 trigger_block_reason = "direction_context_missing_live"
@@ -751,7 +916,11 @@ class OrderFlowStrategy(EliteStrategy):
             elif not side_alignment_ok and not conflict_override_applied:
                 trigger_block_reason = "direction_bias_conflict"
                 LOGGER.info(
-                    "ORDERFLOW_DIRECTION_BIAS_CONFLICT symbol=%s underlying_direction=%s contract_side=%s depth_imbalance=%.4f tick_direction=%s side_alignment_ok=%s microstructure_confirms_side=%s bias_invalidated_by_microstructure=%s",
+                    "ORDERFLOW_DIRECTION_BIAS_CONFLICT symbol=%s "
+                    "underlying_direction=%s contract_side=%s "
+                    "depth_imbalance=%.4f tick_direction=%s "
+                    "side_alignment_ok=%s microstructure_confirms_side=%s "
+                    "bias_invalidated_by_microstructure=%s",
                     symbol,
                     direction if direction in {"CE", "PE"} else None,
                     side,
@@ -763,15 +932,17 @@ class OrderFlowStrategy(EliteStrategy):
                     extra={
                         "event": "ORDERFLOW_DIRECTION_BIAS_CONFLICT",
                         "symbol": symbol,
-                        "underlying_direction": direction
-                        if direction in {"CE", "PE"}
-                        else None,
+                        "underlying_direction": (
+                            direction if direction in {"CE", "PE"} else None
+                        ),
                         "contract_side": side,
                         "depth_imbalance": round(depth_imbalance, 4),
                         "tick_direction": tick_direction,
                         "side_alignment_ok": side_alignment_ok,
                         "microstructure_confirms_side": microstructure_confirms_side,
-                        "bias_invalidated_by_microstructure": bias_invalidated_by_microstructure,
+                        "bias_invalidated_by_microstructure": (
+                            bias_invalidated_by_microstructure
+                        ),
                     },
                 )
             elif spread_pct > trigger_max_spread_pct:
@@ -782,7 +953,7 @@ class OrderFlowStrategy(EliteStrategy):
                     if is_live_mode
                     else "score_below_trigger_min"
                 )
-            elif not tick_supports:
+            elif not flow_supports:
                 trigger_block_reason = "negative_premium_flow"
 
             context_evidence_score, context_confirmation_score = (
@@ -799,7 +970,8 @@ class OrderFlowStrategy(EliteStrategy):
                 and (not is_live_mode or context_age_ok)
             )
             effective_context_alignment = bool(
-                side_aligns or bias_invalidated_by_microstructure
+                (side_aligns or bias_invalidated_by_microstructure)
+                and not ofi_conflicts_side
             )
             effective_context_conflict = bool(
                 direction in {"CE", "PE"}
@@ -837,15 +1009,22 @@ class OrderFlowStrategy(EliteStrategy):
                 "strong_depth_supports_side": strong_depth_supports_side,
                 "depth_support_threshold": round(support_threshold, 4),
                 "strong_depth_support_threshold": round(strong_support_threshold, 4),
-                "orderflow_config_imbalance_ratio_min": float(self._cfg.imbalance_ratio_min),
+                "orderflow_config_imbalance_ratio_min": float(
+                    self._cfg.imbalance_ratio_min
+                ),
                 "orderflow_config_large_order_threshold_pct": float(
                     self._cfg.large_order_threshold_pct
                 ),
                 "tick_direction": tick_direction,
+                **ofi_snapshot,
+                "ofi_threshold": ofi_threshold,
+                "ofi_directional": ofi_directional,
+                "ofi_supports_side": ofi_supports_side,
+                "ofi_conflicts_side": ofi_conflicts_side,
+                "flow_confirmation_source": flow_confirmation_source,
+                "flow_supports_side": flow_supports,
                 "liquidity_ok": spread_pct <= context_spread_limit,
-                "premium_stop_distance": max(
-                    0.8 * atr, current_price * 0.02, 1.0
-                ),
+                "premium_stop_distance": max(0.8 * atr, current_price * 0.02, 1.0),
                 "premium_target_rr": 1.8,
                 "can_trigger": bool(trigger_conditions_met),
                 "trigger_min_score": trigger_min_score,
@@ -862,14 +1041,13 @@ class OrderFlowStrategy(EliteStrategy):
                 "spread_score": spread_score,
                 "depth_score": depth_score,
                 "tick_score": tick_score,
+                "flow_score": tick_score,
                 "direction_alignment_score": direction_score,
                 "freshness_score": freshness_score,
                 "tradable_quote": tradable_quote,
                 "depth_available": depth_available,
                 "premium_flow_direction": tick_direction,
-                "negative_premium_flow_mode": "hard"
-                if clear_adverse_flow
-                else "soft",
+                "negative_premium_flow_mode": "hard" if clear_adverse_flow else "soft",
                 "tick_age_ms": tick_age_ms,
                 "quote_update_version": quote_update_version,
                 "quote_readiness_allowed": quote_readiness.allowed,
@@ -878,11 +1056,11 @@ class OrderFlowStrategy(EliteStrategy):
                 "real_tick_count_derived": quote_readiness.real_tick_count_derived,
                 "reversal_persistence_confirmed": reversal_persistence_confirmed,
                 "selected_or_near_atm": selected_or_near_atm,
-                "bias_invalidated_by_microstructure": bias_invalidated_by_microstructure,
+                "bias_invalidated_by_microstructure": (
+                    bias_invalidated_by_microstructure
+                ),
                 "microstructure_confirms_side": microstructure_confirms_side,
-                "raw_direction_bias": direction
-                if direction in {"CE", "PE"}
-                else None,
+                "raw_direction_bias": direction if direction in {"CE", "PE"} else None,
                 "orderflow_conflict_override_requested": conflict_override_requested,
                 "orderflow_conflict_override_applied": conflict_override_applied,
                 "orderflow_conflict_override": conflict_override_applied,
@@ -902,16 +1080,22 @@ class OrderFlowStrategy(EliteStrategy):
                 {
                     "context_role": "confirmation",
                     "vote_timestamp": time.time(),
-                    "context_bonus_score": context_confirmation_score
-                    if context_quality_eligible and effective_context_alignment
-                    else 0.0,
-                    "context_veto_score": strategy_score
-                    if context_quality_eligible and effective_context_conflict
-                    else 0.0,
+                    "context_bonus_score": (
+                        context_confirmation_score
+                        if context_quality_eligible and effective_context_alignment
+                        else 0.0
+                    ),
+                    "context_veto_score": (
+                        strategy_score
+                        if context_quality_eligible and effective_context_conflict
+                        else 0.0
+                    ),
                 }
             )
             LOGGER.info(
-                "ORDERFLOW_TRIGGER_DECISION symbol=%s side=%s trigger_conditions_met=%s trigger_block_reason=%s score=%.2f spread_pct=%.2f context_age_seconds=%s",
+                "ORDERFLOW_TRIGGER_DECISION symbol=%s side=%s "
+                "trigger_conditions_met=%s trigger_block_reason=%s "
+                "score=%.2f spread_pct=%.2f context_age_seconds=%s",
                 symbol,
                 side,
                 trigger_conditions_met,
