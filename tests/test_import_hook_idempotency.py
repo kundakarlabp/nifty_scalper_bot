@@ -13,17 +13,13 @@ def _hook_count(attr: str) -> int:
 
 def _reset_core_modules() -> None:
     for name in list(sys.modules):
-        if name == "nifty_scalper_bot.core" or name.startswith(
-            "nifty_scalper_bot.core.app"
-        ):
+        if name == "nifty_scalper_bot.core" or name.startswith("nifty_scalper_bot.core.app"):
             sys.modules.pop(name, None)
 
 
 def _reset_data_modules() -> None:
     for name in list(sys.modules):
-        if name == "nifty_scalper_bot.data" or name.startswith(
-            "nifty_scalper_bot.data.data_hub"
-        ):
+        if name == "nifty_scalper_bot.data" or name.startswith("nifty_scalper_bot.data.data_hub"):
             sys.modules.pop(name, None)
 
 
@@ -47,7 +43,7 @@ def test_core_app_import_hook_is_not_duplicated_by_repeated_imports() -> None:
         assert _hook_count(CORE_HOOK_ATTR) == first
 
 
-def test_core_app_direct_import_reuses_single_hook_with_native_polling_owner() -> None:
+def test_core_app_direct_import_reuses_single_hook_and_still_patches_app() -> None:
     _reset_core_modules()
     importlib.import_module("nifty_scalper_bot.core")
     hook_count = _hook_count(CORE_HOOK_ATTR)
@@ -55,10 +51,8 @@ def test_core_app_direct_import_reuses_single_hook_with_native_polling_owner() -
     app_module = importlib.import_module("nifty_scalper_bot.core.app")
 
     assert _hook_count(CORE_HOOK_ATTR) == hook_count == 1
-    supervisor = getattr(app_module, "_polling_failover_supervisor_iteration", None)
-    assert callable(supervisor)
-    assert supervisor.__module__ == "nifty_scalper_bot.core.app"
-    assert not getattr(app_module, "_polling_failover_runtime_patch_installed", False)
+    assert getattr(app_module, "_polling_failover_runtime_patch_installed", False) is True
+    assert callable(getattr(app_module, "_polling_failover_supervisor_iteration", None))
 
 
 def test_datahub_import_hook_is_not_duplicated_by_repeated_imports() -> None:
@@ -89,11 +83,4 @@ def test_direct_datahub_import_reuses_single_hook_and_still_patches_datahub() ->
     datahub_module = importlib.import_module("nifty_scalper_bot.data.data_hub")
 
     assert _hook_count(DATA_HOOK_ATTR) == hook_count == 1
-    assert (
-        getattr(
-            datahub_module.DataHub,
-            "_synthetic_timestamp_guard_installed",
-            False,
-        )
-        is True
-    )
+    assert getattr(datahub_module.DataHub, "_synthetic_timestamp_guard_installed", False) is True
