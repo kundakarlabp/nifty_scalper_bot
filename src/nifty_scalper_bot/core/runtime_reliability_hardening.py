@@ -8,10 +8,9 @@ diagnostics while preserving fail-closed behavior for entry-critical queues.
 
 from __future__ import annotations
 
-from datetime import datetime
-from functools import wraps
 import logging
 import time
+from functools import wraps
 from typing import Any, Mapping
 
 from nifty_scalper_bot.data.data_hub import (
@@ -82,8 +81,10 @@ def _install_mdm_overload_patch() -> bool:
                 self._pipeline_overloaded = True
                 self._overload_since_mono = time.monotonic()
                 self._logger.warning(
-                    "DATA_PIPELINE_OVERLOAD_ENTER pending_ticks=%d oldest_pending_age_ms=%.0f "
-                    "critical_oldest_pending_age_ms=%.0f enter_pending=%d enter_oldest_ms=%.0f",
+                    "DATA_PIPELINE_OVERLOAD_ENTER pending_ticks=%d "
+                    "oldest_pending_age_ms=%.0f "
+                    "critical_oldest_pending_age_ms=%.0f "
+                    "enter_pending=%d enter_oldest_ms=%.0f",
                     pending,
                     total_oldest_ms,
                     critical_oldest_ms,
@@ -108,7 +109,8 @@ def _install_mdm_overload_patch() -> bool:
             self._pipeline_overloaded = False
             self._overload_since_mono = None
             self._logger.warning(
-                "DATA_PIPELINE_OVERLOAD_RECOVERED pending_ticks=%d oldest_pending_age_ms=%.0f "
+                "DATA_PIPELINE_OVERLOAD_RECOVERED pending_ticks=%d "
+                "oldest_pending_age_ms=%.0f "
                 "critical_oldest_pending_age_ms=%.0f overloaded_for_s=%.1f",
                 pending,
                 total_oldest_ms,
@@ -123,8 +125,10 @@ def _install_mdm_overload_patch() -> bool:
                 },
             )
 
-    MarketDataManager._update_pipeline_overload_locked = (  # type: ignore[method-assign]
-        _update_pipeline_overload_locked
+    setattr(
+        MarketDataManager,
+        "_update_pipeline_overload_locked",
+        _update_pipeline_overload_locked,
     )
     setattr(MarketDataManager, _PATCH_ATTR, True)
     return True
@@ -163,8 +167,9 @@ def _install_runner_cpu_telemetry_patch() -> bool:
             count_source = "dynamic_active_symbols"
 
         self._logger.info(
-            "CPU_OPTIMIZATION_SUMMARY evaluated_symbols_count=%s skipped_by_midday_pause=%s "
-            "skipped_by_eval_throttle=%s skipped_by_option_cap=%s active_option_symbols_count=%s",
+            "CPU_OPTIMIZATION_SUMMARY evaluated_symbols_count=%s "
+            "skipped_by_midday_pause=%s skipped_by_eval_throttle=%s "
+            "skipped_by_option_cap=%s active_option_symbols_count=%s",
             metrics.get("evaluated_symbols", 0),
             metrics.get("skipped_by_midday_pause", 0),
             metrics.get("skipped_by_eval_throttle", 0),
