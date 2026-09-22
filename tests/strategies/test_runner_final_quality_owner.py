@@ -104,3 +104,4 @@ def test_vwap_runner_uses_independent_alpha_for_quality_and_confidence() -> None
     assert "strategy_score_for_quality" in source
     assert 'quality.components.get("alpha_score", quality.final_score)' in source
     assert '"alpha_score": alpha_score' in source
+    assert "alpha_score=%.2f threshold=%.2f" in source
