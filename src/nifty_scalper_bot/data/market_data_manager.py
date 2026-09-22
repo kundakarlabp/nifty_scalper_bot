@@ -3710,6 +3710,7 @@ class MarketDataManager:
             tick_mono = (getattr(self, "_last_valid_live_tick_mono", {}) or {}).get(
                 canonical
             )
+            tick_ts = (getattr(self, "_last_tick_ts", {}) or {}).get(canonical)
             current_token = self._current_symbol_token_locked(canonical)
             tracked = canonical in (getattr(self, "_tracked_symbols", set()) or set())
         subscription_requested = (
@@ -3730,6 +3731,21 @@ class MarketDataManager:
         )
         age_s = (
             None if tick_mono is None else max(time.monotonic() - float(tick_mono), 0.0)
+        )
+        market_event_age_s: float | None = None
+        if tick_ts is not None:
+            parsed_tick_ts = pd.to_datetime(tick_ts, utc=True, errors="coerce")
+            if not pd.isna(parsed_tick_ts):
+                market_event_age_s = max(
+                    (
+                        pd.Timestamp.now(tz="UTC") - pd.Timestamp(parsed_tick_ts)
+                    ).total_seconds(),
+                    0.0,
+                )
+        market_event_fresh = (
+            None
+            if market_event_age_s is None
+            else market_event_age_s <= max_age_s
         )
         if token_int is None:
             reason = "subscription_missing"
@@ -3755,9 +3771,15 @@ class MarketDataManager:
             reason = "tick_timestamp_missing"
         elif age_s > max_age_s:
             reason = "tick_stale"
+        elif market_event_fresh is False:
+            reason = "market_event_stale"
         else:
             reason = "ready"
-        fresh = bool(age_s is not None and age_s <= max_age_s)
+        fresh = bool(
+            age_s is not None
+            and age_s <= max_age_s
+            and market_event_fresh is not False
+        )
         return {
             "symbol": canonical,
             "token": token_int,
@@ -3769,6 +3791,8 @@ class MarketDataManager:
             "tick_generation": tick_gen,
             "current_generation_tick_received": current_generation_tick_received,
             "tick_age_s": age_s,
+            "market_event_age_s": market_event_age_s,
+            "market_event_fresh": market_event_fresh,
             "fresh": fresh,
             "ready": reason == "ready",
             "reason": reason,
