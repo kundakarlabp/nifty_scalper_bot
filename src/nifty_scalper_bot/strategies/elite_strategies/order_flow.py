@@ -253,7 +253,7 @@ class OrderFlowStrategy(EliteStrategy):
             + (prev_ask_qty if ask >= prev_ask else 0.0)
         )
         depth_scale = max((bid_qty + ask_qty) / 2.0, 1.0)
-        events = list(state.get("events") or [])
+        events = list(state.get("events") or []) if isinstance(state, Mapping) else []
         events.append((now, float(ofi_event), float(depth_scale)))
         events = [event for event in events if now - float(event[0]) <= 3.0]
 
@@ -614,10 +614,11 @@ class OrderFlowStrategy(EliteStrategy):
                 and ofi_1s_normalized is not None
                 and abs(ofi_1s_normalized) >= ofi_threshold
             )
+            ofi_value = ofi_1s_normalized if ofi_1s_normalized is not None else 0.0
             ofi_supports_side = bool(
                 ofi_directional
                 and _depth_supports_side(
-                    float(ofi_1s_normalized),
+                    ofi_value,
                     side=side,
                     option_premium_domain=option_premium_domain,
                     threshold=ofi_threshold,
@@ -626,7 +627,7 @@ class OrderFlowStrategy(EliteStrategy):
             ofi_conflicts_side = bool(
                 ofi_directional
                 and _depth_supports_side(
-                    -float(ofi_1s_normalized),
+                    -ofi_value,
                     side=side,
                     option_premium_domain=option_premium_domain,
                     threshold=ofi_threshold,
@@ -818,17 +819,11 @@ class OrderFlowStrategy(EliteStrategy):
                 )
             )
             selected_or_near_atm = bool(indicators.get("is_selected_option"))
-            if (
-                not selected_or_near_atm
-                and indicators.get("strike_distance_from_atm") is not None
-            ):
-                try:
-                    selected_or_near_atm = (
-                        float(indicators.get("strike_distance_from_atm"))
-                        <= near_atm_threshold
-                    )
-                except (TypeError, ValueError):
-                    selected_or_near_atm = False
+            strike_distance_from_atm = _safe_float_value(
+                indicators.get("strike_distance_from_atm")
+            )
+            if not selected_or_near_atm and strike_distance_from_atm is not None:
+                selected_or_near_atm = strike_distance_from_atm <= near_atm_threshold
             if is_live_mode and not selected_meta_available:
                 selected_or_near_atm = False
 
