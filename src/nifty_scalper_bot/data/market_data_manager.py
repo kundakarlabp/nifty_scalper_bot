@@ -3710,6 +3710,10 @@ class MarketDataManager:
             tick_mono = (getattr(self, "_last_valid_live_tick_mono", {}) or {}).get(
                 canonical
             )
+            latest_tick = (
+                (getattr(self, "_latest_ticks", {}) or {}).get(canonical)
+                or (getattr(self, "_tick_cache", {}) or {}).get(canonical)
+            )
             current_token = self._current_symbol_token_locked(canonical)
             tracked = canonical in (getattr(self, "_tracked_symbols", set()) or set())
         subscription_requested = (
@@ -3730,6 +3734,16 @@ class MarketDataManager:
         )
         age_s = (
             None if tick_mono is None else max(time.monotonic() - float(tick_mono), 0.0)
+        )
+        event_wallclock = (
+            self._tick_event_wallclock(latest_tick)
+            if isinstance(latest_tick, Mapping)
+            else None
+        )
+        event_age_s = (
+            None
+            if event_wallclock is None
+            else max(time.time() - float(event_wallclock), 0.0)
         )
         if token_int is None:
             reason = "subscription_missing"
@@ -3755,9 +3769,15 @@ class MarketDataManager:
             reason = "tick_timestamp_missing"
         elif age_s > max_age_s:
             reason = "tick_stale"
+        elif event_age_s is not None and event_age_s > max_age_s:
+            reason = "market_event_stale"
         else:
             reason = "ready"
-        fresh = bool(age_s is not None and age_s <= max_age_s)
+        fresh = bool(
+            age_s is not None
+            and age_s <= max_age_s
+            and (event_age_s is None or event_age_s <= max_age_s)
+        )
         return {
             "symbol": canonical,
             "token": token_int,
@@ -3769,6 +3789,7 @@ class MarketDataManager:
             "tick_generation": tick_gen,
             "current_generation_tick_received": current_generation_tick_received,
             "tick_age_s": age_s,
+            "market_event_age_s": event_age_s,
             "fresh": fresh,
             "ready": reason == "ready",
             "reason": reason,
