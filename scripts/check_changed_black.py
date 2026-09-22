@@ -18,9 +18,7 @@ import tempfile
 from pathlib import Path
 from typing import Iterable
 
-_HUNK_RE = re.compile(
-    r"^@@ -\d+(?:,\d+)? \+(?P<start>\d+)(?:,(?P<length>\d+))? @@"
-)
+_HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(?P<start>\d+)(?:,(?P<length>\d+))? @@")
 
 
 def changed_line_ranges(diff_text: str) -> list[tuple[int, int]]:
@@ -152,9 +150,7 @@ def _git_changed_ranges(base: str, path: Path) -> list[tuple[int, int]]:
         path.as_posix(),
     )
     if result.returncode != 0:
-        raise RuntimeError(
-            f"git diff failed for {path}: {result.stderr.strip()}"
-        )
+        raise RuntimeError(f"git diff failed for {path}: {result.stderr.strip()}")
     return changed_line_ranges(result.stdout)
 
 
