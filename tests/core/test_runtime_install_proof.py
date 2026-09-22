@@ -18,6 +18,13 @@ class _PlainFinder:
     pass
 
 
+async def _native_polling_supervisor(*args, **kwargs):
+    return None, None
+
+
+_native_polling_supervisor.__module__ = "nifty_scalper_bot.core.app"
+
+
 class _Mdm:
     _freshness_hardening_installed = True
 
