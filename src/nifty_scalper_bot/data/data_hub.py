@@ -118,63 +118,6 @@ def _quote_timestamp_ms(payload: Mapping[str, Any]) -> float | None:
             return parsed
     return None
 
-def _runtime_tick_timestamp_ms(payload: Mapping[str, Any]) -> float | None:
-    """Return canonical MDM runtime timestamp milliseconds without reparsing."""
-    timestamp_ms = payload.get("timestamp_ms")
-    if isinstance(timestamp_ms, (int, float)) and not isinstance(timestamp_ms, bool):
-        value = float(timestamp_ms)
-        return value if value > 0 else None
-    timestamp = payload.get("timestamp")
-    if isinstance(timestamp, datetime) and timestamp.tzinfo is not None:
-        value = float(timestamp.timestamp() * 1000.0)
-        return value if value > 0 else None
-    return None
-
-
-def _is_canonical_runtime_tick(payload: Mapping[str, Any]) -> bool:
-    """Return whether MDM already produced the complete live-tick contract."""
-    symbol = str(payload.get("symbol") or "").strip()
-    if not symbol or normalize_symbol(symbol) != symbol:
-        return False
-    token = payload.get("instrument_token") or payload.get("token")
-    price = payload.get("ltp") or payload.get("last_price")
-    timestamp_ms = _runtime_tick_timestamp_ms(payload)
-    try:
-        if int(token) <= 0 or float(price) <= 0 or timestamp_ms is None:
-            return False
-    except (TypeError, ValueError):
-        return False
-    source = str(payload.get("source") or "").strip().lower()
-    if source not in {
-        "ws",
-        "ws_full",
-        "websocket",
-        "stream",
-        "poll",
-        "rest",
-        "rest_poll",
-        "fallback",
-        "quote",
-        "rest_quote",
-    }:
-        return False
-    explicit_quality = str(payload.get("timestamp_quality") or "").strip().lower()
-    if explicit_quality in _UNUSABLE_TIMESTAMP_QUALITIES:
-        return False
-    if payload.get("source_timestamp_valid") is not True:
-        return False
-    return all(
-        key in payload
-        for key in (
-            "timestamp",
-            "timestamp_source",
-            "received_at",
-            "depth_available",
-            "tradable_quote",
-        )
-    )
-
-
 
 def _quote_symbol_hint(quote: Mapping[str, Any]) -> str:
     for key in _QUOTE_IDENTITY_KEYS:
@@ -1057,29 +1000,6 @@ class DataHub:
 
     def _canonicalize_tick_payload(self, payload: Mapping[str, Any]) -> dict[str, Any] | None:
         """Args: payload. Returns: canonicalized tick or None. Raises: None."""
-        if _is_canonical_runtime_tick(payload):
-            tick = dict(payload)
-            symbol = str(tick["symbol"])
-            timestamp_ms = _runtime_tick_timestamp_ms(tick)
-            if timestamp_ms is None:
-                return None
-            timestamp = tick.get("timestamp")
-            if isinstance(timestamp, datetime):
-                tick["timestamp"] = timestamp.isoformat()
-            tick["timestamp_ms"] = timestamp_ms
-            timestamp_source = str(tick.get("timestamp_source") or "").lower()
-            timestamp_quality = str(tick.get("timestamp_quality") or "").lower()
-            if not timestamp_quality:
-                timestamp_quality = (
-                    "exchange" if "exchange" in timestamp_source else "broker"
-                )
-                tick["timestamp_quality"] = timestamp_quality
-            tick.setdefault("hard_readiness_eligible", True)
-            tick.setdefault("quote_source", tick.get("source"))
-            tick.setdefault("exchange_symbol", symbol)
-            tick.setdefault("quote_identity_timestamp_source", timestamp_quality)
-            return tick
-
         tick = dict(payload)
         timestamp_quality = _timestamp_quality(tick)
         symbol = str(tick.get("symbol") or "").strip()
