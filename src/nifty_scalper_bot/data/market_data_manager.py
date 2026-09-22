@@ -7383,7 +7383,7 @@ class MarketDataManager:
         # wrong field this telemetry was fixed to stop producing.
         _loop_owner = getattr(self, "_event_loop_thread_id", None)
         event_loop_thread = None if _loop_owner is None else thread_id == _loop_owner
-        key = f"tick_stage_slow:{id(self)}:{metric_key}:{symbol}"
+        key = f"tick_stage_slow:{id(self)}:{metric_key}"
         log_throttled(
             self._logger,
             key,
