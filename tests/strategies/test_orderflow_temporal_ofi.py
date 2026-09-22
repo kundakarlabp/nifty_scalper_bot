@@ -8,7 +8,7 @@ SYMBOL = "NFO:NIFTY26SEP25000CE"
 
 def _strategy() -> order_flow.OrderFlowStrategy:
     return order_flow.OrderFlowStrategy(
-        order_flow.order_flow.OrderFlowStrategyConfig(enabled=True, quantity=1),
+        order_flow.OrderFlowStrategyConfig(enabled=True, quantity=1),
         indicator_engine=None,
     )
 
