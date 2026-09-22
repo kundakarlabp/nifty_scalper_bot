@@ -54,6 +54,7 @@ jobs:
           mapfile -t files < <(git diff --diff-filter=ACMR --name-only "$base"...HEAD -- '*.py' \
             | grep -E '^(src|dashboard|scripts|tests)/' || true)
           printf '%s\n' "${files[@]}" > /tmp/changed-python.txt
+          printf '%s\n' "$base" > /tmp/quality-base.txt
           if ((${#files[@]})); then
             echo "has_python=true" >> "$GITHUB_OUTPUT"
           else
@@ -66,7 +67,10 @@ jobs:
         run: xargs -r python -m ruff check < /tmp/changed-python.txt
       - name: Black changed Python
         if: steps.changed.outputs.has_python == 'true'
-        run: xargs -r python -m black --check --diff < /tmp/changed-python.txt
+        run: >-
+          python scripts/check_changed_black.py
+          --base "$(cat /tmp/quality-base.txt)"
+          --files-from /tmp/changed-python.txt
       - name: Mypy changed production Python
         if: steps.changed.outputs.has_python == 'true'
         shell: bash
