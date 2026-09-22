@@ -16597,53 +16597,6 @@ class StrategyRunner:
                                 or "runner_context",
                                 "tick_direction": quote_map.get("tick_direction")
                                 or tick_map.get("tick_direction"),
-                                "ofi_ready": (
-                                    quote_map.get("ofi_ready")
-                                    if quote_map.get("ofi_ready") is not None
-                                    else tick_map.get("ofi_ready")
-                                ),
-                                "ofi_event": (
-                                    quote_map.get("ofi_event")
-                                    if quote_map.get("ofi_event") is not None
-                                    else tick_map.get("ofi_event")
-                                ),
-                                "ofi_1s": (
-                                    quote_map.get("ofi_1s")
-                                    if quote_map.get("ofi_1s") is not None
-                                    else tick_map.get("ofi_1s")
-                                ),
-                                "ofi_3s": (
-                                    quote_map.get("ofi_3s")
-                                    if quote_map.get("ofi_3s") is not None
-                                    else tick_map.get("ofi_3s")
-                                ),
-                                "ofi_1s_normalized": (
-                                    quote_map.get("ofi_1s_normalized")
-                                    if quote_map.get("ofi_1s_normalized") is not None
-                                    else tick_map.get("ofi_1s_normalized")
-                                ),
-                                "ofi_3s_normalized": (
-                                    quote_map.get("ofi_3s_normalized")
-                                    if quote_map.get("ofi_3s_normalized") is not None
-                                    else tick_map.get("ofi_3s_normalized")
-                                ),
-                                "ofi_update_count_1s": (
-                                    quote_map.get("ofi_update_count_1s")
-                                    if quote_map.get("ofi_update_count_1s") is not None
-                                    else tick_map.get("ofi_update_count_1s")
-                                ),
-                                "ofi_update_count_3s": (
-                                    quote_map.get("ofi_update_count_3s")
-                                    if quote_map.get("ofi_update_count_3s") is not None
-                                    else tick_map.get("ofi_update_count_3s")
-                                ),
-                                "ofi_source": quote_map.get("ofi_source")
-                                or tick_map.get("ofi_source"),
-                                "queue_imbalance_top": (
-                                    quote_map.get("queue_imbalance_top")
-                                    if quote_map.get("queue_imbalance_top") is not None
-                                    else tick_map.get("queue_imbalance_top")
-                                ),
                                 "data_age_seconds": quote_age_s,
                                 "tick_age_ms": (
                                     quote_age_s * 1000.0
@@ -16655,6 +16608,23 @@ class StrategyRunner:
                                 "quote_update_version_source": quote_update_version_source,
                             }
                         )
+                        for microstructure_key in (
+                            "ofi_ready",
+                            "ofi_event",
+                            "ofi_1s",
+                            "ofi_3s",
+                            "ofi_1s_normalized",
+                            "ofi_3s_normalized",
+                            "ofi_update_count_1s",
+                            "ofi_update_count_3s",
+                            "ofi_source",
+                            "queue_imbalance_top",
+                        ):
+                            microstructure_value = quote_map.get(microstructure_key)
+                            if microstructure_value is None:
+                                microstructure_value = tick_map.get(microstructure_key)
+                            if microstructure_value is not None:
+                                runtime_ctx[microstructure_key] = microstructure_value
                         indicators_ctx.update(runtime_ctx)
                         if hasattr(self._indicator_engine, "set_runtime_context"):
                             self._indicator_engine.set_runtime_context(
