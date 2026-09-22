@@ -7552,33 +7552,59 @@ class MarketDataManager:
         oldest = float(heap[0][0])
         return max(0.0, (time.monotonic() - oldest) * 1000.0)
 
+    def _critical_oldest_pending_age_ms_locked(self) -> float:
+        """Return oldest entry-critical queue age; near-ATM context is noncritical."""
+        oldest_mono: float | None = None
+        for queue in (getattr(self, "_pending_tick_queues", {}) or {}).values():
+            if not queue:
+                continue
+            tick = queue[0]
+            if not isinstance(tick, Mapping):
+                return float(self._overload_enter_oldest_ms)
+            bucket = str(tick.get("_mdm_priority_bucket") or "").strip().lower()
+            if bucket == "near_atm":
+                continue
+            timestamp = tick.get("_mdm_enqueued_mono")
+            if not isinstance(timestamp, (int, float)):
+                return float(self._overload_enter_oldest_ms)
+            candidate = float(timestamp)
+            oldest_mono = (
+                candidate if oldest_mono is None else min(oldest_mono, candidate)
+            )
+        if oldest_mono is None:
+            return 0.0
+        return max(0.0, (time.monotonic() - oldest_mono) * 1000.0)
+
     def _update_pipeline_overload_locked(self) -> None:
         pending = self._pending_count_locked()
         oldest_ms = self._oldest_pending_age_ms_locked()
+        critical_oldest_ms = self._critical_oldest_pending_age_ms_locked()
         if not self._pipeline_overloaded:
             if (
                 pending >= self._overload_enter_pending
-                or oldest_ms >= self._overload_enter_oldest_ms
+                or critical_oldest_ms >= self._overload_enter_oldest_ms
             ):
                 self._pipeline_overloaded = True
                 self._overload_since_mono = time.monotonic()
                 self._logger.warning(
-                    "DATA_PIPELINE_OVERLOAD_ENTER pending_ticks=%d oldest_pending_age_ms=%.0f enter_pending=%d enter_oldest_ms=%.0f",
+                    "DATA_PIPELINE_OVERLOAD_ENTER pending_ticks=%d oldest_pending_age_ms=%.0f "
+                    "critical_oldest_pending_age_ms=%.0f enter_pending=%d enter_oldest_ms=%.0f",
                     pending,
                     oldest_ms,
+                    critical_oldest_ms,
                     self._overload_enter_pending,
                     self._overload_enter_oldest_ms,
                     extra={
                         "event": "DATA_PIPELINE_OVERLOAD_ENTER",
                         "pending_ticks": pending,
                         "oldest_pending_age_ms": oldest_ms,
+                        "critical_oldest_pending_age_ms": critical_oldest_ms,
                     },
                 )
         else:
-            # Hysteresis: recover only when BOTH signals are below exit bounds.
             if (
                 pending <= self._overload_exit_pending
-                and oldest_ms <= self._overload_exit_oldest_ms
+                and critical_oldest_ms <= self._overload_exit_oldest_ms
             ):
                 duration = 0.0
                 if self._overload_since_mono is not None:
@@ -7586,14 +7612,17 @@ class MarketDataManager:
                 self._pipeline_overloaded = False
                 self._overload_since_mono = None
                 self._logger.warning(
-                    "DATA_PIPELINE_OVERLOAD_RECOVERED pending_ticks=%d oldest_pending_age_ms=%.0f overloaded_for_s=%.1f",
+                    "DATA_PIPELINE_OVERLOAD_RECOVERED pending_ticks=%d oldest_pending_age_ms=%.0f "
+                    "critical_oldest_pending_age_ms=%.0f overloaded_for_s=%.1f",
                     pending,
                     oldest_ms,
+                    critical_oldest_ms,
                     duration,
                     extra={
                         "event": "DATA_PIPELINE_OVERLOAD_RECOVERED",
                         "pending_ticks": pending,
                         "oldest_pending_age_ms": oldest_ms,
+                        "critical_oldest_pending_age_ms": critical_oldest_ms,
                     },
                 )
 
