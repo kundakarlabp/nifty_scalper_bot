@@ -12,6 +12,8 @@ import calendar
 import re
 from typing import Any, Iterable, Mapping, Sequence
 
+from nifty_scalper_bot.utils.smart_symbol import get_nifty_monthly_expiry_date
+
 NIFTY_FUT_RE = re.compile(r"^NIFTY(?P<yy>\d{2})(?P<mon>[A-Z]{3})FUT$")
 NIFTY_OPT_RE = re.compile(r"^NIFTY(?P<yy>\d{2})(?P<mon>[A-Z]{3})(?P<strike>\d{4,6})(?P<side>CE|PE)$")
 MONTH_ABBR_TO_NUM = {m.upper(): i for i, m in enumerate(calendar.month_abbr) if m}
@@ -67,13 +69,6 @@ def canonical_nifty_option_symbol(symbol: Any) -> str | None:
     return f"NFO:{tradingsymbol}"
 
 
-def _last_thursday(year: int, month: int) -> date:
-    d = date(year, month, calendar.monthrange(year, month)[1])
-    while d.weekday() != 3:
-        d = date.fromordinal(d.toordinal() - 1)
-    return d
-
-
 def parse_nifty_future_expiry(symbol: Any) -> date | None:
     canonical = canonical_nifty_future_symbol(symbol)
     if not canonical:
@@ -83,7 +78,7 @@ def parse_nifty_future_expiry(symbol: Any) -> date | None:
         return None
     year = 2000 + int(match.group("yy"))
     month = MONTH_ABBR_TO_NUM.get(match.group("mon"))
-    return _last_thursday(year, month) if month else None
+    return get_nifty_monthly_expiry_date(year, month) if month else None
 
 
 def parse_instrument_expiry(value: Any) -> date | None:
