@@ -175,7 +175,10 @@ def check_file(base: str, path: Path) -> tuple[bool, str]:
         if not black_spans:
             return True, f"PASS {path}: legacy file is now Black-clean"
         if not changed_spans:
-            return False, f"FAIL {path}: changed file has no resolvable changed-line ranges"
+            return (
+                False,
+                f"FAIL {path}: changed file has no resolvable changed-line ranges",
+            )
         if ranges_intersect(black_spans, changed_spans):
             return (
                 False,
