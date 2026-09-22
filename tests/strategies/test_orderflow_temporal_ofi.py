@@ -1,19 +1,14 @@
 from __future__ import annotations
 
-from nifty_scalper_bot.strategies.elite_strategies.config_models import (
-    OrderFlowStrategyConfig,
-)
-from nifty_scalper_bot.strategies.elite_strategies.order_flow import (
-    OrderFlowStrategy,
-)
+from nifty_scalper_bot.strategies.elite_strategies import order_flow
 
 
 SYMBOL = "NFO:NIFTY26SEP25000CE"
 
 
-def _strategy() -> OrderFlowStrategy:
-    return OrderFlowStrategy(
-        OrderFlowStrategyConfig(enabled=True, quantity=1),
+def _strategy() -> order_flow.OrderFlowStrategy:
+    return order_flow.OrderFlowStrategy(
+        order_flow.order_flow.OrderFlowStrategyConfig(enabled=True, quantity=1),
         indicator_engine=None,
     )
 
@@ -26,7 +21,7 @@ def _depth(
 
 
 def _prime_ofi(
-    strategy: OrderFlowStrategy,
+    strategy: order_flow.OrderFlowStrategy,
     monkeypatch,
     quantities: tuple[tuple[float, float], ...],
 ) -> dict[str, object]:
