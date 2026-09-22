@@ -15,8 +15,7 @@ from contextlib import suppress
 from typing import Any, Mapping
 
 from . import bracket_core as _core
-
-_CoreBracketManager = _core.BracketManager
+from .bracket_core import BracketManager as _CoreBracketManager
 
 
 class HardenedBracketManager(_CoreBracketManager):
@@ -150,7 +149,6 @@ class HardenedBracketManager(_CoreBracketManager):
             if not callable(original):
                 continue
 
-            @functools.wraps(original)
             def guarded(
                 *args: Any,
                 __original: Any = original,
@@ -164,6 +162,7 @@ class HardenedBracketManager(_CoreBracketManager):
                     return rejection_for(__method_name, details)
                 return __original(*args, **method_kwargs)
 
+            functools.update_wrapper(guarded, original)
             setattr(order_manager, method_name, guarded)
 
         setattr(order_manager, "_unresolved_exit_guard_installed", True)
