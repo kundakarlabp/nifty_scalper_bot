@@ -12,7 +12,7 @@ import time
 from contextlib import suppress
 from typing import Any, Mapping
 
-from nifty_scalper_bot.execution import bracket_manager as _legacy
+import nifty_scalper_bot.execution.bracket_core as _core
 from nifty_scalper_bot.execution.ledger_bracket_manager import LedgerBracketManager
 
 
@@ -45,7 +45,7 @@ class RuntimeBracketManager(LedgerBracketManager):
         try:
             return self._authoritative_position_snapshot().all_flat
         except Exception as exc:  # noqa: BLE001
-            _legacy.LOGGER.error(
+            _core.LOGGER.error(
                 "FILL_LEDGER_ORPHAN_POSITION_CHECK_FAILED error=%s",
                 exc,
                 extra={
@@ -70,7 +70,7 @@ class RuntimeBracketManager(LedgerBracketManager):
             try:
                 quantity = self._broker_position_quantity(symbol)
             except Exception as exc:  # noqa: BLE001 - unknown remains blocked
-                _legacy.LOGGER.error(
+                _core.LOGGER.error(
                     "FILL_LEDGER_ORPHAN_POSITION_CHECK_FAILED bracket_id=%s symbol=%s error=%s",
                     bracket_id,
                     symbol,
@@ -91,7 +91,7 @@ class RuntimeBracketManager(LedgerBracketManager):
             flat = self._broker_all_positions_flat()
 
         if flat is not True:
-            _legacy.LOGGER.warning(
+            _core.LOGGER.warning(
                 "FILL_LEDGER_ORPHAN_BLOCK_RETAINED bracket_id=%s symbol=%s broker_flat=%s",
                 bracket_id,
                 symbol or "unknown",
@@ -109,7 +109,7 @@ class RuntimeBracketManager(LedgerBracketManager):
         if self._release_store is not None:
             with suppress(Exception):
                 self._release_store.clear(str(bracket_id))
-        _legacy.LOGGER.warning(
+        _core.LOGGER.warning(
             "FILL_LEDGER_ORPHAN_BLOCK_CLEARED bracket_id=%s symbol=%s",
             bracket_id,
             symbol or "account_flat",
@@ -155,7 +155,7 @@ class RuntimeBracketManager(LedgerBracketManager):
 
         bracket = self.get_bracket(order_id)
         if bracket is None:
-            _legacy.LOGGER.critical(
+            _core.LOGGER.critical(
                 "PARTIAL_ENTRY_BRACKET_MISSING order_id=%s qty=%s price=%s",
                 order_id,
                 filled_quantity,
@@ -196,7 +196,7 @@ class RuntimeBracketManager(LedgerBracketManager):
         self.confirm_entry_fill(order_id, price)
         with suppress(Exception):
             self.save_state()
-        _legacy.LOGGER.critical(
+        _core.LOGGER.critical(
             "PARTIAL_ENTRY_PROTECTED order_id=%s symbol=%s planned_qty=%s filled_qty=%s fill_price=%.2f",
             order_id,
             bracket.symbol,
@@ -229,17 +229,17 @@ class RuntimeBracketManager(LedgerBracketManager):
     def _active_brackets_for_exit_symbol(self, symbol: str) -> list[Any]:
         """Return non-terminal brackets for one canonical symbol."""
 
-        key = _legacy.normalize_symbol(symbol)
+        key = _core.normalize_symbol(symbol)
         terminal = {
-            _legacy.BracketExitLifecycle.CLOSED.value,
-            _legacy.BracketExitLifecycle.EXIT_FILLED.value,
-            _legacy.BracketExitLifecycle.EXIT_RECONCILED_FLAT.value,
+            _core.BracketExitLifecycle.CLOSED.value,
+            _core.BracketExitLifecycle.EXIT_FILLED.value,
+            _core.BracketExitLifecycle.EXIT_RECONCILED_FLAT.value,
         }
         with self._lock:
             return [
                 bracket
                 for bracket in self._brackets.values()
-                if _legacy.normalize_symbol(bracket.symbol) == key
+                if _core.normalize_symbol(bracket.symbol) == key
                 and int(bracket.remaining_quantity or 0) > 0
                 and str(bracket.exit_state or "") not in terminal
             ]
@@ -253,7 +253,7 @@ class RuntimeBracketManager(LedgerBracketManager):
     def _resolve_exit_bracket(self, order: Any) -> tuple[Any | None, str]:
         """Resolve an exit fill to a bracket without guessing across exposures."""
 
-        symbol = _legacy.normalize_symbol(getattr(order, "symbol", ""))
+        symbol = _core.normalize_symbol(getattr(order, "symbol", ""))
         identity = [
             str(getattr(order, name, "") or "").strip()
             for name in ("bracket_id", "linked_entry_order_id", "trade_lifecycle_id")
@@ -265,7 +265,7 @@ class RuntimeBracketManager(LedgerBracketManager):
                 bracket = self.get_bracket(value)
             if (
                 bracket is not None
-                and _legacy.normalize_symbol(bracket.symbol) == symbol
+                and _core.normalize_symbol(bracket.symbol) == symbol
                 and self._exit_side_matches(bracket, order)
             ):
                 return bracket, "managed_identity"
@@ -300,12 +300,12 @@ class RuntimeBracketManager(LedgerBracketManager):
         """
 
         order_id = str(getattr(order, "order_id", "") or "").strip()
-        symbol = _legacy.normalize_symbol(getattr(order, "symbol", ""))
+        symbol = _core.normalize_symbol(getattr(order, "symbol", ""))
         if not order_id or not symbol:
             return False
         bracket, source = self._resolve_exit_bracket(order)
         if bracket is None:
-            _legacy.LOGGER.warning(
+            _core.LOGGER.warning(
                 "EXIT_ORDER_CORRELATION_DEFERRED order_id=%s symbol=%s source=%s",
                 order_id,
                 symbol,
@@ -340,7 +340,7 @@ class RuntimeBracketManager(LedgerBracketManager):
             bracket.exit_pending = True
             bracket.exit_in_progress = False
             bracket.exit_submission_inflight = False
-            bracket.exit_state = _legacy.BracketExitLifecycle.EXIT_ORDER_SUBMITTED.value
+            bracket.exit_state = _core.BracketExitLifecycle.EXIT_ORDER_SUBMITTED.value
             bracket.entry_status = bracket.exit_state
             bracket.exit_submitted_at = bracket.exit_submitted_at or now
             bracket.last_exit_attempt_at = bracket.last_exit_attempt_at or now
@@ -355,7 +355,7 @@ class RuntimeBracketManager(LedgerBracketManager):
 
         with suppress(Exception):
             self.save_state()
-        _legacy.LOGGER.info(
+        _core.LOGGER.info(
             "EXIT_ORDER_CORRELATED bracket_id=%s order_id=%s symbol=%s source=%s reason=%s qty=%s fill_price=%s",
             bracket.bracket_id,
             order_id,
@@ -463,7 +463,7 @@ class RuntimeBracketManager(LedgerBracketManager):
             bracket.exit_in_progress = False
             bracket.active = False
             bracket.position_flat_confirmed = True
-            bracket.exit_state = _legacy.BracketExitLifecycle.CLOSED.value
+            bracket.exit_state = _core.BracketExitLifecycle.CLOSED.value
             bracket.entry_status = "CLOSED"
             bracket.pending_exit_order_id = None
             positions = getattr(self.order_manager, "_positions", None)
@@ -524,7 +524,7 @@ class RuntimeBracketManager(LedgerBracketManager):
         try:
             self.save_state()
         except Exception as exc:  # noqa: BLE001
-            _legacy.LOGGER.error(
+            _core.LOGGER.error(
                 "BRACKET_CLOSE_PERSIST_FAILED bracket_id=%s error=%s",
                 bracket.bracket_id,
                 exc,
@@ -538,7 +538,7 @@ class RuntimeBracketManager(LedgerBracketManager):
             ledger_complete=bool(ledger_pnl and ledger_pnl.complete),
         )
         setattr(bracket, "_completed_trade_outcome", outcome)
-        _legacy.LOGGER.info(
+        _core.LOGGER.info(
             "BRACKET_CLOSED bracket_id=%s symbol=%s close_source=%s side=%s qty=%s entry=%s exit=%s pnl=%s",
             bracket.bracket_id,
             bracket.symbol,
@@ -585,7 +585,7 @@ class RuntimeBracketManager(LedgerBracketManager):
             try:
                 hook(bracket.symbol)
             except Exception:
-                _legacy.LOGGER.exception(
+                _core.LOGGER.exception(
                     "BRACKET_EXIT_COMPLETE_HOOK_FAILED symbol=%s", bracket.symbol
                 )
 

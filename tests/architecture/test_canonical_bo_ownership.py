@@ -133,7 +133,11 @@ def test_core_modules_are_imported_only_by_canonical_facades() -> None:
         },
         "nifty_scalper_bot.execution.bracket_core": {
             "bracket_manager.py",
+            "canonical_bracket_manager.py",
+            "hardened_bracket_manager.py",
+            "ledger_bracket_manager.py",
             "ownership.py",
+            "runtime_bracket_manager.py",
         },
         "nifty_scalper_bot.execution.adaptive_trailing_core": {
             "adaptive_trailing.py",
@@ -147,6 +151,25 @@ def test_core_modules_are_imported_only_by_canonical_facades() -> None:
             if module in imported and path.name not in allowed_names:
                 offenders.append(f"{relative} imports {module}")
     assert not offenders, offenders
+
+
+def test_bracket_implementation_layers_do_not_import_public_facade() -> None:
+    facade = "nifty_scalper_bot.execution.bracket_manager"
+    implementation_files = (
+        "hardened_bracket_manager.py",
+        "canonical_bracket_manager.py",
+        "ledger_bracket_manager.py",
+        "runtime_bracket_manager.py",
+    )
+    offenders = [
+        name
+        for name in implementation_files
+        if facade in _imports(EXECUTION / name)
+    ]
+    assert not offenders, (
+        "Bracket implementation layers must depend on bracket_core, not the "
+        f"public facade: {offenders}"
+    )
 
 
 def test_retired_duplicate_bo_modules_are_absent() -> None:

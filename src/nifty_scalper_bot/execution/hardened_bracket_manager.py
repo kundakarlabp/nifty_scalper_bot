@@ -1,6 +1,6 @@
 """Deterministic live-money hardening for the virtual bracket manager.
 
-The legacy manager remains the implementation owner. This subclass tightens its
+The core manager remains the implementation owner. This subclass tightens its
 state transitions, rescues stale protective orders without duplicate exposure,
 and installs a final unresolved-exit guard on the attached OrderManager.
 """
@@ -14,12 +14,12 @@ import os
 import time
 from typing import Any, Mapping
 
-from nifty_scalper_bot.execution import bracket_manager as _legacy
+import nifty_scalper_bot.execution.bracket_core as _core
 
-_LegacyBracketManager = _legacy.BracketManager
+_CoreBracketManager = _core.BracketManager
 
 
-class HardenedBracketManager(_LegacyBracketManager):
+class HardenedBracketManager(_CoreBracketManager):
     """Virtual bracket manager with latched exits and controlled rescue orders."""
 
     _OPEN_ORDER_STATUSES = {
@@ -40,25 +40,25 @@ class HardenedBracketManager(_LegacyBracketManager):
         self._exit_escalation_notifications: set[tuple[str, str]] = set()
         self._exit_open_order_timeout_seconds = max(
             0.5,
-            _legacy.parse_float_env(
+            _core.parse_float_env(
                 os.getenv("EXIT_OPEN_ORDER_RESCUE_AFTER_SECONDS"), 3.0
             ),
         )
         self._exit_cancel_confirm_timeout_seconds = max(
             0.25,
-            _legacy.parse_float_env(
+            _core.parse_float_env(
                 os.getenv("EXIT_CANCEL_CONFIRM_TIMEOUT_SECONDS"), 1.5
             ),
         )
         self._exit_cancel_poll_interval_seconds = max(
             0.05,
-            _legacy.parse_float_env(
+            _core.parse_float_env(
                 os.getenv("EXIT_CANCEL_POLL_INTERVAL_SECONDS"), 0.10
             ),
         )
         self._exit_rescue_max_attempts = max(
             1,
-            _legacy.parse_int_env(os.getenv("EXIT_RESCUE_MAX_ATTEMPTS"), 2),
+            _core.parse_int_env(os.getenv("EXIT_RESCUE_MAX_ATTEMPTS"), 2),
         )
         super().__init__(*args, **kwargs)
         self._install_unresolved_exit_entry_guard()
@@ -88,7 +88,7 @@ class HardenedBracketManager(_LegacyBracketManager):
             if callable(setter):
                 with suppress(Exception):
                     setter("unresolved_exit_position")
-            _legacy.LOGGER.critical(
+            _core.LOGGER.critical(
                 "ENTRY_BLOCKED_UNRESOLVED_EXIT bracket_id=%s",
                 bracket_id,
                 extra={
@@ -169,7 +169,7 @@ class HardenedBracketManager(_LegacyBracketManager):
             setattr(order_manager, method_name, guarded)
 
         setattr(order_manager, "_unresolved_exit_guard_installed", True)
-        _legacy.LOGGER.info(
+        _core.LOGGER.info(
             "UNRESOLVED_EXIT_ENTRY_GUARD_INSTALLED",
             extra={"event": "UNRESOLVED_EXIT_ENTRY_GUARD_INSTALLED"},
         )
@@ -178,15 +178,15 @@ class HardenedBracketManager(_LegacyBracketManager):
     # Virtual trailing-stop integrity.
     # ------------------------------------------------------------------
     def register_virtual_bracket(self, *args: Any, **kwargs: Any) -> None:
-        _LegacyBracketManager.register_virtual_bracket(self, *args, **kwargs)
+        _CoreBracketManager.register_virtual_bracket(self, *args, **kwargs)
         order_id = str(kwargs.get("order_id") or (args[0] if args else ""))
         bracket = self.get_bracket(order_id) if order_id else None
         if bracket is None:
             return
         with self._lock:
             if not bracket.exit_pending and bracket.exit_state in {
-                _legacy.BracketExitLifecycle.OPEN_PENDING_FILL.value,
-                _legacy.BracketExitLifecycle.OPEN_ACTIVE.value,
+                _core.BracketExitLifecycle.OPEN_PENDING_FILL.value,
+                _core.BracketExitLifecycle.OPEN_ACTIVE.value,
             }:
                 bracket.exit_order_id = None
                 bracket.pending_exit_order_id = None
@@ -197,7 +197,7 @@ class HardenedBracketManager(_LegacyBracketManager):
     def confirm_entry_fill(
         self, order_id: str, fill_price: float, filled_qty: int | None = None
     ) -> None:
-        _LegacyBracketManager.confirm_entry_fill(
+        _CoreBracketManager.confirm_entry_fill(
             self, order_id, fill_price, filled_qty
         )
         bracket = self.get_bracket(order_id)
@@ -215,7 +215,7 @@ class HardenedBracketManager(_LegacyBracketManager):
             return False
         if not math.isfinite(proposed) or proposed <= 0:
             return False
-        proposed = _legacy._round_to_tick(proposed)
+        proposed = _core._round_to_tick(proposed)
 
         target = None
         with self._lock:
@@ -243,7 +243,7 @@ class HardenedBracketManager(_LegacyBracketManager):
 
         with suppress(Exception):
             self.save_state()
-        _legacy.LOGGER.info(
+        _core.LOGGER.info(
             "VIRTUAL_TRAILING_SL_RATCHET symbol=%s old_sl=%.2f new_sl=%.2f ltp=%.2f",
             target.symbol,
             current,
@@ -291,7 +291,7 @@ class HardenedBracketManager(_LegacyBracketManager):
         *,
         now: float,
     ) -> None:
-        symbol = _legacy.normalize_symbol(bracket.symbol)
+        symbol = _core.normalize_symbol(bracket.symbol)
         qty = max(
             0,
             min(
@@ -305,7 +305,7 @@ class HardenedBracketManager(_LegacyBracketManager):
         with self._lock:
             if (
                 bracket.exit_state
-                == _legacy.BracketExitLifecycle.EXIT_FAILED_ESCALATED.value
+                == _core.BracketExitLifecycle.EXIT_FAILED_ESCALATED.value
                 and not self._exit_continue_retry_after_escalation
             ):
                 self._log_exit_pending_summary_locked(bracket, now)
@@ -315,10 +315,10 @@ class HardenedBracketManager(_LegacyBracketManager):
         if order_id:
             status_payload = self._get_broker_order_status(str(order_id))
             status = str((status_payload or {}).get("status") or "").strip().upper()
-            if status in _legacy._FILLED_STATUSES:
+            if status in _core._FILLED_STATUSES:
                 self._reconcile_exit_state(bracket, requested_by="hardening_filled")
                 return
-            if status in _legacy._CANCELLED_STATUSES:
+            if status in _core._CANCELLED_STATUSES:
                 with self._lock:
                     bracket.exit_order_id = None
                     bracket.pending_exit_order_id = None
@@ -349,18 +349,18 @@ class HardenedBracketManager(_LegacyBracketManager):
                 # unresolved state merely because an old broker order id exists.
                 if (
                     bracket.exit_state
-                    == _legacy.BracketExitLifecycle.EXIT_FAILED_ESCALATED.value
+                    == _core.BracketExitLifecycle.EXIT_FAILED_ESCALATED.value
                 ):
                     self._log_exit_pending_summary_locked(bracket, now)
                     return
                 bracket.exit_state = (
-                    _legacy.BracketExitLifecycle.EXIT_ORDER_SUBMITTED.value
+                    _core.BracketExitLifecycle.EXIT_ORDER_SUBMITTED.value
                 )
                 bracket.entry_status = bracket.exit_state
                 self._log_exit_pending_summary_locked(bracket, now)
             return
 
-        _LegacyBracketManager._process_exit_state(self, bracket, action, now=now)
+        _CoreBracketManager._process_exit_state(self, bracket, action, now=now)
 
     def _rescue_stale_exit_order(
         self,
@@ -380,7 +380,7 @@ class HardenedBracketManager(_LegacyBracketManager):
             bracket.exit_in_progress = True
             self._exit_rescue_attempts[bracket.bracket_id] = attempts + 1
 
-        _legacy.LOGGER.critical(
+        _core.LOGGER.critical(
             "EXIT_STALE_ORDER_RESCUE bracket_id=%s order_id=%s status=%s qty=%s rescue_attempt=%s",
             bracket.bracket_id,
             order_id,
@@ -440,11 +440,11 @@ class HardenedBracketManager(_LegacyBracketManager):
             bracket.last_exit_attempt_at = now_ts
             bracket.exit_triggered_at = now_ts
             attempt = bracket.exit_attempt_count
-            bracket.exit_state = _legacy.BracketExitLifecycle.EXIT_ORDER_PENDING.value
+            bracket.exit_state = _core.BracketExitLifecycle.EXIT_ORDER_PENDING.value
             bracket.entry_status = bracket.exit_state
 
         result = self.submit_exit_order(
-            symbol=_legacy.normalize_symbol(bracket.symbol),
+            symbol=_core.normalize_symbol(bracket.symbol),
             qty=qty,
             reason="EXIT_ESCALATED_RESCUE",
             bracket_id=bracket.bracket_id,
@@ -458,14 +458,14 @@ class HardenedBracketManager(_LegacyBracketManager):
                 bracket.exit_order_id = new_order_id
                 bracket.pending_exit_order_id = new_order_id
                 bracket.exit_state = (
-                    _legacy.BracketExitLifecycle.EXIT_ORDER_SUBMITTED.value
+                    _core.BracketExitLifecycle.EXIT_ORDER_SUBMITTED.value
                 )
                 bracket.entry_status = bracket.exit_state
                 bracket.last_exit_error = None
                 bracket.next_exit_attempt_at = None
                 bracket.escalated_at = None
                 self._exit_order_open_since[new_order_id] = time.time()
-                _legacy.LOGGER.critical(
+                _core.LOGGER.critical(
                     "EXIT_RESCUE_ORDER_SUBMITTED bracket_id=%s prior_order_id=%s new_order_id=%s attempt=%s qty=%s",
                     bracket.bracket_id,
                     prior_order_id,
@@ -493,7 +493,7 @@ class HardenedBracketManager(_LegacyBracketManager):
                 < self._exit_rescue_max_attempts
             ):
                 bracket.exit_state = (
-                    _legacy.BracketExitLifecycle.EXIT_REJECTED_RETRYABLE.value
+                    _core.BracketExitLifecycle.EXIT_REJECTED_RETRYABLE.value
                 )
                 bracket.entry_status = bracket.exit_state
                 bracket.next_exit_attempt_at = (
@@ -528,7 +528,7 @@ class HardenedBracketManager(_LegacyBracketManager):
                 except Exception as exc:  # noqa: BLE001
                     last_error = exc
                     break
-        _legacy.LOGGER.error(
+        _core.LOGGER.error(
             "EXIT_CANCEL_REQUEST_FAILED order_id=%s error=%s",
             order_id,
             last_error,
@@ -547,9 +547,9 @@ class HardenedBracketManager(_LegacyBracketManager):
         while time.monotonic() <= deadline:
             status_payload = self._get_broker_order_status(order_id)
             status = str((status_payload or {}).get("status") or "").strip().upper()
-            if status in _legacy._FILLED_STATUSES:
+            if status in _core._FILLED_STATUSES:
                 return "filled"
-            if status in _legacy._CANCELLED_STATUSES:
+            if status in _core._CANCELLED_STATUSES:
                 return "cancelled"
             time.sleep(self._exit_cancel_poll_interval_seconds)
         return "unconfirmed"
@@ -558,7 +558,7 @@ class HardenedBracketManager(_LegacyBracketManager):
         try:
             return bool(self._position_flat_for_symbol(symbol))
         except Exception as exc:  # noqa: BLE001
-            _legacy.LOGGER.error(
+            _core.LOGGER.error(
                 "EXIT_POSITION_RECONCILE_FAILED symbol=%s error=%s",
                 symbol,
                 exc,
@@ -581,12 +581,12 @@ class HardenedBracketManager(_LegacyBracketManager):
         ):
             bracket.exit_pending = True
             bracket.exit_state = (
-                _legacy.BracketExitLifecycle.EXIT_FAILED_ESCALATED.value
+                _core.BracketExitLifecycle.EXIT_FAILED_ESCALATED.value
             )
             bracket.entry_status = bracket.exit_state
             self._exit_escalation_notifications.add(key)
             return
-        _LegacyBracketManager._escalate_exit_locked(self, bracket, reason)
+        _CoreBracketManager._escalate_exit_locked(self, bracket, reason)
         self._exit_escalation_notifications.add(key)
 
 
