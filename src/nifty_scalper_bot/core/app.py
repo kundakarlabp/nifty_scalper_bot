@@ -1584,7 +1584,6 @@ from nifty_scalper_bot.utils.errors import (
 )
 from nifty_scalper_bot.utils.logging import (
     get_logger,
-    log_state_change,
     log_throttled,
     setup_logging,
 )
