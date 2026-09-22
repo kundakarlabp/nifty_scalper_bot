@@ -18,18 +18,23 @@ The merged telemetry contract was visible live:
 
 `core/app.py` already defined and called `_polling_failover_supervisor_iteration()`, but `core/polling_failover_runtime.py` replaced that function at import time. This created two implementations of one recovery path.
 
-The runtime adapter contained newer safety behavior that must not be lost:
-- structured `futures_live_tick_stale` blocker forces required-symbol recovery;
-- async/sync-safe fallback start/stop handling;
-- anti-flap recovery cooldown;
-- fail-closed non-fatal supervisor behavior;
-- decision observability.
+The deeper audit showed that the runtime adapter was compensating for a lower-level
+freshness mismatch rather than fixing the right owner. `MarketDataManager.trading_feed_health()`
+already publishes `required_symbol_recovery_active`, and the canonical
+`decide_polling_fallback()` already treats that state as authoritative. However,
+`MarketDataManager.classify_live_tick_readiness()` only checked packet-arrival
+monotonic age. A stream of newly arriving packets carrying an old exchange/event
+timestamp could therefore be classified as ready.
 
 Canonical action:
-- preserve the newer safety behavior in `core/app.py`;
+- make MDM current-generation readiness evaluate both packet-arrival age and
+  market-event timestamp age;
+- classify fresh-arrival/stale-event data as `market_event_stale`;
+- let existing `trading_feed_health()` expose that required-symbol recovery;
+- leave the native `core/app.py` polling supervisor unchanged;
 - delete the runtime replacement module;
-- keep `polling_failover_runtime_patch_installed=false` as a compatibility observability field;
-- add `polling_failover_native=true` as the positive proof.
+- keep `polling_failover_runtime_patch_installed=false` as compatibility
+  observability and add `polling_failover_native=true` as the positive proof.
 
 ### 2. Runner CandleEngine mirror cache
 
@@ -68,10 +73,14 @@ This canonicalization does not change:
 ## Validation contract
 
 Regression coverage must prove:
-1. stale futures readiness still activates the existing REST recovery path;
-2. unrelated blockers do not activate fallback on a healthy feed;
-3. market-closed fallback is stopped safely;
-4. direct `core.app` import keeps the polling owner native;
-5. repeated Runner engine resolution calls MDM only once after the mirror is cached;
-6. runtime install proof reports native polling ownership and no polling runtime patch.
+1. a current-generation futures tick with fresh arrival but stale market-event
+   time is classified `market_event_stale`;
+2. MDM feed health exposes that symbol as required recovery even while the
+   transport/arrival age is fresh;
+3. the unchanged native polling supervisor activates the existing REST recovery
+   path from MDM's structured recovery state;
+4. unrelated blockers do not activate fallback on a healthy feed;
+5. direct `core.app` import keeps the polling owner native;
+6. repeated Runner engine resolution calls MDM only once after the mirror is cached;
+7. runtime install proof reports native polling ownership and no polling runtime patch.
 
