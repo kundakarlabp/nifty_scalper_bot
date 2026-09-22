@@ -144,7 +144,6 @@ class OrderFlowStrategy(EliteStrategy):
         super().__init__(config=config, indicator_engine=indicator_engine)
         self._cfg = config
         self._reversal_confirmation: dict[str, dict[str, Any]] = {}
-        self._ofi_state: dict[str, dict[str, Any]] = {}
 
     def get_required_indicators(self) -> set[str]:
         """Args: none. Returns: indicator keys. Raises: Exception."""
@@ -159,133 +158,6 @@ class OrderFlowStrategy(EliteStrategy):
             "spread_pct",
             "atr",
         }
-
-    def _temporal_ofi_snapshot(
-        self,
-        *,
-        symbol: str,
-        bid: float,
-        ask: float,
-        bids: list[Any],
-        asks: list[Any],
-        update_version: object | None,
-    ) -> dict[str, Any]:
-        """Aggregate best-book OFI across distinct strategy quote updates."""
-        if not bids or not asks:
-            return {}
-        bid_qty = _safe_float_value(
-            bids[0].get("quantity") if isinstance(bids[0], Mapping) else None
-        )
-        ask_qty = _safe_float_value(
-            asks[0].get("quantity") if isinstance(asks[0], Mapping) else None
-        )
-        if (
-            bid <= 0.0
-            or ask <= bid
-            or bid_qty is None
-            or ask_qty is None
-            or bid_qty <= 0.0
-            or ask_qty <= 0.0
-        ):
-            return {}
-
-        version = update_version
-        if version in (None, "", 0, 0.0):
-            version = (
-                round(bid, 4),
-                round(ask, 4),
-                round(bid_qty, 2),
-                round(ask_qty, 2),
-            )
-        now = time.monotonic()
-        state = self._ofi_state.get(symbol)
-        if state is not None and state.get("version") == version:
-            return dict(state.get("snapshot") or {})
-
-        current = {
-            "bid": float(bid),
-            "ask": float(ask),
-            "bid_qty": float(bid_qty),
-            "ask_qty": float(ask_qty),
-            "observed_at": now,
-        }
-        previous = state.get("last") if isinstance(state, Mapping) else None
-        previous_at = (
-            _safe_float_value(previous.get("observed_at"))
-            if isinstance(previous, Mapping)
-            else None
-        )
-        if (
-            not isinstance(previous, Mapping)
-            or previous_at is None
-            or now <= previous_at
-            or now - previous_at > 5.0
-        ):
-            snapshot = {
-                "ofi_ready": False,
-                "ofi_event": 0.0,
-                "ofi_1s": 0.0,
-                "ofi_3s": 0.0,
-                "ofi_1s_normalized": 0.0,
-                "ofi_3s_normalized": 0.0,
-                "ofi_update_count_1s": 0,
-                "ofi_update_count_3s": 0,
-                "ofi_source": "strategy_quote_updates",
-                "queue_imbalance_top": (bid_qty - ask_qty)
-                / max(bid_qty + ask_qty, 1.0),
-            }
-            self._ofi_state[symbol] = {
-                "version": version,
-                "last": current,
-                "events": [],
-                "snapshot": snapshot,
-            }
-            return dict(snapshot)
-
-        prev_bid = float(previous["bid"])
-        prev_ask = float(previous["ask"])
-        prev_bid_qty = float(previous["bid_qty"])
-        prev_ask_qty = float(previous["ask_qty"])
-        ofi_event = (
-            (bid_qty if bid >= prev_bid else 0.0)
-            - (prev_bid_qty if bid <= prev_bid else 0.0)
-            - (ask_qty if ask <= prev_ask else 0.0)
-            + (prev_ask_qty if ask >= prev_ask else 0.0)
-        )
-        depth_scale = max((bid_qty + ask_qty) / 2.0, 1.0)
-        events = list(state.get("events") or []) if isinstance(state, Mapping) else []
-        events.append((now, float(ofi_event), float(depth_scale)))
-        events = [event for event in events if now - float(event[0]) <= 3.0]
-
-        def _window(seconds: float) -> tuple[float, float, int]:
-            window = [event for event in events if now - float(event[0]) <= seconds]
-            if not window:
-                return 0.0, 0.0, 0
-            total = sum(float(event[1]) for event in window)
-            mean_depth = sum(float(event[2]) for event in window) / len(window)
-            return total, total / max(mean_depth, 1.0), len(window)
-
-        ofi_1s, ofi_1s_normalized, count_1s = _window(1.0)
-        ofi_3s, ofi_3s_normalized, count_3s = _window(3.0)
-        snapshot = {
-            "ofi_ready": count_1s >= 2,
-            "ofi_event": float(ofi_event),
-            "ofi_1s": ofi_1s,
-            "ofi_3s": ofi_3s,
-            "ofi_1s_normalized": ofi_1s_normalized,
-            "ofi_3s_normalized": ofi_3s_normalized,
-            "ofi_update_count_1s": count_1s,
-            "ofi_update_count_3s": count_3s,
-            "ofi_source": "strategy_quote_updates",
-            "queue_imbalance_top": (bid_qty - ask_qty) / max(bid_qty + ask_qty, 1.0),
-        }
-        self._ofi_state[symbol] = {
-            "version": version,
-            "last": current,
-            "events": events,
-            "snapshot": snapshot,
-        }
-        return dict(snapshot)
 
     def _reversal_persistence_confirmed(
         self,
@@ -433,14 +305,22 @@ class OrderFlowStrategy(EliteStrategy):
             quote_depth_valid = quote_readiness.depth_available
             tick_age_ms = quote_readiness.tick_age_ms
             quote_update_version = quote_readiness.quote_update_version
-            ofi_snapshot = self._temporal_ofi_snapshot(
-                symbol=symbol,
-                bid=bid,
-                ask=ask,
-                bids=bids,
-                asks=asks,
-                update_version=quote_update_version,
-            )
+            ofi_snapshot = {
+                key: indicators[key]
+                for key in (
+                    "ofi_ready",
+                    "ofi_event",
+                    "ofi_1s",
+                    "ofi_3s",
+                    "ofi_1s_normalized",
+                    "ofi_3s_normalized",
+                    "ofi_update_count_1s",
+                    "ofi_update_count_3s",
+                    "ofi_source",
+                    "queue_imbalance_top",
+                )
+                if key in indicators
+            }
 
             if total_bid + total_ask <= 0:
                 allow_fallback = str(
