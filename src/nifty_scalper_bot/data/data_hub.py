@@ -975,9 +975,7 @@ class DataHub:
         try:
             ts = float(timestamp) if timestamp is not None else None
             normalized["ts"] = (
-                self._now()
-                if ts is None
-                else (ts / 1000.0 if ts > 1e11 else ts)
+                self._now() if ts is None else (ts / 1000.0 if ts > 1e11 else ts)
             )
         except (TypeError, ValueError):
             normalized["ts"] = self._now()
@@ -1307,9 +1305,7 @@ class DataHub:
 
     def _ingest_tick_impl(self, tick: Tick) -> None:
         canonical_tick = (
-            self._canonicalize_tick_payload(tick)
-            if isinstance(tick, Mapping)
-            else None
+            self._canonicalize_tick_payload(tick) if isinstance(tick, Mapping) else None
         )
         if canonical_tick is None:
             return
