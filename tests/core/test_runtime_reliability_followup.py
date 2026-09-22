@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 import time
 import types
 from unittest.mock import MagicMock
+from pathlib import Path
 
 from nifty_scalper_bot.core.app import _reconciliation_sleep_seconds
 from nifty_scalper_bot.core.runtime_reliability_hardening import (
@@ -301,3 +302,19 @@ def test_datahub_generic_tick_still_uses_full_canonicalization(monkeypatch) -> N
     )
 
     assert stamp_calls >= 1
+
+
+def test_runtime_reliability_hotpath_behavior_is_native_not_monkey_patched() -> None:
+    reliability = Path(
+        "src/nifty_scalper_bot/core/runtime_reliability_hardening.py"
+    ).read_text(encoding="utf-8")
+    datahub = Path("src/nifty_scalper_bot/data/data_hub.py").read_text(encoding="utf-8")
+    mdm = Path("src/nifty_scalper_bot/data/market_data_manager.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "MarketDataManager._update_pipeline_overload_locked =" not in reliability
+    assert "DataHub._canonicalize_tick_payload =" not in reliability
+    assert "def _critical_oldest_pending_age_ms_locked" in mdm
+    assert "if _is_canonical_runtime_tick(payload):" in datahub
+    assert "RUNTIME_RELIABILITY_NATIVE_VERIFIED" in reliability
