@@ -21,7 +21,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
-from nifty_scalper_bot.execution import bracket_manager as _legacy
+from . import bracket_core as _legacy
 from nifty_scalper_bot.execution.hardened_bracket_manager import (
     HardenedBracketManager,
 )

@@ -1,6 +1,6 @@
 """Deterministic live-money hardening for the virtual bracket manager.
 
-The legacy manager remains the implementation owner. This subclass tightens its
+The bracket core remains the implementation owner. This subclass tightens its
 state transitions, rescues stale protective orders without duplicate exposure,
 and installs a final unresolved-exit guard on the attached OrderManager.
 """
@@ -14,7 +14,7 @@ import os
 import time
 from typing import Any, Mapping
 
-from nifty_scalper_bot.execution import bracket_manager as _legacy
+from . import bracket_core as _legacy
 
 _LegacyBracketManager = _legacy.BracketManager
 

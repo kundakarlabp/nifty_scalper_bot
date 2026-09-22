@@ -20,7 +20,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Mapping
 
-from nifty_scalper_bot.execution import bracket_manager as _legacy
+from . import bracket_core as _legacy
 from nifty_scalper_bot.execution.canonical_bracket_manager import (
     CanonicalBracketManager,
 )
