@@ -1081,9 +1081,7 @@ class DataHub:
                 tick.setdefault("hard_readiness_eligible", True)
                 tick.setdefault("quote_source", tick.get("source"))
                 tick.setdefault("exchange_symbol", symbol)
-                tick.setdefault(
-                    "quote_identity_timestamp_source", timestamp_quality
-                )
+                tick.setdefault("quote_identity_timestamp_source", timestamp_quality)
                 return tick
 
         tick = dict(payload)
