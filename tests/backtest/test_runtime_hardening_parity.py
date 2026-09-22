@@ -17,6 +17,7 @@ _REQUIRED = {
     "market_data_hardening",
     "dynamic_universe",
     "live_ws_tick_receipts",
+    "runtime_reliability",
     "runner_candle_cache",
     "strategy_context_fast_path",
     "off_market_controller",
