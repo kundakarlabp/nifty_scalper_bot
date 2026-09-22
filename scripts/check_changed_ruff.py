@@ -120,7 +120,8 @@ def check_file(base: str, path: Path) -> tuple[bool, str]:
         print(f"{path}: NEW {code} {message}{suffix}")
         if source:
             print(f"    {source}")
-    return False, f"FAIL {path}: introduced {sum(int(v) for v in introduced.values())} Ruff diagnostic(s)"
+    count = sum(int(value) for value in introduced.values())
+    return False, f"FAIL {path}: introduced {count} Ruff diagnostic(s)"
 
 
 def _read_paths(files_from: Path) -> list[Path]:
