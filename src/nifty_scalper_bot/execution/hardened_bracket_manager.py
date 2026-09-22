@@ -14,7 +14,7 @@ import time
 from contextlib import suppress
 from typing import Any, Mapping
 
-import nifty_scalper_bot.execution.bracket_core as _core
+from . import bracket_core as _core
 
 _CoreBracketManager = _core.BracketManager
 

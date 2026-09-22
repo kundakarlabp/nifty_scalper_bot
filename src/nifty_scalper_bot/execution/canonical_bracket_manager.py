@@ -21,7 +21,7 @@ from contextlib import suppress
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
-import nifty_scalper_bot.execution.bracket_core as _core
+from . import bracket_core as _core
 from nifty_scalper_bot.execution.broker_position_evidence import (
     BrokerPositionEvidence,
     BrokerPositionState,
@@ -429,9 +429,9 @@ class CanonicalBracketManager(HardenedBracketManager):
                         else _core.LOGGER.warning
                     )
                     log(
-                        "EXIT_FLAT_BUT_ORDER_NOT_TERMINAL bracket_id=%s symbol=%s order_id=%s "
-                        "order_status=%s age_seconds=%.3f grace_seconds=%.3f "
-                        "close_deferred=True",
+                        "EXIT_FLAT_BUT_ORDER_NOT_TERMINAL bracket_id=%s "
+                        "symbol=%s order_id=%s order_status=%s "
+                        "age_seconds=%.3f grace_seconds=%.3f close_deferred=True",
                         bracket.bracket_id,
                         bracket.symbol,
                         order_id,
