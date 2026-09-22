@@ -1,12 +1,8 @@
-"""Regime vocabulary contract.
-
-Producers and consumers of the regime label previously used four different
-vocabularies, so gates and weights keyed on words nothing emitted resolved to
-their neutral default. These tests pin the single canonical vocabulary and the
-normalisation seam that every consumer must go through.
-"""
+"""Canonical market-regime vocabulary and ownership contract."""
 
 from __future__ import annotations
+
+from pathlib import Path
 
 import pytest
 
@@ -18,10 +14,24 @@ from nifty_scalper_bot.config.regime_ontology import (
 from nifty_scalper_bot.core.market_regime import MarketRegimeDetector
 from nifty_scalper_bot.core.strategy_manager import REGIME_STRATEGY_WEIGHTS
 from nifty_scalper_bot.risk.regime_sizing import RegimeType
-from nifty_scalper_bot.strategies.market_regime_engine import MarketRegimeEngine
 
 
+ROOT = Path(__file__).resolve().parents[2]
 CANONICAL = {member.value for member in MarketRegime}
+
+
+def test_strategy_regime_duplicate_is_absent() -> None:
+    duplicate = (
+        ROOT
+        / "src"
+        / "nifty_scalper_bot"
+        / "strategies"
+        / "market_regime_engine.py"
+    )
+    assert not duplicate.exists(), (
+        "Market regime classification must remain owned by core.market_regime "
+        "and config.regime_ontology"
+    )
 
 
 def test_regime_weight_table_is_keyed_by_canonical_names_only() -> None:
@@ -30,22 +40,8 @@ def test_regime_weight_table_is_keyed_by_canonical_names_only() -> None:
     assert unknown_keys == set(), f"non-canonical weight rows: {sorted(unknown_keys)}"
 
 
-def test_runner_regime_engine_only_emits_canonical_regimes() -> None:
-    engine = MarketRegimeEngine()
-    indicator_sets = [
-        {"adx": 30.0, "atr": 12.0, "atr_average": 10.0, "vwap_slope": 0.5, "volume_expansion": 1.2},
-        {"adx": 20.0, "atr": 30.0, "atr_average": 10.0, "vwap_slope": 0.0, "volume_expansion": 1.0},
-        {"adx": 10.0, "atr": 9.0, "atr_average": 10.0, "vwap_slope": 0.0, "volume_expansion": 1.0},
-        {"adx": 20.0, "atr": 9.0, "atr_average": 10.0, "vwap_slope": 0.0, "volume_expansion": 0.2},
-        {"adx": None, "atr": 0.0, "atr_average": 0.0, "vwap_slope": 0.0, "volume_expansion": 0.0},
-    ]
-    for indicators in indicator_sets:
-        snapshot = engine.classify(indicators)
-        assert snapshot.regime.value in CANONICAL
-
-
 def test_core_detector_regimes_normalise_to_canonical_names() -> None:
-    """The core detector emits lowercase words; they must resolve, not fall through."""
+    """Core detector labels must resolve onto the canonical vocabulary."""
     for emitted in ("trend", "range", "volatile", "event"):
         assert normalize_regime(emitted) is not MarketRegime.UNKNOWN
         assert normalize_regime(emitted).value in CANONICAL
@@ -111,10 +107,17 @@ def test_trend_regime_now_receives_its_configured_weight() -> None:
     """The defect: detector said TREND, the table said TREND_UP, SMC got 1.0."""
     trend_row = REGIME_STRATEGY_WEIGHTS[MarketRegime.TREND.value]
     assert trend_row["SMC"] > 1.0
-    assert REGIME_STRATEGY_WEIGHTS[normalize_regime("trend").value]["SMC"] == trend_row["SMC"]
+    assert (
+        REGIME_STRATEGY_WEIGHTS[normalize_regime("trend").value]["SMC"]
+        == trend_row["SMC"]
+    )
 
 
 def test_defensive_regimes_damp_directional_triggers() -> None:
-    for regime in (MarketRegime.VOLATILE, MarketRegime.EVENT, MarketRegime.LOW_ACTIVITY):
+    for regime in (
+        MarketRegime.VOLATILE,
+        MarketRegime.EVENT,
+        MarketRegime.LOW_ACTIVITY,
+    ):
         row = REGIME_STRATEGY_WEIGHTS[regime.value]
         assert row["SMC"] < 1.0, f"{regime.value} must not score SMC at full weight"
