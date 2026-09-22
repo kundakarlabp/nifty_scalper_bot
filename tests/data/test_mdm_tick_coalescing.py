@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
-from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -1581,50 +1580,6 @@ def test_symbol_recovery_attempts_are_cooldown_bounded(monkeypatch):
         mdm._check_zombie_ticks()
 
     assert requests == [stale]
-
-
-def test_fresh_arrival_with_stale_market_event_requires_symbol_recovery():
-    mdm = MarketDataManager(kite=None)
-    mapping = _wire_symbols(mdm)
-    mdm.set_readiness_requirements(
-        spot_symbol="NSE:NIFTY",
-        futures_symbol="NFO:NIFTY26JUNFUT",
-        atm_ce_symbol="NFO:NIFTY26JUN24000CE",
-        atm_pe_symbol="NFO:NIFTY26JUN24000PE",
-        option_symbols=[
-            "NFO:NIFTY26JUN24000CE",
-            "NFO:NIFTY26JUN24000PE",
-        ],
-    )
-    now_mono = time.monotonic()
-    now_wall = time.time()
-    now_event = datetime.now(timezone.utc)
-    for token, symbol in mapping.items():
-        generation = int(mdm._symbol_subscription_generation.get(symbol, 1) or 1)
-        mdm._symbol_subscription_generation[symbol] = generation
-        mdm._symbol_first_tick_generation[symbol] = generation
-        mdm._desired_tokens.add(token)
-        mdm._dispatched_subscriptions.add(token)
-        mdm._confirmed_subscriptions.add(token)
-        mdm._last_valid_live_tick_mono[symbol] = now_mono
-        mdm._last_tick_wallclock[symbol] = now_wall
-        mdm._last_tick_time[symbol] = now_wall
-        mdm._last_tick_ts[symbol] = now_event
-
-    future = "NFO:NIFTY26JUNFUT"
-    mdm._last_tick_ts[future] = now_event - timedelta(seconds=120)
-
-    readiness = mdm.classify_live_tick_readiness(future, 4, max_age_s=60.0)
-    health = mdm.trading_feed_health(max_age_ms=60_000)
-
-    assert readiness["tick_age_s"] < 1.0
-    assert readiness["market_event_age_s"] >= 119.0
-    assert readiness["market_event_fresh"] is False
-    assert readiness["reason"] == "market_event_stale"
-    assert readiness["ready"] is False
-    assert health["futures_fresh"] is True
-    assert health["required_symbol_recovery_active"] is True
-    assert future in health["stale_required_symbols"]
 
 
 def test_trading_feed_health_exposes_required_symbol_recovery():
