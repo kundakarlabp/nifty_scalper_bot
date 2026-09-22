@@ -8,7 +8,8 @@ import zipfile
 
 import pandas as pd
 import requests
-from dateutil.relativedelta import relativedelta
+
+from nifty_scalper_bot.utils.smart_symbol import get_nifty_monthly_expiry_date
 
 HEADERS = {
     "User-Agent": (
@@ -25,17 +26,9 @@ URL_PATTERNS = [
 ]
 
 
-def last_thursday(year: int, month: int) -> dt.date:
-    d = dt.date(year, month, 1) + relativedelta(months=1, days=-1)
-    while d.weekday() != 3:
-        d -= dt.timedelta(days=1)
-    return d
-
-
 def classify(expiry: dt.date) -> str:
-    return "MONTHLY" if expiry == last_thursday(expiry.year, expiry.month) else "WEEKLY"
-
-
+    monthly_expiry = get_nifty_monthly_expiry_date(expiry.year, expiry.month)
+    return "MONTHLY" if expiry == monthly_expiry else "WEEKLY"
 def ddrange(days: int, end_date: dt.date | None = None):
     end = end_date or dt.date.today()
     for i in range(days):
