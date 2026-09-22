@@ -101,6 +101,7 @@ from nifty_scalper_bot.execution.readiness import (
     evaluate_quote_readiness,
     normalize_readiness_blockers,
 )
+from nifty_scalper_bot.utils.log_throttle import log_on_change
 from nifty_scalper_bot.utils.market_hours import (
     get_runtime_market_mode,
     post_market_basket_refresh_seconds,
@@ -484,261 +485,277 @@ def _polling_fallback_degraded(
     ).activate
 
 
-def _safe_supervisor_call(
-    name: str, fn: Any, *args: Any, default: Any = None, **kwargs: Any
-) -> Any:
-    """Call a polling-supervisor dependency only when callable; log controlled diagnostics otherwise."""
+async def _maybe_await(value: Any) -> Any:
+    if inspect.isawaitable(value):
+        return await value
+    return value
 
-    if not callable(fn):
+
+def _safe_callable(
+    value: Any, *, name: str, default: Any = None
+) -> tuple[bool, Any]:
+    if callable(value):
+        try:
+            return True, value()
+        except Exception as exc:  # noqa: BLE001 - supervisor must stay alive
+            LOGGER.warning(
+                "POLLING_SUPERVISOR_CALL_FAILED name=%s error_type=%s error=%s",
+                name,
+                type(exc).__name__,
+                exc,
+                extra={
+                    "event": "POLLING_SUPERVISOR_CALL_FAILED",
+                    "dependency": name,
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                },
+            )
+            return False, default
+    if value is not None and not isinstance(value, (bool, int, float, str)):
         LOGGER.warning(
-            "POLLING_SUPERVISOR_NONCALLABLE name=%s type=%s",
+            "POLLING_SUPERVISOR_NONCALLABLE name=%s value_type=%s",
             name,
-            type(fn).__name__,
+            type(value).__name__,
             extra={
                 "event": "POLLING_SUPERVISOR_NONCALLABLE",
                 "dependency": name,
-                "type": type(fn).__name__,
+                "value_type": type(value).__name__,
             },
         )
-        return default
+    return False, value if isinstance(value, bool) else default
+
+
+def _feed_health_bool(
+    payload: Mapping[str, Any], key: str, default: bool = True
+) -> bool:
+    value = payload.get(key, default)
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _safe_feed_health(mdm: Any) -> Mapping[str, Any]:
+    if mdm is None:
+        return {}
+    getter = getattr(mdm, "trading_feed_health", None)
+    if not callable(getter):
+        return {}
     try:
-        return fn(*args, **kwargs)
-    except Exception as exc:  # noqa: BLE001 - supervisor must keep retrying safely
+        value = getter()
+    except Exception as exc:  # noqa: BLE001 - recovery must not crash WS path
         LOGGER.warning(
-            "POLLING_SUPERVISOR_CALL_FAILED name=%s error=%s",
-            name,
+            "POLLING_FALLBACK_HEALTH_FAILED error_type=%s error=%s",
+            type(exc).__name__,
             exc,
             extra={
-                "event": "POLLING_SUPERVISOR_CALL_FAILED",
-                "dependency": name,
+                "event": "POLLING_FALLBACK_HEALTH_FAILED",
+                "error_type": type(exc).__name__,
                 "error": str(exc),
             },
         )
-        return default
+        return {}
+    return value if isinstance(value, Mapping) else {}
+
+
+def _safe_data_age_ms(mdm: Any) -> float | None:
+    if mdm is None:
+        return None
+    getter = getattr(mdm, "data_age_ms", None)
+    if not callable(getter):
+        return None
+    try:
+        value = getter()
+        return float(value) if value is not None else None
+    except Exception as exc:  # noqa: BLE001 - recovery must not crash WS path
+        LOGGER.warning(
+            "POLLING_FALLBACK_AGE_FAILED error_type=%s error=%s",
+            type(exc).__name__,
+            exc,
+            extra={
+                "event": "POLLING_FALLBACK_AGE_FAILED",
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+            },
+        )
+        return None
+
+
+async def _stop_polling_fallback_safely(
+    polling_fallback: Any, *, reason: str
+) -> None:
+    try:
+        running_fn = getattr(polling_fallback, "is_running", None)
+        running = (
+            bool(running_fn())
+            if callable(running_fn)
+            else bool(getattr(polling_fallback, "_running", False))
+        )
+        if not running:
+            return
+        mode_fn = getattr(polling_fallback, "set_websocket_mode", None)
+        if callable(mode_fn):
+            await _maybe_await(mode_fn(True))
+        stop_fn = getattr(polling_fallback, "stop", None)
+        if callable(stop_fn):
+            await _maybe_await(stop_fn())
+    except Exception as exc:  # noqa: BLE001 - supervisor must remain non-fatal
+        LOGGER.warning(
+            "POLLING_FALLBACK_STOP_FAILED reason=%s error_type=%s error=%s",
+            reason,
+            type(exc).__name__,
+            exc,
+            extra={
+                "event": "POLLING_FALLBACK_STOP_FAILED",
+                "reason": reason,
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+            },
+        )
+
+
+async def _start_polling_fallback_safely(
+    polling_fallback: Any, *, decision_reason: str | None
+) -> None:
+    try:
+        mode_fn = getattr(polling_fallback, "set_websocket_mode", None)
+        if callable(mode_fn):
+            await _maybe_await(mode_fn(False))
+        running_fn = getattr(polling_fallback, "is_running", None)
+        running = (
+            bool(running_fn())
+            if callable(running_fn)
+            else bool(getattr(polling_fallback, "_running", False))
+        )
+        if not running:
+            start_fn = getattr(polling_fallback, "start", None)
+            if callable(start_fn):
+                await _maybe_await(start_fn())
+    except Exception as exc:  # noqa: BLE001 - never destabilize WS path
+        LOGGER.warning(
+            "POLLING_FALLBACK_START_FAILED reason=%s error_type=%s error=%s",
+            decision_reason,
+            type(exc).__name__,
+            exc,
+            extra={
+                "event": "POLLING_FALLBACK_START_FAILED",
+                "reason": decision_reason,
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+            },
+        )
+
+
+_FUTURES_STALE_BLOCKER = "futures_live_tick_stale"
+
+
+def _futures_live_tick_stale(ctx: Any) -> bool:
+    """Return whether readiness requires recovery of a stale futures event."""
+    blockers = getattr(ctx, "readiness_blockers", None)
+    if isinstance(blockers, (list, tuple, set, frozenset)):
+        if any(_FUTURES_STALE_BLOCKER == str(item) for item in blockers):
+            return True
+    return _FUTURES_STALE_BLOCKER in str(
+        getattr(ctx, "live_block_reason", "") or ""
+    )
 
 
 async def _polling_failover_supervisor_iteration(
     ctx: Any,
     polling_fallback: Any,
     *,
-    quote_stale_ms: int,
+    quote_stale_ms: int | float,
     degraded_since: float | None,
     recovered_since: float | None,
     activate_after: float,
     recover_cooldown: float = 10.0,
 ) -> tuple[float | None, float | None]:
-    """Run one polling failover supervisor iteration. Returns updated hysteresis timestamps."""
+    """Run one non-fatal polling failover supervisor iteration."""
 
-    market_open = bool(
-        _safe_supervisor_call("is_market_open_now", is_market_open_now, default=False)
+    _called, market_open = _safe_callable(
+        getattr(ctx, "is_market_open_now", None) or is_market_open_now,
+        name="is_market_open_now",
+        default=False,
     )
-    now_mono = time_module.monotonic()
-    if not market_open:
-        log_throttled(
-            LOGGER,
-            "polling_fallback_skipped:NSE:NIFTY:market_closed",
-            "POLLING_FALLBACK_SKIPPED reason=market_closed age_ms=%s" % None,
-            interval_sec=60.0,
-            level=logging.DEBUG,
-            extra={
-                "event": "POLLING_FALLBACK_SKIPPED",
-                "reason": "market_closed",
-                "age_ms": None,
-            },
+    if not bool(market_open):
+        await _stop_polling_fallback_safely(
+            polling_fallback, reason="market_closed"
         )
-        if bool(
-            _safe_supervisor_call(
-                "polling_fallback.is_running",
-                getattr(polling_fallback, "is_running", None),
-                default=False,
-            )
-        ):
-            _safe_supervisor_call(
-                "polling_fallback.set_websocket_mode",
-                getattr(polling_fallback, "set_websocket_mode", None),
-                True,
-            )
-            _safe_supervisor_call(
-                "polling_fallback.stop", getattr(polling_fallback, "stop", None)
-            )
-        return None, recovered_since
+        return None, time_module.monotonic()
 
-    ws_ok = bool(
-        _safe_supervisor_call(
-            "websocket_manager.is_connected",
-            getattr(getattr(ctx, "websocket_manager", None), "is_connected", None),
-            default=False,
-        )
+    ws_manager = getattr(ctx, "websocket_manager", None)
+    _called_ws, ws_state = _safe_callable(
+        getattr(ws_manager, "is_connected", None),
+        name="websocket_manager.is_connected",
+        default=False,
     )
+    ws_ok = bool(ws_state)
     mdm = getattr(ctx, "market_data_manager", None)
-    feed_health_getter = getattr(mdm, "trading_feed_health", None)
-    if callable(feed_health_getter):
-        try:
-            feed_health = feed_health_getter(max_age_ms=quote_stale_ms)
-        except TypeError:
-            try:
-                feed_health = feed_health_getter()
-            except Exception as exc:
-                LOGGER.warning(
-                    "POLLING_FALLBACK_HEALTH_FAILED error_type=%s error=%s",
-                    type(exc).__name__,
-                    exc,
-                    extra={
-                        "event": "POLLING_FALLBACK_HEALTH_FAILED",
-                        "error_type": type(exc).__name__,
-                        "error": str(exc),
-                    },
-                )
-                feed_health = {}
-        except Exception as exc:
-            LOGGER.warning(
-                "POLLING_FALLBACK_HEALTH_FAILED error_type=%s error=%s",
-                type(exc).__name__,
-                exc,
-                extra={
-                    "event": "POLLING_FALLBACK_HEALTH_FAILED",
-                    "error_type": type(exc).__name__,
-                    "error": str(exc),
-                },
-            )
-            feed_health = {}
-    else:
-        feed_health = {}
-    if not isinstance(feed_health, Mapping):
-        feed_health = {}
-    futures_fresh = bool(feed_health.get("futures_fresh"))
-    options_fresh = bool(feed_health.get("options_fresh"))
-    spot_fresh = bool(feed_health.get("spot_fresh"))
-    spot_symbol = str(feed_health.get("spot_symbol") or "NSE:NIFTY")
-    spot_age_ms = feed_health.get("spot_age_ms")
-    auth_tick_age_ms = _safe_supervisor_call(
-        "market_data_manager.data_age_ms",
-        getattr(mdm, "data_age_ms", None),
-        default=quote_stale_ms + 1,
+    feed_health = _safe_feed_health(mdm)
+    data_age_ms = _safe_data_age_ms(mdm)
+    if _futures_live_tick_stale(ctx):
+        feed_health = dict(feed_health)
+        feed_health["required_symbol_recovery_active"] = True
+
+    lagging = bool(
+        feed_health.get("lagging")
+        or feed_health.get("event_loop_lagging")
+        or getattr(ctx, "event_loop_lagging", False)
     )
-    try:
-        lagging = float(auth_tick_age_ms) > float(quote_stale_ms)
-    except (TypeError, ValueError):
-        lagging = True
-    try:
-        decision_data_age_ms = (
-            float(auth_tick_age_ms) if auth_tick_age_ms is not None else None
-        )
-    except (TypeError, ValueError):
-        decision_data_age_ms = None
+    futures_fresh = _feed_health_bool(feed_health, "futures_fresh", True)
+    options_fresh = _feed_health_bool(feed_health, "options_fresh", True)
     decision = decide_polling_fallback(
         ws_ok=ws_ok,
         lagging=lagging,
         futures_fresh=futures_fresh,
         options_fresh=options_fresh,
-        quote_stale_ms=quote_stale_ms,
+        quote_stale_ms=float(quote_stale_ms),
         feed_health=feed_health,
-        data_age_ms=decision_data_age_ms,
+        data_age_ms=data_age_ms,
     )
-    if decision.activate:
-        recovered_since = None
-        degraded_since = degraded_since or now_mono
-        running = bool(
-            _safe_supervisor_call(
-                "polling_fallback.is_running",
-                getattr(polling_fallback, "is_running", None),
-                default=False,
-            )
-        )
-        if now_mono - degraded_since >= activate_after and not running:
-            log_state_change(
-                LOGGER,
-                "POLLING_FALLBACK_ACTIVATE",
-                (decision.reason, ws_ok, lagging, futures_fresh, options_fresh),
-                level=logging.WARNING,
-                msg="POLLING_FALLBACK_ACTIVATE reason=%s age_ms=%s threshold_ms=%s ws_ok=%s lagging=%s"
-                % (
-                    decision.reason,
-                    decision.max_age_ms,
-                    quote_stale_ms,
-                    ws_ok,
-                    lagging,
-                ),
-                extra={
-                    "event": "poll_fallback_activate",
-                    "reason": decision.reason,
-                    "lagging": lagging,
-                    "futures_fresh": futures_fresh,
-                    "options_fresh": options_fresh,
-                    "authoritative_age_ms": auth_tick_age_ms,
-                },
-            )
-            try:
-                mode_fn = getattr(polling_fallback, "set_websocket_mode", None)
-                if callable(mode_fn):
-                    mode_fn(False)
-                start_fn = getattr(polling_fallback, "start", None)
-                if callable(start_fn):
-                    start_fn()
-            except Exception as exc:
-                LOGGER.warning(
-                    "POLLING_FALLBACK_START_FAILED reason=%s error_type=%s error=%s",
-                    decision.reason,
-                    type(exc).__name__,
-                    exc,
-                    extra={
-                        "event": "POLLING_FALLBACK_START_FAILED",
-                        "reason": decision.reason,
-                        "error_type": type(exc).__name__,
-                        "error": str(exc),
-                    },
-                )
-        return degraded_since, recovered_since
+    log_on_change(
+        LOGGER,
+        key="polling_fallback_decision",
+        state=(
+            decision.activate,
+            decision.reason,
+            decision.ws_ok,
+            decision.lagging,
+            decision.futures_fresh,
+            decision.options_fresh,
+            decision.required_symbol_recovery_active,
+            decision.stale_required_symbols,
+        ),
+        message=(
+            "POLLING_FALLBACK_DECISION "
+            f"activate={decision.activate} reason={decision.reason} "
+            f"ws_ok={decision.ws_ok} lagging={decision.lagging} "
+            f"futures_fresh={decision.futures_fresh} "
+            f"options_fresh={decision.options_fresh} "
+            f"max_age_ms={decision.max_age_ms} "
+            f"threshold_ms={decision.threshold_ms}"
+        ),
+        reminder_seconds=60.0,
+        level=logging.INFO,
+        extra=decision.as_log_extra(),
+    )
 
-    if not spot_fresh:
-        _safe_supervisor_call(
-            "market_data_manager.ensure_spot_reference_fresh",
-            getattr(mdm, "ensure_spot_reference_fresh", None),
-            symbol=spot_symbol,
-            stale_after_ms=quote_stale_ms,
-        )
-        log_state_change(
-            LOGGER,
-            f"poll_fallback_skipped_spot_only_stale:{spot_symbol}",
-            (
-                "spot_only_stale",
-                spot_symbol,
-                bool(spot_fresh),
-                bool(futures_fresh),
-                bool(options_fresh),
-            ),
-            level=logging.INFO,
-            msg="poll_fallback_skipped_spot_only_stale symbol=%s age_ms=%s"
-            % (spot_symbol, spot_age_ms),
-            extra={
-                "event": "poll_fallback_skipped_spot_only_stale",
-                "symbol": spot_symbol,
-                "age_ms": spot_age_ms,
-            },
-        )
-    degraded_since = None
-    recovered_since = recovered_since or now_mono
-    if now_mono - recovered_since >= recover_cooldown and bool(
-        _safe_supervisor_call(
-            "polling_fallback.is_running",
-            getattr(polling_fallback, "is_running", None),
-            default=False,
-        )
-    ):
-        LOGGER.info(
-            "Polling fallback deactivate (supervisor) after ws recovery cooldown",
-            extra={"event": "polling_fallback_deactivated"},
-        )
-        _safe_supervisor_call(
-            "polling_fallback.set_websocket_mode",
-            getattr(polling_fallback, "set_websocket_mode", None),
-            True,
-        )
-        _safe_supervisor_call(
-            "polling_fallback.stop", getattr(polling_fallback, "stop", None)
-        )
-    return degraded_since, recovered_since
+    now_mono = time_module.monotonic()
+    if not decision.activate:
+        recovered_since = recovered_since or now_mono
+        if now_mono - recovered_since >= max(
+            0.0, float(recover_cooldown or 0.0)
+        ):
+            await _stop_polling_fallback_safely(
+                polling_fallback, reason="feed_recovered"
+            )
+        return None, recovered_since
 
+    degraded_since = degraded_since or now_mono
+    if now_mono - degraded_since >= max(0.0, float(activate_after or 0.0)):
+        await _start_polling_fallback_safely(
+            polling_fallback, decision_reason=decision.reason
+        )
+    return degraded_since, None
 
 def _run_sync_locked(operation: Callable[[], Any]) -> Any:
     """Run synchronization-critical broker operations under a process-wide lock."""
