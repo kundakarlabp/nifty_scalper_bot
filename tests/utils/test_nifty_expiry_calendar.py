@@ -1,8 +1,9 @@
 from datetime import date
 
+from scripts.sync_nifty_options import classify
+
 from nifty_scalper_bot.instruments.active_contracts import parse_nifty_future_expiry
 from nifty_scalper_bot.utils.smart_symbol import get_nifty_monthly_expiry_date
-from scripts.sync_nifty_options import classify
 
 
 def test_nifty_monthly_expiry_preserves_pre_transition_thursday_rule() -> None:
