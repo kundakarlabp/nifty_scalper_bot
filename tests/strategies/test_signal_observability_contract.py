@@ -190,7 +190,9 @@ def test_signal_metadata_quote_version_is_valid_fallback() -> None:
     result = stamp_evaluation_identity(signal, {})
 
     assert result.metadata["quote_update_version"] == 6
-    assert result.metadata["quote_update_version_source"] == "microstructure_fingerprint"
+    assert (
+        result.metadata["quote_update_version_source"] == "microstructure_fingerprint"
+    )
 
 
 def _orderflow_signal(*, bid: float = 99.5) -> SimpleNamespace:
@@ -240,13 +242,37 @@ def test_orderflow_prefers_existing_quote_version(monkeypatch) -> None:
     assert result.metadata["quote_update_version_source"] == "quote_update_version"
 
 
-def test_runner_candidate_counter_is_not_exposed_as_a_trade_signal_count() -> None:
-    import inspect
+def test_runner_distinguishes_generated_candidates_from_final_quality_approvals() -> None:
+    import threading
 
     from nifty_scalper_bot.strategies.runner import StrategyRunner
 
-    source = inspect.getsource(StrategyRunner)
-    assert '"approved_candidate_count": getattr(self, "_signal_counter", 0)' in source
-    assert "ENGINE_SUMMARY evals=%d approved_candidates=%d" in source
-    assert '"signal_count": getattr(self, "_signal_counter", 0)' not in source
-    assert '"signals": self._signal_counter' not in source
+    runner = object.__new__(StrategyRunner)
+    runner._lock = threading.RLock()
+    runner._symbol_state = {}
+    runner._running = True
+    runner._trading_paused = False
+    runner._runner_state = "TEST"
+    runner._candidate_counter = 3
+    runner._final_quality_approved_counter = 1
+    runner._eval_counter = 9
+    runner._last_tick_seen_ts = 0.0
+    runner._last_global_eval_ts = 0.0
+
+    status = runner.get_status()
+
+    assert status["candidate_generated_count"] == 3
+    assert status["approved_candidate_count"] == 1
+
+
+def test_manager_qualification_and_runner_approval_events_are_not_conflated() -> None:
+    import inspect
+
+    from nifty_scalper_bot.core.strategy_manager import StrategyManager
+    from nifty_scalper_bot.strategies.runner import StrategyRunner
+
+    manager_source = inspect.getsource(StrategyManager)
+    runner_source = inspect.getsource(StrategyRunner)
+    assert "STRATEGY_CANDIDATE_QUALIFIED" in manager_source
+    assert '"event": "SIGNAL_APPROVED"' not in manager_source
+    assert '"event": "SIGNAL_APPROVED"' in runner_source
