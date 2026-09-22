@@ -26,17 +26,22 @@ already publishes `required_symbol_recovery_active`, and the canonical
 monotonic age. A stream of newly arriving packets carrying an old exchange/event
 timestamp could therefore be classified as ready.
 
-Canonical action:
-- make MDM current-generation readiness evaluate both packet-arrival age and
-  market-event timestamp age;
-- classify fresh-arrival/stale-event data as `market_event_stale`;
-- let existing `trading_feed_health()` expose that required-symbol recovery;
-- make `core/app.py` the only polling supervisor owner while preserving the
-  deployed hysteresis, sync/async-safe fallback lifecycle, and change-based
+Canonical action in this PR:
+- make `core/app.py` the only polling supervisor owner;
+- preserve the deployed stale-futures compensation by consuming structured
+  `readiness_blockers` (with the legacy primary-blocker string as fallback);
+- preserve hysteresis, sync/async-safe fallback lifecycle, and change-based
   decision logging;
 - delete the runtime replacement module;
 - replace the patch-installed health marker with
   `polling_failover_native_owner=true` as the positive proof.
+
+A deeper MDM market-event timestamp correction was prototyped but deliberately
+removed from this PR. Deterministic live simulation uses a virtual market clock,
+so a naïve wall-clock comparison falsely classified valid simulated ticks as
+stale. The MDM file also carries unrelated legacy lint debt. Event-time
+freshness therefore remains a separate owner-level task requiring an injected
+clock/time-domain contract and dedicated parity tests.
 
 ### 2. Runner CandleEngine mirror cache
 
@@ -75,14 +80,13 @@ This canonicalization does not change:
 ## Validation contract
 
 Regression coverage must prove:
-1. a current-generation futures tick with fresh arrival but stale market-event
-   time is classified `market_event_stale`;
-2. MDM feed health exposes that symbol as required recovery even while the
-   transport/arrival age is fresh;
-3. the unchanged native polling supervisor activates the existing REST recovery
-   path from MDM's structured recovery state;
-4. unrelated blockers do not activate fallback on a healthy feed;
-5. direct `core.app` import keeps the polling owner native;
-6. repeated Runner engine resolution calls MDM only once after the mirror is cached;
-7. runtime install proof reports native polling ownership and no polling runtime patch.
+1. the native polling supervisor preserves stale-futures recovery when the
+   primary blocker names `futures_live_tick_stale`;
+2. a higher-priority primary blocker cannot hide a structured
+   `futures_live_tick_stale` recovery requirement;
+3. unrelated blockers do not activate fallback on a healthy feed;
+4. direct `core.app` import keeps the polling owner native;
+5. repeated Runner engine resolution calls MDM only once after the mirror is cached;
+6. runtime install proof reports native polling ownership and no polling runtime patch;
+7. deterministic live simulation remains clock-domain compatible.
 
