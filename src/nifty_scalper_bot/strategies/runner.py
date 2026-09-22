@@ -8256,8 +8256,35 @@ class StrategyRunner:
             self._logger.error("Failure in StrategyRunner.on_tick_event: %s", e)
 
     def on_datahub_tick(self, tick: dict[str, Any]) -> None:
-        """Args: tick; Returns: none; Raises: none."""
-        self.on_tick_event(tick)
+        """Consume a DataHub tick and report slow callback latency."""
+        started = time.perf_counter()
+        try:
+            self.on_tick_event(tick)
+        finally:
+            duration_ms = (time.perf_counter() - started) * 1000.0
+            if duration_ms >= 50.0:
+                symbol = normalize_symbol(str(tick.get("symbol") or ""))
+                try:
+                    route = self._entry_evaluation_route(symbol)
+                    route_value = str(getattr(route, "value", route))
+                except Exception:
+                    route_value = "unknown"
+                log_throttled(
+                    self._logger,
+                    f"runner_datahub_tick_slow:{symbol}:{route_value}",
+                    "RUNNER_DATAHUB_TICK_SLOW symbol=%s route=%s duration_ms=%.1f",
+                    symbol,
+                    route_value,
+                    duration_ms,
+                    interval_sec=30.0,
+                    level=logging.WARNING,
+                    extra={
+                        "event": "RUNNER_DATAHUB_TICK_SLOW",
+                        "symbol": symbol,
+                        "route": route_value,
+                        "duration_ms": duration_ms,
+                    },
+                )
 
     def _with_temporal_ofi(
         self,
@@ -12447,17 +12474,30 @@ class StrategyRunner:
         metrics[key] = int(metrics.get(key, 0)) + 1
         if self._should_log_throttled("cpu_optimization_summary", 60.0):
             whitelist = getattr(self, "_eval_option_whitelist", None) or set()
+            if whitelist:
+                option_count = len(whitelist)
+                count_source = "eval_option_whitelist"
+            else:
+                active = getattr(self, "_active_symbols", None) or set()
+                option_count = sum(
+                    1
+                    for symbol in active
+                    if normalize_symbol(str(symbol or "")).upper().startswith("NFO:NIFTY")
+                    and normalize_symbol(str(symbol or "")).upper().endswith(("CE", "PE"))
+                )
+                count_source = "dynamic_active_symbols"
             self._logger.info(
                 "CPU_OPTIMIZATION_SUMMARY evaluated_symbols_count=%s skipped_by_midday_pause=%s skipped_by_eval_throttle=%s skipped_by_option_cap=%s active_option_symbols_count=%s",
                 metrics.get("evaluated_symbols", 0),
                 metrics.get("skipped_by_midday_pause", 0),
                 metrics.get("skipped_by_eval_throttle", 0),
                 metrics.get("skipped_by_option_cap", 0),
-                len(whitelist),
+                option_count,
                 extra={
                     "event": "CPU_OPTIMIZATION_SUMMARY",
                     **{k: int(v) for k, v in metrics.items()},
-                    "active_option_symbols_count": len(whitelist),
+                    "active_option_symbols_count": option_count,
+                    "active_option_count_source": count_source,
                 },
             )
             metrics.clear()

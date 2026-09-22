@@ -10,17 +10,14 @@ diagnostics while preserving fail-closed behavior for entry-critical queues.
 
 from __future__ import annotations
 
-import logging
 import time
-from functools import wraps
 from typing import Any, Mapping
 
 from nifty_scalper_bot.data.data_hub import (
     _is_canonical_runtime_tick,
     _runtime_tick_timestamp_ms,
 )
-from nifty_scalper_bot.utils.logging import get_logger, log_throttled
-from nifty_scalper_bot.utils.symbols import normalize_symbol
+from nifty_scalper_bot.utils.logging import get_logger
 
 _LOG = get_logger(__name__)
 _PATCH_ATTR = "_runtime_reliability_hardening_installed"
@@ -129,108 +126,8 @@ def _install_mdm_overload_patch() -> bool:
     return True
 
 
-def _is_dynamic_option_symbol(symbol: object) -> bool:
-    upper = normalize_symbol(str(symbol or "")).upper()
-    return upper.startswith("NFO:NIFTY") and upper.endswith(("CE", "PE"))
-
-
-def _install_runner_cpu_telemetry_patch() -> bool:
-    from nifty_scalper_bot.strategies.runner import StrategyRunner
-
-    attr = "_dynamic_cpu_telemetry_hardening_installed"
-    if bool(getattr(StrategyRunner, attr, False)):
-        return True
-
-    def _bump_cpu_metric(self: Any, key: str) -> None:
-        metrics = getattr(self, "_cpu_opt_metrics", None)
-        if metrics is None:
-            metrics = {}
-            self._cpu_opt_metrics = metrics
-        metrics[key] = int(metrics.get(key, 0)) + 1
-        if not self._should_log_throttled("cpu_optimization_summary", 60.0):
-            return
-
-        whitelist = getattr(self, "_eval_option_whitelist", None) or set()
-        if whitelist:
-            option_count = len(whitelist)
-            count_source = "eval_option_whitelist"
-        else:
-            active = getattr(self, "_active_symbols", None) or set()
-            option_count = sum(
-                1 for symbol in active if _is_dynamic_option_symbol(symbol)
-            )
-            count_source = "dynamic_active_symbols"
-
-        self._logger.info(
-            "CPU_OPTIMIZATION_SUMMARY evaluated_symbols_count=%s skipped_by_midday_pause=%s "
-            "skipped_by_eval_throttle=%s skipped_by_option_cap=%s active_option_symbols_count=%s",
-            metrics.get("evaluated_symbols", 0),
-            metrics.get("skipped_by_midday_pause", 0),
-            metrics.get("skipped_by_eval_throttle", 0),
-            metrics.get("skipped_by_option_cap", 0),
-            option_count,
-            extra={
-                "event": "CPU_OPTIMIZATION_SUMMARY",
-                **{name: int(value) for name, value in metrics.items()},
-                "active_option_symbols_count": option_count,
-                "active_option_count_source": count_source,
-            },
-        )
-        metrics.clear()
-
-    StrategyRunner._bump_cpu_metric = _bump_cpu_metric  # type: ignore[method-assign]
-    setattr(StrategyRunner, attr, True)
-    return True
-
-
-def _install_runner_tick_latency_telemetry_patch() -> bool:
-    """Expose whether remaining DataHub callback latency is inside Runner."""
-
-    from nifty_scalper_bot.strategies.runner import StrategyRunner
-
-    attr = "_datahub_tick_latency_telemetry_installed"
-    if bool(getattr(StrategyRunner, attr, False)):
-        return True
-    original = StrategyRunner.on_datahub_tick
-
-    @wraps(original)
-    def on_datahub_tick(self: Any, tick: dict[str, Any]) -> None:
-        started = time.perf_counter()
-        try:
-            original(self, tick)
-        finally:
-            duration_ms = (time.perf_counter() - started) * 1000.0
-            if duration_ms >= 50.0:
-                symbol = normalize_symbol(str(tick.get("symbol") or ""))
-                try:
-                    route = self._entry_evaluation_route(symbol)
-                    route_value = str(getattr(route, "value", route))
-                except Exception:
-                    route_value = "unknown"
-                log_throttled(
-                    self._logger,
-                    f"runner_datahub_tick_slow:{symbol}:{route_value}",
-                    "RUNNER_DATAHUB_TICK_SLOW symbol=%s route=%s duration_ms=%.1f",
-                    symbol,
-                    route_value,
-                    duration_ms,
-                    interval_sec=30.0,
-                    level=logging.WARNING,
-                    extra={
-                        "event": "RUNNER_DATAHUB_TICK_SLOW",
-                        "symbol": symbol,
-                        "route": route_value,
-                        "duration_ms": duration_ms,
-                    },
-                )
-
-    StrategyRunner.on_datahub_tick = on_datahub_tick  # type: ignore[method-assign]
-    setattr(StrategyRunner, attr, True)
-    return True
-
-
 def apply_patches() -> dict[str, bool]:
-    """Install remaining adapters and verify native DataHub hot-path ownership."""
+    """Install MDM overload protection and verify native DataHub ownership."""
 
     from nifty_scalper_bot.data.data_hub import DataHub
 
@@ -239,8 +136,6 @@ def apply_patches() -> dict[str, bool]:
         "datahub_tick_hotpath": callable(
             getattr(DataHub, "_canonicalize_tick_payload", None)
         ),
-        "runner_cpu_telemetry": _install_runner_cpu_telemetry_patch(),
-        "runner_tick_latency_telemetry": _install_runner_tick_latency_telemetry_patch(),
     }
     if not all(state.values()):
         raise RuntimeError(f"runtime_reliability_hardening_incomplete state={state}")
