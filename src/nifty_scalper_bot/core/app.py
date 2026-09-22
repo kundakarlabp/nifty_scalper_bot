@@ -485,12 +485,6 @@ def _polling_fallback_degraded(
     ).activate
 
 
-async def _maybe_await(value: Any) -> Any:
-    if inspect.isawaitable(value):
-        return await value
-    return value
-
-
 def _safe_callable(
     value: Any, *, name: str, default: Any = None
 ) -> tuple[bool, Any]:
@@ -671,7 +665,7 @@ async def _polling_failover_supervisor_iteration(
 ) -> tuple[float | None, float | None]:
     """Run one non-fatal polling failover supervisor iteration."""
 
-    _called, market_open = _safe_callable(
+    _, market_open = _safe_callable(
         getattr(ctx, "is_market_open_now", None) or is_market_open_now,
         name="is_market_open_now",
         default=False,
@@ -683,7 +677,7 @@ async def _polling_failover_supervisor_iteration(
         return None, time_module.monotonic()
 
     ws_manager = getattr(ctx, "websocket_manager", None)
-    _called_ws, ws_state = _safe_callable(
+    _, ws_state = _safe_callable(
         getattr(ws_manager, "is_connected", None),
         name="websocket_manager.is_connected",
         default=False,
