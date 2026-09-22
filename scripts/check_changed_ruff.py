@@ -8,11 +8,11 @@ comparison base. Every new diagnostic fingerprint remains a hard failure.
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import json
+from pathlib import Path
 import subprocess
 import sys
-from collections import Counter
-from pathlib import Path
 from typing import Any
 
 
