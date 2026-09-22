@@ -16597,6 +16597,53 @@ class StrategyRunner:
                                 or "runner_context",
                                 "tick_direction": quote_map.get("tick_direction")
                                 or tick_map.get("tick_direction"),
+                                "ofi_ready": (
+                                    quote_map.get("ofi_ready")
+                                    if quote_map.get("ofi_ready") is not None
+                                    else tick_map.get("ofi_ready")
+                                ),
+                                "ofi_event": (
+                                    quote_map.get("ofi_event")
+                                    if quote_map.get("ofi_event") is not None
+                                    else tick_map.get("ofi_event")
+                                ),
+                                "ofi_1s": (
+                                    quote_map.get("ofi_1s")
+                                    if quote_map.get("ofi_1s") is not None
+                                    else tick_map.get("ofi_1s")
+                                ),
+                                "ofi_3s": (
+                                    quote_map.get("ofi_3s")
+                                    if quote_map.get("ofi_3s") is not None
+                                    else tick_map.get("ofi_3s")
+                                ),
+                                "ofi_1s_normalized": (
+                                    quote_map.get("ofi_1s_normalized")
+                                    if quote_map.get("ofi_1s_normalized") is not None
+                                    else tick_map.get("ofi_1s_normalized")
+                                ),
+                                "ofi_3s_normalized": (
+                                    quote_map.get("ofi_3s_normalized")
+                                    if quote_map.get("ofi_3s_normalized") is not None
+                                    else tick_map.get("ofi_3s_normalized")
+                                ),
+                                "ofi_update_count_1s": (
+                                    quote_map.get("ofi_update_count_1s")
+                                    if quote_map.get("ofi_update_count_1s") is not None
+                                    else tick_map.get("ofi_update_count_1s")
+                                ),
+                                "ofi_update_count_3s": (
+                                    quote_map.get("ofi_update_count_3s")
+                                    if quote_map.get("ofi_update_count_3s") is not None
+                                    else tick_map.get("ofi_update_count_3s")
+                                ),
+                                "ofi_source": quote_map.get("ofi_source")
+                                or tick_map.get("ofi_source"),
+                                "queue_imbalance_top": (
+                                    quote_map.get("queue_imbalance_top")
+                                    if quote_map.get("queue_imbalance_top") is not None
+                                    else tick_map.get("queue_imbalance_top")
+                                ),
                                 "data_age_seconds": quote_age_s,
                                 "tick_age_ms": (
                                     quote_age_s * 1000.0
