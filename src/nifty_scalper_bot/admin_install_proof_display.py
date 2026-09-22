@@ -25,8 +25,14 @@ def install_proof_display(proof: Mapping[str, Any] | None) -> dict[str, Any]:
             "missing": [],
             "hook_counts": {},
         }
-    missing = [label for key, label in _REQUIRED_FLAGS if not bool(proof.get(key))]
-    hook_counts = dict(proof.get("import_hook_counts") or {}) if isinstance(proof.get("import_hook_counts"), Mapping) else {}
+    missing = [
+        label for key, label in _REQUIRED_FLAGS if not bool(proof.get(key))
+    ]
+    hook_counts = (
+        dict(proof.get("import_hook_counts") or {})
+        if isinstance(proof.get("import_hook_counts"), Mapping)
+        else {}
+    )
     all_installed = bool(proof.get("all_required_installed")) and not missing
     if all_installed:
         label = "ALL HARDENING INSTALLED"
