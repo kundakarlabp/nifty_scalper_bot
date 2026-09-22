@@ -127,6 +127,73 @@ def test_default_recovery_scans_all_available_same_session_history(monkeypatch):
     assert "2026-09-08 04:30:00+00:00" in signal.metadata["setup_id"]
 
 
+def test_overextended_quote_still_recovers_same_session_thesis_state(monkeypatch):
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    symbol = "NFO:NIFTY2690823650CE"
+    history = [
+        _bar(
+            "2026-09-08T10:00:00",
+            open_=101.0,
+            high=101.2,
+            low=99.0,
+            close=99.5,
+        )
+    ]
+    strategy = VWAPProStrategy(VWAPProStrategyConfig(), _HistoryEngine(history))
+    indicators = _indicators(
+        session_date="2026-09-08",
+        latest_bar_ts="2026-09-08T10:40:00+05:30",
+    )
+    indicators.update(
+        {
+            "close": 140.0,
+            "open": 139.0,
+            "high": 141.0,
+            "low": 138.0,
+        }
+    )
+
+    signal = strategy._evaluate_signal(symbol, indicators, 140.0)
+
+    assert signal is None
+    assert strategy.last_no_vote_reason == "distance_outside_band"
+    assert strategy._thesis_anchor_by_scope[(symbol, "2026-09-08")]
+
+
+def test_overextended_below_vwap_records_current_reset_anchor(monkeypatch):
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    symbol = "NFO:NIFTY2690823650CE"
+    history = [
+        _bar(
+            "2026-09-08T10:00:00",
+            open_=101.0,
+            high=101.2,
+            low=99.0,
+            close=99.5,
+        )
+    ]
+    strategy = VWAPProStrategy(VWAPProStrategyConfig(), _HistoryEngine(history))
+    indicators = _indicators(
+        session_date="2026-09-08",
+        latest_bar_ts="2026-09-08T10:40:00+05:30",
+    )
+    indicators.update(
+        {
+            "close": 70.0,
+            "open": 72.0,
+            "high": 73.0,
+            "low": 69.0,
+        }
+    )
+
+    signal = strategy._evaluate_signal(symbol, indicators, 70.0)
+
+    assert signal is None
+    assert strategy.last_no_vote_reason == "distance_outside_band"
+    anchor = str(strategy._thesis_anchor_by_scope[(symbol, "2026-09-08")])
+    assert "05:10:00+00:00" in anchor
+
+
 def test_recovery_never_uses_prior_session_history(monkeypatch):
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     history = [

@@ -102,6 +102,25 @@ def _safe_float_value(value: t.Any) -> float | None:
     return result
 
 
+_SIGNAL_SCORE_METADATA_KEYS = (
+    "final_trade_score",
+    "consensus_score",
+    "setup_score",
+    "raw_setup_score",
+    "strategy_score",
+)
+
+
+def _signal_score_for_diagnostics(signal: Signal) -> float | None:
+    """Return the canonical strategy score for exit telemetry, never order quantity."""
+    metadata = dict(getattr(signal, "metadata", {}) or {})
+    for key in _SIGNAL_SCORE_METADATA_KEYS:
+        score = _safe_float_value(metadata.get(key))
+        if score is not None:
+            return score
+    return None
+
+
 def _normalise_ohlcv_bars(bars: t.Any) -> list[dict[str, float]]:
     normalised: list[dict[str, float]] = []
     rows: t.Iterable[t.Any]
@@ -2547,21 +2566,6 @@ class StrategyManager(_BaseStrategyManager):
             elif delta_signal < 0:
                 tick_side = "PE"
                 reasons.append("tick_slope_negative")
-        if (
-            ce_score + pe_score <= 0
-            and ltp is not None
-            and close is not None
-            and close > 0
-        ):
-            ltp_close_delta_pct = (ltp - close) / close * 100.0
-            min_delta_pct = self._env_float(
-                "STRATEGY_CONTEXT_MIN_LTP_CLOSE_DELTA_PCT", 0.03
-            )
-            if ltp_close_delta_pct >= min_delta_pct:
-                reasons.append("ltp_above_close_fallback")
-            elif ltp_close_delta_pct <= -min_delta_pct:
-                reasons.append("ltp_below_close_fallback")
-                
         total = ce_score + pe_score
         if total <= 0:
             return None, 0.0, [*reasons, "direction_unavailable"]
@@ -3803,7 +3807,7 @@ class StrategyManager(_BaseStrategyManager):
         if combined and bool(getattr(combined, "metadata", {}).get("is_approved")):
             exit_result = "signal"
             signal_action = combined.action
-            signal_score = float(combined.quantity)
+            signal_score = _signal_score_for_diagnostics(combined)
             signal_confidence = float(combined.confidence)
             _emit_strategy_exit()
             return combined
@@ -3860,7 +3864,7 @@ class StrategyManager(_BaseStrategyManager):
                 self._emit_metrics_snapshot()
                 exit_result = "signal"
                 signal_action = combined.action
-                signal_score = float(combined.quantity)
+                signal_score = _signal_score_for_diagnostics(combined)
                 signal_confidence = float(combined.confidence)
                 _emit_strategy_exit()
                 return combined
@@ -5207,7 +5211,7 @@ class StrategyManager(_BaseStrategyManager):
         )
         if two_trigger_aligned:
             approval_path = "aligned_two_trigger_consensus"
-            log.info("CONSENSUS_SIGNAL_APPROVED symbol=%s side=%s approval_path=%s trigger_vote_count=%s context_vote_count=%s", symbol_norm, best_vote.side, approval_path, len(trigger_votes), len(context_votes), extra={"event":"CONSENSUS_SIGNAL_APPROVED","symbol":symbol_norm,"side":best_vote.side,"approval_path":"aligned_two_trigger_consensus","trigger_vote_count":len(trigger_votes),"context_vote_count":len(context_votes),"ignored_neutral_no_votes":[r for r in neutral_no_votes if no_vote_counts.get(r)],"hard_veto_reasons":hard_veto_reasons,"trade_quality_score":quality_score,"direction_bias":direction_bias,"context_age_seconds":context_age_seconds,"spread_pct":spread_pct,"selected_ok":bool(selected_ok),"near_atm_ok":bool(near_atm)})
+            log.info("CONSENSUS_CANDIDATE_QUALIFIED symbol=%s side=%s approval_path=%s trigger_vote_count=%s context_vote_count=%s", symbol_norm, best_vote.side, approval_path, len(trigger_votes), len(context_votes), extra={"event":"CONSENSUS_CANDIDATE_QUALIFIED","symbol":symbol_norm,"side":best_vote.side,"approval_path":"aligned_two_trigger_consensus","trigger_vote_count":len(trigger_votes),"context_vote_count":len(context_votes),"ignored_neutral_no_votes":[r for r in neutral_no_votes if no_vote_counts.get(r)],"hard_veto_reasons":hard_veto_reasons,"trade_quality_score":quality_score,"direction_bias":direction_bias,"context_age_seconds":context_age_seconds,"spread_pct":spread_pct,"selected_ok":bool(selected_ok),"near_atm_ok":bool(near_atm)})
 
         metadata.setdefault("trigger_strategy_score", metadata.get("strategy_score"))
         metadata["setup_score"] = round(raw_trigger_score, 3)
@@ -5231,7 +5235,7 @@ class StrategyManager(_BaseStrategyManager):
         metadata["is_approved"] = True
         log.info("TRADE_DECISION_TRACE approval_path=%s symbol=%s strategy=%s", approval_path, symbol_norm, best_vote.strategy)
         log.info(
-            "SIGNAL_APPROVED symbol=%s strategy=%s side=%s approval_path=%s "
+            "STRATEGY_CANDIDATE_QUALIFIED symbol=%s strategy=%s side=%s approval_path=%s "
             "final_score=%.2f trade_quality_score=%.2f",
             symbol_norm,
             best_vote.strategy,
@@ -5240,7 +5244,7 @@ class StrategyManager(_BaseStrategyManager):
             final_score,
             quality_score,
             extra={
-                "event": "SIGNAL_APPROVED",
+                "event": "STRATEGY_CANDIDATE_QUALIFIED",
                 "symbol": symbol_norm,
                 "strategy": best_vote.strategy,
                 "side": best_vote.side,

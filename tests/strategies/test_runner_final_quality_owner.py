@@ -98,10 +98,14 @@ def test_strong_alpha_with_good_execution_remains_tradable(monkeypatch) -> None:
     assert quality.allowed is True
 
 
-def test_vwap_runner_uses_independent_alpha_for_quality_and_confidence() -> None:
-    source = _RUNNER.read_text(encoding="utf-8")
-    assert '"independent_setup_score"' in source
-    assert "strategy_score_for_quality" in source
-    assert 'quality.components.get("alpha_score", quality.final_score)' in source
-    assert '"alpha_score": alpha_score' in source
-    assert "alpha_score=%.2f threshold=%.2f" in source
+def test_vwap_runner_uses_canonical_metadata_quality_adapter() -> None:
+    runner_source = _RUNNER.read_text(encoding="utf-8")
+    quality_source = _SIGNAL_QUALITY.read_text(encoding="utf-8")
+
+    assert "score_signal_metadata(" in runner_source
+    assert "strategy_score_for_quality" not in runner_source
+    assert 'strategy_key == "vwap_pro"' in quality_source
+    assert '"independent_setup_score"' in quality_source
+    assert 'quality.components.get("alpha_score", quality.final_score)' in runner_source
+    assert '"alpha_score": alpha_score' in runner_source
+    assert "alpha_score=%.2f threshold=%.2f" in runner_source

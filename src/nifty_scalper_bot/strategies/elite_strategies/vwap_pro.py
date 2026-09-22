@@ -364,6 +364,58 @@ class VWAPProStrategy(EliteStrategy):
                 if strong_fresh_trend_context
                 else self._quality_max_distance_atr
             )
+            bar_anchor = next(
+                (
+                    indicators.get(key)
+                    for key in (
+                        "latest_bar_ts",
+                        "bar_timestamp",
+                        "setup_candle_timestamp",
+                    )
+                    if indicators.get(key) not in (None, "")
+                ),
+                None,
+            )
+            symbol_scope = str(symbol or "").strip().upper()
+            session_scope = _resolve_session_token(indicators, bar_anchor)
+            thesis_scope = (symbol_scope, session_scope)
+            thesis_recovered_from_history = False
+            thesis_anchor = self._thesis_anchor_by_scope.get(thesis_scope)
+            if not thesis_anchor:
+                recovered_anchor = self._recover_thesis_anchor_from_history(
+                    symbol,
+                    session_scope=session_scope,
+                    vwap=vwap,
+                )
+                if recovered_anchor:
+                    thesis_anchor = recovered_anchor
+                    thesis_recovered_from_history = True
+                    self._thesis_anchor_by_scope[thesis_scope] = recovered_anchor
+                    LOGGER.info(
+                        "VWAP_THESIS_RECOVERED symbol=%s session=%s anchor=%s source=own_completed_history",
+                        symbol_scope,
+                        session_scope,
+                        recovered_anchor,
+                        extra={
+                            "event": "VWAP_THESIS_RECOVERED",
+                            "symbol": symbol_scope,
+                            "session": session_scope,
+                            "anchor": recovered_anchor,
+                            "source": "own_completed_history",
+                        },
+                    )
+            if close < vwap:
+                if bar_anchor is not None:
+                    self._thesis_anchor_by_scope[thesis_scope] = (
+                        _normalize_thesis_anchor(bar_anchor)
+                    )
+                    thesis_anchor = self._thesis_anchor_by_scope[thesis_scope]
+            elif (open_price < vwap or low < vwap) and bar_anchor is not None:
+                self._thesis_anchor_by_scope[thesis_scope] = (
+                    _normalize_thesis_anchor(bar_anchor)
+                )
+                thesis_anchor = self._thesis_anchor_by_scope[thesis_scope]
+
             overextended = bool(
                 distance_pct > allowed_distance
                 or distance_atr > effective_quality_max_distance_atr
@@ -411,57 +463,10 @@ class VWAPProStrategy(EliteStrategy):
                 self._no_vote("invalid_price_domain")
                 return None
 
-            bar_anchor = next(
-                (
-                    indicators.get(key)
-                    for key in (
-                        "latest_bar_ts",
-                        "bar_timestamp",
-                        "setup_candle_timestamp",
-                    )
-                    if indicators.get(key) not in (None, "")
-                ),
-                None,
-            )
-            symbol_scope = str(symbol or "").strip().upper()
-            session_scope = _resolve_session_token(indicators, bar_anchor)
-            thesis_scope = (symbol_scope, session_scope)
-            thesis_recovered_from_history = False
             if close < vwap:
-                if bar_anchor is not None:
-                    self._thesis_anchor_by_scope[thesis_scope] = (
-                        _normalize_thesis_anchor(bar_anchor)
-                    )
                 self._no_vote("vwap_thesis_reset")
                 return None
-            if (open_price < vwap or low < vwap) and bar_anchor is not None:
-                self._thesis_anchor_by_scope[thesis_scope] = _normalize_thesis_anchor(
-                    bar_anchor
-                )
-            thesis_anchor = self._thesis_anchor_by_scope.get(thesis_scope)
-            if not thesis_anchor:
-                recovered_anchor = self._recover_thesis_anchor_from_history(
-                    symbol,
-                    session_scope=session_scope,
-                    vwap=vwap,
-                )
-                if recovered_anchor:
-                    thesis_anchor = recovered_anchor
-                    thesis_recovered_from_history = True
-                    self._thesis_anchor_by_scope[thesis_scope] = recovered_anchor
-                    LOGGER.info(
-                        "VWAP_THESIS_RECOVERED symbol=%s session=%s anchor=%s source=own_completed_history",
-                        symbol_scope,
-                        session_scope,
-                        recovered_anchor,
-                        extra={
-                            "event": "VWAP_THESIS_RECOVERED",
-                            "symbol": symbol_scope,
-                            "session": session_scope,
-                            "anchor": recovered_anchor,
-                            "source": "own_completed_history",
-                        },
-                    )
+            thesis_anchor = self._thesis_anchor_by_scope.get(thesis_scope) or thesis_anchor
             if not thesis_anchor:
                 self._no_vote("vwap_thesis_not_armed")
                 return None

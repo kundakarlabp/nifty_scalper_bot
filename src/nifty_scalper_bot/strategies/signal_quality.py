@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from typing import Mapping
+from typing import Any, Mapping, cast
 
 from nifty_scalper_bot.config.entry_policy import resolve_entry_policy
 from nifty_scalper_bot.config.regime_ontology import MarketRegime, normalize_regime
@@ -70,23 +70,29 @@ def build_trade_quality_evidence(
     """Derive canonical quality fields from evidence already owned by the engine."""
     payload = dict(indicators or {})
     resolved_side = str(side or "").strip().upper()
-    direction = str(
-        payload.get("underlying_direction_bias")
-        or payload.get("direction_bias")
-        or ""
-    ).strip().upper()
+    direction = (
+        str(
+            payload.get("underlying_direction_bias")
+            or payload.get("direction_bias")
+            or ""
+        )
+        .strip()
+        .upper()
+    )
 
     bid = ask = 0.0
     try:
-        bid = float(payload.get("bid") or 0.0)
-        ask = float(payload.get("ask") or 0.0)
+        bid = float(cast(Any, payload.get("bid") or 0.0))
+        ask = float(cast(Any, payload.get("ask") or 0.0))
     except (TypeError, ValueError):
         pass
     bid_ask_valid = bid > 0.0 and ask >= bid
 
     spread_observed = payload.get("spread_pct") is not None
     try:
-        spread_pct = float(payload.get("spread_pct")) if spread_observed else 0.0
+        spread_pct = (
+            float(cast(Any, payload.get("spread_pct"))) if spread_observed else 0.0
+        )
     except (TypeError, ValueError):
         spread_pct = 0.0
         spread_observed = False
@@ -97,15 +103,9 @@ def build_trade_quality_evidence(
             spread_observed = True
 
     spread_limit = canonical_max_spread_pct()
-    spread_pass: bool | None = (
-        spread_pct <= spread_limit if spread_observed else None
-    )
+    spread_pass: bool | None = spread_pct <= spread_limit if spread_observed else None
     spread_status = (
-        "unknown"
-        if spread_pass is None
-        else "pass"
-        if spread_pass
-        else "fail"
+        "unknown" if spread_pass is None else "pass" if spread_pass else "fail"
     )
 
     depth_valid = bool(payload.get("quote_depth_valid"))
@@ -126,9 +126,7 @@ def build_trade_quality_evidence(
 
     return {
         "direction_alignment_score": (
-            2.0
-            if resolved_side in {"CE", "PE"} and direction == resolved_side
-            else 0.0
+            2.0 if resolved_side in {"CE", "PE"} and direction == resolved_side else 0.0
         ),
         "liquidity_score": liquidity_score,
         "regime_time_suitability_score": regime_score,
@@ -152,7 +150,7 @@ class SignalQualityScore:
     rr_score: float
     allowed: bool
     reasons: list[str]
-    components: dict[str, float] = field(default_factory=dict)
+    components: dict[str, object] = field(default_factory=dict)
 
 
 def missing_score_components(metadata: dict[str, object] | None) -> list[str]:
@@ -240,7 +238,7 @@ def _global_score_floor() -> float | None:
 
 
 def trigger_threshold(strategy_name: str | None, mode: str | None = None) -> float:
-    """Args: strategy_name/mode. Returns: trigger threshold on 0..10 scale. Raises: none."""
+    """Return the strategy trigger threshold on the internal 0..10 scale."""
     effective_mode = str(mode or os.getenv("EXECUTION_MODE", "SHADOW")).strip().upper()
     strategy_key = normalize_strategy_name(strategy_name)
     is_live = effective_mode == "LIVE"
@@ -288,13 +286,7 @@ def score_signal_quality(
     data = max(0.0, min(10.0, float(data_score)))
     rr = max(0.0, min(10.0, float(rr_score)))
 
-    final = (
-        0.30 * direction
-        + 0.25 * strategy
-        + 0.20 * option
-        + 0.15 * data
-        + 0.10 * rr
-    )
+    final = 0.30 * direction + 0.25 * strategy + 0.20 * option + 0.15 * data + 0.10 * rr
     # Direction + native setup quality are the alpha evidence. Option
     # microstructure, data readiness and R:R validate executability but must
     # not rescue a weak directional thesis into an entry.
@@ -339,4 +331,37 @@ def score_signal_quality(
             "strategy_name": strategy_name or "",
             "normalized_strategy_name": normalized_strategy_name,
         },
+    )
+
+
+def score_signal_metadata(
+    metadata: Mapping[str, object] | None,
+    *,
+    strategy_name: str | None,
+) -> SignalQualityScore:
+    """Score Runner-ready metadata with the canonical quality model."""
+    payload = dict(metadata or {})
+    strategy_key = normalize_strategy_name(strategy_name)
+    strategy_score = payload.get("strategy_score", 0.0)
+    if strategy_key == "vwap_pro":
+        strategy_score = payload.get("independent_setup_score", strategy_score)
+
+    def _score(key: str, value: object = 0.0) -> float:
+        try:
+            return float(cast(Any, payload.get(key, value) or 0.0))
+        except (TypeError, ValueError):
+            return 0.0
+
+    try:
+        native_strategy_score = float(cast(Any, strategy_score or 0.0))
+    except (TypeError, ValueError):
+        native_strategy_score = 0.0
+
+    return score_signal_quality(
+        direction_score=_score("direction_score"),
+        strategy_score=native_strategy_score,
+        option_score=_score("option_score"),
+        data_score=_score("data_score"),
+        rr_score=_score("rr_score"),
+        strategy_name=strategy_name,
     )

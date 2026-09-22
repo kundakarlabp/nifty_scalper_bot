@@ -184,8 +184,8 @@ def _execution_runner(monkeypatch, *, ce_ok=True, pe_ok=False):
 
     monkeypatch.setattr(
         runner_mod,
-        "score_signal_quality",
-        lambda **kwargs: SimpleNamespace(
+        "score_signal_metadata",
+        lambda *args, **kwargs: SimpleNamespace(
             allowed=True,
             final_score=10.0,
             direction_score=10.0,
@@ -563,9 +563,7 @@ def test_capacity_exhaustion_arms_existing_prebroker_risk_cooldown(monkeypatch) 
         min_option_premium=25.0,
         max_option_premium=650.0,
         _last_rejects={},
-        select_ranked_candidates=lambda **_kwargs: [
-            SimpleNamespace(symbol="NFO:CE")
-        ],
+        select_ranked_candidates=lambda **_kwargs: [SimpleNamespace(symbol="NFO:CE")],
     )
     runner._build_candidate_snapshots_sync_safe = lambda **kwargs: (
         kwargs["existing_snapshots"],
@@ -714,7 +712,7 @@ def test_live_candidate_selection_prefers_signal_contract_when_affordable() -> N
     assert decisions[signal_contract.symbol]["affordable"] is True
 
 
-def test_live_candidate_selection_still_falls_back_when_signal_contract_unaffordable() -> None:
+def test_live_candidate_falls_back_when_signal_contract_unaffordable() -> None:
     """Preserve capital-aware replacement when the original cannot fund one lot."""
     runner = object.__new__(StrategyRunner)
     runner._logger = _Logger()

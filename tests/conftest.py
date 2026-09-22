@@ -1,24 +1,24 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import suppress
-from dataclasses import dataclass, replace
 import inspect
 import os
-from pathlib import Path
 import shutil
 import tempfile
+from contextlib import suppress
+from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any, Generator
 
 import numpy as np
 import pandas as pd
 import pytest
-
-from nifty_scalper_bot.core.trading_switch import trading_switch
 from src.nifty_scalper_bot.backtesting.backtest_engine import (
     BacktestConfig,
     BacktestEngine,
 )
+
+from nifty_scalper_bot.core.trading_switch import trading_switch
 
 _ORIGINAL_PATH_READ_TEXT = Path.read_text
 
@@ -64,18 +64,21 @@ def _stabilize_live_runtime_entry_exit_contract(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Keep the runtime contract test independent of score calibration."""
-    if request.node.name != "test_live_runtime_bullish_spot_future_selects_ce_and_exits_target":
+    if (
+        request.node.name
+        != "test_live_runtime_bullish_spot_future_selects_ce_and_exits_target"
+    ):
         return
 
     import nifty_scalper_bot.strategies.runner as runner_mod
 
-    real_score_signal_quality = runner_mod.score_signal_quality
+    real_score_signal_metadata = runner_mod.score_signal_metadata
 
-    def _allow_contract_signal(**kwargs: Any):
-        score = real_score_signal_quality(**kwargs)
+    def _allow_contract_signal(*args: Any, **kwargs: Any):
+        score = real_score_signal_metadata(*args, **kwargs)
         return replace(score, allowed=True, reasons=[])
 
-    monkeypatch.setattr(runner_mod, "score_signal_quality", _allow_contract_signal)
+    monkeypatch.setattr(runner_mod, "score_signal_metadata", _allow_contract_signal)
 
 
 @pytest.fixture(autouse=True)

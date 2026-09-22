@@ -200,6 +200,20 @@ def test_tick_movement_cannot_manufacture_source_direction() -> None:
     assert "tick_slope_positive" in snapshot["direction_context_reasons"]
 
 
+def test_ltp_close_delta_alone_does_not_claim_direction_fallback() -> None:
+    manager = _direction_manager()
+    manager._update_context_snapshot(
+        symbol="NSE:NIFTY",
+        indicators={**_direction_inputs(None), "ltp": 100.10},
+        role="spot_context",
+    )
+
+    snapshot = manager._latest_context_snapshots["spot_context"]
+    assert snapshot["direction_bias"] is None
+    assert "direction_unavailable" in snapshot["direction_context_reasons"]
+    assert "ltp_above_close_fallback" not in snapshot["direction_context_reasons"]
+
+
 def test_source_direction_switch_requires_persistent_contrary_structure(
     monkeypatch,
 ) -> None:
