@@ -18,7 +18,7 @@ class _PlainFinder:
     pass
 
 
-async def _native_polling_supervisor(*args, **kwargs):
+async def _native_polling_supervisor(*_args, **_kwargs):
     return None, None
 
 
