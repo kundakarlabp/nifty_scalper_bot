@@ -8813,7 +8813,6 @@ class MarketDataManager:
             )
             if normalized_live is None:
                 return
-            normalized_live = self._enrich_order_flow_imbalance(normalized_live)
             stage_started = time.perf_counter()
             self._ingest_normalized_tick(normalized_live)
             duration_ms = (time.perf_counter() - stage_started) * 1000.0
@@ -13013,7 +13012,6 @@ class MarketDataManager:
                 "timestamp": ts_py,
                 "timestamp_source": timestamp_source,
                 "source_timestamp_valid": source_timestamp_valid,
-                "received_at": _coerce_float(raw.get("received_at")) or time.time(),
                 "source": (
                     "poll"
                     if str(source).lower() == "poll"
@@ -13026,153 +13024,6 @@ class MarketDataManager:
                 ),
             }
         return None
-
-    def _enrich_order_flow_imbalance(
-        self, tick: Mapping[str, Any]
-    ) -> dict[str, Any]:
-        """Add short-window OFI from consecutive accepted FULL-depth WS updates."""
-        payload = dict(tick)
-        if str(payload.get("source") or "").lower() != "ws":
-            return payload
-        if not bool(payload.get("depth_available")):
-            return payload
-
-        bid = _coerce_float(payload.get("bid") or payload.get("best_bid"))
-        ask = _coerce_float(payload.get("ask") or payload.get("best_ask"))
-        bid_qty = _coerce_float(payload.get("bid_qty") or payload.get("buy_qty"))
-        ask_qty = _coerce_float(payload.get("ask_qty") or payload.get("sell_qty"))
-        if (
-            bid is None
-            or ask is None
-            or bid <= 0.0
-            or ask <= bid
-            or bid_qty is None
-            or ask_qty is None
-            or bid_qty <= 0.0
-            or ask_qty <= 0.0
-        ):
-            return payload
-
-        symbol = self._canonical_symbol(str(payload.get("symbol") or ""))
-        if not symbol:
-            return payload
-        received_at = _coerce_float(payload.get("received_at")) or time.time()
-        token_raw = payload.get("instrument_token") or payload.get("token")
-        try:
-            token = int(token_raw) if token_raw is not None else None
-        except (TypeError, ValueError):
-            token = None
-
-        state_by_symbol = getattr(self, "_order_flow_state_by_symbol", None)
-        if state_by_symbol is None:
-            state_by_symbol = {}
-            self._order_flow_state_by_symbol = state_by_symbol
-
-        current = {
-            "bid": float(bid),
-            "ask": float(ask),
-            "bid_qty": float(bid_qty),
-            "ask_qty": float(ask_qty),
-            "received_at": float(received_at),
-        }
-        state = state_by_symbol.get(symbol)
-        previous = state.get("last") if isinstance(state, Mapping) else None
-        previous_token = state.get("token") if isinstance(state, Mapping) else None
-        previous_received_at = (
-            _coerce_float(previous.get("received_at"))
-            if isinstance(previous, Mapping)
-            else None
-        )
-        reset = bool(
-            not isinstance(previous, Mapping)
-            or previous_token != token
-            or previous_received_at is None
-            or received_at <= previous_received_at
-            or (received_at - previous_received_at) > 5.0
-        )
-        if reset:
-            state_by_symbol[symbol] = {
-                "token": token,
-                "last": current,
-                "events": deque(maxlen=512),
-            }
-            payload.update(
-                {
-                    "ofi_ready": False,
-                    "ofi_event": 0.0,
-                    "ofi_1s": 0.0,
-                    "ofi_3s": 0.0,
-                    "ofi_1s_normalized": 0.0,
-                    "ofi_3s_normalized": 0.0,
-                    "ofi_update_count_1s": 0,
-                    "ofi_update_count_3s": 0,
-                    "ofi_source": "ws_full_depth",
-                    "queue_imbalance_top": (bid_qty - ask_qty)
-                    / max(bid_qty + ask_qty, 1.0),
-                }
-            )
-            return payload
-
-        prev_bid = float(previous["bid"])
-        prev_ask = float(previous["ask"])
-        prev_bid_qty = float(previous["bid_qty"])
-        prev_ask_qty = float(previous["ask_qty"])
-        ofi_event = (
-            (bid_qty if bid >= prev_bid else 0.0)
-            - (prev_bid_qty if bid <= prev_bid else 0.0)
-            - (ask_qty if ask <= prev_ask else 0.0)
-            + (prev_ask_qty if ask >= prev_ask else 0.0)
-        )
-        depth_scale = max((bid_qty + ask_qty) / 2.0, 1.0)
-        events = state.get("events")
-        if not isinstance(events, deque):
-            events = deque(maxlen=512)
-            state["events"] = events
-        events.append((float(received_at), float(ofi_event), float(depth_scale)))
-        cutoff_3s = float(received_at) - 3.0
-        while events and float(events[0][0]) < cutoff_3s:
-            events.popleft()
-
-        ofi_1s = 0.0
-        ofi_3s = 0.0
-        depth_1s = 0.0
-        depth_3s = 0.0
-        count_1s = 0
-        count_3s = 0
-        cutoff_1s = float(received_at) - 1.0
-        for event_ts, event_value, event_depth in events:
-            event_ts_f = float(event_ts)
-            event_value_f = float(event_value)
-            event_depth_f = max(float(event_depth), 1.0)
-            if event_ts_f >= cutoff_3s:
-                ofi_3s += event_value_f
-                depth_3s += event_depth_f
-                count_3s += 1
-            if event_ts_f >= cutoff_1s:
-                ofi_1s += event_value_f
-                depth_1s += event_depth_f
-                count_1s += 1
-
-        mean_depth_1s = depth_1s / count_1s if count_1s else depth_scale
-        mean_depth_3s = depth_3s / count_3s if count_3s else depth_scale
-        state["token"] = token
-        state["last"] = current
-        payload.update(
-            {
-                "ofi_ready": count_1s >= 2,
-                "ofi_event": float(ofi_event),
-                "ofi_1s": float(ofi_1s),
-                "ofi_3s": float(ofi_3s),
-                "ofi_1s_normalized": float(ofi_1s / max(mean_depth_1s, 1.0)),
-                "ofi_3s_normalized": float(ofi_3s / max(mean_depth_3s, 1.0)),
-                "ofi_update_count_1s": count_1s,
-                "ofi_update_count_3s": count_3s,
-                "ofi_source": "ws_full_depth",
-                "queue_imbalance_top": (bid_qty - ask_qty)
-                / max(bid_qty + ask_qty, 1.0),
-            }
-        )
-        return payload
 
     def _ltp_stale_threshold_for_symbol(self, symbol: str) -> float:
         """Return per-symbol stale threshold. Args: symbol. Returns: seconds. Raises: none."""
