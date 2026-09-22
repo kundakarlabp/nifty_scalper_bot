@@ -6,13 +6,15 @@ import importlib.abc
 import importlib.machinery
 import os
 import sys
+from collections.abc import Sequence
 from functools import wraps
 from types import ModuleType
 from typing import Any
 
 from nifty_scalper_bot.utils.logging import get_logger
-# TODO: remove compatibility shim once downstream modules are updated.
 from nifty_scalper_bot.utils.pricing import canonical_price_source  # compat
+
+# TODO: remove compatibility shim once downstream modules are updated.
 
 _CORE_TRUTHY = {"1", "true", "yes", "y", "on", "live"}
 _APP_MODULE_NAME = "nifty_scalper_bot.core.app"
@@ -38,7 +40,9 @@ def _core_env_true(name: str) -> bool:
 
 def _real_live_mode_requested() -> bool:
     mode = str(os.getenv("EXECUTION_MODE", "SHADOW") or "SHADOW").strip().upper()
-    live_enabled = _core_env_true("ENABLE_LIVE") or _core_env_true("ENABLE_LIVE_TRADING")
+    live_enabled = _core_env_true("ENABLE_LIVE") or _core_env_true(
+        "ENABLE_LIVE_TRADING"
+    )
     paper_shadow = (
         _core_env_true("PAPER_MODE")
         or _core_env_true("PAPER__ENABLED")
@@ -57,26 +61,13 @@ except Exception as exc:  # noqa: BLE001 - non-live tooling imports should remai
     get_logger(__name__).error(
         "STRATEGY_LIVE_SAFETY_PATCH_FAILED error=%s",
         exc,
-        extra={"event": "STRATEGY_LIVE_SAFETY_PATCH_FAILED", "error_type": type(exc).__name__},
-    )
-    if _real_live_mode_requested():
-        raise RuntimeError("strategy_live_safety_patch_failed") from exc
-
-try:
-    from nifty_scalper_bot.core.strategy_exit_score_diagnostics import (
-        apply_patches as _apply_strategy_exit_score_diagnostics,
-    )
-
-    _apply_strategy_exit_score_diagnostics()
-except Exception as exc:  # noqa: BLE001 - diagnostics must not disable tooling imports
-    get_logger(__name__).error(
-        "STRATEGY_EXIT_SCORE_DIAGNOSTIC_PATCH_FAILED error=%s",
-        exc,
         extra={
-            "event": "STRATEGY_EXIT_SCORE_DIAGNOSTIC_PATCH_FAILED",
+            "event": "STRATEGY_LIVE_SAFETY_PATCH_FAILED",
             "error_type": type(exc).__name__,
         },
     )
+    if _real_live_mode_requested():
+        raise RuntimeError("strategy_live_safety_patch_failed") from exc
 
 try:
     from nifty_scalper_bot.core.boot_log_safety import (
@@ -88,7 +79,10 @@ except Exception as exc:  # noqa: BLE001 - core package import must not crash to
     get_logger(__name__).error(
         "BOOT_LOG_RATE_CONTROL_FAILED error=%s",
         exc,
-        extra={"event": "BOOT_LOG_RATE_CONTROL_FAILED", "error_type": type(exc).__name__},
+        extra={
+            "event": "BOOT_LOG_RATE_CONTROL_FAILED",
+            "error_type": type(exc).__name__,
+        },
     )
 
 __all__ = ["NiftyScalperApp", "canonical_price_source", "install_runtime_hardening"]
@@ -227,8 +221,8 @@ def _runtime_hardening_install_proof(
     from nifty_scalper_bot.data.candle_engine import CandleEngine
     from nifty_scalper_bot.data.data_hub import DataHub
     from nifty_scalper_bot.data.market_data_manager import MarketDataManager
-    from nifty_scalper_bot.streaming.websocket_manager import WebSocketManager
     from nifty_scalper_bot.strategies.runner import StrategyRunner
+    from nifty_scalper_bot.streaming.websocket_manager import WebSocketManager
 
     reliability = (
         isinstance(runtime_reliability_state, dict)
@@ -245,7 +239,13 @@ def _runtime_hardening_install_proof(
                     False,
                 )
             ),
-            bool(getattr(DataHub, "_active_basket_subscription_hardening_installed", False)),
+            bool(
+                getattr(
+                    DataHub,
+                    "_active_basket_subscription_hardening_installed",
+                    False,
+                )
+            ),
             bool(getattr(MarketDataManager, "_freshness_hardening_installed", False)),
             bool(getattr(WebSocketManager, "_market_data_hardening_installed", False)),
         )
@@ -260,7 +260,11 @@ def _runtime_hardening_install_proof(
         ),
         "runtime_reliability": reliability,
         "runner_candle_cache": bool(
-            getattr(StrategyRunner, "_candle_engine_mirror_cache_patch_installed", False)
+            getattr(
+                StrategyRunner,
+                "_candle_engine_mirror_cache_patch_installed",
+                False,
+            )
         ),
         "strategy_context_fast_path": bool(
             getattr(StrategyManager, "_context_only_fast_path_installed", False)
@@ -285,13 +289,21 @@ def _apply_app_runtime_patches(app_module: Any) -> dict[str, bool]:
     """Install and verify the single runtime-hardening contract idempotently."""
     _install_market_data_runtime_hardening()
 
-    from nifty_scalper_bot.core.boot_readiness_safety import apply_app_patch as _ready_adapter
-    from nifty_scalper_bot.core.live_ws_tick_receipts import apply_patch as _live_ws_receipt_adapter
+    from nifty_scalper_bot.core.boot_readiness_safety import (
+        apply_app_patch as _ready_adapter,
+    )
+    from nifty_scalper_bot.core.live_ws_tick_receipts import (
+        apply_patch as _live_ws_receipt_adapter,
+    )
     from nifty_scalper_bot.core.off_market_basket_safety import (
         apply_app_patch as _off_market_app_adapter,
+    )
+    from nifty_scalper_bot.core.off_market_basket_safety import (
         apply_patches as _off_market_controller_adapter,
     )
-    from nifty_scalper_bot.core.polling_failover_runtime import apply_app_patch as _polling_adapter
+    from nifty_scalper_bot.core.polling_failover_runtime import (
+        apply_app_patch as _polling_adapter,
+    )
     from nifty_scalper_bot.core.runtime_reliability_hardening import (
         apply_patches as _runtime_reliability_adapter,
     )
@@ -368,7 +380,7 @@ class _CoreAppPatchLoader(importlib.abc.Loader):
         else:
             load_module = getattr(self._wrapped, "load_module", None)
             if callable(load_module):
-                loaded = load_module(module.__name__)  # pragma: no cover - legacy loader path
+                loaded = load_module(module.__name__)  # pragma: no cover
                 if loaded is not module:
                     module.__dict__.update(getattr(loaded, "__dict__", {}))
         _apply_app_runtime_patches(module)
@@ -378,13 +390,17 @@ class _CoreAppPatchFinder(importlib.abc.MetaPathFinder):
     def find_spec(
         self,
         fullname: str,
-        path: list[str] | None,
+        path: Sequence[str] | None,
         target: ModuleType | None = None,
     ) -> importlib.machinery.ModuleSpec | None:
         if fullname != _APP_MODULE_NAME:
             return None
         spec = importlib.machinery.PathFinder.find_spec(fullname, path)
-        if spec is None or spec.loader is None or isinstance(spec.loader, _CoreAppPatchLoader):
+        if (
+            spec is None
+            or spec.loader is None
+            or isinstance(spec.loader, _CoreAppPatchLoader)
+        ):
             return spec
         spec.loader = _CoreAppPatchLoader(spec.loader)
         return spec
