@@ -11,11 +11,56 @@ from dataclasses import dataclass, field
 from typing import Callable, Deque, Dict, Iterable, Mapping, Sequence, cast
 
 import nifty_scalper_bot.config.settings as app_settings
+from nifty_scalper_bot.config.regime_ontology import MarketRegime
 from nifty_scalper_bot.infra.metrics import METRICS
 from nifty_scalper_bot.risk.regime_sizing import RegimeSizer, RegimeType
 from nifty_scalper_bot.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
+
+
+def _runner_regime_float(value: object) -> float:
+    """Coerce a runner regime input to float without raising."""
+    if isinstance(value, (int, float)):
+        return float(value)
+    return 0.0
+
+
+def _runner_regime_adx(value: object) -> float | None:
+    """Return a finite ADX percentage in the canonical 0-100 domain."""
+    if isinstance(value, (int, float)):
+        resolved = float(value)
+        if 0.0 <= resolved <= 100.0:
+            return resolved
+    return None
+
+
+def classify_runner_regime(
+    indicators: Mapping[str, float | int | None],
+) -> MarketRegime:
+    """Preserve the established StrategyRunner regime gate classification.
+
+    This is the canonical owner of the lightweight runner gate that previously
+    lived in the strategies market-regime helper. Thresholds are intentionally
+    unchanged so canonicalization cannot silently alter live admission.
+    """
+    adx = _runner_regime_adx(indicators.get("adx"))
+    atr = _runner_regime_float(indicators.get("atr"))
+    atr_average = max(_runner_regime_float(indicators.get("atr_average")), 1e-6)
+    vwap_slope = _runner_regime_float(indicators.get("vwap_slope"))
+    volume_expansion = _runner_regime_float(indicators.get("volume_expansion"))
+
+    if adx is None:
+        return MarketRegime.UNKNOWN
+    if adx > 25.0 and abs(vwap_slope) > 0.01:
+        return MarketRegime.TREND
+    if atr > 1.8 * atr_average:
+        return MarketRegime.VOLATILE
+    if adx < 15.0:
+        return MarketRegime.RANGE
+    if volume_expansion < 0.7:
+        return MarketRegime.LOW_ACTIVITY
+    return MarketRegime.UNKNOWN
 
 
 @dataclass(slots=True)
@@ -1458,4 +1503,9 @@ class MarketRegimeDetector:
         return dict(base)
 
 
-__all__ = ["MarketRegimeDetector", "RegimeParameters", "RegimeSnapshot"]
+__all__ = [
+    "MarketRegimeDetector",
+    "RegimeParameters",
+    "RegimeSnapshot",
+    "classify_runner_regime",
+]

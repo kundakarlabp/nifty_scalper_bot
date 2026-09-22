@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+import pathlib
 
 import pytest
 
@@ -16,7 +16,7 @@ from nifty_scalper_bot.core.strategy_manager import REGIME_STRATEGY_WEIGHTS
 from nifty_scalper_bot.risk.regime_sizing import RegimeType
 
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = pathlib.Path(__file__).resolve().parents[2]
 CANONICAL = {member.value for member in MarketRegime}
 
 
