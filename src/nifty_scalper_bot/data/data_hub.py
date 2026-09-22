@@ -21,6 +21,8 @@ Safe-edit notes:
 - Keep this a facade: no contract selection, no broker history fetching here.
 """
 
+# ruff: noqa: E501  # Legacy long diagnostics; functional/import Ruff checks remain active.
+
 from __future__ import annotations
 
 import asyncio
