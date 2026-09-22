@@ -6,20 +6,24 @@ bounded consensus-quality evidence, tick hot-path duplication, and runtime
 diagnostics while preserving fail-closed behavior for entry-critical queues.
 """
 
+# ruff: noqa: E501  # Legacy diagnostic strings; other Ruff rules remain active.
+
 from __future__ import annotations
 
-from datetime import datetime
-from functools import wraps
 import logging
 import time
+from functools import wraps
 from typing import Any, Mapping
 
+from nifty_scalper_bot.data.data_hub import (
+    _is_canonical_runtime_tick,
+    _runtime_tick_timestamp_ms,
+)
 from nifty_scalper_bot.utils.logging import get_logger, log_throttled
 from nifty_scalper_bot.utils.symbols import normalize_symbol
 
 _LOG = get_logger(__name__)
 _PATCH_ATTR = "_runtime_reliability_hardening_installed"
-_UNUSABLE_TIMESTAMP_QUALITIES = {"synthetic", "unknown", "invalid"}
 
 
 def _critical_oldest_pending_age_ms_locked(mdm: Any) -> float:
@@ -125,110 +129,6 @@ def _install_mdm_overload_patch() -> bool:
     return True
 
 
-def _runtime_tick_timestamp_ms(payload: Mapping[str, Any]) -> float | None:
-    """Return MDM runtime timestamp milliseconds without pandas reparsing."""
-
-    timestamp_ms = payload.get("timestamp_ms")
-    if isinstance(timestamp_ms, (int, float)) and not isinstance(timestamp_ms, bool):
-        value = float(timestamp_ms)
-        return value if value > 0 else None
-    timestamp = payload.get("timestamp")
-    if isinstance(timestamp, datetime) and timestamp.tzinfo is not None:
-        value = float(timestamp.timestamp() * 1000.0)
-        return value if value > 0 else None
-    return None
-
-
-def _is_canonical_runtime_tick(payload: Mapping[str, Any]) -> bool:
-    """Return whether MDM already produced the complete live-tick contract."""
-
-    symbol = str(payload.get("symbol") or "").strip()
-    if not symbol or normalize_symbol(symbol) != symbol:
-        return False
-    token = payload.get("instrument_token") or payload.get("token")
-    price = payload.get("ltp") or payload.get("last_price")
-    timestamp_ms = _runtime_tick_timestamp_ms(payload)
-    try:
-        if int(token) <= 0 or float(price) <= 0 or timestamp_ms is None:
-            return False
-    except (TypeError, ValueError):
-        return False
-    source = str(payload.get("source") or "").strip().lower()
-    if source not in {
-        "ws",
-        "ws_full",
-        "websocket",
-        "stream",
-        "poll",
-        "rest",
-        "rest_poll",
-        "fallback",
-        "quote",
-        "rest_quote",
-    }:
-        return False
-    explicit_quality = str(payload.get("timestamp_quality") or "").strip().lower()
-    if explicit_quality in _UNUSABLE_TIMESTAMP_QUALITIES:
-        return False
-    if payload.get("source_timestamp_valid") is not True:
-        return False
-    return all(
-        key in payload
-        for key in (
-            "timestamp",
-            "timestamp_source",
-            "received_at",
-            "depth_available",
-            "tradable_quote",
-        )
-    )
-
-
-def _install_datahub_tick_hotpath_patch() -> bool:
-    """Avoid rebuilding MDM's already-canonical tick before Runner dispatch."""
-
-    from nifty_scalper_bot.data.data_hub import DataHub
-
-    attr = "_mdm_tick_hotpath_hardening_installed"
-    if bool(getattr(DataHub, attr, False)):
-        return True
-    original = DataHub._canonicalize_tick_payload
-
-    @wraps(original)
-    def _canonicalize_tick_payload(
-        self: Any, payload: Mapping[str, Any]
-    ) -> dict[str, Any] | None:
-        if _is_canonical_runtime_tick(payload):
-            tick = dict(payload)
-            symbol = str(tick["symbol"])
-            timestamp_ms = _runtime_tick_timestamp_ms(tick)
-            if timestamp_ms is None:
-                return original(self, payload)
-            timestamp = tick.get("timestamp")
-            if isinstance(timestamp, datetime):
-                tick["timestamp"] = timestamp.isoformat()
-            tick["timestamp_ms"] = timestamp_ms
-            timestamp_source = str(tick.get("timestamp_source") or "").lower()
-            timestamp_quality = str(tick.get("timestamp_quality") or "").lower()
-            if not timestamp_quality:
-                timestamp_quality = (
-                    "exchange" if "exchange" in timestamp_source else "broker"
-                )
-                tick["timestamp_quality"] = timestamp_quality
-            tick.setdefault("hard_readiness_eligible", True)
-            tick.setdefault("quote_source", tick.get("source"))
-            tick.setdefault("exchange_symbol", symbol)
-            tick.setdefault("quote_identity_timestamp_source", timestamp_quality)
-            return tick
-        return original(self, payload)
-
-    DataHub._canonicalize_tick_payload = (  # type: ignore[method-assign]
-        _canonicalize_tick_payload
-    )
-    setattr(DataHub, attr, True)
-    return True
-
-
 def _is_dynamic_option_symbol(symbol: object) -> bool:
     upper = normalize_symbol(str(symbol or "")).upper()
     return upper.startswith("NFO:NIFTY") and upper.endswith(("CE", "PE"))
@@ -330,11 +230,15 @@ def _install_runner_tick_latency_telemetry_patch() -> bool:
 
 
 def apply_patches() -> dict[str, bool]:
-    """Install focused reliability adapters idempotently."""
+    """Install remaining adapters and verify native DataHub hot-path ownership."""
+
+    from nifty_scalper_bot.data.data_hub import DataHub
 
     state = {
         "mdm_overload": _install_mdm_overload_patch(),
-        "datahub_tick_hotpath": _install_datahub_tick_hotpath_patch(),
+        "datahub_tick_hotpath": callable(
+            getattr(DataHub, "_canonicalize_tick_payload", None)
+        ),
         "runner_cpu_telemetry": _install_runner_cpu_telemetry_patch(),
         "runner_tick_latency_telemetry": _install_runner_tick_latency_telemetry_patch(),
     }

@@ -21,29 +21,34 @@ Safe-edit notes:
 - Keep this a facade: no contract selection, no broker history fetching here.
 """
 
+# ruff: noqa: E501  # Legacy long diagnostics; other Ruff rules remain active.
+
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
-from enum import Enum
 import logging
 import os
 import re
 import threading
 import time
 from collections import defaultdict, deque
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from enum import Enum
 from math import sqrt
-
-import pandas as pd
 from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, Mapping, Optional
 
-from nifty_scalper_bot.storage.hub_store import HubStore
-from nifty_scalper_bot.instruments.active_contracts import canonical_nifty_future_symbol
-from nifty_scalper_bot.utils.options_math import black_scholes_greeks, implied_volatility
+import pandas as pd
+
 from nifty_scalper_bot.execution.readiness import resolve_quote_bid_ask_spread
-from nifty_scalper_bot.utils.symbols import canonical, normalize_symbol
+from nifty_scalper_bot.instruments.active_contracts import canonical_nifty_future_symbol
+from nifty_scalper_bot.storage.hub_store import HubStore
+from nifty_scalper_bot.utils.options_math import (
+    black_scholes_greeks,
+    implied_volatility,
+)
 from nifty_scalper_bot.utils.serialization import to_json_safe
+from nifty_scalper_bot.utils.symbols import canonical, normalize_symbol
 
 if TYPE_CHECKING:
     from nifty_scalper_bot.core.message_bus import Message
@@ -108,7 +113,7 @@ def _quote_timestamp_ms(payload: Mapping[str, Any]) -> float | None:
         value = payload.get(key)
         if key == "timestamp_ms":
             try:
-                parsed = float(value)
+                parsed = float(value) if value is not None else None
             except (TypeError, ValueError):
                 parsed = None
             if parsed is not None and parsed > 0:
@@ -117,6 +122,65 @@ def _quote_timestamp_ms(payload: Mapping[str, Any]) -> float | None:
         if parsed is not None:
             return parsed
     return None
+
+
+def _runtime_tick_timestamp_ms(payload: Mapping[str, Any]) -> float | None:
+    """Return canonical runtime timestamp milliseconds without reparsing strings."""
+    timestamp_ms = payload.get("timestamp_ms")
+    if isinstance(timestamp_ms, (int, float)) and not isinstance(timestamp_ms, bool):
+        value = float(timestamp_ms)
+        return value if value > 0 else None
+    timestamp = payload.get("timestamp")
+    if isinstance(timestamp, datetime) and timestamp.tzinfo is not None:
+        value = float(timestamp.timestamp() * 1000.0)
+        return value if value > 0 else None
+    return None
+
+
+def _is_canonical_runtime_tick(payload: Mapping[str, Any]) -> bool:
+    """Return whether MDM already produced the complete live-tick contract."""
+    symbol = str(payload.get("symbol") or "").strip()
+    if not symbol or normalize_symbol(symbol) != symbol:
+        return False
+    token = payload.get("instrument_token") or payload.get("token")
+    price = payload.get("ltp") or payload.get("last_price")
+    timestamp_ms = _runtime_tick_timestamp_ms(payload)
+    if token is None or price is None or timestamp_ms is None:
+        return False
+    try:
+        if int(token) <= 0 or float(price) <= 0:
+            return False
+    except (TypeError, ValueError):
+        return False
+    source = str(payload.get("source") or "").strip().lower()
+    if source not in {
+        "ws",
+        "ws_full",
+        "websocket",
+        "stream",
+        "poll",
+        "rest",
+        "rest_poll",
+        "fallback",
+        "quote",
+        "rest_quote",
+    }:
+        return False
+    explicit_quality = str(payload.get("timestamp_quality") or "").strip().lower()
+    if explicit_quality in _UNUSABLE_TIMESTAMP_QUALITIES:
+        return False
+    if payload.get("source_timestamp_valid") is not True:
+        return False
+    return all(
+        key in payload
+        for key in (
+            "timestamp",
+            "timestamp_source",
+            "received_at",
+            "depth_available",
+            "tradable_quote",
+        )
+    )
 
 
 def _quote_symbol_hint(quote: Mapping[str, Any]) -> str:
@@ -823,7 +887,7 @@ class DataHub:
         return position["symbol"]
 
     def _normalize_position(self, position: dict[str, Any]) -> dict[str, Any] | None:
-        symbol = self._position_symbol(position.get("symbol"))
+        symbol = self._position_symbol(str(position.get("symbol") or ""))
         if not symbol or not self._position_allowed(symbol):
             return None
         try:
@@ -886,7 +950,7 @@ class DataHub:
             return None
         normalized = dict(order)
         normalized["order_id"] = order_id
-        normalized["symbol"] = self._position_symbol(order.get("symbol"))
+        normalized["symbol"] = self._position_symbol(str(order.get("symbol") or ""))
         normalized["side"] = str(order.get("side") or "").strip().lower() or None
         normalized["status"] = str(order.get("status") or "").strip().lower()
         try:
@@ -909,8 +973,10 @@ class DataHub:
                     normalized[field] = None
         timestamp = order.get("timestamp")
         try:
-            ts = float(timestamp)
-            normalized["ts"] = ts / 1000.0 if ts > 1e11 else ts
+            ts = float(timestamp) if timestamp is not None else None
+            normalized["ts"] = (
+                self._now() if ts is None else (ts / 1000.0 if ts > 1e11 else ts)
+            )
         except (TypeError, ValueError):
             normalized["ts"] = self._now()
         return normalized
@@ -1000,6 +1066,28 @@ class DataHub:
 
     def _canonicalize_tick_payload(self, payload: Mapping[str, Any]) -> dict[str, Any] | None:
         """Args: payload. Returns: canonicalized tick or None. Raises: None."""
+        if _is_canonical_runtime_tick(payload):
+            tick = dict(payload)
+            symbol = str(tick["symbol"])
+            timestamp_ms = _runtime_tick_timestamp_ms(tick)
+            if timestamp_ms is not None:
+                timestamp = tick.get("timestamp")
+                if isinstance(timestamp, datetime):
+                    tick["timestamp"] = timestamp.isoformat()
+                tick["timestamp_ms"] = timestamp_ms
+                timestamp_source = str(tick.get("timestamp_source") or "").lower()
+                timestamp_quality = str(tick.get("timestamp_quality") or "").lower()
+                if not timestamp_quality:
+                    timestamp_quality = (
+                        "exchange" if "exchange" in timestamp_source else "broker"
+                    )
+                    tick["timestamp_quality"] = timestamp_quality
+                tick.setdefault("hard_readiness_eligible", True)
+                tick.setdefault("quote_source", tick.get("source"))
+                tick.setdefault("exchange_symbol", symbol)
+                tick.setdefault("quote_identity_timestamp_source", timestamp_quality)
+                return tick
+
         tick = dict(payload)
         timestamp_quality = _timestamp_quality(tick)
         symbol = str(tick.get("symbol") or "").strip()
@@ -1216,9 +1304,12 @@ class DataHub:
         )
 
     def _ingest_tick_impl(self, tick: Tick) -> None:
-        tick = self._canonicalize_tick_payload(tick) if isinstance(tick, Mapping) else None
-        if tick is None:
+        canonical_tick = (
+            self._canonicalize_tick_payload(tick) if isinstance(tick, Mapping) else None
+        )
+        if canonical_tick is None:
             return
+        tick = canonical_tick
         symbol = self._normalize_tick_symbol(tick)
         if not symbol:
             return
@@ -1366,7 +1457,7 @@ class DataHub:
             first_seen_bus = False
             if symbol:
                 if not hasattr(self, "_first_bus_ingested_symbols"):
-                    self._first_bus_ingested_symbols = set()
+                    self._first_bus_ingested_symbols: set[str] = set()
                 first_seen_bus = symbol not in self._first_bus_ingested_symbols
                 if first_seen_bus:
                     self._first_bus_ingested_symbols.add(symbol)
@@ -2031,12 +2122,16 @@ class DataHub:
                 self._ticks.pop(token, None)
                 self._token_quotes.pop(token, None)
             for symbol in list(normalized_symbols):
-                token = self._token_by_symbol.pop(symbol, None)
-                if token is not None:
-                    normalized_tokens.add(int(token))
-                    self._symbol_by_token.pop(int(token), None)
-                    self._ticks.pop(int(token), None)
-                    self._token_quotes.pop(int(token), None)
+                popped_token = (
+                    self._token_by_symbol.pop(symbol)
+                    if symbol in self._token_by_symbol
+                    else None
+                )
+                if popped_token is not None:
+                    normalized_tokens.add(int(popped_token))
+                    self._symbol_by_token.pop(int(popped_token), None)
+                    self._ticks.pop(int(popped_token), None)
+                    self._token_quotes.pop(int(popped_token), None)
                 aliases = set(self._symbol_aliases.pop(symbol, set()))
                 normalized_symbols.update(str(alias).strip().upper() for alias in aliases if str(alias).strip())
                 for cache in (self._quotes, self._last_ts, self._last_arrival, self._last_ws_arrival, self._last_poll_arrival, self._last_arrival_mono):
@@ -2283,7 +2378,11 @@ class DataHub:
                 for sym, _ in ordered[:-max_size]:
                     warm_cache.pop(sym, None)
         except Exception as exc:
-            self._logger.error('Failure in _touch_warm_symbol_cache: %s', exc, exc_info=exc)
+            LOGGER.error(
+                "Failure in _touch_warm_symbol_cache: %s",
+                exc,
+                exc_info=exc,
+            )
 
     async def hydrate_symbol_history(
         self,
