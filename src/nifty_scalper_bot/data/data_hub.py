@@ -2122,16 +2122,16 @@ class DataHub:
                 self._ticks.pop(token, None)
                 self._token_quotes.pop(token, None)
             for symbol in list(normalized_symbols):
-                token = (
+                popped_token = (
                     self._token_by_symbol.pop(symbol)
                     if symbol in self._token_by_symbol
                     else None
                 )
-                if token is not None:
-                    normalized_tokens.add(int(token))
-                    self._symbol_by_token.pop(int(token), None)
-                    self._ticks.pop(int(token), None)
-                    self._token_quotes.pop(int(token), None)
+                if popped_token is not None:
+                    normalized_tokens.add(int(popped_token))
+                    self._symbol_by_token.pop(int(popped_token), None)
+                    self._ticks.pop(int(popped_token), None)
+                    self._token_quotes.pop(int(popped_token), None)
                 aliases = set(self._symbol_aliases.pop(symbol, set()))
                 normalized_symbols.update(str(alias).strip().upper() for alias in aliases if str(alias).strip())
                 for cache in (self._quotes, self._last_ts, self._last_arrival, self._last_ws_arrival, self._last_poll_arrival, self._last_arrival_mono):
