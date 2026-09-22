@@ -1,28 +1,31 @@
-from nifty_scalper_bot.config.regime_ontology import (
-    MarketRegime,
-    normalize_regime,
-    regime_label,
-)
-from nifty_scalper_bot.core.market_regime import MarketRegimeDetector
-from nifty_scalper_bot.core.strategy_manager import REGIME_STRATEGY_WEIGHTS
-from nifty_scalper_bot.risk.regime_sizing import RegimeType
-
-
-CANONICAL = {member.value for member in MarketRegime}
-
-
 def test_regime_weight_table_is_keyed_by_canonical_names_only() -> None:
-    unknown_keys = set(REGIME_STRATEGY_WEIGHTS) - CANONICAL
+    from nifty_scalper_bot.config.regime_ontology import MarketRegime
+    from nifty_scalper_bot.core.strategy_manager import REGIME_STRATEGY_WEIGHTS
+
+    canonical = {member.value for member in MarketRegime}
+    unknown_keys = set(REGIME_STRATEGY_WEIGHTS) - canonical
     assert unknown_keys == set(), f"non-canonical weight rows: {sorted(unknown_keys)}"
 
 
 def test_core_detector_regimes_normalise_to_canonical_names() -> None:
+    from nifty_scalper_bot.config.regime_ontology import (
+        MarketRegime,
+        normalize_regime,
+    )
+
+    canonical = {member.value for member in MarketRegime}
     for emitted in ("trend", "range", "volatile", "event"):
         assert normalize_regime(emitted) is not MarketRegime.UNKNOWN
-        assert normalize_regime(emitted).value in CANONICAL
+        assert normalize_regime(emitted).value in canonical
 
 
 def test_detector_classify_outputs_are_canonical() -> None:
+    from nifty_scalper_bot.config.regime_ontology import (
+        MarketRegime,
+        normalize_regime,
+    )
+    from nifty_scalper_bot.core.market_regime import MarketRegimeDetector
+
     detector = MarketRegimeDetector()
     features = {
         "adx": 32.0,
@@ -40,11 +43,23 @@ def test_detector_classify_outputs_are_canonical() -> None:
 
 
 def test_risk_regime_sizing_labels_are_canonical() -> None:
+    from nifty_scalper_bot.config.regime_ontology import (
+        MarketRegime,
+        normalize_regime,
+    )
+    from nifty_scalper_bot.risk.regime_sizing import RegimeType
+
+    canonical = {member.value for member in MarketRegime}
     for member in RegimeType:
-        assert normalize_regime(member.value).value in CANONICAL
+        assert normalize_regime(member.value).value in canonical
 
 
 def test_legacy_labels_normalise_to_canonical() -> None:
+    from nifty_scalper_bot.config.regime_ontology import (
+        MarketRegime,
+        normalize_regime,
+    )
+
     cases = (
         ("TREND_UP", MarketRegime.TREND),
         ("TREND_DOWN", MarketRegime.TREND),
@@ -62,11 +77,22 @@ def test_legacy_labels_normalise_to_canonical() -> None:
 
 
 def test_unresolvable_labels_fail_closed_as_unknown() -> None:
+    from nifty_scalper_bot.config.regime_ontology import (
+        MarketRegime,
+        normalize_regime,
+    )
+
     for raw in (None, "", "   ", "gibberish", 17, object()):
         assert normalize_regime(raw) is MarketRegime.UNKNOWN
 
 
 def test_enum_and_snapshot_inputs_are_accepted() -> None:
+    from nifty_scalper_bot.config.regime_ontology import (
+        MarketRegime,
+        normalize_regime,
+        regime_label,
+    )
+
     class _Snapshot:
         regime = "volatile"
 
@@ -76,6 +102,12 @@ def test_enum_and_snapshot_inputs_are_accepted() -> None:
 
 
 def test_trend_regime_now_receives_its_configured_weight() -> None:
+    from nifty_scalper_bot.config.regime_ontology import (
+        MarketRegime,
+        normalize_regime,
+    )
+    from nifty_scalper_bot.core.strategy_manager import REGIME_STRATEGY_WEIGHTS
+
     trend_row = REGIME_STRATEGY_WEIGHTS[MarketRegime.TREND.value]
     assert trend_row["SMC"] > 1.0
     assert (
@@ -85,6 +117,9 @@ def test_trend_regime_now_receives_its_configured_weight() -> None:
 
 
 def test_defensive_regimes_damp_directional_triggers() -> None:
+    from nifty_scalper_bot.config.regime_ontology import MarketRegime
+    from nifty_scalper_bot.core.strategy_manager import REGIME_STRATEGY_WEIGHTS
+
     for regime in (
         MarketRegime.VOLATILE,
         MarketRegime.EVENT,
