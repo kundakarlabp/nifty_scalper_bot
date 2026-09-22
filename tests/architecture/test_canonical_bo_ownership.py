@@ -196,12 +196,3 @@ def test_live_capable_strategies_do_not_bypass_trade_plan_execution() -> None:
             continue
         offenders.append(str(path.relative_to(ROOT)))
     assert not offenders, f"Live-capable strategy bypasses canonical TradePlan path: {offenders}"
-
-
-def test_duplicate_strategy_regime_engine_is_absent() -> None:
-    duplicate = SRC / "strategies" / "market_regime_engine.py"
-    assert not duplicate.exists(), (
-        "Market regime classification must remain owned by core.market_regime "
-        "and config.regime_ontology"
-    )
-

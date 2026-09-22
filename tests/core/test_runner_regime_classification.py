@@ -1,5 +1,6 @@
 from nifty_scalper_bot.config.regime_ontology import MarketRegime
 from nifty_scalper_bot.core.market_regime import classify_runner_regime
+from nifty_scalper_bot.strategies.runner import StrategyRunner
 
 
 def test_runner_regime_trend_classification() -> None:
@@ -65,3 +66,8 @@ def test_runner_regime_missing_adx_is_unknown_not_range() -> None:
         }
     )
     assert regime is MarketRegime.UNKNOWN
+
+
+def test_runner_uses_canonical_regime_classifier() -> None:
+    globals_map = StrategyRunner._compute_regime_snapshot.__globals__
+    assert globals_map["classify_runner_regime"] is classify_runner_regime

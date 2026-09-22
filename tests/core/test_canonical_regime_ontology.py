@@ -1,7 +1,3 @@
-"""Canonical market-regime vocabulary and ownership contract."""
-
-from __future__ import annotations
-
 import pytest
 
 from nifty_scalper_bot.config.regime_ontology import (
@@ -18,13 +14,11 @@ CANONICAL = {member.value for member in MarketRegime}
 
 
 def test_regime_weight_table_is_keyed_by_canonical_names_only() -> None:
-    """A weight row keyed on a word no producer emits can never be applied."""
     unknown_keys = set(REGIME_STRATEGY_WEIGHTS) - CANONICAL
     assert unknown_keys == set(), f"non-canonical weight rows: {sorted(unknown_keys)}"
 
 
 def test_core_detector_regimes_normalise_to_canonical_names() -> None:
-    """Core detector labels must resolve onto the canonical vocabulary."""
     for emitted in ("trend", "range", "volatile", "event"):
         assert normalize_regime(emitted) is not MarketRegime.UNKNOWN
         assert normalize_regime(emitted).value in CANONICAL
@@ -67,13 +61,15 @@ def test_risk_regime_sizing_labels_are_canonical() -> None:
         ("event", MarketRegime.EVENT),
     ],
 )
-def test_legacy_labels_normalise_to_canonical(raw: str, expected: MarketRegime) -> None:
+def test_legacy_labels_normalise_to_canonical(
+    raw: str,
+    expected: MarketRegime,
+) -> None:
     assert normalize_regime(raw) is expected
 
 
 @pytest.mark.parametrize("raw", [None, "", "   ", "gibberish", 17, object()])
 def test_unresolvable_labels_fail_closed_as_unknown(raw: object) -> None:
-    """An unrecognised label must not score as a tradable regime."""
     assert normalize_regime(raw) is MarketRegime.UNKNOWN
 
 
@@ -87,7 +83,6 @@ def test_enum_and_snapshot_inputs_are_accepted() -> None:
 
 
 def test_trend_regime_now_receives_its_configured_weight() -> None:
-    """The defect: detector said TREND, the table said TREND_UP, SMC got 1.0."""
     trend_row = REGIME_STRATEGY_WEIGHTS[MarketRegime.TREND.value]
     assert trend_row["SMC"] > 1.0
     assert (
@@ -103,4 +98,4 @@ def test_defensive_regimes_damp_directional_triggers() -> None:
         MarketRegime.LOW_ACTIVITY,
     ):
         row = REGIME_STRATEGY_WEIGHTS[regime.value]
-        assert row["SMC"] < 1.0, f"{regime.value} must not score SMC at full weight"
+        assert row["SMC"] < 1.0
