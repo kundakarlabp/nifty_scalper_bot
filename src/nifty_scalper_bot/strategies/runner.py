@@ -168,7 +168,7 @@ from nifty_scalper_bot.strategies.signal_generator import Signal
 from nifty_scalper_bot.strategies.signal_quality import (
     infer_option_side,
     missing_score_components,
-    score_signal_quality,
+    score_signal_metadata,
 )
 from nifty_scalper_bot.strategies.trade_selector import TradeCandidateSelector
 from nifty_scalper_bot.utils import metrics
@@ -1308,7 +1308,8 @@ class StrategyRunner:
             thread_name_prefix="nifty-entry-eval",
         )
         self._eval_counter = 0
-        self._signal_counter = 0
+        self._candidate_counter = 0
+        self._final_quality_approved_counter = 0
         self._regime_block_counter = 0
         self._capital_block_counter = 0
         self._last_candle_eval: dict[str, float] = {}
@@ -5656,7 +5657,10 @@ class StrategyRunner:
                 "runner_state": str(self._runner_state),
                 "active_symbols": sorted(self._active_symbols),
                 "symbols": symbols,
-                "approved_candidate_count": getattr(self, "_signal_counter", 0),
+                "candidate_generated_count": getattr(self, "_candidate_counter", 0),
+                "approved_candidate_count": getattr(
+                    self, "_final_quality_approved_counter", 0
+                ),
                 "tick_count": getattr(self, "_eval_counter", 0),
                 "last_tick_age_sec": (
                     round(time.monotonic() - self._last_tick_seen_ts, 1)
@@ -8522,23 +8526,26 @@ class StrategyRunner:
             self._emit_composite_reports()
             if now - self._last_summary_log >= 60.0:
                 self._logger.info(
-                    "ENGINE_SUMMARY evals=%d approved_candidates=%d regime_blocks=%d "
-                    "capital_blocks=%d runner_state=%s",
+                    "ENGINE_SUMMARY evals=%d candidate_generated=%d approved_candidates=%d "
+                    "regime_blocks=%d capital_blocks=%d runner_state=%s",
                     self._eval_counter,
-                    self._signal_counter,
+                    self._candidate_counter,
+                    self._final_quality_approved_counter,
                     self._regime_block_counter,
                     self._capital_block_counter,
                     str(self._runner_state),
                     extra={
                         "evals": self._eval_counter,
-                        "approved_candidates": self._signal_counter,
+                        "candidate_generated": self._candidate_counter,
+                        "approved_candidates": self._final_quality_approved_counter,
                         "regime_blocks": self._regime_block_counter,
                         "capital_blocks": self._capital_block_counter,
                         "runner_state": str(self._runner_state),
                     },
                 )
                 self._eval_counter = 0
-                self._signal_counter = 0
+                self._candidate_counter = 0
+                self._final_quality_approved_counter = 0
                 self._regime_block_counter = 0
                 self._capital_block_counter = 0
                 self._last_summary_log = now
@@ -16974,7 +16981,7 @@ class StrategyRunner:
                         signal = None
                     self._strategy_window_symbols.add(symbol)
                     if signal is not None:
-                        self._signal_counter += 1
+                        self._candidate_counter += 1
                         self._strategy_window_signals += 1
 
                         # --- Objective 8: Prometheus metrics ---
@@ -20586,26 +20593,8 @@ class StrategyRunner:
                 or getattr(signal, "reason", None)
                 or reason_key
             )
-            resolved_strategy_key = (
-                str(resolved_strategy_name or "").strip().lower().replace(" ", "_")
-            )
-            strategy_score_for_quality = float(
-                (
-                    metadata.get(
-                        "independent_setup_score",
-                        metadata.get("strategy_score", 0.0),
-                    )
-                    if resolved_strategy_key in {"vwappro", "vwap_pro"}
-                    else metadata.get("strategy_score", 0.0)
-                )
-                or 0.0
-            )
-            quality = score_signal_quality(
-                direction_score=float(metadata.get("direction_score", 0.0) or 0.0),
-                strategy_score=strategy_score_for_quality,
-                option_score=float(metadata.get("option_score", 0.0) or 0.0),
-                data_score=float(metadata.get("data_score", 0.0) or 0.0),
-                rr_score=float(metadata.get("rr_score", 0.0) or 0.0),
+            quality = score_signal_metadata(
+                metadata,
                 strategy_name=str(resolved_strategy_name or ""),
             )
             alpha_score = float(
@@ -20711,6 +20700,35 @@ class StrategyRunner:
                         "reasons": rejection_reasons,
                     },
                 )
+            self._final_quality_approved_counter = (
+                getattr(self, "_final_quality_approved_counter", 0) + 1
+            )
+            self._logger.info(
+                "SIGNAL_APPROVED symbol=%s strategy=%s side=%s final_score=%.2f "
+                "alpha_score=%.2f threshold=%.2f approval_path=%s trace_id=%s",
+                base_symbol,
+                str(quality.components.get("strategy_name", "")),
+                infer_option_side(signal.symbol, metadata),
+                quality.final_score,
+                alpha_score,
+                float(quality.components.get("threshold", 0.0) or 0.0),
+                metadata.get("approval_path"),
+                trace_id,
+                extra={
+                    "event": "SIGNAL_APPROVED",
+                    "symbol": base_symbol,
+                    "strategy": str(quality.components.get("strategy_name", "")),
+                    "side": infer_option_side(signal.symbol, metadata),
+                    "final_score": quality.final_score,
+                    "alpha_score": alpha_score,
+                    "threshold": float(
+                        quality.components.get("threshold", 0.0) or 0.0
+                    ),
+                    "approval_path": metadata.get("approval_path"),
+                    "trace_id": trace_id,
+                    "approval_stage": "runner_final_quality",
+                },
+            )
             signal = dataclasses.replace(
                 signal,
                 confidence=final_confidence,
