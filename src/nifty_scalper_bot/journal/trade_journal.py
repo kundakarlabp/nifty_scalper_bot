@@ -283,8 +283,7 @@ class TradeJournal:
         conn.execute("PRAGMA journal_mode=WAL;")
         conn.execute("PRAGMA synchronous=NORMAL;")
 
-        conn.execute(
-            """
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS trade_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp REAL NOT NULL,
@@ -304,11 +303,9 @@ class TradeJournal:
                 meta_json TEXT,
                 event_json TEXT NOT NULL
             )
-            """
-        )
+            """)
         existing = {
-            str(row[1])
-            for row in conn.execute("PRAGMA table_info(trade_events)")
+            str(row[1]) for row in conn.execute("PRAGMA table_info(trade_events)")
         }
         extra_columns = {
             "event_name": "TEXT",
