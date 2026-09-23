@@ -6654,7 +6654,11 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     background_tasks: list[asyncio.Task[Any]] = []
     if not ctx_ref.get("background_tasks_started", False):
         try:
-            background_tasks = start_background_tasks(order_manager, LOGGER)
+            background_tasks = start_background_tasks(
+                order_manager,
+                LOGGER,
+                trade_journal=trade_journal,
+            )
             ctx_ref["background_tasks_started"] = True
             LOGGER.info(
                 "Background tasks started",
