@@ -61,7 +61,7 @@ _original_confirm_entry_fill = BoundBracketManager.confirm_entry_fill
 
 def _positive_filled_quantity(value):
     try:
-        quantity = int(value or 0)
+        quantity = int(float(value or 0))
     except (TypeError, ValueError):
         return None
     return quantity if quantity > 0 else None
@@ -77,9 +77,7 @@ def _reconcile_confirmed_entry_quantity(self, order_id, bracket, filled_qty):
         return False
     try:
         registered = int(getattr(bracket, "quantity", 0) or 0)
-        requested = int(
-            getattr(bracket, "requested_entry_quantity", 0) or registered
-        )
+        requested = int(getattr(bracket, "requested_entry_quantity", 0) or registered)
     except (TypeError, ValueError):
         return False
     if (
@@ -192,6 +190,7 @@ from nifty_scalper_bot.execution.market_aware_profit_extension import (  # noqa:
 
 _apply_market_aware_profit_extension(BoundBracketManager)
 
+
 _original_on_tick = BoundBracketManager.on_tick
 
 
@@ -209,10 +208,7 @@ def _capture_same_tick_cached_quote(self, symbol, ltp, exchange_ts):
         return
     try:
         cached_ltp = float(
-            cached.get("ltp")
-            or cached.get("last_price")
-            or cached.get("price")
-            or 0.0
+            cached.get("ltp") or cached.get("last_price") or cached.get("price") or 0.0
         )
         current_ltp = float(ltp)
     except (TypeError, ValueError):
