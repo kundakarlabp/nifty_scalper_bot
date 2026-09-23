@@ -589,8 +589,7 @@ def test_ledger_complete_true_never_regresses_to_false(tmp_path) -> None:
 
 def _create_legacy_trade_events_db(db_path, events) -> None:
     with sqlite3.connect(db_path) as conn:
-        conn.execute(
-            """
+        conn.execute("""
             CREATE TABLE trade_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp REAL NOT NULL,
@@ -603,8 +602,7 @@ def _create_legacy_trade_events_db(db_path, events) -> None:
                 meta_json TEXT,
                 event_json TEXT NOT NULL
             )
-            """
-        )
+            """)
         conn.executemany(
             """
             INSERT INTO trade_events (
