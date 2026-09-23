@@ -52,6 +52,23 @@ def _manager(provider: Any | None = None) -> RuntimeOrderManager:
     return manager
 
 
+def test_operator_controls_are_native_runtime_methods() -> None:
+    for name in (
+        "emergency_stop",
+        "engage_kill_switch",
+        "kill_switch",
+        "cancel_pending_orders",
+        "cancel_all_open_orders",
+        "cancel_non_protective_orders",
+        "flatten_all",
+        "flatten_positions",
+        "close_all_positions",
+    ):
+        method = getattr(RuntimeOrderManager, name)
+        assert method.__module__ == "nifty_scalper_bot.execution.runtime_order_manager"
+    assert not hasattr(RuntimeOrderManager, "_operator_control_patch")
+
+
 def test_public_order_import_has_one_stable_runtime_identity() -> None:
     assert order_manager.OrderManager is RuntimeOrderManager
     assert execution.OrderManager is RuntimeOrderManager
