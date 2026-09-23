@@ -14,7 +14,6 @@ from typing import Any, Iterable, Mapping
 from nifty_scalper_bot.core.trading_switch import trading_switch
 from nifty_scalper_bot.utils.symbols import normalize_symbol
 
-
 _OPEN_ORDER_STATUSES = {
     "OPEN",
     "OPEN PENDING",
