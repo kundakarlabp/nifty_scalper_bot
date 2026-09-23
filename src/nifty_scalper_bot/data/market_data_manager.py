@@ -1195,11 +1195,6 @@ class MarketDataManager:
         fast_requested = bool(live_append or source == "clock_flush_candle")
         incremental_used = False
         divergence = False
-        completed: list[dict[str, Any]] | None = None
-        canonical_fingerprint: list[
-            tuple[Any, float, float, float, float, float]
-        ] | None = None
-
         projected: Deque[dict[str, Any]]
         canonical_latest_ts: pd.Timestamp | None
         previous_latest: pd.Timestamp | None
@@ -1219,10 +1214,11 @@ class MarketDataManager:
             latest_row = tail[-1] if tail else None
             previous_matches = expected_previous_len == 0 and completed_count == 1
             if expected_previous_len > 0 and len(tail) >= 2 and previous:
+                projection_tail = self._candle_projection_fingerprint([previous[-1]])
+                engine_previous = self._candle_projection_fingerprint([tail[-2]])
                 previous_matches = (
                     len(previous) == expected_previous_len
-                    and self._candle_projection_fingerprint([previous[-1]])
-                    == self._candle_projection_fingerprint([tail[-2]])
+                    and projection_tail == engine_previous
                 )
             elif len(previous) != expected_previous_len:
                 previous_matches = False
@@ -1238,9 +1234,7 @@ class MarketDataManager:
                             [previous[-1]]
                         )
                         previous_key = (
-                            previous_fingerprint[0][0]
-                            if previous_fingerprint
-                            else None
+                            previous_fingerprint[0][0] if previous_fingerprint else None
                         )
                         if previous_key is not None:
                             previous_latest = pd.Timestamp(previous_key)
@@ -1260,9 +1254,7 @@ class MarketDataManager:
                     else:
                         lag_before_seconds = max(
                             0.0,
-                            (
-                                canonical_latest_ts - previous_latest
-                            ).total_seconds(),
+                            (canonical_latest_ts - previous_latest).total_seconds(),
                         )
                     lag_before_bars = 1.0
                     lag_after_seconds = 0.0
