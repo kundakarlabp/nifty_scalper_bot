@@ -236,6 +236,17 @@ class HardenedBracketManager(_CoreBracketManager):
             target.last_trail_price = ltp or None
             target.trail_revision = int(getattr(target, "trail_revision", 0) or 0) + 1
 
+        self._log_bracket_event(
+            "TRAIL_UPDATED",
+            target,
+            meta={
+                "old_sl": current,
+                "new_sl": proposed,
+                "ltp": ltp,
+                "trail_revision": target.trail_revision,
+                "source": "adaptive_controller",
+            },
+        )
         with suppress(Exception):
             self.save_state()
         _core.LOGGER.info(

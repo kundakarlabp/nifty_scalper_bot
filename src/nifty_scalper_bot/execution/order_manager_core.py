@@ -1306,10 +1306,45 @@ class OrderManager:
         order_id: str | None = None,
         meta: Mapping[str, object] | None = None,
     ) -> None:
-        """Queue async trade journal event. Args: event_type,symbol,side,qty,price,order_id,meta; Returns: None; Raises: None."""
+        """Queue one normalized trade-journal event without fabricating fill facts."""
         journal = self._trade_journal
         if journal is None:
             return
+
+        metadata = dict(meta or {})
+        if event_type == "ORDER_FILL_CONFIRMED":
+            order = self._orders.get(str(order_id)) if order_id else None
+            try:
+                filled_qty = int(float(getattr(order, "filled_quantity", 0) or 0))
+            except (TypeError, ValueError):
+                filled_qty = 0
+            try:
+                fill_price = float(
+                    getattr(order, "fill_price", None)
+                    or getattr(order, "average_price", None)
+                    or 0.0
+                )
+            except (TypeError, ValueError):
+                fill_price = 0.0
+            if filled_qty <= 0 or fill_price <= 0:
+                self._logger.error(
+                    "ENTRY_FILL_JOURNAL_SUPPRESSED_UNCONFIRMED order_id=%s "
+                    "filled_qty=%s fill_price=%s",
+                    order_id,
+                    filled_qty,
+                    fill_price,
+                )
+                return
+            qty = filled_qty
+            price = fill_price
+            metadata.update(
+                {
+                    "filled_quantity": filled_qty,
+                    "fill_price": fill_price,
+                    "broker_confirmed_fill": True,
+                }
+            )
+
         try:
             journal.log_event(
                 {
@@ -1320,7 +1355,7 @@ class OrderManager:
                     "qty": int(qty),
                     "price": float(price),
                     "order_id": order_id,
-                    "meta": dict(meta or {}),
+                    "meta": metadata,
                 }
             )
         except Exception as exc:  # noqa: BLE001
@@ -3448,6 +3483,13 @@ class OrderManager:
             signal_id = f"manual_{sig_hash}"
 
         trade_id = f"TRD_{signal_id}"
+        trade_provenance = dict(trade_provenance or {})
+        trade_provenance.setdefault("trade_id", trade_id)
+        trade_provenance.setdefault("signal_id", signal_id)
+        if trace_id:
+            trade_provenance.setdefault("trace_id", trace_id)
+        if strategy_name:
+            trade_provenance.setdefault("strategy", strategy_name)
         unique_client_id = f"bot_{signal_id[-12:]}"  # Max 20 chars usually
         suffix = unique_client_id[-8:]
         base_tag = str(tag or "bot").strip() or "bot"
@@ -8370,85 +8412,99 @@ class OrderManager:
             return [order for order in self._history if order.timestamp.date() == today]
 
     def _confirm_fill_fast(self, order_id: str, timeout_ms: int = 2000) -> bool:
-        """
-        Fast fill confirmation with exponential backoff.
-
-        ✅ WORLD-CLASS: Sub-500ms fill detection when possible
-
-        Args:
-            order_id: The broker order ID to confirm
-            timeout_ms: Maximum time to wait (default 2 seconds)
-
-        Returns:
-            True if fill confirmed, False if timeout/rejected
-        """
+        """Confirm a fill only from broker status, quantity, and execution price."""
         import time
 
         start = time.monotonic()
-        backoff_ms = 50  # Start checking every 50ms
-        max_backoff_ms = 300  # Don't wait more than 300ms between checks
+        backoff_ms = 50.0
+        max_backoff_ms = 300.0
         attempts = 0
 
-        self._logger.debug(f"⏱️ Fast fill check started for {order_id}")
+        self._logger.debug("Fast fill check started for %s", order_id)
 
-        while (time.monotonic() - start) * 1000 < timeout_ms:
+        while (time.monotonic() - start) * 1000.0 < float(timeout_ms):
             attempts += 1
-
             try:
-                # Check order status
                 status = None
-                if hasattr(self._broker, "get_order_status"):
-                    status = self._broker.get_order_status(order_id)
-                elif hasattr(self._broker, "order_history"):
-                    # Some brokers use order_history
-                    history = self._broker.order_history(order_id)
-                    if history and isinstance(history, list):
-                        status = history[-1] if history else None
+                getter = getattr(self._broker, "get_order_status", None)
+                if callable(getter):
+                    status = getter(order_id)
+                else:
+                    history_getter = getattr(self._broker, "order_history", None)
+                    if callable(history_getter):
+                        history = history_getter(order_id)
+                        if isinstance(history, list) and history:
+                            status = history[-1]
 
-                if not status:
-                    time.sleep(backoff_ms / 1000)
+                if not isinstance(status, Mapping) or not status:
+                    time.sleep(backoff_ms / 1000.0)
                     backoff_ms = min(backoff_ms * 1.5, max_backoff_ms)
                     continue
 
-                status_str = str(status.get("status", "")).upper()
-
-                # ✅ FILL DETECTED - Immediately process
-                if status_str in {"COMPLETE", "FILLED"}:
-                    elapsed = (time.monotonic() - start) * 1000
-                    self._logger.info(
-                        f"✅ FILL CONFIRMED in {elapsed:.0f}ms (attempts: {attempts}): {order_id}"
-                    )
-
-                    # CRITICAL: Trigger immediate order update processing
-                    # This activates the bracket instantly
-                    self.on_order_update(status)
-
-                    return True
-
-                # ❌ REJECTED/CANCELLED - Stop waiting
-                if status_str in {"REJECTED", "CANCELLED", "CANCELED"}:
+                status_text = str(status.get("status") or "").strip().upper()
+                if status_text in {"COMPLETE", "FILLED"}:
+                    try:
+                        filled_qty = int(
+                            float(
+                                status.get("filled_quantity")
+                                or status.get("filled")
+                                or 0
+                            )
+                        )
+                    except (TypeError, ValueError):
+                        filled_qty = 0
+                    try:
+                        fill_price = float(
+                            status.get("average_price")
+                            or status.get("avg_price")
+                            or status.get("fill_price")
+                            or 0.0
+                        )
+                    except (TypeError, ValueError):
+                        fill_price = 0.0
+                    if filled_qty > 0 and fill_price > 0:
+                        payload = dict(status)
+                        payload["filled_quantity"] = filled_qty
+                        payload["average_price"] = fill_price
+                        self.on_order_update(payload)
+                        self._logger.info(
+                            "BROKER_FILL_CONFIRMED order_id=%s qty=%s "
+                            "price=%.2f attempts=%s",
+                            order_id,
+                            filled_qty,
+                            fill_price,
+                            attempts,
+                        )
+                        return True
                     self._logger.warning(
-                        f"❌ Order {order_id} {status_str}: {status.get('status_message', 'No reason')}"
+                        "BROKER_FILL_EVIDENCE_INCOMPLETE order_id=%s status=%s "
+                        "filled_qty=%s fill_price=%s",
+                        order_id,
+                        status_text,
+                        filled_qty,
+                        fill_price,
                     )
-                    self.on_order_update(status)
+
+                if status_text in {"REJECTED", "CANCELLED", "CANCELED", "EXPIRED"}:
+                    self.on_order_update(dict(status))
                     return False
 
-                # PENDING/SUBMITTED - Continue waiting with backoff
-                if status_str in {"PENDING", "SUBMITTED", "OPEN", "TRIGGER PENDING"}:
-                    time.sleep(backoff_ms / 1000)
-                    backoff_ms = min(backoff_ms * 1.5, max_backoff_ms)
-                    continue
+            except Exception as exc:
+                self._logger.debug(
+                    "Fast fill check failed order_id=%s attempt=%s error=%s",
+                    order_id,
+                    attempts,
+                    exc,
+                )
 
-            except Exception as e:
-                self._logger.debug(f"Fill check error (attempt {attempts}): {e}")
-
-            time.sleep(backoff_ms / 1000)
+            time.sleep(backoff_ms / 1000.0)
             backoff_ms = min(backoff_ms * 1.5, max_backoff_ms)
 
-        # Timeout - rely on periodic reconcile
-        elapsed = (time.monotonic() - start) * 1000
         self._logger.warning(
-            f"⏰ Fill check timeout after {elapsed:.0f}ms (attempts: {attempts}): {order_id}"
+            "BROKER_FILL_CONFIRM_TIMEOUT order_id=%s timeout_ms=%s attempts=%s",
+            order_id,
+            timeout_ms,
+            attempts,
         )
         return False
 
