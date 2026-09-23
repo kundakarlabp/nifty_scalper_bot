@@ -586,6 +586,7 @@ def test_ledger_complete_true_never_regresses_to_false(tmp_path) -> None:
 
     assert row == (1, 640.0, 560.0, 21.0)
 
+
 def _create_legacy_trade_events_db(db_path, events) -> None:
     with sqlite3.connect(db_path) as conn:
         conn.execute(
@@ -751,4 +752,3 @@ def test_historical_trade_backfill_runs_only_once(tmp_path) -> None:
         ).fetchone()[0]
 
     assert count == 0
-
