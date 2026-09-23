@@ -210,15 +210,13 @@ class SupabaseTradeReplicator:
 
     @staticmethod
     def _ensure_checkpoint_schema(conn: sqlite3.Connection) -> None:
-        conn.execute(
-            """
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS replication_state (
                 sink TEXT PRIMARY KEY,
                 last_event_id INTEGER NOT NULL DEFAULT 0,
                 last_success_at REAL
             )
-            """
-        )
+            """)
         conn.execute(
             """
             INSERT OR IGNORE INTO replication_state (sink, last_event_id)
