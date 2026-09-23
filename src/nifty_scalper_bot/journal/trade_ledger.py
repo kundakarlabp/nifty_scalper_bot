@@ -29,7 +29,20 @@ _TRADE_STATES = {
     "trade.closed": ("CLOSED", 100),
 }
 
-_UPSERT_SQL = """
+
+def _monotonic_merge_sql(column: str) -> str:
+    """Prefer a populated higher-rank value or a non-older same-rank value."""
+    return (
+        f"CASE WHEN excluded.{column} IS NOT NULL AND ("
+        f"trade_ledger.{column} IS NULL "
+        "OR excluded.state_rank > trade_ledger.state_rank "
+        "OR (excluded.state_rank = trade_ledger.state_rank "
+        "AND excluded.updated_at >= trade_ledger.updated_at)) "
+        f"THEN excluded.{column} ELSE trade_ledger.{column} END"
+    )
+
+
+_UPSERT_SQL = f"""
 INSERT INTO trade_ledger (
     trade_id, signal_id, trace_id, strategy, symbol, side,
     state, state_rank, entry_order_id, exit_order_id, quantity,
@@ -146,136 +159,18 @@ ON CONFLICT(trade_id) DO UPDATE SET
         THEN excluded.exit_price
         ELSE trade_ledger.exit_price
     END,
-    gross_pnl = CASE
-        WHEN excluded.gross_pnl IS NOT NULL
-          AND (
-              trade_ledger.gross_pnl IS NULL
-              OR excluded.state_rank > trade_ledger.state_rank
-              OR (
-                  excluded.state_rank = trade_ledger.state_rank
-                  AND excluded.updated_at >= trade_ledger.updated_at
-              )
-          )
-        THEN excluded.gross_pnl
-        ELSE trade_ledger.gross_pnl
-    END,
-    estimated_costs = CASE
-        WHEN excluded.estimated_costs IS NOT NULL
-          AND (
-              trade_ledger.estimated_costs IS NULL
-              OR excluded.state_rank > trade_ledger.state_rank
-              OR (
-                  excluded.state_rank = trade_ledger.state_rank
-                  AND excluded.updated_at >= trade_ledger.updated_at
-              )
-          )
-        THEN excluded.estimated_costs
-        ELSE trade_ledger.estimated_costs
-    END,
-    net_pnl = CASE
-        WHEN excluded.net_pnl IS NOT NULL
-          AND (
-              trade_ledger.net_pnl IS NULL
-              OR excluded.state_rank > trade_ledger.state_rank
-              OR (
-                  excluded.state_rank = trade_ledger.state_rank
-                  AND excluded.updated_at >= trade_ledger.updated_at
-              )
-          )
-        THEN excluded.net_pnl
-        ELSE trade_ledger.net_pnl
-    END,
-    r_multiple = CASE
-        WHEN excluded.r_multiple IS NOT NULL
-          AND (
-              trade_ledger.r_multiple IS NULL
-              OR excluded.state_rank > trade_ledger.state_rank
-              OR (
-                  excluded.state_rank = trade_ledger.state_rank
-                  AND excluded.updated_at >= trade_ledger.updated_at
-              )
-          )
-        THEN excluded.r_multiple
-        ELSE trade_ledger.r_multiple
-    END,
-    mfe_r = CASE
-        WHEN excluded.mfe_r IS NOT NULL
-          AND (
-              trade_ledger.mfe_r IS NULL
-              OR excluded.state_rank > trade_ledger.state_rank
-              OR (
-                  excluded.state_rank = trade_ledger.state_rank
-                  AND excluded.updated_at >= trade_ledger.updated_at
-              )
-          )
-        THEN excluded.mfe_r
-        ELSE trade_ledger.mfe_r
-    END,
-    mae_r = CASE
-        WHEN excluded.mae_r IS NOT NULL
-          AND (
-              trade_ledger.mae_r IS NULL
-              OR excluded.state_rank > trade_ledger.state_rank
-              OR (
-                  excluded.state_rank = trade_ledger.state_rank
-                  AND excluded.updated_at >= trade_ledger.updated_at
-              )
-          )
-        THEN excluded.mae_r
-        ELSE trade_ledger.mae_r
-    END,
-    holding_seconds = CASE
-        WHEN excluded.holding_seconds IS NOT NULL
-          AND (
-              trade_ledger.holding_seconds IS NULL
-              OR excluded.state_rank > trade_ledger.state_rank
-              OR (
-                  excluded.state_rank = trade_ledger.state_rank
-                  AND excluded.updated_at >= trade_ledger.updated_at
-              )
-          )
-        THEN excluded.holding_seconds
-        ELSE trade_ledger.holding_seconds
-    END,
-    exit_reason = CASE
-        WHEN excluded.exit_reason IS NOT NULL
-          AND (
-              trade_ledger.exit_reason IS NULL
-              OR excluded.state_rank > trade_ledger.state_rank
-              OR (
-                  excluded.state_rank = trade_ledger.state_rank
-                  AND excluded.updated_at >= trade_ledger.updated_at
-              )
-          )
-        THEN excluded.exit_reason
-        ELSE trade_ledger.exit_reason
-    END,
-    close_source = CASE
-        WHEN excluded.close_source IS NOT NULL
-          AND (
-              trade_ledger.close_source IS NULL
-              OR excluded.state_rank > trade_ledger.state_rank
-              OR (
-                  excluded.state_rank = trade_ledger.state_rank
-                  AND excluded.updated_at >= trade_ledger.updated_at
-              )
-          )
-        THEN excluded.close_source
-        ELSE trade_ledger.close_source
-    END,
+    gross_pnl = {_monotonic_merge_sql("gross_pnl")},
+    estimated_costs = {_monotonic_merge_sql("estimated_costs")},
+    net_pnl = {_monotonic_merge_sql("net_pnl")},
+    r_multiple = {_monotonic_merge_sql("r_multiple")},
+    mfe_r = {_monotonic_merge_sql("mfe_r")},
+    mae_r = {_monotonic_merge_sql("mae_r")},
+    holding_seconds = {_monotonic_merge_sql("holding_seconds")},
+    exit_reason = {_monotonic_merge_sql("exit_reason")},
+    close_source = {_monotonic_merge_sql("close_source")},
     ledger_complete = CASE
         WHEN trade_ledger.ledger_complete = 1 THEN 1
-        WHEN excluded.ledger_complete IS NOT NULL
-          AND (
-              trade_ledger.ledger_complete IS NULL
-              OR excluded.state_rank > trade_ledger.state_rank
-              OR (
-                  excluded.state_rank = trade_ledger.state_rank
-                  AND excluded.updated_at >= trade_ledger.updated_at
-              )
-          )
-        THEN excluded.ledger_complete
-        ELSE trade_ledger.ledger_complete
+        ELSE {_monotonic_merge_sql("ledger_complete")}
     END,
     decision_at = COALESCE(trade_ledger.decision_at, excluded.decision_at),
     entry_submitted_at = COALESCE(
@@ -309,45 +204,9 @@ ON CONFLICT(trade_id) DO UPDATE SET
         THEN excluded.build_sha
         ELSE trade_ledger.build_sha
     END,
-    costs_json = CASE
-        WHEN excluded.costs_json IS NOT NULL
-          AND (
-              trade_ledger.costs_json IS NULL
-              OR excluded.state_rank > trade_ledger.state_rank
-              OR (
-                  excluded.state_rank = trade_ledger.state_rank
-                  AND excluded.updated_at >= trade_ledger.updated_at
-              )
-          )
-        THEN excluded.costs_json
-        ELSE trade_ledger.costs_json
-    END,
-    execution_quality_json = CASE
-        WHEN excluded.execution_quality_json IS NOT NULL
-          AND (
-              trade_ledger.execution_quality_json IS NULL
-              OR excluded.state_rank > trade_ledger.state_rank
-              OR (
-                  excluded.state_rank = trade_ledger.state_rank
-                  AND excluded.updated_at >= trade_ledger.updated_at
-              )
-          )
-        THEN excluded.execution_quality_json
-        ELSE trade_ledger.execution_quality_json
-    END,
-    outcome_json = CASE
-        WHEN excluded.outcome_json IS NOT NULL
-          AND (
-              trade_ledger.outcome_json IS NULL
-              OR excluded.state_rank > trade_ledger.state_rank
-              OR (
-                  excluded.state_rank = trade_ledger.state_rank
-                  AND excluded.updated_at >= trade_ledger.updated_at
-              )
-          )
-        THEN excluded.outcome_json
-        ELSE trade_ledger.outcome_json
-    END
+    costs_json = {_monotonic_merge_sql("costs_json")},
+    execution_quality_json = {_monotonic_merge_sql("execution_quality_json")},
+    outcome_json = {_monotonic_merge_sql("outcome_json")}
 """
 
 
