@@ -97,6 +97,47 @@ def _mark_filled_exit(
     return bracket
 
 
+def test_partial_entry_fill_persists_broker_confirmed_quantity(
+    monkeypatch, tmp_path
+) -> None:
+    manager, _order_manager, _broker = _manager(monkeypatch, tmp_path)
+
+    manager.confirm_entry_fill("entry-1", 100.0, filled_qty=65)
+
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    assert bracket.quantity == 65
+    assert bracket.remaining_quantity == 65
+    assert manager._fill_ledger is not None
+    fills = manager._fill_ledger.load_fills(bracket.bracket_id)
+    assert [(fill.kind, fill.quantity, fill.price) for fill in fills] == [
+        ("ENTRY", 65, 100.0)
+    ]
+
+
+def test_duplicate_entry_fill_does_not_reactivate_native_ledger_manager(
+    monkeypatch, tmp_path
+) -> None:
+    manager, _order_manager, _broker = _manager(monkeypatch, tmp_path)
+
+    manager.confirm_entry_fill("entry-1", 100.0, filled_qty=65)
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    bracket.entry_fill_ts = 123.0
+    bracket.trail_revision = 7
+
+    result = manager.confirm_entry_fill("entry-1", 100.0, filled_qty=65)
+
+    assert result is True
+    assert bracket.entry_fill_ts == 123.0
+    assert bracket.trail_revision == 7
+    assert manager._fill_ledger is not None
+    fills = manager._fill_ledger.load_fills(bracket.bracket_id)
+    assert [(fill.kind, fill.quantity, fill.price) for fill in fills] == [
+        ("ENTRY", 65, 100.0)
+    ]
+
+
 def test_scaled_fills_persist_and_close_uses_exact_weighted_pnl(
     monkeypatch, tmp_path
 ) -> None:
