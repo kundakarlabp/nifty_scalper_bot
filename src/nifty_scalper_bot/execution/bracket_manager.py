@@ -541,9 +541,11 @@ def _get_broker_order_status_with_fill_evidence(self, order_id):
                 "fill_price": fill_price,
             },
         )
-        sanitized = dict(status)
-        sanitized["status"] = "OPEN"
-        return sanitized
+        # Keep the terminal broker status visible to the existing canonical
+        # fill/position sync state machine. It will not close while residual
+        # exposure is non-zero or unknown; this preserves bounded catch-up
+        # handling without fabricating a filled quantity.
+        return status
 
     evidence = self.__dict__.setdefault("_canonical_exit_fill_evidence", {})
     evidence[str(order_id)] = {
