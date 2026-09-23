@@ -28,7 +28,7 @@ class TradeEventSink:
 
     @property
     def enabled(self) -> bool:
-        return bool(os.getenv("SUPABASE_URL") and os.getenv("SUPABASE_SERVICE_ROLE_KEY"))
+        return bool(\n            os.getenv("SUPABASE_URL") and os.getenv("SUPABASE_SERVICE_ROLE_KEY")\n        )
 
     def start(self) -> None:
         if not self.enabled or (self._thread and self._thread.is_alive()):
