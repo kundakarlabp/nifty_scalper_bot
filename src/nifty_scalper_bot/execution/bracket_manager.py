@@ -396,7 +396,8 @@ def _reconcile_pending_entry_broker_evidence(self, bracket):
             )
             return
         _core.LOGGER.warning(
-            "PENDING_ENTRY_FILL_EVIDENCE_INCOMPLETE entry_order_id=%s symbol=%s status=%s filled_qty=%s fill_price=%s",
+            "PENDING_ENTRY_FILL_EVIDENCE_INCOMPLETE entry_order_id=%s "
+        "symbol=%s status=%s filled_qty=%s fill_price=%s",
             bracket.entry_order_id,
             bracket.symbol,
             status_text,
@@ -424,7 +425,8 @@ def _reconcile_pending_entry_broker_evidence(self, bracket):
     if not self._position_flat_for_symbol(bracket.symbol):
         return
     _core.LOGGER.warning(
-        "PENDING_ENTRY_RECONCILED_FLAT entry_order_id=%s symbol=%s order_status=%s age_s=%.1f",
+        "PENDING_ENTRY_RECONCILED_FLAT entry_order_id=%s symbol=%s "
+        "order_status=%s age_s=%.1f",
         bracket.entry_order_id,
         bracket.symbol,
         status_text or "ABSENT",
@@ -446,7 +448,7 @@ _original_get_broker_order_status = BoundBracketManager._get_broker_order_status
 
 
 def _get_broker_order_status_with_fill_evidence(self, order_id):
-    """Hide terminal fill state until broker quantity and price prove execution."""
+    """Require quantitative broker evidence before accepting terminal exit fill."""
     status = _original_get_broker_order_status(self, order_id)
     if not isinstance(status, Mapping):
         return status
@@ -462,6 +464,55 @@ def _get_broker_order_status_with_fill_evidence(self, order_id):
         or status.get("avg_price")
         or status.get("fill_price")
     )
+
+    bracket = None
+    with self._lock:
+        for candidate in self._brackets.values():
+            candidate_order_id = (
+                getattr(candidate, "exit_order_id", None)
+                or getattr(candidate, "pending_exit_order_id", None)
+            )
+            if str(candidate_order_id or "") == str(order_id):
+                bracket = candidate
+                break
+
+    residual_quantity = None
+    if filled_qty is None and fill_price is not None and bracket is not None:
+        residual_quantity = self._broker_position_quantity(bracket.symbol)
+        try:
+            previous_remaining = int(bracket.remaining_quantity or 0)
+        except (TypeError, ValueError):
+            previous_remaining = 0
+        if (
+            residual_quantity is not None
+            and previous_remaining > 0
+            and 0 <= int(residual_quantity) < previous_remaining
+        ):
+            filled_qty = previous_remaining - int(residual_quantity)
+            status = dict(status)
+            status["filled_quantity"] = int(filled_qty)
+            status["fill_quantity_source"] = "broker_position_delta"
+            _core.LOGGER.info(
+                "EXIT_FILL_QTY_INFERRED_FROM_BROKER_POSITION "
+                "order_id=%s bracket_id=%s previous_qty=%s residual_qty=%s "
+                "filled_qty=%s fill_price=%s",
+                order_id,
+                bracket.bracket_id,
+                previous_remaining,
+                residual_quantity,
+                filled_qty,
+                fill_price,
+                extra={
+                    "event": "EXIT_FILL_QTY_INFERRED_FROM_BROKER_POSITION",
+                    "order_id": str(order_id),
+                    "bracket_id": str(bracket.bracket_id),
+                    "previous_quantity": previous_remaining,
+                    "residual_quantity": int(residual_quantity),
+                    "filled_quantity": int(filled_qty),
+                    "fill_price": float(fill_price),
+                },
+            )
+
     expected_qty = 0
     orders = getattr(getattr(self, "order_manager", None), "_orders", {})
     if isinstance(orders, Mapping):
@@ -478,7 +529,8 @@ def _get_broker_order_status_with_fill_evidence(self, order_id):
     )
     if not complete:
         _core.LOGGER.warning(
-            "EXIT_FILL_EVIDENCE_INCOMPLETE order_id=%s status=%s filled_qty=%s expected_qty=%s fill_price=%s",
+            "EXIT_FILL_EVIDENCE_INCOMPLETE order_id=%s status=%s "
+            "filled_qty=%s expected_qty=%s fill_price=%s",
             order_id,
             status_text,
             filled_qty,
@@ -503,11 +555,15 @@ def _get_broker_order_status_with_fill_evidence(self, order_id):
         "filled_qty": int(filled_qty),
         "fill_price": float(fill_price),
         "broker_status": status_text,
+        "residual_quantity": residual_quantity,
+        "fill_quantity_source": status.get(
+            "fill_quantity_source", "broker_order_payload"
+        ),
     }
     return status
 
 
-BoundBracketManager._get_broker_order_status = _get_broker_order_status_with_fill_evidence
+BoundBracketManager._get_broker_order_status = (\n    _get_broker_order_status_with_fill_evidence\n)
 
 _original_process_exit_state = BoundBracketManager._process_exit_state
 
@@ -560,7 +616,7 @@ def _submit_exit_order_with_event(
     )
     bracket = self.get_bracket(bracket_id)
     order_id = str(getattr(result, "order_id", "") or "")
-    accepted = bool(getattr(result, "accepted", False) or getattr(result, "submitted", False))
+    accepted = bool(\n        getattr(result, "accepted", False)\n        or getattr(result, "submitted", False)\n    )
     if bracket is not None and accepted and order_id:
         self._log_bracket_event(
             "EXIT_SUBMITTED",
@@ -595,7 +651,7 @@ def _close_bracket_with_fill_event(
             or ""
         )
         evidence_map = getattr(self, "_canonical_exit_fill_evidence", {})
-        evidence = evidence_map.get(order_id) if isinstance(evidence_map, Mapping) else None
+        evidence = (\n            evidence_map.get(order_id)\n            if isinstance(evidence_map, Mapping)\n            else None\n        )
         already = str(
             getattr(bracket, "_canonical_exit_fill_journaled_order_id", "") or ""
         )
@@ -668,7 +724,7 @@ def _apply_trailing_math_with_event(self, bracket):
 def _update_trailing_sl_with_event(self, symbol, new_sl):
     with self._lock:
         before = {
-            entry_id: float(getattr(self._brackets.get(entry_id), "sl_trigger_price", 0.0) or 0.0)
+            entry_id: float(\n                getattr(self._brackets.get(entry_id), "sl_trigger_price", 0.0)\n                or 0.0\n            )
             for entry_id in list(self._symbol_map.get(symbol, []))
             if self._brackets.get(entry_id) is not None
         }
