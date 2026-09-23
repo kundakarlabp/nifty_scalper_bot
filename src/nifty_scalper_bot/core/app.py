@@ -6256,7 +6256,6 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     safe_order_manager = SafeOrderManager(
         order_manager=order_manager,
         settings=settings.orders,
-        regime_manager=market_regime_manager,
     )
 
     session_guard = TradingSessionGuard(
@@ -6375,7 +6374,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     LOGGER.info("📅 Using active futures symbol: %s", futures_symbol or "unavailable")
     orchestrator = StrategyOrchestrator(
         risk_manager=risk_manager,
-        order_manager=safe_order_manager,
+        order_manager=order_manager,
         data_hub=data_hub,
         futures_symbol=futures_symbol,
     )
@@ -6510,7 +6509,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             risk=risk_manager,
             streamer=streamer,
             data_hub=data_hub,
-            orders=safe_order_manager or order_manager,
+            orders=order_manager,
             strategies=strategy_manager,
             logger=LOGGER.getChild("init.unified_manager"),
         )
