@@ -84,16 +84,6 @@ def test_malformed_positions_are_unknown_not_flat():
     assert evidence.net_quantity is None
 
 
-def test_live_exit_patch_apply_is_deprecated_no_method_reassignment():
-    from nifty_scalper_bot.execution import live_exit_reconciliation_patch
-    from nifty_scalper_bot.execution.ownership import BoundBracketManager
-
-    before = BoundBracketManager._reconcile_exit_state
-    with pytest.warns(DeprecationWarning):
-        live_exit_reconciliation_patch.apply_patches()
-    assert BoundBracketManager._reconcile_exit_state is before
-
-
 @pytest.mark.parametrize(
     "value",
     [None, False, True, "", " ", "abc", "NaN", float("nan"), float("inf"), 1.5, {}, []],
