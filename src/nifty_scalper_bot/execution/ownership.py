@@ -218,11 +218,10 @@ class BoundBracketManager(RuntimeBracketManager):
 
         metadata = self._correlation_for_bracket(bracket)
         metadata.update(dict(meta or {}))
+        metadata.setdefault("bracket_id", str(getattr(bracket, "bracket_id", "") or ""))
         metadata.setdefault(
-            "bracket_id", str(getattr(bracket, "bracket_id", "") or "")
-        )
-        metadata.setdefault(
-            "entry_order_id", str(getattr(bracket, "entry_order_id", "") or "")
+            "entry_order_id",
+            str(getattr(bracket, "entry_order_id", "") or ""),
         )
         metadata.setdefault(
             "trade_lifecycle_id",
