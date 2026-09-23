@@ -115,6 +115,7 @@ def test_lifecycle_safety_methods_are_not_replaced_by_public_facades() -> None:
     assert "BoundBracketManager.confirm_entry_fill =" not in bracket_source
     assert "_core.tick_exchange_epoch =" not in bracket_source
     assert "BoundBracketManager.on_tick =" not in bracket_source
+    assert BracketManager.on_tick.__module__ == "nifty_scalper_bot.execution.ownership"
 
 
 def test_runner_uses_only_canonical_entry_api() -> None:
