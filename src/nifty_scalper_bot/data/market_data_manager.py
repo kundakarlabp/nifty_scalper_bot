@@ -349,6 +349,8 @@ class MarketDataManager:
 
     _native_candle_queue_reservation_owner = True
 
+    _native_candle_flush_lifecycle_owner = True
+
     def __init__(
         self,
         broker: Any = None,
@@ -527,6 +529,14 @@ class MarketDataManager:
         self._cached_near_atm_symbols: set[str] = set()
         self._cached_spot_future_symbols: set[str] = set()
         self._tick_consumer_task: asyncio.Task[None] | None = None
+        self._candle_flush_task: asyncio.Task[None] | None = None
+        self._candle_flush_interval_s = self._parse_float_env(
+            "MDM_CANDLE_FLUSH_INTERVAL_SECONDS", default=1.0, minimum=0.25
+        )
+        self._candle_flush_grace_s = self._parse_float_env(
+            "MDM_CANDLE_FLUSH_GRACE_SECONDS", default=1.5, minimum=0.0
+        )
+        self._last_candle_flush_log_mono = 0.0
         self._pending_tick_lock = threading.Lock()
         self._pending_tick_queues: dict[str, Deque[dict[str, Any]]] = defaultdict(deque)
         self._pending_far_ticks: dict[str, dict[str, Any]] = {}
@@ -2039,6 +2049,10 @@ class MarketDataManager:
         return task.done()
 
     def stop(self) -> None:
+        self._stop_candle_flush_task()
+        stop_fallback_worker = getattr(self, "_stop_fallback_tick_worker", None)
+        if callable(stop_fallback_worker):
+            stop_fallback_worker()
         should_stop = self._prepare_stop_state()
         tick_drain_task, tick_consumer_task = self._capture_tick_shutdown_tasks()
         drain_settled = self._settle_cancelled_tick_task(
@@ -6444,6 +6458,76 @@ class MarketDataManager:
             _start()
         else:
             loop.call_soon_threadsafe(_start)
+        self._ensure_candle_flush_task(reason=reason)
+
+    def _ensure_candle_flush_task(self, *, reason: str) -> None:
+        """Start the owned task that finalizes idle one-minute candles."""
+        loop = self._main_loop
+        if loop is None or not loop.is_running():
+            return
+        task = self._candle_flush_task
+        if task is not None and not task.done():
+            return
+
+        async def _runner() -> None:
+            interval = max(float(self._candle_flush_interval_s or 1.0), 0.25)
+            try:
+                while True:
+                    await asyncio.sleep(interval)
+                    flush_due_candles = getattr(self, "flush_due_candles", None)
+                    if not callable(flush_due_candles):
+                        raise RuntimeError("candle flush owner is not installed")
+                    flush_due_candles()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # pragma: no cover - defensive task guard
+                self._logger.error(
+                    "MDM_CANDLE_FLUSH_TASK_STOPPED error=%r",
+                    exc,
+                    exc_info=True,
+                    extra={
+                        "event": "MDM_CANDLE_FLUSH_TASK_STOPPED",
+                        "error": repr(exc),
+                    },
+                )
+
+        def _start() -> None:
+            task_inner = self._candle_flush_task
+            if task_inner is None or task_inner.done():
+                self._candle_flush_task = loop.create_task(_runner())
+                self._logger.info(
+                    "MDM_CANDLE_FLUSH_TASK_STARTED reason=%s",
+                    reason,
+                    extra={
+                        "event": "MDM_CANDLE_FLUSH_TASK_STARTED",
+                        "reason": reason,
+                    },
+                )
+
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+        if running_loop is loop:
+            _start()
+        else:
+            loop.call_soon_threadsafe(_start)
+
+    def _stop_candle_flush_task(self) -> None:
+        """Cancel the owned idle-candle flush task without blocking shutdown."""
+        task = self._candle_flush_task
+        if task is None or task.done():
+            self._candle_flush_task = None
+            return
+        loop = self._main_loop
+        try:
+            if loop is not None and loop.is_running():
+                loop.call_soon_threadsafe(task.cancel)
+            else:
+                task.cancel()
+        except Exception as exc:  # noqa: BLE001
+            self._logger.debug("candle flush task cancel skipped: %s", exc)
+        self._candle_flush_task = None
 
     def _invalidate_priority_context_cache(self) -> None:
         """Clear cached priority context sets. Args: none. Returns: None."""
