@@ -372,22 +372,35 @@ def test_event_without_trade_id_does_not_create_trade_ledger_row(tmp_path) -> No
     assert event_count == 1
     assert ledger_count == 0
 
+
 def _normalized_close_event(
     journal: TradeJournal,
     *,
     timestamp: float,
-    gross_pnl: float,
-    costs: float,
-    net_pnl: float,
-    r_multiple: float,
-    mfe_r: float,
-    mae_r: float,
-    holding_seconds: float,
-    exit_reason: str,
-    close_source: str,
-    ledger_complete: bool,
     marker: str,
+    **overrides,
 ):
+    completed_trade = {
+        "quantity": 65,
+        "entry_price": 100.0,
+        "exit_price": 110.0,
+        "gross_pnl": 650.0,
+        "estimated_costs": {"total": 75.0, "marker": marker},
+        "net_pnl": 575.0,
+        "final_stop_price": 105.0,
+        "r_multiple": 1.2,
+        "mfe_r": 1.6,
+        "mae_r": 0.3,
+        "holding_seconds": 90.0,
+        "exit_reason": "TARGET",
+        "close_source": "broker_fill",
+        "ledger_complete": True,
+        "execution_quality": {"marker": marker},
+        "marker": marker,
+    }
+    completed_trade.update(overrides)
+    if "estimated_costs" not in overrides:
+        completed_trade["estimated_costs"] = {"total": 75.0, "marker": marker}
     return journal._normalize_event(
         {
             "event_type": "BRACKET_CLOSED",
@@ -396,24 +409,7 @@ def _normalized_close_event(
             "side": "BUY",
             "meta": {
                 "trade_id": "trade-replay-1",
-                "completed_trade": {
-                    "quantity": 65,
-                    "entry_price": 100.0,
-                    "exit_price": 110.0,
-                    "gross_pnl": gross_pnl,
-                    "estimated_costs": {"total": costs, "marker": marker},
-                    "net_pnl": net_pnl,
-                    "final_stop_price": 105.0,
-                    "r_multiple": r_multiple,
-                    "mfe_r": mfe_r,
-                    "mae_r": mae_r,
-                    "holding_seconds": holding_seconds,
-                    "exit_reason": exit_reason,
-                    "close_source": close_source,
-                    "ledger_complete": ledger_complete,
-                    "execution_quality": {"marker": marker},
-                    "marker": marker,
-                },
+                "completed_trade": completed_trade,
             },
         }
     )
@@ -422,26 +418,13 @@ def _normalized_close_event(
 def test_stale_closed_event_cannot_overwrite_newer_terminal_outcome(tmp_path) -> None:
     db_path = tmp_path / "journal.db"
     journal = TradeJournal(str(db_path))
-    newest = _normalized_close_event(
-        journal,
-        timestamp=20.0,
-        gross_pnl=650.0,
-        costs=75.0,
-        net_pnl=575.0,
-        r_multiple=1.2,
-        mfe_r=1.6,
-        mae_r=0.3,
-        holding_seconds=90.0,
-        exit_reason="TARGET",
-        close_source="broker_fill",
-        ledger_complete=True,
-        marker="new",
-    )
+    newest = _normalized_close_event(journal, timestamp=20.0, marker="new")
     stale = _normalized_close_event(
         journal,
         timestamp=10.0,
+        marker="old",
         gross_pnl=-325.0,
-        costs=120.0,
+        estimated_costs={"total": 120.0, "marker": "old"},
         net_pnl=-445.0,
         r_multiple=-0.8,
         mfe_r=0.2,
@@ -450,7 +433,6 @@ def test_stale_closed_event_cannot_overwrite_newer_terminal_outcome(tmp_path) ->
         exit_reason="STALE",
         close_source="replay",
         ledger_complete=False,
-        marker="old",
     )
 
     conn = journal._flush_batch([newest], None)
@@ -493,21 +475,7 @@ def test_stale_closed_event_cannot_overwrite_newer_terminal_outcome(tmp_path) ->
 def test_duplicate_closed_event_is_idempotent(tmp_path) -> None:
     db_path = tmp_path / "journal.db"
     journal = TradeJournal(str(db_path))
-    close_event = _normalized_close_event(
-        journal,
-        timestamp=20.0,
-        gross_pnl=650.0,
-        costs=75.0,
-        net_pnl=575.0,
-        r_multiple=1.2,
-        mfe_r=1.6,
-        mae_r=0.3,
-        holding_seconds=90.0,
-        exit_reason="TARGET",
-        close_source="broker_fill",
-        ledger_complete=True,
-        marker="same",
-    )
+    close_event = _normalized_close_event(journal, timestamp=20.0, marker="same")
 
     conn = journal._flush_batch([close_event], None)
     conn = journal._flush_batch([close_event], conn)
@@ -533,32 +501,22 @@ def test_newer_corrected_closed_event_replaces_older_terminal_outcome(tmp_path) 
     original = _normalized_close_event(
         journal,
         timestamp=20.0,
-        gross_pnl=650.0,
-        costs=75.0,
-        net_pnl=575.0,
-        r_multiple=1.2,
-        mfe_r=1.6,
-        mae_r=0.3,
-        holding_seconds=90.0,
-        exit_reason="TARGET",
-        close_source="broker_fill",
-        ledger_complete=False,
         marker="original",
+        ledger_complete=False,
     )
     corrected = _normalized_close_event(
         journal,
         timestamp=21.0,
+        marker="corrected",
         gross_pnl=630.0,
-        costs=80.0,
+        estimated_costs={"total": 80.0, "marker": "corrected"},
         net_pnl=550.0,
         r_multiple=1.1,
         mfe_r=1.5,
         mae_r=0.4,
         holding_seconds=92.0,
         exit_reason="TARGET_CORRECTED",
-        close_source="broker_fill",
         ledger_complete=True,
-        marker="corrected",
     )
 
     conn = journal._flush_batch([original], None)
@@ -579,17 +537,7 @@ def test_newer_corrected_closed_event_replaces_older_terminal_outcome(tmp_path) 
         ).fetchone()
 
     assert row is not None
-    assert row[:9] == (
-        630.0,
-        80.0,
-        550.0,
-        1.1,
-        1.5,
-        0.4,
-        92.0,
-        "TARGET_CORRECTED",
-        1,
-    )
+    assert row[:9] == (630.0, 80.0, 550.0, 1.1, 1.5, 0.4, 92.0, "TARGET_CORRECTED", 1)
     assert json.loads(row[9])["marker"] == "corrected"
     assert row[10] == 21.0
 
@@ -597,35 +545,14 @@ def test_newer_corrected_closed_event_replaces_older_terminal_outcome(tmp_path) 
 def test_ledger_complete_true_never_regresses_to_false(tmp_path) -> None:
     db_path = tmp_path / "journal.db"
     journal = TradeJournal(str(db_path))
-    complete = _normalized_close_event(
-        journal,
-        timestamp=20.0,
-        gross_pnl=650.0,
-        costs=75.0,
-        net_pnl=575.0,
-        r_multiple=1.2,
-        mfe_r=1.6,
-        mae_r=0.3,
-        holding_seconds=90.0,
-        exit_reason="TARGET",
-        close_source="broker_fill",
-        ledger_complete=True,
-        marker="complete",
-    )
+    complete = _normalized_close_event(journal, timestamp=20.0, marker="complete")
     newer_incomplete = _normalized_close_event(
         journal,
         timestamp=21.0,
-        gross_pnl=640.0,
-        costs=80.0,
-        net_pnl=560.0,
-        r_multiple=1.1,
-        mfe_r=1.5,
-        mae_r=0.4,
-        holding_seconds=92.0,
-        exit_reason="TARGET_CORRECTED",
-        close_source="broker_fill",
-        ledger_complete=False,
         marker="newer",
+        gross_pnl=640.0,
+        net_pnl=560.0,
+        ledger_complete=False,
     )
 
     conn = journal._flush_batch([complete], None)
