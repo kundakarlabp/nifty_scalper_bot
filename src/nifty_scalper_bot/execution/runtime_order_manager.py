@@ -316,9 +316,7 @@ def _enrich_trade_plan_exit_provenance(plan: Any) -> Any:
         tp1_qty = tp1_lots * lot_size
         tp1_price = entry + risk * tp1_r if side == "BUY" else entry - risk * tp1_r
         strictly_before_final = (
-            entry < tp1_price < target
-            if side == "BUY"
-            else target < tp1_price < entry
+            entry < tp1_price < target if side == "BUY" else target < tp1_price < entry
         )
         if tp1_qty >= quantity:
             tp1_skip_reason = "no_remainder"
@@ -338,9 +336,7 @@ def _enrich_trade_plan_exit_provenance(plan: Any) -> Any:
 
     trailing_mult = _positive_float(enriched.get("trailing_atr_mult"))
     if trailing_mult is None:
-        trailing_mult = _positive_float(
-            os.getenv("BRACKET_TRAILING_ATR_MULT", "0")
-        )
+        trailing_mult = _positive_float(os.getenv("BRACKET_TRAILING_ATR_MULT", "0"))
     if trailing_mult is not None:
         enriched["trailing_atr_mult"] = float(trailing_mult)
 
@@ -357,21 +353,15 @@ def _submit_core_with_exit_provenance(manager: Any, plan: Any) -> Any:
 class RuntimeOrderManager(_core.OrderManager):
     """Production order manager with native recovery and entry gating."""
 
-    def emergency_stop(
-        self, reason: str = "telegram_emergency"
-    ) -> dict[str, Any]:
+    def emergency_stop(self, reason: str = "telegram_emergency") -> dict[str, Any]:
         """Pause entries, cancel pending orders and flatten open exposure."""
         return _operator_control.emergency_stop(self, reason=reason)
 
-    def engage_kill_switch(
-        self, reason: str = "telegram_emergency"
-    ) -> dict[str, Any]:
+    def engage_kill_switch(self, reason: str = "telegram_emergency") -> dict[str, Any]:
         """Compatibility alias for the canonical emergency-stop control."""
         return self.emergency_stop(reason=reason)
 
-    def kill_switch(
-        self, reason: str = "telegram_emergency"
-    ) -> dict[str, Any]:
+    def kill_switch(self, reason: str = "telegram_emergency") -> dict[str, Any]:
         """Compatibility alias for the canonical emergency-stop control."""
         return self.emergency_stop(reason=reason)
 
@@ -639,7 +629,9 @@ class RuntimeOrderManager(_core.OrderManager):
     def _place_order_native(self, *args: Any, **kwargs: Any) -> Any:
         effective_kwargs = dict(kwargs)
         managed_strategy = getattr(self, "_managed_strategy_name", None)
-        current_strategy = str(effective_kwargs.get("strategy_name") or "").strip().lower()
+        current_strategy = (
+            str(effective_kwargs.get("strategy_name") or "").strip().lower()
+        )
         if managed_strategy and current_strategy in {"", "manual"}:
             effective_kwargs["strategy_name"] = managed_strategy
         blocked = self._blocked("place_order", args, effective_kwargs)

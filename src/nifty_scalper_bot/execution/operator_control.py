@@ -212,9 +212,7 @@ def flatten_all(
     setattr(self, "_kill_switch_engaged_at", time.time())
     setattr(self, "_kill_switch_reason", str(reason))
     cancel_result = (
-        cancel_pending_orders(self)
-        if cancel_first
-        else {"cancelled": [], "failed": []}
+        cancel_pending_orders(self) if cancel_first else {"cancelled": [], "failed": []}
     )
 
     submitted: list[dict[str, Any]] = []
