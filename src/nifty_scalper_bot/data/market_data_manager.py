@@ -11983,7 +11983,7 @@ class MarketDataManager:
                 "_dispatched_subscriptions",
                 "_confirmed_subscriptions",
             ):
-                values = getattr(self, token_set_name, set()) or set()
+                values: Iterable[Any] = getattr(self, token_set_name, set()) or set()
                 for value in values:
                     try:
                         token_int = int(value)
