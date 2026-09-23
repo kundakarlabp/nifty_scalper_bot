@@ -155,6 +155,11 @@ class TradeJournal:
             "dropped_events": self._dropped_events,
         }
 
+    @property
+    def db_path(self) -> Path:
+        """Return the canonical SQLite journal path for read-only consumers."""
+        return self._db_path
+
     # -------------------------------------------------------
     # Internal
     # -------------------------------------------------------

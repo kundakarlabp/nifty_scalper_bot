@@ -273,6 +273,8 @@ def test_trade_lifecycle_materializes_one_authoritative_ledger_row(tmp_path) -> 
     assert row["entry_price"] == 100.0
     assert row["stop_price"] == 101.0
     assert row["target_price"] == 120.0
+    assert row["initial_stop_price"] == 90.0
+    assert row["initial_target_price"] == 120.0
     assert row["exit_price"] == 110.0
     assert row["gross_pnl"] == 1300.0
     assert row["estimated_costs"] == 88.5
