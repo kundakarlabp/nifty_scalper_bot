@@ -127,9 +127,8 @@ class SupabaseTradeReplicator:
             self._timeout_seconds,
         )
         if response.get("ok") is not True:
-            raise RuntimeError(
-                f"Supabase trade replication rejected: {response.get('error') or response}"
-            )
+            detail = response.get("error") or response
+            raise RuntimeError(f"Supabase trade replication rejected: {detail}")
 
         last_event_id = int(event_rows[-1]["id"])
         self._store_checkpoint(last_event_id)
@@ -377,7 +376,12 @@ def _trading_date(timestamp: float | None) -> str:
     resolved = float(timestamp or 0.0)
     if resolved <= 0:
         resolved = datetime.now(timezone.utc).timestamp()
-    return datetime.fromtimestamp(resolved, timezone.utc).astimezone(_IST).date().isoformat()
+    return (
+        datetime.fromtimestamp(resolved, timezone.utc)
+        .astimezone(_IST)
+        .date()
+        .isoformat()
+    )
 
 
 def _optional_text(value: Any) -> str | None:
