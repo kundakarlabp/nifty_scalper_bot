@@ -62,7 +62,7 @@ def test_trade_decision_uses_trace_as_signal_correlation(tmp_path) -> None:
         ("BRACKET_CLOSED", "trade.closed"),
     ],
 )
-def test_post_entry_events_have_canonical_names(
+def test_explicit_post_entry_event_name_is_preserved(
     tmp_path, event_type: str, event_name: str
 ) -> None:
     journal = TradeJournal(str(tmp_path / "journal.db"))
@@ -71,6 +71,7 @@ def test_post_entry_events_have_canonical_names(
         {
             "event_type": event_type,
             "meta": {
+                "event_name": event_name,
                 "trade_id": "TRD_sig-1",
                 "signal_id": "sig-1",
                 "trace_id": "trace-1",
