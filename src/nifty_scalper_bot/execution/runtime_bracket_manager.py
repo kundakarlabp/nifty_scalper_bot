@@ -322,15 +322,41 @@ class RuntimeBracketManager(LedgerBracketManager):
             )
             return False
 
-        quantity = int(
-            getattr(order, "filled_quantity", 0)
-            or getattr(order, "quantity", 0)
-            or bracket.remaining_quantity
-            or 0
-        )
-        fill_price = getattr(order, "fill_price", None)
-        if fill_price is None and isinstance(payload, Mapping):
-            fill_price = payload.get("average_price") or payload.get("fill_price")
+        payload = payload if isinstance(payload, Mapping) else {}
+        try:
+            quantity = max(
+                0,
+                int(
+                    float(
+                        getattr(order, "filled_quantity", 0)
+                        or payload.get("filled_quantity")
+                        or payload.get("filled")
+                        or 0
+                    )
+                ),
+            )
+        except (TypeError, ValueError):
+            quantity = 0
+        try:
+            fill_price = float(
+                getattr(order, "fill_price", None)
+                or payload.get("average_price")
+                or payload.get("avg_price")
+                or payload.get("fill_price")
+                or 0.0
+            )
+        except (TypeError, ValueError):
+            fill_price = 0.0
+        if quantity <= 0 or fill_price <= 0:
+            _core.LOGGER.warning(
+                "EXIT_FILL_EVIDENCE_INCOMPLETE order_id=%s symbol=%s "
+                "filled_qty=%s fill_price=%s",
+                order_id,
+                symbol,
+                quantity,
+                fill_price,
+            )
+            return False
         now = time.time()
         with self._lock:
             if order_id not in bracket.linked_exit_order_ids:
@@ -379,6 +405,25 @@ class RuntimeBracketManager(LedgerBracketManager):
                 "fill_price": fill_price,
             },
         )
+        residual = self._broker_position_quantity(symbol)
+        if residual == 0 and quantity >= int(bracket.remaining_quantity or 0):
+            self._log_bracket_event(
+                "EXIT_FILLED",
+                bracket,
+                meta={
+                    "exit_order_id": order_id,
+                    "filled_qty": quantity,
+                    "fill_price": fill_price,
+                    "reason": str(bracket.exit_reason or ""),
+                },
+            )
+            self._close_bracket(
+                bracket,
+                close_source="broker_fill",
+                exit_price=fill_price,
+            )
+            return True
+
         return bool(
             self._reconcile_exit_state(
                 bracket,

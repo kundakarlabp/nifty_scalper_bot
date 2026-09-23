@@ -103,6 +103,17 @@ def test_execution_package_import_does_not_install_or_replace_runtime_methods() 
     assert "LegacyAdaptiveTrailingController" not in source
 
 
+def test_lifecycle_safety_methods_are_not_replaced_by_public_facades() -> None:
+    order_source = (EXECUTION / "order_manager.py").read_text(encoding="utf-8")
+    bracket_source = (EXECUTION / "bracket_manager.py").read_text(encoding="utf-8")
+    assert "RuntimeOrderManager._confirm_fill_fast =" not in order_source
+    assert "RuntimeOrderManager._log_trade_event =" not in order_source
+    assert "BoundBracketManager._reconcile_pending_entry =" not in bracket_source
+    assert "BoundBracketManager._get_broker_order_status =" not in bracket_source
+    assert "BoundBracketManager._process_exit_state =" not in bracket_source
+    assert "BoundBracketManager._close_bracket =" not in bracket_source
+
+
 def test_runner_uses_only_canonical_entry_api() -> None:
     calls = _strategy_runner_execute_order_calls()
     assert "submit_trade_plan_result" in calls
