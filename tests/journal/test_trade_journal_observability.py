@@ -585,4 +585,3 @@ def test_ledger_complete_true_never_regresses_to_false(tmp_path) -> None:
         ).fetchone()
 
     assert row == (1, 640.0, 560.0, 21.0)
-
