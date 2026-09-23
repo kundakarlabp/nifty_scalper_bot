@@ -8808,6 +8808,7 @@ class MarketDataManager:
         return payload
 
     def _process_queued_tick(self, raw: dict[str, Any]) -> None:
+        reserved_tick = raw
         tick_started = time.perf_counter()
         symbol_for_timing = str(raw.get("symbol") or "") or None
         source_for_timing = str(raw.get("source") or "ws")
@@ -9147,7 +9148,7 @@ class MarketDataManager:
                             == reservation_symbol
                         ):
                             setattr(self, "_candle_tick_inflight_symbol", None)
-                        self._release_popped_candle_tick_locked(raw)
+                        self._release_popped_candle_tick_locked(reserved_tick)
 
     def get_candle_engine(self, symbol: str) -> CandleEngine:
         """Return the authoritative CandleEngine for a canonicalized symbol."""
