@@ -8811,7 +8811,7 @@ class MarketDataManager:
         tick_started = time.perf_counter()
         symbol_for_timing = str(raw.get("symbol") or "") or None
         source_for_timing = str(raw.get("source") or "ws")
-        reservation_symbol = symbol_for_timing
+        reservation_symbol: str | None = symbol_for_timing
         if not reservation_symbol:
             try:
                 reservation_token = int(
@@ -8822,8 +8822,14 @@ class MarketDataManager:
             reservation_symbol = str(self._symbol_by_token.get(reservation_token) or "")
         if reservation_symbol:
             reservation_symbol = self._canonical_symbol(reservation_symbol)
-        with self._pending_tick_lock:
-            self._candle_tick_inflight_symbol = reservation_symbol or None
+        pending_tick_lock = getattr(self, "_pending_tick_lock", None)
+        if pending_tick_lock is not None:
+            with pending_tick_lock:
+                setattr(
+                    self,
+                    "_candle_tick_inflight_symbol",
+                    reservation_symbol or None,
+                )
         try:
             stage_started = time.perf_counter()
             raw = self._normalize_ws_tick(raw)
@@ -9124,13 +9130,14 @@ class MarketDataManager:
             # and readiness flapping.
 
         finally:
-            with self._pending_tick_lock:
-                if (
-                    getattr(self, "_candle_tick_inflight_symbol", None)
-                    == reservation_symbol
-                ):
-                    self._candle_tick_inflight_symbol = None
-                self._release_popped_candle_tick_locked(raw)
+            if pending_tick_lock is not None:
+                with pending_tick_lock:
+                    if (
+                        getattr(self, "_candle_tick_inflight_symbol", None)
+                        == reservation_symbol
+                    ):
+                        setattr(self, "_candle_tick_inflight_symbol", None)
+                    self._release_popped_candle_tick_locked(raw)
             tick_duration_ms = (time.perf_counter() - tick_started) * 1000.0
             if tick_duration_ms >= 100.0:
                 self._log_slow_tick_stage(
