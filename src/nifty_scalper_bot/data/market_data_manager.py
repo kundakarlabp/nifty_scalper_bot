@@ -6474,7 +6474,10 @@ class MarketDataManager:
             try:
                 while True:
                     await asyncio.sleep(interval)
-                    self.flush_due_candles()
+                    flush_due_candles = getattr(self, "flush_due_candles", None)
+                    if not callable(flush_due_candles):
+                        raise RuntimeError("candle flush owner is not installed")
+                    flush_due_candles()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # pragma: no cover - defensive task guard
