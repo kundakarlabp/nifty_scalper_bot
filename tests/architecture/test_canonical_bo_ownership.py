@@ -171,6 +171,7 @@ def test_retired_execution_modules_are_absent() -> None:
         "order_processor.py",
         "entry_price.py",
         "lifecycle_manager.py",
+        "live_exit_reconciliation_patch.py",
     }
     present = sorted(name for name in retired if (EXECUTION / name).exists())
     assert not present, f"Retired BO modules still present: {present}"
