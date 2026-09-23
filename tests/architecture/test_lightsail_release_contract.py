@@ -177,5 +177,8 @@ def test_release_provisions_nonsecret_trade_replication_settings() -> None:
         assert endpoint in text
         assert "SUPABASE_SERVICE_ROLE" not in text
         assert "SUPABASE_SECRET" not in text
-    assert 'if [ "$RUNTIME_ENV_CHANGED" = true ]; then FORCE_RESTART=true; fi' in release
+    assert (
+        'if [ "$RUNTIME_ENV_CHANGED" = true ]; then FORCE_RESTART=true; fi'
+        in release
+    )
     assert "tests/infra/test_supabase_trade_replication.py" in release
