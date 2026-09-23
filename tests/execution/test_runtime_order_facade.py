@@ -396,7 +396,6 @@ def test_real_broker_update_supplies_order_to_partial_fill_reconciler(
     assert reconciled == [(entry_order, payload)]
 
 
-
 def test_fast_fill_rejects_status_only_complete_payload() -> None:
     manager = _manager(None)
     updates: list[dict[str, Any]] = []
