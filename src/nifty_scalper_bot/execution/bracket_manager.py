@@ -25,7 +25,6 @@ from nifty_scalper_bot.execution.runtime_bracket_manager import (  # noqa: E402,
     RuntimeBracketManager,
 )
 
-
 _original_tick_exchange_epoch = _core.tick_exchange_epoch
 
 
