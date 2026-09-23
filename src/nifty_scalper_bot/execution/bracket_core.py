@@ -3121,6 +3121,17 @@ class BracketManager:
                                 "profit_pct": round(profit_pct, 2),
                             },
                         )
+                    self._log_bracket_event(
+                        "TRAIL_UPDATED",
+                        bracket,
+                        meta={
+                            "old_sl": old_sl,
+                            "new_sl": bracket.sl_trigger_price,
+                            "ltp": ltp,
+                            "trail_revision": bracket.trail_revision,
+                            "source": "fallback_trailing",
+                        },
+                    )
                     self.save_state()
                     return True
         return False
@@ -3573,7 +3584,8 @@ class BracketManager:
             )
 
     def _move_sl_to_breakeven(self, bracket: BracketState) -> None:
-        """Moves SL to Entry Price (Cost)."""
+        """Move the protective stop to entry and journal only a real ratchet."""
+        old_sl = float(bracket.sl_trigger_price or 0.0)
         with self._lock:
             if bracket.side == "BUY":
                 if bracket.entry_price > bracket.sl_trigger_price:
@@ -3581,12 +3593,23 @@ class BracketManager:
                     LOGGER.info(
                         f"🔒 {bracket.symbol}: SL Moved to Breakeven ({bracket.entry_price})"
                     )
-            else:
-                if bracket.entry_price < bracket.sl_trigger_price:
-                    bracket.sl_trigger_price = bracket.entry_price
-                    LOGGER.info(
-                        f"🔒 {bracket.symbol}: SL Moved to Breakeven ({bracket.entry_price})"
-                    )
+            elif bracket.entry_price < bracket.sl_trigger_price:
+                bracket.sl_trigger_price = bracket.entry_price
+                LOGGER.info(
+                    f"🔒 {bracket.symbol}: SL Moved to Breakeven ({bracket.entry_price})"
+                )
+        if float(bracket.sl_trigger_price or 0.0) != old_sl:
+            self._log_bracket_event(
+                "TRAIL_UPDATED",
+                bracket,
+                meta={
+                    "old_sl": old_sl,
+                    "new_sl": float(bracket.sl_trigger_price or 0.0),
+                    "ltp": float(bracket.last_ltp or 0.0),
+                    "trail_revision": int(bracket.trail_revision or 0),
+                    "source": "breakeven",
+                },
+            )
 
     def _extract_exit_quote(
         self, symbol: str
