@@ -1165,9 +1165,19 @@ class MarketDataManager:
             return self._last_history_import_result_by_symbol.get(normalized)
 
     def _refresh_candle_projection(
-        self, symbol: str, *, source: str | None = None
+        self,
+        symbol: str,
+        *,
+        source: str | None = None,
+        live_append: bool = False,
     ) -> list[dict[str, Any]]:
-        """Refresh MDM's read-only OHLC projection from CandleEngine."""
+        """Refresh MDM's read-only OHLC projection from CandleEngine.
+
+        Live candle closes use an O(1) append fast path only when the existing
+        projection is exactly one authoritative CandleEngine bar behind. Any
+        mismatch falls back to the full projection rebuild and divergence
+        checks used by hydration and repair paths.
+        """
         normalized = (
             self._canonical_symbol(symbol)
             if hasattr(self, "_canonical_symbol")
@@ -1179,48 +1189,120 @@ class MarketDataManager:
             else normalized
         )
         engine = self.get_candle_engine(normalized)
-        completed = engine.get_completed_bars()
         with self._lock:
             previous = list(self._ohlc.get(key, ()) or ())
-        previous_fingerprint = self._candle_projection_fingerprint(previous)
-        canonical_fingerprint = self._candle_projection_fingerprint(completed)
-        engine_latest = engine.latest_finalized_minute()
-        canonical_latest_ts = (
-            pd.Timestamp(engine_latest) if engine_latest is not None else None
-        )
-        previous_latest = self._latest_projection_timestamp(
-            previous, fingerprint=previous_fingerprint
-        )
-        lag_before_seconds, lag_before_bars = self._projection_lag(
-            completed,
-            canonical_latest_ts,
-            previous_latest,
-            completed_fingerprint=canonical_fingerprint,
-        )
-        divergence = bool(
-            previous
-            and not self._projection_matches_canonical_slice(
-                previous_fingerprint, canonical_fingerprint
+
+        fast_requested = bool(live_append or source == "clock_flush_candle")
+        incremental_used = False
+        divergence = False
+        projected: Deque[dict[str, Any]]
+        canonical_latest_ts: pd.Timestamp | None
+        previous_latest: pd.Timestamp | None
+        refreshed_latest: pd.Timestamp | None
+        lag_before_seconds: float
+        lag_before_bars: float
+        lag_after_seconds: float
+        lag_after_bars: float
+
+        if fast_requested:
+            completed_count = engine.completed_bar_count()
+            tail = engine.get_completed_tail(2)
+            expected_previous_len = min(
+                int(self._cache_len),
+                max(0, completed_count - 1),
             )
-        )
+            latest_row = tail[-1] if tail else None
+            previous_matches = expected_previous_len == 0 and completed_count == 1
+            if expected_previous_len > 0 and len(tail) >= 2 and previous:
+                projection_tail = self._candle_projection_fingerprint([previous[-1]])
+                engine_previous = self._candle_projection_fingerprint([tail[-2]])
+                previous_matches = (
+                    len(previous) == expected_previous_len
+                    and projection_tail == engine_previous
+                )
+            elif len(previous) != expected_previous_len:
+                previous_matches = False
 
-        projected: Deque[dict[str, Any]] = deque(maxlen=self._cache_len)
-        for row in completed[-self._cache_len :]:
-            bar = dict(row)
-            bar["symbol"] = normalized
-            bar["source"] = source or bar.get("source") or "candle_engine"
-            projected.append(bar)
+            if latest_row is not None and previous_matches:
+                latest_fingerprint = self._candle_projection_fingerprint([latest_row])
+                latest_key = latest_fingerprint[0][0] if latest_fingerprint else None
+                if latest_key is not None:
+                    canonical_latest_ts = pd.Timestamp(latest_key)
+                    previous_latest = None
+                    if previous:
+                        previous_fingerprint = self._candle_projection_fingerprint(
+                            [previous[-1]]
+                        )
+                        previous_key = (
+                            previous_fingerprint[0][0] if previous_fingerprint else None
+                        )
+                        if previous_key is not None:
+                            previous_latest = pd.Timestamp(previous_key)
 
-        projected_fingerprint = canonical_fingerprint[-self._cache_len :]
-        refreshed_latest = self._latest_projection_timestamp(
-            projected, fingerprint=projected_fingerprint
-        )
-        lag_after_seconds, lag_after_bars = self._projection_lag(
-            completed,
-            canonical_latest_ts,
-            refreshed_latest,
-            completed_fingerprint=canonical_fingerprint,
-        )
+                    projected = deque(
+                        (dict(row) for row in previous),
+                        maxlen=self._cache_len,
+                    )
+                    bar = dict(latest_row)
+                    bar["symbol"] = normalized
+                    bar["source"] = source or bar.get("source") or "candle_engine"
+                    projected.append(bar)
+
+                    refreshed_latest = canonical_latest_ts
+                    if previous_latest is None:
+                        lag_before_seconds = 60.0
+                    else:
+                        lag_before_seconds = max(
+                            0.0,
+                            (canonical_latest_ts - previous_latest).total_seconds(),
+                        )
+                    lag_before_bars = 1.0
+                    lag_after_seconds = 0.0
+                    lag_after_bars = 0.0
+                    incremental_used = True
+
+        if not incremental_used:
+            completed = engine.get_completed_bars()
+            previous_fingerprint = self._candle_projection_fingerprint(previous)
+            canonical_fingerprint = self._candle_projection_fingerprint(completed)
+            engine_latest = engine.latest_finalized_minute()
+            canonical_latest_ts = (
+                pd.Timestamp(engine_latest) if engine_latest is not None else None
+            )
+            previous_latest = self._latest_projection_timestamp(
+                previous, fingerprint=previous_fingerprint
+            )
+            lag_before_seconds, lag_before_bars = self._projection_lag(
+                completed,
+                canonical_latest_ts,
+                previous_latest,
+                completed_fingerprint=canonical_fingerprint,
+            )
+            divergence = bool(
+                previous
+                and not self._projection_matches_canonical_slice(
+                    previous_fingerprint, canonical_fingerprint
+                )
+            )
+
+            projected = deque(maxlen=self._cache_len)
+            for row in completed[-self._cache_len :]:
+                bar = dict(row)
+                bar["symbol"] = normalized
+                bar["source"] = source or bar.get("source") or "candle_engine"
+                projected.append(bar)
+
+            projected_fingerprint = canonical_fingerprint[-self._cache_len :]
+            refreshed_latest = self._latest_projection_timestamp(
+                projected, fingerprint=projected_fingerprint
+            )
+            lag_after_seconds, lag_after_bars = self._projection_lag(
+                completed,
+                canonical_latest_ts,
+                refreshed_latest,
+                completed_fingerprint=canonical_fingerprint,
+            )
+
         refreshed_at = time.time()
         canonical_latest_value = (
             canonical_latest_ts.timestamp() if canonical_latest_ts is not None else None
@@ -1234,6 +1316,14 @@ class MarketDataManager:
         with self._lock:
             self._ohlc[key] = projected
             self._candle_metrics["candle_projection_refresh_total"] += 1
+            if incremental_used:
+                self._candle_metrics["candle_projection_incremental_total"] += 1
+            else:
+                self._candle_metrics["candle_projection_full_refresh_total"] += 1
+                if fast_requested:
+                    self._candle_metrics[
+                        "candle_projection_incremental_fallback_total"
+                    ] += 1
             self._candle_metrics["candle_projection_last_refresh"] = refreshed_at
             self._candle_metrics["candle_projection_size"] = float(len(projected))
             if canonical_latest_value is not None:
@@ -1278,6 +1368,7 @@ class MarketDataManager:
                 "lag_after_refresh_bars": lag_after_bars,
                 "projection_size": len(projected),
                 "refreshed_at": refreshed_at,
+                "incremental": incremental_used,
                 "divergence_total": previous_divergence_total
                 + (1.0 if divergence else 0.0),
             }
@@ -8908,7 +8999,7 @@ class MarketDataManager:
                     ),
                     "source": "ws_candle",
                 }
-                self._refresh_candle_projection(symbol)
+                self._refresh_candle_projection(symbol, live_append=True)
                 self._publish_closed_bar(bar)
                 verbose_candles = str(
                     os.getenv("LOG_VERBOSE_CANDLES", "false")

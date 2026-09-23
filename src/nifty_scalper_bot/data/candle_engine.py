@@ -406,6 +406,24 @@ class CandleEngine:
         with self._lock:
             return [dict(row) for row in self._completed_candles]
 
+    def completed_bar_count(self) -> int:
+        """Return the authoritative finalized-bar count in O(1)."""
+        with self._lock:
+            return len(self._completed_candles)
+
+    def get_completed_tail(self, limit: int = 2) -> list[dict[str, Any]]:
+        """Return defensive copies of the newest finalized bars in O(limit)."""
+        size = max(0, int(limit))
+        if size == 0:
+            return []
+        with self._lock:
+            count = len(self._completed_candles)
+            start = max(0, count - size)
+            rows: list[dict[str, Any]] = []
+            for index in range(start, count):
+                rows.append(dict(self._completed_candles[index]))
+            return rows
+
     def get_current_candle(self) -> dict[str, Any] | None:
         """Return a defensive copy of the current partial candle, if any."""
         with self._lock:
