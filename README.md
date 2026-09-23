@@ -390,10 +390,9 @@ src/nifty_scalper_bot/
 │   ├── indicators.py       # Technical indicator library
 │   └── base_strategy.py    # Abstract strategy interface
 ├── execution/
-│   ├── lifecycle_manager.py    # TP/SL/trailing logic
-│   ├── order_manager.py        # Order creation & modification
+│   ├── order_manager.py        # Canonical order entry/submission
 │   ├── position_manager.py     # Active position tracking
-│   ├── bracket_manager.py      # Bracket order orchestration
+│   ├── bracket_manager.py      # TP/SL/trailing & exit lifecycle
 │   └── shadow_paper.py         # Paper trading simulator
 ├── risk/
 │   ├── risk_manager.py     # Portfolio-level risk aggregation

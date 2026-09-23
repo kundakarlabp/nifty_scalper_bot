@@ -15,8 +15,6 @@ PYTHON_FILES = (
     "src/nifty_scalper_bot/execution/bracket_manager.py",
     "src/nifty_scalper_bot/execution/adaptive_trailing.py",
     "src/nifty_scalper_bot/execution/ownership.py",
-    "src/nifty_scalper_bot/execution/safe_order_manager.py",
-    "src/nifty_scalper_bot/execution/lifecycle_manager.py",
     "src/nifty_scalper_bot/deployment_main.py",
 )
 

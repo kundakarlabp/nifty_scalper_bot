@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Callable
+from typing import Any, Callable, Protocol
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse, PlainTextResponse
@@ -24,8 +24,12 @@ from nifty_scalper_bot.utils.logging import get_logger
 LOGGER = get_logger(__name__)
 
 
-if TYPE_CHECKING:
-    from nifty_scalper_bot.execution.safe_order_manager import SafeOrderManager
+class HealthOrderMetrics(Protocol):
+    """Minimal order-runtime surface required by the health endpoint."""
+
+    def throttled_count(self) -> int: ...
+
+    def rejection_count(self) -> int: ...
 
 
 def _prepare_registry(
@@ -63,7 +67,7 @@ def _prepare_registry(
 @dataclass(slots=True)
 class HealthState:
     streamer: Any
-    order_manager: SafeOrderManager
+    order_manager: HealthOrderMetrics
     risk_manager: RiskManager
     live_enabled: Callable[[], bool]
     registry: CollectorRegistry | None = None
@@ -229,4 +233,4 @@ def create_health_app(state: HealthState) -> FastAPI:
     return app
 
 
-__all__ = ["HealthState", "create_health_app"]
+__all__ = ["HealthOrderMetrics", "HealthState", "create_health_app"]
