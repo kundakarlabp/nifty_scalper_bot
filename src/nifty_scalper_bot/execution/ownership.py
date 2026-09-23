@@ -136,7 +136,9 @@ class BoundBracketManager(RuntimeBracketManager):
     ) -> None:
         """Recover executable depth from the cached SSOT without mixing ticks."""
         source = getattr(self, "_market_data", None)
-        getter = getattr(source, "get_latest_tick", None) if source is not None else None
+        getter = (
+            getattr(source, "get_latest_tick", None) if source is not None else None
+        )
         if not callable(getter):
             return
         try:
