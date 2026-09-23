@@ -264,10 +264,129 @@ class LedgerBracketManager(CanonicalBracketManager):
             )
         )
 
+    @staticmethod
+    def _positive_filled_quantity(value: Any) -> int | None:
+        try:
+            quantity = int(float(value or 0))
+        except (TypeError, ValueError):
+            return None
+        return quantity if quantity > 0 else None
+
+    def _reconcile_confirmed_entry_quantity(
+        self,
+        order_id: str,
+        bracket: Any,
+        filled_qty: int | None,
+    ) -> bool:
+        """Reconcile cumulative broker fills before entry-ledger persistence."""
+        reported = self._positive_filled_quantity(filled_qty)
+        if bracket is None or reported is None:
+            return False
+        intent = str(
+            getattr(bracket, "entry_order_intent", "ENTRY") or "ENTRY"
+        ).upper()
+        if intent not in {"ENTRY", "SCALE_IN", "REVERSAL"}:
+            return False
+        try:
+            registered = int(getattr(bracket, "quantity", 0) or 0)
+            requested = int(
+                getattr(bracket, "requested_entry_quantity", 0) or registered
+            )
+        except (TypeError, ValueError):
+            return False
+        if (
+            registered <= 0
+            or requested <= 0
+            or reported > requested
+            or reported == registered
+        ):
+            return False
+        if not self._reconcile_entry_fill_quantity(bracket, reported):
+            return False
+
+        if bool(getattr(bracket, "entry_confirmed", False)):
+            ledger = self._fill_ledger
+            ledger_reconcile = getattr(ledger, "reconcile_entry_quantity", None)
+            if callable(ledger_reconcile):
+                try:
+                    ledger_reconcile(
+                        self._entry_fill_id(str(order_id)),
+                        reported,
+                        maximum_quantity=requested,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    self._block_ledger_release(
+                        bracket,
+                        reason="entry_fill_quantity_reconcile_failed",
+                        payload={
+                            "order_id": str(order_id),
+                            "filled_qty": reported,
+                            "error": str(exc),
+                        },
+                    )
+                    raise
+            _core.LOGGER.warning(
+                "FILL_LEDGER_ENTRY_QTY_RECONCILED order_id=%s symbol=%s "
+                "requested=%s previous=%s filled=%s",
+                order_id,
+                bracket.symbol,
+                requested,
+                registered,
+                reported,
+                extra={
+                    "event": "FILL_LEDGER_ENTRY_QTY_RECONCILED",
+                    "order_id": str(order_id),
+                    "symbol": bracket.symbol,
+                    "requested_qty": requested,
+                    "previous_filled_qty": registered,
+                    "filled_qty": reported,
+                },
+            )
+        return True
+
     def confirm_entry_fill(
         self, order_id: str, fill_price: float, filled_qty: int | None = None
     ) -> None:
         bracket = self.get_bracket(order_id)
+        quantity_reconciled = self._reconcile_confirmed_entry_quantity(
+            order_id,
+            bracket,
+            filled_qty,
+        )
+        try:
+            price = float(fill_price)
+            prior = float(bracket.entry_fill_price) if bracket is not None else None
+        except (TypeError, ValueError):
+            price = prior = None
+        if (
+            bracket is not None
+            and bracket.entry_confirmed
+            and prior is not None
+            and price is not None
+            and abs(prior - price) < 1e-9
+        ):
+            event = (
+                "BRACKET_DUPLICATE_FILL_QTY_RECONCILED"
+                if quantity_reconciled
+                else "BRACKET_ACTIVATION_DUPLICATE_IGNORED"
+            )
+            _core.LOGGER.info(
+                "%s order_id=%s symbol=%s fill_price=%.2f filled_qty=%s",
+                event,
+                order_id,
+                bracket.symbol,
+                price,
+                self._positive_filled_quantity(filled_qty),
+                extra={
+                    "event": event,
+                    "order_id": str(order_id),
+                    "symbol": bracket.symbol,
+                    "fill_price": price,
+                    "filled_qty": self._positive_filled_quantity(filled_qty),
+                },
+            )
+            return True  # type: ignore[return-value]
+
         ledger_ok = True
         if bracket is not None:
             entry_intent = str(
