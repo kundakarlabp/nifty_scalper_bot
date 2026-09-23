@@ -394,3 +394,78 @@ def test_real_broker_update_supplies_order_to_partial_fill_reconciler(
     assert result is entry_order
     assert entry_order.status is order_manager_core.OrderStatus.PARTIALLY_FILLED
     assert reconciled == [(entry_order, payload)]
+
+
+def test_fast_fill_rejects_status_only_complete_payload() -> None:
+    manager = _manager(None)
+    updates: list[dict[str, Any]] = []
+
+    class _Broker:
+        def get_order_status(self, _order_id: str) -> dict[str, Any]:
+            return {"status": "COMPLETE", "average_price": 101.5}
+
+    manager._broker = _Broker()
+    manager.on_order_update = lambda payload: updates.append(dict(payload))
+
+    assert manager._confirm_fill_fast("ENTRY-STATUS-ONLY", timeout_ms=1) is False
+    assert updates == []
+
+
+def test_fast_fill_accepts_quantitative_broker_execution() -> None:
+    manager = _manager(None)
+    updates: list[dict[str, Any]] = []
+
+    class _Broker:
+        def get_order_status(self, _order_id: str) -> dict[str, Any]:
+            return {
+                "status": "COMPLETE",
+                "average_price": 101.5,
+                "filled_quantity": 65,
+            }
+
+    manager._broker = _Broker()
+    manager.on_order_update = lambda payload: updates.append(dict(payload))
+
+    assert manager._confirm_fill_fast("ENTRY-1", timeout_ms=50) is True
+    assert updates == [
+        {
+            "status": "COMPLETE",
+            "average_price": 101.5,
+            "filled_quantity": 65,
+        }
+    ]
+
+
+def test_entry_fill_journal_uses_actual_broker_fill_values() -> None:
+    manager = _manager(None)
+    events: list[dict[str, Any]] = []
+    manager._trade_journal = SimpleNamespace(
+        log_event=lambda payload: events.append(dict(payload))
+    )
+    manager._orders = {
+        "ENTRY-1": SimpleNamespace(
+            filled_quantity=65,
+            fill_price=101.5,
+            average_price=101.5,
+        )
+    }
+
+    manager._log_trade_event(
+        "ORDER_FILL_CONFIRMED",
+        symbol="NFO:NIFTY26JUL23950CE",
+        side="BUY",
+        qty=130,
+        price=99.0,
+        order_id="ENTRY-1",
+        meta={
+            "trade_id": "TRD_sig-1",
+            "signal_id": "sig-1",
+            "trace_id": "trace-1",
+            "strategy": "VWAP",
+        },
+    )
+
+    assert len(events) == 1
+    assert events[0]["qty"] == 65
+    assert events[0]["price"] == 101.5
+    assert events[0]["meta"]["broker_confirmed_fill"] is True

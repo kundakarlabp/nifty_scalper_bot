@@ -25,7 +25,11 @@ class _Broker:
         ]
 
     def get_order_status(self, _order_id: str) -> dict[str, Any]:
-        return {"status": self.status, "average_price": 157.10}
+        return {
+            "status": self.status,
+            "average_price": 157.10,
+            "filled_quantity": 65,
+        }
 
     def get_positions(self) -> list[dict[str, Any]]:
         return list(self.positions)
@@ -334,3 +338,24 @@ def test_two_bracket_lifecycles_each_emit_exit_triggered(caplog) -> None:
     ]
     assert len(exit_triggered) == 2
     assert len(om.calls) == 2
+
+
+def test_status_only_complete_exit_is_not_treated_as_broker_fill() -> None:
+    class _StatusOnlyBroker(_Broker):
+        def get_order_status(self, _order_id: str) -> dict[str, Any]:
+            return {"status": "COMPLETE", "average_price": 157.10}
+
+    broker = _StatusOnlyBroker(
+        status="COMPLETE",
+        positions=[{"symbol": "NFO:NIFTY2660923100CE", "quantity": 65}],
+    )
+    om = _OrderManager(broker=broker, order_id="exit-status-only")
+    manager = _active_manager(om)
+
+    manager.on_tick("NFO:NIFTY2660923100CE", 157.10)
+
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    assert bracket.exit_state != BracketExitLifecycle.CLOSED.value
+    assert bracket.close_source != "broker_fill"
+    assert manager.has_unresolved_exit() is True
