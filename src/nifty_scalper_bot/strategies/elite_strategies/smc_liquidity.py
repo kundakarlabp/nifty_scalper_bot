@@ -791,8 +791,15 @@ class SMCStrategy(EliteStrategy):
                     self._no_vote("smc_direction_conflict")
                     return None
 
-                bos_confirmed = bool(indicators.get("bos_confirmed"))
-                choch_confirmed = bool(indicators.get("choch_confirmed"))
+                # Enrichment supplies a side for each structure event. A break
+                # against the option being bought cannot confirm that entry.
+                # Older providers without side metadata retain their vote.
+                bos_confirmed = bool(indicators.get("bos_confirmed")) and str(
+                    indicators.get("bos_side") or contract_side
+                ).upper() == contract_side
+                choch_confirmed = bool(indicators.get("choch_confirmed")) and str(
+                    indicators.get("choch_side") or contract_side
+                ).upper() == contract_side
                 structure_confirmed = bool(bos_confirmed or choch_confirmed)
                 retest_confirmed = bool(
                     indicators.get("retest_confirmed")
