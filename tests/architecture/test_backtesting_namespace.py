@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import importlib
 from pathlib import Path
 
@@ -50,3 +51,35 @@ def test_legacy_and_canonical_exports_have_stable_identity() -> None:
 def test_backtesting_engine_does_not_depend_on_legacy_namespace() -> None:
     source = (CANONICAL / "backtest_engine.py").read_text(encoding="utf-8")
     assert "nifty_scalper_bot.backtest." not in source
+
+
+def test_internal_code_does_not_import_legacy_backtest_namespace() -> None:
+    offenders: list[tuple[str, str]] = []
+    roots = (PKG, ROOT / "tests")
+    for root in roots:
+        for path in root.rglob("*.py"):
+            if LEGACY in path.parents:
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                module = None
+                if isinstance(node, ast.ImportFrom):
+                    module = node.module
+                elif isinstance(node, ast.Import):
+                    for alias in node.names:
+                        name = alias.name
+                        if name == "nifty_scalper_bot.backtest" or name.startswith(
+                            "nifty_scalper_bot.backtest."
+                        ):
+                            offenders.append(
+                                (str(path.relative_to(ROOT)), name)
+                            )
+                    continue
+                if module and (
+                    module == "nifty_scalper_bot.backtest"
+                    or module.startswith("nifty_scalper_bot.backtest.")
+                    or module == "src.nifty_scalper_bot.backtest"
+                    or module.startswith("src.nifty_scalper_bot.backtest.")
+                ):
+                    offenders.append((str(path.relative_to(ROOT)), module))
+    assert offenders == []
