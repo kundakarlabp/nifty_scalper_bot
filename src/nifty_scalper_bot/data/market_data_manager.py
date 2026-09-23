@@ -11958,26 +11958,13 @@ class MarketDataManager:
                 stale_tokens.add(token_int)
 
         with self._lock:
-            for symbol in list(self._tracked_symbols) + list(
-                self._active_subscribed_symbols
-            ):
-                _mark_symbol(symbol)
-            for mapping_name in ("_token_by_symbol", "_symbol_to_token"):
-                mapping = getattr(self, mapping_name, {})
-                if isinstance(mapping, dict):
-                    for symbol, token in list(mapping.items()):
-                        canonical = canonical_nifty_future_symbol(symbol)
-                        if canonical and canonical != active:
-                            stale_symbols.add(canonical)
-                            _mark_token(token)
-            for mapping_name in ("_symbol_by_token", "_token_to_symbol"):
-                mapping = getattr(self, mapping_name, {})
-                if isinstance(mapping, dict):
-                    for token, symbol in list(mapping.items()):
-                        canonical = canonical_nifty_future_symbol(symbol)
-                        if canonical and canonical != active:
-                            stale_symbols.add(canonical)
-                            _mark_token(token)
+            # Subscription cleanup must scale with the live runtime universe, not
+            # the full instrument catalogue. _token_by_symbol and
+            # _symbol_by_token can contain ~50k instruments in production;
+            # scanning those maps for every subscription request blocked the
+            # asyncio loop during startup.
+            runtime_symbols: set[str] = set(self._tracked_symbols)
+            runtime_symbols.update(self._active_subscribed_symbols)
             for cache_name in (
                 "_latest_ticks",
                 "_tick_cache",
@@ -11986,8 +11973,35 @@ class MarketDataManager:
             ):
                 cache = getattr(self, cache_name, {})
                 if isinstance(cache, dict):
-                    for symbol in list(cache.keys()):
-                        _mark_symbol(symbol)
+                    runtime_symbols.update(str(symbol) for symbol in cache.keys())
+
+            runtime_tokens: set[int] = set()
+            for token_set_name in (
+                "_desired_tokens",
+                "_pending_subscription_tokens",
+                "_pending_subscriptions",
+                "_dispatched_subscriptions",
+                "_confirmed_subscriptions",
+            ):
+                values: Iterable[Any] = getattr(self, token_set_name, set()) or set()
+                for value in values:
+                    try:
+                        token_int = int(value)
+                    except (TypeError, ValueError):
+                        continue
+                    if token_int > 0:
+                        runtime_tokens.add(token_int)
+
+            for token_int in runtime_tokens:
+                mapped_symbol = self._symbol_by_token.get(
+                    token_int
+                ) or self._token_to_symbol.get(token_int)
+                if mapped_symbol:
+                    runtime_symbols.add(str(mapped_symbol))
+
+            for symbol in runtime_symbols:
+                _mark_symbol(symbol)
+
             reqs = dict(getattr(self, "_readiness_requirements", {}) or {})
             for key, value in list(reqs.items()):
                 canonical = canonical_nifty_future_symbol(value)
@@ -12053,7 +12067,6 @@ class MarketDataManager:
                 self._pending_subscriptions.discard(token)
                 self._dispatched_subscriptions.discard(token)
                 self._confirmed_subscriptions.discard(token)
-
         ws_tokens: list[int] = []
         ws = self._ws
         if ws is not None:
