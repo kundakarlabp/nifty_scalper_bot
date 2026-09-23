@@ -53,9 +53,7 @@ class HardenedBracketManager(_CoreBracketManager):
         )
         self._exit_cancel_poll_interval_seconds = max(
             0.05,
-            _core.parse_float_env(
-                os.getenv("EXIT_CANCEL_POLL_INTERVAL_SECONDS"), 0.10
-            ),
+            _core.parse_float_env(os.getenv("EXIT_CANCEL_POLL_INTERVAL_SECONDS"), 0.10),
         )
         self._exit_rescue_max_attempts = max(
             1,
@@ -196,9 +194,7 @@ class HardenedBracketManager(_CoreBracketManager):
     def confirm_entry_fill(
         self, order_id: str, fill_price: float, filled_qty: int | None = None
     ) -> None:
-        _CoreBracketManager.confirm_entry_fill(
-            self, order_id, fill_price, filled_qty
-        )
+        _CoreBracketManager.confirm_entry_fill(self, order_id, fill_price, filled_qty)
         bracket = self.get_bracket(order_id)
         if bracket is None:
             return
@@ -581,9 +577,7 @@ class HardenedBracketManager(_CoreBracketManager):
             or key in self._exit_escalation_notifications
         ):
             bracket.exit_pending = True
-            bracket.exit_state = (
-                _core.BracketExitLifecycle.EXIT_FAILED_ESCALATED.value
-            )
+            bracket.exit_state = _core.BracketExitLifecycle.EXIT_FAILED_ESCALATED.value
             bracket.entry_status = bracket.exit_state
             self._exit_escalation_notifications.add(key)
             return
