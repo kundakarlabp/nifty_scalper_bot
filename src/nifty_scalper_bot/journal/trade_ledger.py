@@ -252,9 +252,7 @@ def ensure_trade_ledger_schema(conn: sqlite3.Connection) -> None:
             outcome_json TEXT
         )
         """)
-    existing = {
-        str(row[1]) for row in conn.execute("PRAGMA table_info(trade_ledger)")
-    }
+    existing = {str(row[1]) for row in conn.execute("PRAGMA table_info(trade_ledger)")}
     for column in ("initial_stop_price", "initial_target_price"):
         if column not in existing:
             conn.execute(f"ALTER TABLE trade_ledger ADD COLUMN {column} REAL")
