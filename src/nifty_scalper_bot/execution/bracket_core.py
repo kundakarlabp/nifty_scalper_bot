@@ -153,9 +153,18 @@ STALE_TICK_ARM_WINDOW_SEC = 5.0
 
 def tick_exchange_epoch(tick: Mapping[str, Any]) -> float | None:
     """Return broker event time, then explicit receipt time, as epoch seconds."""
+    raw = tick.get("exchange_timestamp") or tick.get("timestamp")
+    if raw is not None:
+        if hasattr(raw, "timestamp"):
+            try:
+                return float(raw.timestamp())
+            except (TypeError, ValueError, OSError):
+                pass
+        elif isinstance(raw, (int, float)):
+            value = float(raw)
+            return value / 1000.0 if value > 1e12 else value
+
     for key in (
-        "exchange_timestamp",
-        "timestamp",
         "last_trade_time",
         "last_traded_time",
         "last_trade_timestamp",
@@ -163,17 +172,15 @@ def tick_exchange_epoch(tick: Mapping[str, Any]) -> float | None:
         "received_ts",
         "received_time",
     ):
-        raw = tick.get(key)
-        if raw is None:
-            continue
-        if hasattr(raw, "timestamp"):
+        value = tick.get(key)
+        if hasattr(value, "timestamp"):
             try:
-                return float(raw.timestamp())
+                return float(value.timestamp())
             except (TypeError, ValueError, OSError):
                 continue
-        if isinstance(raw, (int, float)) and not isinstance(raw, bool):
-            value = float(raw)
-            return value / 1000.0 if value > 1e12 else value
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            epoch = float(value)
+            return epoch / 1000.0 if epoch > 1e12 else epoch
     return None
 
 
