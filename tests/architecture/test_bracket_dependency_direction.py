@@ -4,6 +4,12 @@ import ast
 from pathlib import Path
 
 from nifty_scalper_bot.execution import bracket_core, bracket_manager
+from nifty_scalper_bot.execution.canonical_bracket_manager import (
+    CanonicalBracketManager,
+)
+from nifty_scalper_bot.execution.hardened_bracket_manager import (
+    HardenedBracketManager,
+)
 
 
 def test_bracket_implementation_layers_do_not_import_public_facade() -> None:
@@ -38,3 +44,11 @@ def test_bracket_implementation_layers_use_core_terminology() -> None:
     ):
         source = (execution / f"{name}.py").read_text(encoding="utf-8")
         assert "_legacy" not in source, name
+
+
+def test_canonical_bracket_layer_does_not_shadow_fill_activation_passthrough() -> None:
+    assert "confirm_entry_fill" not in CanonicalBracketManager.__dict__
+    assert (
+        CanonicalBracketManager.confirm_entry_fill
+        is HardenedBracketManager.confirm_entry_fill
+    )
