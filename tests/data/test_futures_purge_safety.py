@@ -106,4 +106,3 @@ def test_purge_work_is_bounded_by_live_state_not_instrument_catalogue(
 
     assert purged == []
     assert calls < 200
-
