@@ -123,7 +123,8 @@ def _confirm_fill_fast_broker_evidence(self, order_id, timeout_ms=2000):
                 if filled_qty > 0 and fill_price is not None:
                     elapsed_ms = (time.monotonic() - start) * 1000.0
                     self._logger.info(
-                        "BROKER_FILL_CONFIRMED order_id=%s qty=%s price=%.2f elapsed_ms=%.0f attempts=%s",
+                        "BROKER_FILL_CONFIRMED order_id=%s qty=%s price=%.2f "
+                        "elapsed_ms=%.0f attempts=%s",
                         order_id,
                         filled_qty,
                         fill_price,
@@ -142,7 +143,8 @@ def _confirm_fill_fast_broker_evidence(self, order_id, timeout_ms=2000):
                     return True
 
                 self._logger.warning(
-                    "BROKER_FILL_EVIDENCE_INCOMPLETE order_id=%s status=%s filled_qty=%s fill_price=%s",
+                    "BROKER_FILL_EVIDENCE_INCOMPLETE order_id=%s status=%s "
+                    "filled_qty=%s fill_price=%s",
                     order_id,
                     status_text,
                     filled_qty,
@@ -229,7 +231,8 @@ def _log_trade_event_broker_truth(
         )
         if filled_qty <= 0 or fill_price is None:
             self._logger.error(
-                "ENTRY_FILL_JOURNAL_SUPPRESSED_UNCONFIRMED order_id=%s filled_qty=%s fill_price=%s",
+                "ENTRY_FILL_JOURNAL_SUPPRESSED_UNCONFIRMED order_id=%s "
+                "filled_qty=%s fill_price=%s",
                 order_id,
                 filled_qty,
                 fill_price,
@@ -370,6 +373,7 @@ def _get_latest_quote_freshest_cached(self, symbol):
         "_market_data_manager",
         "market_data_manager",
         "_market_data",
+        "_data_hub",
         "data_hub",
     ):
         provider = getattr(self, attr, None)
