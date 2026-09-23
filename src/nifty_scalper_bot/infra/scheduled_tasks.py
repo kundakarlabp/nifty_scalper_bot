@@ -7,6 +7,10 @@ import inspect
 from typing import Any, Awaitable, Callable
 
 from nifty_scalper_bot.infra.log_rotation import rotate_order_history_archive
+from nifty_scalper_bot.infra.supabase_trade_replication import (
+    build_supabase_trade_replicator,
+    replication_interval_seconds,
+)
 from nifty_scalper_bot.utils.async_helpers import safe_task
 from nifty_scalper_bot.utils.logging import get_logger
 
@@ -110,7 +114,12 @@ async def run_archive_rotation(order_manager: Any, max_age_days: int = 90) -> No
         )
 
 
-def start_background_tasks(order_manager: Any, logger: Any) -> list[asyncio.Task[Any]]:
+def start_background_tasks(
+    order_manager: Any,
+    logger: Any,
+    *,
+    trade_journal: Any | None = None,
+) -> list[asyncio.Task[Any]]:
     """Start background maintenance tasks for the execution stack.
 
     Args:
@@ -147,6 +156,22 @@ def start_background_tasks(order_manager: Any, logger: Any) -> list[asyncio.Task
             )
         )
     )
+
+    if trade_journal is not None:
+        db_path = getattr(trade_journal, "db_path", None)
+        replicator = (
+            build_supabase_trade_replicator(db_path) if db_path is not None else None
+        )
+        if replicator is not None:
+            tasks.append(
+                safe_task(
+                    run_periodic_task(
+                        task_fn=lambda: asyncio.to_thread(replicator.replicate_once),
+                        interval_sec=replication_interval_seconds(),
+                        task_name="replicate_trade_observability",
+                    )
+                )
+            )
 
     logger.info(
         "Scheduled maintenance tasks created",
