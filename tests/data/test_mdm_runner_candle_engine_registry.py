@@ -241,3 +241,78 @@ def test_projection_diagnostics_are_per_symbol() -> None:
         mdm._candle_projection_diagnostics[SYMBOL]
         is not mdm._candle_projection_diagnostics[other]
     )
+
+
+def test_live_projection_refresh_uses_incremental_tail_fast_path() -> None:
+    mdm = _mdm()
+    engine = mdm.get_candle_engine(SYMBOL)
+    start = datetime(2026, 1, 1, 9, 15, tzinfo=timezone.utc)
+
+    assert engine.on_tick({"symbol": SYMBOL, "timestamp": start, "ltp": 100.0}) is None
+    assert engine.on_tick(
+        {"symbol": SYMBOL, "timestamp": start + timedelta(minutes=1), "ltp": 101.0}
+    )
+    mdm._refresh_candle_projection(SYMBOL)
+
+    assert engine.on_tick(
+        {"symbol": SYMBOL, "timestamp": start + timedelta(minutes=2), "ltp": 102.0}
+    )
+
+    original_get_completed = engine.get_completed_bars
+
+    def fail_full_history_read():
+        raise AssertionError("live append fast path must not copy full history")
+
+    engine.get_completed_bars = fail_full_history_read  # type: ignore[method-assign]
+    try:
+        refreshed = mdm._refresh_candle_projection(SYMBOL, live_append=True)
+    finally:
+        engine.get_completed_bars = original_get_completed  # type: ignore[method-assign]
+
+    assert [bar["close"] for bar in refreshed] == [100.0, 101.0]
+    assert mdm._candle_metrics["candle_projection_incremental_total"] == 1
+    assert mdm._candle_projection_diagnostics[SYMBOL]["incremental"] is True
+
+
+def test_live_projection_refresh_falls_back_when_projection_tail_diverges() -> None:
+    mdm = _mdm()
+    engine = mdm.get_candle_engine(SYMBOL)
+    start = datetime(2026, 1, 1, 9, 15, tzinfo=timezone.utc)
+
+    assert engine.on_tick({"symbol": SYMBOL, "timestamp": start, "ltp": 100.0}) is None
+    assert engine.on_tick(
+        {"symbol": SYMBOL, "timestamp": start + timedelta(minutes=1), "ltp": 101.0}
+    )
+    mdm._refresh_candle_projection(SYMBOL)
+    mdm._ohlc[SYMBOL][-1]["close"] = 999.0
+
+    assert engine.on_tick(
+        {"symbol": SYMBOL, "timestamp": start + timedelta(minutes=2), "ltp": 102.0}
+    )
+    refreshed = mdm._refresh_candle_projection(SYMBOL, live_append=True)
+
+    assert [bar["close"] for bar in refreshed] == [100.0, 101.0]
+    assert mdm._candle_metrics["candle_projection_incremental_total"] == 0
+    assert mdm._candle_metrics["candle_projection_incremental_fallback_total"] == 1
+    assert mdm._candle_metrics["candle_projection_divergence_total"] == 1
+    assert mdm._candle_projection_diagnostics[SYMBOL]["incremental"] is False
+
+
+def test_candle_engine_completed_tail_is_bounded_and_defensive() -> None:
+    engine = CandleEngine(max_bars=3, symbol=SYMBOL)
+    start = datetime(2026, 1, 1, 9, 15, tzinfo=timezone.utc)
+
+    for minute in range(4):
+        engine.on_tick(
+            {
+                "symbol": SYMBOL,
+                "timestamp": start + timedelta(minutes=minute),
+                "ltp": 100.0 + minute,
+            }
+        )
+
+    assert engine.completed_bar_count() == 3
+    tail = engine.get_completed_tail(2)
+    assert [bar["close"] for bar in tail] == [101.0, 102.0]
+    tail[-1]["close"] = 999.0
+    assert engine.get_completed_tail(1)[0]["close"] == 102.0
