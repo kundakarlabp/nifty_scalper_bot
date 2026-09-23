@@ -25,7 +25,7 @@ class _Broker:
         ]
 
     def get_order_status(self, _order_id: str) -> dict[str, Any]:
-        return {"status": self.status, "average_price": 157.10, "filled_quantity": 65}
+        return {\n            "status": self.status,\n            "average_price": 157.10,\n            "filled_quantity": 65,\n        }
 
     def get_positions(self) -> list[dict[str, Any]]:
         return list(self.positions)
