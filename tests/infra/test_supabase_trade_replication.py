@@ -154,13 +154,11 @@ def test_failed_remote_batch_does_not_advance_checkpoint(tmp_path: Any) -> None:
         replicator.replicate_once()
 
     with sqlite3.connect(db_path) as conn:
-        checkpoint = conn.execute(
-            """
+        checkpoint = conn.execute("""
             SELECT last_event_id
             FROM replication_state
             WHERE sink = 'supabase_trade_observability'
-            """
-        ).fetchone()[0]
+            """).fetchone()[0]
     assert checkpoint == 0
 
     calls = 0
