@@ -155,9 +155,7 @@ def test_tick_epoch_uses_explicit_receipt_time_when_exchange_time_missing() -> N
     )
 
 
-def test_tick_epoch_preserves_timestamp_fallback_when_exchange_value_is_zero() -> (
-    None
-):
+def test_tick_epoch_preserves_timestamp_fallback_when_exchange_value_is_zero() -> None:
     assert (
         bracket_core.tick_exchange_epoch(
             {"exchange_timestamp": 0, "timestamp": 1_000.0}
