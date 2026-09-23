@@ -354,6 +354,7 @@ def refresh_broker_pnl_diagnostic(
             status == "mismatch"
             and (_finite_float(raw.get("strategy_day_rows")) or 0) > 0
             and positions_marked is not None
+            and positions_closed is not None
             and positions_difference is not None
             and abs(positions_marked - positions_closed) <= _MATCH_TOLERANCE_RUPEES
             and abs(positions_difference) <= _MATCH_TOLERANCE_RUPEES
