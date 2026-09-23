@@ -8819,9 +8819,7 @@ class MarketDataManager:
                 )
             except (TypeError, ValueError):
                 reservation_token = 0
-            reservation_symbol = str(
-                self._symbol_by_token.get(reservation_token) or ""
-            )
+            reservation_symbol = str(self._symbol_by_token.get(reservation_token) or "")
         if reservation_symbol:
             reservation_symbol = self._canonical_symbol(reservation_symbol)
         with self._pending_tick_lock:
