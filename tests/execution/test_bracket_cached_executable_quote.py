@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from unittest.mock import Mock
 
 from nifty_scalper_bot.execution.bracket_manager import BracketManager
@@ -57,3 +58,24 @@ def test_runtime_on_tick_does_not_mix_quote_from_different_tick() -> None:
     manager.on_tick(symbol, 99.50, exchange_ts=1_000.0, defer_submission=True)
 
     assert symbol not in manager._exit_quotes
+
+
+def test_runtime_on_tick_matches_cached_quote_using_received_at_fallback() -> None:
+    symbol = "NFO:NIFTY26AUG24050PE"
+    received_at = datetime.fromtimestamp(1_000.0, tz=timezone.utc)
+    manager = _manager(
+        _CachedMarketData(
+            {
+                "symbol": symbol,
+                "ltp": 99.50,
+                "bid": 99.25,
+                "ask": 99.55,
+                "received_at": received_at,
+                "source": "ws",
+            }
+        )
+    )
+
+    manager.on_tick(symbol, 99.50, exchange_ts=1_000.0, defer_submission=True)
+
+    assert manager._exit_quotes[symbol][:2] == (99.25, 99.55)
