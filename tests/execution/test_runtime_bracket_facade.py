@@ -147,6 +147,59 @@ def test_identical_entry_fill_callback_does_not_reactivate_bracket(
     assert bracket.trail_revision == 7
 
 
+def test_bound_manager_journals_correlated_lifecycle_event() -> None:
+    events: list[dict[str, Any]] = []
+    manager = BoundBracketManager.__new__(BoundBracketManager)
+    manager._trade_journal = SimpleNamespace(
+        log_event=lambda payload: events.append(dict(payload))
+    )
+    manager.order_manager = SimpleNamespace(
+        _canonical_trade_correlation={
+            "ENTRY-1": {
+                "trade_id": "TRD-1",
+                "signal_id": "SIG-1",
+                "trace_id": "TRACE-1",
+                "strategy": "VWAP",
+            }
+        },
+        _orders={},
+    )
+    bracket = SimpleNamespace(
+        entry_order_id="ENTRY-1",
+        bracket_id="BRACKET-1",
+        trade_lifecycle_id="TRD-1",
+        trade_provenance={},
+        tag="VWAP",
+        exit_order_id="EXIT-1",
+        pending_exit_order_id=None,
+        last_ltp=95.0,
+        entry_fill_price=100.0,
+        entry_price=100.0,
+        symbol="NFO:NIFTY26JUL23950CE",
+        side="BUY",
+        remaining_quantity=65,
+        exit_triggered_at=0.0,
+    )
+
+    manager._log_bracket_event(
+        "EXIT_SUBMITTED",
+        bracket,
+        meta={"exit_order_id": "EXIT-1", "exit_price": 96.0},
+    )
+
+    assert len(events) == 1
+    event = events[0]
+    assert event["event_type"] == "EXIT_SUBMITTED"
+    assert event["order_id"] == "EXIT-1"
+    assert event["price"] == 96.0
+    assert event["meta"]["event_name"] == "exit.submitted"
+    assert event["meta"]["trade_id"] == "TRD-1"
+    assert event["meta"]["signal_id"] == "SIG-1"
+    assert event["meta"]["trace_id"] == "TRACE-1"
+    assert event["meta"]["strategy"] == "VWAP"
+    assert bracket.trade_provenance["trade_id"] == "TRD-1"
+
+
 def test_tick_epoch_uses_explicit_receipt_time_when_exchange_time_missing() -> None:
     received_at = datetime(2026, 7, 27, 7, 49, tzinfo=timezone.utc)
     assert bracket_core.tick_exchange_epoch({"received_at": received_at}) == received_at.timestamp()
