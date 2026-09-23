@@ -347,6 +347,8 @@ def _is_nifty_index_future_row(row: Mapping[str, Any]) -> bool:
 class MarketDataManager:
     """Central hub for normalized market data with subscriber fan-out."""
 
+    _native_candle_queue_reservation_owner = True
+
     def __init__(
         self,
         broker: Any = None,
@@ -7363,38 +7365,126 @@ class MarketDataManager:
             self._update_pipeline_overload_locked()
             self._schedule_tick_drain_locked(loop)
 
+    @staticmethod
+    def _candle_raw_tick_minute(tick: Mapping[str, Any]) -> pd.Timestamp | None:
+        """Return the exchange minute for a queued tick, normalized to IST."""
+        for key in ("exchange_timestamp", "timestamp", "last_trade_time"):
+            value = tick.get(key)
+            if value in (None, ""):
+                continue
+            try:
+                timestamp = pd.Timestamp(value)
+            except Exception:
+                continue
+            if pd.isna(timestamp):
+                continue
+            if timestamp.tzinfo is None:
+                timestamp = timestamp.tz_localize("Asia/Kolkata")
+            else:
+                timestamp = timestamp.tz_convert("Asia/Kolkata")
+            return timestamp.floor("1min")
+        return None
+
+    def _candle_tick_reservation_key(
+        self, tick: Mapping[str, Any]
+    ) -> tuple[str, pd.Timestamp] | None:
+        """Return canonical symbol/minute identity for a popped queued tick."""
+        symbol = str(tick.get("symbol") or "")
+        if not symbol:
+            try:
+                token = int(tick.get("instrument_token") or tick.get("token") or 0)
+            except (TypeError, ValueError):
+                token = 0
+            symbol = str(self._symbol_by_token.get(token) or "")
+        if not symbol:
+            return None
+        canonical = self._canonical_symbol(symbol)
+        minute = self._candle_raw_tick_minute(tick)
+        if not canonical or minute is None:
+            return None
+        return canonical, minute
+
+    def _reserve_popped_candle_tick_locked(self, tick: Mapping[str, Any]) -> None:
+        """Keep a popped-but-unapplied tick visible to clock finalization."""
+        tick_id = id(tick)
+        reserved_ids = getattr(self, "_candle_tick_reserved_ids", None)
+        if not isinstance(reserved_ids, dict):
+            reserved_ids = {}
+            self._candle_tick_reserved_ids = reserved_ids
+        if tick_id in reserved_ids:
+            return
+        key = self._candle_tick_reservation_key(tick)
+        if key is None:
+            return
+        reservations = getattr(self, "_candle_tick_reserved_minutes", None)
+        if not isinstance(reservations, dict):
+            reservations = {}
+            self._candle_tick_reserved_minutes = reservations
+        reservations[key] = int(reservations.get(key, 0) or 0) + 1
+        reserved_ids[tick_id] = key
+
+    def _release_popped_candle_tick_locked(self, tick: Mapping[str, Any]) -> None:
+        """Release one popped-tick reservation after processing completes."""
+        reserved_ids = getattr(self, "_candle_tick_reserved_ids", None)
+        if not isinstance(reserved_ids, dict):
+            return
+        key = reserved_ids.pop(id(tick), None)
+        if key is None:
+            return
+        reservations = getattr(self, "_candle_tick_reserved_minutes", None)
+        if not isinstance(reservations, dict):
+            return
+        remaining = int(reservations.get(key, 0) or 0) - 1
+        if remaining > 0:
+            reservations[key] = remaining
+        else:
+            reservations.pop(key, None)
+
     def _pop_pending_tick_batch(self) -> list[dict[str, Any]]:
+        """Pop a bounded batch while preserving candle-rollover visibility."""
         batch: list[dict[str, Any]] = []
         with self._pending_tick_lock:
             if self._pending_count_locked() <= 0:
                 self._tick_drain_scheduled = False
                 return []
             for _ in range(self._tick_drain_batch_size):
-                selected_key = None
-                selected_priority = 99
+                selected_key: str | None = None
+                selected_rank: tuple[int, int, float] | None = None
                 for key, queue in self._pending_tick_queues.items():
                     if not queue:
                         continue
-                    priority = int(queue[0].get("_mdm_priority", 99))
-                    if priority < selected_priority:
+                    head = queue[0]
+                    priority = int(head.get("_mdm_priority", 99))
+                    bucket = str(head.get("_mdm_priority_bucket") or "")
+                    bucket_rank = 1 if bucket == "near_atm" else 0
+                    enqueued = head.get("_mdm_enqueued_mono")
+                    age_rank = (
+                        float(enqueued)
+                        if isinstance(enqueued, (int, float))
+                        else float("inf")
+                    )
+                    rank = (priority, bucket_rank, age_rank)
+                    if selected_rank is None or rank < selected_rank:
                         selected_key = key
-                        selected_priority = priority
-                        if priority == 0:
-                            break
+                        selected_rank = rank
                 if selected_key is not None:
                     queue = self._pending_tick_queues[selected_key]
-                    batch.append(queue.popleft())
+                    tick = queue.popleft()
+                    self._reserve_popped_candle_tick_locked(tick)
+                    batch.append(tick)
                     self._pending_decrement_locked(1)
                     if not queue:
                         self._pending_tick_queues.pop(selected_key, None)
                     continue
                 if self._pending_far_ticks:
                     _key, tick = self._pending_far_ticks.popitem()
+                    self._reserve_popped_candle_tick_locked(tick)
                     self._pending_decrement_locked(1)
                     batch.append(tick)
                     continue
                 break
-            return batch
+            self._pending_heap_prune_locked()
+        return batch
 
     def _requeue_unprocessed_ticks(self, ticks: list[dict[str, Any]]) -> None:
         if not ticks:
@@ -8718,9 +8808,29 @@ class MarketDataManager:
         return payload
 
     def _process_queued_tick(self, raw: dict[str, Any]) -> None:
+        reserved_tick = raw
         tick_started = time.perf_counter()
         symbol_for_timing = str(raw.get("symbol") or "") or None
         source_for_timing = str(raw.get("source") or "ws")
+        reservation_symbol: str | None = symbol_for_timing
+        if not reservation_symbol:
+            try:
+                reservation_token = int(
+                    raw.get("instrument_token") or raw.get("token") or 0
+                )
+            except (TypeError, ValueError):
+                reservation_token = 0
+            reservation_symbol = str(self._symbol_by_token.get(reservation_token) or "")
+        if reservation_symbol:
+            reservation_symbol = self._canonical_symbol(reservation_symbol)
+        pending_tick_lock = getattr(self, "_pending_tick_lock", None)
+        if pending_tick_lock is not None:
+            with pending_tick_lock:
+                setattr(
+                    self,
+                    "_candle_tick_inflight_symbol",
+                    reservation_symbol or None,
+                )
         try:
             stage_started = time.perf_counter()
             raw = self._normalize_ws_tick(raw)
@@ -9021,14 +9131,24 @@ class MarketDataManager:
             # and readiness flapping.
 
         finally:
-            tick_duration_ms = (time.perf_counter() - tick_started) * 1000.0
-            if tick_duration_ms >= 100.0:
-                self._log_slow_tick_stage(
-                    stage="one_tick",
-                    symbol=symbol_for_timing,
-                    duration_ms=tick_duration_ms,
-                    source=source_for_timing,
-                )
+            try:
+                tick_duration_ms = (time.perf_counter() - tick_started) * 1000.0
+                if tick_duration_ms >= 100.0:
+                    self._log_slow_tick_stage(
+                        stage="one_tick",
+                        symbol=symbol_for_timing,
+                        duration_ms=tick_duration_ms,
+                        source=source_for_timing,
+                    )
+            finally:
+                if pending_tick_lock is not None:
+                    with pending_tick_lock:
+                        if (
+                            getattr(self, "_candle_tick_inflight_symbol", None)
+                            == reservation_symbol
+                        ):
+                            setattr(self, "_candle_tick_inflight_symbol", None)
+                        self._release_popped_candle_tick_locked(reserved_tick)
 
     def get_candle_engine(self, symbol: str) -> CandleEngine:
         """Return the authoritative CandleEngine for a canonicalized symbol."""

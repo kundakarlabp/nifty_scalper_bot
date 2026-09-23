@@ -229,3 +229,15 @@ def test_requeued_popped_tick_reservation_is_not_double_counted() -> None:
         == 1
     )
     assert engine.latest_finalized_minute() == minute
+
+
+def test_clock_hardening_does_not_replace_native_mdm_queue_hot_path() -> None:
+    process = MarketDataManager._process_queued_tick
+    pop_batch = MarketDataManager._pop_pending_tick_batch
+
+    install_candle_clock_flush_hardening(MarketDataManager)
+
+    assert MarketDataManager._process_queued_tick is process
+    assert MarketDataManager._pop_pending_tick_batch is pop_batch
+    assert process.__module__ == "nifty_scalper_bot.data.market_data_manager"
+    assert pop_batch.__module__ == "nifty_scalper_bot.data.market_data_manager"
