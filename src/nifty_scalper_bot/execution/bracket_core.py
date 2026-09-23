@@ -1005,7 +1005,7 @@ class BracketManager:
         status_text = str(status.get("status") or "").upper()
         if status_text in _FILLED_STATUSES:
             filled_qty = self._extract_status_filled_quantity(status)
-            fill_price = self._extract_status_price(status)
+            fill_price = self._extract_status_fill_price(status)
             if filled_qty > 0 and fill_price is not None:
                 self.confirm_entry_fill(
                     bracket.entry_order_id,
@@ -4036,7 +4036,7 @@ class BracketManager:
             if order_id:
                 status = self._get_broker_order_status(str(order_id))
                 order_status = str((status or {}).get("status", "")).upper()
-                fill_price = self._extract_status_price(status)
+                fill_price = self._extract_status_fill_price(status)
                 filled_qty = self._extract_status_filled_quantity(status)
                 if order_status in _FILLED_STATUSES:
                     filled = filled_qty > 0 and fill_price is not None
@@ -4201,6 +4201,21 @@ class BracketManager:
         if not status:
             return None
         for key in ("average_price", "avg_price", "price", "fill_price"):
+            try:
+                value = float(status.get(key) or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if value > 0:
+                return value
+        return None
+
+    @staticmethod
+    def _extract_status_fill_price(
+        status: Mapping[str, Any] | None,
+    ) -> float | None:
+        if not status:
+            return None
+        for key in ("average_price", "avg_price", "fill_price"):
             try:
                 value = float(status.get(key) or 0.0)
             except (TypeError, ValueError):
