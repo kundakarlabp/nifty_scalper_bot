@@ -7,8 +7,8 @@ while preserving one order-entry and protective-exit authority.
 
 from __future__ import annotations
 
-from contextlib import suppress
 import time
+from contextlib import suppress
 from typing import Any, Iterable, Mapping
 
 from nifty_scalper_bot.core.trading_switch import trading_switch
@@ -49,7 +49,9 @@ def _as_iterable(value: Any) -> list[Any]:
     if isinstance(value, Mapping):
         for key in ("data", "positions", "orders", "net", "day"):
             nested = value.get(key)
-            if isinstance(nested, Iterable) and not isinstance(nested, (str, bytes, Mapping)):
+            if isinstance(nested, Iterable) and not isinstance(
+                nested, (str, bytes, Mapping)
+            ):
                 return list(nested)
         return [value]
     if isinstance(value, Iterable) and not isinstance(value, (str, bytes)):
@@ -170,7 +172,11 @@ def cancel_pending_orders(self: Any) -> dict[str, Any]:
         "OPERATOR_CANCEL_PENDING_ORDERS cancelled=%s failed=%s",
         len(cancelled),
         len(failed),
-        extra={"event": "OPERATOR_CANCEL_PENDING_ORDERS", "cancelled": cancelled, "failed": failed},
+        extra={
+            "event": "OPERATOR_CANCEL_PENDING_ORDERS",
+            "cancelled": cancelled,
+            "failed": failed,
+        },
     )
     return {"cancelled": cancelled, "failed": failed}
 
@@ -206,7 +212,11 @@ def flatten_all(
         trading_switch().pause()
     setattr(self, "_kill_switch_engaged_at", time.time())
     setattr(self, "_kill_switch_reason", str(reason))
-    cancel_result = cancel_pending_orders(self) if cancel_first else {"cancelled": [], "failed": []}
+    cancel_result = (
+        cancel_pending_orders(self)
+        if cancel_first
+        else {"cancelled": [], "failed": []}
+    )
 
     submitted: list[dict[str, Any]] = []
     failed: list[dict[str, Any]] = []
@@ -220,10 +230,23 @@ def flatten_all(
         try:
             order_id = _place_flatten_order(self, symbol, qty)
         except Exception as exc:  # noqa: BLE001 - operator control boundary
-            failed.append({"symbol": symbol, "qty": qty, "error": f"{type(exc).__name__}: {exc}"})
+            failed.append(
+                {
+                    "symbol": symbol,
+                    "qty": qty,
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            )
             continue
         if order_id:
-            submitted.append({"symbol": symbol, "qty": abs(qty), "side": "SELL" if qty > 0 else "BUY", "order_id": order_id})
+            submitted.append(
+                {
+                    "symbol": symbol,
+                    "qty": abs(qty),
+                    "side": "SELL" if qty > 0 else "BUY",
+                    "order_id": order_id,
+                }
+            )
         else:
             failed.append({"symbol": symbol, "qty": qty, "error": "missing_order_id"})
 
@@ -239,7 +262,7 @@ def flatten_all(
 
 
 def emergency_stop(self: Any, reason: str = "telegram_emergency") -> dict[str, Any]:
-    """Fail closed immediately: pause entries, latch kill flag, cancel orders, flatten exposure."""
+    """Pause entries, latch the kill flag, cancel orders and flatten exposure."""
 
     with suppress(Exception):
         trading_switch().pause()
@@ -248,7 +271,8 @@ def emergency_stop(self: Any, reason: str = "telegram_emergency") -> dict[str, A
     cancel_result = cancel_pending_orders(self)
     flatten_result = flatten_all(self, reason=reason, cancel_first=False)
     _logger(self).critical(
-        "OPERATOR_EMERGENCY_STOP reason=%s cancelled=%s failed=%s flattened=%s flatten_failed=%s",
+        "OPERATOR_EMERGENCY_STOP reason=%s cancelled=%s failed=%s "
+        "flattened=%s flatten_failed=%s",
         reason,
         len(cancel_result.get("cancelled", [])),
         len(cancel_result.get("failed", [])),
@@ -261,7 +285,12 @@ def emergency_stop(self: Any, reason: str = "telegram_emergency") -> dict[str, A
             "flatten": flatten_result,
         },
     )
-    return {"kill_switch": True, "reason": str(reason), "cancel": cancel_result, "flatten": flatten_result}
+    return {
+        "kill_switch": True,
+        "reason": str(reason),
+        "cancel": cancel_result,
+        "flatten": flatten_result,
+    }
 
 
 __all__ = [

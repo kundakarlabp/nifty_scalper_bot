@@ -1,6 +1,9 @@
 from types import SimpleNamespace
 
-from nifty_scalper_bot.execution.operator_control import _place_flatten_order, emergency_stop
+from nifty_scalper_bot.execution.operator_control import (
+    _place_flatten_order,
+    emergency_stop,
+)
 
 
 class FakeRuntimeOrderManager:
