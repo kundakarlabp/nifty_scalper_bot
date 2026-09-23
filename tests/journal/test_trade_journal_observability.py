@@ -52,8 +52,7 @@ def test_trade_decision_uses_trace_as_signal_correlation(tmp_path) -> None:
 def test_existing_trade_events_table_is_migrated_in_place(tmp_path) -> None:
     db_path = tmp_path / "journal.db"
     with sqlite3.connect(db_path) as conn:
-        conn.execute(
-            """
+        conn.execute("""
             CREATE TABLE trade_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp REAL NOT NULL,
@@ -66,8 +65,7 @@ def test_existing_trade_events_table_is_migrated_in_place(tmp_path) -> None:
                 meta_json TEXT,
                 event_json TEXT NOT NULL
             )
-            """
-        )
+            """)
 
     journal = TradeJournal(str(db_path))
     conn = journal._ensure_connection(None)
