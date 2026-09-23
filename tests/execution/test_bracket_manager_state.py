@@ -43,7 +43,7 @@ def _pending(order_id, *, age=10):
 def test_pending_bracket_reconciles_filled_order_from_get_order_status():
     class _Broker:
         def get_order_status(self, oid):
-            return {"status": "COMPLETE", "average_price": 101.5}
+            return {"status": "COMPLETE", "average_price": 101.5, "filled_quantity": 1}
     bm = _mk_bm_with_broker(_Broker())
     bracket = BracketState("E1", "NFO:NIFTYCE", "BUY", 1, 100.0, 95.0, 110.0, created_at=time.time() - 10, active=False, entry_confirmed=False)
     bm._brackets["E1"] = bracket
@@ -57,7 +57,7 @@ def test_pending_bracket_reconciles_filled_order_from_get_orders():
         def get_order_status(self, oid):
             return {}
         def get_orders(self):
-            return [{"order_id": "E2", "status": "COMPLETE", "avg_price": 102.0}]
+            return [{"order_id": "E2", "status": "COMPLETE", "avg_price": 102.0, "filled_quantity": 1}]
     bm = _mk_bm_with_broker(_Broker())
     bracket = BracketState("E2", "NFO:NIFTYCE", "BUY", 1, 100.0, 95.0, 110.0, created_at=time.time() - 10, active=False, entry_confirmed=False)
     bm._brackets["E2"] = bracket
@@ -69,7 +69,7 @@ def test_pending_bracket_reconciles_filled_order_from_get_orders():
 def test_pending_bracket_not_reconciled_before_threshold():
     class _Broker:
         def get_order_status(self, oid):
-            return {"status": "COMPLETE", "average_price": 101.0}
+            return {"status": "COMPLETE", "average_price": 101.0, "filled_quantity": 1}
     bm = _mk_bm_with_broker(_Broker())
     bm._pending_entry_reconcile_after_sec = 30.0
     bracket = BracketState("E3", "NFO:NIFTYCE", "BUY", 1, 100.0, 95.0, 110.0, created_at=time.time(), active=False, entry_confirmed=False)
