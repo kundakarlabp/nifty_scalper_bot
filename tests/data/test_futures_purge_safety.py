@@ -67,3 +67,40 @@ def test_unknown_token_not_purged_without_symbol_identity() -> None:
 
     assert purged == []
     assert 999 in mdm._desired_tokens  # noqa: SLF001
+
+def test_purge_work_is_bounded_by_live_state_not_instrument_catalogue(monkeypatch) -> None:
+    """Large instrument maps must not make live subscription cleanup O(catalogue size)."""
+    import nifty_scalper_bot.data.market_data_manager as mdm_module
+
+    mdm = MarketDataManager(websocket=None)
+    basket = _complete_basket()
+    mdm.set_active_contract_basket(basket)
+
+    # Production carries roughly 47k instrument mappings. These catalogue
+    # entries are lookup metadata, not active subscription state.
+    for index in range(5_000):
+        symbol = f"NFO:CATALOGUE{index}"
+        token = 1_000_000 + index
+        mdm._token_by_symbol[symbol] = token  # noqa: SLF001
+        mdm._symbol_to_token[symbol] = token  # noqa: SLF001
+        mdm._symbol_by_token[token] = symbol  # noqa: SLF001
+        mdm._token_to_symbol[token] = symbol  # noqa: SLF001
+
+    original = mdm_module.canonical_nifty_future_symbol
+    calls = 0
+
+    def counted(value):
+        nonlocal calls
+        calls += 1
+        return original(value)
+
+    monkeypatch.setattr(mdm_module, "canonical_nifty_future_symbol", counted)
+
+    purged = mdm.purge_stale_nifty_futures(
+        "NFO:NIFTY26JUNFUT",
+        reason="catalogue_scaling_regression",
+    )
+
+    assert purged == []
+    assert calls < 200
+
