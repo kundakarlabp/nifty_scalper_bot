@@ -164,3 +164,18 @@ def test_release_runner_publishes_exact_runtime_build_sha() -> None:
     no_change_block = release[healthy_no_change:candidate]
     assert "current_runtime_sha" in no_change_block
     assert "FORCE_RESTART=true" in no_change_block
+
+
+def test_release_provisions_nonsecret_trade_replication_settings() -> None:
+    release = _text("deploy/lightsail_release.sh")
+    setup = _text("deploy/lightsail_setup.sh")
+    endpoint = (
+        "https://dehdptgkqbrkyzyodicd.supabase.co/functions/v1/nifty-trade-ingest"
+    )
+    for text in (release, setup):
+        assert "SUPABASE_TRADE_REPLICATION_ENABLED true" in text
+        assert endpoint in text
+        assert "SUPABASE_SERVICE_ROLE" not in text
+        assert "SUPABASE_SECRET" not in text
+    assert 'if [ "$RUNTIME_ENV_CHANGED" = true ]; then FORCE_RESTART=true; fi' in release
+    assert "tests/infra/test_supabase_trade_replication.py" in release
