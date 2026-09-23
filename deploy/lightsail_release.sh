@@ -297,6 +297,8 @@ TARGETED_TESTS=(
   tests/architecture/test_file_header_standard.py
   tests/architecture/test_canonical_bo_ownership.py
   tests/architecture/test_lightsail_release_contract.py
+  tests/infra/test_supabase_trade_replication.py
+  tests/infra/test_scheduled_tasks.py
   tests/test_execution_path_contract.py
   tests/execution/test_runtime_order_facade.py
   tests/execution/test_runtime_bracket_facade.py
