@@ -79,7 +79,7 @@ def _optional_positive_int(value: Any) -> int | None:
 
 
 def _mapping_json(value: Any) -> str | None:
-    if not isinstance(value, Mapping):
+    if not isinstance(value, Mapping) or not value:
         return None
     return json.dumps(dict(value), separators=(",", ":"), default=str)
 
