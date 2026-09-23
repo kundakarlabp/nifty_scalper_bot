@@ -16,7 +16,8 @@ _IMPLEMENTATION_MODULES = ("replay", "parity", "premium_decay_backtest")
 
 def test_backtesting_owns_all_backtest_implementations() -> None:
     missing = [
-        name for name in _IMPLEMENTATION_MODULES
+        name
+        for name in _IMPLEMENTATION_MODULES
         if not (CANONICAL / f"{name}.py").exists()
     ]
     assert missing == [], f"canonical backtesting modules missing: {missing}"
@@ -71,9 +72,7 @@ def test_internal_code_does_not_import_legacy_backtest_namespace() -> None:
                         if name == "nifty_scalper_bot.backtest" or name.startswith(
                             "nifty_scalper_bot.backtest."
                         ):
-                            offenders.append(
-                                (str(path.relative_to(ROOT)), name)
-                            )
+                            offenders.append((str(path.relative_to(ROOT)), name))
                     continue
                 if module and (
                     module == "nifty_scalper_bot.backtest"
