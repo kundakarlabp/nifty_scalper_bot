@@ -20,6 +20,7 @@ FORCE_RESTART=false
 AUTO_MODE=false
 SYSTEMD_ENTRYPOINT_MIGRATED=false
 AUTODEPLOY_ENTRYPOINT_MIGRATED=false
+RUNTIME_ENV_CHANGED=false
 
 for arg in "$@"; do
   case "$arg" in
@@ -55,6 +56,15 @@ env_truthy() {
   local value
   value="$(first_nonempty_env "$1" 2>/dev/null || true)"
   case "${value,,}" in 1|true|yes|on) return 0 ;; *) return 1 ;; esac
+}
+
+ensure_env_default() {
+  local key="$1" value="$2"
+  if ! grep -qE "^${key}=" "$ENV_FILE" 2>/dev/null; then
+    printf '%s=%s\n' "$key" "$value" >> "$ENV_FILE"
+    chmod 600 "$ENV_FILE" 2>/dev/null || true
+    RUNTIME_ENV_CHANGED=true
+  fi
 }
 
 set_runtime_build_sha() {
@@ -233,6 +243,13 @@ if [ ! -f "$ENV_FILE" ] && [ -f "$APP_DIR/.env" ]; then
   cp -p "$APP_DIR/.env" "$ENV_FILE"; chmod 600 "$ENV_FILE"
 fi
 validate_environment
+ensure_env_default SUPABASE_TRADE_REPLICATION_ENABLED true
+ensure_env_default SUPABASE_TRADE_REPLICATION_URL "https://dehdptgkqbrkyzyodicd.supabase.co/functions/v1/nifty-trade-ingest"
+ensure_env_default SUPABASE_TRADE_REPLICATION_SOURCE lightsail
+ensure_env_default SUPABASE_TRADE_REPLICATION_INTERVAL_SECONDS 30
+ensure_env_default SUPABASE_TRADE_REPLICATION_BATCH_SIZE 100
+ensure_env_default SUPABASE_TRADE_REPLICATION_TIMEOUT_SECONDS 5
+if [ "$RUNTIME_ENV_CHANGED" = true ]; then FORCE_RESTART=true; fi
 migrate_systemd_entrypoint
 migrate_autodeploy_entrypoint
 if [ "$SYSTEMD_ENTRYPOINT_MIGRATED" = true ]; then
