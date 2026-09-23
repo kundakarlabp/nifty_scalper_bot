@@ -267,7 +267,8 @@ class TradeJournal:
     # DB Layer
     # -------------------------------------------------------
     def _ensure_connection(
-        self, conn: sqlite3.Connection | None
+        self,
+        conn: sqlite3.Connection | None,
     ) -> sqlite3.Connection:
         if conn is not None:
             return conn
@@ -306,7 +307,8 @@ class TradeJournal:
             """
         )
         existing = {
-            str(row[1]) for row in conn.execute("PRAGMA table_info(trade_events)")
+            str(row[1])
+            for row in conn.execute("PRAGMA table_info(trade_events)")
         }
         extra_columns = {
             "event_name": "TEXT",
