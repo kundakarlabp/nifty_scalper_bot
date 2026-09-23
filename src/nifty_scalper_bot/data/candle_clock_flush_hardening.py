@@ -138,6 +138,10 @@ def install_candle_clock_flush_hardening(manager_cls: type[Any]) -> None:
         getattr(manager_cls, "_pop_pending_tick_batch", None)
     )
 
+    native_queue_owner = bool(
+        getattr(manager_cls, "_native_candle_queue_reservation_owner", False)
+    )
+
     def _process_queued_tick(self: Any, raw: Mapping[str, Any]) -> Any:
         symbol = str(raw.get("symbol") or "")
         if not symbol:
@@ -352,7 +356,7 @@ def install_candle_clock_flush_hardening(manager_cls: type[Any]) -> None:
                 )
         return flushed
 
-    if has_tick_queue:
+    if has_tick_queue and not native_queue_owner:
         manager_cls._process_queued_tick = _process_queued_tick
         manager_cls._pop_pending_tick_batch = _pop_pending_tick_batch
     manager_cls.flush_due_candles = flush_due_candles
