@@ -86,9 +86,7 @@ def install_market_data_manager_hardening(manager_cls: type[Any]) -> None:
                 original_ensure_consumer,
             )
 
-            def _ensure_tick_consumer_with_candle_flush(
-                self: Any, reason: str
-            ) -> None:
+            def _ensure_tick_consumer_with_candle_flush(self: Any, reason: str) -> None:
                 original_ensure_consumer(self, reason)
                 self._ensure_candle_flush_task(reason=reason)
 
@@ -134,9 +132,7 @@ def _initialise_hardening_state(self: Any) -> None:
     self._fallback_tick_queue: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=maxsize)
     if not isinstance(getattr(self, "_tick_worker_stop", None), threading.Event):
         self._tick_worker_stop = threading.Event()
-    if not bool(
-        getattr(type(self), "_native_candle_flush_lifecycle_owner", False)
-    ):
+    if not bool(getattr(type(self), "_native_candle_flush_lifecycle_owner", False)):
         self._candle_flush_task: asyncio.Task[None] | None = None
         self._candle_flush_interval_s = _float_env(
             "MDM_CANDLE_FLUSH_INTERVAL_SECONDS",
