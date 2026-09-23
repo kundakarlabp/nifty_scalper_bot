@@ -1,10 +1,8 @@
-"""Operator control hooks for Telegram emergency and flatten commands.
+"""Broker-aware operator control helpers for the canonical order runtime.
 
-The Telegram command layer calls methods on the service/order-manager if they
-exist. Production previously registered the commands but did not expose concrete
-RuntimeOrderManager methods, so /emergency and /flatten could end as not_wired.
-This patch adds bounded, broker-aware controls without introducing a second entry
-path.
+RuntimeOrderManager exposes explicit native methods that delegate here. Keeping
+the broker interaction helpers separate avoids import-time method replacement
+while preserving one order-entry and protective-exit authority.
 """
 
 from __future__ import annotations
@@ -16,7 +14,6 @@ from typing import Any, Iterable, Mapping
 from nifty_scalper_bot.core.trading_switch import trading_switch
 from nifty_scalper_bot.utils.symbols import normalize_symbol
 
-_PATCH_APPLIED = False
 
 _OPEN_ORDER_STATUSES = {
     "OPEN",
@@ -267,29 +264,9 @@ def emergency_stop(self: Any, reason: str = "telegram_emergency") -> dict[str, A
     return {"kill_switch": True, "reason": str(reason), "cancel": cancel_result, "flatten": flatten_result}
 
 
-def apply_patches() -> None:
-    global _PATCH_APPLIED
-    if _PATCH_APPLIED:
-        return
-    from nifty_scalper_bot.execution.runtime_order_manager import RuntimeOrderManager
-
-    RuntimeOrderManager.emergency_stop = emergency_stop
-    RuntimeOrderManager.engage_kill_switch = emergency_stop
-    RuntimeOrderManager.kill_switch = emergency_stop
-    RuntimeOrderManager.cancel_pending_orders = cancel_pending_orders
-    RuntimeOrderManager.cancel_all_open_orders = cancel_pending_orders
-    RuntimeOrderManager.cancel_non_protective_orders = cancel_pending_orders
-    RuntimeOrderManager.flatten_all = flatten_all
-    RuntimeOrderManager.flatten_positions = flatten_all
-    RuntimeOrderManager.close_all_positions = flatten_all
-    RuntimeOrderManager._operator_control_patch = True
-    _PATCH_APPLIED = True
-
-
 __all__ = [
-    "apply_patches",
+    "cancel_pending_orders",
     "emergency_stop",
     "flatten_all",
-    "cancel_pending_orders",
     "_place_flatten_order",
 ]
