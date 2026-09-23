@@ -112,6 +112,7 @@ def test_lifecycle_safety_methods_are_not_replaced_by_public_facades() -> None:
     assert "BoundBracketManager._get_broker_order_status =" not in bracket_source
     assert "BoundBracketManager._process_exit_state =" not in bracket_source
     assert "BoundBracketManager._close_bracket =" not in bracket_source
+    assert "BoundBracketManager.confirm_entry_fill =" not in bracket_source
 
 
 def test_runner_uses_only_canonical_entry_api() -> None:
