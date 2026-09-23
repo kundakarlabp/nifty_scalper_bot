@@ -24,6 +24,7 @@ from contextlib import suppress
 from enum import Enum
 from typing import Any, Mapping, Sequence
 
+from nifty_scalper_bot.execution import bracket_core as _core
 from nifty_scalper_bot.execution.position_snapshot import BrokerExposureState
 from nifty_scalper_bot.execution.runtime_bracket_manager import RuntimeBracketManager
 from nifty_scalper_bot.utils.symbols import normalize_symbol
@@ -126,6 +127,66 @@ def _synthetic_position_blocker(position_manager: Any) -> dict[str, Any] | None:
 
 class BoundBracketManager(RuntimeBracketManager):
     """Bracket authority that configures the OrderManager native entry gate."""
+
+    def _capture_same_tick_cached_quote(
+        self,
+        symbol: str,
+        ltp: float,
+        exchange_ts: float | None,
+    ) -> None:
+        """Recover executable depth from the cached SSOT without mixing ticks."""
+        source = getattr(self, "_market_data", None)
+        getter = getattr(source, "get_latest_tick", None) if source is not None else None
+        if not callable(getter):
+            return
+        try:
+            cached = getter(symbol)
+        except Exception:
+            return
+        if not isinstance(cached, Mapping):
+            return
+        try:
+            cached_ltp = float(
+                cached.get("ltp")
+                or cached.get("last_price")
+                or cached.get("price")
+                or 0.0
+            )
+            current_ltp = float(ltp)
+        except (TypeError, ValueError):
+            return
+        if (
+            cached_ltp <= 0.0
+            or current_ltp <= 0.0
+            or abs(cached_ltp - current_ltp) > 1e-9
+        ):
+            return
+        if exchange_ts is not None:
+            cached_ts = _core.tick_exchange_epoch(cached)
+            try:
+                current_ts = float(exchange_ts)
+            except (TypeError, ValueError):
+                return
+            if cached_ts is None or abs(float(cached_ts) - current_ts) > 0.001:
+                return
+        self._capture_exit_quote(normalize_symbol(symbol), cached)
+
+    def on_tick(
+        self,
+        symbol: str,
+        ltp: float,
+        exchange_ts: float | None = None,
+        *,
+        defer_submission: bool = False,
+    ) -> None:
+        """Preserve executable bid/ask before native bracket tick evaluation."""
+        self._capture_same_tick_cached_quote(symbol, ltp, exchange_ts)
+        super().on_tick(
+            symbol,
+            ltp,
+            exchange_ts,
+            defer_submission=defer_submission,
+        )
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         # State is initialized before the inherited exit watchdog starts. The
