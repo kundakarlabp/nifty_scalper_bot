@@ -193,9 +193,25 @@ def test_safe_order_manager_does_not_own_execution_logic() -> None:
 
 
 def test_safe_order_manager_is_not_injected_as_runtime_execution_owner() -> None:
-    app_source = (SRC / "core" / "app.py").read_text(encoding="utf-8")
-    assert "order_manager=safe_order_manager" not in app_source
-    assert "orders=safe_order_manager or order_manager" not in app_source
+    app_tree = ast.parse((SRC / "core" / "app.py").read_text(encoding="utf-8"))
+    expected = {
+        ("StrategyOrchestrator", "order_manager"): "order_manager",
+        ("UnifiedManager", "orders"): "order_manager",
+    }
+    observed: dict[tuple[str, str], str | None] = {}
+    for node in ast.walk(app_tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+            continue
+        for callee, keyword in expected:
+            if node.func.id != callee:
+                continue
+            for argument in node.keywords:
+                if argument.arg != keyword:
+                    continue
+                observed[(callee, keyword)] = (
+                    argument.value.id if isinstance(argument.value, ast.Name) else None
+                )
+    assert observed == expected
 
 
 def test_safe_order_manager_has_no_regime_or_execution_policy_state() -> None:
