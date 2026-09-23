@@ -152,6 +152,12 @@ def test_tick_epoch_uses_explicit_receipt_time_when_exchange_time_missing() -> N
     assert bracket_core.tick_exchange_epoch({"received_at": received_at}) == received_at.timestamp()
 
 
+def test_tick_epoch_preserves_timestamp_fallback_when_exchange_value_is_zero() -> None:
+    assert bracket_core.tick_exchange_epoch(
+        {"exchange_timestamp": 0, "timestamp": 1_000.0}
+    ) == 1_000.0
+
+
 class _ExitBroker:
     def __init__(self, symbol: str) -> None:
         self.symbol = symbol
