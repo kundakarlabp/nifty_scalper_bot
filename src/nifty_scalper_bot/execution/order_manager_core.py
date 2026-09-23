@@ -1337,6 +1337,13 @@ class OrderManager:
         payload = dict(snapshot)
         if trace_id:
             payload["trace_id"] = trace_id
+            payload.setdefault("signal_id", trace_id)
+        payload["event_name"] = (
+            "candidate.approved"
+            if bool(payload.get("order_submitted"))
+            else "candidate.blocked"
+        )
+        payload.setdefault("reason_code", payload.get("final_reason"))
         self._log_trade_event(
             "TRADE_DECISION",
             symbol=str(payload.get("symbol") or ""),
@@ -3467,6 +3474,7 @@ class OrderManager:
                 "trade_id": trade_id,
                 "signal_id": signal_id,
                 "strategy": strategy_name,
+                "trace_id": trace_id,
                 "status": "SUBMIT_ATTEMPT",
             },
         )
@@ -3760,7 +3768,13 @@ class OrderManager:
                         qty=quantity,
                         price=float(price or 0.0),
                         order_id=order_id,
-                        meta={"trade_id": trade_id, "status": "SUBMITTED"},
+                        meta={
+                            "trade_id": trade_id,
+                            "signal_id": signal_id,
+                            "trace_id": trace_id,
+                            "strategy": strategy_name,
+                            "status": "SUBMITTED",
+                        },
                     )
 
                     # B. Register Order Locally
@@ -3964,7 +3978,13 @@ class OrderManager:
                             qty=quantity,
                             price=float(price or 0.0),
                             order_id=order_id,
-                            meta={"trade_id": trade_id, "status": "FILLED"},
+                            meta={
+                                "trade_id": trade_id,
+                                "signal_id": signal_id,
+                                "trace_id": trace_id,
+                                "strategy": strategy_name,
+                                "status": "FILLED",
+                            },
                         )
                     else:
                         self._logger.info(
@@ -14924,8 +14944,6 @@ class OrderManager:
             )
         # ---------------------------------------------------
 
-    # Alias for compatibility with main app
-    reconcile_open_orders_with_broker = reconcile_open_orders
 
 
 __all__ = [

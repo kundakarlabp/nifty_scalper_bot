@@ -5,6 +5,7 @@ from __future__ import annotations
 import atexit
 import json
 import logging
+import os
 import queue
 import sqlite3
 import threading
@@ -14,6 +15,23 @@ from pathlib import Path
 from typing import Any
 
 LOGGER = logging.getLogger(__name__)
+
+_CANONICAL_EVENT_NAMES = {
+    "TRADE_DECISION": "signal.evaluated",
+    "ORDER_BLOCKED_DUPLICATE": "candidate.blocked",
+    "ORDER_SUBMIT_ATTEMPT": "order.submit_attempt",
+    "ORDER_SUBMITTED": "order.acknowledged",
+    "ORDER_FILL_CONFIRMED": "entry.filled",
+    "ORDER_REJECTED_FATAL": "broker.rejected",
+    "BRACKET_GUARD_REGISTERED": "bracket.armed",
+}
+
+
+def _canonical_event_name(event_type: str) -> str:
+    mapped = _CANONICAL_EVENT_NAMES.get(event_type)
+    if mapped:
+        return mapped
+    return event_type.strip().lower().replace("_", ".") or "unknown"
 
 
 class TradeJournal:
@@ -134,15 +152,40 @@ class TradeJournal:
         if not isinstance(meta, Mapping):
             meta = {}
 
+        event_type = str(event.get("event_type") or "UNKNOWN")
+        meta_dict = dict(meta)
+        trace_id = str(meta_dict.get("trace_id") or "") or None
+        signal_id = str(meta_dict.get("signal_id") or trace_id or "") or None
         return {
-            "event_type": str(event.get("event_type") or "UNKNOWN"),
+            "event_type": event_type,
+            "event_name": str(
+                meta_dict.get("event_name") or _canonical_event_name(event_type)
+            ),
             "timestamp": float(event.get("timestamp") or time.time()),
             "symbol": str(event.get("symbol") or ""),
             "side": str(event.get("side") or ""),
             "qty": int(event.get("qty") or 0),
             "price": float(event.get("price") or 0.0),
             "order_id": str(event.get("order_id")) if event.get("order_id") else None,
-            "meta": dict(meta),
+            "trade_id": str(meta_dict.get("trade_id") or "") or None,
+            "signal_id": signal_id,
+            "trace_id": trace_id,
+            "strategy": str(meta_dict.get("strategy") or "") or None,
+            "reason_code": str(
+                meta_dict.get("reason_code")
+                or meta_dict.get("block_reason")
+                or meta_dict.get("final_reason")
+                or ""
+            )
+            or None,
+            "build_sha": str(
+                meta_dict.get("build_sha")
+                or os.getenv("GIT_SHA")
+                or os.getenv("BUILD_SHA")
+                or ""
+            )
+            or None,
+            "meta": meta_dict,
         }
 
     # -------------------------------------------------------
@@ -224,7 +267,8 @@ class TradeJournal:
     # DB Layer
     # -------------------------------------------------------
     def _ensure_connection(
-        self, conn: sqlite3.Connection | None
+        self,
+        conn: sqlite3.Connection | None,
     ) -> sqlite3.Connection:
         if conn is not None:
             return conn
@@ -239,21 +283,49 @@ class TradeJournal:
         conn.execute("PRAGMA journal_mode=WAL;")
         conn.execute("PRAGMA synchronous=NORMAL;")
 
-        conn.execute(
-            """
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS trade_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp REAL NOT NULL,
                 event_type TEXT NOT NULL,
+                event_name TEXT,
                 symbol TEXT,
                 side TEXT,
                 qty INTEGER,
                 price REAL,
                 order_id TEXT,
+                trade_id TEXT,
+                signal_id TEXT,
+                trace_id TEXT,
+                strategy TEXT,
+                reason_code TEXT,
+                build_sha TEXT,
                 meta_json TEXT,
                 event_json TEXT NOT NULL
             )
-            """
+            """)
+        existing = {
+            str(row[1]) for row in conn.execute("PRAGMA table_info(trade_events)")
+        }
+        extra_columns = {
+            "event_name": "TEXT",
+            "trade_id": "TEXT",
+            "signal_id": "TEXT",
+            "trace_id": "TEXT",
+            "strategy": "TEXT",
+            "reason_code": "TEXT",
+            "build_sha": "TEXT",
+        }
+        for column, sql_type in extra_columns.items():
+            if column not in existing:
+                conn.execute(f"ALTER TABLE trade_events ADD COLUMN {column} {sql_type}")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_trade_events_trade_id "
+            "ON trade_events(trade_id, timestamp)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_trade_events_signal_id "
+            "ON trade_events(signal_id, timestamp)"
         )
 
         return conn
@@ -269,18 +341,27 @@ class TradeJournal:
         rows = []
 
         for event in batch:
-            meta_json = json.dumps(event.get("meta", {}), separators=(",", ":"), default=str)
+            meta_json = json.dumps(
+                event.get("meta", {}), separators=(",", ":"), default=str
+            )
             event_json = json.dumps(event, separators=(",", ":"), default=str)
 
             rows.append(
                 (
                     event["timestamp"],
                     event["event_type"],
+                    event["event_name"],
                     event["symbol"],
                     event["side"],
                     event["qty"],
                     event["price"],
                     event["order_id"],
+                    event["trade_id"],
+                    event["signal_id"],
+                    event["trace_id"],
+                    event["strategy"],
+                    event["reason_code"],
+                    event["build_sha"],
                     meta_json,
                     event_json,
                 )
@@ -294,9 +375,10 @@ class TradeJournal:
                 conn.executemany(
                     """
                     INSERT INTO trade_events (
-                        timestamp, event_type, symbol, side,
-                        qty, price, order_id, meta_json, event_json
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        timestamp, event_type, event_name, symbol, side,
+                        qty, price, order_id, trade_id, signal_id, trace_id,
+                        strategy, reason_code, build_sha, meta_json, event_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     rows,
                 )
