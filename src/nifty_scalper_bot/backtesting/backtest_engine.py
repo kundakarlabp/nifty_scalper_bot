@@ -44,7 +44,7 @@ from nifty_scalper_bot.strategies.signal_generator import (
 from nifty_scalper_bot.utils.logging import get_logger
 
 if TYPE_CHECKING:
-    from nifty_scalper_bot.backtest.parity import SinglePipelineParity
+    from nifty_scalper_bot.backtesting.parity import SinglePipelineParity
 
 
 LOGGER = get_logger(__name__)

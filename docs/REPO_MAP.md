@@ -93,7 +93,11 @@ Do not bypass this flow. Options are the only tradable instruments. Spot is dire
 
 ### Backtesting
 
-- `backtesting/backtest_engine.py` — event-driven historical replay with simulated fills and costs.
+- `backtesting/backtest_engine.py` — event-driven historical engine with simulated fills and costs.
+- `backtesting/replay.py` — canonical historical replay harness over the live runtime pipeline.
+- `backtesting/parity.py` — canonical live-vs-replay parity checks.
+- `backtesting/premium_decay_backtest.py` — premium-decay strategy backtest harness.
+- `backtest/` — legacy import-compatibility shims only; new internal code must use `backtesting/`.
 
 ## Source-to-test navigation
 

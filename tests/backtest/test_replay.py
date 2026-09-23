@@ -6,7 +6,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from nifty_scalper_bot.backtest.replay import (
+from nifty_scalper_bot.backtesting.replay import (
     HistoricalContractCatalog,
     ReplayContractSnapshot,
     ReplayHarness,
