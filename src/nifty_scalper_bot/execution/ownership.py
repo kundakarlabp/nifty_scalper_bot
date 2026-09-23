@@ -7,6 +7,7 @@ Key responsibilities:
     - Resolve live-mode consistently before durable bracket-state enforcement.
     - Surface position/reconciliation lifecycle blockers to the native entry gate.
     - Keep active virtual brackets supplied with fresh canonical market data.
+    - Own correlated bracket lifecycle journaling without facade method replacement.
 
 Operational constraints:
     - Production wiring must use the native provider contract, not method replacement.
