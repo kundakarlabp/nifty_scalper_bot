@@ -116,3 +116,29 @@ def test_clock_flush_finalizes_idle_candle_without_next_tick() -> None:
     assert engine.current_candle is None
     assert len(mdm._ohlc[SYMBOL]) == 1
     assert mdm._ohlc[SYMBOL][0]["source"] == "clock_flush_candle"
+
+
+def test_native_mdm_owns_candle_flush_task_lifecycle() -> None:
+    ensure_consumer = MarketDataManager._ensure_tick_consumer
+    ensure_flush = MarketDataManager._ensure_candle_flush_task
+    stop_flush = MarketDataManager._stop_candle_flush_task
+    stop = MarketDataManager.stop
+
+    install_market_data_manager_hardening(MarketDataManager)
+
+    assert MarketDataManager._ensure_tick_consumer is ensure_consumer
+    assert MarketDataManager._ensure_candle_flush_task is ensure_flush
+    assert MarketDataManager._stop_candle_flush_task is stop_flush
+    assert MarketDataManager.stop is stop
+    assert ensure_consumer.__module__ == "nifty_scalper_bot.data.market_data_manager"
+    assert ensure_flush.__module__ == "nifty_scalper_bot.data.market_data_manager"
+    assert stop_flush.__module__ == "nifty_scalper_bot.data.market_data_manager"
+    assert stop.__module__ == "nifty_scalper_bot.data.market_data_manager"
+
+
+def test_native_mdm_initializes_candle_flush_lifecycle_state() -> None:
+    mdm = _manager()
+
+    assert mdm._candle_flush_task is None
+    assert mdm._candle_flush_interval_s >= 0.25
+    assert mdm._candle_flush_grace_s >= 0.0
