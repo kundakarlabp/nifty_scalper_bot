@@ -415,7 +415,9 @@ def _normalized_close_event(
     )
 
 
-def test_stale_closed_event_cannot_overwrite_newer_terminal_outcome(tmp_path) -> None:
+def test_stale_closed_event_cannot_overwrite_newer_terminal_outcome(
+    tmp_path,
+) -> None:
     db_path = tmp_path / "journal.db"
     journal = TradeJournal(str(db_path))
     newest = _normalized_close_event(journal, timestamp=20.0, marker="new")
@@ -495,7 +497,9 @@ def test_duplicate_closed_event_is_idempotent(tmp_path) -> None:
     assert rows == [(650.0, 575.0, 1, 20.0, "trade.closed")]
 
 
-def test_newer_corrected_closed_event_replaces_older_terminal_outcome(tmp_path) -> None:
+def test_newer_corrected_closed_event_replaces_older_terminal_outcome(
+    tmp_path,
+) -> None:
     db_path = tmp_path / "journal.db"
     journal = TradeJournal(str(db_path))
     original = _normalized_close_event(
@@ -537,7 +541,17 @@ def test_newer_corrected_closed_event_replaces_older_terminal_outcome(tmp_path) 
         ).fetchone()
 
     assert row is not None
-    assert row[:9] == (630.0, 80.0, 550.0, 1.1, 1.5, 0.4, 92.0, "TARGET_CORRECTED", 1)
+    assert row[:9] == (
+        630.0,
+        80.0,
+        550.0,
+        1.1,
+        1.5,
+        0.4,
+        92.0,
+        "TARGET_CORRECTED",
+        1,
+    )
     assert json.loads(row[9])["marker"] == "corrected"
     assert row[10] == 21.0
 
