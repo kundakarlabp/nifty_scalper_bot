@@ -24,6 +24,12 @@ _CANONICAL_EVENT_NAMES = {
     "ORDER_FILL_CONFIRMED": "entry.filled",
     "ORDER_REJECTED_FATAL": "broker.rejected",
     "BRACKET_GUARD_REGISTERED": "bracket.armed",
+    "BRACKET_ARMED": "bracket.armed",
+    "TRAIL_UPDATED": "trail.updated",
+    "EXIT_TRIGGERED": "exit.triggered",
+    "EXIT_SUBMITTED": "exit.submitted",
+    "EXIT_FILLED": "exit.filled",
+    "BRACKET_CLOSED": "trade.closed",
 }
 
 
