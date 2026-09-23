@@ -563,7 +563,9 @@ def _get_broker_order_status_with_fill_evidence(self, order_id):
     return status
 
 
-BoundBracketManager._get_broker_order_status = (\n    _get_broker_order_status_with_fill_evidence\n)
+BoundBracketManager._get_broker_order_status = (
+    _get_broker_order_status_with_fill_evidence
+)
 
 _original_process_exit_state = BoundBracketManager._process_exit_state
 
@@ -616,7 +618,10 @@ def _submit_exit_order_with_event(
     )
     bracket = self.get_bracket(bracket_id)
     order_id = str(getattr(result, "order_id", "") or "")
-    accepted = bool(\n        getattr(result, "accepted", False)\n        or getattr(result, "submitted", False)\n    )
+    accepted = bool(
+        getattr(result, "accepted", False)
+        or getattr(result, "submitted", False)
+    )
     if bracket is not None and accepted and order_id:
         self._log_bracket_event(
             "EXIT_SUBMITTED",
@@ -651,7 +656,11 @@ def _close_bracket_with_fill_event(
             or ""
         )
         evidence_map = getattr(self, "_canonical_exit_fill_evidence", {})
-        evidence = (\n            evidence_map.get(order_id)\n            if isinstance(evidence_map, Mapping)\n            else None\n        )
+        evidence = (
+            evidence_map.get(order_id)
+            if isinstance(evidence_map, Mapping)
+            else None
+        )
         already = str(
             getattr(bracket, "_canonical_exit_fill_journaled_order_id", "") or ""
         )
@@ -724,7 +733,10 @@ def _apply_trailing_math_with_event(self, bracket):
 def _update_trailing_sl_with_event(self, symbol, new_sl):
     with self._lock:
         before = {
-            entry_id: float(\n                getattr(self._brackets.get(entry_id), "sl_trigger_price", 0.0)\n                or 0.0\n            )
+            entry_id: float(
+                getattr(self._brackets.get(entry_id), "sl_trigger_price", 0.0)
+                or 0.0
+            )
             for entry_id in list(self._symbol_map.get(symbol, []))
             if self._brackets.get(entry_id) is not None
         }
