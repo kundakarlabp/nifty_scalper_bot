@@ -11,7 +11,6 @@ from nifty_scalper_bot.execution.broker_pnl_authority_patch import (
 )
 from nifty_scalper_bot.execution.position_manager import PositionManager
 
-
 SYMBOL = "NFO:NIFTY2691523400CE"
 
 
@@ -171,3 +170,37 @@ def test_broker_pnl_failure_preserves_local_strategy_accounting(tmp_path) -> Non
     assert manager.get_broker_account_realized_pnl() is None
     assert snapshot["broker_account_pnl_error"] is not None
     assert snapshot["pnl_diagnostic_only"] is True
+
+
+def test_positions_confirm_local_pnl_when_margins_m2m_stays_zero(tmp_path) -> None:
+    """A flat broker day can agree with fills despite a zero margins M2M."""
+    manager = PositionManager(state_file=str(tmp_path / "positions.json"))
+    with manager._lock:
+        manager._local_realized_pnl = -39.0
+        manager._refresh_realized_pnl_locked()
+    manager.set_broker_client(
+        SimpleNamespace(
+            get_pnl_snapshot=lambda: {
+                "account_realized": 0.0,
+                "account_unrealized": 0.0,
+                "strategy_day_marked_gross": -39.0,
+                "strategy_day_closed_gross": -39.0,
+                "strategy_day_rows": 2,
+                "source": "zerodha_margins_m2m",
+                "positions_source": "zerodha_positions_day",
+            }
+        )
+    )
+
+    diagnostic = manager.refresh_broker_pnl_diagnostic(force=True)
+
+    assert diagnostic["status"] == "source_disagreement"
+    assert diagnostic["positions_vs_strategy_difference"] == pytest.approx(0.0)
+    assert diagnostic["difference"] == pytest.approx(39.0)
+    assert manager.get_realized_pnl() == pytest.approx(-39.0)
+    assert manager.pnl_reconciliation_snapshot()[
+        "broker_positions_vs_strategy_difference"
+    ] == pytest.approx(0.0)
+    assert manager.pnl_reconciliation_snapshot()["broker_account_pnl_status"] == (
+        "source_disagreement"
+    )

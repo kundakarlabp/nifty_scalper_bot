@@ -129,6 +129,21 @@ def test_resolve_broker_realized_rejects_explicit_diagnostic_mismatch() -> None:
     assert _resolve_broker_realized_pnl(manager, force=True) is None
 
 
+def test_positions_agreeing_with_ledger_cannot_promote_stale_margins() -> None:
+    manager = SimpleNamespace(
+        refresh_broker_pnl_diagnostic=lambda force=False: {
+            "account_realized": 0.0,
+            "strategy_realized": -39.0,
+            "positions_vs_strategy_difference": 0.0,
+            "status": "source_disagreement",
+            "diagnostic_only": True,
+        },
+        get_broker_account_realized_pnl=lambda force=False: 0.0,
+    )
+
+    assert _resolve_broker_realized_pnl(manager, force=True) is None
+
+
 def test_restart_mismatch_preserves_strategy_loss_plus_persisted_costs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

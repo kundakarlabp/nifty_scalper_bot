@@ -344,11 +344,21 @@ def refresh_broker_pnl_diagnostic(
     with getattr(self, "_lock"):
         strategy_realized = float(getattr(self, "_local_realized_pnl", 0.0) or 0.0)
         difference = float(realized) - strategy_realized
-        status = (
-            "matched"
-            if abs(difference) <= _MATCH_TOLERANCE_RUPEES
-            else "mismatch"
+        status = "matched" if abs(difference) <= _MATCH_TOLERANCE_RUPEES else "mismatch"
+        positions_closed = _finite_float(raw.get("strategy_day_closed_gross"))
+        positions_marked = _finite_float(raw.get("strategy_day_marked_gross"))
+        positions_difference = (
+            None if positions_closed is None else positions_closed - strategy_realized
         )
+        if (
+            status == "mismatch"
+            and (_finite_float(raw.get("strategy_day_rows")) or 0) > 0
+            and positions_marked is not None
+            and positions_difference is not None
+            and abs(positions_marked - positions_closed) <= _MATCH_TOLERANCE_RUPEES
+            and abs(positions_difference) <= _MATCH_TOLERANCE_RUPEES
+        ):
+            status = "source_disagreement"
         snapshot = dict(raw)
         snapshot.update(
             {
@@ -358,6 +368,7 @@ def refresh_broker_pnl_diagnostic(
                 ),
                 "strategy_realized": strategy_realized,
                 "difference": difference,
+                "positions_vs_strategy_difference": positions_difference,
                 "status": status,
                 "diagnostic_only": True,
                 "fetched_monotonic": now_mono,
@@ -402,16 +413,20 @@ def refresh_broker_pnl_diagnostic(
     if callable(log) and _should_emit_pnl_log(self, log_fingerprint, now_mono):
         log(
             "PNL_BROKER_DIAGNOSTIC broker_realized=%.2f strategy_realized=%.2f "
-            "difference=%.2f status=%s source=zerodha_margins_m2m",
+            "difference=%.2f status=%s source=zerodha_margins_m2m "
+            "positions_closed=%s positions_vs_strategy_difference=%s",
             realized,
             strategy_realized,
             difference,
             status,
+            positions_closed,
+            positions_difference,
             extra={
                 "event": "PNL_BROKER_DIAGNOSTIC",
                 "broker_realized": float(realized),
                 "strategy_realized": strategy_realized,
                 "difference": difference,
+                "positions_vs_strategy_difference": positions_difference,
                 "status": status,
                 "source": "zerodha_margins_m2m",
                 "diagnostic_only": True,
@@ -494,6 +509,9 @@ def _patched_pnl_reconciliation_snapshot(self: Any) -> dict[str, object]:
             ),
             "broker_strategy_day_rows": diagnostic.get("strategy_day_rows", 0),
             "broker_vs_strategy_realized_difference": diagnostic.get("difference"),
+            "broker_positions_vs_strategy_difference": diagnostic.get(
+                "positions_vs_strategy_difference"
+            ),
             "broker_account_pnl_status": diagnostic.get("status", "unavailable"),
             "broker_account_pnl_source": diagnostic.get("source"),
             "broker_account_pnl_observed_at": diagnostic.get("observed_at"),
