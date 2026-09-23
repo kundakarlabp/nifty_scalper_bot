@@ -585,3 +585,170 @@ def test_ledger_complete_true_never_regresses_to_false(tmp_path) -> None:
         ).fetchone()
 
     assert row == (1, 640.0, 560.0, 21.0)
+
+def _create_legacy_trade_events_db(db_path, events) -> None:
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE trade_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp REAL NOT NULL,
+                event_type TEXT NOT NULL,
+                symbol TEXT,
+                side TEXT,
+                qty INTEGER,
+                price REAL,
+                order_id TEXT,
+                meta_json TEXT,
+                event_json TEXT NOT NULL
+            )
+            """
+        )
+        conn.executemany(
+            """
+            INSERT INTO trade_events (
+                timestamp, event_type, symbol, side, qty, price,
+                order_id, meta_json, event_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    event["timestamp"],
+                    event["event_type"],
+                    event.get("symbol"),
+                    event.get("side"),
+                    event.get("qty"),
+                    event.get("price"),
+                    event.get("order_id"),
+                    json.dumps(event.get("meta", {})),
+                    json.dumps(event),
+                )
+                for event in events
+            ],
+        )
+
+
+def _historical_trade_events(trade_id: str = "TRD_historical-1"):
+    correlation = {
+        "trade_id": trade_id,
+        "signal_id": "historical-1",
+        "trace_id": "trace-historical-1",
+        "strategy": "VWAP",
+    }
+    return [
+        {
+            "event_type": "ORDER_FILL_CONFIRMED",
+            "event_name": "entry.filled",
+            "timestamp": 10.0,
+            "symbol": "NFO:NIFTYCE",
+            "side": "BUY",
+            "qty": 65,
+            "price": 100.0,
+            "order_id": "ENTRY-HIST-1",
+            "trade_id": trade_id,
+            "signal_id": correlation["signal_id"],
+            "trace_id": correlation["trace_id"],
+            "strategy": correlation["strategy"],
+            "meta": correlation,
+        },
+        {
+            "event_type": "BRACKET_CLOSED",
+            "event_name": "trade.closed",
+            "timestamp": 20.0,
+            "symbol": "NFO:NIFTYCE",
+            "side": "BUY",
+            "qty": 65,
+            "price": 110.0,
+            "order_id": "ENTRY-HIST-1",
+            "trade_id": trade_id,
+            "signal_id": correlation["signal_id"],
+            "trace_id": correlation["trace_id"],
+            "strategy": correlation["strategy"],
+            "meta": {
+                **correlation,
+                "completed_trade": {
+                    "quantity": 65,
+                    "entry_price": 100.0,
+                    "exit_price": 110.0,
+                    "gross_pnl": 650.0,
+                    "estimated_costs": {"total": 75.0},
+                    "net_pnl": 575.0,
+                    "exit_reason": "TARGET",
+                    "close_source": "broker_fill",
+                    "ledger_complete": True,
+                },
+            },
+        },
+    ]
+
+
+def test_journal_start_backfills_historical_trade_events_without_new_event(
+    tmp_path,
+) -> None:
+    db_path = tmp_path / "journal.db"
+    _create_legacy_trade_events_db(db_path, _historical_trade_events())
+
+    journal = TradeJournal(str(db_path))
+    journal.start()
+    journal.stop()
+
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT state, entry_price, exit_price, gross_pnl,
+                   estimated_costs, net_pnl, ledger_complete
+            FROM trade_ledger
+            WHERE trade_id = ?
+            """,
+            ("TRD_historical-1",),
+        ).fetchone()
+        marker = conn.execute(
+            "SELECT value FROM trade_ledger_meta WHERE key = ?",
+            ("historical_backfill_v1",),
+        ).fetchone()
+
+    assert row == ("CLOSED", 100.0, 110.0, 650.0, 75.0, 575.0, 1)
+    assert marker == ("done",)
+
+
+def test_historical_trade_backfill_runs_only_once(tmp_path) -> None:
+    db_path = tmp_path / "journal.db"
+    _create_legacy_trade_events_db(db_path, _historical_trade_events())
+
+    journal = TradeJournal(str(db_path))
+    journal.start()
+    journal.stop()
+
+    late_event = _historical_trade_events("TRD_should-not-rescan")[0]
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO trade_events (
+                timestamp, event_type, symbol, side, qty, price,
+                order_id, meta_json, event_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                late_event["timestamp"],
+                late_event["event_type"],
+                late_event["symbol"],
+                late_event["side"],
+                late_event["qty"],
+                late_event["price"],
+                late_event["order_id"],
+                json.dumps(late_event["meta"]),
+                json.dumps(late_event),
+            ),
+        )
+
+    journal.start()
+    journal.stop()
+
+    with sqlite3.connect(db_path) as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM trade_ledger WHERE trade_id = ?",
+            ("TRD_should-not-rescan",),
+        ).fetchone()[0]
+
+    assert count == 0
+
