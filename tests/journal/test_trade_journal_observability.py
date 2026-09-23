@@ -371,3 +371,217 @@ def test_event_without_trade_id_does_not_create_trade_ledger_row(tmp_path) -> No
 
     assert event_count == 1
     assert ledger_count == 0
+
+
+def _normalized_close_event(
+    journal: TradeJournal,
+    *,
+    timestamp: float,
+    marker: str,
+    **overrides,
+):
+    completed_trade = {
+        "quantity": 65,
+        "entry_price": 100.0,
+        "exit_price": 110.0,
+        "gross_pnl": 650.0,
+        "estimated_costs": {"total": 75.0, "marker": marker},
+        "net_pnl": 575.0,
+        "final_stop_price": 105.0,
+        "r_multiple": 1.2,
+        "mfe_r": 1.6,
+        "mae_r": 0.3,
+        "holding_seconds": 90.0,
+        "exit_reason": "TARGET",
+        "close_source": "broker_fill",
+        "ledger_complete": True,
+        "execution_quality": {"marker": marker},
+        "marker": marker,
+    }
+    completed_trade.update(overrides)
+    if "estimated_costs" not in overrides:
+        completed_trade["estimated_costs"] = {"total": 75.0, "marker": marker}
+    return journal._normalize_event(
+        {
+            "event_type": "BRACKET_CLOSED",
+            "timestamp": timestamp,
+            "symbol": "NFO:NIFTYCE",
+            "side": "BUY",
+            "meta": {
+                "trade_id": "trade-replay-1",
+                "completed_trade": completed_trade,
+            },
+        }
+    )
+
+
+def test_stale_closed_event_cannot_overwrite_newer_terminal_outcome(
+    tmp_path,
+) -> None:
+    db_path = tmp_path / "journal.db"
+    journal = TradeJournal(str(db_path))
+    newest = _normalized_close_event(journal, timestamp=20.0, marker="new")
+    stale = _normalized_close_event(
+        journal,
+        timestamp=10.0,
+        marker="old",
+        gross_pnl=-325.0,
+        estimated_costs={"total": 120.0, "marker": "old"},
+        net_pnl=-445.0,
+        r_multiple=-0.8,
+        mfe_r=0.2,
+        mae_r=1.1,
+        holding_seconds=30.0,
+        exit_reason="STALE",
+        close_source="replay",
+        ledger_complete=False,
+    )
+
+    conn = journal._flush_batch([newest], None)
+    conn = journal._flush_batch([stale], conn)
+    assert conn is not None
+    conn.close()
+
+    with sqlite3.connect(db_path) as read_conn:
+        row = read_conn.execute(
+            """
+            SELECT gross_pnl, estimated_costs, net_pnl, r_multiple,
+                   mfe_r, mae_r, holding_seconds, exit_reason, close_source,
+                   ledger_complete, costs_json, execution_quality_json,
+                   outcome_json, updated_at, last_event_name
+            FROM trade_ledger
+            WHERE trade_id = ?
+            """,
+            ("trade-replay-1",),
+        ).fetchone()
+
+    assert row is not None
+    assert row[:10] == (
+        650.0,
+        75.0,
+        575.0,
+        1.2,
+        1.6,
+        0.3,
+        90.0,
+        "TARGET",
+        "broker_fill",
+        1,
+    )
+    assert json.loads(row[10])["marker"] == "new"
+    assert json.loads(row[11])["marker"] == "new"
+    assert json.loads(row[12])["marker"] == "new"
+    assert row[13:] == (20.0, "trade.closed")
+
+
+def test_duplicate_closed_event_is_idempotent(tmp_path) -> None:
+    db_path = tmp_path / "journal.db"
+    journal = TradeJournal(str(db_path))
+    close_event = _normalized_close_event(journal, timestamp=20.0, marker="same")
+
+    conn = journal._flush_batch([close_event], None)
+    conn = journal._flush_batch([close_event], conn)
+    assert conn is not None
+    conn.close()
+
+    with sqlite3.connect(db_path) as read_conn:
+        rows = read_conn.execute(
+            """
+            SELECT gross_pnl, net_pnl, ledger_complete, updated_at, last_event_name
+            FROM trade_ledger
+            WHERE trade_id = ?
+            """,
+            ("trade-replay-1",),
+        ).fetchall()
+
+    assert rows == [(650.0, 575.0, 1, 20.0, "trade.closed")]
+
+
+def test_newer_corrected_closed_event_replaces_older_terminal_outcome(
+    tmp_path,
+) -> None:
+    db_path = tmp_path / "journal.db"
+    journal = TradeJournal(str(db_path))
+    original = _normalized_close_event(
+        journal,
+        timestamp=20.0,
+        marker="original",
+        ledger_complete=False,
+    )
+    corrected = _normalized_close_event(
+        journal,
+        timestamp=21.0,
+        marker="corrected",
+        gross_pnl=630.0,
+        estimated_costs={"total": 80.0, "marker": "corrected"},
+        net_pnl=550.0,
+        r_multiple=1.1,
+        mfe_r=1.5,
+        mae_r=0.4,
+        holding_seconds=92.0,
+        exit_reason="TARGET_CORRECTED",
+        ledger_complete=True,
+    )
+
+    conn = journal._flush_batch([original], None)
+    conn = journal._flush_batch([corrected], conn)
+    assert conn is not None
+    conn.close()
+
+    with sqlite3.connect(db_path) as read_conn:
+        row = read_conn.execute(
+            """
+            SELECT gross_pnl, estimated_costs, net_pnl, r_multiple,
+                   mfe_r, mae_r, holding_seconds, exit_reason,
+                   ledger_complete, outcome_json, updated_at
+            FROM trade_ledger
+            WHERE trade_id = ?
+            """,
+            ("trade-replay-1",),
+        ).fetchone()
+
+    assert row is not None
+    assert row[:9] == (
+        630.0,
+        80.0,
+        550.0,
+        1.1,
+        1.5,
+        0.4,
+        92.0,
+        "TARGET_CORRECTED",
+        1,
+    )
+    assert json.loads(row[9])["marker"] == "corrected"
+    assert row[10] == 21.0
+
+
+def test_ledger_complete_true_never_regresses_to_false(tmp_path) -> None:
+    db_path = tmp_path / "journal.db"
+    journal = TradeJournal(str(db_path))
+    complete = _normalized_close_event(journal, timestamp=20.0, marker="complete")
+    newer_incomplete = _normalized_close_event(
+        journal,
+        timestamp=21.0,
+        marker="newer",
+        gross_pnl=640.0,
+        net_pnl=560.0,
+        ledger_complete=False,
+    )
+
+    conn = journal._flush_batch([complete], None)
+    conn = journal._flush_batch([newer_incomplete], conn)
+    assert conn is not None
+    conn.close()
+
+    with sqlite3.connect(db_path) as read_conn:
+        row = read_conn.execute(
+            """
+            SELECT ledger_complete, gross_pnl, net_pnl, updated_at
+            FROM trade_ledger
+            WHERE trade_id = ?
+            """,
+            ("trade-replay-1",),
+        ).fetchone()
+
+    assert row == (1, 640.0, 560.0, 21.0)
