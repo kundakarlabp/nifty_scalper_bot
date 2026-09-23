@@ -318,9 +318,7 @@ class TradeJournal:
         }
         for column, sql_type in extra_columns.items():
             if column not in existing:
-                conn.execute(
-                    f"ALTER TABLE trade_events ADD COLUMN {column} {sql_type}"
-                )
+                conn.execute(f"ALTER TABLE trade_events ADD COLUMN {column} {sql_type}")
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_trade_events_trade_id "
             "ON trade_events(trade_id, timestamp)"
