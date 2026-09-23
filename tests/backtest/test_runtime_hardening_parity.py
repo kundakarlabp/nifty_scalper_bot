@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 import nifty_scalper_bot.core as core
-from nifty_scalper_bot.backtest.replay import ReplayHarness
+from nifty_scalper_bot.backtesting.replay import ReplayHarness
 
 
 _REQUIRED = {
