@@ -14944,8 +14944,6 @@ class OrderManager:
             )
         # ---------------------------------------------------
 
-    # Alias for compatibility with main app
-    reconcile_open_orders_with_broker = reconcile_open_orders
 
 
 __all__ = [
