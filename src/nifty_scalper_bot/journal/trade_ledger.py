@@ -33,8 +33,9 @@ _UPSERT_SQL = """
 INSERT INTO trade_ledger (
     trade_id, signal_id, trace_id, strategy, symbol, side,
     state, state_rank, entry_order_id, exit_order_id, quantity,
-    entry_price, stop_price, target_price, exit_price,
-    gross_pnl, estimated_costs, net_pnl, r_multiple, mfe_r, mae_r,
+    entry_price, stop_price, target_price, initial_stop_price,
+    initial_target_price, exit_price, gross_pnl, estimated_costs,
+    net_pnl, r_multiple, mfe_r, mae_r,
     holding_seconds, exit_reason, close_source, ledger_complete,
     decision_at, entry_submitted_at, entry_filled_at, bracket_armed_at,
     exit_triggered_at, exit_submitted_at, exit_filled_at, closed_at,
@@ -43,8 +44,9 @@ INSERT INTO trade_ledger (
 ) VALUES (
     :trade_id, :signal_id, :trace_id, :strategy, :symbol, :side,
     :state, :state_rank, :entry_order_id, :exit_order_id, :quantity,
-    :entry_price, :stop_price, :target_price, :exit_price,
-    :gross_pnl, :estimated_costs, :net_pnl, :r_multiple, :mfe_r, :mae_r,
+    :entry_price, :stop_price, :target_price, :initial_stop_price,
+    :initial_target_price, :exit_price, :gross_pnl, :estimated_costs,
+    :net_pnl, :r_multiple, :mfe_r, :mae_r,
     :holding_seconds, :exit_reason, :close_source, :ledger_complete,
     :decision_at, :entry_submitted_at, :entry_filled_at, :bracket_armed_at,
     :exit_triggered_at, :exit_submitted_at, :exit_filled_at, :closed_at,
@@ -133,6 +135,12 @@ ON CONFLICT(trade_id) DO UPDATE SET
         THEN excluded.target_price
         ELSE trade_ledger.target_price
     END,
+    initial_stop_price = COALESCE(
+        trade_ledger.initial_stop_price, excluded.initial_stop_price
+    ),
+    initial_target_price = COALESCE(
+        trade_ledger.initial_target_price, excluded.initial_target_price
+    ),
     exit_price = CASE
         WHEN excluded.exit_price IS NOT NULL
           AND (
@@ -214,6 +222,8 @@ def ensure_trade_ledger_schema(conn: sqlite3.Connection) -> None:
             entry_price REAL,
             stop_price REAL,
             target_price REAL,
+            initial_stop_price REAL,
+            initial_target_price REAL,
             exit_price REAL,
             gross_pnl REAL,
             estimated_costs REAL,
@@ -242,6 +252,12 @@ def ensure_trade_ledger_schema(conn: sqlite3.Connection) -> None:
             outcome_json TEXT
         )
         """)
+    existing = {
+        str(row[1]) for row in conn.execute("PRAGMA table_info(trade_ledger)")
+    }
+    for column in ("initial_stop_price", "initial_target_price"):
+        if column not in existing:
+            conn.execute(f"ALTER TABLE trade_ledger ADD COLUMN {column} REAL")
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_trade_ledger_signal_id "
         "ON trade_ledger(signal_id)"
@@ -317,6 +333,12 @@ def _build_trade_row(event: Mapping[str, Any]) -> dict[str, Any] | None:
         meta.get("stop_price"),
     )
     target_price = _number(meta.get("target_price"))
+    initial_stop_price = (
+        _number(meta.get("stop_price")) if event_name == "bracket.armed" else None
+    )
+    initial_target_price = (
+        _number(meta.get("target_price")) if event_name == "bracket.armed" else None
+    )
 
     exit_price = _number(outcome.get("exit_price"))
     if exit_price is None and event_name == "exit.filled":
@@ -351,6 +373,8 @@ def _build_trade_row(event: Mapping[str, Any]) -> dict[str, Any] | None:
         "entry_price": entry_price,
         "stop_price": stop_price,
         "target_price": target_price,
+        "initial_stop_price": initial_stop_price,
+        "initial_target_price": initial_target_price,
         "exit_price": exit_price,
         "gross_pnl": _first_number(outcome.get("gross_pnl"), meta.get("pnl")),
         "estimated_costs": _first_number(costs.get("total")),
