@@ -21,9 +21,10 @@ for _name in dir(_core):
     if not _name.startswith("__"):
         globals()[_name] = getattr(_core, _name)
 
-from nifty_scalper_bot.execution.runtime_bracket_manager import RuntimeBracketManager  # noqa: E402
+from nifty_scalper_bot.execution.runtime_bracket_manager import (
+    RuntimeBracketManager,
+)  # noqa: E402
 from nifty_scalper_bot.execution.ownership import BoundBracketManager  # noqa: E402
-
 
 _original_tick_exchange_epoch = _core.tick_exchange_epoch
 
@@ -85,9 +86,7 @@ def _reconcile_confirmed_entry_quantity(self, order_id, bracket, filled_qty):
         return False
     try:
         registered = int(getattr(bracket, "quantity", 0) or 0)
-        requested = int(
-            getattr(bracket, "requested_entry_quantity", 0) or registered
-        )
+        requested = int(getattr(bracket, "requested_entry_quantity", 0) or registered)
     except (TypeError, ValueError):
         return False
     if (
@@ -397,7 +396,7 @@ def _reconcile_pending_entry_broker_evidence(self, bracket):
             return
         _core.LOGGER.warning(
             "PENDING_ENTRY_FILL_EVIDENCE_INCOMPLETE entry_order_id=%s "
-        "symbol=%s status=%s filled_qty=%s fill_price=%s",
+            "symbol=%s status=%s filled_qty=%s fill_price=%s",
             bracket.entry_order_id,
             bracket.symbol,
             status_text,
@@ -416,9 +415,7 @@ def _reconcile_pending_entry_broker_evidence(self, bracket):
 
     terminal_unfilled = status_text in _core._CANCELLED_STATUSES
     authoritatively_absent = (
-        status_known
-        and not status_text
-        and age >= self._pending_entry_stale_after_sec
+        status_known and not status_text and age >= self._pending_entry_stale_after_sec
     )
     if not (terminal_unfilled or authoritatively_absent):
         return
@@ -468,9 +465,8 @@ def _get_broker_order_status_with_fill_evidence(self, order_id):
     bracket = None
     with self._lock:
         for candidate in self._brackets.values():
-            candidate_order_id = (
-                getattr(candidate, "exit_order_id", None)
-                or getattr(candidate, "pending_exit_order_id", None)
+            candidate_order_id = getattr(candidate, "exit_order_id", None) or getattr(
+                candidate, "pending_exit_order_id", None
             )
             if str(candidate_order_id or "") == str(order_id):
                 bracket = candidate
@@ -619,8 +615,7 @@ def _submit_exit_order_with_event(
     bracket = self.get_bracket(bracket_id)
     order_id = str(getattr(result, "order_id", "") or "")
     accepted = bool(
-        getattr(result, "accepted", False)
-        or getattr(result, "submitted", False)
+        getattr(result, "accepted", False) or getattr(result, "submitted", False)
     )
     if bracket is not None and accepted and order_id:
         self._log_bracket_event(
@@ -657,9 +652,7 @@ def _close_bracket_with_fill_event(
         )
         evidence_map = getattr(self, "_canonical_exit_fill_evidence", {})
         evidence = (
-            evidence_map.get(order_id)
-            if isinstance(evidence_map, Mapping)
-            else None
+            evidence_map.get(order_id) if isinstance(evidence_map, Mapping) else None
         )
         already = str(
             getattr(bracket, "_canonical_exit_fill_journaled_order_id", "") or ""
@@ -734,8 +727,7 @@ def _update_trailing_sl_with_event(self, symbol, new_sl):
     with self._lock:
         before = {
             entry_id: float(
-                getattr(self._brackets.get(entry_id), "sl_trigger_price", 0.0)
-                or 0.0
+                getattr(self._brackets.get(entry_id), "sl_trigger_price", 0.0) or 0.0
             )
             for entry_id in list(self._symbol_map.get(symbol, []))
             if self._brackets.get(entry_id) is not None
@@ -781,10 +773,7 @@ def _capture_same_tick_cached_quote(self, symbol, ltp, exchange_ts):
         return
     try:
         cached_ltp = float(
-            cached.get("ltp")
-            or cached.get("last_price")
-            or cached.get("price")
-            or 0.0
+            cached.get("ltp") or cached.get("last_price") or cached.get("price") or 0.0
         )
         current_ltp = float(ltp)
     except (TypeError, ValueError):
