@@ -362,9 +362,9 @@ def test_event_without_trade_id_does_not_create_trade_ledger_row(tmp_path) -> No
     conn.close()
 
     with sqlite3.connect(db_path) as read_conn:
-        event_count = read_conn.execute(
-            "SELECT COUNT(*) FROM trade_events"
-        ).fetchone()[0]
+        event_count = read_conn.execute("SELECT COUNT(*) FROM trade_events").fetchone()[
+            0
+        ]
         ledger_count = read_conn.execute(
             "SELECT COUNT(*) FROM trade_ledger"
         ).fetchone()[0]
