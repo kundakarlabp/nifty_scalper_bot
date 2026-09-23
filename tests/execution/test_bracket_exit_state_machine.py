@@ -340,7 +340,6 @@ def test_two_bracket_lifecycles_each_emit_exit_triggered(caplog) -> None:
     assert len(om.calls) == 2
 
 
-
 def test_status_only_complete_exit_is_not_treated_as_broker_fill() -> None:
     class _StatusOnlyBroker(_Broker):
         def get_order_status(self, _order_id: str) -> dict[str, Any]:
