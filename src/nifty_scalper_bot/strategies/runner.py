@@ -1804,7 +1804,11 @@ class StrategyRunner:
             )
 
     def _mirror_authoritative_candle_engine(self, symbol: str) -> Any | None:
-        """Mirror the MDM-owned CandleEngine object without creating one locally."""
+        """Mirror the MDM-owned CandleEngine without creating one locally."""
+        normalized = self._normalize_symbol(symbol)
+        cached = self._candle_engines.get(normalized)
+        if cached is not None:
+            return cached
         getter = getattr(self._market_data, "get_candle_engine", None)
         if not callable(getter):
             try:
@@ -1816,7 +1820,6 @@ class StrategyRunner:
                     "MarketDataManager CandleEngine accessor unavailable"
                 )
             return None
-        normalized = self._normalize_symbol(symbol)
         engine = getter(normalized)
         with self._lock:
             self._candle_engines[normalized] = engine
