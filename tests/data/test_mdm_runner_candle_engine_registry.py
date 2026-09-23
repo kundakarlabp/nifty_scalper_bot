@@ -243,7 +243,7 @@ def test_projection_diagnostics_are_per_symbol() -> None:
     )
 
 
-def test_live_projection_refresh_uses_incremental_tail_fast_path() -> None:
+def test_live_projection_refresh_uses_incremental_tail_fast_path(monkeypatch) -> None:
     mdm = _mdm()
     engine = mdm.get_candle_engine(SYMBOL)
     start = datetime(2026, 1, 1, 9, 15, tzinfo=timezone.utc)
@@ -258,16 +258,11 @@ def test_live_projection_refresh_uses_incremental_tail_fast_path() -> None:
         {"symbol": SYMBOL, "timestamp": start + timedelta(minutes=2), "ltp": 102.0}
     )
 
-    original_get_completed = engine.get_completed_bars
-
-    def fail_full_history_read():
+    def fail_full_history_read(_self):
         raise AssertionError("live append fast path must not copy full history")
 
-    engine.get_completed_bars = fail_full_history_read  # type: ignore[method-assign]
-    try:
-        refreshed = mdm._refresh_candle_projection(SYMBOL, live_append=True)
-    finally:
-        engine.get_completed_bars = original_get_completed  # type: ignore[method-assign]
+    monkeypatch.setattr(CandleEngine, "get_completed_bars", fail_full_history_read)
+    refreshed = mdm._refresh_candle_projection(SYMBOL, live_append=True)
 
     assert [bar["close"] for bar in refreshed] == [100.0, 101.0]
     assert mdm._candle_metrics["candle_projection_incremental_total"] == 1
