@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from nifty_scalper_bot.backtest.premium_decay_backtest import (
+from nifty_scalper_bot.backtesting.premium_decay_backtest import (
     BacktestBar,
     run_premium_decay_backtest,
 )
