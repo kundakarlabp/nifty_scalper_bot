@@ -14,6 +14,11 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from nifty_scalper_bot.journal.trade_ledger import (
+    ensure_trade_ledger_schema,
+    materialize_trade_events,
+)
+
 LOGGER = logging.getLogger(__name__)
 
 _CANONICAL_EVENT_NAMES = {
@@ -333,6 +338,7 @@ class TradeJournal:
             "CREATE INDEX IF NOT EXISTS idx_trade_events_signal_id "
             "ON trade_events(signal_id, timestamp)"
         )
+        ensure_trade_ledger_schema(conn)
 
         return conn
 
@@ -388,6 +394,7 @@ class TradeJournal:
                     """,
                     rows,
                 )
+                materialize_trade_events(conn, batch)
                 conn.execute("COMMIT")
 
                 return conn
