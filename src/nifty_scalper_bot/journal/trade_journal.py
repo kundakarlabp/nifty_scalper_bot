@@ -344,7 +344,9 @@ class TradeJournal:
         rows = []
 
         for event in batch:
-            meta_json = json.dumps(\n                event.get("meta", {}), separators=(",", ":"), default=str\n            )
+            meta_json = json.dumps(
+                event.get("meta", {}), separators=(",", ":"), default=str
+            )
             event_json = json.dumps(event, separators=(",", ":"), default=str)
 
             rows.append(
