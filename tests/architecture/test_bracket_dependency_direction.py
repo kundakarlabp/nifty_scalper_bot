@@ -10,6 +10,7 @@ from nifty_scalper_bot.execution.canonical_bracket_manager import (
 from nifty_scalper_bot.execution.hardened_bracket_manager import (
     HardenedBracketManager,
 )
+from nifty_scalper_bot.execution.ownership import BoundBracketManager
 
 
 def test_bracket_implementation_layers_do_not_import_public_facade() -> None:
@@ -51,4 +52,16 @@ def test_canonical_bracket_layer_does_not_shadow_fill_activation_passthrough() -
     assert (
         CanonicalBracketManager.confirm_entry_fill
         is HardenedBracketManager.confirm_entry_fill
+    )
+
+
+def test_bound_manager_owns_correlated_bracket_journaling_explicitly() -> None:
+    execution = Path(__file__).resolve().parents[2] / "src/nifty_scalper_bot/execution"
+    ownership_source = (execution / "ownership.py").read_text(encoding="utf-8")
+    facade_source = (execution / "bracket_manager.py").read_text(encoding="utf-8")
+
+    assert "def _log_bracket_event(" in ownership_source
+    assert "BoundBracketManager._log_bracket_event =" not in facade_source
+    assert BoundBracketManager._log_bracket_event.__module__ == (
+        "nifty_scalper_bot.execution.ownership"
     )
