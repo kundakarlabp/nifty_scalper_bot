@@ -419,10 +419,10 @@ class CandleEngine:
         with self._lock:
             count = len(self._completed_candles)
             start = max(0, count - size)
-            return [
-                dict(self._completed_candles[index])
-                for index in range(start, count)
-            ]
+            rows: list[dict[str, Any]] = []
+            for index in range(start, count):
+                rows.append(dict(self._completed_candles[index]))
+            return rows
 
     def get_current_candle(self) -> dict[str, Any] | None:
         """Return a defensive copy of the current partial candle, if any."""
