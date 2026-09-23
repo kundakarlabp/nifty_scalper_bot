@@ -1,13 +1,14 @@
 """File purpose:
-    Preserve the historical ``SafeOrderManager`` constructor shape for startup code.
+    Preserve the historical ``SafeOrderManager`` control-plane shape for startup code.
 
 Key responsibilities:
-    - Delegate monitoring, counters, skip reasons and order placement to ``OrderManager``.
-    - Keep operator-facing compatibility without owning execution state.
+    - Keep operator-facing live-toggle and health compatibility.
+    - Delegate compatibility calls to the canonical ``OrderManager``.
 
 Operational constraints:
     - This adapter must not retry, throttle, reprice or submit an order independently.
     - The canonical ``OrderManager`` remains the only execution authority.
+    - Strategy/runtime execution wiring must receive ``OrderManager`` directly.
 """
 
 from __future__ import annotations
@@ -27,7 +28,6 @@ class SafeOrderManager:
     settings: OrderSettings
     on_order_rejected: Callable[[str, str], None] | None = None
     post_order_hook: Callable[[str, str, int, float | None], None] | None = None
-    regime_manager: Any | None = None
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self.order_manager, name)

@@ -64,12 +64,6 @@ class CanonicalBracketManager(HardenedBracketManager):
         )
         super().__init__(*args, **kwargs)
 
-    def confirm_entry_fill(
-        self, order_id: str, fill_price: float, filled_qty: int | None = None
-    ) -> None:
-        """Delegate fill activation to the single canonical geometry owner."""
-        super().confirm_entry_fill(order_id, fill_price, filled_qty)
-
     def _broker_position_quantity(self, symbol: str) -> int | None:
         """Return absolute broker quantity, or ``None`` when exposure is unknown."""
         try:

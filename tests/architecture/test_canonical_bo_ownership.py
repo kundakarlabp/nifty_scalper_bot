@@ -192,6 +192,33 @@ def test_safe_order_manager_does_not_own_execution_logic() -> None:
     assert "_monitor_loop" not in safe_methods
 
 
+def test_safe_order_manager_is_not_injected_as_runtime_execution_owner() -> None:
+    app_tree = ast.parse((SRC / "core" / "app.py").read_text(encoding="utf-8"))
+    expected = {
+        ("StrategyOrchestrator", "order_manager"): "order_manager",
+        ("UnifiedManager", "orders"): "order_manager",
+    }
+    observed: dict[tuple[str, str], str | None] = {}
+    for node in ast.walk(app_tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+            continue
+        for callee, keyword in expected:
+            if node.func.id != callee:
+                continue
+            for argument in node.keywords:
+                if argument.arg != keyword:
+                    continue
+                observed[(callee, keyword)] = (
+                    argument.value.id if isinstance(argument.value, ast.Name) else None
+                )
+    assert observed == expected
+
+
+def test_safe_order_manager_has_no_regime_or_execution_policy_state() -> None:
+    safe_source = (EXECUTION / "safe_order_manager.py").read_text(encoding="utf-8")
+    assert "regime_manager:" not in safe_source
+
+
 def test_live_capable_strategies_do_not_bypass_trade_plan_execution() -> None:
     offenders: list[str] = []
     strategies_root = SRC / "strategies"
