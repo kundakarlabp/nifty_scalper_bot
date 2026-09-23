@@ -161,7 +161,7 @@ def test_core_modules_are_imported_only_by_canonical_facades() -> None:
     assert not offenders, offenders
 
 
-def test_retired_duplicate_bo_modules_are_absent() -> None:
+def test_retired_execution_modules_are_absent() -> None:
     retired = {
         "order_manager_legacy.py",
         "legacy_bracket_manager.py",
@@ -170,35 +170,25 @@ def test_retired_duplicate_bo_modules_are_absent() -> None:
         "order_executor.py",
         "order_processor.py",
         "entry_price.py",
+        "lifecycle_manager.py",
     }
     present = sorted(name for name in retired if (EXECUTION / name).exists())
     assert not present, f"Retired BO modules still present: {present}"
     assert (EXECUTION / "options_policy.py").exists()
 
 
-def test_startup_compatibility_adapters_do_not_own_execution_logic() -> None:
+def test_safe_order_manager_does_not_own_execution_logic() -> None:
     safe_tree = ast.parse(
         (EXECUTION / "safe_order_manager.py").read_text(encoding="utf-8")
-    )
-    lifecycle_tree = ast.parse(
-        (EXECUTION / "lifecycle_manager.py").read_text(encoding="utf-8")
     )
     safe_methods = {
         node.name
         for node in ast.walk(safe_tree)
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
-    lifecycle_methods = {
-        node.name
-        for node in ast.walk(lifecycle_tree)
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-    }
     assert "_chase_fill" not in safe_methods
     assert "_check_rate_limit" not in safe_methods
     assert "_monitor_loop" not in safe_methods
-    assert "_evaluate_tick" not in lifecycle_methods
-    assert "_monitor_loop" not in lifecycle_methods
-    assert "_execute_exit" not in lifecycle_methods
 
 
 def test_live_capable_strategies_do_not_bypass_trade_plan_execution() -> None:

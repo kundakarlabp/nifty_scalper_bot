@@ -1509,7 +1509,6 @@ from nifty_scalper_bot.execution.bracket_manager import (
     SupportsCancelOrder,
 )
 
-from nifty_scalper_bot.execution.lifecycle_manager import LifecycleManager
 from nifty_scalper_bot.execution.order_manager import OrderManager, OrderType
 from nifty_scalper_bot.execution.paper_fill_engine import PaperFillEngine
 from nifty_scalper_bot.execution.position_manager import ActiveContract, PositionManager
@@ -3145,7 +3144,7 @@ class BotContext:
     paper_engine: PaperFillEngine | None = None
     safe_order_manager: SafeOrderManager | None = None
     state_tracker: StateTracker | None = None
-    lifecycle_manager: LifecycleManager | None = None
+    lifecycle_manager: Any | None = None
     post_fill_monitor: PostFillMonitor | None = None
     strategy_manager: StrategyManager | None = None
     strategy_runner: StrategyRunner | None = None
@@ -6547,10 +6546,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     state_tracker = StateTracker()
     lifecycle_tracker_adapter = _LifecycleTrackerAdapter(state_tracker)
 
-    lifecycle_manager = LifecycleManager(
-        data_hub=data_hub,
-        state_tracker=lifecycle_tracker_adapter,
-    )
+    lifecycle_manager = None
     reconciliation_interval = coalesce_int("RECONCILIATION_INTERVAL_SEC", default=30)
     reconciliation_alert = coalesce_bool(
         "RECONCILIATION_ALERT_ON_MISMATCH", default=True

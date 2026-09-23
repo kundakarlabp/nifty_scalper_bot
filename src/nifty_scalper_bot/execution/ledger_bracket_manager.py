@@ -20,7 +20,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Mapping
 
-from nifty_scalper_bot.execution import bracket_core as _legacy
+from nifty_scalper_bot.execution import bracket_core as _core
 from nifty_scalper_bot.execution.canonical_bracket_manager import (
     CanonicalBracketManager,
 )
@@ -119,7 +119,7 @@ class LedgerBracketManager(CanonicalBracketManager):
             self._release_store = _LedgerReleaseStore(self._ledger_path)
             self._ledger_blocked = self._release_store.load()
         except Exception as exc:  # noqa: BLE001 - protection must still initialize
-            _legacy.LOGGER.critical(
+            _core.LOGGER.critical(
                 "FILL_LEDGER_INIT_FAILED path=%s error=%s",
                 self._ledger_path,
                 exc,
@@ -165,7 +165,7 @@ class LedgerBracketManager(CanonicalBracketManager):
                     str(reason),
                     dict(payload or {}),
                 )
-        _legacy.LOGGER.critical(
+        _core.LOGGER.critical(
             "FILL_LEDGER_RELEASE_BLOCKED bracket_id=%s symbol=%s reason=%s payload=%s",
             bracket.bracket_id,
             bracket.symbol,
@@ -202,7 +202,7 @@ class LedgerBracketManager(CanonicalBracketManager):
         if self._fill_ledger is None:
             raise FillLedgerError("fill ledger is unavailable")
         inserted = self._fill_ledger.record_fill(leg)
-        _legacy.LOGGER.info(
+        _core.LOGGER.info(
             "FILL_LEDGER_RECORDED bracket_id=%s fill_id=%s "
             "kind=%s side=%s qty=%s price=%.2f inserted=%s",
             leg.bracket_id,
@@ -617,7 +617,7 @@ class LedgerBracketManager(CanonicalBracketManager):
                 and int(getattr(bracket, "remaining_quantity", 0) or 0) <= 0
             )
             if already_accounted or getattr(bracket, "_final_close_in_progress", False):
-                _legacy.LOGGER.info(
+                _core.LOGGER.info(
                     "BRACKET_CLOSE_ALREADY_ACCOUNTED bracket_id=%s close_source=%s",
                     getattr(bracket, "bracket_id", None),
                     close_source,
@@ -675,7 +675,7 @@ class LedgerBracketManager(CanonicalBracketManager):
             bracket.exit_in_progress = False
             bracket.active = False
             bracket.position_flat_confirmed = True
-            bracket.exit_state = _legacy.BracketExitLifecycle.CLOSED.value
+            bracket.exit_state = _core.BracketExitLifecycle.CLOSED.value
             bracket.entry_status = "CLOSED"
             bracket.pending_exit_order_id = None
             positions = getattr(self.order_manager, "_positions", None)
@@ -738,7 +738,7 @@ class LedgerBracketManager(CanonicalBracketManager):
         )
         setattr(bracket, "_completed_trade_outcome", outcome)
         net_pnl = outcome["net_pnl"]
-        _legacy.LOGGER.info(
+        _core.LOGGER.info(
             "BRACKET_CLOSED bracket_id=%s symbol=%s close_source=%s side=%s "
             "qty=%s entry=%s exit=%s pnl=%s net_pnl=%s r=%s mfe_r=%s mae_r=%s "
             "trail_rev=%s final_sl=%s exit_reason=%s ledger_complete=%s",
@@ -794,7 +794,7 @@ class LedgerBracketManager(CanonicalBracketManager):
                     hook(bracket.symbol)
                     setattr(bracket, "_ledger_release_hook_fired", True)
                 except Exception:
-                    _legacy.LOGGER.exception(
+                    _core.LOGGER.exception(
                         "BRACKET_EXIT_COMPLETE_HOOK_FAILED symbol=%s", bracket.symbol
                     )
 
@@ -833,7 +833,7 @@ class LedgerBracketManager(CanonicalBracketManager):
                 replayed = True
 
             if (
-                bracket.exit_state != _legacy.BracketExitLifecycle.CLOSED.value
+                bracket.exit_state != _core.BracketExitLifecycle.CLOSED.value
                 and not replayed
             ):
                 # Durable block on a still-open bracket with nothing to replay
@@ -842,7 +842,7 @@ class LedgerBracketManager(CanonicalBracketManager):
                 # reconciliation clears it once flat + ledger-complete.
                 return False
 
-            if bracket.exit_state == _legacy.BracketExitLifecycle.CLOSED.value:
+            if bracket.exit_state == _core.BracketExitLifecycle.CLOSED.value:
                 if not self._safe_position_flat(bracket.symbol):
                     return False
                 if self._fill_ledger is None:
@@ -872,7 +872,7 @@ class LedgerBracketManager(CanonicalBracketManager):
             self._clear_ledger_release(bracket)
             return True
         except Exception as exc:  # noqa: BLE001
-            _legacy.LOGGER.error(
+            _core.LOGGER.error(
                 "FILL_LEDGER_RECONCILE_FAILED bracket_id=%s error=%s",
                 bracket.bracket_id,
                 exc,

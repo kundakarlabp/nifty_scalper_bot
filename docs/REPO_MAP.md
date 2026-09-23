@@ -77,9 +77,10 @@ Do not bypass this flow. Options are the only tradable instruments. Spot is dire
 
 ### Execution and risk
 
-- `execution/safe_order_manager.py` — safety wrapper around OrderManager.
+- `execution/order_manager.py` — canonical order-entry and submission facade.
+- `execution/safe_order_manager.py` — live-mode/operator compatibility wrapper around OrderManager.
+- `execution/bracket_manager.py` — canonical TP/SL/trailing and exit-lifecycle facade.
 - `execution/readiness.py` — pure readiness/arming helpers.
-- `execution/lifecycle_manager.py` — lifecycle coordination where used.
 - `execution/fill_ledger.py` — fill accounting and reconciliation where used.
 - `risk/risk_manager.py` — risk limits and telemetry.
 
