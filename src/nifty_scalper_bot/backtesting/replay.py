@@ -108,10 +108,13 @@ class ReplayHarness:
         runtime_proof = core.install_runtime_hardening()
         if not isinstance(runtime_proof, Mapping) or not runtime_proof:
             raise RuntimeError("runtime_hardening_incomplete proof_unavailable")
-        missing = sorted(name for name, installed in runtime_proof.items() if not installed)
+        missing = sorted(
+            name for name, installed in runtime_proof.items() if not installed
+        )
         if missing:
             raise RuntimeError(
-                f"runtime_hardening_incomplete missing={missing} proof={dict(runtime_proof)}"
+                "runtime_hardening_incomplete "
+                f"missing={missing} proof={dict(runtime_proof)}"
             )
 
         self._runner = runner
