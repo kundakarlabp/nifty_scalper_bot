@@ -15,7 +15,7 @@ from src.nifty_scalper_bot.backtesting.backtest_engine import (
     BacktestEngine,
 )
 
-from nifty_scalper_bot.backtest.parity import SinglePipelineParity
+from nifty_scalper_bot.backtesting.parity import SinglePipelineParity
 from nifty_scalper_bot.execution.paper_fill_engine import PaperFillEngine
 
 
