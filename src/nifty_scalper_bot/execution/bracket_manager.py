@@ -18,13 +18,12 @@ for _name in dir(_core):
     if not _name.startswith("__"):
         globals()[_name] = getattr(_core, _name)
 
+from nifty_scalper_bot.execution.market_aware_profit_extension import (  # noqa: E402
+    apply_patches as _apply_market_aware_profit_extension,
+)
 from nifty_scalper_bot.execution.ownership import BoundBracketManager  # noqa: E402
 from nifty_scalper_bot.execution.runtime_bracket_manager import (  # noqa: E402,F401
     RuntimeBracketManager,
-)
-
-from nifty_scalper_bot.execution.market_aware_profit_extension import (  # noqa: E402
-    apply_patches as _apply_market_aware_profit_extension,
 )
 
 _apply_market_aware_profit_extension(BoundBracketManager)
