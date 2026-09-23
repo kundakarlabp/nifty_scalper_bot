@@ -14,6 +14,8 @@ import time
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+_BACKFILL_KEY = "historical_backfill_v1"
+
 _TRADE_STATES = {
     "signal.evaluated": ("SIGNAL_EVALUATED", 10),
     "candidate.blocked": ("BLOCKED", 100),
@@ -268,6 +270,58 @@ def ensure_trade_ledger_schema(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_trade_ledger_updated_at "
         "ON trade_ledger(updated_at)"
     )
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS trade_ledger_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+        """)
+
+
+def backfill_trade_ledger(
+    conn: sqlite3.Connection,
+    *,
+    batch_size: int = 500,
+) -> int:
+    """Replay historical journal events exactly once into the derived ledger."""
+    marker = conn.execute(
+        "SELECT 1 FROM trade_ledger_meta WHERE key = ?",
+        (_BACKFILL_KEY,),
+    ).fetchone()
+    if marker is not None:
+        return 0
+
+    replayed = 0
+    conn.execute("BEGIN")
+    try:
+        cursor = conn.execute(
+            "SELECT event_json FROM trade_events ORDER BY timestamp ASC, id ASC"
+        )
+        while True:
+            rows = cursor.fetchmany(max(1, int(batch_size)))
+            if not rows:
+                break
+            events: list[Mapping[str, Any]] = []
+            for (event_json,) in rows:
+                try:
+                    event = json.loads(event_json)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    continue
+                if isinstance(event, Mapping):
+                    events.append(event)
+            if events:
+                materialize_trade_events(conn, events)
+                replayed += len(events)
+
+        conn.execute(
+            "INSERT INTO trade_ledger_meta (key, value) VALUES (?, ?)",
+            (_BACKFILL_KEY, "done"),
+        )
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    return replayed
 
 
 def materialize_trade_events(
@@ -442,4 +496,8 @@ def _first_number(*values: Any) -> float | None:
     return None
 
 
-__all__ = ["ensure_trade_ledger_schema", "materialize_trade_events"]
+__all__ = [
+    "backfill_trade_ledger",
+    "ensure_trade_ledger_schema",
+    "materialize_trade_events",
+]
