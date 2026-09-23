@@ -57,7 +57,14 @@ def test_pending_bracket_reconciles_filled_order_from_get_orders():
         def get_order_status(self, oid):
             return {}
         def get_orders(self):
-            return [\n                {\n                    "order_id": "E2",\n                    "status": "COMPLETE",\n                    "avg_price": 102.0,\n                    "filled_quantity": 1,\n                }\n            ]
+            return [
+                {
+                    "order_id": "E2",
+                    "status": "COMPLETE",
+                    "avg_price": 102.0,
+                    "filled_quantity": 1,
+                }
+            ]
     bm = _mk_bm_with_broker(_Broker())
     bracket = BracketState("E2", "NFO:NIFTYCE", "BUY", 1, 100.0, 95.0, 110.0, created_at=time.time() - 10, active=False, entry_confirmed=False)
     bm._brackets["E2"] = bracket
