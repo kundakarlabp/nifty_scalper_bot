@@ -9130,22 +9130,24 @@ class MarketDataManager:
             # and readiness flapping.
 
         finally:
-            if pending_tick_lock is not None:
-                with pending_tick_lock:
-                    if (
-                        getattr(self, "_candle_tick_inflight_symbol", None)
-                        == reservation_symbol
-                    ):
-                        setattr(self, "_candle_tick_inflight_symbol", None)
-                    self._release_popped_candle_tick_locked(raw)
-            tick_duration_ms = (time.perf_counter() - tick_started) * 1000.0
-            if tick_duration_ms >= 100.0:
-                self._log_slow_tick_stage(
-                    stage="one_tick",
-                    symbol=symbol_for_timing,
-                    duration_ms=tick_duration_ms,
-                    source=source_for_timing,
-                )
+            try:
+                tick_duration_ms = (time.perf_counter() - tick_started) * 1000.0
+                if tick_duration_ms >= 100.0:
+                    self._log_slow_tick_stage(
+                        stage="one_tick",
+                        symbol=symbol_for_timing,
+                        duration_ms=tick_duration_ms,
+                        source=source_for_timing,
+                    )
+            finally:
+                if pending_tick_lock is not None:
+                    with pending_tick_lock:
+                        if (
+                            getattr(self, "_candle_tick_inflight_symbol", None)
+                            == reservation_symbol
+                        ):
+                            setattr(self, "_candle_tick_inflight_symbol", None)
+                        self._release_popped_candle_tick_locked(raw)
 
     def get_candle_engine(self, symbol: str) -> CandleEngine:
         """Return the authoritative CandleEngine for a canonicalized symbol."""
