@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+import pytest
+
 from nifty_scalper_bot.strategies.elite_strategies.config_models import SMCStrategyConfig
 from nifty_scalper_bot.strategies.elite_strategies.smc_liquidity import SMCStrategy
 
@@ -182,6 +184,62 @@ def test_bullish_underlying_sweep_requires_later_confirmation_bar(monkeypatch) -
     assert signal.metadata["requires_orderflow_confirmation"] is True
     assert signal.metadata["orderflow_confirmation_owner"] == "StrategyManager"
     assert signal.metadata["underlying_invalidation_level"] < 23974.0
+
+
+@pytest.mark.parametrize("feature", ["bos", "choch"])
+@pytest.mark.parametrize("mode", ["SHADOW", "LIVE"])
+def test_opposite_side_option_structure_does_not_confirm_ce_sweep(
+    monkeypatch, feature: str, mode: str
+) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", mode)
+    rows = _base_rows()
+    rows.append(
+        _bar(
+            30,
+            open_=23988.0,
+            high=23991.0,
+            low=23974.0,
+            close=23984.0,
+            volume=2400.0,
+        )
+    )
+    opposite = _strategy(rows)
+    aligned = _strategy(rows)
+    sweep_indicators = _indicators(latest_bar_ts=rows[-1]["timestamp"])
+    assert opposite.generate_signal(CE, sweep_indicators, 102.0) is None
+    assert aligned.generate_signal(CE, sweep_indicators, 102.0) is None
+
+    rows.append(
+        _bar(
+            31,
+            open_=23984.0,
+            high=23999.0,
+            low=23982.0,
+            close=23997.0,
+            volume=2100.0,
+        )
+    )
+    features = {
+        "latest_bar_ts": rows[-1]["timestamp"],
+        "bos_confirmed": feature == "bos",
+        "choch_confirmed": feature == "choch",
+    }
+    opposite_vote = opposite.generate_signal(
+        CE, _indicators(**features, **{f"{feature}_side": "PE"}), 103.0
+    )
+    aligned_vote = aligned.generate_signal(
+        CE, _indicators(**features, **{f"{feature}_side": "CE"}), 103.0
+    )
+
+    assert opposite_vote is not None and aligned_vote is not None
+    assert opposite_vote.metadata["structure_confirmed"] is False
+    assert "structure_confirmation" not in opposite_vote.metadata["score_reasons"]
+    assert aligned_vote.metadata["structure_confirmed"] is True
+    assert (
+        aligned_vote.metadata["strategy_score"]
+        - opposite_vote.metadata["strategy_score"]
+        == 1.0
+    )
 
 
 def test_tiny_one_tick_breach_is_not_accepted_as_liquidity_sweep(monkeypatch) -> None:
