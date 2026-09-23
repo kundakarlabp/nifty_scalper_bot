@@ -1004,9 +1004,23 @@ class BracketManager:
         )
         status_text = str(status.get("status") or "").upper()
         if status_text in _FILLED_STATUSES:
+            filled_qty = self._extract_status_filled_quantity(status)
             fill_price = self._extract_status_price(status)
-            self.confirm_entry_fill(
-                bracket.entry_order_id, fill_price or bracket.entry_price
+            if filled_qty > 0 and fill_price is not None:
+                self.confirm_entry_fill(
+                    bracket.entry_order_id,
+                    fill_price,
+                    filled_qty,
+                )
+                return
+            LOGGER.warning(
+                "PENDING_ENTRY_FILL_EVIDENCE_INCOMPLETE entry_order_id=%s "
+                "symbol=%s status=%s filled_qty=%s fill_price=%s",
+                bracket.entry_order_id,
+                bracket.symbol,
+                status_text,
+                filled_qty,
+                fill_price,
             )
             return
         terminal_unfilled = status_text in _CANCELLED_STATUSES
@@ -1639,6 +1653,16 @@ class BracketManager:
                     "tp": round(bracket.tp_trigger_price, 2),
                 },
             )
+            self._log_bracket_event(
+                "BRACKET_ARMED",
+                bracket,
+                meta={
+                    "filled_qty": int(bracket.quantity or 0),
+                    "fill_price": float(bracket.entry_fill_price or bracket.entry_price),
+                    "stop_price": float(bracket.sl_trigger_price or 0.0),
+                    "target_price": float(bracket.tp_trigger_price or 0.0),
+                },
+            )
             self._notify_open_position_priority("open", bracket.symbol)
             self._sync_active_bracket_symbols_to_mdm()
 
@@ -1793,6 +1817,17 @@ class BracketManager:
                         "new_sl": rounded,
                         "ltp": ltp,
                         "trail_revision": target_bracket.trail_revision,
+                    },
+                )
+                self._log_bracket_event(
+                    "TRAIL_UPDATED",
+                    target_bracket,
+                    meta={
+                        "old_sl": old_sl,
+                        "new_sl": rounded,
+                        "ltp": ltp,
+                        "trail_revision": target_bracket.trail_revision,
+                        "source": "virtual_modify_sl",
                     },
                 )
                 # ✅ FIX: Persist trailing update
@@ -3039,6 +3074,17 @@ class BracketManager:
                                 "profit_pct": round(profit_pct, 2),
                             },
                         )
+                    self._log_bracket_event(
+                        "TRAIL_UPDATED",
+                        bracket,
+                        meta={
+                            "old_sl": old_sl,
+                            "new_sl": bracket.sl_trigger_price,
+                            "ltp": ltp,
+                            "trail_revision": bracket.trail_revision,
+                            "source": "fallback_trailing",
+                        },
+                    )
                     self.save_state()
                     return True
             else:  # SELL
@@ -3846,6 +3892,17 @@ class BracketManager:
                 kwargs["price"] = price
             order_id = self.order_manager.place_order(**kwargs)
             if order_id:
+                if bracket is not None:
+                    self._log_bracket_event(
+                        "EXIT_SUBMITTED",
+                        bracket,
+                        meta={
+                            "exit_order_id": str(order_id),
+                            "reason": str(reason or ""),
+                            "qty": int(qty or 0),
+                            "preferred_order_type": str(preferred_order_type or ""),
+                        },
+                    )
                 return SubmitExitOrderResult(
                     accepted=True,
                     order_id=str(order_id),
@@ -3949,6 +4006,7 @@ class BracketManager:
         )
 
         filled = False
+        filled_qty = 0
         fill_price: float | None = None
         order_status = ""
         try:
@@ -3956,8 +4014,18 @@ class BracketManager:
                 status = self._get_broker_order_status(str(order_id))
                 order_status = str((status or {}).get("status", "")).upper()
                 fill_price = self._extract_status_price(status)
+                filled_qty = self._extract_status_filled_quantity(status)
                 if order_status in _FILLED_STATUSES:
-                    filled = True
+                    filled = filled_qty > 0 and fill_price is not None
+                    if not filled:
+                        LOGGER.warning(
+                            "EXIT_FILL_EVIDENCE_INCOMPLETE order_id=%s "
+                            "status=%s filled_qty=%s fill_price=%s",
+                            order_id,
+                            order_status,
+                            filled_qty,
+                            fill_price,
+                        )
                 elif not order_status:
                     waiter = getattr(self.order_manager, "wait_for_fill", None)
                     if callable(waiter):
@@ -4016,6 +4084,16 @@ class BracketManager:
             filled,
         )
         if filled:
+            self._log_bracket_event(
+                "EXIT_FILLED",
+                bracket,
+                meta={
+                    "exit_order_id": str(order_id or ""),
+                    "filled_qty": filled_qty,
+                    "fill_price": fill_price,
+                    "reason": str(bracket.exit_reason or ""),
+                },
+            )
             self._close_bracket(
                 bracket, close_source="broker_fill", exit_price=fill_price
             )
@@ -4107,6 +4185,26 @@ class BracketManager:
             if value > 0:
                 return value
         return None
+
+    @staticmethod
+    def _extract_status_filled_quantity(
+        status: Mapping[str, Any] | None,
+    ) -> int:
+        if not status:
+            return 0
+        try:
+            return max(
+                0,
+                int(
+                    float(
+                        status.get("filled_quantity")
+                        or status.get("filled")
+                        or 0
+                    )
+                ),
+            )
+        except (TypeError, ValueError):
+            return 0
 
     def _position_flat_for_symbol(self, symbol: str) -> bool:
         """Return flatness only from the canonical authoritative snapshot."""
@@ -4490,6 +4588,17 @@ class BracketManager:
                         round(old_sl, 2),
                         round(bracket.sl_trigger_price, 2),
                     )
+                    self._log_bracket_event(
+                        "TRAIL_UPDATED",
+                        bracket,
+                        meta={
+                            "old_sl": old_sl,
+                            "new_sl": bracket.sl_trigger_price,
+                            "ltp": float(bracket.last_ltp or 0.0),
+                            "trail_revision": int(bracket.trail_revision or 0),
+                            "source": "update_trailing_sl",
+                        },
+                    )
 
     # --------------------------------------------------------------------------
     # 6. HOUSEKEEPING & UTILS
@@ -4724,10 +4833,48 @@ class BracketManager:
         *,
         meta: Mapping[str, object] | None = None,
     ) -> None:
-        """Queue non-blocking bracket journal event. Args: event_type,bracket,meta; Returns: None; Raises: None."""
+        """Queue one bracket event using the bracket's durable trade provenance."""
         journal = self._trade_journal
         if journal is None:
             return
+        metadata = dict(bracket.trade_provenance or {})
+        metadata.update(dict(meta or {}))
+        metadata.setdefault("bracket_id", bracket.bracket_id)
+        metadata.setdefault("entry_order_id", bracket.entry_order_id)
+        metadata.setdefault(
+            "trade_lifecycle_id",
+            bracket.trade_lifecycle_id or bracket.entry_order_id,
+        )
+        exit_order_id = (
+            metadata.get("exit_order_id")
+            or bracket.exit_order_id
+            or bracket.pending_exit_order_id
+        )
+        order_id = (
+            str(exit_order_id)
+            if event_type in {"EXIT_SUBMITTED", "EXIT_FILLED"} and exit_order_id
+            else bracket.entry_order_id
+        )
+        try:
+            quantity = int(
+                metadata.get("filled_qty")
+                or metadata.get("qty")
+                or bracket.remaining_quantity
+                or 0
+            )
+        except (TypeError, ValueError):
+            quantity = int(bracket.remaining_quantity or 0)
+        try:
+            price = float(
+                metadata.get("fill_price")
+                or metadata.get("exit_price")
+                or bracket.last_ltp
+                or bracket.entry_fill_price
+                or bracket.entry_price
+                or 0.0
+            )
+        except (TypeError, ValueError):
+            price = 0.0
         try:
             journal.log_event(
                 {
@@ -4735,14 +4882,14 @@ class BracketManager:
                     "timestamp": time.time(),
                     "symbol": bracket.symbol,
                     "side": bracket.side,
-                    "qty": int(bracket.remaining_quantity),
-                    "price": float(bracket.last_ltp or bracket.entry_price),
-                    "order_id": bracket.entry_order_id,
-                    "meta": dict(meta or {}),
+                    "qty": quantity,
+                    "price": price,
+                    "order_id": order_id,
+                    "meta": metadata,
                 }
             )
-        except Exception as e:
-            LOGGER.error("Failure in _log_bracket_event: %s", e)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.error("Failure in _log_bracket_event: %s", exc)
 
     # ----------------------------------------------------------------
     # 💾 PERSISTENCE LAYER (Add to BracketManager)
