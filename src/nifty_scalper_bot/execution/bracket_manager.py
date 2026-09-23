@@ -20,8 +20,10 @@ for _name in dir(_core):
     if not _name.startswith("__"):
         globals()[_name] = getattr(_core, _name)
 
-from nifty_scalper_bot.execution.runtime_bracket_manager import RuntimeBracketManager  # noqa: E402
 from nifty_scalper_bot.execution.ownership import BoundBracketManager  # noqa: E402
+from nifty_scalper_bot.execution.runtime_bracket_manager import (  # noqa: E402,F401
+    RuntimeBracketManager,
+)
 
 
 _original_tick_exchange_epoch = _core.tick_exchange_epoch
