@@ -146,16 +146,137 @@ ON CONFLICT(trade_id) DO UPDATE SET
         THEN excluded.exit_price
         ELSE trade_ledger.exit_price
     END,
-    gross_pnl = COALESCE(excluded.gross_pnl, trade_ledger.gross_pnl),
-    estimated_costs = COALESCE(excluded.estimated_costs, trade_ledger.estimated_costs),
-    net_pnl = COALESCE(excluded.net_pnl, trade_ledger.net_pnl),
-    r_multiple = COALESCE(excluded.r_multiple, trade_ledger.r_multiple),
-    mfe_r = COALESCE(excluded.mfe_r, trade_ledger.mfe_r),
-    mae_r = COALESCE(excluded.mae_r, trade_ledger.mae_r),
-    holding_seconds = COALESCE(excluded.holding_seconds, trade_ledger.holding_seconds),
-    exit_reason = COALESCE(excluded.exit_reason, trade_ledger.exit_reason),
-    close_source = COALESCE(excluded.close_source, trade_ledger.close_source),
-    ledger_complete = COALESCE(excluded.ledger_complete, trade_ledger.ledger_complete),
+    gross_pnl = CASE
+        WHEN excluded.gross_pnl IS NOT NULL
+          AND (
+              trade_ledger.gross_pnl IS NULL
+              OR excluded.state_rank > trade_ledger.state_rank
+              OR (
+                  excluded.state_rank = trade_ledger.state_rank
+                  AND excluded.updated_at >= trade_ledger.updated_at
+              )
+          )
+        THEN excluded.gross_pnl
+        ELSE trade_ledger.gross_pnl
+    END,
+    estimated_costs = CASE
+        WHEN excluded.estimated_costs IS NOT NULL
+          AND (
+              trade_ledger.estimated_costs IS NULL
+              OR excluded.state_rank > trade_ledger.state_rank
+              OR (
+                  excluded.state_rank = trade_ledger.state_rank
+                  AND excluded.updated_at >= trade_ledger.updated_at
+              )
+          )
+        THEN excluded.estimated_costs
+        ELSE trade_ledger.estimated_costs
+    END,
+    net_pnl = CASE
+        WHEN excluded.net_pnl IS NOT NULL
+          AND (
+              trade_ledger.net_pnl IS NULL
+              OR excluded.state_rank > trade_ledger.state_rank
+              OR (
+                  excluded.state_rank = trade_ledger.state_rank
+                  AND excluded.updated_at >= trade_ledger.updated_at
+              )
+          )
+        THEN excluded.net_pnl
+        ELSE trade_ledger.net_pnl
+    END,
+    r_multiple = CASE
+        WHEN excluded.r_multiple IS NOT NULL
+          AND (
+              trade_ledger.r_multiple IS NULL
+              OR excluded.state_rank > trade_ledger.state_rank
+              OR (
+                  excluded.state_rank = trade_ledger.state_rank
+                  AND excluded.updated_at >= trade_ledger.updated_at
+              )
+          )
+        THEN excluded.r_multiple
+        ELSE trade_ledger.r_multiple
+    END,
+    mfe_r = CASE
+        WHEN excluded.mfe_r IS NOT NULL
+          AND (
+              trade_ledger.mfe_r IS NULL
+              OR excluded.state_rank > trade_ledger.state_rank
+              OR (
+                  excluded.state_rank = trade_ledger.state_rank
+                  AND excluded.updated_at >= trade_ledger.updated_at
+              )
+          )
+        THEN excluded.mfe_r
+        ELSE trade_ledger.mfe_r
+    END,
+    mae_r = CASE
+        WHEN excluded.mae_r IS NOT NULL
+          AND (
+              trade_ledger.mae_r IS NULL
+              OR excluded.state_rank > trade_ledger.state_rank
+              OR (
+                  excluded.state_rank = trade_ledger.state_rank
+                  AND excluded.updated_at >= trade_ledger.updated_at
+              )
+          )
+        THEN excluded.mae_r
+        ELSE trade_ledger.mae_r
+    END,
+    holding_seconds = CASE
+        WHEN excluded.holding_seconds IS NOT NULL
+          AND (
+              trade_ledger.holding_seconds IS NULL
+              OR excluded.state_rank > trade_ledger.state_rank
+              OR (
+                  excluded.state_rank = trade_ledger.state_rank
+                  AND excluded.updated_at >= trade_ledger.updated_at
+              )
+          )
+        THEN excluded.holding_seconds
+        ELSE trade_ledger.holding_seconds
+    END,
+    exit_reason = CASE
+        WHEN excluded.exit_reason IS NOT NULL
+          AND (
+              trade_ledger.exit_reason IS NULL
+              OR excluded.state_rank > trade_ledger.state_rank
+              OR (
+                  excluded.state_rank = trade_ledger.state_rank
+                  AND excluded.updated_at >= trade_ledger.updated_at
+              )
+          )
+        THEN excluded.exit_reason
+        ELSE trade_ledger.exit_reason
+    END,
+    close_source = CASE
+        WHEN excluded.close_source IS NOT NULL
+          AND (
+              trade_ledger.close_source IS NULL
+              OR excluded.state_rank > trade_ledger.state_rank
+              OR (
+                  excluded.state_rank = trade_ledger.state_rank
+                  AND excluded.updated_at >= trade_ledger.updated_at
+              )
+          )
+        THEN excluded.close_source
+        ELSE trade_ledger.close_source
+    END,
+    ledger_complete = CASE
+        WHEN trade_ledger.ledger_complete = 1 THEN 1
+        WHEN excluded.ledger_complete IS NOT NULL
+          AND (
+              trade_ledger.ledger_complete IS NULL
+              OR excluded.state_rank > trade_ledger.state_rank
+              OR (
+                  excluded.state_rank = trade_ledger.state_rank
+                  AND excluded.updated_at >= trade_ledger.updated_at
+              )
+          )
+        THEN excluded.ledger_complete
+        ELSE trade_ledger.ledger_complete
+    END,
     decision_at = COALESCE(trade_ledger.decision_at, excluded.decision_at),
     entry_submitted_at = COALESCE(
         trade_ledger.entry_submitted_at, excluded.entry_submitted_at
@@ -188,11 +309,45 @@ ON CONFLICT(trade_id) DO UPDATE SET
         THEN excluded.build_sha
         ELSE trade_ledger.build_sha
     END,
-    costs_json = COALESCE(excluded.costs_json, trade_ledger.costs_json),
-    execution_quality_json = COALESCE(
-        excluded.execution_quality_json, trade_ledger.execution_quality_json
-    ),
-    outcome_json = COALESCE(excluded.outcome_json, trade_ledger.outcome_json)
+    costs_json = CASE
+        WHEN excluded.costs_json IS NOT NULL
+          AND (
+              trade_ledger.costs_json IS NULL
+              OR excluded.state_rank > trade_ledger.state_rank
+              OR (
+                  excluded.state_rank = trade_ledger.state_rank
+                  AND excluded.updated_at >= trade_ledger.updated_at
+              )
+          )
+        THEN excluded.costs_json
+        ELSE trade_ledger.costs_json
+    END,
+    execution_quality_json = CASE
+        WHEN excluded.execution_quality_json IS NOT NULL
+          AND (
+              trade_ledger.execution_quality_json IS NULL
+              OR excluded.state_rank > trade_ledger.state_rank
+              OR (
+                  excluded.state_rank = trade_ledger.state_rank
+                  AND excluded.updated_at >= trade_ledger.updated_at
+              )
+          )
+        THEN excluded.execution_quality_json
+        ELSE trade_ledger.execution_quality_json
+    END,
+    outcome_json = CASE
+        WHEN excluded.outcome_json IS NOT NULL
+          AND (
+              trade_ledger.outcome_json IS NULL
+              OR excluded.state_rank > trade_ledger.state_rank
+              OR (
+                  excluded.state_rank = trade_ledger.state_rank
+                  AND excluded.updated_at >= trade_ledger.updated_at
+              )
+          )
+        THEN excluded.outcome_json
+        ELSE trade_ledger.outcome_json
+    END
 """
 
 
