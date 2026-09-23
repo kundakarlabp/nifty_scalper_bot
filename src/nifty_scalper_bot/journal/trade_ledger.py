@@ -29,7 +29,20 @@ _TRADE_STATES = {
     "trade.closed": ("CLOSED", 100),
 }
 
-_UPSERT_SQL = """
+
+def _monotonic_merge_sql(column: str) -> str:
+    """Prefer a populated higher-rank value or a non-older same-rank value."""
+    return (
+        f"CASE WHEN excluded.{column} IS NOT NULL AND ("
+        f"trade_ledger.{column} IS NULL "
+        "OR excluded.state_rank > trade_ledger.state_rank "
+        "OR (excluded.state_rank = trade_ledger.state_rank "
+        "AND excluded.updated_at >= trade_ledger.updated_at)) "
+        f"THEN excluded.{column} ELSE trade_ledger.{column} END"
+    )
+
+
+_UPSERT_SQL = f"""
 INSERT INTO trade_ledger (
     trade_id, signal_id, trace_id, strategy, symbol, side,
     state, state_rank, entry_order_id, exit_order_id, quantity,
@@ -146,16 +159,19 @@ ON CONFLICT(trade_id) DO UPDATE SET
         THEN excluded.exit_price
         ELSE trade_ledger.exit_price
     END,
-    gross_pnl = COALESCE(excluded.gross_pnl, trade_ledger.gross_pnl),
-    estimated_costs = COALESCE(excluded.estimated_costs, trade_ledger.estimated_costs),
-    net_pnl = COALESCE(excluded.net_pnl, trade_ledger.net_pnl),
-    r_multiple = COALESCE(excluded.r_multiple, trade_ledger.r_multiple),
-    mfe_r = COALESCE(excluded.mfe_r, trade_ledger.mfe_r),
-    mae_r = COALESCE(excluded.mae_r, trade_ledger.mae_r),
-    holding_seconds = COALESCE(excluded.holding_seconds, trade_ledger.holding_seconds),
-    exit_reason = COALESCE(excluded.exit_reason, trade_ledger.exit_reason),
-    close_source = COALESCE(excluded.close_source, trade_ledger.close_source),
-    ledger_complete = COALESCE(excluded.ledger_complete, trade_ledger.ledger_complete),
+    gross_pnl = {_monotonic_merge_sql("gross_pnl")},
+    estimated_costs = {_monotonic_merge_sql("estimated_costs")},
+    net_pnl = {_monotonic_merge_sql("net_pnl")},
+    r_multiple = {_monotonic_merge_sql("r_multiple")},
+    mfe_r = {_monotonic_merge_sql("mfe_r")},
+    mae_r = {_monotonic_merge_sql("mae_r")},
+    holding_seconds = {_monotonic_merge_sql("holding_seconds")},
+    exit_reason = {_monotonic_merge_sql("exit_reason")},
+    close_source = {_monotonic_merge_sql("close_source")},
+    ledger_complete = CASE
+        WHEN trade_ledger.ledger_complete = 1 THEN 1
+        ELSE {_monotonic_merge_sql("ledger_complete")}
+    END,
     decision_at = COALESCE(trade_ledger.decision_at, excluded.decision_at),
     entry_submitted_at = COALESCE(
         trade_ledger.entry_submitted_at, excluded.entry_submitted_at
@@ -188,11 +204,9 @@ ON CONFLICT(trade_id) DO UPDATE SET
         THEN excluded.build_sha
         ELSE trade_ledger.build_sha
     END,
-    costs_json = COALESCE(excluded.costs_json, trade_ledger.costs_json),
-    execution_quality_json = COALESCE(
-        excluded.execution_quality_json, trade_ledger.execution_quality_json
-    ),
-    outcome_json = COALESCE(excluded.outcome_json, trade_ledger.outcome_json)
+    costs_json = {_monotonic_merge_sql("costs_json")},
+    execution_quality_json = {_monotonic_merge_sql("execution_quality_json")},
+    outcome_json = {_monotonic_merge_sql("outcome_json")}
 """
 
 
