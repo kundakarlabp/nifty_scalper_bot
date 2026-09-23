@@ -24,11 +24,29 @@ from contextlib import suppress
 from enum import Enum
 from typing import Any, Mapping, Sequence
 
+from nifty_scalper_bot.execution import bracket_core as _core
 from nifty_scalper_bot.execution.position_snapshot import BrokerExposureState
 from nifty_scalper_bot.execution.runtime_bracket_manager import RuntimeBracketManager
 from nifty_scalper_bot.utils.symbols import normalize_symbol
 
 _TRUTHY = {"1", "true", "yes", "y", "on", "live"}
+
+_CANONICAL_BRACKET_EVENTS = {
+    "BRACKET_ARMED": "bracket.armed",
+    "TRAIL_UPDATED": "trail.updated",
+    "EXIT_TRIGGERED": "exit.triggered",
+    "EXIT_SUBMITTED": "exit.submitted",
+    "EXIT_FILLED": "exit.filled",
+    "BRACKET_CLOSED": "trade.closed",
+}
+
+
+def _positive_journal_price(value: Any) -> float | None:
+    try:
+        price = float(value or 0.0)
+    except (TypeError, ValueError):
+        return None
+    return price if price > 0.0 else None
 
 
 def _env_truthy(name: str) -> bool:
@@ -126,6 +144,140 @@ def _synthetic_position_blocker(position_manager: Any) -> dict[str, Any] | None:
 
 class BoundBracketManager(RuntimeBracketManager):
     """Bracket authority that configures the OrderManager native entry gate."""
+
+    def _correlation_for_bracket(self, bracket: Any) -> dict[str, Any]:
+        """Resolve one durable correlation chain without creating parallel state."""
+        merged: dict[str, Any] = {}
+        order_id = str(getattr(bracket, "entry_order_id", "") or "")
+
+        manager = getattr(self, "order_manager", None)
+        cache = getattr(manager, "_canonical_trade_correlation", {})
+        if isinstance(cache, Mapping):
+            cached = cache.get(order_id)
+            if isinstance(cached, Mapping):
+                merged.update(cached)
+
+        orders = getattr(manager, "_orders", {})
+        if isinstance(orders, Mapping):
+            order = orders.get(order_id)
+            provenance = getattr(order, "trade_provenance", None)
+            if isinstance(provenance, Mapping):
+                merged.update(provenance)
+            signal_id = getattr(order, "signal_id", None)
+            if signal_id:
+                merged.setdefault("signal_id", signal_id)
+
+        provenance = getattr(bracket, "trade_provenance", None)
+        if isinstance(provenance, Mapping):
+            merged.update(provenance)
+
+        trade_id = str(
+            merged.get("trade_id")
+            or getattr(bracket, "trade_lifecycle_id", "")
+            or getattr(bracket, "bracket_id", "")
+            or order_id
+        )
+        trace_id = str(merged.get("trace_id") or "")
+        signal_id = str(merged.get("signal_id") or trace_id or "")
+        strategy = str(
+            merged.get("strategy")
+            or merged.get("strategy_name")
+            or getattr(bracket, "tag", "")
+            or ""
+        )
+
+        if trade_id:
+            merged["trade_id"] = trade_id
+        if signal_id:
+            merged["signal_id"] = signal_id
+        if trace_id:
+            merged["trace_id"] = trace_id
+        if strategy:
+            merged["strategy"] = strategy
+
+        durable = getattr(bracket, "trade_provenance", None)
+        if not isinstance(durable, dict):
+            durable = dict(durable or {}) if isinstance(durable, Mapping) else {}
+            bracket.trade_provenance = durable
+        for key in ("trade_id", "signal_id", "trace_id", "strategy"):
+            if merged.get(key) not in (None, ""):
+                durable.setdefault(key, merged[key])
+        return merged
+
+    def _log_bracket_event(
+        self,
+        event_type: str,
+        bracket: Any,
+        *,
+        meta: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Write canonical bracket events into the existing TradeJournal queue."""
+        journal = getattr(self, "_trade_journal", None)
+        if journal is None:
+            return
+
+        metadata = self._correlation_for_bracket(bracket)
+        metadata.update(dict(meta or {}))
+        metadata.setdefault(
+            "bracket_id", str(getattr(bracket, "bracket_id", "") or "")
+        )
+        metadata.setdefault(
+            "entry_order_id", str(getattr(bracket, "entry_order_id", "") or "")
+        )
+        metadata.setdefault(
+            "trade_lifecycle_id",
+            str(getattr(bracket, "trade_lifecycle_id", "") or ""),
+        )
+        event_name = _CANONICAL_BRACKET_EVENTS.get(str(event_type))
+        if event_name:
+            metadata["event_name"] = event_name
+
+        exit_order_id = str(
+            metadata.get("exit_order_id")
+            or getattr(bracket, "exit_order_id", "")
+            or getattr(bracket, "pending_exit_order_id", "")
+            or ""
+        )
+        journal_order_id = (
+            exit_order_id
+            if str(event_type) in {"EXIT_SUBMITTED", "EXIT_FILLED"} and exit_order_id
+            else str(getattr(bracket, "entry_order_id", "") or "")
+        )
+        price = (
+            _positive_journal_price(metadata.get("fill_price"))
+            or _positive_journal_price(metadata.get("exit_price"))
+            or _positive_journal_price(getattr(bracket, "last_ltp", None))
+            or _positive_journal_price(getattr(bracket, "entry_fill_price", None))
+            or _positive_journal_price(getattr(bracket, "entry_price", None))
+            or 0.0
+        )
+
+        try:
+            journal.log_event(
+                {
+                    "event_type": str(event_type),
+                    "timestamp": time.time(),
+                    "symbol": str(getattr(bracket, "symbol", "") or ""),
+                    "side": str(getattr(bracket, "side", "") or ""),
+                    "qty": int(getattr(bracket, "remaining_quantity", 0) or 0),
+                    "price": float(price),
+                    "order_id": journal_order_id or None,
+                    "meta": metadata,
+                }
+            )
+            if str(event_type) == "EXIT_TRIGGERED":
+                setattr(
+                    bracket,
+                    "_canonical_exit_trigger_journaled_at",
+                    float(getattr(bracket, "exit_triggered_at", 0.0) or time.time()),
+                )
+        except Exception as exc:  # noqa: BLE001
+            _core.LOGGER.error(
+                "CANONICAL_BRACKET_JOURNAL_FAILED event=%s bracket_id=%s error=%s",
+                event_type,
+                getattr(bracket, "bracket_id", ""),
+                exc,
+            )
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         # State is initialized before the inherited exit watchdog starts. The
