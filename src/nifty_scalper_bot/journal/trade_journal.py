@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from nifty_scalper_bot.journal.trade_ledger import (
+    backfill_trade_ledger,
     ensure_trade_ledger_schema,
     materialize_trade_events,
 )
@@ -210,6 +211,8 @@ class TradeJournal:
 
         while True:
             try:
+                if conn is None:
+                    conn = self._ensure_connection(conn)
                 timeout = max(0.0, deadline - time.monotonic())
                 item = self._queue.get(timeout=timeout)
 
@@ -339,6 +342,7 @@ class TradeJournal:
             "ON trade_events(signal_id, timestamp)"
         )
         ensure_trade_ledger_schema(conn)
+        backfill_trade_ledger(conn)
 
         return conn
 
