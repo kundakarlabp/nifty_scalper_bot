@@ -68,8 +68,11 @@ def test_unknown_token_not_purged_without_symbol_identity() -> None:
     assert purged == []
     assert 999 in mdm._desired_tokens  # noqa: SLF001
 
-def test_purge_work_is_bounded_by_live_state_not_instrument_catalogue(monkeypatch) -> None:
-    """Large instrument maps must not make live subscription cleanup O(catalogue size)."""
+
+def test_purge_work_is_bounded_by_live_state_not_instrument_catalogue(
+    monkeypatch,
+) -> None:
+    """Keep purge complexity independent of the full instrument catalogue."""
     import nifty_scalper_bot.data.market_data_manager as mdm_module
 
     mdm = MarketDataManager(websocket=None)
