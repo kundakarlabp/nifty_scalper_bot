@@ -1,5 +1,10 @@
 # Market data completion validation
 
+The market-data manager classifies stale required symbols; the polling decision
+helper evaluates that health state. `core/app.py` owns the polling supervisor,
+including activation and recovery cooldown. Polling remains a recovery path and
+must not replace fresher WebSocket FULL quotes.
+
 Run these checks locally before increasing live size:
 
 ```bash

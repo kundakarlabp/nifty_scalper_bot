@@ -64,7 +64,10 @@ jobs:
           cat /tmp/changed-python.txt
       - name: Ruff changed Python
         if: steps.changed.outputs.has_python == 'true'
-        run: xargs -r python -m ruff check < /tmp/changed-python.txt
+        run: >-
+          python scripts/check_changed_ruff.py
+          --base "$(cat /tmp/quality-base.txt)"
+          --files-from /tmp/changed-python.txt
       - name: Black changed Python
         if: steps.changed.outputs.has_python == 'true'
         run: >-
@@ -73,12 +76,10 @@ jobs:
           --files-from /tmp/changed-python.txt
       - name: Mypy changed production Python
         if: steps.changed.outputs.has_python == 'true'
-        shell: bash
-        run: |
-          grep '^src/nifty_scalper_bot/.*\.py$' /tmp/changed-python.txt > /tmp/changed-production.txt || true
-          if [[ -s /tmp/changed-production.txt ]]; then
-            xargs -r python -m mypy --follow-imports=skip < /tmp/changed-production.txt
-          fi
+        run: >-
+          python scripts/check_changed_mypy.py
+          --base "$(cat /tmp/quality-base.txt)"
+          --files-from /tmp/changed-python.txt
 
   tests:
     runs-on: ubuntu-latest
