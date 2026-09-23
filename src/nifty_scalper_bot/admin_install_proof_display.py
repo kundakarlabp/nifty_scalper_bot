@@ -8,7 +8,7 @@ _REQUIRED_FLAGS = (
     ("market_data_manager_hardened", "MDM"),
     ("websocket_hardened", "WebSocket"),
     ("datahub_synthetic_guard_installed", "DataHub synthetic guard"),
-    ("polling_failover_runtime_patch_installed", "Polling failover"),
+    ("polling_failover_native_owner", "Polling failover"),
     ("core_app_import_hook_installed", "core.app hook"),
     ("datahub_import_hook_installed", "DataHub hook"),
 )

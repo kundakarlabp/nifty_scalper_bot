@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import importlib
 import inspect
 import sys
+import types
 
 
 def _reset_core_modules() -> None:
@@ -13,6 +15,17 @@ def _reset_core_modules() -> None:
             sys.modules.pop(name, None)
 
 
+def _assert_native_polling_owner(app_module) -> None:
+    supervisor = getattr(app_module, "_polling_failover_supervisor_iteration", None)
+    assert callable(supervisor)
+    assert getattr(supervisor, "__module__", None) == "nifty_scalper_bot.core.app"
+    assert not hasattr(app_module, "_polling_failover_runtime_patch_installed")
+    assert (
+        "quote_stale_ms"
+        in inspect.signature(app_module._polling_fallback_degraded).parameters
+    )
+
+
 def test_core_package_import_does_not_eagerly_import_app_module() -> None:
     _reset_core_modules()
 
@@ -21,70 +34,52 @@ def test_core_package_import_does_not_eagerly_import_app_module() -> None:
     assert "nifty_scalper_bot.core.app" not in sys.modules
 
 
-def test_direct_core_app_import_applies_polling_patch_without_lazy_getattr() -> None:
+def test_direct_core_app_import_uses_native_polling_owner() -> None:
     _reset_core_modules()
 
     app_module = importlib.import_module("nifty_scalper_bot.core.app")
 
-    assert (
-        getattr(app_module, "_polling_failover_runtime_patch_installed", False) is True
-    )
-    supervisor = getattr(app_module, "_polling_failover_supervisor_iteration", None)
-    assert callable(supervisor)
-    assert getattr(supervisor, "_nifty_polling_supervisor_version", None) == 2
-    assert "quote_stale_ms" in inspect.signature(
-        app_module._polling_fallback_degraded
-    ).parameters
+    _assert_native_polling_owner(app_module)
 
 
-def test_core_lazy_app_resolution_applies_polling_patch() -> None:
+def test_core_lazy_app_resolution_preserves_native_polling_owner() -> None:
     core = importlib.import_module("nifty_scalper_bot.core")
     app_module = core.__getattr__("app")
 
-    assert (
-        getattr(app_module, "_polling_failover_runtime_patch_installed", False) is True
-    )
-    supervisor = getattr(app_module, "_polling_failover_supervisor_iteration", None)
-    assert callable(supervisor)
-    assert getattr(supervisor, "_nifty_polling_supervisor_version", None) == 2
+    _assert_native_polling_owner(app_module)
 
 
-def test_nifty_scalper_app_lazy_resolution_applies_app_patches() -> None:
+def test_nifty_scalper_app_lazy_resolution_preserves_native_polling_owner() -> None:
     core = importlib.import_module("nifty_scalper_bot.core")
     app_cls = core.NiftyScalperApp
     app_module = sys.modules.get("nifty_scalper_bot.core.app")
 
     assert app_cls is getattr(app_module, "NiftyScalperApp")
-    assert (
-        getattr(app_module, "_polling_failover_runtime_patch_installed", False) is True
-    )
+    _assert_native_polling_owner(app_module)
 
 
-def test_installed_polling_failover_iteration_accepts_recover_cooldown() -> None:
-    """The installed supervisor must accept core.app's complete call contract."""
-    import asyncio
-    import types
-
-    from nifty_scalper_bot.core import polling_failover_runtime as pfr
-
-    app_module = types.SimpleNamespace()
-    pfr.apply_app_patch(app_module)
-    installed = app_module._polling_failover_supervisor_iteration
-
+def test_native_polling_iteration_accepts_recover_cooldown_and_async_stop() -> None:
+    app_module = importlib.import_module("nifty_scalper_bot.core.app")
     stops: list[bool] = []
 
     class _Fallback:
         def is_running(self) -> bool:
             return True
 
+        async def set_websocket_mode(self, _enabled: bool) -> None:
+            return None
+
         async def stop(self) -> None:
             stops.append(True)
 
     ctx = types.SimpleNamespace(
-        websocket_manager=None, market_data_manager=None, event_loop_lagging=False
+        is_market_open_now=lambda: False,
+        websocket_manager=None,
+        market_data_manager=None,
+        event_loop_lagging=False,
     )
     result = asyncio.run(
-        installed(
+        app_module._polling_failover_supervisor_iteration(
             ctx,
             _Fallback(),
             quote_stale_ms=5000.0,
@@ -94,4 +89,6 @@ def test_installed_polling_failover_iteration_accepts_recover_cooldown() -> None
             recover_cooldown=10.0,
         )
     )
+
     assert isinstance(result, tuple) and len(result) == 2
+    assert stops == [True]

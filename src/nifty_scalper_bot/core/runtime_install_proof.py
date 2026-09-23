@@ -112,10 +112,16 @@ def build_runtime_install_proof(ctx: Any | None = None) -> dict[str, Any]:
     else:
         datahub_hardening_satisfied = False
         datahub_hardening_mode = "missing"
-    polling_failover_patched = bool(
-        _module_attr(
-            "nifty_scalper_bot.core.app", "_polling_failover_runtime_patch_installed"
-        )
+    app_module = _module("nifty_scalper_bot.core.app")
+    polling_supervisor = (
+        getattr(app_module, "_polling_failover_supervisor_iteration", None)
+        if app_module is not None
+        else None
+    )
+    polling_failover_native_owner = bool(
+        callable(polling_supervisor)
+        and getattr(polling_supervisor, "__module__", None)
+        == "nifty_scalper_bot.core.app"
     )
 
     return {
@@ -126,7 +132,7 @@ def build_runtime_install_proof(ctx: Any | None = None) -> dict[str, Any]:
         "datahub_import_hook_required": datahub_import_hook_required,
         "datahub_hardening_satisfied": datahub_hardening_satisfied,
         "datahub_hardening_mode": datahub_hardening_mode,
-        "polling_failover_runtime_patch_installed": polling_failover_patched,
+        "polling_failover_native_owner": polling_failover_native_owner,
         "core_app_import_hook_installed": core_hook_count == 1,
         "datahub_import_hook_installed": datahub_hook_count == 1,
         "import_hook_counts": {
@@ -137,7 +143,7 @@ def build_runtime_install_proof(ctx: Any | None = None) -> dict[str, Any]:
             market_data_manager_hardened
             and websocket_hardened
             and datahub_hardening_satisfied
-            and polling_failover_patched
+            and polling_failover_native_owner
             and core_hook_count == 1
         ),
     }
