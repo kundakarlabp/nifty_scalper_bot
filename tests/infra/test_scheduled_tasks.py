@@ -112,3 +112,43 @@ def test_start_background_tasks_creates_tasks(monkeypatch: pytest.MonkeyPatch) -
     assert created == tasks
     assert logger.messages[-1][0] == "Scheduled maintenance tasks created"
     assert logger.messages[-1][1]["count"] == 2
+
+
+def test_start_background_tasks_adds_replication_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> None:
+    created: list[Any] = []
+
+    class _FakeTask:
+        def __init__(self, coro: Awaitable[Any]) -> None:
+            self.coro = coro
+
+    class _Replicator:
+        def replicate_once(self) -> dict[str, int]:
+            return {"events": 0, "ledger": 0, "checkpoint": 0}
+
+    def fake_create_task(coro: Awaitable[Any]) -> _FakeTask:
+        task = _FakeTask(coro)
+        created.append(task)
+        return task
+
+    monkeypatch.setattr(asyncio, "create_task", fake_create_task)
+    monkeypatch.setattr(
+        "nifty_scalper_bot.infra.scheduled_tasks.build_supabase_trade_replicator",
+        lambda _path: _Replicator(),
+    )
+    monkeypatch.setattr(
+        "nifty_scalper_bot.infra.scheduled_tasks.replication_interval_seconds",
+        lambda: 30.0,
+    )
+
+    manager = _DummyOrderManager(history_path=tmp_path / "orders.jsonl")
+    journal = type("_Journal", (), {"db_path": tmp_path / "trades.db"})()
+    logger = _DummyLogger()
+
+    tasks = start_background_tasks(manager, logger, trade_journal=journal)
+
+    assert len(tasks) == 3
+    assert created == tasks
+    assert logger.messages[-1][1]["count"] == 3
