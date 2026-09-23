@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import sqlite3
 
+import pytest
+
 from nifty_scalper_bot.journal.trade_journal import TradeJournal
 
 
@@ -47,6 +49,39 @@ def test_trade_decision_uses_trace_as_signal_correlation(tmp_path) -> None:
     assert event["event_name"] == "signal.evaluated"
     assert event["signal_id"] == "trace-1"
     assert event["reason_code"] == "candidate_not_ready"
+
+
+@pytest.mark.parametrize(
+    ("event_type", "event_name"),
+    [
+        ("BRACKET_ARMED", "bracket.armed"),
+        ("TRAIL_UPDATED", "trail.updated"),
+        ("EXIT_TRIGGERED", "exit.triggered"),
+        ("EXIT_SUBMITTED", "exit.submitted"),
+        ("EXIT_FILLED", "exit.filled"),
+        ("BRACKET_CLOSED", "trade.closed"),
+    ],
+)
+def test_post_entry_events_have_canonical_names(
+    tmp_path, event_type: str, event_name: str
+) -> None:
+    journal = TradeJournal(str(tmp_path / "journal.db"))
+
+    event = journal._normalize_event(
+        {
+            "event_type": event_type,
+            "meta": {
+                "trade_id": "TRD_sig-1",
+                "signal_id": "sig-1",
+                "trace_id": "trace-1",
+            },
+        }
+    )
+
+    assert event["event_name"] == event_name
+    assert event["trade_id"] == "TRD_sig-1"
+    assert event["signal_id"] == "sig-1"
+    assert event["trace_id"] == "trace-1"
 
 
 def test_existing_trade_events_table_is_migrated_in_place(tmp_path) -> None:
