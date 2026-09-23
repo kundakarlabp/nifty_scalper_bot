@@ -34,6 +34,10 @@ def install_market_data_manager_hardening(manager_cls: type[Any]) -> None:
     if bool(getattr(manager_cls, _INSTALLED_ATTR, False)):
         return
 
+    native_candle_lifecycle_owner = bool(
+        getattr(manager_cls, "_native_candle_flush_lifecycle_owner", False)
+    )
+
     original_init = getattr(manager_cls, "__init__", None)
     if callable(original_init):
         setattr(manager_cls, _ORIGINAL_INIT_ATTR, original_init)
@@ -73,33 +77,53 @@ def install_market_data_manager_hardening(manager_cls: type[Any]) -> None:
         setattr(manager_cls, _ORIGINAL_ENQUEUE_ATTR, original_enqueue)
         setattr(manager_cls, "_enqueue_tick_threadsafe", _enqueue_tick_threadsafe_hardened)
 
-    original_ensure_consumer = getattr(manager_cls, "_ensure_tick_consumer", None)
-    if callable(original_ensure_consumer):
-        setattr(manager_cls, _ORIGINAL_ENSURE_CONSUMER_ATTR, original_ensure_consumer)
+    if not native_candle_lifecycle_owner:
+        original_ensure_consumer = getattr(manager_cls, "_ensure_tick_consumer", None)
+        if callable(original_ensure_consumer):
+            setattr(
+                manager_cls,
+                _ORIGINAL_ENSURE_CONSUMER_ATTR,
+                original_ensure_consumer,
+            )
 
-        def _ensure_tick_consumer_with_candle_flush(self: Any, reason: str) -> None:
-            original_ensure_consumer(self, reason)
-            self._ensure_candle_flush_task(reason=reason)
+            def _ensure_tick_consumer_with_candle_flush(
+                self: Any, reason: str
+            ) -> None:
+                original_ensure_consumer(self, reason)
+                self._ensure_candle_flush_task(reason=reason)
 
-        setattr(manager_cls, "_ensure_tick_consumer", _ensure_tick_consumer_with_candle_flush)
+            setattr(
+                manager_cls,
+                "_ensure_tick_consumer",
+                _ensure_tick_consumer_with_candle_flush,
+            )
 
-    original_stop = getattr(manager_cls, "stop", None)
-    if callable(original_stop):
-        setattr(manager_cls, _ORIGINAL_STOP_ATTR, original_stop)
+        original_stop = getattr(manager_cls, "stop", None)
+        if callable(original_stop):
+            setattr(manager_cls, _ORIGINAL_STOP_ATTR, original_stop)
 
-        def _stop_with_hardening(self: Any) -> None:
-            self._stop_candle_flush_task()
-            self._stop_fallback_tick_worker()
-            original_stop(self)
+            def _stop_with_hardening(self: Any) -> None:
+                self._stop_candle_flush_task()
+                self._stop_fallback_tick_worker()
+                original_stop(self)
 
-        setattr(manager_cls, "stop", _stop_with_hardening)
+            setattr(manager_cls, "stop", _stop_with_hardening)
 
     setattr(manager_cls, "has_fresh_ws_ltp", _has_fresh_ws_ltp_strict)
     setattr(manager_cls, "_ensure_tick_worker", _ensure_tick_worker_thread_queue)
     setattr(manager_cls, "_tick_worker_loop", _tick_worker_loop_thread_queue)
     setattr(manager_cls, "_put_fallback_tick_nowait", _put_fallback_tick_nowait)
-    setattr(manager_cls, "_ensure_candle_flush_task", _ensure_candle_flush_task)
-    setattr(manager_cls, "_stop_candle_flush_task", _stop_candle_flush_task)
+    if not native_candle_lifecycle_owner:
+        setattr(
+            manager_cls,
+            "_ensure_candle_flush_task",
+            _ensure_candle_flush_task,
+        )
+        setattr(
+            manager_cls,
+            "_stop_candle_flush_task",
+            _stop_candle_flush_task,
+        )
     setattr(manager_cls, "_stop_fallback_tick_worker", _stop_fallback_tick_worker)
     setattr(manager_cls, "flush_due_candles", _flush_due_candles)
     setattr(manager_cls, _INSTALLED_ATTR, True)
@@ -110,10 +134,21 @@ def _initialise_hardening_state(self: Any) -> None:
     self._fallback_tick_queue: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=maxsize)
     if not isinstance(getattr(self, "_tick_worker_stop", None), threading.Event):
         self._tick_worker_stop = threading.Event()
-    self._candle_flush_task: asyncio.Task[None] | None = None
-    self._candle_flush_interval_s = _float_env("MDM_CANDLE_FLUSH_INTERVAL_SECONDS", 1.0, minimum=0.25)
-    self._candle_flush_grace_s = _float_env("MDM_CANDLE_FLUSH_GRACE_SECONDS", 1.5, minimum=0.0)
-    self._last_candle_flush_log_mono = 0.0
+    if not bool(
+        getattr(type(self), "_native_candle_flush_lifecycle_owner", False)
+    ):
+        self._candle_flush_task: asyncio.Task[None] | None = None
+        self._candle_flush_interval_s = _float_env(
+            "MDM_CANDLE_FLUSH_INTERVAL_SECONDS",
+            1.0,
+            minimum=0.25,
+        )
+        self._candle_flush_grace_s = _float_env(
+            "MDM_CANDLE_FLUSH_GRACE_SECONDS",
+            1.5,
+            minimum=0.0,
+        )
+        self._last_candle_flush_log_mono = 0.0
 
 
 def _float_env(name: str, default: float, *, minimum: float) -> float:
