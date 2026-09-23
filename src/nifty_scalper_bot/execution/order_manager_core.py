@@ -8412,7 +8412,7 @@ class OrderManager:
             return [order for order in self._history if order.timestamp.date() == today]
 
     def _confirm_fill_fast(self, order_id: str, timeout_ms: int = 2000) -> bool:
-        """Confirm a broker fill only when status, quantity, and execution price agree."""
+        """Confirm a fill only from broker status, quantity, and execution price."""
         import time
 
         start = time.monotonic()
@@ -8468,7 +8468,8 @@ class OrderManager:
                         payload["average_price"] = fill_price
                         self.on_order_update(payload)
                         self._logger.info(
-                            "BROKER_FILL_CONFIRMED order_id=%s qty=%s price=%.2f attempts=%s",
+                            "BROKER_FILL_CONFIRMED order_id=%s qty=%s "
+                            "price=%.2f attempts=%s",
                             order_id,
                             filled_qty,
                             fill_price,
