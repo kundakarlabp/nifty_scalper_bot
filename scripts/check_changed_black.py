@@ -172,10 +172,6 @@ def check_file(base: str, path: Path) -> tuple[bool, str]:
     try:
         if _black_check(base_path):
             clean = _black_check(path)
-            if not clean:
-                diff = _black_diff(path)
-                if diff:
-                    print(diff)
             return clean, (
                 f"PASS {path}: Black-clean file remains clean"
                 if clean
