@@ -35,6 +35,17 @@ def test_normalize_event_adds_canonical_correlation_fields(tmp_path) -> None:
     assert event["strategy"] == "VWAP"
 
 
+def test_normalize_event_uses_canonical_runtime_build_sha(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("GIT_COMMIT_SHA", "abc123")
+    journal = TradeJournal(str(tmp_path / "journal.db"))
+
+    event = journal._normalize_event({"event_type": "TRADE_DECISION"})
+
+    assert event["build_sha"] == "abc123"
+
+
 def test_trade_decision_uses_trace_as_signal_correlation(tmp_path) -> None:
     journal = TradeJournal(str(tmp_path / "journal.db"))
     event = journal._normalize_event(

@@ -91,16 +91,18 @@ def test_pnl_diagnostics_do_not_block_live_readiness() -> None:
 
 def test_canonical_app_pnl_diagnostics_are_filtered_before_arming() -> None:
     app_source = Path("src/nifty_scalper_bot/core/app.py").read_text(encoding="utf-8")
-    patch_source = Path(
-        "src/nifty_scalper_bot/execution/pnl_nonblocking_patch.py"
-    ).read_text(encoding="utf-8")
+    readiness_path = Path("src/nifty_scalper_bot/execution/readiness.py")
+    readiness_source = readiness_path.read_text(encoding="utf-8")
+    ownership_path = Path("src/nifty_scalper_bot/execution/ownership.py")
+    ownership_source = ownership_path.read_text(encoding="utf-8")
 
     assert "current_pnl_reconciliation_blocker" in app_source
     assert "missing.append(str(pnl_blocker))" in app_source
-    assert "_normalize_readiness_without_pnl_blocking" in patch_source
-    assert '"pnl_baseline_uninitialized"' in patch_source
-    assert '"pnl_session_date_unverified"' in patch_source
-    assert '"pnl_reconciliation_mismatch"' in patch_source
+    assert "is_pnl_diagnostic_reason" in readiness_source
+    assert "is_pnl_diagnostic_reason" in ownership_source
+    assert '"pnl_baseline_uninitialized"' in readiness_source
+    assert '"pnl_session_date_unverified"' in readiness_source
+    assert '"pnl_reconciliation_mismatch"' in readiness_source
 
 
 def test_canonical_app_requires_pnl_baseline_before_broker_hydration() -> None:

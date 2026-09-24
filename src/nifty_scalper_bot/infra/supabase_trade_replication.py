@@ -410,7 +410,7 @@ class SupabaseTradeReplicator:
             "updated_at": _iso_utc(float(row["updated_at"])),
             "created_at": _iso_utc(float(row["created_at"])),
         }
-        return {key: value for key, value in payload.items() if value is not None}
+        return payload
 
 
 def _post_json(
