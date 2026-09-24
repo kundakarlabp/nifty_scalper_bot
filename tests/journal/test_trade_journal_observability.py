@@ -652,8 +652,7 @@ def test_trade_journal_worker_backfills_existing_events_once(tmp_path) -> None:
         },
     ]
     with sqlite3.connect(db_path) as conn:
-        conn.execute(
-            """
+        conn.execute("""
             CREATE TABLE trade_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp REAL NOT NULL,
@@ -666,8 +665,7 @@ def test_trade_journal_worker_backfills_existing_events_once(tmp_path) -> None:
                 meta_json TEXT,
                 event_json TEXT NOT NULL
             )
-            """
-        )
+            """)
         for event in events:
             _seed_legacy_trade_event(
                 conn,
@@ -691,13 +689,11 @@ def test_trade_journal_worker_backfills_existing_events_once(tmp_path) -> None:
             """,
             ("trade-old-1",),
         ).fetchone()
-        migration_count = conn.execute(
-            """
+        migration_count = conn.execute("""
             SELECT COUNT(*)
             FROM trade_journal_migrations
             WHERE name = 'trade_ledger_historical_backfill_v1'
-            """
-        ).fetchone()[0]
+            """).fetchone()[0]
 
     assert row == ("CLOSED", 100.0, 110.0, 650.0, 575.0, 1, 20.0)
     assert migration_count == 1
@@ -706,23 +702,17 @@ def test_trade_journal_worker_backfills_existing_events_once(tmp_path) -> None:
     second.start()
     second.stop()
     with sqlite3.connect(db_path) as conn:
-        assert (
-            conn.execute(
-                """
+        assert conn.execute("""
                 SELECT COUNT(*)
                 FROM trade_journal_migrations
                 WHERE name = 'trade_ledger_historical_backfill_v1'
-                """
-            ).fetchone()[0]
-            == 1
-        )
+                """).fetchone()[0] == 1
 
 
 def test_historical_backfill_skips_malformed_event_json(tmp_path) -> None:
     db_path = tmp_path / "journal.db"
     with sqlite3.connect(db_path) as conn:
-        conn.execute(
-            """
+        conn.execute("""
             CREATE TABLE trade_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp REAL NOT NULL,
@@ -735,8 +725,7 @@ def test_historical_backfill_skips_malformed_event_json(tmp_path) -> None:
                 meta_json TEXT,
                 event_json TEXT NOT NULL
             )
-            """
-        )
+            """)
         _seed_legacy_trade_event(
             conn,
             event_type="BROKEN",
@@ -779,4 +768,3 @@ def test_historical_backfill_skips_malformed_event_json(tmp_path) -> None:
             ).fetchone()[0]
             == "CLOSED"
         )
-
