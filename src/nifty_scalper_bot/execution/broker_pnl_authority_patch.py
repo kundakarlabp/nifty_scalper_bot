@@ -438,6 +438,8 @@ def refresh_broker_pnl_diagnostic(
             and positions_marked is not None
             and abs(positions_marked - positions_closed) <= _MATCH_TOLERANCE_RUPEES
         )
+        broker_evidence: float | None
+        evidence_source: str
         if tradebook_realized is not None and tradebook_fills > 0:
             broker_evidence = tradebook_realized
             evidence_source = "zerodha_trades"
