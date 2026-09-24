@@ -3229,8 +3229,7 @@ class StrategyRunner:
         snapshot: dict[str, float] = {}
 
         try:
-            data_source = self._data_hub or self._market_data
-            quote = data_source.get_quote(base_symbol)
+            quote = self.get_quote(base_symbol)
         except Exception as exc:
             self._logger.warning(
                 "underlying_snapshot_error",
@@ -12088,7 +12087,7 @@ class StrategyRunner:
         return bool(depth_payload) or has_top_of_book
 
     def get_quote(self, symbol: str) -> dict[str, Any] | None:
-        """Return freshest normalized quote available from DataHub/MDM."""
+        """Return freshest cached quote available from DataHub/MDM."""
         normalized = normalize_symbol(symbol)
         for source in (self._data_hub, self._market_data):
             if source is None:
@@ -12098,7 +12097,13 @@ class StrategyRunner:
                 if not callable(fn):
                     continue
                 try:
-                    raw = fn(normalized)
+                    if name == "get_quote":
+                        try:
+                            raw = fn(normalized, allow_pull=False)
+                        except TypeError:
+                            raw = fn(normalized)
+                    else:
+                        raw = fn(normalized)
                 except Exception:
                     continue
                 if raw is None:
@@ -21889,8 +21894,7 @@ class StrategyRunner:
 
         spread = 0.0
         try:
-            _quote_source = self._data_hub or self._market_data
-            quote = _quote_source.get_quote(symbol) if _quote_source else None
+            quote = self.get_quote(symbol)
             if quote:
                 ask_price = float(quote.get("ask") or quote.get("ask_price") or 0.0)
                 bid_price = float(quote.get("bid") or quote.get("bid_price") or 0.0)
