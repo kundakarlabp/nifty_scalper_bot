@@ -121,9 +121,9 @@ def test_lifecycle_safety_methods_are_not_replaced_by_public_facades() -> None:
 def test_market_aware_bracket_hooks_are_explicit_native_methods() -> None:
     bracket_source = (EXECUTION / "bracket_manager.py").read_text(encoding="utf-8")
     ownership_source = (EXECUTION / "ownership.py").read_text(encoding="utf-8")
-    extension_source = (
-        EXECUTION / "market_aware_profit_extension.py"
-    ).read_text(encoding="utf-8")
+    extension_source = (EXECUTION / "market_aware_profit_extension.py").read_text(
+        encoding="utf-8"
+    )
 
     assert "_apply_market_aware_profit_extension" not in bracket_source
     assert "apply_patches(" not in bracket_source
