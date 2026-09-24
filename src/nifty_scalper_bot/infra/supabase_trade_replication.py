@@ -107,12 +107,18 @@ class SupabaseTradeReplicator:
         self._transport = transport or _post_json
 
     def replicate_once(self) -> dict[str, int]:
-        """Replicate one bounded batch; checkpoint only after remote success."""
+        """Replicate one bounded event batch plus one independent ledger batch."""
         if not self._db_path.exists():
             return {"events": 0, "ledger": 0, "checkpoint": 0}
 
-        event_rows, ledger_rows, checkpoint = self._load_batch()
-        if not event_rows:
+        (
+            event_rows,
+            ledger_rows,
+            checkpoint,
+            ledger_updated_at,
+            ledger_trade_id,
+        ) = self._load_batch()
+        if not event_rows and not ledger_rows:
             return {"events": 0, "ledger": 0, "checkpoint": checkpoint}
 
         events = [self._event_payload(row) for row in event_rows]
@@ -130,8 +136,15 @@ class SupabaseTradeReplicator:
             detail = response.get("error") or response
             raise RuntimeError(f"Supabase trade replication rejected: {detail}")
 
-        last_event_id = int(event_rows[-1]["id"])
-        self._store_checkpoint(last_event_id)
+        last_event_id = int(event_rows[-1]["id"]) if event_rows else checkpoint
+        if ledger_rows:
+            ledger_updated_at = float(ledger_rows[-1]["updated_at"])
+            ledger_trade_id = str(ledger_rows[-1]["trade_id"])
+        self._store_progress(
+            last_event_id,
+            ledger_updated_at=ledger_updated_at,
+            ledger_trade_id=ledger_trade_id,
+        )
         LOGGER.info(
             "SUPABASE_TRADE_REPLICATION_SUCCESS events=%d ledger=%d checkpoint=%d",
             len(events),
@@ -152,12 +165,13 @@ class SupabaseTradeReplicator:
 
     def _load_batch(
         self,
-    ) -> tuple[list[sqlite3.Row], list[sqlite3.Row], int]:
+    ) -> tuple[list[sqlite3.Row], list[sqlite3.Row], int, float, str]:
         with sqlite3.connect(str(self._db_path), timeout=1.0) as conn:
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA busy_timeout=1000")
             self._ensure_checkpoint_schema(conn)
-            checkpoint = self._checkpoint(conn)
+            checkpoint, ledger_updated_at, ledger_trade_id = self._progress(conn)
+
             try:
                 events = list(
                     conn.execute(
@@ -173,29 +187,27 @@ class SupabaseTradeReplicator:
                 )
             except sqlite3.OperationalError as exc:
                 if "no such table" in str(exc).lower():
-                    return [], [], checkpoint
-                raise
+                    events = []
+                else:
+                    raise
 
-            trade_ids: set[str] = set()
-            for row in events:
-                trade_id = dict(row).get("trade_id")
-                if trade_id not in (None, ""):
-                    trade_ids.add(str(trade_id))
-            sorted_trade_ids = sorted(trade_ids)
-            if not sorted_trade_ids:
-                return events, [], checkpoint
-
-            placeholders = ",".join("?" for _ in sorted_trade_ids)
             try:
                 ledger = list(
                     conn.execute(
-                        f"""
+                        """
                         SELECT *
                         FROM trade_ledger
-                        WHERE trade_id IN ({placeholders})
-                        ORDER BY trade_id
+                        WHERE updated_at > ?
+                           OR (updated_at = ? AND trade_id > ?)
+                        ORDER BY updated_at, trade_id
+                        LIMIT ?
                         """,
-                        sorted_trade_ids,
+                        (
+                            ledger_updated_at,
+                            ledger_updated_at,
+                            ledger_trade_id,
+                            self._batch_size,
+                        ),
                     )
                 )
             except sqlite3.OperationalError as exc:
@@ -203,7 +215,14 @@ class SupabaseTradeReplicator:
                     ledger = []
                 else:
                     raise
-            return events, ledger, checkpoint
+
+            return (
+                events,
+                ledger,
+                checkpoint,
+                ledger_updated_at,
+                ledger_trade_id,
+            )
 
     @staticmethod
     def _ensure_checkpoint_schema(conn: sqlite3.Connection) -> None:
@@ -211,9 +230,24 @@ class SupabaseTradeReplicator:
             CREATE TABLE IF NOT EXISTS replication_state (
                 sink TEXT PRIMARY KEY,
                 last_event_id INTEGER NOT NULL DEFAULT 0,
+                last_ledger_updated_at REAL NOT NULL DEFAULT 0,
+                last_ledger_trade_id TEXT NOT NULL DEFAULT '',
                 last_success_at REAL
             )
             """)
+        existing = {
+            str(row[1]) for row in conn.execute("PRAGMA table_info(replication_state)")
+        }
+        if "last_ledger_updated_at" not in existing:
+            conn.execute(
+                "ALTER TABLE replication_state "
+                "ADD COLUMN last_ledger_updated_at REAL NOT NULL DEFAULT 0"
+            )
+        if "last_ledger_trade_id" not in existing:
+            conn.execute(
+                "ALTER TABLE replication_state "
+                "ADD COLUMN last_ledger_trade_id TEXT NOT NULL DEFAULT ''"
+            )
         conn.execute(
             """
             INSERT OR IGNORE INTO replication_state (sink, last_event_id)
@@ -223,14 +257,26 @@ class SupabaseTradeReplicator:
         )
 
     @staticmethod
-    def _checkpoint(conn: sqlite3.Connection) -> int:
+    def _progress(conn: sqlite3.Connection) -> tuple[int, float, str]:
         row = conn.execute(
-            "SELECT last_event_id FROM replication_state WHERE sink = ?",
+            """
+            SELECT last_event_id, last_ledger_updated_at, last_ledger_trade_id
+            FROM replication_state
+            WHERE sink = ?
+            """,
             (_REPLICATION_SINK,),
         ).fetchone()
-        return max(0, int(row[0] if row is not None else 0))
+        if row is None:
+            return 0, 0.0, ""
+        return max(0, int(row[0])), max(0.0, float(row[1] or 0.0)), str(row[2] or "")
 
-    def _store_checkpoint(self, event_id: int) -> None:
+    def _store_progress(
+        self,
+        event_id: int,
+        *,
+        ledger_updated_at: float,
+        ledger_trade_id: str,
+    ) -> None:
         with sqlite3.connect(str(self._db_path), timeout=1.0) as conn:
             conn.execute("PRAGMA busy_timeout=1000")
             self._ensure_checkpoint_schema(conn)
@@ -238,10 +284,17 @@ class SupabaseTradeReplicator:
                 """
                 UPDATE replication_state
                 SET last_event_id = MAX(last_event_id, ?),
+                    last_ledger_updated_at = ?,
+                    last_ledger_trade_id = ?,
                     last_success_at = strftime('%s', 'now')
                 WHERE sink = ?
                 """,
-                (int(event_id), _REPLICATION_SINK),
+                (
+                    int(event_id),
+                    float(ledger_updated_at),
+                    str(ledger_trade_id),
+                    _REPLICATION_SINK,
+                ),
             )
 
     def _event_payload(self, row: sqlite3.Row) -> dict[str, Any]:
@@ -255,22 +308,50 @@ class SupabaseTradeReplicator:
             or _optional_text(event_json.get("event_type"))
             or "UNKNOWN"
         )
+        meta = _json_object(data.get("meta_json"))
+        event_meta = event_json.get("meta")
+        if isinstance(event_meta, Mapping):
+            meta.update(event_meta)
+        completed_trade = meta.get("completed_trade")
+        if not isinstance(completed_trade, Mapping):
+            completed_trade = {}
         return {
             "source": self._source,
             "source_event_id": int(data["id"]),
             "trading_date": _trading_date(timestamp),
             "event_at": _iso_utc(timestamp),
             "event_name": event_name,
-            "trade_id": _optional_text(data.get("trade_id")),
-            "signal_id": _optional_text(data.get("signal_id")),
-            "trace_id": _optional_text(data.get("trace_id")),
+            "trade_id": _first_text(
+                data.get("trade_id"),
+                meta.get("trade_id"),
+                completed_trade.get("trade_id"),
+            ),
+            "signal_id": _first_text(
+                data.get("signal_id"),
+                meta.get("signal_id"),
+                completed_trade.get("signal_id"),
+            ),
+            "trace_id": _first_text(
+                data.get("trace_id"),
+                meta.get("trace_id"),
+                completed_trade.get("trace_id"),
+            ),
             "symbol": _optional_text(data.get("symbol")),
             "side": _optional_text(data.get("side")),
             "qty": _optional_int(data.get("qty")),
             "price": _optional_float(data.get("price")),
             "order_id": _optional_text(data.get("order_id")),
-            "strategy": _optional_text(data.get("strategy")),
-            "reason_code": _optional_text(data.get("reason_code")),
+            "strategy": _first_text(
+                data.get("strategy"),
+                meta.get("strategy"),
+                completed_trade.get("strategy"),
+                completed_trade.get("strategy_name"),
+            ),
+            "reason_code": _first_text(
+                data.get("reason_code"),
+                meta.get("reason_code"),
+                meta.get("reason"),
+            ),
             "build_sha": _optional_text(data.get("build_sha")),
             "payload": event_json,
         }
@@ -385,6 +466,14 @@ def _trading_date(timestamp: float | None) -> str:
         .date()
         .isoformat()
     )
+
+
+def _first_text(*values: Any) -> str | None:
+    for value in values:
+        resolved = _optional_text(value)
+        if resolved is not None:
+            return resolved
+    return None
 
 
 def _optional_text(value: Any) -> str | None:

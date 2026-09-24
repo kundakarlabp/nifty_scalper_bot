@@ -154,12 +154,12 @@ def test_failed_remote_batch_does_not_advance_checkpoint(tmp_path: Any) -> None:
         replicator.replicate_once()
 
     with sqlite3.connect(db_path) as conn:
-        checkpoint = conn.execute("""
-            SELECT last_event_id
+        progress = conn.execute("""
+            SELECT last_event_id, last_ledger_updated_at, last_ledger_trade_id
             FROM replication_state
             WHERE sink = 'supabase_trade_observability'
-            """).fetchone()[0]
-    assert checkpoint == 0
+            """).fetchone()
+    assert progress == (0, 0.0, "")
 
     calls = 0
 
@@ -213,7 +213,8 @@ def test_replication_accepts_legacy_trade_event_schema(tmp_path: Any) -> None:
                 65,
                 100.0,
                 "entry-legacy",
-                "{}",
+                '{"trade_id":"TRD_legacy-1","signal_id":"legacy-1",'
+                '"trace_id":"trace-legacy-1","strategy":"VWAP"}',
                 '{"event_type":"ORDER_FILL_CONFIRMED"}',
             ),
         )
@@ -242,9 +243,10 @@ def test_replication_accepts_legacy_trade_event_schema(tmp_path: Any) -> None:
     assert len(calls) == 1
     event = calls[0]["events"][0]
     assert event["event_name"] == "ORDER_FILL_CONFIRMED"
-    assert event["trade_id"] is None
-    assert event["signal_id"] is None
-    assert event["trace_id"] is None
+    assert event["trade_id"] == "TRD_legacy-1"
+    assert event["signal_id"] == "legacy-1"
+    assert event["trace_id"] == "trace-legacy-1"
+    assert event["strategy"] == "VWAP"
 
     with sqlite3.connect(db_path) as conn:
         columns = {
@@ -252,6 +254,59 @@ def test_replication_accepts_legacy_trade_event_schema(tmp_path: Any) -> None:
         }
     assert "event_name" not in columns
     assert "trade_id" not in columns
+
+
+def test_ledger_backfill_runs_after_event_checkpoint_already_advanced(
+    tmp_path: Any,
+) -> None:
+    db_path = tmp_path / "trades.db"
+    _write_lifecycle(db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("""
+            CREATE TABLE replication_state (
+                sink TEXT PRIMARY KEY,
+                last_event_id INTEGER NOT NULL DEFAULT 0,
+                last_success_at REAL
+            )
+            """)
+        conn.execute("""
+            INSERT INTO replication_state (sink, last_event_id)
+            VALUES ('supabase_trade_observability', 4)
+            """)
+
+    calls: list[dict[str, Any]] = []
+
+    def transport(
+        _url: str,
+        payload: Mapping[str, Any],
+        _timeout: float,
+    ) -> Mapping[str, Any]:
+        calls.append(dict(payload))
+        return {"ok": True}
+
+    replicator = SupabaseTradeReplicator(
+        db_path=db_path,
+        endpoint_url="https://example.test/ingest",
+        transport=transport,
+    )
+
+    first = replicator.replicate_once()
+    second = replicator.replicate_once()
+
+    assert first == {"events": 0, "ledger": 1, "checkpoint": 4}
+    assert second == {"events": 0, "ledger": 0, "checkpoint": 4}
+    assert len(calls) == 1
+    assert calls[0]["events"] == []
+    assert calls[0]["ledger"][0]["trade_id"] == "trade-1"
+
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute("""
+            SELECT last_event_id, last_ledger_updated_at, last_ledger_trade_id
+            FROM replication_state
+            WHERE sink = 'supabase_trade_observability'
+            """).fetchone()
+
+    assert row == (4, 1_790_000_003.0, "trade-1")
 
 
 def test_missing_database_is_a_noop(tmp_path: Any) -> None:

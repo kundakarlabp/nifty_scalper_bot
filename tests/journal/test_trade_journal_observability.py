@@ -52,6 +52,29 @@ def test_trade_decision_uses_trace_as_signal_correlation(tmp_path) -> None:
     assert event["reason_code"] == "candidate_not_ready"
 
 
+def test_closed_trade_recovers_canonical_identity_from_completed_trade(
+    tmp_path,
+) -> None:
+    journal = TradeJournal(str(tmp_path / "journal.db"))
+    event = journal._normalize_event(
+        {
+            "event_type": "BRACKET_CLOSED",
+            "meta": {
+                "completed_trade": {
+                    "signal_id": "sig-1",
+                    "trace_id": "trace-1",
+                    "strategy_name": "VWAPPro",
+                }
+            },
+        }
+    )
+
+    assert event["trade_id"] == "TRD_sig-1"
+    assert event["signal_id"] == "sig-1"
+    assert event["trace_id"] == "trace-1"
+    assert event["strategy"] == "VWAPPro"
+
+
 @pytest.mark.parametrize(
     ("event_type", "event_name"),
     [
@@ -620,7 +643,7 @@ def _seed_legacy_trade_event(
 
 def test_trade_journal_worker_backfills_existing_events_once(tmp_path) -> None:
     db_path = tmp_path / "journal.db"
-    correlation = {"trade_id": "trade-old-1", "signal_id": "sig-old-1"}
+    correlation = {"trade_id": "TRD_sig-old-1", "signal_id": "sig-old-1"}
     events = [
         {
             "event_type": "ORDER_FILL_CONFIRMED",
@@ -638,8 +661,10 @@ def test_trade_journal_worker_backfills_existing_events_once(tmp_path) -> None:
             "symbol": "NFO:NIFTYCE",
             "side": "BUY",
             "meta": {
-                **correlation,
                 "completed_trade": {
+                    "signal_id": "sig-old-1",
+                    "trace_id": "trace-old-1",
+                    "strategy_name": "VWAPPro",
                     "quantity": 65,
                     "entry_price": 100.0,
                     "exit_price": 110.0,
@@ -687,12 +712,12 @@ def test_trade_journal_worker_backfills_existing_events_once(tmp_path) -> None:
             FROM trade_ledger
             WHERE trade_id = ?
             """,
-            ("trade-old-1",),
+            ("TRD_sig-old-1",),
         ).fetchone()
         migration_count = conn.execute("""
             SELECT COUNT(*)
             FROM trade_journal_migrations
-            WHERE name = 'trade_ledger_historical_backfill_v1'
+            WHERE name = 'trade_ledger_historical_backfill_v2_identity'
             """).fetchone()[0]
 
     assert row == ("CLOSED", 100.0, 110.0, 650.0, 575.0, 1, 20.0)
@@ -705,7 +730,7 @@ def test_trade_journal_worker_backfills_existing_events_once(tmp_path) -> None:
         assert conn.execute("""
                 SELECT COUNT(*)
                 FROM trade_journal_migrations
-                WHERE name = 'trade_ledger_historical_backfill_v1'
+                WHERE name = 'trade_ledger_historical_backfill_v2_identity'
                 """).fetchone()[0] == 1
 
 
