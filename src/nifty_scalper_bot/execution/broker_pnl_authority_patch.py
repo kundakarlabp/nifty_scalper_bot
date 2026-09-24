@@ -2,8 +2,9 @@
 
 Zerodha ``data.net`` position rows are authoritative for quantity/exposure, but
 their ``realised`` field is legacy and must not be used as the live account P&L
-authority.  This patch keeps position reconciliation unchanged while sourcing
-account-risk P&L from Zerodha margins (``m2m_realised``/``m2m_unrealised``).
+authority.  This patch keeps position reconciliation unchanged while sourcing broker P&L
+evidence from Zerodha trades/positions, with margins M2M retained as diagnostic
+fallback rather than strategy realised-P&L authority.
 
 The bot's local fill ledger remains the strategy P&L authority. Broker/account
 differences are observable diagnostics only; they never become entry/readiness
@@ -145,29 +146,92 @@ def _strategy_day_marked_pnl(
     return marked_total, closed_total, seen
 
 
+def _strategy_tradebook_realized_pnl(
+    rows: object,
+) -> tuple[float | None, int]:
+    """Calculate realized gross P&L from current-day Zerodha trade fills."""
+
+    if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes)):
+        return None, 0
+
+    inventory: dict[str, list[list[float]]] = {}
+    realized = 0.0
+    seen = 0
+    for item in rows:
+        if not isinstance(item, Mapping):
+            continue
+        symbol = _strategy_symbol(item)
+        if not symbol or not is_strategy_instrument(symbol):
+            continue
+        if str(item.get("product") or "").strip().upper() != "MIS":
+            continue
+        raw_side = item.get("transaction_type") or item.get("side") or ""
+        side = str(raw_side).strip().upper()
+        quantity = _finite_float(item.get("quantity", item.get("filled_quantity")))
+        price = _finite_float(item.get("average_price", item.get("price")))
+        if side not in {"BUY", "SELL"} or quantity is None or price is None:
+            continue
+        if quantity <= 0 or price <= 0:
+            continue
+
+        signed = float(quantity) if side == "BUY" else -float(quantity)
+        remaining = abs(signed)
+        lots = inventory.setdefault(symbol, [])
+        while remaining > 1e-9 and lots and lots[0][0] * signed < 0:
+            lot_qty, lot_price = lots[0]
+            matched = min(abs(lot_qty), remaining)
+            if signed < 0:
+                realized += (float(price) - lot_price) * matched
+            else:
+                realized += (lot_price - float(price)) * matched
+            remaining -= matched
+            lot_remaining = abs(lot_qty) - matched
+            if lot_remaining <= 1e-9:
+                lots.pop(0)
+            else:
+                lots[0][0] = lot_remaining if lot_qty > 0 else -lot_remaining
+
+        if remaining > 1e-9:
+            lots.append([remaining if signed > 0 else -remaining, float(price)])
+        seen += 1
+
+    if not seen:
+        return None, 0
+    return realized, seen
+
+
 def _zerodha_get_pnl_snapshot(self: Any) -> dict[str, Any]:
     """Return dedicated broker P&L evidence without changing exposure semantics."""
 
+    realized: float | None = None
+    unrealized: float | None = None
+    margins_error: str | None = None
     margins_fetcher = getattr(self, "get_account_margins", None)
-    if not callable(margins_fetcher):
-        raise RuntimeError("broker account margins endpoint unavailable")
-
-    margins = margins_fetcher(segment="equity")
-    realized, unrealized = _extract_account_m2m(margins)
-    if realized is None:
-        raise RuntimeError("broker margins missing m2m_realised")
+    if callable(margins_fetcher):
+        try:
+            margins = margins_fetcher(segment="equity")
+            realized, unrealized = _extract_account_m2m(margins)
+        except Exception as exc:
+            margins_error = f"{type(exc).__name__}: {exc}"
+    else:
+        margins_error = "broker account margins endpoint unavailable"
 
     day_marked: float | None = None
     day_closed: float | None = None
     day_rows = 0
     positions_error: str | None = None
+    tradebook_realized: float | None = None
+    tradebook_fill_count = 0
+    tradebook_error: str | None = None
+
+    acquire = getattr(self, "_acquire_bucket", None)
+    bucket = getattr(self, "_GENERAL_BUCKET", None)
+    request = getattr(self, "_make_request", None)
+    ensure_json = getattr(self, "_ensure_json", None)
+
     try:
-        acquire = getattr(self, "_acquire_bucket", None)
-        bucket = getattr(self, "_GENERAL_BUCKET", None)
         if callable(acquire) and bucket is not None:
             acquire(bucket)
-        request = getattr(self, "_make_request", None)
-        ensure_json = getattr(self, "_ensure_json", None)
         if callable(request) and callable(ensure_json):
             response = ensure_json(
                 request(
@@ -182,16 +246,37 @@ def _zerodha_get_pnl_snapshot(self: Any) -> dict[str, Any]:
     except Exception as exc:  # diagnostic enrichment must never impair P&L authority
         positions_error = f"{type(exc).__name__}: {exc}"
 
+    try:
+        if callable(acquire) and bucket is not None:
+            acquire(bucket)
+        if callable(request) and callable(ensure_json):
+            response = ensure_json(
+                request("GET", "/trades", operation_label="pnl.trades")
+            )
+            trades = response.get("data") if isinstance(response, Mapping) else None
+            tradebook_realized, tradebook_fill_count = _strategy_tradebook_realized_pnl(
+                trades
+            )
+    except Exception as exc:  # diagnostic enrichment must never impair P&L authority
+        tradebook_error = f"{type(exc).__name__}: {exc}"
+
+    margin_realized = None if realized is None else float(realized)
+    margin_unrealized = None if unrealized is None else float(unrealized)
     return {
-        "account_realized": float(realized),
-        "account_unrealized": (
-            None if unrealized is None else float(unrealized)
-        ),
+        "account_realized": margin_realized,
+        "account_unrealized": margin_unrealized,
         "account_total": (
-            float(realized)
-            if unrealized is None
-            else float(realized) + float(unrealized)
+            None
+            if margin_realized is None
+            else margin_realized + float(margin_unrealized or 0.0)
         ),
+        "margin_m2m_realized": margin_realized,
+        "margin_m2m_unrealized": margin_unrealized,
+        "margins_error": margins_error,
+        "strategy_tradebook_realized_gross": tradebook_realized,
+        "strategy_tradebook_fill_count": int(tradebook_fill_count),
+        "tradebook_source": "zerodha_trades",
+        "tradebook_error": tradebook_error,
         "strategy_day_marked_gross": day_marked,
         "strategy_day_closed_gross": day_closed,
         "strategy_day_rows": int(day_rows),
@@ -315,10 +400,8 @@ def refresh_broker_pnl_diagnostic(
         raw = fetcher()
         if not isinstance(raw, Mapping):
             raise RuntimeError("broker P&L snapshot is not a mapping")
-        realized = _finite_float(raw.get("account_realized"))
+        margin_realized = _finite_float(raw.get("account_realized"))
         unrealized = _finite_float(raw.get("account_unrealized"))
-        if realized is None:
-            raise RuntimeError("broker P&L snapshot missing account_realized")
     except Exception as exc:  # P&L evidence is diagnostic, never an entry blocker
         error = f"{type(exc).__name__}: {exc}"
         with getattr(self, "_lock"):
@@ -343,32 +426,65 @@ def refresh_broker_pnl_diagnostic(
     persist_baseline = False
     with getattr(self, "_lock"):
         strategy_realized = float(getattr(self, "_local_realized_pnl", 0.0) or 0.0)
-        difference = float(realized) - strategy_realized
-        status = "matched" if abs(difference) <= _MATCH_TOLERANCE_RUPEES else "mismatch"
+        tradebook_realized = _finite_float(raw.get("strategy_tradebook_realized_gross"))
+        tradebook_fills = int(
+            _finite_float(raw.get("strategy_tradebook_fill_count")) or 0
+        )
         positions_closed = _finite_float(raw.get("strategy_day_closed_gross"))
         positions_marked = _finite_float(raw.get("strategy_day_marked_gross"))
+        positions_flat = (
+            (_finite_float(raw.get("strategy_day_rows")) or 0) > 0
+            and positions_closed is not None
+            and positions_marked is not None
+            and abs(positions_marked - positions_closed) <= _MATCH_TOLERANCE_RUPEES
+        )
+        broker_evidence: float | None
+        evidence_source: str
+        if tradebook_realized is not None and tradebook_fills > 0:
+            broker_evidence = tradebook_realized
+            evidence_source = "zerodha_trades"
+        elif positions_flat:
+            broker_evidence = positions_closed
+            evidence_source = "zerodha_positions_day"
+        else:
+            broker_evidence = margin_realized
+            evidence_source = "zerodha_margins_m2m"
+
+        difference = (
+            None
+            if broker_evidence is None
+            else float(broker_evidence) - strategy_realized
+        )
+        if difference is None:
+            status = "unavailable"
+        elif abs(difference) <= _MATCH_TOLERANCE_RUPEES:
+            status = "matched"
+        else:
+            status = "mismatch"
         positions_difference = (
             None if positions_closed is None else positions_closed - strategy_realized
         )
-        if (
-            status == "mismatch"
-            and (_finite_float(raw.get("strategy_day_rows")) or 0) > 0
-            and positions_marked is not None
-            and positions_closed is not None
-            and positions_difference is not None
-            and abs(positions_marked - positions_closed) <= _MATCH_TOLERANCE_RUPEES
-            and abs(positions_difference) <= _MATCH_TOLERANCE_RUPEES
-        ):
-            status = "source_disagreement"
+        margin_difference = (
+            None
+            if margin_realized is None
+            else float(margin_realized) - strategy_realized
+        )
         snapshot = dict(raw)
         snapshot.update(
             {
-                "account_realized": float(realized),
+                "account_realized": margin_realized,
                 "account_unrealized": (
                     None if unrealized is None else float(unrealized)
                 ),
+                "margin_m2m_realized": margin_realized,
+                "margin_m2m_unrealized": (
+                    None if unrealized is None else float(unrealized)
+                ),
+                "broker_realized_evidence": broker_evidence,
+                "broker_realized_evidence_source": evidence_source,
                 "strategy_realized": strategy_realized,
                 "difference": difference,
+                "margin_vs_strategy_difference": margin_difference,
                 "positions_vs_strategy_difference": positions_difference,
                 "status": status,
                 "diagnostic_only": True,
@@ -408,28 +524,31 @@ def refresh_broker_pnl_diagnostic(
     log_fingerprint = (
         "available",
         status,
-        round(float(realized), 2),
+        None if broker_evidence is None else round(float(broker_evidence), 2),
         round(float(strategy_realized), 2),
     )
     if callable(log) and _should_emit_pnl_log(self, log_fingerprint, now_mono):
         log(
-            "PNL_BROKER_DIAGNOSTIC broker_realized=%.2f strategy_realized=%.2f "
-            "difference=%.2f status=%s source=zerodha_margins_m2m "
-            "positions_closed=%s positions_vs_strategy_difference=%s",
-            realized,
+            "PNL_BROKER_DIAGNOSTIC broker_evidence=%s strategy_realized=%.2f "
+            "difference=%s status=%s source=%s margin_m2m_realized=%s "
+            "positions_closed=%s",
+            broker_evidence,
             strategy_realized,
             difference,
             status,
+            evidence_source,
+            margin_realized,
             positions_closed,
-            positions_difference,
             extra={
                 "event": "PNL_BROKER_DIAGNOSTIC",
-                "broker_realized": float(realized),
+                "broker_realized_evidence": broker_evidence,
                 "strategy_realized": strategy_realized,
                 "difference": difference,
+                "margin_m2m_realized": margin_realized,
+                "margin_vs_strategy_difference": margin_difference,
                 "positions_vs_strategy_difference": positions_difference,
                 "status": status,
-                "source": "zerodha_margins_m2m",
+                "source": evidence_source,
                 "diagnostic_only": True,
             },
         )
@@ -459,7 +578,7 @@ def get_broker_account_realized_pnl(
     max_age_s: float | None = None,
 ) -> float | None:
     snapshot = refresh_broker_pnl_diagnostic(self, force=force)
-    realized = _finite_float(snapshot.get("account_realized"))
+    realized = _finite_float(snapshot.get("broker_realized_evidence"))
     fetched = _finite_float(snapshot.get("fetched_monotonic"))
     if realized is None or fetched is None:
         return None
@@ -502,6 +621,18 @@ def _patched_pnl_reconciliation_snapshot(self: Any) -> dict[str, object]:
             "broker_account_realized": diagnostic.get("account_realized"),
             "broker_account_unrealized": diagnostic.get("account_unrealized"),
             "broker_account_total": diagnostic.get("account_total"),
+            "broker_margin_m2m_realized": diagnostic.get("margin_m2m_realized"),
+            "broker_margin_m2m_unrealized": diagnostic.get("margin_m2m_unrealized"),
+            "broker_realized_evidence": diagnostic.get("broker_realized_evidence"),
+            "broker_realized_evidence_source": diagnostic.get(
+                "broker_realized_evidence_source"
+            ),
+            "broker_tradebook_realized_gross": diagnostic.get(
+                "strategy_tradebook_realized_gross"
+            ),
+            "broker_tradebook_fill_count": diagnostic.get(
+                "strategy_tradebook_fill_count", 0
+            ),
             "broker_strategy_day_marked_gross": diagnostic.get(
                 "strategy_day_marked_gross"
             ),
@@ -562,5 +693,6 @@ __all__ = [
     "apply_patches",
     "_extract_account_m2m",
     "_strategy_day_marked_pnl",
+    "_strategy_tradebook_realized_pnl",
     "_strip_legacy_position_pnl",
 ]
