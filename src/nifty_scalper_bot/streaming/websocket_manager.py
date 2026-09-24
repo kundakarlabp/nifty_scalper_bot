@@ -306,9 +306,7 @@ class WebSocketManager:
                 self._schedule_blocking(lambda: ticker.unsubscribe(to_remove))
         if connected and ticker is not None and to_add:
             with suppress(Exception):
-                self._schedule_blocking(
-                    lambda: self._subscribe_full(ticker, to_add)
-                )
+                self._schedule_blocking(lambda: self._subscribe_full(ticker, to_add))
                 self._log_ws_subscriptions(to_add)
 
         self._tokens = new_tokens
@@ -319,7 +317,6 @@ class WebSocketManager:
             len(to_remove),
         )
         return True
-
 
     @staticmethod
     def _subscribe_full(ticker: Any, tokens: Sequence[int]) -> None:
@@ -348,6 +345,17 @@ class WebSocketManager:
 
         del mode
         self.add_tokens(tokens)
+
+    def reassert_full_mode(self, tokens: Sequence[int]) -> bool:
+        """Reassert FULL mode for already subscribed transport tokens."""
+        wanted = sorted({int(token) for token in tokens if int(token) in self._tokens})
+        ticker = self._ticker
+        if ticker is None or not self._connected.is_set() or not wanted:
+            return False
+        with suppress(Exception):
+            self._schedule_blocking(lambda: ticker.set_mode(ticker.MODE_FULL, wanted))
+            return True
+        return False
 
     def resubscribe(self, tokens: list[int]) -> None:
         """Compatibility replay helper that delegates token-set reconciliation."""
