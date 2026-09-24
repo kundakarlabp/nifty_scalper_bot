@@ -213,10 +213,8 @@ def test_replication_accepts_legacy_trade_event_schema(tmp_path: Any) -> None:
                 65,
                 100.0,
                 "entry-legacy",
-                (
-                    '{"trade_id":"TRD_legacy-1","signal_id":"legacy-1",'
-                    '"trace_id":"trace-legacy-1","strategy":"VWAP"}'
-                ),
+                '{"trade_id":"TRD_legacy-1","signal_id":"legacy-1",'
+                '"trace_id":"trace-legacy-1","strategy":"VWAP"}',
                 '{"event_type":"ORDER_FILL_CONFIRMED"}',
             ),
         )
