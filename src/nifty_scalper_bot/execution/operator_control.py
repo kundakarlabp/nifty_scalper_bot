@@ -1,22 +1,18 @@
-"""Operator control hooks for Telegram emergency and flatten commands.
+"""Broker-aware operator control helpers for the canonical order runtime.
 
-The Telegram command layer calls methods on the service/order-manager if they
-exist. Production previously registered the commands but did not expose concrete
-RuntimeOrderManager methods, so /emergency and /flatten could end as not_wired.
-This patch adds bounded, broker-aware controls without introducing a second entry
-path.
+RuntimeOrderManager exposes explicit native methods that delegate here. Keeping
+the broker interaction helpers separate avoids import-time method replacement
+while preserving one order-entry and protective-exit authority.
 """
 
 from __future__ import annotations
 
-from contextlib import suppress
 import time
+from contextlib import suppress
 from typing import Any, Iterable, Mapping
 
 from nifty_scalper_bot.core.trading_switch import trading_switch
 from nifty_scalper_bot.utils.symbols import normalize_symbol
-
-_PATCH_APPLIED = False
 
 _OPEN_ORDER_STATUSES = {
     "OPEN",
@@ -52,7 +48,9 @@ def _as_iterable(value: Any) -> list[Any]:
     if isinstance(value, Mapping):
         for key in ("data", "positions", "orders", "net", "day"):
             nested = value.get(key)
-            if isinstance(nested, Iterable) and not isinstance(nested, (str, bytes, Mapping)):
+            if isinstance(nested, Iterable) and not isinstance(
+                nested, (str, bytes, Mapping)
+            ):
                 return list(nested)
         return [value]
     if isinstance(value, Iterable) and not isinstance(value, (str, bytes)):
@@ -173,7 +171,11 @@ def cancel_pending_orders(self: Any) -> dict[str, Any]:
         "OPERATOR_CANCEL_PENDING_ORDERS cancelled=%s failed=%s",
         len(cancelled),
         len(failed),
-        extra={"event": "OPERATOR_CANCEL_PENDING_ORDERS", "cancelled": cancelled, "failed": failed},
+        extra={
+            "event": "OPERATOR_CANCEL_PENDING_ORDERS",
+            "cancelled": cancelled,
+            "failed": failed,
+        },
     )
     return {"cancelled": cancelled, "failed": failed}
 
@@ -209,7 +211,9 @@ def flatten_all(
         trading_switch().pause()
     setattr(self, "_kill_switch_engaged_at", time.time())
     setattr(self, "_kill_switch_reason", str(reason))
-    cancel_result = cancel_pending_orders(self) if cancel_first else {"cancelled": [], "failed": []}
+    cancel_result = (
+        cancel_pending_orders(self) if cancel_first else {"cancelled": [], "failed": []}
+    )
 
     submitted: list[dict[str, Any]] = []
     failed: list[dict[str, Any]] = []
@@ -223,10 +227,23 @@ def flatten_all(
         try:
             order_id = _place_flatten_order(self, symbol, qty)
         except Exception as exc:  # noqa: BLE001 - operator control boundary
-            failed.append({"symbol": symbol, "qty": qty, "error": f"{type(exc).__name__}: {exc}"})
+            failed.append(
+                {
+                    "symbol": symbol,
+                    "qty": qty,
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            )
             continue
         if order_id:
-            submitted.append({"symbol": symbol, "qty": abs(qty), "side": "SELL" if qty > 0 else "BUY", "order_id": order_id})
+            submitted.append(
+                {
+                    "symbol": symbol,
+                    "qty": abs(qty),
+                    "side": "SELL" if qty > 0 else "BUY",
+                    "order_id": order_id,
+                }
+            )
         else:
             failed.append({"symbol": symbol, "qty": qty, "error": "missing_order_id"})
 
@@ -242,7 +259,7 @@ def flatten_all(
 
 
 def emergency_stop(self: Any, reason: str = "telegram_emergency") -> dict[str, Any]:
-    """Fail closed immediately: pause entries, latch kill flag, cancel orders, flatten exposure."""
+    """Pause entries, latch the kill flag, cancel orders and flatten exposure."""
 
     with suppress(Exception):
         trading_switch().pause()
@@ -251,7 +268,8 @@ def emergency_stop(self: Any, reason: str = "telegram_emergency") -> dict[str, A
     cancel_result = cancel_pending_orders(self)
     flatten_result = flatten_all(self, reason=reason, cancel_first=False)
     _logger(self).critical(
-        "OPERATOR_EMERGENCY_STOP reason=%s cancelled=%s failed=%s flattened=%s flatten_failed=%s",
+        "OPERATOR_EMERGENCY_STOP reason=%s cancelled=%s failed=%s "
+        "flattened=%s flatten_failed=%s",
         reason,
         len(cancel_result.get("cancelled", [])),
         len(cancel_result.get("failed", [])),
@@ -264,32 +282,17 @@ def emergency_stop(self: Any, reason: str = "telegram_emergency") -> dict[str, A
             "flatten": flatten_result,
         },
     )
-    return {"kill_switch": True, "reason": str(reason), "cancel": cancel_result, "flatten": flatten_result}
-
-
-def apply_patches() -> None:
-    global _PATCH_APPLIED
-    if _PATCH_APPLIED:
-        return
-    from nifty_scalper_bot.execution.runtime_order_manager import RuntimeOrderManager
-
-    RuntimeOrderManager.emergency_stop = emergency_stop
-    RuntimeOrderManager.engage_kill_switch = emergency_stop
-    RuntimeOrderManager.kill_switch = emergency_stop
-    RuntimeOrderManager.cancel_pending_orders = cancel_pending_orders
-    RuntimeOrderManager.cancel_all_open_orders = cancel_pending_orders
-    RuntimeOrderManager.cancel_non_protective_orders = cancel_pending_orders
-    RuntimeOrderManager.flatten_all = flatten_all
-    RuntimeOrderManager.flatten_positions = flatten_all
-    RuntimeOrderManager.close_all_positions = flatten_all
-    RuntimeOrderManager._operator_control_patch = True
-    _PATCH_APPLIED = True
+    return {
+        "kill_switch": True,
+        "reason": str(reason),
+        "cancel": cancel_result,
+        "flatten": flatten_result,
+    }
 
 
 __all__ = [
-    "apply_patches",
+    "cancel_pending_orders",
     "emergency_stop",
     "flatten_all",
-    "cancel_pending_orders",
     "_place_flatten_order",
 ]

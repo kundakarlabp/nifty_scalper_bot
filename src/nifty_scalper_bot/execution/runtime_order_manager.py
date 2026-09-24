@@ -19,6 +19,7 @@ from contextlib import suppress
 from types import SimpleNamespace
 from typing import Any, Callable, Mapping
 
+import nifty_scalper_bot.execution.operator_control as _operator_control
 from nifty_scalper_bot.execution import order_manager_core as _core
 from nifty_scalper_bot.execution.entry_geometry import (
     release_prebroker_entry_reservation,
@@ -355,6 +356,61 @@ def _submit_core_with_exit_provenance(manager: Any, plan: Any) -> Any:
 
 class RuntimeOrderManager(_core.OrderManager):
     """Production order manager with native recovery and entry gating."""
+
+    def emergency_stop(self, reason: str = "telegram_emergency") -> dict[str, Any]:
+        """Pause entries, cancel pending orders and flatten open exposure."""
+        return _operator_control.emergency_stop(self, reason=reason)
+
+    def engage_kill_switch(self, reason: str = "telegram_emergency") -> dict[str, Any]:
+        """Compatibility alias for the canonical emergency-stop control."""
+        return self.emergency_stop(reason=reason)
+
+    def kill_switch(self, reason: str = "telegram_emergency") -> dict[str, Any]:
+        """Compatibility alias for the canonical emergency-stop control."""
+        return self.emergency_stop(reason=reason)
+
+    def cancel_pending_orders(self) -> dict[str, Any]:
+        """Cancel currently open or pending broker orders."""
+        return _operator_control.cancel_pending_orders(self)
+
+    def cancel_all_open_orders(self) -> dict[str, Any]:
+        """Compatibility alias for canonical pending-order cancellation."""
+        return self.cancel_pending_orders()
+
+    def cancel_non_protective_orders(self) -> dict[str, Any]:
+        """Compatibility alias for canonical pending-order cancellation."""
+        return self.cancel_pending_orders()
+
+    def flatten_all(
+        self,
+        reason: str = "telegram_flatten",
+        *,
+        cancel_first: bool = True,
+    ) -> dict[str, Any]:
+        """Cancel pending orders and flatten every non-zero exposure."""
+        return _operator_control.flatten_all(
+            self,
+            reason=reason,
+            cancel_first=cancel_first,
+        )
+
+    def flatten_positions(
+        self,
+        reason: str = "telegram_flatten",
+        *,
+        cancel_first: bool = True,
+    ) -> dict[str, Any]:
+        """Compatibility alias for the canonical flatten operation."""
+        return self.flatten_all(reason=reason, cancel_first=cancel_first)
+
+    def close_all_positions(
+        self,
+        reason: str = "telegram_flatten",
+        *,
+        cancel_first: bool = True,
+    ) -> dict[str, Any]:
+        """Compatibility alias for the canonical flatten operation."""
+        return self.flatten_all(reason=reason, cancel_first=cancel_first)
 
     def set_trade_plan_rebuilder(
         self,
