@@ -103,6 +103,7 @@ from nifty_scalper_bot.execution.readiness import (
 )
 from nifty_scalper_bot.utils.log_throttle import log_on_change
 from nifty_scalper_bot.utils.market_hours import (
+    EOD_FLATTEN_TIME,
     get_runtime_market_mode,
     post_market_basket_refresh_seconds,
     post_market_quiet_mode_enabled,
@@ -135,7 +136,7 @@ def _next_eod_flatten_time_ist(now_ist: datetime) -> datetime | None:
         if not is_nse_trading_day(candidate_day):
             continue
         candidate = datetime.combine(
-            candidate_day, time(15, 24), tzinfo=ZoneInfo("Asia/Kolkata")
+            candidate_day, EOD_FLATTEN_TIME, tzinfo=ZoneInfo("Asia/Kolkata")
         )
         if candidate > now_ist:
             return candidate
