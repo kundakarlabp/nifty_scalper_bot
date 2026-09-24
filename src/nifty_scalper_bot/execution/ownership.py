@@ -411,9 +411,7 @@ class BoundBracketManager(RuntimeBracketManager):
             refresh_error: Exception | None = None
             try:
                 if ltp_stale:
-                    ltp_dispatched = bool(
-                        refresher(symbol, reason="bracket_ltp_stale")
-                    )
+                    ltp_dispatched = bool(refresher(symbol, reason="bracket_ltp_stale"))
                 depth_refresher = getattr(mdm, "request_depth_refresh", None)
                 if depth_stale and callable(depth_refresher):
                     depth_dispatched = bool(
