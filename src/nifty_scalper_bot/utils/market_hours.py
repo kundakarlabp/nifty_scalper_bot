@@ -161,9 +161,7 @@ def post_market_broker_refresh_seconds() -> float:
     try:
         return max(
             300.0,
-            float(
-                os.getenv("POST_MARKET_BROKER_REFRESH_SECONDS", "3600") or 3600
-            ),
+            float(os.getenv("POST_MARKET_BROKER_REFRESH_SECONDS", "3600") or 3600),
         )
     except (TypeError, ValueError):
         return 3600.0
