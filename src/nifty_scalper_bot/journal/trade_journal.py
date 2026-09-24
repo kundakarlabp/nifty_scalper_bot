@@ -38,11 +38,60 @@ _CANONICAL_EVENT_NAMES = {
 }
 
 
-def _canonical_event_name(event_type: str) -> str:
+def canonical_event_name(event_type: str) -> str:
     mapped = _CANONICAL_EVENT_NAMES.get(event_type)
     if mapped:
         return mapped
     return event_type.strip().lower().replace("_", ".") or "unknown"
+
+
+def ensure_trade_journal_schema(conn: sqlite3.Connection) -> None:
+    """Create or migrate the canonical local trade journal schema."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS trade_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp REAL NOT NULL,
+            event_type TEXT NOT NULL,
+            event_name TEXT,
+            symbol TEXT,
+            side TEXT,
+            qty INTEGER,
+            price REAL,
+            order_id TEXT,
+            trade_id TEXT,
+            signal_id TEXT,
+            trace_id TEXT,
+            strategy TEXT,
+            reason_code TEXT,
+            build_sha TEXT,
+            meta_json TEXT,
+            event_json TEXT NOT NULL
+        )
+        """)
+    existing = {
+        str(row[1]) for row in conn.execute("PRAGMA table_info(trade_events)")
+    }
+    extra_columns = {
+        "event_name": "TEXT",
+        "trade_id": "TEXT",
+        "signal_id": "TEXT",
+        "trace_id": "TEXT",
+        "strategy": "TEXT",
+        "reason_code": "TEXT",
+        "build_sha": "TEXT",
+    }
+    for column, sql_type in extra_columns.items():
+        if column not in existing:
+            conn.execute(f"ALTER TABLE trade_events ADD COLUMN {column} {sql_type}")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_trade_events_trade_id "
+        "ON trade_events(trade_id, timestamp)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_trade_events_signal_id "
+        "ON trade_events(signal_id, timestamp)"
+    )
+    ensure_trade_ledger_schema(conn)
 
 
 class TradeJournal:
@@ -175,7 +224,7 @@ class TradeJournal:
         return {
             "event_type": event_type,
             "event_name": str(
-                meta_dict.get("event_name") or _canonical_event_name(event_type)
+                meta_dict.get("event_name") or canonical_event_name(event_type)
             ),
             "timestamp": float(event.get("timestamp") or time.time()),
             "symbol": str(event.get("symbol") or ""),
@@ -299,51 +348,7 @@ class TradeJournal:
         conn.execute("PRAGMA journal_mode=WAL;")
         conn.execute("PRAGMA synchronous=NORMAL;")
 
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS trade_events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp REAL NOT NULL,
-                event_type TEXT NOT NULL,
-                event_name TEXT,
-                symbol TEXT,
-                side TEXT,
-                qty INTEGER,
-                price REAL,
-                order_id TEXT,
-                trade_id TEXT,
-                signal_id TEXT,
-                trace_id TEXT,
-                strategy TEXT,
-                reason_code TEXT,
-                build_sha TEXT,
-                meta_json TEXT,
-                event_json TEXT NOT NULL
-            )
-            """)
-        existing = {
-            str(row[1]) for row in conn.execute("PRAGMA table_info(trade_events)")
-        }
-        extra_columns = {
-            "event_name": "TEXT",
-            "trade_id": "TEXT",
-            "signal_id": "TEXT",
-            "trace_id": "TEXT",
-            "strategy": "TEXT",
-            "reason_code": "TEXT",
-            "build_sha": "TEXT",
-        }
-        for column, sql_type in extra_columns.items():
-            if column not in existing:
-                conn.execute(f"ALTER TABLE trade_events ADD COLUMN {column} {sql_type}")
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_trade_events_trade_id "
-            "ON trade_events(trade_id, timestamp)"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_trade_events_signal_id "
-            "ON trade_events(signal_id, timestamp)"
-        )
-        ensure_trade_ledger_schema(conn)
+        ensure_trade_journal_schema(conn)
 
         return conn
 
