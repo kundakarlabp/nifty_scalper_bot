@@ -5198,6 +5198,8 @@ class StrategyRunner:
         risk_allowed: bool | None = None,
         order_submitted: bool = False,
         trace_id: str | None = None,
+        signal_id: str | None = None,
+        signal_score: float | None = None,
     ) -> None:
         """Update diagnostics and persist the decision in the existing journal."""
         try:
@@ -5218,7 +5220,13 @@ class StrategyRunner:
             globals()["LAST_TRADE_DECISION_SNAPSHOT"] = snapshot
             recorder = getattr(self._order_manager, "record_trade_decision", None)
             if callable(recorder):
-                recorder(dataclasses.asdict(snapshot), trace_id=trace_id)
+                payload = dataclasses.asdict(snapshot)
+                if order_submitted and signal_id:
+                    payload["signal_id"] = signal_id
+                    payload["trade_id"] = f"TRD_{signal_id}"
+                    if signal_score is not None:
+                        payload["signal_score"] = signal_score
+                recorder(payload, trace_id=trace_id)
         except Exception as exc:  # noqa: BLE001 - diagnostics must never block trading
             self._logger.debug(
                 "TRADE_DECISION_SNAPSHOT_UPDATE_FAILED error_type=%s",
@@ -21574,6 +21582,8 @@ class StrategyRunner:
                     risk_allowed=True,
                     order_submitted=True,
                     trace_id=trace_id,
+                    signal_id=signal.deterministic_id,
+                    signal_score=metadata.get("final_score"),
                 )
                 return SignalExecutionResult(
                     True,
