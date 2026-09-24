@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -64,6 +65,38 @@ def test_explicit_exit_intent_bypasses_entry_kill_switch_without_tag(
 
     assert order_id == "EXIT-1"
     assert broker.calls == 1
+
+
+def test_protective_exit_does_not_create_entry_trade_identity(
+    monkeypatch, tmp_path
+) -> None:
+    """A protective exit belongs to the existing trade, not a new manual trade."""
+    manager, broker = _manager(monkeypatch, tmp_path)
+    events: list[dict] = []
+    manager._trade_journal = SimpleNamespace(
+        log_event=lambda payload: events.append(dict(payload))
+    )
+
+    order_id = manager.place_order(
+        symbol=SYMBOL,
+        side="SELL",
+        quantity=65,
+        order_type=OrderType.MARKET,
+        check_risk=False,
+        intent="EXIT",
+        bracket_id="entry-1",
+        linked_entry_order_id="entry-1",
+        trade_lifecycle_id="entry-1",
+        tag="EXIT_HARD_SL",
+    )
+
+    assert order_id == "EXIT-1"
+    assert broker.calls == 1
+    assert manager._orders["EXIT-1"].signal_id is None
+    assert not any(
+        event["event_type"] in {"ORDER_SUBMIT_ATTEMPT", "ORDER_SUBMITTED"}
+        for event in events
+    )
 
 
 def test_reversal_remains_subject_to_entry_kill_switch(monkeypatch, tmp_path) -> None:
