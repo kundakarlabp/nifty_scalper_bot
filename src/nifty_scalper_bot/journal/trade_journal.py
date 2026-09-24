@@ -203,11 +203,7 @@ class TradeJournal:
             or None
         )
         trade_id = (
-            str(
-                meta_dict.get("trade_id")
-                or completed_trade.get("trade_id")
-                or ""
-            )
+            str(meta_dict.get("trade_id") or completed_trade.get("trade_id") or "")
             or None
         )
         if trade_id is None and signal_id and event_type in _TRADE_ID_EVENT_TYPES:
