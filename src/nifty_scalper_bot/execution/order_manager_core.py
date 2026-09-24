@@ -168,6 +168,66 @@ class RefPriceMeta:
     market_protect: bool = False
 
 
+_QUOTE_IDENTITY_KEYS = (
+    "symbol",
+    "tradingsymbol",
+    "trading_symbol",
+    "instrument",
+    "instrument_symbol",
+    "exchange_symbol",
+)
+_TRADE_PLAN_IDENTITY_INTENTS = {"ENTRY", "SCALE_IN", "REVERSAL"}
+
+
+def _quote_identity_values(quote: Any) -> set[str]:
+    """Return canonical instrument identities carried by a quote snapshot."""
+    if not isinstance(quote, Mapping):
+        return set()
+    values: set[str] = set()
+    for key in _QUOTE_IDENTITY_KEYS:
+        value = quote.get(key)
+        if isinstance(value, str) and value.strip():
+            values.add(normalize_symbol(value))
+    instrument = quote.get("instrument")
+    if isinstance(instrument, Mapping):
+        for key in _QUOTE_IDENTITY_KEYS:
+            value = instrument.get(key)
+            if isinstance(value, str) and value.strip():
+                values.add(normalize_symbol(value))
+    meta = quote.get("meta") or quote.get("metadata")
+    if isinstance(meta, Mapping):
+        for key in _QUOTE_IDENTITY_KEYS:
+            value = meta.get(key)
+            if isinstance(value, str) and value.strip():
+                values.add(normalize_symbol(value))
+    return {value for value in values if value}
+
+
+def _trade_plan_identity_guard_enabled(manager: Any, plan: Any) -> bool:
+    """Match the former live identity guard activation semantics exactly."""
+    intent = str(getattr(plan, "intent", "ENTRY") or "ENTRY").strip().upper()
+    if intent not in _TRADE_PLAN_IDENTITY_INTENTS:
+        return False
+    live_fn = getattr(manager, "_order_live_execution_enabled", None)
+    if not callable(live_fn):
+        return False
+    try:
+        return bool(live_fn())
+    except Exception:
+        return False
+
+
+def _trade_plan_identity_details(
+    symbol: str,
+    quote_symbols: set[str],
+) -> dict[str, Any]:
+    return {
+        "symbol": symbol,
+        "quote_symbols": sorted(quote_symbols),
+        "identity_chain": "quote.symbol->trade_plan.symbol",
+    }
+
+
 def _mid(bid: float | None, ask: float | None) -> float | None:
     """Return the arithmetic mid-price if both bid and ask are valid.
 
@@ -4897,6 +4957,20 @@ class OrderManager:
                 "depth_insufficient",
                 {"depth_qty": qd["depth_qty"], "limit_qty": plan.min_depth_qty},
             )
+        if _trade_plan_identity_guard_enabled(self, plan):
+            quote_symbols = _quote_identity_values(quote)
+            if quote_symbols and symbol not in quote_symbols:
+                return OrderPreflightResult(
+                    False,
+                    "quote_symbol_identity_mismatch",
+                    _trade_plan_identity_details(symbol, quote_symbols),
+                )
+            if not quote_symbols:
+                return OrderPreflightResult(
+                    False,
+                    "quote_symbol_identity_missing",
+                    _trade_plan_identity_details(symbol, quote_symbols),
+                )
         return OrderPreflightResult(
             True, "allowed", {"quote": qd, "lot_size": lot_size}
         )
