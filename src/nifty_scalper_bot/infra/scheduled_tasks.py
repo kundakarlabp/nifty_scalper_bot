@@ -63,7 +63,9 @@ async def run_periodic_task(
             break
         except Exception as exc:  # noqa: BLE001
             LOGGER.error(
-                "Periodic task failed",
+                "Periodic task failed name=%s error=%s",
+                task_name,
+                exc,
                 extra={"event": f"task.{task_name}.error", "error": str(exc)},
                 exc_info=exc,
             )
