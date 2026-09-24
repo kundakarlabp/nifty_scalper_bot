@@ -58,6 +58,7 @@ async def test_manager_routes_ticks_to_callback(
 
     assert received == [{'instrument_token': 101}]
 
+
 def test_dynamic_subscription_serializes_subscribe_before_full_mode() -> None:
     calls: list[tuple[str, object]] = []
     jobs: list[Callable[[], Any]] = []
