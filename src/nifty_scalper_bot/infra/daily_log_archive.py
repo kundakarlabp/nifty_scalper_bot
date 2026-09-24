@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 
 import requests
 
+from nifty_scalper_bot.config.env_utils import resolve_build_sha
 from nifty_scalper_bot.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
@@ -58,6 +59,7 @@ class DailyLogArchiver:
         self._timeout_seconds = max(1.0, float(timeout_seconds))
         self._transport = transport or _post_json
         self._log_reader = log_reader or self._read_journal
+        self._finalized_session_date = None
 
     def archive_once(self, now: datetime | None = None) -> dict[str, Any]:
         current = (now or datetime.now(timezone.utc)).astimezone(_IST)
@@ -67,6 +69,8 @@ class DailyLogArchiver:
         session_date = current.date()
         start = datetime.combine(session_date, _OPEN, tzinfo=_IST)
         close = datetime.combine(session_date, _CLOSE, tzinfo=_IST)
+        if current >= close and self._finalized_session_date == session_date:
+            return {"archived": False, "reason": "already_finalized"}
         end = min(current, close)
         text = self._log_reader(start, end)
         if not text.strip():
@@ -77,7 +81,7 @@ class DailyLogArchiver:
             "trading_date": session_date.isoformat(),
             "captured_at": current.astimezone(timezone.utc).isoformat(),
             "source": "lightsail-journald",
-            "build_sha": os.getenv("GIT_SHA") or os.getenv("BUILD_SHA") or None,
+            "build_sha": resolve_build_sha(),
             "line_count": len(lines),
             "byte_count": len(text.encode("utf-8")),
             "log_text": text,
@@ -88,6 +92,8 @@ class DailyLogArchiver:
         response = self._transport(self._endpoint_url, payload, self._timeout_seconds)
         if response.get("ok") is not True:
             raise RuntimeError(f"daily log archive rejected: {response}")
+        if payload["finalized"]:
+            self._finalized_session_date = session_date
         return {
             "archived": True,
             "line_count": len(lines),
