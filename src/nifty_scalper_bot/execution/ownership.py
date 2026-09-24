@@ -389,8 +389,8 @@ class BoundBracketManager(RuntimeBracketManager):
             depth_age = (
                 None if quote is None else max(time.time() - float(quote[2]), 0.0)
             )
-            depth_stale = depth_age is None or depth_age > float(
-                self._exit_quote_max_age
+            depth_stale = (
+                depth_age is None or depth_age > float(self._exit_quote_max_age)
             )
             if not ltp_stale and not depth_stale:
                 self._bracket_stale_refresh_at.pop(symbol, None)
