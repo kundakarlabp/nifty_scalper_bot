@@ -296,9 +296,7 @@ def test_tradebook_snapshot_survives_margin_endpoint_failure() -> None:
         def _ensure_json(payload):
             return payload
 
-        def _make_request(
-            self, method: str, path: str, *, operation_label: str
-        ):
+        def _make_request(self, method: str, path: str, *, operation_label: str):
             assert method == "GET"
             if path == "/portfolio/positions":
                 return {"data": {"day": []}}
