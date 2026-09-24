@@ -3473,6 +3473,38 @@ class MarketDataManager:
         self._schedule_rest_refresh(resolved.canonical_symbol)
         return True
 
+    def request_depth_refresh(self, symbol: str, *, reason: str) -> bool:
+        """Recover executable depth without treating a fresh LTP as healthy depth."""
+        resolved = self._resolve_instrument(symbol)
+        canonical = resolved.canonical_symbol
+        dispatched = False
+        reassert = getattr(self._ws, "reassert_full_mode", None)
+        if resolved.instrument_token is not None and callable(reassert):
+            with suppress(Exception):
+                dispatched = bool(reassert([int(resolved.instrument_token)]))
+
+        rest_dispatched = False
+        if self._should_refresh_symbol(canonical):
+            self._schedule_rest_refresh(canonical)
+            rest_dispatched = True
+
+        self._logger.info(
+            "MDM_DEPTH_REFRESH_REQUESTED symbol=%s reason=%s full_mode=%s rest=%s",
+            canonical,
+            reason,
+            dispatched,
+            rest_dispatched,
+            extra={
+                "event": "MDM_DEPTH_REFRESH_REQUESTED",
+                "symbol": canonical,
+                "reason": reason,
+                "full_mode_reasserted": dispatched,
+                "rest_refresh_dispatched": rest_dispatched,
+            },
+        )
+        return dispatched or rest_dispatched
+
+
     def subscribe(self, symbol: str, callback: TickCallback) -> None:
         """Subscribe *callback* to receive normalized ticks for *symbol*."""
 
@@ -3935,25 +3967,17 @@ class MarketDataManager:
                     canonical,
                 )
                 return None
+            source = "rest_quote" if canonical.endswith(("CE", "PE")) else "rest_ltp"
             tick = {
+                **dict(quote),
                 "symbol": canonical,
                 "ltp": float(ltp),
                 "last_price": float(ltp),
-                "bid": _coerce_positive_float(
-                    quote.get("bid") or quote.get("buy_price")
-                ),
-                "ask": _coerce_positive_float(
-                    quote.get("ask") or quote.get("sell_price")
-                ),
-                "received_at": time.time(),
-                "timestamp": time.time(),
-                "source": (
-                    "rest_quote" if canonical.endswith(("CE", "PE")) else "rest_ltp"
-                ),
             }
+            prepared = self._prepare_rest_tick(tick, source=source)
             with self._lock:
                 previous = self._latest_ticks.get(canonical)
-            normalized = self._normalize_tick(canonical, tick, previous)
+            normalized = self._normalize_tick(canonical, prepared, previous)
             if normalized is None:
                 self._logger.info(
                     "MDM_REST_QUOTE_FALLBACK_SKIPPED symbol=%s reason=normalization_failed",
@@ -3965,8 +3989,8 @@ class MarketDataManager:
                 self._logger.info(
                     "MDM_REST_QUOTE_FALLBACK_USED symbol=%s bid=%s ask=%s",
                     canonical,
-                    tick.get("bid"),
-                    tick.get("ask"),
+                    normalized.get("bid"),
+                    normalized.get("ask"),
                 )
             else:
                 self._logger.info(
