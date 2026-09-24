@@ -156,6 +156,19 @@ def post_market_quiet_mode_enabled() -> bool:
     }
 
 
+def post_market_broker_refresh_seconds() -> float:
+    """Return the quiet-mode broker polling interval outside active trading."""
+    try:
+        return max(
+            300.0,
+            float(
+                os.getenv("POST_MARKET_BROKER_REFRESH_SECONDS", "3600") or 3600
+            ),
+        )
+    except (TypeError, ValueError):
+        return 3600.0
+
+
 def post_market_basket_refresh_seconds() -> float:
     try:
         return max(
