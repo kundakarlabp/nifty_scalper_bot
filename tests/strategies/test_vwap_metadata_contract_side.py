@@ -4,7 +4,9 @@ from nifty_scalper_bot.core.strategy_manager import (
     StrategyManager,
     signal_to_vote,
 )
-from nifty_scalper_bot.strategies.elite_strategies.config_models import VWAPProStrategyConfig
+from nifty_scalper_bot.strategies.elite_strategies.config_models import (
+    VWAPProStrategyConfig,
+)
 from nifty_scalper_bot.strategies.elite_strategies.vwap_pro import VWAPProStrategy
 
 
