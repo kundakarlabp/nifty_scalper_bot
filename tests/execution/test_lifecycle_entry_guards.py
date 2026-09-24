@@ -204,11 +204,14 @@ def test_bound_bracket_manager_surfaces_position_manager_reason() -> None:
     assert blocker["broker_attempted"] is False
 
 
-def test_bound_bracket_manager_skips_pnl_diagnostic_but_keeps_later_safety_blocker() -> None:
+def test_bound_bracket_manager_skips_pnl_diagnostic_but_keeps_later_safety_blocker(
+) -> None:
     position_manager = SimpleNamespace(
         current_entry_protection_blocker=lambda: None,
         current_pnl_reconciliation_blocker=lambda: "pnl_reconciliation_mismatch",
-        current_position_reconciliation_blocker=lambda: "position_reconciliation_failed",
+        current_position_reconciliation_blocker=(
+            lambda: "position_reconciliation_failed"
+        ),
         current_orphan_position_blocker=lambda: None,
         current_exit_lifecycle_blocker=lambda: None,
         unresolved_terminal_summary=lambda: {"count": 0},
@@ -223,7 +226,8 @@ def test_bound_bracket_manager_skips_pnl_diagnostic_but_keeps_later_safety_block
     assert blocker["block_source"] == "current_position_reconciliation_blocker"
 
 
-def test_bound_bracket_manager_skips_pnl_diagnostic_when_canonical_safety_is_clear() -> None:
+def test_bound_bracket_manager_skips_pnl_diagnostic_when_canonical_safety_is_clear(
+) -> None:
     position_manager = SimpleNamespace(
         current_entry_protection_blocker=lambda: None,
         current_pnl_reconciliation_blocker=lambda: "pnl_baseline_uninitialized",
