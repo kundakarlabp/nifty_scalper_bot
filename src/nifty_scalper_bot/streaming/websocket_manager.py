@@ -306,9 +306,7 @@ class WebSocketManager:
                 self._schedule_blocking(lambda: ticker.unsubscribe(to_remove))
         if connected and ticker is not None and to_add:
             with suppress(Exception):
-                self._schedule_blocking(
-                    lambda: self._subscribe_full(ticker, to_add)
-                )
+                self._schedule_blocking(lambda: self._subscribe_full(ticker, to_add))
                 self._log_ws_subscriptions(to_add)
 
         self._tokens = new_tokens
@@ -319,7 +317,6 @@ class WebSocketManager:
             len(to_remove),
         )
         return True
-
 
     @staticmethod
     def _subscribe_full(ticker: Any, tokens: Sequence[int]) -> None:
