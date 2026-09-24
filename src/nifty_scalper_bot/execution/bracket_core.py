@@ -146,6 +146,38 @@ def _normalize_bracket_side(side: str) -> str:
 
 _FILLED_STATUSES = {"FILLED", "COMPLETE", "COMPLETED"}
 _CANCELLED_STATUSES = {"CANCELLED", "REJECTED", "CANCELED"}
+_TERMINAL_OWNERSHIP_STATES = {"CLOSED", "EXIT_FILLED", "EXIT_RECONCILED_FLAT"}
+
+
+def _is_nonterminal_owner(bracket: Any) -> bool:
+    """Return whether a bracket still owns its symbol lifecycle."""
+    with suppress(Exception):
+        if int(getattr(bracket, "remaining_quantity", 0) or 0) <= 0:
+            return False
+    if bool(getattr(bracket, "exit_executed", False)):
+        return False
+    state = str(getattr(bracket, "exit_state", "") or "").upper()
+    return state not in _TERMINAL_OWNERSHIP_STATES
+
+
+def _existing_owner(
+    manager: Any,
+    symbol: str,
+    order_id: str | None = None,
+) -> Any | None:
+    """Return another non-terminal bracket already owning the symbol."""
+    brackets = getattr(manager, "_brackets", {})
+    if not isinstance(brackets, Mapping):
+        return None
+    canonical_symbol = normalize_symbol(symbol)
+    for bracket in brackets.values():
+        if order_id and str(getattr(bracket, "entry_order_id", "")) == str(order_id):
+            continue
+        if normalize_symbol(str(getattr(bracket, "symbol", "") or "")) != canonical_symbol:
+            continue
+        if _is_nonterminal_owner(bracket):
+            return bracket
+    return None
 # Seconds after entry fill during which ticks older than the fill timestamp
 # are rejected (pre-fill/replayed signal ticks must not fire a false exit).
 STALE_TICK_ARM_WINDOW_SEC = 5.0
@@ -1285,6 +1317,22 @@ class BracketManager:
             None.
         """
         symbol = normalize_symbol(symbol)
+        with self._lock:
+            owner = _existing_owner(self, symbol, str(order_id))
+        if owner is not None:
+            LOGGER.warning(
+                "BRACKET_OWNERSHIP_CONFLICT_SKIPPED symbol=%s existing=%s attempted=%s",
+                symbol,
+                getattr(owner, "entry_order_id", None),
+                order_id,
+                extra={
+                    "event": "BRACKET_OWNERSHIP_CONFLICT_SKIPPED",
+                    "symbol": symbol,
+                    "existing_entry_order_id": getattr(owner, "entry_order_id", None),
+                    "attempted_order_id": str(order_id),
+                },
+            )
+            return
         normalized_intent = str(intent or "").strip().upper()
         if normalized_intent in {"EXIT", "REDUCE"}:
             LOGGER.error(

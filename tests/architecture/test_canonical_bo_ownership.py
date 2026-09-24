@@ -98,6 +98,7 @@ def test_execution_package_import_does_not_install_or_replace_runtime_methods() 
     source = (EXECUTION / "__init__.py").read_text(encoding="utf-8")
     assert "install_entry_recovery(" not in source
     assert "_bracket_module.BracketManager" not in source
+    assert "bracket_ownership_extension" not in source
     assert "LegacyOrderManager" not in source
     assert "LegacyBracketManager" not in source
     assert "LegacyAdaptiveTrailingController" not in source
