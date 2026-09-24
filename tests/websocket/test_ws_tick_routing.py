@@ -86,4 +86,3 @@ def test_dynamic_subscription_serializes_subscribe_before_full_mode() -> None:
         ("subscribe", [101]),
         ("set_mode", ("full", [101])),
     ]
-
