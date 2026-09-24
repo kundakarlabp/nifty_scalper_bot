@@ -229,3 +229,41 @@ def test_order_preflight_does_not_trigger_http_pull_before_cached_ws_lookup() ->
     assert quote is not None
     assert quote["marker"] == "mdm_ws_full"
     assert data_hub.pull_attempts == 0
+
+
+
+def test_execution_depth_helpers_use_cached_ws_full_quote_only() -> None:
+    symbol = "NFO:NIFTY26AUG24050PE"
+    data_hub = _PullTrackingDataHub()
+    manager = _manager(
+        data_hub=data_hub,
+        mdm=_TickProvider(
+            _depth_quote(symbol, bid_qty=130, ask_qty=195)
+        ),
+    )
+
+    class _Logger:
+        def debug(self, *_args, **_kwargs) -> None:
+            return None
+
+        def info(self, *_args, **_kwargs) -> None:
+            return None
+
+        def error(self, *_args, **_kwargs) -> None:
+            return None
+
+    manager._logger = _Logger()
+
+    depth = manager.get_best_bid_ask_depth(symbol)
+    queue = manager.calculate_queue_position(symbol, "BUY", 100.10)
+    average, slippage, best = manager._estimate_order_slippage(symbol, "BUY", 65)
+
+    assert depth["bid"] == 99.90
+    assert depth["ask"] == 100.10
+    assert depth["bid_size"] == 130.0
+    assert depth["ask_size"] == 195.0
+    assert queue >= 195
+    assert average == 100.10
+    assert slippage is not None
+    assert best == 100.10
+    assert data_hub.pull_attempts == 0
