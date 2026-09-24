@@ -7,6 +7,7 @@ import pytest
 from nifty_scalper_bot.execution.broker_pnl_authority_patch import (
     _extract_account_m2m,
     _strategy_day_marked_pnl,
+    _strategy_tradebook_realized_pnl,
     _strip_legacy_position_pnl,
 )
 from nifty_scalper_bot.execution.position_manager import PositionManager
@@ -204,3 +205,78 @@ def test_positions_confirm_local_pnl_when_margins_m2m_stays_zero(tmp_path) -> No
     assert manager.pnl_reconciliation_snapshot()["broker_account_pnl_status"] == (
         "source_disagreement"
     )
+
+def test_tradebook_realized_pnl_matches_multiple_round_trips() -> None:
+    realized, fills = _strategy_tradebook_realized_pnl(
+        [
+            {
+                "exchange": "NFO",
+                "tradingsymbol": "NIFTY2691523400CE",
+                "product": "MIS",
+                "transaction_type": "BUY",
+                "quantity": 65,
+                "average_price": 100.0,
+            },
+            {
+                "exchange": "NFO",
+                "tradingsymbol": "NIFTY2691523400CE",
+                "product": "MIS",
+                "transaction_type": "SELL",
+                "quantity": 65,
+                "average_price": 102.0,
+            },
+            {
+                "exchange": "NFO",
+                "tradingsymbol": "NIFTY2691523400CE",
+                "product": "MIS",
+                "transaction_type": "BUY",
+                "quantity": 65,
+                "average_price": 110.0,
+            },
+            {
+                "exchange": "NFO",
+                "tradingsymbol": "NIFTY2691523400CE",
+                "product": "MIS",
+                "transaction_type": "SELL",
+                "quantity": 65,
+                "average_price": 108.0,
+            },
+        ]
+    )
+
+    assert realized == pytest.approx(0.0)
+    assert fills == 4
+
+
+def test_tradebook_evidence_matches_strategy_when_margin_m2m_is_zero(tmp_path) -> None:
+    manager = PositionManager(state_file=str(tmp_path / "positions.json"))
+    with manager._lock:
+        manager._local_realized_pnl = -39.0
+        manager._refresh_realized_pnl_locked()
+    manager.set_broker_client(
+        SimpleNamespace(
+            get_pnl_snapshot=lambda: {
+                "account_realized": 0.0,
+                "account_unrealized": 0.0,
+                "strategy_tradebook_realized_gross": -39.0,
+                "strategy_tradebook_fill_count": 4,
+                "strategy_day_marked_gross": -39.0,
+                "strategy_day_closed_gross": -39.0,
+                "strategy_day_rows": 2,
+                "source": "zerodha_margins_m2m",
+                "tradebook_source": "zerodha_trades",
+                "positions_source": "zerodha_positions_day",
+            }
+        )
+    )
+
+    diagnostic = manager.refresh_broker_pnl_diagnostic(force=True)
+
+    assert diagnostic["status"] == "matched"
+    assert diagnostic["broker_realized_evidence"] == pytest.approx(-39.0)
+    assert diagnostic["margin_m2m_realized"] == pytest.approx(0.0)
+    assert diagnostic["margin_vs_strategy_difference"] == pytest.approx(39.0)
+    assert diagnostic["difference"] == pytest.approx(0.0)
+    assert manager.get_broker_account_realized_pnl() == pytest.approx(-39.0)
+    assert manager.get_realized_pnl() == pytest.approx(-39.0)
+
