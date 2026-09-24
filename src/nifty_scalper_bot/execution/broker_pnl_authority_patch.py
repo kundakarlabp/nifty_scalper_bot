@@ -165,12 +165,12 @@ def _strategy_tradebook_realized_pnl(
             continue
         if str(item.get("product") or "").strip().upper() != "MIS":
             continue
-        side = str(
-            item.get("transaction_type") or item.get("side") or ""
-        ).strip().upper()
-        quantity = _finite_float(
-            item.get("quantity", item.get("filled_quantity"))
+        side = (
+            str(item.get("transaction_type") or item.get("side") or "")
+            .strip()
+            .upper()
         )
+        quantity = _finite_float(item.get("quantity", item.get("filled_quantity")))
         price = _finite_float(item.get("average_price", item.get("price")))
         if side not in {"BUY", "SELL"} or quantity is None or price is None:
             continue
@@ -192,14 +192,10 @@ def _strategy_tradebook_realized_pnl(
             if lot_remaining <= 1e-9:
                 lots.pop(0)
             else:
-                lots[0][0] = (
-                    lot_remaining if lot_qty > 0 else -lot_remaining
-                )
+                lots[0][0] = lot_remaining if lot_qty > 0 else -lot_remaining
 
         if remaining > 1e-9:
-            lots.append(
-                [remaining if signed > 0 else -remaining, float(price)]
-            )
+            lots.append([remaining if signed > 0 else -remaining, float(price)])
         seen += 1
 
     if not seen:
@@ -261,8 +257,8 @@ def _zerodha_get_pnl_snapshot(self: Any) -> dict[str, Any]:
                 request("GET", "/trades", operation_label="pnl.trades")
             )
             trades = response.get("data") if isinstance(response, Mapping) else None
-            tradebook_realized, tradebook_fill_count = (
-                _strategy_tradebook_realized_pnl(trades)
+            tradebook_realized, tradebook_fill_count = _strategy_tradebook_realized_pnl(
+                trades
             )
     except Exception as exc:  # diagnostic enrichment must never impair P&L authority
         tradebook_error = f"{type(exc).__name__}: {exc}"
@@ -433,9 +429,7 @@ def refresh_broker_pnl_diagnostic(
     persist_baseline = False
     with getattr(self, "_lock"):
         strategy_realized = float(getattr(self, "_local_realized_pnl", 0.0) or 0.0)
-        tradebook_realized = _finite_float(
-            raw.get("strategy_tradebook_realized_gross")
-        )
+        tradebook_realized = _finite_float(raw.get("strategy_tradebook_realized_gross"))
         tradebook_fills = int(
             _finite_float(raw.get("strategy_tradebook_fill_count")) or 0
         )
@@ -445,8 +439,7 @@ def refresh_broker_pnl_diagnostic(
             (_finite_float(raw.get("strategy_day_rows")) or 0) > 0
             and positions_closed is not None
             and positions_marked is not None
-            and abs(positions_marked - positions_closed)
-            <= _MATCH_TOLERANCE_RUPEES
+            and abs(positions_marked - positions_closed) <= _MATCH_TOLERANCE_RUPEES
         )
         if tradebook_realized is not None and tradebook_fills > 0:
             broker_evidence = tradebook_realized
@@ -466,11 +459,9 @@ def refresh_broker_pnl_diagnostic(
         status = (
             "unavailable"
             if difference is None
-            else (
-                "matched"
-                if abs(difference) <= _MATCH_TOLERANCE_RUPEES
-                else "mismatch"
-            )
+            else "matched"
+            if abs(difference) <= _MATCH_TOLERANCE_RUPEES
+            else "mismatch"
         )
         positions_difference = (
             None if positions_closed is None else positions_closed - strategy_realized
