@@ -166,6 +166,21 @@ def test_release_runner_publishes_exact_runtime_build_sha() -> None:
     assert "FORCE_RESTART=true" in no_change_block
 
 
+def test_release_enables_existing_daily_log_archive() -> None:
+    release = _text("deploy/lightsail_release.sh")
+    setup = _text("deploy/lightsail_setup.sh")
+    example = _text(".env.example")
+    endpoint = (
+        "https://dehdptgkqbrkyzyodicd.supabase.co/functions/v1/nifty-log-archive-ingest"
+    )
+
+    assert "set_env_value SUPABASE_LOG_ARCHIVE_ENABLED true" in release
+    for text in (release, setup):
+        assert endpoint in text
+        assert "SUPABASE_LOG_ARCHIVE_INTERVAL_SECONDS 300" in text
+    assert "SUPABASE_LOG_ARCHIVE_ENABLED=true" in example
+
+
 def test_release_provisions_nonsecret_trade_replication_settings() -> None:
     release = _text("deploy/lightsail_release.sh")
     setup = _text("deploy/lightsail_setup.sh")
