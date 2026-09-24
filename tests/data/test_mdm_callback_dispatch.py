@@ -234,6 +234,7 @@ def test_ws_tick_still_reaches_subscribers_when_cache_rejects_older_event() -> N
     assert seen[-1]["ltp"] == 101.5
     assert mdm._mdm_selected_tick_count >= 1
 
+
 def test_depth_refresh_reasserts_full_mode_and_schedules_rest(monkeypatch) -> None:
     symbol = "NFO:NIFTY26SEP23100CE"
     token = 123
@@ -247,7 +248,7 @@ def test_depth_refresh_reasserts_full_mode_and_schedules_rest(monkeypatch) -> No
         {
             "reassert_full_mode": lambda _self, tokens: (
                 mode_calls.append(list(tokens)) or True
-            )
+            ),
         },
     )()
     monkeypatch.setattr(mdm, "_schedule_rest_refresh", scheduled.append)
@@ -256,4 +257,3 @@ def test_depth_refresh_reasserts_full_mode_and_schedules_rest(monkeypatch) -> No
 
     assert mode_calls == [[token]]
     assert scheduled == [symbol]
-
