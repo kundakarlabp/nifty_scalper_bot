@@ -95,6 +95,35 @@ def test_trade_decision_snapshot_is_persisted_to_existing_journal() -> None:
     assert captured[0][1] == "trace-1"
 
 
+def test_approved_decision_uses_executed_signal_identity_and_score() -> None:
+    captured: list[dict[str, object]] = []
+    runner = SimpleNamespace(
+        _runtime_live_orders_armed=True,
+        _last_trade_decision=None,
+        _order_manager=SimpleNamespace(
+            record_trade_decision=lambda snapshot, trace_id=None: captured.append(
+                snapshot
+            )
+        ),
+        _logger=SimpleNamespace(debug=lambda *_args, **_kwargs: None),
+    )
+
+    StrategyRunner._record_trade_decision_snapshot(
+        runner,
+        symbol="NFO:NIFTYCE",
+        direction="CE",
+        final_reason="order_submitted",
+        order_submitted=True,
+        trace_id="runner-trace",
+        signal_id="executed-signal",
+        signal_score=7.8,
+    )
+
+    assert captured[0]["signal_id"] == "executed-signal"
+    assert captured[0]["trade_id"] == "TRD_executed-signal"
+    assert captured[0]["signal_score"] == 7.8
+
+
 def test_margin_needed_rejection_is_deterministic_risk_capacity() -> None:
     assert (
         StrategyRunner._deterministic_execution_reject_reason("MARGIN needed=11225.50")

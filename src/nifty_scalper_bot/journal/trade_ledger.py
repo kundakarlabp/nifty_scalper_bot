@@ -16,6 +16,7 @@ from typing import Any
 
 _TRADE_STATES = {
     "signal.evaluated": ("SIGNAL_EVALUATED", 10),
+    "candidate.approved": ("SIGNAL_EVALUATED", 10),
     "candidate.blocked": ("BLOCKED", 100),
     "order.submit_attempt": ("ENTRY_SUBMITTING", 20),
     "order.acknowledged": ("ENTRY_SUBMITTED", 30),
@@ -401,7 +402,11 @@ def _build_trade_row(event: Mapping[str, Any]) -> dict[str, Any] | None:
             meta.get("close_source"),
         ),
         "ledger_complete": ledger_complete,
-        "decision_at": timestamp if event_name == "signal.evaluated" else None,
+        "decision_at": (
+            timestamp
+            if event_name in {"signal.evaluated", "candidate.approved"}
+            else None
+        ),
         "entry_submitted_at": (
             timestamp if event_name == "order.acknowledged" else None
         ),
