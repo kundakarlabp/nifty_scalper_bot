@@ -250,10 +250,13 @@ def test_execution_depth_helpers_use_cached_ws_full_quote_only() -> None:
             return None
 
     manager._logger = _Logger()
+    manager._history = []
 
     depth = manager.get_best_bid_ask_depth(symbol)
     queue = manager.calculate_queue_position(symbol, "BUY", 100.10)
-    average, slippage, best = manager._estimate_order_slippage(symbol, "BUY", 65)
+    average, slippage, historical = manager._estimate_order_slippage(
+        symbol, "BUY", 65
+    )
 
     assert depth["bid"] == 99.90
     assert depth["ask"] == 100.10
@@ -261,6 +264,6 @@ def test_execution_depth_helpers_use_cached_ws_full_quote_only() -> None:
     assert depth["ask_size"] == 195.0
     assert queue >= 195
     assert average == 100.10
-    assert slippage is not None
-    assert best == 100.10
+    assert slippage == 0.0
+    assert historical is None
     assert data_hub.pull_attempts == 0
