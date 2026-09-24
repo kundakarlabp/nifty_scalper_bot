@@ -19,7 +19,6 @@ from nifty_scalper_bot.execution.bracket_manager import BoundBracketManager, Bra
 from nifty_scalper_bot.execution.order_manager import OrderManager, RuntimeOrderManager
 from nifty_scalper_bot.execution.live_safety_identity import apply_patches as _apply_live_safety_identity_patches
 from nifty_scalper_bot.execution.position_identity_extension import apply_patches as _apply_position_identity_extension_patches
-from nifty_scalper_bot.execution.operator_control_patch import apply_patches as _apply_operator_control_patches
 from nifty_scalper_bot.execution.position_risk_state_patch import apply_patches as _apply_position_risk_state_patches
 from nifty_scalper_bot.execution.broker_pnl_authority_patch import apply_patches as _apply_broker_pnl_authority_patches
 from nifty_scalper_bot.execution.pnl_session_rollover_patch import apply_patches as _apply_pnl_session_rollover_patches
@@ -33,7 +32,6 @@ import nifty_scalper_bot.execution.trade_plan_identity_guard as _trade_plan_iden
 
 _apply_live_safety_identity_patches()
 _apply_position_identity_extension_patches()
-_apply_operator_control_patches()
 _apply_position_risk_state_patches()
 _quote_identity_extension.apply_patches()
 _broker_exposure_quarantine_extension.apply_patches()
