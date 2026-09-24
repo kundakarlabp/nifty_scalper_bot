@@ -2760,7 +2760,11 @@ class StrategyRunner:
                     grace = safe_positive_int_env(
                         "CONTEXT_HISTORY_COLD_GRACE_PASSES", 3, minimum=1
                     )
-                    if cold_passes[normalized] <= grace:
+                    inflight = getattr(self, "_runtime_history_ensure_inflight", {})
+                    ensure_inflight = bool(
+                        isinstance(inflight, dict) and normalized in inflight
+                    )
+                    if cold_passes[normalized] <= grace or ensure_inflight:
                         log_throttled(
                             self._logger,
                             f"context_history_pending:{normalized}",
@@ -2778,6 +2782,7 @@ class StrategyRunner:
                                 "indicator_history_count": after,
                                 "required_bars": minimum,
                                 "cold_pass": cold_passes[normalized],
+                                "history_ensure_inflight": ensure_inflight,
                             },
                         )
                     else:
