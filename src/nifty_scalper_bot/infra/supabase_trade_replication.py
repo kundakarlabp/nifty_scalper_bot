@@ -18,6 +18,10 @@ from zoneinfo import ZoneInfo
 
 import requests
 
+from nifty_scalper_bot.journal.trade_journal import (
+    canonical_event_name,
+    ensure_trade_journal_schema,
+)
 from nifty_scalper_bot.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
@@ -156,15 +160,16 @@ class SupabaseTradeReplicator:
         with sqlite3.connect(str(self._db_path), timeout=1.0) as conn:
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA busy_timeout=1000")
+            ensure_trade_journal_schema(conn)
             self._ensure_checkpoint_schema(conn)
             checkpoint = self._checkpoint(conn)
             try:
                 events = list(
                     conn.execute(
                         """
-                        SELECT id, timestamp, event_name, symbol, side, qty, price,
-                               order_id, trade_id, signal_id, trace_id, strategy,
-                               reason_code, build_sha, event_json
+                        SELECT id, timestamp, event_type, event_name, symbol, side,
+                               qty, price, order_id, trade_id, signal_id, trace_id,
+                               strategy, reason_code, build_sha, meta_json, event_json
                         FROM trade_events
                         WHERE id > ?
                         ORDER BY id
@@ -250,23 +255,63 @@ class SupabaseTradeReplicator:
     def _event_payload(self, row: sqlite3.Row) -> dict[str, Any]:
         timestamp = float(row["timestamp"])
         event_json = _json_object(row["event_json"])
+        meta = _json_object(row["meta_json"])
+        event_meta = event_json.get("meta")
+        if isinstance(event_meta, Mapping):
+            meta = {**dict(event_meta), **meta}
+
+        event_type = _first_text(row["event_type"], event_json.get("event_type"))
+        trace_id = _first_text(
+            row["trace_id"],
+            event_json.get("trace_id"),
+            meta.get("trace_id"),
+        )
+        signal_id = _first_text(
+            row["signal_id"],
+            event_json.get("signal_id"),
+            meta.get("signal_id"),
+            trace_id,
+        )
         return {
             "source": self._source,
             "source_event_id": int(row["id"]),
             "trading_date": _trading_date(timestamp),
             "event_at": _iso_utc(timestamp),
-            "event_name": str(row["event_name"] or ""),
-            "trade_id": _optional_text(row["trade_id"]),
-            "signal_id": _optional_text(row["signal_id"]),
-            "trace_id": _optional_text(row["trace_id"]),
-            "symbol": _optional_text(row["symbol"]),
-            "side": _optional_text(row["side"]),
+            "event_name": _first_text(
+                row["event_name"],
+                event_json.get("event_name"),
+                meta.get("event_name"),
+            )
+            or canonical_event_name(event_type or "UNKNOWN"),
+            "trade_id": _first_text(
+                row["trade_id"],
+                event_json.get("trade_id"),
+                meta.get("trade_id"),
+            ),
+            "signal_id": signal_id,
+            "trace_id": trace_id,
+            "symbol": _first_text(row["symbol"], event_json.get("symbol")),
+            "side": _first_text(row["side"], event_json.get("side")),
             "qty": _optional_int(row["qty"]),
             "price": _optional_float(row["price"]),
-            "order_id": _optional_text(row["order_id"]),
-            "strategy": _optional_text(row["strategy"]),
-            "reason_code": _optional_text(row["reason_code"]),
-            "build_sha": _optional_text(row["build_sha"]),
+            "order_id": _first_text(row["order_id"], event_json.get("order_id")),
+            "strategy": _first_text(
+                row["strategy"],
+                event_json.get("strategy"),
+                meta.get("strategy"),
+            ),
+            "reason_code": _first_text(
+                row["reason_code"],
+                event_json.get("reason_code"),
+                meta.get("reason_code"),
+                meta.get("block_reason"),
+                meta.get("final_reason"),
+            ),
+            "build_sha": _first_text(
+                row["build_sha"],
+                event_json.get("build_sha"),
+                meta.get("build_sha"),
+            ),
             "payload": event_json,
         }
 
@@ -385,6 +430,14 @@ def _trading_date(timestamp: float | None) -> str:
 def _optional_text(value: Any) -> str | None:
     text = str(value or "").strip()
     return text or None
+
+
+def _first_text(*values: Any) -> str | None:
+    for value in values:
+        resolved = _optional_text(value)
+        if resolved is not None:
+            return resolved
+    return None
 
 
 def _optional_int(value: Any) -> int | None:
