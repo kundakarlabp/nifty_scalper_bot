@@ -52,7 +52,9 @@ def test_trade_decision_uses_trace_as_signal_correlation(tmp_path) -> None:
     assert event["reason_code"] == "candidate_not_ready"
 
 
-def test_closed_trade_recovers_canonical_identity_from_completed_trade(tmp_path) -> None:
+def test_closed_trade_recovers_canonical_identity_from_completed_trade(
+    tmp_path,
+) -> None:
     journal = TradeJournal(str(tmp_path / "journal.db"))
     event = journal._normalize_event(
         {
