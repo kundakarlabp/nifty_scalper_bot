@@ -103,7 +103,7 @@ def _current_result(
     role: str,
     phase: str,
     reason: str,
-) -> Any:
+) -> RuntimeHistoryResult:
     policy = resolve_history_policy(
         ctx, symbol, role=role, phase=phase, reason=reason
     )
@@ -225,7 +225,8 @@ def maybe_defer_dynamic_context_history(
                 completed.result()
             except Exception as exc:  # noqa: BLE001
                 _LOG.warning(
-                    "DYNAMIC_CONTEXT_HISTORY_BACKGROUND_FAILED symbol=%s error_type=%s error=%s",
+                    "DYNAMIC_CONTEXT_HISTORY_BACKGROUND_FAILED "
+                    "symbol=%s error_type=%s error=%s",
                     normalized,
                     type(exc).__name__,
                     exc,
@@ -247,7 +248,9 @@ def maybe_defer_dynamic_context_history(
         reason=reason,
     )
     _LOG.info(
-        "DYNAMIC_CONTEXT_HISTORY_DEFERRED symbol=%s spot=%s atm=%s strike=%s required_bars=%s current_mdm_bars=%s current_runner_bars=%s current_indicator_bars=%s",
+        "DYNAMIC_CONTEXT_HISTORY_DEFERRED symbol=%s spot=%s atm=%s "
+        "strike=%s required_bars=%s current_mdm_bars=%s "
+        "current_runner_bars=%s current_indicator_bars=%s",
         normalized,
         spot,
         atm,
