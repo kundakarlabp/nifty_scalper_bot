@@ -43,7 +43,10 @@ def _env_time(name: str, default: dtime) -> dtime:
 
 MARKET_OPEN = _env_time("MARKET_OPEN_TIME", dtime(9, 15))
 SAFE_START = _env_time("SAFE_START_TIME", dtime(9, 20))
-SAFE_END = _env_time("SAFE_END_TIME", dtime(15, 25))
+EOD_FLATTEN_TIME = dtime(15, 24)
+# New entries must stop before the one-shot EOD flatten callback can run.
+# Earlier operator cutoffs remain valid; later values are clamped fail-closed.
+SAFE_END = min(_env_time("SAFE_END_TIME", dtime(15, 23)), dtime(15, 23))
 MARKET_CLOSE = _env_time("MARKET_CLOSE_TIME", dtime(15, 30))
 
 
@@ -398,6 +401,7 @@ __all__ = [
     "MARKET_OPEN",
     "SAFE_START",
     "SAFE_END",
+    "EOD_FLATTEN_TIME",
     "MARKET_CLOSE",
     "allow_offhours_testing_safe",
     "stale_threshold_for_symbol",
