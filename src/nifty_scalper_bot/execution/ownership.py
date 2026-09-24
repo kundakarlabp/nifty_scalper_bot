@@ -392,9 +392,8 @@ class BoundBracketManager(RuntimeBracketManager):
             depth_threshold = float(
                 getattr(self, "_exit_quote_max_age", 3.0) or 0.0
             )
-            depth_stale = (
-                depth_threshold > 0.0
-                and (depth_age is None or depth_age > depth_threshold)
+            depth_stale = depth_threshold > 0.0 and (
+                depth_age is None or depth_age > depth_threshold
             )
             if not ltp_stale and not depth_stale:
                 self._bracket_stale_refresh_at.pop(symbol, None)
