@@ -181,7 +181,6 @@ def test_failed_remote_batch_does_not_advance_checkpoint(tmp_path: Any) -> None:
     assert calls == 1
 
 
-
 def test_replication_accepts_legacy_trade_event_schema(tmp_path: Any) -> None:
     db_path = tmp_path / "trades.db"
     with sqlite3.connect(db_path) as conn:
@@ -253,7 +252,6 @@ def test_replication_accepts_legacy_trade_event_schema(tmp_path: Any) -> None:
         }
     assert "event_name" not in columns
     assert "trade_id" not in columns
-
 
 
 def test_missing_database_is_a_noop(tmp_path: Any) -> None:
