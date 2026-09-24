@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from threading import RLock
 from types import SimpleNamespace
 
-from nifty_scalper_bot.execution import bracket_ownership_extension as bracket_owner
+from nifty_scalper_bot.execution import bracket_core as bracket_owner
 from nifty_scalper_bot.execution import position_identity_extension as position_owner
 from nifty_scalper_bot.execution import position_manager as position_module
 from nifty_scalper_bot.strategies.orchestrator import StrategyAllocation, StrategyOrchestrator
@@ -172,6 +173,33 @@ def test_bot_managed_position_counts_toward_strategy_capital_headroom():
 
     managed.order_id = None
     assert orchestrator._has_capital_headroom(allocation, position_manager) is True
+
+
+def test_native_register_rejects_second_nonterminal_symbol_owner():
+    existing = SimpleNamespace(
+        entry_order_id="ENTRY-1",
+        symbol="NFO:NIFTY2670724250PE",
+        remaining_quantity=65,
+        exit_executed=False,
+        exit_state="OPEN_PENDING_FILL",
+    )
+    manager = object.__new__(bracket_owner.BracketManager)
+    manager._lock = RLock()
+    manager._brackets = {"ENTRY-1": existing}
+
+    result = bracket_owner.BracketManager.register_virtual_bracket(
+        manager,
+        order_id="ENTRY-2",
+        symbol="NIFTY2670724250PE",
+        side="BUY",
+        qty=65,
+        price=100.0,
+        sl=90.0,
+        tp=120.0,
+    )
+
+    assert result is None
+    assert set(manager._brackets) == {"ENTRY-1"}
 
 
 def test_existing_nonterminal_bracket_owns_canonical_symbol():
