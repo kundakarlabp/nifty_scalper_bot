@@ -311,24 +311,76 @@ class TradeJournal:
 
         materialized = 0
         skipped = 0
+        last_id = 0
         try:
             conn.execute("BEGIN")
-            cursor = conn.execute(
-                "SELECT event_json FROM trade_events ORDER BY id"
-            )
             while True:
-                rows = cursor.fetchmany(500)
+                rows = conn.execute(
+                    """
+                    SELECT id, timestamp, event_type, event_name, symbol, side,
+                           qty, price, order_id, trade_id, signal_id, trace_id,
+                           strategy, reason_code, build_sha, meta_json, event_json
+                    FROM trade_events
+                    WHERE id > ?
+                    ORDER BY id
+                    LIMIT 500
+                    """,
+                    (last_id,),
+                ).fetchall()
                 if not rows:
                     break
+
                 events: list[dict[str, Any]] = []
-                for (event_json,) in rows:
+                for row in rows:
+                    last_id = int(row[0])
                     try:
-                        raw = json.loads(str(event_json))
+                        raw = json.loads(str(row[16]))
                         if not isinstance(raw, Mapping):
                             raise TypeError("event_json is not an object")
-                        events.append(self._normalize_event(raw))
+                        event = dict(raw)
+                        stored_meta = json.loads(str(row[15] or "{}"))
+                        if not isinstance(stored_meta, Mapping):
+                            stored_meta = {}
+                        event_meta = event.get("meta")
+                        if not isinstance(event_meta, Mapping):
+                            event_meta = {}
+                        meta = dict(stored_meta)
+                        meta.update(event_meta)
+                        for key, value in zip(
+                            (
+                                "event_name",
+                                "trade_id",
+                                "signal_id",
+                                "trace_id",
+                                "strategy",
+                                "reason_code",
+                                "build_sha",
+                            ),
+                            row[3:4] + row[9:15],
+                            strict=True,
+                        ):
+                            if value not in (None, ""):
+                                meta.setdefault(key, value)
+                        event["meta"] = meta
+                        for key, value in zip(
+                            (
+                                "timestamp",
+                                "event_type",
+                                "symbol",
+                                "side",
+                                "qty",
+                                "price",
+                                "order_id",
+                            ),
+                            row[1:3] + row[4:9],
+                            strict=True,
+                        ):
+                            if value is not None:
+                                event.setdefault(key, value)
+                        events.append(self._normalize_event(event))
                     except Exception:  # noqa: BLE001
                         skipped += 1
+
                 if events:
                     materialize_trade_events(conn, events)
                     materialized += len(events)
