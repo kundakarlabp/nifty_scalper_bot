@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import subprocess
 from collections.abc import Callable, Mapping
-from datetime import datetime, time, timezone
+from datetime import date, datetime, time, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -59,7 +59,7 @@ class DailyLogArchiver:
         self._timeout_seconds = max(1.0, float(timeout_seconds))
         self._transport = transport or _post_json
         self._log_reader = log_reader or self._read_journal
-        self._finalized_session_date = None
+        self._finalized_session_date: date | None = None
 
     def archive_once(self, now: datetime | None = None) -> dict[str, Any]:
         current = (now or datetime.now(timezone.utc)).astimezone(_IST)
