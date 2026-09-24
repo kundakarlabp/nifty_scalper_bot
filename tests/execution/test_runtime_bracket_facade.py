@@ -237,6 +237,40 @@ def test_managed_filled_exit_terminalizes_linked_bracket(tmp_path, monkeypatch) 
     assert manager.has_unresolved_exit() is False
 
 
+def test_duplicate_managed_exit_fill_is_idempotent(tmp_path, monkeypatch) -> None:
+    manager, broker, symbol = _exit_manager(tmp_path, monkeypatch)
+    events: list[dict[str, Any]] = []
+    manager._trade_journal = SimpleNamespace(
+        log_event=lambda payload: events.append(dict(payload))
+    )
+    bracket = manager.get_bracket("ENTRY-1")
+    assert bracket is not None
+    bracket.exit_reason = "HARD_SL_BREACH"
+    broker.statuses["EXIT-1"] = {"status": "COMPLETE", "average_price": 95.0}
+    broker.positions = []
+    order = SimpleNamespace(
+        order_id="EXIT-1",
+        symbol=symbol,
+        side="SELL",
+        quantity=65,
+        filled_quantity=65,
+        fill_price=95.0,
+        intent="EXIT",
+        bracket_id="ENTRY-1",
+        linked_entry_order_id="ENTRY-1",
+        trade_lifecycle_id="ENTRY-1",
+    )
+
+    assert manager.reconcile_filled_exit_order(order, broker.statuses["EXIT-1"]) is True
+    closed_at = bracket.closed_at
+    assert sum(event["event_type"] == "EXIT_FILLED" for event in events) == 1
+
+    assert manager.reconcile_filled_exit_order(order, broker.statuses["EXIT-1"]) is True
+    assert bracket.exit_state == bracket_core.BracketExitLifecycle.CLOSED.value
+    assert bracket.closed_at == closed_at
+    assert sum(event["event_type"] == "EXIT_FILLED" for event in events) == 1
+
+
 def test_external_flatten_closes_only_unique_flat_bracket(tmp_path, monkeypatch) -> None:
     manager, broker, symbol = _exit_manager(tmp_path, monkeypatch)
     bracket = manager.get_bracket("ENTRY-1")
