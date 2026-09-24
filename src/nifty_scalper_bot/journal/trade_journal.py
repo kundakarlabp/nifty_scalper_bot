@@ -236,8 +236,9 @@ class TradeJournal:
                 or ""
             )
             or None,
-            "build_sha": str(meta_dict.get("build_sha") or resolve_build_sha())
-            or None,
+            "build_sha": (
+                str(meta_dict.get("build_sha") or resolve_build_sha()) or None
+            ),
             "meta": meta_dict,
         }
 
