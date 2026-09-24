@@ -86,3 +86,26 @@ def test_dynamic_subscription_serializes_subscribe_before_full_mode() -> None:
         ("subscribe", [101]),
         ("set_mode", ("full", [101])),
     ]
+
+def test_reassert_full_mode_does_not_resubscribe_existing_token() -> None:
+    calls: list[tuple[str, object]] = []
+    jobs: list[Callable[[], Any]] = []
+
+    class _Ticker:
+        MODE_FULL = "full"
+
+        def set_mode(self, mode: str, tokens: list[int]) -> None:
+            calls.append(("set_mode", (mode, list(tokens))))
+
+    manager = ws_module.WebSocketManager("key", "token", tokens=[101])
+    manager._ticker = _Ticker()  # noqa: SLF001
+    manager._connected.set()  # noqa: SLF001
+    manager._schedule_blocking = jobs.append  # type: ignore[method-assign]
+
+    assert manager.reassert_full_mode([101]) is True
+    assert len(jobs) == 1
+
+    jobs[0]()
+
+    assert calls == [("set_mode", ("full", [101]))]
+
