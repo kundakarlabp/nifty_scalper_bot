@@ -3536,21 +3536,35 @@ class OrderManager:
         # ---------------------------------------------------------------------
         # 5. STATE PERSISTENCE (Save Intent BEFORE Execution)
         # ---------------------------------------------------------------------
-        # Generate ID if manual
-        if not signal_id:
+        entry_lifecycle = normalized_intent in {"ENTRY", "SCALE_IN", "REVERSAL"}
+
+        # Only exposure-creating orders own a signal/trade lifecycle. Protective
+        # exits are journaled by BracketManager against the existing trade.
+        order_identity = signal_id
+        if entry_lifecycle and not signal_id:
             raw_sig = f"{normalized_symbol}:{side}:{quantity}:{int(time.time())}"
             sig_hash = hashlib.md5(raw_sig.encode()).hexdigest()[:12]
             signal_id = f"manual_{sig_hash}"
+            order_identity = signal_id
+        elif not order_identity:
+            raw_order = (
+                f"{normalized_symbol}:{side}:{quantity}:"
+                f"{normalized_intent}:{int(time.time())}"
+            )
+            order_hash = hashlib.md5(raw_order.encode()).hexdigest()[:12]
+            order_identity = f"order_{order_hash}"
 
-        trade_id = f"TRD_{signal_id}"
+        trade_id = f"TRD_{signal_id}" if entry_lifecycle and signal_id else None
         trade_provenance = dict(trade_provenance or {})
-        trade_provenance.setdefault("trade_id", trade_id)
-        trade_provenance.setdefault("signal_id", signal_id)
+        if trade_id:
+            trade_provenance.setdefault("trade_id", trade_id)
+        if signal_id:
+            trade_provenance.setdefault("signal_id", signal_id)
         if trace_id:
             trade_provenance.setdefault("trace_id", trace_id)
         if strategy_name:
             trade_provenance.setdefault("strategy", strategy_name)
-        unique_client_id = f"bot_{signal_id[-12:]}"  # Max 20 chars usually
+        unique_client_id = f"bot_{order_identity[-12:]}"  # Max 20 chars usually
         suffix = unique_client_id[-8:]
         base_tag = str(tag or "bot").strip() or "bot"
         safe_base = "".join(ch for ch in base_tag if ch.isalnum() or ch in {"_", "-"})
@@ -3563,23 +3577,24 @@ class OrderManager:
             broker_tag = f"{safe_base}_{suffix}"[:20]
 
         pending_signal_marked = False
-        if signal_id:
+        if entry_lifecycle and signal_id:
             self._mark_signal_pending(signal_id)
             pending_signal_marked = True
-        self._log_trade_event(
-            "ORDER_SUBMIT_ATTEMPT",
-            symbol=normalized_symbol,
-            side=side,
-            qty=quantity,
-            price=float(price or 0.0),
-            meta={
-                "trade_id": trade_id,
-                "signal_id": signal_id,
-                "strategy": strategy_name,
-                "trace_id": trace_id,
-                "status": "SUBMIT_ATTEMPT",
-            },
-        )
+        if entry_lifecycle:
+            self._log_trade_event(
+                "ORDER_SUBMIT_ATTEMPT",
+                symbol=normalized_symbol,
+                side=side,
+                qty=quantity,
+                price=float(price or 0.0),
+                meta={
+                    "trade_id": trade_id,
+                    "signal_id": signal_id,
+                    "strategy": strategy_name,
+                    "trace_id": trace_id,
+                    "status": "SUBMIT_ATTEMPT",
+                },
+            )
 
         # ---------------------------------------------------------------------
         # 6. PAYLOAD OPTIMIZATION (SL-M Fix) - CORRECTED
@@ -3863,21 +3878,22 @@ class OrderManager:
                         normalized_symbol,
                     )
 
-                    self._log_trade_event(
-                        "ORDER_SUBMITTED",
-                        symbol=normalized_symbol,
-                        side=side,
-                        qty=quantity,
-                        price=float(price or 0.0),
-                        order_id=order_id,
-                        meta={
-                            "trade_id": trade_id,
-                            "signal_id": signal_id,
-                            "trace_id": trace_id,
-                            "strategy": strategy_name,
-                            "status": "SUBMITTED",
-                        },
-                    )
+                    if entry_lifecycle:
+                        self._log_trade_event(
+                            "ORDER_SUBMITTED",
+                            symbol=normalized_symbol,
+                            side=side,
+                            qty=quantity,
+                            price=float(price or 0.0),
+                            order_id=order_id,
+                            meta={
+                                "trade_id": trade_id,
+                                "signal_id": signal_id,
+                                "trace_id": trace_id,
+                                "strategy": strategy_name,
+                                "status": "SUBMITTED",
+                            },
+                        )
 
                     # B. Register Order Locally
                     details = OrderDetails(
