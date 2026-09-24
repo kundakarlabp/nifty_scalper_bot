@@ -10,6 +10,7 @@ from nifty_scalper_bot.infra.scheduled_tasks import (
     run_archive_rotation,
     run_periodic_task,
     start_background_tasks,
+    start_trade_replication_task,
 )
 
 
@@ -114,7 +115,7 @@ def test_start_background_tasks_creates_tasks(monkeypatch: pytest.MonkeyPatch) -
     assert logger.messages[-1][1]["count"] == 2
 
 
-def test_start_background_tasks_adds_replication_when_enabled(
+def test_start_trade_replication_task_is_independent_of_execution_stack(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Any,
 ) -> None:
@@ -143,12 +144,7 @@ def test_start_background_tasks_adds_replication_when_enabled(
         lambda: 30.0,
     )
 
-    manager = _DummyOrderManager(history_path=tmp_path / "orders.jsonl")
-    journal = type("_Journal", (), {"db_path": tmp_path / "trades.db"})()
-    logger = _DummyLogger()
+    task = start_trade_replication_task(tmp_path / "trades.db")
 
-    tasks = start_background_tasks(manager, logger, trade_journal=journal)
-
-    assert len(tasks) == 3
-    assert created == tasks
-    assert logger.messages[-1][1]["count"] == 3
+    assert task is created[0]
+    assert len(created) == 1
