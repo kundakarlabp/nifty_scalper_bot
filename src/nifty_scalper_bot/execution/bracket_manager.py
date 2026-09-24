@@ -23,7 +23,6 @@ from nifty_scalper_bot.execution.runtime_bracket_manager import (  # noqa: E402,
     RuntimeBracketManager,
 )
 
-
 BracketManager = BoundBracketManager
 
 __all__ = sorted(
