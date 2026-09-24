@@ -298,7 +298,9 @@ def test_tradebook_snapshot_survives_margin_endpoint_failure() -> None:
         def _ensure_json(payload):
             return payload
 
-        def _make_request(self, method: str, path: str, *, operation_label: str):
+        def _make_request(
+            self, method: str, path: str, *, operation_label: str
+        ):
             assert method == "GET"
             if path == "/portfolio/positions":
                 return {"data": {"day": []}}
@@ -331,4 +333,3 @@ def test_tradebook_snapshot_survives_margin_endpoint_failure() -> None:
     assert snapshot["margins_error"] is not None
     assert snapshot["strategy_tradebook_realized_gross"] == pytest.approx(-65.0)
     assert snapshot["strategy_tradebook_fill_count"] == 2
-
