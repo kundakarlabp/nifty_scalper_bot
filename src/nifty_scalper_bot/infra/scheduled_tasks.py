@@ -7,7 +7,7 @@ import inspect
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
-from nifty_scalper_bot.infra.log_rotation import rotate_order_history_archive
+from nifty_scalper_bot.infra.daily_log_archive import (\n    archive_interval_seconds,\n    build_daily_log_archiver,\n)\nfrom nifty_scalper_bot.infra.log_rotation import rotate_order_history_archive
 from nifty_scalper_bot.infra.supabase_trade_replication import (
     build_supabase_trade_replicator,
     replication_interval_seconds,
@@ -71,7 +71,7 @@ async def run_periodic_task(
             )
 
 
-def start_trade_replication_task(
+def start_daily_log_archive_task() -> asyncio.Task[Any] | None:\n    """Start optional full-session log archival off the trading hot path."""\n    archiver = build_daily_log_archiver()\n    if archiver is None:\n        return None\n    return safe_task(\n        run_periodic_task(\n            task_fn=lambda: asyncio.to_thread(archiver.archive_once),\n            interval_sec=archive_interval_seconds(),\n            task_name="archive_daily_market_logs",\n        )\n    )\n\n\ndef start_trade_replication_task(
     db_path: str | Path,
 ) -> asyncio.Task[Any] | None:
     """Start optional trade replication independently of broker startup."""
