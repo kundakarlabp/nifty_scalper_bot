@@ -210,11 +210,17 @@ def _zerodha_get_pnl_snapshot(self: Any) -> dict[str, Any]:
     """Return dedicated broker P&L evidence without changing exposure semantics."""
 
     margins_fetcher = getattr(self, "get_account_margins", None)
-    if not callable(margins_fetcher):
-        raise RuntimeError("broker account margins endpoint unavailable")
-
-    margins = margins_fetcher(segment="equity")
-    realized, unrealized = _extract_account_m2m(margins)
+    realized: float | None = None
+    unrealized: float | None = None
+    margins_error: str | None = None
+    if callable(margins_fetcher):
+        try:
+            margins = margins_fetcher(segment="equity")
+            realized, unrealized = _extract_account_m2m(margins)
+        except Exception as exc:
+            margins_error = f"{type(exc).__name__}: {exc}"
+    else:
+        margins_error = "broker account margins endpoint unavailable"
 
     day_marked: float | None = None
     day_closed: float | None = None
@@ -271,6 +277,7 @@ def _zerodha_get_pnl_snapshot(self: Any) -> dict[str, Any]:
         ),
         "margin_m2m_realized": margin_realized,
         "margin_m2m_unrealized": margin_unrealized,
+        "margins_error": margins_error,
         "strategy_tradebook_realized_gross": tradebook_realized,
         "strategy_tradebook_fill_count": int(tradebook_fill_count),
         "strategy_day_marked_gross": day_marked,
