@@ -120,7 +120,6 @@ def test_live_option_freshness_prefers_genuine_ws_age_over_fresh_cached_quote(
     )
 
 
-
 def test_runner_get_quote_never_allows_implicit_pull() -> None:
     symbol = "NFO:NIFTY26SEP23100CE"
 
