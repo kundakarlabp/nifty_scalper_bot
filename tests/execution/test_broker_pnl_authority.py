@@ -9,6 +9,7 @@ from nifty_scalper_bot.execution.broker_pnl_authority_patch import (
     _strategy_day_marked_pnl,
     _strategy_tradebook_realized_pnl,
     _strip_legacy_position_pnl,
+    _zerodha_get_pnl_snapshot,
 )
 from nifty_scalper_bot.execution.position_manager import PositionManager
 
@@ -142,10 +143,12 @@ def test_dedicated_broker_pnl_never_overwrites_strategy_ledger(tmp_path) -> None
     snapshot = manager.pnl_reconciliation_snapshot()
     assert manager.get_realized_pnl() == pytest.approx(-125.0)
     assert manager.get_strategy_realized_pnl() == pytest.approx(-125.0)
-    assert manager.get_broker_account_realized_pnl() == pytest.approx(-90.0)
+    assert manager.get_broker_account_realized_pnl() == pytest.approx(-120.0)
     assert snapshot["broker_account_realized"] == pytest.approx(-90.0)
     assert snapshot["broker_account_unrealized"] == pytest.approx(-10.0)
-    assert snapshot["broker_vs_strategy_realized_difference"] == pytest.approx(35.0)
+    assert snapshot["broker_realized_evidence"] == pytest.approx(-120.0)
+    assert snapshot["broker_realized_evidence_source"] == "zerodha_positions_day"
+    assert snapshot["broker_vs_strategy_realized_difference"] == pytest.approx(5.0)
     assert snapshot["broker_account_pnl_status"] == "mismatch"
     assert snapshot["pnl_diagnostic_only"] is True
     assert snapshot["pnl_authority"] == "local_confirmed_ledger"
@@ -195,9 +198,12 @@ def test_positions_confirm_local_pnl_when_margins_m2m_stays_zero(tmp_path) -> No
 
     diagnostic = manager.refresh_broker_pnl_diagnostic(force=True)
 
-    assert diagnostic["status"] == "source_disagreement"
+    assert diagnostic["status"] == "matched"
+    assert diagnostic["broker_realized_evidence"] == pytest.approx(-39.0)
+    assert diagnostic["broker_realized_evidence_source"] == "zerodha_positions_day"
     assert diagnostic["positions_vs_strategy_difference"] == pytest.approx(0.0)
-    assert diagnostic["difference"] == pytest.approx(39.0)
+    assert diagnostic["margin_vs_strategy_difference"] == pytest.approx(39.0)
+    assert diagnostic["difference"] == pytest.approx(0.0)
     assert manager.get_realized_pnl() == pytest.approx(-39.0)
     assert manager.pnl_reconciliation_snapshot()[
         "broker_positions_vs_strategy_difference"
@@ -279,4 +285,53 @@ def test_tradebook_evidence_matches_strategy_when_margin_m2m_is_zero(tmp_path) -
     assert diagnostic["difference"] == pytest.approx(0.0)
     assert manager.get_broker_account_realized_pnl() == pytest.approx(-39.0)
     assert manager.get_realized_pnl() == pytest.approx(-39.0)
+
+def test_tradebook_snapshot_survives_margin_endpoint_failure() -> None:
+    class _Client:
+        _GENERAL_BUCKET = object()
+
+        def get_account_margins(self, *, segment: str):
+            assert segment == "equity"
+            raise RuntimeError("temporary margins outage")
+
+        def _acquire_bucket(self, _bucket: object) -> None:
+            return None
+
+        @staticmethod
+        def _ensure_json(payload):
+            return payload
+
+        def _make_request(self, method: str, path: str, *, operation_label: str):
+            assert method == "GET"
+            if path == "/portfolio/positions":
+                return {"data": {"day": []}}
+            if path == "/trades":
+                return {
+                    "data": [
+                        {
+                            "exchange": "NFO",
+                            "tradingsymbol": "NIFTY2691523400CE",
+                            "product": "MIS",
+                            "transaction_type": "BUY",
+                            "quantity": 65,
+                            "average_price": 100.0,
+                        },
+                        {
+                            "exchange": "NFO",
+                            "tradingsymbol": "NIFTY2691523400CE",
+                            "product": "MIS",
+                            "transaction_type": "SELL",
+                            "quantity": 65,
+                            "average_price": 99.0,
+                        },
+                    ]
+                }
+            raise AssertionError((path, operation_label))
+
+    snapshot = _zerodha_get_pnl_snapshot(_Client())
+
+    assert snapshot["margin_m2m_realized"] is None
+    assert snapshot["margins_error"] is not None
+    assert snapshot["strategy_tradebook_realized_gross"] == pytest.approx(-65.0)
+    assert snapshot["strategy_tradebook_fill_count"] == 2
 
