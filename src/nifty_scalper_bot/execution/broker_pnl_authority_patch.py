@@ -165,11 +165,9 @@ def _strategy_tradebook_realized_pnl(
             continue
         if str(item.get("product") or "").strip().upper() != "MIS":
             continue
-        side = (
-            str(item.get("transaction_type") or item.get("side") or "")
-            .strip()
-            .upper()
-        )
+        side = str(
+            item.get("transaction_type") or item.get("side") or ""
+        ).strip().upper()
         quantity = _finite_float(item.get("quantity", item.get("filled_quantity")))
         price = _finite_float(item.get("average_price", item.get("price")))
         if side not in {"BUY", "SELL"} or quantity is None or price is None:
@@ -456,13 +454,12 @@ def refresh_broker_pnl_diagnostic(
             if broker_evidence is None
             else float(broker_evidence) - strategy_realized
         )
-        status = (
-            "unavailable"
-            if difference is None
-            else "matched"
-            if abs(difference) <= _MATCH_TOLERANCE_RUPEES
-            else "mismatch"
-        )
+        if difference is None:
+            status = "unavailable"
+        elif abs(difference) <= _MATCH_TOLERANCE_RUPEES:
+            status = "matched"
+        else:
+            status = "mismatch"
         positions_difference = (
             None if positions_closed is None else positions_closed - strategy_realized
         )
