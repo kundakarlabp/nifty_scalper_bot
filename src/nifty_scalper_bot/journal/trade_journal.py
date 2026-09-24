@@ -21,7 +21,21 @@ from nifty_scalper_bot.journal.trade_ledger import (
 
 LOGGER = logging.getLogger(__name__)
 
-_TRADE_LEDGER_BACKFILL_MIGRATION = "trade_ledger_historical_backfill_v1"
+_TRADE_LEDGER_BACKFILL_MIGRATION = "trade_ledger_historical_backfill_v2_identity"
+
+_TRADE_ID_EVENT_TYPES = {
+    "ORDER_SUBMIT_ATTEMPT",
+    "ORDER_SUBMITTED",
+    "ORDER_FILL_CONFIRMED",
+    "ORDER_REJECTED_FATAL",
+    "BRACKET_GUARD_REGISTERED",
+    "BRACKET_ARMED",
+    "TRAIL_UPDATED",
+    "EXIT_TRIGGERED",
+    "EXIT_SUBMITTED",
+    "EXIT_FILLED",
+    "BRACKET_CLOSED",
+}
 
 _CANONICAL_EVENT_NAMES = {
     "TRADE_DECISION": "signal.evaluated",
@@ -172,8 +186,32 @@ class TradeJournal:
 
         event_type = str(event.get("event_type") or "UNKNOWN")
         meta_dict = dict(meta)
-        trace_id = str(meta_dict.get("trace_id") or "") or None
-        signal_id = str(meta_dict.get("signal_id") or trace_id or "") or None
+        completed_trade = meta_dict.get("completed_trade")
+        if not isinstance(completed_trade, Mapping):
+            completed_trade = {}
+        trace_id = (
+            str(meta_dict.get("trace_id") or completed_trade.get("trace_id") or "")
+            or None
+        )
+        signal_id = (
+            str(
+                meta_dict.get("signal_id")
+                or completed_trade.get("signal_id")
+                or trace_id
+                or ""
+            )
+            or None
+        )
+        trade_id = (
+            str(
+                meta_dict.get("trade_id")
+                or completed_trade.get("trade_id")
+                or ""
+            )
+            or None
+        )
+        if trade_id is None and signal_id and event_type in _TRADE_ID_EVENT_TYPES:
+            trade_id = f"TRD_{signal_id}"
         return {
             "event_type": event_type,
             "event_name": str(
@@ -185,10 +223,16 @@ class TradeJournal:
             "qty": int(event.get("qty") or 0),
             "price": float(event.get("price") or 0.0),
             "order_id": str(event.get("order_id")) if event.get("order_id") else None,
-            "trade_id": str(meta_dict.get("trade_id") or "") or None,
+            "trade_id": trade_id,
             "signal_id": signal_id,
             "trace_id": trace_id,
-            "strategy": str(meta_dict.get("strategy") or "") or None,
+            "strategy": str(
+                meta_dict.get("strategy")
+                or completed_trade.get("strategy")
+                or completed_trade.get("strategy_name")
+                or ""
+            )
+            or None,
             "reason_code": str(
                 meta_dict.get("reason_code")
                 or meta_dict.get("block_reason")
