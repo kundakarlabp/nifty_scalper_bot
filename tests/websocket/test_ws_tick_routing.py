@@ -57,3 +57,32 @@ async def test_manager_routes_ticks_to_callback(
     await asyncio.sleep(0)
 
     assert received == [{'instrument_token': 101}]
+
+def test_dynamic_subscription_serializes_subscribe_before_full_mode() -> None:
+    calls: list[tuple[str, object]] = []
+    jobs: list[Callable[[], Any]] = []
+
+    class _Ticker:
+        MODE_FULL = "full"
+
+        def subscribe(self, tokens: list[int]) -> None:
+            calls.append(("subscribe", list(tokens)))
+
+        def set_mode(self, mode: str, tokens: list[int]) -> None:
+            calls.append(("set_mode", (mode, list(tokens))))
+
+    manager = ws_module.WebSocketManager("key", "token")
+    manager._ticker = _Ticker()  # noqa: SLF001
+    manager._connected.set()  # noqa: SLF001
+    manager._schedule_blocking = jobs.append  # type: ignore[method-assign]
+
+    assert manager.set_tokens([101]) is True
+    assert len(jobs) == 1
+
+    jobs[0]()
+
+    assert calls == [
+        ("subscribe", [101]),
+        ("set_mode", ("full", [101])),
+    ]
+
