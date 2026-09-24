@@ -162,9 +162,7 @@ class SupabaseTradeReplicator:
                 events = list(
                     conn.execute(
                         """
-                        SELECT id, timestamp, event_name, symbol, side, qty, price,
-                               order_id, trade_id, signal_id, trace_id, strategy,
-                               reason_code, build_sha, event_json
+                        SELECT *
                         FROM trade_events
                         WHERE id > ?
                         ORDER BY id
@@ -178,17 +176,16 @@ class SupabaseTradeReplicator:
                     return [], [], checkpoint
                 raise
 
-            trade_ids = sorted(
-                {
-                    str(row["trade_id"])
-                    for row in events
-                    if row["trade_id"] not in (None, "")
-                }
-            )
-            if not trade_ids:
+            trade_ids: set[str] = set()
+            for row in events:
+                trade_id = dict(row).get("trade_id")
+                if trade_id not in (None, ""):
+                    trade_ids.add(str(trade_id))
+            sorted_trade_ids = sorted(trade_ids)
+            if not sorted_trade_ids:
                 return events, [], checkpoint
 
-            placeholders = ",".join("?" for _ in trade_ids)
+            placeholders = ",".join("?" for _ in sorted_trade_ids)
             try:
                 ledger = list(
                     conn.execute(
@@ -198,7 +195,7 @@ class SupabaseTradeReplicator:
                         WHERE trade_id IN ({placeholders})
                         ORDER BY trade_id
                         """,
-                        trade_ids,
+                        sorted_trade_ids,
                     )
                 )
             except sqlite3.OperationalError as exc:
@@ -248,25 +245,33 @@ class SupabaseTradeReplicator:
             )
 
     def _event_payload(self, row: sqlite3.Row) -> dict[str, Any]:
-        timestamp = float(row["timestamp"])
-        event_json = _json_object(row["event_json"])
+        data = dict(row)
+        timestamp = float(data["timestamp"])
+        event_json = _json_object(data.get("event_json"))
+        event_name = (
+            _optional_text(data.get("event_name"))
+            or _optional_text(event_json.get("event_name"))
+            or _optional_text(data.get("event_type"))
+            or _optional_text(event_json.get("event_type"))
+            or "UNKNOWN"
+        )
         return {
             "source": self._source,
-            "source_event_id": int(row["id"]),
+            "source_event_id": int(data["id"]),
             "trading_date": _trading_date(timestamp),
             "event_at": _iso_utc(timestamp),
-            "event_name": str(row["event_name"] or ""),
-            "trade_id": _optional_text(row["trade_id"]),
-            "signal_id": _optional_text(row["signal_id"]),
-            "trace_id": _optional_text(row["trace_id"]),
-            "symbol": _optional_text(row["symbol"]),
-            "side": _optional_text(row["side"]),
-            "qty": _optional_int(row["qty"]),
-            "price": _optional_float(row["price"]),
-            "order_id": _optional_text(row["order_id"]),
-            "strategy": _optional_text(row["strategy"]),
-            "reason_code": _optional_text(row["reason_code"]),
-            "build_sha": _optional_text(row["build_sha"]),
+            "event_name": event_name,
+            "trade_id": _optional_text(data.get("trade_id")),
+            "signal_id": _optional_text(data.get("signal_id")),
+            "trace_id": _optional_text(data.get("trace_id")),
+            "symbol": _optional_text(data.get("symbol")),
+            "side": _optional_text(data.get("side")),
+            "qty": _optional_int(data.get("qty")),
+            "price": _optional_float(data.get("price")),
+            "order_id": _optional_text(data.get("order_id")),
+            "strategy": _optional_text(data.get("strategy")),
+            "reason_code": _optional_text(data.get("reason_code")),
+            "build_sha": _optional_text(data.get("build_sha")),
             "payload": event_json,
         }
 
