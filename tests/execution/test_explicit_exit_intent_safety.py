@@ -67,7 +67,9 @@ def test_explicit_exit_intent_bypasses_entry_kill_switch_without_tag(
     assert broker.calls == 1
 
 
-def test_protective_exit_does_not_create_entry_trade_identity(monkeypatch, tmp_path) -> None:
+def test_protective_exit_does_not_create_entry_trade_identity(
+    monkeypatch, tmp_path
+) -> None:
     """A protective exit belongs to the existing trade, not a new manual trade."""
     manager, broker = _manager(monkeypatch, tmp_path)
     events: list[dict] = []
