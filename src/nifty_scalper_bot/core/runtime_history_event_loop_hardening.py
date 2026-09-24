@@ -43,9 +43,7 @@ def _current_spot(ctx: Any) -> float | None:
         return None
     if isinstance(snapshot, Mapping):
         return _positive_float(
-            snapshot.get("ltp")
-            or snapshot.get("last_price")
-            or snapshot.get("price")
+            snapshot.get("ltp") or snapshot.get("last_price") or snapshot.get("price")
         )
     return _positive_float(
         getattr(snapshot, "ltp", None)
@@ -104,9 +102,7 @@ def _current_result(
     phase: str,
     reason: str,
 ) -> RuntimeHistoryResult:
-    policy = resolve_history_policy(
-        ctx, symbol, role=role, phase=phase, reason=reason
-    )
+    policy = resolve_history_policy(ctx, symbol, role=role, phase=phase, reason=reason)
     mdm = getattr(ctx, "market_data_manager", None)
     runner = getattr(ctx, "strategy_runner", None)
     try:
