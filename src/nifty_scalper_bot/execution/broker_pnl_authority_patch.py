@@ -165,9 +165,7 @@ def _strategy_tradebook_realized_pnl(
             continue
         if str(item.get("product") or "").strip().upper() != "MIS":
             continue
-        side = str(
-            item.get("transaction_type") or item.get("side") or ""
-        ).strip().upper()
+        side = str(item.get("transaction_type") or item.get("side") or "").strip().upper()
         quantity = _finite_float(item.get("quantity", item.get("filled_quantity")))
         price = _finite_float(item.get("average_price", item.get("price")))
         if side not in {"BUY", "SELL"} or quantity is None or price is None:
