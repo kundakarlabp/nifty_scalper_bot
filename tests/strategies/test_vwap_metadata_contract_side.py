@@ -257,6 +257,7 @@ def test_real_vwap_vote_clears_default_live_quality_gate(monkeypatch):
     assert signal.metadata['liquidity_score'] == 2.0
     assert signal.metadata['regime_time_suitability_score'] == 1.0
 
+
 def test_vwap_has_no_unreachable_early_trend_pullback_branch():
     init_source = inspect.getsource(VWAPProStrategy.__init__)
     evaluate_source = inspect.getsource(VWAPProStrategy._evaluate_signal)
@@ -264,4 +265,3 @@ def test_vwap_has_no_unreachable_early_trend_pullback_branch():
     assert "_allow_early_trend_pullback" not in init_source
     assert "early_trend_pullback" not in evaluate_source
     assert "VWAP_PRO_ALLOW_EARLY_TREND_PULLBACK" not in init_source
-
