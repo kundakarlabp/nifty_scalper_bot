@@ -172,6 +172,10 @@ def check_file(base: str, path: Path) -> tuple[bool, str]:
     try:
         if _black_check(base_path):
             clean = _black_check(path)
+            if not clean:
+                diff = _black_diff(path)
+                if diff:
+                    print(diff)
             return clean, (
                 f"PASS {path}: Black-clean file remains clean"
                 if clean
@@ -186,6 +190,9 @@ def check_file(base: str, path: Path) -> tuple[bool, str]:
         if not black_spans:
             return True, f"PASS {path}: legacy file is now Black-clean"
         if not changed_spans:
+            diff = _black_diff(path)
+            if diff:
+                print(diff)
             return (
                 False,
                 f"FAIL {path}: changed file has no resolvable changed-line ranges",
