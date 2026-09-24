@@ -14,11 +14,14 @@ from nifty_scalper_bot.strategies.trade_selector import TradeCandidateSelector
 
 
 class _Logger:
+    def __init__(self) -> None:
+        self.info_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
     def debug(self, *args, **kwargs):
         pass
 
     def info(self, *args, **kwargs):
-        pass
+        self.info_calls.append((args, kwargs))
 
     def warning(self, *args, **kwargs):
         pass
@@ -173,6 +176,49 @@ def test_candidate_capacity_uses_materialized_stop_and_selects_risk_safe_fallbac
     assert decisions[preferred.symbol]["reason"] == "minimum_lot_risk_unaffordable"
     assert decisions[fallback.symbol]["plan_risk_affordable"] is True
     assert decisions[fallback.symbol]["affordable"] is True
+
+
+def test_candidate_capacity_log_distinguishes_cash_from_risk_block() -> None:
+    runner = object.__new__(StrategyRunner)
+    runner._logger = _Logger()
+    runner._order_manager = _order_manager(balance=15_000.0)
+    runner._data_hub = SimpleNamespace(
+        get_available_balance=lambda force=False: 15_000.0
+    )
+    runner._risk_manager = SimpleNamespace(available_balance=15_000.0)
+    runner._capital_block_counter = 0
+    runner._is_symbol_execution_ready = lambda _symbol: True
+    runner._ensure_symbol_execution_ready_for_order = lambda _symbol, trace_id=None: True
+    candidate = SimpleNamespace(
+        symbol="NFO:NIFTY2691523500PE",
+        entry_price=114.00,
+        stop_loss=110.00,
+    )
+
+    selected, _ = runner._select_capital_eligible_candidate(
+        ranked_candidates=[candidate],
+        candidate_snapshots=[
+            {"symbol": candidate.symbol, "bid": 113.90, "ask": 114.00}
+        ],
+        is_live_mode=True,
+        trace_id="risk-log",
+        preferred_symbol=candidate.symbol,
+        preferred_entry_price=114.00,
+        preferred_stop_loss=110.00,
+    )
+
+    assert selected is None
+    capacity_call = next(
+        args
+        for args, _kwargs in runner._logger.info_calls
+        if args and str(args[0]).startswith("CANDIDATE_CAPACITY_DECISION")
+    )
+    rendered = str(capacity_call[0]) % tuple(capacity_call[1:])
+    assert "capacity_blocker=risk" in rendered
+    assert "cash_required=" in rendered
+    assert "plan_cost_inclusive_risk=" in rendered
+    assert "effective_risk_budget=" in rendered
+    assert "remaining_daily_risk_budget=" in rendered
 
 
 def test_plan_affordability_matches_final_cost_inclusive_risk_authority() -> None:
