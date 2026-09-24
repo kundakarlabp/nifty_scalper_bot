@@ -188,7 +188,9 @@ def test_candidate_capacity_log_distinguishes_cash_from_risk_block() -> None:
     runner._risk_manager = SimpleNamespace(available_balance=15_000.0)
     runner._capital_block_counter = 0
     runner._is_symbol_execution_ready = lambda _symbol: True
-    runner._ensure_symbol_execution_ready_for_order = lambda _symbol, trace_id=None: True
+    runner._ensure_symbol_execution_ready_for_order = (
+        lambda _symbol, trace_id=None: True
+    )
     candidate = SimpleNamespace(
         symbol="NFO:NIFTY2691523500PE",
         entry_price=114.00,
