@@ -389,9 +389,7 @@ class BoundBracketManager(RuntimeBracketManager):
             depth_age = (
                 None if quote is None else max(time.time() - float(quote[2]), 0.0)
             )
-            depth_threshold = float(
-                getattr(self, "_exit_quote_max_age", 3.0) or 0.0
-            )
+            depth_threshold = float(getattr(self, "_exit_quote_max_age", 3.0) or 0.0)
             depth_stale = depth_threshold > 0.0 and (
                 depth_age is None or depth_age > depth_threshold
             )
@@ -442,9 +440,7 @@ class BoundBracketManager(RuntimeBracketManager):
                     )
 
             if depth_stale:
-                depth_label = (
-                    "missing" if depth_age is None else f"{float(depth_age):.3f}"
-                )
+                depth_label = "missing" if depth_age is None else f"{float(depth_age):.3f}"
                 with suppress(Exception):
                     self._log_throttled(
                         "warning",
