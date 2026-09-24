@@ -176,10 +176,6 @@ async def test_run_periodic_task_logs_task_name_and_error(
     task.cancel()
     await task
 
-    assert (
-        "Periodic task failed name=%s error=%s",
-        ("replicate_trade", pytest.raises),
-    ) != messages[-1]
     assert messages[-1][0] == "Periodic task failed name=%s error=%s"
     assert messages[-1][1][0] == "replicate_trade"
     assert str(messages[-1][1][1]) == "remote unavailable"
