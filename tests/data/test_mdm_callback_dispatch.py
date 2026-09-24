@@ -244,7 +244,11 @@ def test_depth_refresh_reasserts_full_mode_and_schedules_rest(monkeypatch) -> No
     mdm._ws = type(
         "_Ws",
         (),
-        {"reassert_full_mode": lambda _self, tokens: mode_calls.append(list(tokens)) or True},
+        {
+            "reassert_full_mode": lambda _self, tokens: (
+                mode_calls.append(list(tokens)) or True
+            )
+        },
     )()
     monkeypatch.setattr(mdm, "_schedule_rest_refresh", scheduled.append)
 
