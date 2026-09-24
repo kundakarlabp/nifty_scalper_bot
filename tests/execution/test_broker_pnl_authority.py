@@ -214,6 +214,7 @@ def test_positions_confirm_local_pnl_when_margins_m2m_stays_zero(tmp_path) -> No
         == "matched"
     )
 
+
 def test_tradebook_realized_pnl_preserves_closed_profit_with_open_residual() -> None:
     realized, fills = _strategy_tradebook_realized_pnl(
         [
