@@ -16,12 +16,11 @@ from collections.abc import Mapping, Sequence
 from contextlib import nullcontext, suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from functools import wraps
 import logging
 import math
 import os
 import time
-from typing import Any, Callable
+from typing import Any
 
 from nifty_scalper_bot.config.regime_ontology import MarketRegime, normalize_regime
 from nifty_scalper_bot.core.active_basket import active_contract_selection_from_basket
@@ -871,115 +870,8 @@ def tighten_market_aware_floor(manager: Any, bracket: Any, ltp: float) -> bool:
     return True
 
 
-def adapt_evaluate_exit_fast(original: Callable[..., Any]) -> Callable[..., Any]:
-    """Let only FINAL_TP consult market continuation; all safety exits pass through."""
-
-    @wraps(original)
-    def wrapped(
-        self: Any,
-        bracket: Any,
-        ltp: float,
-        *,
-        committed_sl: float | None = None,
-    ) -> Any:
-        action = original(self, bracket, ltp, committed_sl=committed_sl)
-        if not isinstance(action, Mapping) or str(action.get("type") or "") != "FINAL_TP":
-            return action
-        try:
-            return extend_final_target_if_supported(self, bracket, float(ltp), action)
-        except Exception as exc:  # noqa: BLE001 - fail closed to canonical FINAL_TP
-            LOGGER.error(
-                "PROFIT_EXTENSION_EVALUATION_FAILED symbol=%s error=%s",
-                getattr(bracket, "symbol", ""),
-                exc,
-                extra={
-                    "event": "PROFIT_EXTENSION_EVALUATION_FAILED",
-                    "symbol": getattr(bracket, "symbol", ""),
-                    "error_type": type(exc).__name__,
-                },
-                exc_info=exc,
-            )
-            return action
-
-    return wrapped
-
-
-def adapt_trailing_math(original: Callable[..., Any]) -> Callable[..., Any]:
-    """Preserve canonical trailing, then optionally tighten weak profitable trades."""
-
-    @wraps(original)
-    def wrapped(self: Any, bracket: Any) -> bool:
-        original_changed = bool(original(self, bracket))
-        ltp = _positive(getattr(bracket, "last_ltp", None))
-        if ltp is None:
-            return original_changed
-        try:
-            market_changed = tighten_market_aware_floor(self, bracket, ltp)
-        except Exception as exc:  # noqa: BLE001 - canonical trailing remains authoritative
-            LOGGER.debug(
-                "PROFIT_TIGHTEN_EVALUATION_FAILED symbol=%s error=%s",
-                getattr(bracket, "symbol", ""),
-                exc,
-            )
-            market_changed = False
-        return original_changed or market_changed
-
-    return wrapped
-
-
-def adapt_confirm_entry_fill(original: Callable[..., Any]) -> Callable[..., Any]:
-    """Capture cached market baselines only after canonical fill activation succeeds."""
-
-    @wraps(original)
-    def wrapped(self: Any, order_id: str, fill_price: float, filled_qty: int | None = None) -> Any:
-        result = original(self, order_id, fill_price, filled_qty)
-        bracket = None
-        getter = getattr(self, "get_bracket", None)
-        if callable(getter):
-            with suppress(Exception):
-                bracket = getter(order_id)
-        if bracket is None or not bool(getattr(bracket, "entry_confirmed", False)):
-            return result
-        try:
-            changed = capture_entry_market_baseline(self, bracket)
-            if changed:
-                saver = getattr(self, "save_state", None)
-                if callable(saver):
-                    saver()
-        except Exception as exc:  # noqa: BLE001 - baseline is optional, protection is not
-            LOGGER.debug(
-                "PROFIT_EXTENSION_BASELINE_CAPTURE_FAILED symbol=%s error=%s",
-                getattr(bracket, "symbol", ""),
-                exc,
-            )
-        return result
-
-    return wrapped
-
-
-def apply_patches(target_cls: type[Any]) -> None:
-    """Install the market-aware supervisor on the single canonical bracket class."""
-    if bool(getattr(target_cls, "_market_aware_profit_extension_installed", False)):
-        return
-
-    evaluate = getattr(target_cls, "_evaluate_exit_fast", None)
-    trailing = getattr(target_cls, "_apply_trailing_math", None)
-    confirm = getattr(target_cls, "confirm_entry_fill", None)
-    if not callable(evaluate) or not callable(trailing) or not callable(confirm):
-        raise RuntimeError("Canonical bracket lifecycle methods unavailable")
-
-    target_cls._evaluate_exit_fast = adapt_evaluate_exit_fast(evaluate)
-    target_cls._apply_trailing_math = adapt_trailing_math(trailing)
-    target_cls.confirm_entry_fill = adapt_confirm_entry_fill(confirm)
-    target_cls._market_aware_profit_extension_installed = True
-
-
 __all__ = [
     "ContinuationDecision",
-    "adapt_confirm_entry_fill",
-    "adapt_evaluate_exit_fast",
-    "adapt_trailing_math",
-    "apply_patches",
     "assess_continuation",
     "capture_entry_market_baseline",
     "extend_final_target_if_supported",

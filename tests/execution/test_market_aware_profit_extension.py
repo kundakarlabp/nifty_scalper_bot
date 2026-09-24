@@ -4,13 +4,17 @@ from types import SimpleNamespace
 
 import pytest
 
+from nifty_scalper_bot.execution import (
+    market_aware_profit_extension as profit_extension,
+)
 from nifty_scalper_bot.execution.market_aware_profit_extension import (
     ContinuationDecision,
     assess_continuation,
-    adapt_evaluate_exit_fast,
     extend_final_target_if_supported,
     tighten_market_aware_floor,
 )
+from nifty_scalper_bot.execution.ownership import BoundBracketManager
+from nifty_scalper_bot.execution.runtime_bracket_manager import RuntimeBracketManager
 
 
 SYMBOL = "NFO:NIFTY2681124500CE"
@@ -312,9 +316,8 @@ def test_market_aware_tightening_never_acts_before_one_r(monkeypatch):
     assert bracket.sl_trigger_price == old_sl
 
 
-def test_hard_stop_and_partial_tp_are_never_overridden(monkeypatch):
-    monkeypatch.setenv("MARKET_AWARE_PROFIT_EXTENSION_SCORE", "0")
-    manager = FakeManager(strong=True)
+def test_native_exit_hook_never_overrides_hard_stop_or_partial_tp(monkeypatch):
+    manager = object.__new__(BoundBracketManager)
     bracket = _bracket()
     calls = []
 
@@ -322,8 +325,13 @@ def test_hard_stop_and_partial_tp_are_never_overridden(monkeypatch):
         calls.append(committed_sl)
         return {"decision": "EXIT_STOP", "type": "SL", "reason": "HARD_SL_BREACH"}
 
-    wrapped = adapt_evaluate_exit_fast(hard_stop)
-    action = wrapped(manager, bracket, 89.0, committed_sl=90.0)
+    monkeypatch.setattr(RuntimeBracketManager, "_evaluate_exit_fast", hard_stop)
+    action = BoundBracketManager._evaluate_exit_fast(
+        manager,
+        bracket,
+        89.0,
+        committed_sl=90.0,
+    )
     assert action is not None and action["type"] == "SL"
     assert calls == [90.0]
 
@@ -331,16 +339,51 @@ def test_hard_stop_and_partial_tp_are_never_overridden(monkeypatch):
         del committed_sl
         return {"decision": "EXIT_TARGET", "type": "PARTIAL_TP", "reason": "TP1 Hit"}
 
-    wrapped_partial = adapt_evaluate_exit_fast(partial)
-    action = wrapped_partial(manager, bracket, 110.0, committed_sl=106.0)
+    monkeypatch.setattr(RuntimeBracketManager, "_evaluate_exit_fast", partial)
+    action = BoundBracketManager._evaluate_exit_fast(
+        manager,
+        bracket,
+        110.0,
+        committed_sl=106.0,
+    )
     assert action is not None and action["type"] == "PARTIAL_TP"
 
 
-def test_facade_installs_market_aware_extension_once():
-    from nifty_scalper_bot.execution.bracket_manager import BracketManager
+def test_native_fill_hook_captures_baseline_after_confirmed_activation(monkeypatch):
+    manager = object.__new__(BoundBracketManager)
+    bracket = _bracket()
+    bracket.entry_confirmed = True
+    calls = []
 
-    assert getattr(
-        BracketManager,
-        "_market_aware_profit_extension_installed",
-        False,
-    ) is True
+    monkeypatch.setattr(
+        RuntimeBracketManager,
+        "confirm_entry_fill",
+        lambda _self, _order_id, _fill_price, _filled_qty=None: "parent-result",
+    )
+    monkeypatch.setattr(
+        BoundBracketManager,
+        "get_bracket",
+        lambda _self, _order_id: bracket,
+    )
+    monkeypatch.setattr(
+        BoundBracketManager,
+        "save_state",
+        lambda _self: calls.append("saved"),
+    )
+    monkeypatch.setattr(
+        profit_extension,
+        "capture_entry_market_baseline",
+        lambda _manager, _bracket: calls.append("captured") or True,
+    )
+
+    result = BoundBracketManager.confirm_entry_fill(manager, "entry-1", 100.0, 65)
+
+    assert result == "parent-result"
+    assert calls == ["captured", "saved"]
+
+
+def test_market_aware_hooks_are_owned_explicitly_by_bound_manager():
+    assert "_evaluate_exit_fast" in BoundBracketManager.__dict__
+    assert "_apply_trailing_math" in BoundBracketManager.__dict__
+    assert "confirm_entry_fill" in BoundBracketManager.__dict__
+    assert not hasattr(BoundBracketManager, "_market_aware_profit_extension_installed")
