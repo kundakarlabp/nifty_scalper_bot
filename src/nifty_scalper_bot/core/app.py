@@ -9022,8 +9022,12 @@ from nifty_scalper_bot.core.history_readiness import (  # noqa: E402
     resolve_symbol_history_role,
 )
 
+from nifty_scalper_bot.core.runtime_history_event_loop_hardening import (  # noqa: E402
+    maybe_defer_dynamic_context_history,
+)
 
-async def ensure_symbol_runtime_history(
+
+async def _ensure_symbol_runtime_history_canonical(
     ctx: "BotContext",
     symbol: str,
     *,
@@ -9246,6 +9250,43 @@ async def ensure_symbol_runtime_history(
         sync_success=sync_success,
         hydration=hydration,
         failure_reason=failure_reason,
+    )
+
+
+async def ensure_symbol_runtime_history(
+    ctx: "BotContext",
+    symbol: str,
+    *,
+    role: str,
+    phase: str,
+    reason: str,
+    required_bars: int | None = None,
+    target_bars: int | None = None,
+    deep_history: bool = False,
+) -> RuntimeHistoryResult:
+    """Own dynamic deferral, then execute canonical history hydration natively."""
+    deferred = maybe_defer_dynamic_context_history(
+        ctx,
+        symbol,
+        role=role,
+        phase=phase,
+        reason=reason,
+        required_bars=required_bars,
+        target_bars=target_bars,
+        deep_history=deep_history,
+        canonical_ensurer=_ensure_symbol_runtime_history_canonical,
+    )
+    if deferred is not None:
+        return deferred
+    return await _ensure_symbol_runtime_history_canonical(
+        ctx,
+        symbol,
+        role=role,
+        phase=phase,
+        reason=reason,
+        required_bars=required_bars,
+        target_bars=target_bars,
+        deep_history=deep_history,
     )
 
 
