@@ -21,6 +21,8 @@ from nifty_scalper_bot.journal.trade_ledger import (
 
 LOGGER = logging.getLogger(__name__)
 
+_TRADE_LEDGER_BACKFILL_MIGRATION = "trade_ledger_historical_backfill_v1"
+
 _CANONICAL_EVENT_NAMES = {
     "TRADE_DECISION": "signal.evaluated",
     "ORDER_BLOCKED_DUPLICATE": "candidate.blocked",
@@ -211,6 +213,15 @@ class TradeJournal:
         conn: sqlite3.Connection | None = None
         batch: list[dict[str, Any]] = []
 
+        try:
+            conn = self._ensure_connection(None)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.error(
+                "TradeJournal initial connection failed: %s",
+                exc,
+                exc_info=exc,
+            )
+
         deadline = time.monotonic() + self._flush_interval_s
 
         while True:
@@ -282,6 +293,70 @@ class TradeJournal:
     # -------------------------------------------------------
     # DB Layer
     # -------------------------------------------------------
+    def _backfill_trade_ledger(self, conn: sqlite3.Connection) -> None:
+        """Replay stored journal events into the derived ledger exactly once."""
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS trade_journal_migrations (
+                name TEXT PRIMARY KEY,
+                completed_at REAL NOT NULL
+            )
+            """
+        )
+        if conn.execute(
+            "SELECT 1 FROM trade_journal_migrations WHERE name = ?",
+            (_TRADE_LEDGER_BACKFILL_MIGRATION,),
+        ).fetchone():
+            return
+
+        materialized = 0
+        skipped = 0
+        try:
+            conn.execute("BEGIN")
+            cursor = conn.execute(
+                "SELECT event_json FROM trade_events ORDER BY id"
+            )
+            while True:
+                rows = cursor.fetchmany(500)
+                if not rows:
+                    break
+                events: list[dict[str, Any]] = []
+                for (event_json,) in rows:
+                    try:
+                        raw = json.loads(str(event_json))
+                        if not isinstance(raw, Mapping):
+                            raise TypeError("event_json is not an object")
+                        events.append(self._normalize_event(raw))
+                    except Exception:  # noqa: BLE001
+                        skipped += 1
+                if events:
+                    materialize_trade_events(conn, events)
+                    materialized += len(events)
+
+            conn.execute(
+                """
+                INSERT INTO trade_journal_migrations (name, completed_at)
+                VALUES (?, ?)
+                """,
+                (_TRADE_LEDGER_BACKFILL_MIGRATION, time.time()),
+            )
+            conn.execute("COMMIT")
+        except Exception as exc:  # noqa: BLE001
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            LOGGER.error(
+                "Trade ledger historical backfill failed: %s",
+                exc,
+                exc_info=exc,
+            )
+            return
+
+        LOGGER.info(
+            "TRADE_LEDGER_BACKFILL_COMPLETE events=%d skipped=%d",
+            materialized,
+            skipped,
+        )
+
     def _ensure_connection(
         self,
         conn: sqlite3.Connection | None,
@@ -344,6 +419,7 @@ class TradeJournal:
             "ON trade_events(signal_id, timestamp)"
         )
         ensure_trade_ledger_schema(conn)
+        self._backfill_trade_ledger(conn)
 
         return conn
 
