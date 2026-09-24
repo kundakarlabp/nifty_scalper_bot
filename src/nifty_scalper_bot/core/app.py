@@ -15276,37 +15276,6 @@ async def startup_sequence(ctx: BotContext) -> None:
         except Exception as e:
             LOGGER.error(f"Reconciliation failed: {e}")
 
-    # ----------------------------------------------------------------
-    # ✅ FIX: Wire DataHub -> Bracket Manager (Corrected Attribute Name)
-    # ----------------------------------------------------------------
-    # CHANGE: ctx.market_data -> ctx.market_data_manager
-    if ctx.bracket_manager and ctx.market_data_manager:
-        try:
-            # 1. Define the tick handler using the fully loaded 'ctx'
-            def _feed_ticks_to_bracket_safe(sym, tick):
-                # Ensure we have LTP
-                ltp = tick.get("ltp")
-                if ltp and ctx.bracket_manager:
-                    from nifty_scalper_bot.execution.bracket_manager import (
-                        tick_exchange_epoch,
-                    )
-
-                    ctx.bracket_manager.on_tick(sym, ltp, tick_exchange_epoch(tick))
-
-            # 2. Subscribe to the DataHub
-            # CHANGE: ctx.market_data -> ctx.market_data_manager
-            if (
-                hasattr(ctx.market_data_manager, "data_hub")
-                and ctx.market_data_manager.data_hub
-            ):
-                ctx.market_data_manager.data_hub.subscribe(
-                    "bracket_feed", _feed_ticks_to_bracket_safe
-                )
-                LOGGER.info("✅ Wired DataHub ticks to BracketManager")
-
-        except Exception as e:
-            LOGGER.error(f"Failed to wire bracket ticks: {e}")
-
     if ctx.bracket_manager:
         try:
             _schedule_next_eod_flatten(loop, ctx.bracket_manager)
