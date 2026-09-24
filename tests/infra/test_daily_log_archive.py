@@ -34,6 +34,42 @@ def test_archive_snapshots_complete_session_and_finalizes_after_close() -> None:
     assert payload["log_text"] == "line one\nline two"
 
 
+def test_archive_uses_canonical_runtime_build_sha(monkeypatch) -> None:
+    calls = []
+    monkeypatch.setenv("GIT_COMMIT_SHA", "abc123")
+
+    archiver = DailyLogArchiver(
+        endpoint_url="https://example.test/archive",
+        transport=lambda _url, payload, _timeout: calls.append(dict(payload))
+        or {"ok": True},
+        log_reader=lambda _start, _end: "line one",
+    )
+
+    archiver.archive_once(datetime(2026, 9, 24, 16, 0, tzinfo=IST))
+
+    assert calls[0]["build_sha"] == "abc123"
+
+
+def test_archive_finalized_session_only_once_per_process() -> None:
+    calls = []
+    reads = []
+
+    archiver = DailyLogArchiver(
+        endpoint_url="https://example.test/archive",
+        transport=lambda _url, payload, _timeout: calls.append(dict(payload))
+        or {"ok": True},
+        log_reader=lambda start, end: reads.append((start, end)) or "line one",
+    )
+
+    first = archiver.archive_once(datetime(2026, 9, 24, 16, 0, tzinfo=IST))
+    second = archiver.archive_once(datetime(2026, 9, 24, 16, 5, tzinfo=IST))
+
+    assert first["archived"] is True
+    assert second == {"archived": False, "reason": "already_finalized"}
+    assert len(reads) == 1
+    assert len(calls) == 1
+
+
 def test_archive_skips_before_market_open() -> None:
     def fail_read(*_args):
         raise AssertionError("must not read")
