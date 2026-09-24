@@ -304,10 +304,13 @@ class WebSocketManager:
         if connected and to_remove:
             with suppress(Exception):
                 self._schedule_blocking(lambda: ticker.unsubscribe(to_remove))
-        if connected and to_add:
+        if connected and ticker is not None and to_add:
             with suppress(Exception):
-                self._schedule_blocking(lambda: ticker.subscribe(to_add))
-                self._schedule_blocking(lambda: ticker.set_mode(ticker.MODE_FULL, to_add))
+                def _subscribe_full() -> None:
+                    ticker.subscribe(to_add)
+                    ticker.set_mode(ticker.MODE_FULL, to_add)
+
+                self._schedule_blocking(_subscribe_full)
                 self._log_ws_subscriptions(to_add)
 
         self._tokens = new_tokens
