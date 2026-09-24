@@ -280,6 +280,7 @@ async def lifespan(app: FastAPI):
     app.state.startup_build_sha = STARTUP_BUILD_SHA
 
     replication_task = start_trade_replication_task(get_data_dir() / "trades.db")
+    log_archive_task = start_daily_log_archive_task()
     task = safe_task(_run_bot_background(app))
     lag_task = safe_task(_event_loop_lag_monitor())
     yield
