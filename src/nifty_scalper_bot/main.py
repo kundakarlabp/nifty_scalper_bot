@@ -27,7 +27,10 @@ from nifty_scalper_bot.config.defaults import (
 from nifty_scalper_bot.config.env_utils import normalise_live_env_defaults
 from nifty_scalper_bot.config.paths import get_data_dir
 from nifty_scalper_bot.core.runtime_install_proof import build_runtime_install_proof
-from nifty_scalper_bot.infra.scheduled_tasks import start_trade_replication_task
+from nifty_scalper_bot.infra.scheduled_tasks import (
+    start_daily_log_archive_task,
+    start_trade_replication_task,
+)
 from nifty_scalper_bot.utils.async_helpers import safe_task
 from nifty_scalper_bot.utils.metrics import ensure_multiproc_dir
 
@@ -277,12 +280,13 @@ async def lifespan(app: FastAPI):
     app.state.startup_build_sha = STARTUP_BUILD_SHA
 
     replication_task = start_trade_replication_task(get_data_dir() / "trades.db")
+    log_archive_task = start_daily_log_archive_task()
     task = safe_task(_run_bot_background(app))
     lag_task = safe_task(_event_loop_lag_monitor())
     yield
 
     try:
-        for running_task in (replication_task, task, lag_task):
+        for running_task in (replication_task, log_archive_task, task, lag_task):
             if running_task is not None and not running_task.done():
                 running_task.cancel()
                 with suppress(asyncio.CancelledError):
