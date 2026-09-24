@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from nifty_scalper_bot.infra.log_rotation import rotate_order_history_archive
@@ -68,6 +69,25 @@ async def run_periodic_task(
             )
 
 
+
+
+
+def start_trade_replication_task(
+    db_path: str | Path,
+) -> asyncio.Task[Any] | None:
+    """Start optional trade replication independently of broker startup."""
+    replicator = build_supabase_trade_replicator(db_path)
+    if replicator is None:
+        return None
+    return safe_task(
+        run_periodic_task(
+            task_fn=lambda: asyncio.to_thread(replicator.replicate_once),
+            interval_sec=replication_interval_seconds(),
+            task_name="replicate_trade_observability",
+        )
+    )
+
+
 async def run_archive_rotation(order_manager: Any, max_age_days: int = 90) -> None:
     """Rotate order history archives for *order_manager*.
 
@@ -117,8 +137,6 @@ async def run_archive_rotation(order_manager: Any, max_age_days: int = 90) -> No
 def start_background_tasks(
     order_manager: Any,
     logger: Any,
-    *,
-    trade_journal: Any | None = None,
 ) -> list[asyncio.Task[Any]]:
     """Start background maintenance tasks for the execution stack.
 
@@ -156,23 +174,6 @@ def start_background_tasks(
             )
         )
     )
-
-    if trade_journal is not None:
-        db_path = getattr(trade_journal, "db_path", None)
-        replicator = (
-            build_supabase_trade_replicator(db_path) if db_path is not None else None
-        )
-        if replicator is not None:
-            tasks.append(
-                safe_task(
-                    run_periodic_task(
-                        task_fn=lambda: asyncio.to_thread(replicator.replicate_once),
-                        interval_sec=replication_interval_seconds(),
-                        task_name="replicate_trade_observability",
-                    )
-                )
-            )
-
     logger.info(
         "Scheduled maintenance tasks created",
         extra={"event": "tasks.created", "count": len(tasks)},
