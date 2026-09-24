@@ -595,6 +595,7 @@ def _seed_legacy_trade_event(
     event_type: str,
     timestamp: float,
     event_json: str,
+    meta_json: str = "{}",
 ) -> None:
     conn.execute(
         """
@@ -611,7 +612,7 @@ def _seed_legacy_trade_event(
             65,
             100.0,
             "ENTRY-1",
-            "{}",
+            meta_json,
             event_json,
         ),
     )
@@ -672,7 +673,8 @@ def test_trade_journal_worker_backfills_existing_events_once(tmp_path) -> None:
                 conn,
                 event_type=str(event["event_type"]),
                 timestamp=float(event["timestamp"]),
-                event_json=json.dumps(event),
+                event_json=json.dumps({"event_type": event["event_type"]}),
+                meta_json=json.dumps(event.get("meta", {})),
             )
 
     journal = TradeJournal(str(db_path))
