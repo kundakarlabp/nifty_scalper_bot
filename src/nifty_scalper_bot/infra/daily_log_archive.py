@@ -30,6 +30,7 @@ def archive_interval_seconds() -> float:
     except (TypeError, ValueError):
         return 300.0
 
+
 def build_daily_log_archiver() -> "DailyLogArchiver | None":
     raw = os.getenv("SUPABASE_LOG_ARCHIVE_ENABLED", "false").strip().lower()
     if raw not in {"1", "true", "yes", "on"}:
