@@ -383,8 +383,18 @@ class BoundBracketManager(RuntimeBracketManager):
 
             if threshold <= 0.0:
                 continue
-            stale = age is None or float(age) > threshold
-            if not stale:
+
+            ltp_stale = age is None or float(age) > threshold
+            quote = self._exit_quotes.get(symbol)
+            depth_age = None
+            if quote is not None:
+                depth_age = max(time.time() - float(quote[2]), 0.0)
+            configured_depth_age = getattr(self, "_exit_quote_max_age", 3.0)
+            depth_threshold = float(configured_depth_age or 0.0)
+            depth_stale = depth_threshold > 0.0
+            if depth_age is not None:
+                depth_stale = depth_stale and depth_age > depth_threshold
+            if not ltp_stale and not depth_stale:
                 self._bracket_stale_refresh_at.pop(symbol, None)
                 continue
 
@@ -396,32 +406,57 @@ class BoundBracketManager(RuntimeBracketManager):
                 continue
             self._bracket_stale_refresh_at[symbol] = now
 
-            dispatched = False
+            ltp_dispatched = False
+            depth_dispatched = False
             refresh_error: Exception | None = None
             try:
-                # MDM owns the actual recovery implementation. In production it
-                # dispatches to the polling streamer or schedules its async REST
-                # refresh; no broker I/O is performed while the bracket lock is held.
-                dispatched = bool(refresher(symbol, reason="bracket_ltp_stale"))
+                if ltp_stale:
+                    ltp_dispatched = bool(refresher(symbol, reason="bracket_ltp_stale"))
+                depth_refresher = getattr(mdm, "request_depth_refresh", None)
+                if depth_stale and callable(depth_refresher):
+                    depth_dispatched = bool(
+                        depth_refresher(symbol, reason="bracket_depth_stale")
+                    )
             except Exception as exc:  # noqa: BLE001 - retry on the next interval
                 refresh_error = exc
 
-            age_label = "missing" if age is None else f"{float(age):.3f}"
-            with suppress(Exception):
-                self._log_throttled(
-                    "warning",
-                    f"bracket_ltp_stale_{symbol}",
-                    5.0,
-                    (
-                        "BRACKET_LTP_STALE symbol=%s age_s=%s threshold_s=%.3f "
-                        "fallback_dispatched=%s error=%s"
-                    ),
-                    symbol,
-                    age_label,
-                    threshold,
-                    dispatched,
-                    str(refresh_error) if refresh_error is not None else "none",
-                )
+            if ltp_stale:
+                age_label = "missing" if age is None else f"{float(age):.3f}"
+                with suppress(Exception):
+                    self._log_throttled(
+                        "warning",
+                        f"bracket_ltp_stale_{symbol}",
+                        5.0,
+                        (
+                            "BRACKET_LTP_STALE symbol=%s age_s=%s threshold_s=%.3f "
+                            "fallback_dispatched=%s error=%s"
+                        ),
+                        symbol,
+                        age_label,
+                        threshold,
+                        ltp_dispatched,
+                        str(refresh_error) if refresh_error is not None else "none",
+                    )
+
+            if depth_stale:
+                depth_label = "missing"
+                if depth_age is not None:
+                    depth_label = f"{float(depth_age):.3f}"
+                with suppress(Exception):
+                    self._log_throttled(
+                        "warning",
+                        f"bracket_depth_stale_{symbol}",
+                        5.0,
+                        (
+                            "BRACKET_DEPTH_STALE symbol=%s age_s=%s threshold_s=%.3f "
+                            "recovery_dispatched=%s error=%s"
+                        ),
+                        symbol,
+                        depth_label,
+                        depth_threshold,
+                        depth_dispatched,
+                        str(refresh_error) if refresh_error is not None else "none",
+                    )
 
     def _bracket_market_data_watchdog_loop(self) -> None:
         """Backstop virtual exits when per-symbol market-data delivery goes silent."""
