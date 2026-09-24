@@ -83,6 +83,9 @@ ensure_env_default SUPABASE_TRADE_REPLICATION_SOURCE lightsail
 ensure_env_default SUPABASE_TRADE_REPLICATION_INTERVAL_SECONDS 30
 ensure_env_default SUPABASE_TRADE_REPLICATION_BATCH_SIZE 100
 ensure_env_default SUPABASE_TRADE_REPLICATION_TIMEOUT_SECONDS 5
+ensure_env_default SUPABASE_LOG_ARCHIVE_ENABLED true
+ensure_env_default SUPABASE_LOG_ARCHIVE_URL "https://dehdptgkqbrkyzyodicd.supabase.co/functions/v1/nifty-log-archive-ingest"
+ensure_env_default SUPABASE_LOG_ARCHIVE_INTERVAL_SECONDS 300
 
 if [ -e "$LEGACY_ENV" ] && [ ! -L "$LEGACY_ENV" ]; then
   mv "$LEGACY_ENV" "$CONFIG_DIR/legacy.env.$(date +%Y%m%d_%H%M%S)"
