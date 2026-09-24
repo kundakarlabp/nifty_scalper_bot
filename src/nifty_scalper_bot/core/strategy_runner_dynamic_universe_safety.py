@@ -251,7 +251,7 @@ def _live_ws_option_tick_fresh(
 
 
 def apply_patches() -> None:
-    """Install the dynamic-universe and selected-option evaluation fixes once."""
+    """Install native StrategyRunner dynamic-universe and selected-option fixes."""
     from nifty_scalper_bot.strategies.runner import StrategyRunner
 
     if getattr(StrategyRunner, "_dynamic_universe_safety_installed", False):
