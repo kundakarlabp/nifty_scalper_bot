@@ -8,7 +8,7 @@ continue through the canonical synchronous/fail-closed orchestration.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable, Coroutine
 from typing import Any, Mapping
 
 from nifty_scalper_bot.core.active_basket import extract_symbol_strike
@@ -172,7 +172,7 @@ def maybe_defer_dynamic_context_history(
     required_bars: int | None = None,
     target_bars: int | None = None,
     deep_history: bool = False,
-    canonical_ensurer: Callable[..., Awaitable[RuntimeHistoryResult]],
+    canonical_ensurer: Callable[..., Coroutine[Any, Any, RuntimeHistoryResult]],
 ) -> RuntimeHistoryResult | None:
     """Defer only provably far, non-gating option-context hydration."""
     normalized = normalize_symbol(str(symbol or ""))
@@ -196,7 +196,7 @@ def maybe_defer_dynamic_context_history(
     key = (id(ctx), normalized)
     existing = _TASKS.get(key)
     if existing is None or existing.done():
-        task = asyncio.create_task(
+        task: asyncio.Task[RuntimeHistoryResult] = asyncio.create_task(
             canonical_ensurer(
                 ctx,
                 normalized,
