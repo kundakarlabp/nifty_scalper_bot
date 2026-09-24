@@ -231,15 +231,12 @@ def test_order_preflight_does_not_trigger_http_pull_before_cached_ws_lookup() ->
     assert data_hub.pull_attempts == 0
 
 
-
 def test_execution_depth_helpers_use_cached_ws_full_quote_only() -> None:
     symbol = "NFO:NIFTY26AUG24050PE"
     data_hub = _PullTrackingDataHub()
     manager = _manager(
         data_hub=data_hub,
-        mdm=_TickProvider(
-            _depth_quote(symbol, bid_qty=130, ask_qty=195)
-        ),
+        mdm=_TickProvider(_depth_quote(symbol, bid_qty=130, ask_qty=195)),
     )
 
     class _Logger:
