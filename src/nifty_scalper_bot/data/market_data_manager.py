@@ -3504,7 +3504,6 @@ class MarketDataManager:
         )
         return dispatched or rest_dispatched
 
-
     def subscribe(self, symbol: str, callback: TickCallback) -> None:
         """Subscribe *callback* to receive normalized ticks for *symbol*."""
 
