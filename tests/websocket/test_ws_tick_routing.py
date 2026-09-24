@@ -12,7 +12,7 @@ from nifty_scalper_bot.streaming import websocket_manager as ws_module
 
 
 class FakeKiteTicker:
-    MODE_FULL = 'full'
+    MODE_FULL = "full"
 
     def __init__(self, api_key: str, access_token: str, reconnect: bool = True) -> None:
         self.api_key = api_key
@@ -26,7 +26,7 @@ class FakeKiteTicker:
     def connect(self, threaded: bool = True) -> None:
         del threaded
         if self.on_connect:
-            self.on_connect(self, {'ok': True})
+            self.on_connect(self, {"ok": True})
 
     def close(self) -> None:
         return None
@@ -47,16 +47,16 @@ async def test_manager_routes_ticks_to_callback(
     async def _callback(tick: dict[str, Any]) -> None:
         received.append(tick)
 
-    monkeypatch.setattr(ws_module, 'KiteTicker', FakeKiteTicker)
-    manager = ws_module.WebSocketManager('key', 'token', on_tick=_callback)
-    monkeypatch.setattr(manager, '_is_within_trading_window', lambda: True)
+    monkeypatch.setattr(ws_module, "KiteTicker", FakeKiteTicker)
+    manager = ws_module.WebSocketManager("key", "token", on_tick=_callback)
+    monkeypatch.setattr(manager, "_is_within_trading_window", lambda: True)
     await manager.connect()
 
     assert manager.ticker.on_ticks is not None
-    manager.ticker.on_ticks(manager.ticker, [{'instrument_token': 101}])
+    manager.ticker.on_ticks(manager.ticker, [{"instrument_token": 101}])
     await asyncio.sleep(0)
 
-    assert received == [{'instrument_token': 101}]
+    assert received == [{"instrument_token": 101}]
 
 
 def test_dynamic_subscription_serializes_subscribe_before_full_mode() -> None:
