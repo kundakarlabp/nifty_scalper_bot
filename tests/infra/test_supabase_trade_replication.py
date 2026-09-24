@@ -262,21 +262,17 @@ def test_ledger_backfill_runs_after_event_checkpoint_already_advanced(
     db_path = tmp_path / "trades.db"
     _write_lifecycle(db_path)
     with sqlite3.connect(db_path) as conn:
-        conn.execute(
-            """
+        conn.execute("""
             CREATE TABLE replication_state (
                 sink TEXT PRIMARY KEY,
                 last_event_id INTEGER NOT NULL DEFAULT 0,
                 last_success_at REAL
             )
-            """
-        )
-        conn.execute(
-            """
+            """)
+        conn.execute("""
             INSERT INTO replication_state (sink, last_event_id)
             VALUES ('supabase_trade_observability', 4)
-            """
-        )
+            """)
 
     calls: list[dict[str, Any]] = []
 
@@ -304,13 +300,11 @@ def test_ledger_backfill_runs_after_event_checkpoint_already_advanced(
     assert calls[0]["ledger"][0]["trade_id"] == "trade-1"
 
     with sqlite3.connect(db_path) as conn:
-        row = conn.execute(
-            """
+        row = conn.execute("""
             SELECT last_event_id, last_ledger_updated_at, last_ledger_trade_id
             FROM replication_state
             WHERE sink = 'supabase_trade_observability'
-            """
-        ).fetchone()
+            """).fetchone()
 
     assert row == (4, 1_790_000_003.0, "trade-1")
 
