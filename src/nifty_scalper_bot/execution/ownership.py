@@ -238,7 +238,9 @@ class BoundBracketManager(RuntimeBracketManager):
                 bracket,
                 ltp,
             )
-        except Exception as exc:  # noqa: BLE001 - canonical trailing remains authoritative
+        except (
+            Exception
+        ) as exc:  # noqa: BLE001 - canonical trailing remains authoritative
             _profit_extension.LOGGER.debug(
                 "PROFIT_TIGHTEN_EVALUATION_FAILED symbol=%s error=%s",
                 getattr(bracket, "symbol", ""),
@@ -268,7 +270,9 @@ class BoundBracketManager(RuntimeBracketManager):
                 saver = getattr(self, "save_state", None)
                 if callable(saver):
                     saver()
-        except Exception as exc:  # noqa: BLE001 - baseline is optional, protection is not
+        except (
+            Exception
+        ) as exc:  # noqa: BLE001 - baseline is optional, protection is not
             _profit_extension.LOGGER.debug(
                 "PROFIT_EXTENSION_BASELINE_CAPTURE_FAILED symbol=%s error=%s",
                 getattr(bracket, "symbol", ""),
