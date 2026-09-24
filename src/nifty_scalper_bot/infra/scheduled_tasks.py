@@ -145,7 +145,8 @@ def start_background_tasks(
     Args:
         order_manager: Order manager instance responsible for persistence.
         logger: Logger compatible interface for lifecycle messages.
-        trade_journal: Retained for call-site compatibility; replication is process-owned.
+        trade_journal: Retained for call-site compatibility; replication is
+            process-owned.
 
     Returns:
         List of created asyncio tasks.
