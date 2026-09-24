@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import logging
 from types import SimpleNamespace
 
 from nifty_scalper_bot.core import app
@@ -212,6 +213,27 @@ async def test_context_history_does_not_reseed_when_already_aligned(monkeypatch)
     runner._sync_context_history_if_cold(source="test_context_aligned")
 
     assert calls == []
+
+
+async def test_context_history_inflight_remains_pending_after_grace(
+    monkeypatch,
+    caplog,
+) -> None:
+    """An active canonical fetch must not be mislabeled as a hydration failure."""
+    monkeypatch.setenv("ORB_ENABLED", "true")
+    monkeypatch.setenv("SMC_MIN_BARS_REQUIRED", "30")
+    monkeypatch.setenv("CONTEXT_HISTORY_COLD_GRACE_PASSES", "3")
+    apply_patches()
+    runner, _calls = _context_sync_runner(mdm_rows=[], indicator_rows=[])
+    runner._logger = logging.getLogger("test.context_history_inflight")
+    runner._context_cold_passes = {FUTURE: 3}
+    runner._context_structural_request_at = {}
+    runner._runtime_history_ensure_inflight = {FUTURE: 400}
+
+    with caplog.at_level(logging.WARNING, logger="test.context_history_inflight"):
+        runner._sync_context_history_if_cold(source="context_tick_bar_sync")
+
+    assert "CONTEXT_HISTORY_HYDRATION_FAILED" not in caplog.text
 
 
 async def test_orb_context_requests_structural_target_even_when_warm_by_count(
