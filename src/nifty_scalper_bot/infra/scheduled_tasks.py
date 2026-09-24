@@ -69,9 +69,6 @@ async def run_periodic_task(
             )
 
 
-
-
-
 def start_trade_replication_task(
     db_path: str | Path,
 ) -> asyncio.Task[Any] | None:
