@@ -27,7 +27,10 @@ from nifty_scalper_bot.config.defaults import (
 from nifty_scalper_bot.config.env_utils import normalise_live_env_defaults
 from nifty_scalper_bot.config.paths import get_data_dir
 from nifty_scalper_bot.core.runtime_install_proof import build_runtime_install_proof
-from nifty_scalper_bot.infra.scheduled_tasks import (\n    start_daily_log_archive_task,\n    start_trade_replication_task,\n)
+from nifty_scalper_bot.infra.scheduled_tasks import (
+    start_daily_log_archive_task,
+    start_trade_replication_task,
+)
 from nifty_scalper_bot.utils.async_helpers import safe_task
 from nifty_scalper_bot.utils.metrics import ensure_multiproc_dir
 
