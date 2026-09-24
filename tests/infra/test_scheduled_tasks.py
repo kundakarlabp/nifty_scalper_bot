@@ -148,3 +148,38 @@ def test_start_trade_replication_task_is_independent_of_execution_stack(
 
     assert task is created[0]
     assert len(created) == 1
+
+
+@pytest.mark.asyncio
+async def test_run_periodic_task_logs_task_name_and_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    messages: list[tuple[str, tuple[Any, ...]]] = []
+
+    class _Logger:
+        def debug(self, *_args: Any, **_kwargs: Any) -> None:
+            return None
+
+        def info(self, *_args: Any, **_kwargs: Any) -> None:
+            return None
+
+        def error(self, message: str, *args: Any, **_kwargs: Any) -> None:
+            messages.append((message, args))
+
+    monkeypatch.setattr("nifty_scalper_bot.infra.scheduled_tasks.LOGGER", _Logger())
+
+    def fail() -> None:
+        raise RuntimeError("remote unavailable")
+
+    task = asyncio.create_task(run_periodic_task(fail, 0.0, "replicate_trade"))
+    await asyncio.sleep(0.01)
+    task.cancel()
+    await task
+
+    assert (
+        "Periodic task failed name=%s error=%s",
+        ("replicate_trade", pytest.raises),
+    ) != messages[-1]
+    assert messages[-1][0] == "Periodic task failed name=%s error=%s"
+    assert messages[-1][1][0] == "replicate_trade"
+    assert str(messages[-1][1][1]) == "remote unavailable"
