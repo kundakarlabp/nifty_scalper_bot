@@ -118,3 +118,40 @@ def test_live_option_freshness_prefers_genuine_ws_age_over_fresh_cached_quote(
         runner._is_option_symbol_tick_fresh("NFO:NIFTY26MAY24000CE", max_age_s=60.0)
         is False
     )
+
+
+
+def test_runner_get_quote_never_allows_implicit_pull() -> None:
+    symbol = "NFO:NIFTY26SEP23100CE"
+
+    class _Hub:
+        def __init__(self) -> None:
+            self.allow_pull_calls: list[bool] = []
+
+        def get_quote(
+            self,
+            _symbol: str,
+            allow_pull: bool = True,
+        ) -> dict[str, object]:
+            self.allow_pull_calls.append(bool(allow_pull))
+            return {
+                "symbol": symbol,
+                "ltp": 100.0,
+                "bid": 99.9,
+                "ask": 100.1,
+                "depth": {
+                    "buy": [{"price": 99.9, "quantity": 65}],
+                    "sell": [{"price": 100.1, "quantity": 65}],
+                },
+            }
+
+    hub = _Hub()
+    runner = object.__new__(StrategyRunner)
+    runner._data_hub = hub
+    runner._market_data = None
+
+    quote = runner.get_quote(symbol)
+
+    assert quote is not None
+    assert quote["depth"]["buy"][0]["quantity"] == 65
+    assert hub.allow_pull_calls == [False]
