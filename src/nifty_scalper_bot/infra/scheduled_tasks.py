@@ -75,7 +75,21 @@ async def run_periodic_task(
             )
 
 
-def start_daily_log_archive_task() -> asyncio.Task[Any] | None:\n    """Start optional full-session log archival off the trading hot path."""\n    archiver = build_daily_log_archiver()\n    if archiver is None:\n        return None\n    return safe_task(\n        run_periodic_task(\n            task_fn=lambda: asyncio.to_thread(archiver.archive_once),\n            interval_sec=archive_interval_seconds(),\n            task_name="archive_daily_market_logs",\n        )\n    )\n\n\ndef start_trade_replication_task(
+def start_daily_log_archive_task() -> asyncio.Task[Any] | None:
+    """Start optional full-session log archival off the trading hot path."""
+    archiver = build_daily_log_archiver()
+    if archiver is None:
+        return None
+    return safe_task(
+        run_periodic_task(
+            task_fn=lambda: asyncio.to_thread(archiver.archive_once),
+            interval_sec=archive_interval_seconds(),
+            task_name="archive_daily_market_logs",
+        )
+    )
+
+
+def start_trade_replication_task(
     db_path: str | Path,
 ) -> asyncio.Task[Any] | None:
     """Start optional trade replication independently of broker startup."""
