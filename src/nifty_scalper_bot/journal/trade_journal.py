@@ -5,7 +5,6 @@ from __future__ import annotations
 import atexit
 import json
 import logging
-import os
 import queue
 import sqlite3
 import threading
@@ -14,6 +13,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from nifty_scalper_bot.config.env_utils import resolve_build_sha
 from nifty_scalper_bot.journal.trade_ledger import (
     ensure_trade_ledger_schema,
     materialize_trade_events,
@@ -236,12 +236,7 @@ class TradeJournal:
                 or ""
             )
             or None,
-            "build_sha": str(
-                meta_dict.get("build_sha")
-                or os.getenv("GIT_SHA")
-                or os.getenv("BUILD_SHA")
-                or ""
-            )
+            "build_sha": str(meta_dict.get("build_sha") or resolve_build_sha())
             or None,
             "meta": meta_dict,
         }
