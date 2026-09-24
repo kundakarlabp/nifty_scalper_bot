@@ -15276,6 +15276,8 @@ async def startup_sequence(ctx: BotContext) -> None:
         except Exception as e:
             LOGGER.error(f"Reconciliation failed: {e}")
 
+    # Bracket ticks already flow through DataHub -> StrategyRunner -> BracketManager.
+    # Keep one canonical protection path; do not install a second startup subscription.
     if ctx.bracket_manager:
         try:
             _schedule_next_eod_flatten(loop, ctx.bracket_manager)
