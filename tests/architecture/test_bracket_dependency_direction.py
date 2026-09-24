@@ -52,3 +52,9 @@ def test_canonical_bracket_layer_does_not_shadow_fill_activation_passthrough() -
         CanonicalBracketManager.confirm_entry_fill
         is HardenedBracketManager.confirm_entry_fill
     )
+
+
+def test_app_has_no_duplicate_datahub_bracket_feed_subscription() -> None:
+    root = Path(__file__).resolve().parents[2]
+    source = (root / "src/nifty_scalper_bot/core/app.py").read_text(encoding="utf-8")
+    assert 'subscribe("bracket_feed"' not in source
