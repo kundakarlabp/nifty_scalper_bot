@@ -98,6 +98,7 @@ def test_execution_package_import_does_not_install_or_replace_runtime_methods() 
     source = (EXECUTION / "__init__.py").read_text(encoding="utf-8")
     assert "install_entry_recovery(" not in source
     assert "_bracket_module.BracketManager" not in source
+    assert "trade_plan_identity_guard" not in source
     assert "bracket_ownership_extension" not in source
     assert "LegacyOrderManager" not in source
     assert "LegacyBracketManager" not in source
@@ -211,6 +212,7 @@ def test_retired_execution_modules_are_absent() -> None:
         "lifecycle_manager.py",
         "live_exit_reconciliation_patch.py",
         "operator_control_patch.py",
+        "trade_plan_identity_guard.py",
     }
     present = sorted(name for name in retired if (EXECUTION / name).exists())
     assert not present, f"Retired BO modules still present: {present}"

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import nifty_scalper_bot.execution  # noqa: F401 - applies runtime safety patches
 from nifty_scalper_bot.execution import order_manager_core as core
 
 GOOD_SYMBOL = "NFO:NIFTY2670724250PE"
@@ -15,6 +14,7 @@ class _Manager:
         self, quote: dict[str, Any], *, active_basket: Any | None = None
     ) -> None:
         self.quote = dict(quote)
+        self.quote_calls = 0
         self._active_contract_basket = (
             active_basket
             if active_basket is not None
@@ -30,6 +30,7 @@ class _Manager:
         return 65
 
     def _get_latest_quote_safe(self, _symbol: str) -> dict[str, Any]:
+        self.quote_calls += 1
         return dict(self.quote)
 
     def _extract_quote_diagnostics(self, quote: dict[str, Any]) -> dict[str, Any]:
@@ -94,6 +95,7 @@ def test_live_trade_plan_allows_matching_quote_identity() -> None:
     result = core.OrderManager._validate_trade_plan(manager, _plan())
 
     assert result.allowed is True
+    assert manager.quote_calls == 1
 
 
 def test_live_trade_plan_requires_lifecycle_identity_before_broker_attempt(monkeypatch):
