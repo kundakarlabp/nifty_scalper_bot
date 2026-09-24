@@ -141,6 +141,56 @@ def test_replication_is_idempotent_and_preserves_risk_semantics(tmp_path: Any) -
     assert trade["ledger_complete"] is True
 
 
+def test_ledger_batch_uses_uniform_postgrest_row_shape(tmp_path: Any) -> None:
+    db_path = tmp_path / "trades.db"
+    _write_lifecycle(db_path)
+    journal = TradeJournal(str(db_path))
+    event = journal._normalize_event(
+        {
+            "event_type": "ORDER_SUBMITTED",
+            "timestamp": 1_790_000_004.0,
+            "symbol": "NFO:NIFTYPE",
+            "side": "BUY",
+            "qty": 65,
+            "order_id": "entry-2",
+            "meta": {
+                "trade_id": "trade-2",
+                "signal_id": "signal-2",
+                "strategy": "ORB",
+            },
+        }
+    )
+    conn = journal._flush_batch([event], None)
+    assert conn is not None
+    conn.close()
+
+    calls: list[dict[str, Any]] = []
+
+    def transport(
+        _url: str,
+        payload: Mapping[str, Any],
+        _timeout: float,
+    ) -> Mapping[str, Any]:
+        calls.append(dict(payload))
+        return {"ok": True}
+
+    replicator = SupabaseTradeReplicator(
+        db_path=db_path,
+        endpoint_url="https://example.test/ingest",
+        transport=transport,
+    )
+    result = replicator.replicate_once()
+
+    assert result["ledger"] == 2
+    rows = calls[0]["ledger"]
+    assert set(rows[0]) == set(rows[1])
+    entry = next(row for row in rows if row["trade_id"] == "trade-2")
+    assert "exit_price" in entry
+    assert entry["exit_price"] is None
+    assert "net_pnl" in entry
+    assert entry["net_pnl"] is None
+
+
 def test_failed_remote_batch_does_not_advance_checkpoint(tmp_path: Any) -> None:
     db_path = tmp_path / "trades.db"
     _write_lifecycle(db_path)
