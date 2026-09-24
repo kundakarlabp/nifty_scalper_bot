@@ -4,7 +4,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from nifty_scalper_bot.execution import market_aware_profit_extension as profit_extension
+from nifty_scalper_bot.execution import (
+    market_aware_profit_extension as profit_extension,
+)
 from nifty_scalper_bot.execution.market_aware_profit_extension import (
     ContinuationDecision,
     assess_continuation,
