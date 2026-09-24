@@ -25,6 +25,7 @@ from enum import Enum
 from typing import Any, Mapping, Sequence
 
 from nifty_scalper_bot.execution import bracket_core as _core
+from nifty_scalper_bot.execution import market_aware_profit_extension as _profit_extension
 from nifty_scalper_bot.execution.position_snapshot import BrokerExposureState
 from nifty_scalper_bot.execution.runtime_bracket_manager import RuntimeBracketManager
 from nifty_scalper_bot.utils.symbols import normalize_symbol
@@ -189,6 +190,95 @@ class BoundBracketManager(RuntimeBracketManager):
             exchange_ts,
             defer_submission=defer_submission,
         )
+
+    def _evaluate_exit_fast(
+        self,
+        bracket: Any,
+        ltp: float,
+        *,
+        committed_sl: float | None = None,
+    ) -> Any:
+        """Apply market-aware extension only after canonical FINAL_TP evaluation."""
+        action = super()._evaluate_exit_fast(
+            bracket,
+            ltp,
+            committed_sl=committed_sl,
+        )
+        if (
+            not isinstance(action, Mapping)
+            or str(action.get("type") or "") != "FINAL_TP"
+        ):
+            return action
+        try:
+            return _profit_extension.extend_final_target_if_supported(
+                self,
+                bracket,
+                float(ltp),
+                action,
+            )
+        except Exception as exc:  # noqa: BLE001 - fail closed to canonical FINAL_TP
+            _profit_extension.LOGGER.error(
+                "PROFIT_EXTENSION_EVALUATION_FAILED symbol=%s error=%s",
+                getattr(bracket, "symbol", ""),
+                exc,
+                extra={
+                    "event": "PROFIT_EXTENSION_EVALUATION_FAILED",
+                    "symbol": getattr(bracket, "symbol", ""),
+                    "error_type": type(exc).__name__,
+                },
+                exc_info=exc,
+            )
+            return action
+
+    def _apply_trailing_math(self, bracket: Any) -> bool:
+        """Preserve canonical trailing, then optionally tighten profitable trades."""
+        canonical_changed = bool(super()._apply_trailing_math(bracket))
+        ltp = _profit_extension._positive(getattr(bracket, "last_ltp", None))
+        if ltp is None:
+            return canonical_changed
+        try:
+            market_changed = _profit_extension.tighten_market_aware_floor(
+                self,
+                bracket,
+                ltp,
+            )
+        except Exception as exc:  # noqa: BLE001 - canonical trailing remains authoritative
+            _profit_extension.LOGGER.debug(
+                "PROFIT_TIGHTEN_EVALUATION_FAILED symbol=%s error=%s",
+                getattr(bracket, "symbol", ""),
+                exc,
+            )
+            market_changed = False
+        return canonical_changed or market_changed
+
+    def confirm_entry_fill(
+        self,
+        order_id: str,
+        fill_price: float,
+        filled_qty: int | None = None,
+    ) -> Any:
+        """Capture market baselines only after canonical fill activation succeeds."""
+        result = super().confirm_entry_fill(order_id, fill_price, filled_qty)
+        bracket = None
+        getter = getattr(self, "get_bracket", None)
+        if callable(getter):
+            with suppress(Exception):
+                bracket = getter(order_id)
+        if bracket is None or not bool(getattr(bracket, "entry_confirmed", False)):
+            return result
+        try:
+            changed = _profit_extension.capture_entry_market_baseline(self, bracket)
+            if changed:
+                saver = getattr(self, "save_state", None)
+                if callable(saver):
+                    saver()
+        except Exception as exc:  # noqa: BLE001 - baseline is optional, protection is not
+            _profit_extension.LOGGER.debug(
+                "PROFIT_EXTENSION_BASELINE_CAPTURE_FAILED symbol=%s error=%s",
+                getattr(bracket, "symbol", ""),
+                exc,
+            )
+        return result
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         # State is initialized before the inherited exit watchdog starts. The
