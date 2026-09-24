@@ -219,6 +219,13 @@ def test_retired_execution_modules_are_absent() -> None:
     assert (EXECUTION / "options_policy.py").exists()
 
 
+def test_retired_quote_identity_extension_is_absent() -> None:
+    retired = SRC / "data" / "quote_identity_extension.py"
+    assert (
+        not retired.exists()
+    ), "Quote identity is natively owned by DataHub._stamp_quote_identity"
+
+
 def test_safe_order_manager_does_not_own_execution_logic() -> None:
     safe_tree = ast.parse(
         (EXECUTION / "safe_order_manager.py").read_text(encoding="utf-8")
