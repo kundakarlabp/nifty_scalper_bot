@@ -33,6 +33,11 @@ from nifty_scalper_bot.risk.limits import RiskSwitches
 from nifty_scalper_bot.risk.net_rr_gate import evaluate_final_net_rr
 from nifty_scalper_bot.utils.env import get_float
 from nifty_scalper_bot.utils.logging import get_logger, log_once_or_throttled
+from nifty_scalper_bot.utils.market_hours import (
+    get_runtime_market_mode,
+    post_market_broker_refresh_seconds,
+    post_market_quiet_mode_enabled,
+)
 from nifty_scalper_bot.utils.metrics import Counter, Gauge
 from nifty_scalper_bot.utils.reasons import SOFT, canonical
 
@@ -50,6 +55,19 @@ COOLDOWN_SLOP_MS = max(int(os.getenv("RISK_COOLDOWN_SLOP_MS", "250")), 0)
 
 
 LOGGER = get_logger(__name__)
+
+
+def _balance_refresher_sleep_seconds(base_interval: float) -> float:
+    interval = max(float(base_interval), 5.0)
+    if not post_market_quiet_mode_enabled():
+        return interval
+    try:
+        mode = get_runtime_market_mode()
+    except Exception:
+        return interval
+    if mode not in {"POST_MARKET", "HOLIDAY"}:
+        return interval
+    return max(interval, post_market_broker_refresh_seconds())
 
 
 def _finite_float(value: object) -> float | None:
@@ -518,7 +536,7 @@ class RiskManager:
                         extra={"event": "risk_balance_refresher_loop_error"},
                         exc_info=exc,
                     )
-                time.sleep(interval)
+                time.sleep(_balance_refresher_sleep_seconds(interval))
 
         thread = threading.Thread(
             target=_run,

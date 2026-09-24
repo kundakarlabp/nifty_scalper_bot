@@ -20,6 +20,11 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from typing import Any
 
+from nifty_scalper_bot.utils.market_hours import (
+    get_runtime_market_mode,
+    post_market_broker_refresh_seconds,
+    post_market_quiet_mode_enabled,
+)
 from nifty_scalper_bot.utils.symbols import is_strategy_instrument
 
 _PATCH_APPLIED = False
@@ -48,6 +53,19 @@ def _refresh_seconds() -> float:
         return max(2.0, min(float(raw), 300.0))
     except (TypeError, ValueError):
         return _DEFAULT_REFRESH_SECONDS
+
+
+def _effective_refresh_seconds() -> float:
+    base = _refresh_seconds()
+    if not post_market_quiet_mode_enabled():
+        return base
+    try:
+        mode = get_runtime_market_mode()
+    except Exception:
+        return base
+    if mode not in {"POST_MARKET", "HOLIDAY"}:
+        return base
+    return max(base, post_market_broker_refresh_seconds())
 
 
 def _max_age_seconds() -> float:
@@ -387,7 +405,7 @@ def refresh_broker_pnl_diagnostic(
         not force
         and cached
         and last_fetch > 0.0
-        and now_mono - last_fetch < _refresh_seconds()
+        and now_mono - last_fetch < _effective_refresh_seconds()
     ):
         return cached
 

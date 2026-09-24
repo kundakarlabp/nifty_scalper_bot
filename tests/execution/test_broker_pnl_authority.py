@@ -4,7 +4,9 @@ from types import SimpleNamespace
 
 import pytest
 
+import nifty_scalper_bot.execution.broker_pnl_authority_patch as pnl_patch
 from nifty_scalper_bot.execution.broker_pnl_authority_patch import (
+    _effective_refresh_seconds,
     _extract_account_m2m,
     _strategy_day_marked_pnl,
     _strategy_tradebook_realized_pnl,
@@ -14,6 +16,23 @@ from nifty_scalper_bot.execution.broker_pnl_authority_patch import (
 from nifty_scalper_bot.execution.position_manager import PositionManager
 
 SYMBOL = "NFO:NIFTY2691523400CE"
+
+
+def test_broker_pnl_refresh_stays_fast_in_open_market(monkeypatch) -> None:
+    monkeypatch.setenv("BROKER_PNL_REFRESH_SECONDS", "15")
+    monkeypatch.setenv("POST_MARKET_QUIET_MODE", "true")
+    monkeypatch.setattr(pnl_patch, "get_runtime_market_mode", lambda: "OPEN")
+
+    assert _effective_refresh_seconds() == pytest.approx(15.0)
+
+
+def test_broker_pnl_refresh_is_throttled_post_market(monkeypatch) -> None:
+    monkeypatch.setenv("BROKER_PNL_REFRESH_SECONDS", "15")
+    monkeypatch.setenv("POST_MARKET_QUIET_MODE", "true")
+    monkeypatch.setenv("POST_MARKET_BROKER_REFRESH_SECONDS", "3600")
+    monkeypatch.setattr(pnl_patch, "get_runtime_market_mode", lambda: "POST_MARKET")
+
+    assert _effective_refresh_seconds() == pytest.approx(3600.0)
 
 
 def test_extract_account_m2m_accepts_zerodha_spelling_variants() -> None:

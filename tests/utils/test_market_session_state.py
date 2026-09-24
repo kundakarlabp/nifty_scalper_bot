@@ -120,6 +120,14 @@ def test_thresholds_respect_env_overrides(monkeypatch):
     )
 
 
+def test_post_market_broker_refresh_default_and_override(monkeypatch) -> None:
+    monkeypatch.delenv("POST_MARKET_BROKER_REFRESH_SECONDS", raising=False)
+    assert market_hours.post_market_broker_refresh_seconds() == pytest.approx(3600.0)
+
+    monkeypatch.setenv("POST_MARKET_BROKER_REFRESH_SECONDS", "1800")
+    assert market_hours.post_market_broker_refresh_seconds() == pytest.approx(1800.0)
+
+
 def test_no_code_path_can_log_threshold_10_for_nifty():
     """Args: none. Returns: None. Raises: AssertionError."""
     # Both paths must yield ≥ 120s, never 10s.
