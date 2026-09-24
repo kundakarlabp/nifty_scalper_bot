@@ -440,7 +440,9 @@ class BoundBracketManager(RuntimeBracketManager):
                     )
 
             if depth_stale:
-                depth_label = "missing" if depth_age is None else f"{float(depth_age):.3f}"
+                depth_label = "missing"
+                if depth_age is not None:
+                    depth_label = f"{float(depth_age):.3f}"
                 with suppress(Exception):
                     self._log_throttled(
                         "warning",
