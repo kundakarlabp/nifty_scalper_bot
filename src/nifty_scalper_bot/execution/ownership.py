@@ -24,8 +24,10 @@ from contextlib import suppress
 from enum import Enum
 from typing import Any, Mapping, Sequence
 
-from nifty_scalper_bot.execution import bracket_core as _core
-from nifty_scalper_bot.execution import market_aware_profit_extension as _profit_extension
+from nifty_scalper_bot.execution import (
+    bracket_core as _core,
+    market_aware_profit_extension as _profit_extension,
+)
 from nifty_scalper_bot.execution.position_snapshot import BrokerExposureState
 from nifty_scalper_bot.execution.runtime_bracket_manager import RuntimeBracketManager
 from nifty_scalper_bot.utils.symbols import normalize_symbol
