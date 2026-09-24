@@ -8,15 +8,19 @@ continue through the canonical synchronous/fail-closed orchestration.
 from __future__ import annotations
 
 import asyncio
-from functools import wraps
+from collections.abc import Awaitable, Callable
 from typing import Any, Mapping
 
 from nifty_scalper_bot.core.active_basket import extract_symbol_strike
+from nifty_scalper_bot.core.history_readiness import (
+    RuntimeHistoryResult,
+    compute_history_readiness,
+    resolve_history_policy,
+)
 from nifty_scalper_bot.utils.logging import get_logger
 from nifty_scalper_bot.utils.symbols import normalize_symbol
 
 _LOG = get_logger(__name__)
-_PATCH_ATTR = "_dynamic_context_history_deferral_installed"
 _TASKS: dict[tuple[int, str], asyncio.Task[Any]] = {}
 
 
@@ -93,7 +97,6 @@ def _safe_far_context_candidate(
 
 
 def _current_result(
-    app_module: Any,
     ctx: Any,
     symbol: str,
     *,
@@ -101,7 +104,7 @@ def _current_result(
     phase: str,
     reason: str,
 ) -> Any:
-    policy = app_module.resolve_history_policy(
+    policy = resolve_history_policy(
         ctx, symbol, role=role, phase=phase, reason=reason
     )
     mdm = getattr(ctx, "market_data_manager", None)
@@ -129,7 +132,7 @@ def _current_result(
             )
     except Exception:
         indicator_bars = 0
-    readiness = app_module.compute_history_readiness(
+    readiness = compute_history_readiness(
         symbol=symbol,
         role=policy.role,
         required_bars=policy.required_bars,
@@ -140,7 +143,7 @@ def _current_result(
     failure_reason = (
         None if readiness.minimum_ready else "dynamic_context_hydration_deferred"
     )
-    return app_module.RuntimeHistoryResult(
+    return RuntimeHistoryResult(
         symbol=symbol,
         role=policy.role,
         phase=policy.phase,
@@ -163,130 +166,109 @@ def _current_result(
     )
 
 
-def apply_app_patch(app_module: Any) -> bool:
-    """Defer cold far-context history; CandleEngine ownership stays native."""
-    if bool(getattr(app_module, _PATCH_ATTR, False)):
-        return True
-    original = getattr(app_module, "ensure_symbol_runtime_history", None)
-    if not callable(original):
-        raise RuntimeError("ensure_symbol_runtime_history_missing")
+def maybe_defer_dynamic_context_history(
+    ctx: Any,
+    symbol: str,
+    *,
+    role: str,
+    phase: str,
+    reason: str,
+    required_bars: int | None = None,
+    target_bars: int | None = None,
+    deep_history: bool = False,
+    canonical_ensurer: Callable[..., Awaitable[RuntimeHistoryResult]],
+) -> RuntimeHistoryResult | None:
+    """Defer only provably far, non-gating option-context hydration."""
+    normalized = normalize_symbol(str(symbol or ""))
+    eligible = bool(
+        normalized
+        and role == "option_context"
+        and phase == "dynamic_update"
+        and reason == "dynamic_option_universe"
+        and required_bars is None
+        and target_bars is None
+        and not deep_history
+    )
+    far_context = False
+    spot = None
+    atm = None
+    if eligible:
+        far_context, spot, atm = _safe_far_context_candidate(ctx, normalized)
+    if not far_context:
+        return None
 
-    @wraps(original)
-    async def ensure_symbol_runtime_history(
-        ctx: Any,
-        symbol: str,
-        *,
-        role: str,
-        phase: str,
-        reason: str,
-        required_bars: int | None = None,
-        target_bars: int | None = None,
-        deep_history: bool = False,
-    ) -> Any:
-        normalized = normalize_symbol(str(symbol or ""))
-        eligible = bool(
-            normalized
-            and role == "option_context"
-            and phase == "dynamic_update"
-            and reason == "dynamic_option_universe"
-            and required_bars is None
-            and target_bars is None
-            and not deep_history
-        )
-        far_context = False
-        spot = None
-        atm = None
-        if eligible:
-            far_context, spot, atm = _safe_far_context_candidate(ctx, normalized)
-        if not far_context:
-            return await original(
+    key = (id(ctx), normalized)
+    existing = _TASKS.get(key)
+    if existing is None or existing.done():
+        task = asyncio.create_task(
+            canonical_ensurer(
                 ctx,
-                symbol,
+                normalized,
                 role=role,
                 phase=phase,
                 reason=reason,
                 required_bars=required_bars,
                 target_bars=target_bars,
                 deep_history=deep_history,
-            )
+            ),
+            name=f"dynamic-context-history-{normalized}",
+        )
+        _TASKS[key] = task
 
-        key = (id(ctx), normalized)
-        existing = _TASKS.get(key)
-        if existing is None or existing.done():
-            task = asyncio.create_task(
-                original(
-                    ctx,
+        def _done(
+            completed: asyncio.Task[Any], *, task_key: tuple[int, str] = key
+        ) -> None:
+            _TASKS.pop(task_key, None)
+            if completed.cancelled():
+                return
+            try:
+                completed.result()
+            except Exception as exc:  # noqa: BLE001
+                _LOG.warning(
+                    "DYNAMIC_CONTEXT_HISTORY_BACKGROUND_FAILED symbol=%s error_type=%s error=%s",
                     normalized,
-                    role=role,
-                    phase=phase,
-                    reason=reason,
-                    required_bars=required_bars,
-                    target_bars=target_bars,
-                    deep_history=deep_history,
-                ),
-                name=f"dynamic-context-history-{normalized}",
-            )
-            _TASKS[key] = task
+                    type(exc).__name__,
+                    exc,
+                    extra={
+                        "event": "DYNAMIC_CONTEXT_HISTORY_BACKGROUND_FAILED",
+                        "symbol": normalized,
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                    },
+                )
 
-            def _done(
-                completed: asyncio.Task[Any], *, task_key: tuple[int, str] = key
-            ) -> None:
-                _TASKS.pop(task_key, None)
-                if completed.cancelled():
-                    return
-                try:
-                    completed.result()
-                except Exception as exc:  # noqa: BLE001
-                    _LOG.warning(
-                        "DYNAMIC_CONTEXT_HISTORY_BACKGROUND_FAILED symbol=%s error_type=%s error=%s",
-                        normalized,
-                        type(exc).__name__,
-                        exc,
-                        extra={
-                            "event": "DYNAMIC_CONTEXT_HISTORY_BACKGROUND_FAILED",
-                            "symbol": normalized,
-                            "error_type": type(exc).__name__,
-                            "error": str(exc),
-                        },
-                    )
+        task.add_done_callback(_done)
 
-            task.add_done_callback(_done)
-
-        current = _current_result(
-            app_module,
-            ctx,
-            normalized,
-            role=role,
-            phase=phase,
-            reason=reason,
-        )
-        _LOG.info(
-            "DYNAMIC_CONTEXT_HISTORY_DEFERRED symbol=%s spot=%s atm=%s strike=%s required_bars=%s current_mdm_bars=%s current_runner_bars=%s current_indicator_bars=%s",
-            normalized,
-            spot,
-            atm,
-            extract_symbol_strike(normalized),
-            current.required_bars,
-            current.mdm_bars,
-            current.runner_bars,
-            current.indicator_bars,
-            extra={
-                "event": "DYNAMIC_CONTEXT_HISTORY_DEFERRED",
-                "symbol": normalized,
-                "spot": spot,
-                "atm": atm,
-                "strike": extract_symbol_strike(normalized),
-                "required_bars": current.required_bars,
-                "current_mdm_bars": current.mdm_bars,
-                "current_runner_bars": current.runner_bars,
-                "current_indicator_bars": current.indicator_bars,
-            },
-        )
-        return current
-
-    app_module.ensure_symbol_runtime_history = ensure_symbol_runtime_history
-    setattr(app_module, _PATCH_ATTR, True)
-    return True
+    current = _current_result(
+        ctx,
+        normalized,
+        role=role,
+        phase=phase,
+        reason=reason,
+    )
+    _LOG.info(
+        "DYNAMIC_CONTEXT_HISTORY_DEFERRED symbol=%s spot=%s atm=%s strike=%s required_bars=%s current_mdm_bars=%s current_runner_bars=%s current_indicator_bars=%s",
+        normalized,
+        spot,
+        atm,
+        extract_symbol_strike(normalized),
+        current.required_bars,
+        current.mdm_bars,
+        current.runner_bars,
+        current.indicator_bars,
+        extra={
+            "event": "DYNAMIC_CONTEXT_HISTORY_DEFERRED",
+            "symbol": normalized,
+            "spot": spot,
+            "atm": atm,
+            "strike": extract_symbol_strike(normalized),
+            "required_bars": current.required_bars,
+            "current_mdm_bars": current.mdm_bars,
+            "current_runner_bars": current.runner_bars,
+            "current_indicator_bars": current.indicator_bars,
+        },
+    )
+    return current
 
 
-__all__ = ["apply_app_patch"]
+__all__ = ["maybe_defer_dynamic_context_history"]
