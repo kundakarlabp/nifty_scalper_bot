@@ -587,3 +587,184 @@ def test_ledger_complete_true_never_regresses_to_false(tmp_path) -> None:
         ).fetchone()
 
     assert row == (1, 640.0, 560.0, 21.0)
+
+
+def _seed_legacy_trade_event(
+    conn: sqlite3.Connection,
+    *,
+    event_type: str,
+    timestamp: float,
+    event_json: str,
+    meta_json: str = "{}",
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO trade_events (
+            timestamp, event_type, symbol, side, qty, price,
+            order_id, meta_json, event_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            timestamp,
+            event_type,
+            "NFO:NIFTYCE",
+            "BUY",
+            65,
+            100.0,
+            "ENTRY-1",
+            meta_json,
+            event_json,
+        ),
+    )
+
+
+def test_trade_journal_worker_backfills_existing_events_once(tmp_path) -> None:
+    db_path = tmp_path / "journal.db"
+    correlation = {"trade_id": "trade-old-1", "signal_id": "sig-old-1"}
+    events = [
+        {
+            "event_type": "ORDER_FILL_CONFIRMED",
+            "timestamp": 10.0,
+            "symbol": "NFO:NIFTYCE",
+            "side": "BUY",
+            "qty": 65,
+            "price": 100.0,
+            "order_id": "ENTRY-1",
+            "meta": correlation,
+        },
+        {
+            "event_type": "BRACKET_CLOSED",
+            "timestamp": 20.0,
+            "symbol": "NFO:NIFTYCE",
+            "side": "BUY",
+            "meta": {
+                **correlation,
+                "completed_trade": {
+                    "quantity": 65,
+                    "entry_price": 100.0,
+                    "exit_price": 110.0,
+                    "gross_pnl": 650.0,
+                    "estimated_costs": {"total": 75.0},
+                    "net_pnl": 575.0,
+                    "ledger_complete": True,
+                },
+            },
+        },
+    ]
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("""
+            CREATE TABLE trade_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp REAL NOT NULL,
+                event_type TEXT NOT NULL,
+                symbol TEXT,
+                side TEXT,
+                qty INTEGER,
+                price REAL,
+                order_id TEXT,
+                meta_json TEXT,
+                event_json TEXT NOT NULL
+            )
+            """)
+        for event in events:
+            _seed_legacy_trade_event(
+                conn,
+                event_type=str(event["event_type"]),
+                timestamp=float(event["timestamp"]),
+                event_json=json.dumps({"event_type": event["event_type"]}),
+                meta_json=json.dumps(event.get("meta", {})),
+            )
+
+    journal = TradeJournal(str(db_path))
+    journal.start()
+    journal.stop()
+
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT state, entry_price, exit_price, gross_pnl, net_pnl,
+                   ledger_complete, closed_at
+            FROM trade_ledger
+            WHERE trade_id = ?
+            """,
+            ("trade-old-1",),
+        ).fetchone()
+        migration_count = conn.execute("""
+            SELECT COUNT(*)
+            FROM trade_journal_migrations
+            WHERE name = 'trade_ledger_historical_backfill_v1'
+            """).fetchone()[0]
+
+    assert row == ("CLOSED", 100.0, 110.0, 650.0, 575.0, 1, 20.0)
+    assert migration_count == 1
+
+    second = TradeJournal(str(db_path))
+    second.start()
+    second.stop()
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("""
+                SELECT COUNT(*)
+                FROM trade_journal_migrations
+                WHERE name = 'trade_ledger_historical_backfill_v1'
+                """).fetchone()[0] == 1
+
+
+def test_historical_backfill_skips_malformed_event_json(tmp_path) -> None:
+    db_path = tmp_path / "journal.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("""
+            CREATE TABLE trade_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp REAL NOT NULL,
+                event_type TEXT NOT NULL,
+                symbol TEXT,
+                side TEXT,
+                qty INTEGER,
+                price REAL,
+                order_id TEXT,
+                meta_json TEXT,
+                event_json TEXT NOT NULL
+            )
+            """)
+        _seed_legacy_trade_event(
+            conn,
+            event_type="BROKEN",
+            timestamp=1.0,
+            event_json="{",
+        )
+        valid = {
+            "event_type": "BRACKET_CLOSED",
+            "timestamp": 2.0,
+            "symbol": "NFO:NIFTYCE",
+            "side": "BUY",
+            "meta": {
+                "trade_id": "trade-valid",
+                "completed_trade": {
+                    "quantity": 65,
+                    "entry_price": 100.0,
+                    "exit_price": 101.0,
+                    "gross_pnl": 65.0,
+                    "net_pnl": 65.0,
+                    "ledger_complete": True,
+                },
+            },
+        }
+        _seed_legacy_trade_event(
+            conn,
+            event_type="BRACKET_CLOSED",
+            timestamp=2.0,
+            event_json=json.dumps(valid),
+        )
+
+    journal = TradeJournal(str(db_path))
+    journal.start()
+    journal.stop()
+
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM trade_ledger").fetchone()[0] == 1
+        assert (
+            conn.execute(
+                "SELECT state FROM trade_ledger WHERE trade_id = 'trade-valid'"
+            ).fetchone()[0]
+            == "CLOSED"
+        )
