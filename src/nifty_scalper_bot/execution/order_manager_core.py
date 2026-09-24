@@ -735,7 +735,7 @@ def resolve_reference_price(
                 },
             )
         try:
-            quote = self._get_latest_quote_safe(symbol) or {}
+            quote = mdm.get_quote(symbol) or {}
         except Exception as exc:  # noqa: BLE001
             _REFERENCE_LOGGER.error(
                 "Failure in resolve_reference_price: %s",
