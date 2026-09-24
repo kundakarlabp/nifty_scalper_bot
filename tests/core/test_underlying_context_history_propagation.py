@@ -236,6 +236,27 @@ async def test_context_history_inflight_remains_pending_after_grace(
     assert "CONTEXT_HISTORY_HYDRATION_FAILED" not in caplog.text
 
 
+async def test_context_history_without_inflight_fails_after_grace(
+    monkeypatch,
+    caplog,
+) -> None:
+    """A truly unowned cold context still fails closed after the grace window."""
+    monkeypatch.setenv("ORB_ENABLED", "true")
+    monkeypatch.setenv("SMC_MIN_BARS_REQUIRED", "30")
+    monkeypatch.setenv("CONTEXT_HISTORY_COLD_GRACE_PASSES", "3")
+    apply_patches()
+    runner, _calls = _context_sync_runner(mdm_rows=[], indicator_rows=[])
+    runner._logger = logging.getLogger("test.context_history_unowned")
+    runner._context_cold_passes = {FUTURE: 3}
+    runner._context_structural_request_at = {}
+    runner._runtime_history_ensure_inflight = {}
+
+    with caplog.at_level(logging.WARNING, logger="test.context_history_unowned"):
+        runner._sync_context_history_if_cold(source="context_tick_bar_sync")
+
+    assert "CONTEXT_HISTORY_HYDRATION_FAILED" in caplog.text
+
+
 async def test_orb_context_requests_structural_target_even_when_warm_by_count(
     monkeypatch,
 ) -> None:
