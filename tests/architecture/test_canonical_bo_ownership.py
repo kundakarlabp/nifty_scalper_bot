@@ -212,6 +212,7 @@ def test_retired_execution_modules_are_absent() -> None:
         "lifecycle_manager.py",
         "live_exit_reconciliation_patch.py",
         "operator_control_patch.py",
+        "pnl_nonblocking_patch.py",
         "trade_plan_identity_guard.py",
     }
     present = sorted(name for name in retired if (EXECUTION / name).exists())

@@ -27,6 +27,7 @@ from typing import Any, Mapping, Sequence
 import nifty_scalper_bot.execution.market_aware_profit_extension as _profit_extension
 from nifty_scalper_bot.execution import bracket_core as _core
 from nifty_scalper_bot.execution.position_snapshot import BrokerExposureState
+from nifty_scalper_bot.execution.readiness import is_pnl_diagnostic_reason
 from nifty_scalper_bot.execution.runtime_bracket_manager import RuntimeBracketManager
 from nifty_scalper_bot.utils.symbols import normalize_symbol
 
@@ -512,16 +513,35 @@ class BoundBracketManager(RuntimeBracketManager):
         if position_manager is None:
             return None
 
-        for method_name in (
-            "current_entry_protection_blocker",
-            "current_pnl_reconciliation_blocker",
+        post_pnl_methods = (
             "current_position_reconciliation_blocker",
             "current_orphan_position_blocker",
             "current_exit_lifecycle_blocker",
+        )
+        required_after_pnl = (
+            *post_pnl_methods,
+            "unresolved_terminal_summary",
+            "get_open_positions",
+        )
+
+        for method_name in (
+            "current_entry_protection_blocker",
+            "current_pnl_reconciliation_blocker",
+            *post_pnl_methods,
         ):
             reason = _call_blocker(position_manager, method_name)
-            if reason:
-                return _block(str(reason), source=method_name)
+            if not reason:
+                continue
+            if (
+                method_name == "current_pnl_reconciliation_blocker"
+                and is_pnl_diagnostic_reason(reason)
+            ):
+                if all(
+                    callable(getattr(position_manager, name, None))
+                    for name in required_after_pnl
+                ):
+                    continue
+            return _block(str(reason), source=method_name)
 
         summary_getter = getattr(position_manager, "unresolved_terminal_summary", None)
         if callable(summary_getter):
