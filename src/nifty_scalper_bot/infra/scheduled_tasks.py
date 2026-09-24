@@ -137,12 +137,15 @@ async def run_archive_rotation(order_manager: Any, max_age_days: int = 90) -> No
 def start_background_tasks(
     order_manager: Any,
     logger: Any,
+    *,
+    trade_journal: Any | None = None,
 ) -> list[asyncio.Task[Any]]:
     """Start background maintenance tasks for the execution stack.
 
     Args:
         order_manager: Order manager instance responsible for persistence.
         logger: Logger compatible interface for lifecycle messages.
+        trade_journal: Retained for call-site compatibility; replication is process-owned.
 
     Returns:
         List of created asyncio tasks.
