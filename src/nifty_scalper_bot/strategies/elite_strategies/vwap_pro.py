@@ -119,11 +119,6 @@ class VWAPProStrategy(EliteStrategy):
         self._futures_slope_neutral_eps = float(
             os.getenv("VWAP_FUTURES_SLOPE_NEUTRAL_EPS", "0.00005") or 0.00005
         )
-        self._allow_early_trend_pullback = str(
-            os.getenv("VWAP_PRO_ALLOW_EARLY_TREND_PULLBACK_LIVE", "false")
-            if str(os.getenv("EXECUTION_MODE", "SHADOW")).strip().upper() == "LIVE"
-            else os.getenv("VWAP_PRO_ALLOW_EARLY_TREND_PULLBACK", "false")
-        ).strip().lower() in {"1", "true", "yes", "on"}
         self._early_trend_min_context_conf = float(
             os.getenv("VWAP_EARLY_TREND_MIN_CONTEXT_CONF", "0.90") or 0.90
         )
@@ -555,29 +550,8 @@ class VWAPProStrategy(EliteStrategy):
             if hard_conflict:
                 self._no_vote("underlying_direction_conflict")
                 return None
-            early_trend_pullback = bool(
-                self._allow_early_trend_pullback
-                and trend_alignment
-                and context_fresh
-                and context_age_seconds <= self._early_trend_max_context_age
-                and underlying_direction_confidence >= self._early_trend_min_context_conf
-                and not premium_above_vwap
-                and not pullback_flag
-                and distance_pct <= min(self._max_distance_pct * 0.15, 0.03)
-                and spread_pct
-                <= min(
-                    canonical_max_spread_pct(),
-                    float(
-                        os.getenv("VWAP_EARLY_TREND_MAX_SPREAD_PCT", "8.0") or 8.0
-                    ),
-                )
-            )
-
             event_confirmed = bool(
-                continuation_confirmed
-                or pullback_flag
-                or penetration_confirmed
-                or early_trend_pullback
+                continuation_confirmed or pullback_flag or penetration_confirmed
             )
             if is_live and not event_confirmed:
                 self._no_vote("vwap_event_unconfirmed")
@@ -620,9 +594,7 @@ class VWAPProStrategy(EliteStrategy):
                 if premium_event_confirmed:
                     independent_setup_score += 2.0
                     independent_setup_reasons.append("premium_event_confirmed")
-                if early_trend_pullback:
-                    reasons.append("early_trend_pullback_context")
-                elif pullback_flag:
+                if pullback_flag:
                     reasons.append("premium_reclaim_vwap")
                 elif continuation_confirmed:
                     reasons.append("premium_continuation")
@@ -742,7 +714,6 @@ class VWAPProStrategy(EliteStrategy):
                         "continuation_confirmed": continuation_confirmed,
                         "trend_alignment": trend_alignment,
                         "pullback_flag": pullback_flag,
-                        "early_trend_pullback": early_trend_pullback,
                         "distance_atr": distance_atr,
                         "configured_proximity_pct": configured_proximity_pct,
                         "effective_quality_max_distance_atr": effective_quality_max_distance_atr,
@@ -841,7 +812,6 @@ class VWAPProStrategy(EliteStrategy):
                 "penetration_confirmed": penetration_confirmed,
                 "vwap_penetration_atr": round(penetration_atr, 4),
                 "vwap_event_confirmed": event_confirmed,
-                "early_trend_pullback": early_trend_pullback,
                 "thesis_scope_symbol": symbol_scope,
                 "thesis_scope_session": session_scope,
                 "thesis_recovered_from_history": thesis_recovered_from_history,
