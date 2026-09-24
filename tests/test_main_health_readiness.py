@@ -502,3 +502,40 @@ def test_fresh_current_generation_feed_proves_market_data_authentication():
     assert body["broker"]["funds_endpoint_verified"] is True
     assert body["broker"]["order_endpoint_verified"] is False
     assert body["broker"]["broker_session_state"] == "funds_verified"
+
+
+async def test_lifespan_keeps_replication_alive_when_bot_startup_fails(
+    monkeypatch,
+    tmp_path,
+):
+    main._release_bot_start_guard()
+    replication_started: list[object] = []
+    replication_cancelled = asyncio.Event()
+
+    async def replication_loop():
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            replication_cancelled.set()
+            raise
+
+    def fake_replication_start(db_path):
+        replication_started.append(db_path)
+        return asyncio.create_task(replication_loop())
+
+    async def failed_runner(app):
+        app.state.bot_error = "broker auth invalid"
+        app.state.bot_started = False
+
+    monkeypatch.setattr(main, "get_data_dir", lambda: tmp_path)
+    monkeypatch.setattr(main, "start_trade_replication_task", fake_replication_start)
+    monkeypatch.setattr(main, "_run_bot_background", failed_runner)
+
+    app = _app_state()
+    async with main.lifespan(app):
+        await asyncio.sleep(0)
+        assert app.state.bot_error == "broker auth invalid"
+        assert replication_started == [tmp_path / "trades.db"]
+        assert replication_cancelled.is_set() is False
+
+    assert replication_cancelled.is_set() is True
