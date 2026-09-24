@@ -199,11 +199,7 @@ class BoundBracketManager(RuntimeBracketManager):
         committed_sl: float | None = None,
     ) -> Any:
         """Apply market-aware extension only after canonical FINAL_TP evaluation."""
-        action = super()._evaluate_exit_fast(
-            bracket,
-            ltp,
-            committed_sl=committed_sl,
-        )
+        action = super()._evaluate_exit_fast(bracket, ltp, committed_sl=committed_sl)
         if (
             not isinstance(action, Mapping)
             or str(action.get("type") or "") != "FINAL_TP"
