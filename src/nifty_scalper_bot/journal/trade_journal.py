@@ -295,14 +295,12 @@ class TradeJournal:
     # -------------------------------------------------------
     def _backfill_trade_ledger(self, conn: sqlite3.Connection) -> None:
         """Replay stored journal events into the derived ledger exactly once."""
-        conn.execute(
-            """
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS trade_journal_migrations (
                 name TEXT PRIMARY KEY,
                 completed_at REAL NOT NULL
             )
-            """
-        )
+            """)
         if conn.execute(
             "SELECT 1 FROM trade_journal_migrations WHERE name = ?",
             (_TRADE_LEDGER_BACKFILL_MIGRATION,),
