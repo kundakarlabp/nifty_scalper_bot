@@ -27,6 +27,7 @@ class _MarketDataManager:
         self.age_seconds = age_seconds
         self.stale_after_seconds = stale_after_seconds
         self.refresh_calls: list[tuple[str, str]] = []
+        self.depth_refresh_calls: list[tuple[str, str]] = []
 
     def time_since_last_tick(self, _symbol: str) -> float | None:
         return self.age_seconds
@@ -36,6 +37,10 @@ class _MarketDataManager:
 
     def request_fallback_refresh(self, symbol: str, *, reason: str) -> bool:
         self.refresh_calls.append((symbol, reason))
+        return True
+
+    def request_depth_refresh(self, symbol: str, *, reason: str) -> bool:
+        self.depth_refresh_calls.append((symbol, reason))
         return True
 
 
@@ -101,6 +106,33 @@ def test_active_bracket_fresh_ltp_does_not_request_fallback_refresh() -> None:
     manager, order_manager = _active_manager(mdm)
     try:
         time.sleep(0.40)
+        assert mdm.refresh_calls == []
+        assert order_manager.place_calls == []
+    finally:
+        manager.shutdown()
+        manager._watchdog_thread.join(timeout=1.0)
+
+
+def test_fresh_ltp_missing_depth_requests_depth_refresh() -> None:
+    mdm = _MarketDataManager(age_seconds=0.25, stale_after_seconds=2.0)
+    manager, order_manager = _active_manager(mdm)
+    try:
+        assert _wait_until(lambda: bool(mdm.depth_refresh_calls))
+        assert mdm.depth_refresh_calls[0] == (SYMBOL, "bracket_depth_stale")
+        assert mdm.refresh_calls == []
+        assert order_manager.place_calls == []
+    finally:
+        manager.shutdown()
+        manager._watchdog_thread.join(timeout=1.0)
+
+
+def test_fresh_executable_depth_does_not_request_depth_refresh() -> None:
+    mdm = _MarketDataManager(age_seconds=0.25, stale_after_seconds=2.0)
+    manager, order_manager = _active_manager(mdm)
+    manager._exit_quotes[SYMBOL] = (99.9, 100.1, time.time())
+    try:
+        time.sleep(0.40)
+        assert mdm.depth_refresh_calls == []
         assert mdm.refresh_calls == []
         assert order_manager.place_calls == []
     finally:
