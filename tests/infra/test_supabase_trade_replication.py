@@ -181,6 +181,81 @@ def test_failed_remote_batch_does_not_advance_checkpoint(tmp_path: Any) -> None:
     assert calls == 1
 
 
+
+def test_replication_accepts_legacy_trade_event_schema(tmp_path: Any) -> None:
+    db_path = tmp_path / "trades.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("""
+            CREATE TABLE trade_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp REAL NOT NULL,
+                event_type TEXT NOT NULL,
+                symbol TEXT,
+                side TEXT,
+                qty INTEGER,
+                price REAL,
+                order_id TEXT,
+                meta_json TEXT,
+                event_json TEXT NOT NULL
+            )
+            """)
+        conn.execute(
+            """
+            INSERT INTO trade_events (
+                timestamp, event_type, symbol, side, qty, price,
+                order_id, meta_json, event_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                1_790_000_000.0,
+                "ORDER_FILL_CONFIRMED",
+                "NFO:NIFTYCE",
+                "BUY",
+                65,
+                100.0,
+                "entry-legacy",
+                "{}",
+                '{"event_type":"ORDER_FILL_CONFIRMED"}',
+            ),
+        )
+
+    calls: list[dict[str, Any]] = []
+
+    def transport(
+        _url: str,
+        payload: Mapping[str, Any],
+        _timeout: float,
+    ) -> Mapping[str, Any]:
+        calls.append(dict(payload))
+        return {"ok": True}
+
+    replicator = SupabaseTradeReplicator(
+        db_path=db_path,
+        endpoint_url="https://example.test/ingest",
+        transport=transport,
+    )
+
+    assert replicator.replicate_once() == {
+        "events": 1,
+        "ledger": 0,
+        "checkpoint": 1,
+    }
+    assert len(calls) == 1
+    event = calls[0]["events"][0]
+    assert event["event_name"] == "ORDER_FILL_CONFIRMED"
+    assert event["trade_id"] is None
+    assert event["signal_id"] is None
+    assert event["trace_id"] is None
+
+    with sqlite3.connect(db_path) as conn:
+        columns = {
+            str(row[1]) for row in conn.execute("PRAGMA table_info(trade_events)")
+        }
+    assert "event_name" not in columns
+    assert "trade_id" not in columns
+
+
+
 def test_missing_database_is_a_noop(tmp_path: Any) -> None:
     called = False
 
