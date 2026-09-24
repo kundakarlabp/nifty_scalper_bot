@@ -5,8 +5,13 @@ from nifty_scalper_bot.core.app import (
     _next_eod_flatten_time_ist,
     _schedule_next_eod_flatten,
 )
+from nifty_scalper_bot.utils.market_hours import EOD_FLATTEN_TIME, SAFE_END
 
 IST = ZoneInfo("Asia/Kolkata")
+
+
+def test_entry_window_closes_before_eod_flatten() -> None:
+    assert SAFE_END < EOD_FLATTEN_TIME
 
 
 def test_eod_before_close_same_trading_day():

@@ -67,6 +67,28 @@ ensure_env_default() {
   fi
 }
 
+set_env_value() {
+  local key="$1" value="$2" current tmp
+  current="$(first_nonempty_env "$key" 2>/dev/null || true)"
+  if [ "$current" = "$value" ]; then return 0; fi
+  tmp="$(mktemp "${ENV_FILE}.runtime.XXXXXX")" || return 1
+  if ! awk -v key="$key" -v value="$value" '
+    BEGIN { written = 0 }
+    index($0, key "=") == 1 {
+      if (!written) { print key "=" value; written = 1 }
+      next
+    }
+    { print }
+    END { if (!written) print key "=" value }
+  ' "$ENV_FILE" > "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
+  mv "$tmp" "$ENV_FILE"
+  RUNTIME_ENV_CHANGED=true
+}
+
 set_runtime_build_sha() {
   local sha="$1" tmp
   if [[ ! "$sha" =~ ^[0-9a-fA-F]{7,64}$ ]]; then
@@ -249,6 +271,9 @@ ensure_env_default SUPABASE_TRADE_REPLICATION_SOURCE lightsail
 ensure_env_default SUPABASE_TRADE_REPLICATION_INTERVAL_SECONDS 30
 ensure_env_default SUPABASE_TRADE_REPLICATION_BATCH_SIZE 100
 ensure_env_default SUPABASE_TRADE_REPLICATION_TIMEOUT_SECONDS 5
+set_env_value SUPABASE_LOG_ARCHIVE_ENABLED true
+ensure_env_default SUPABASE_LOG_ARCHIVE_URL "https://dehdptgkqbrkyzyodicd.supabase.co/functions/v1/nifty-log-archive-ingest"
+ensure_env_default SUPABASE_LOG_ARCHIVE_INTERVAL_SECONDS 300
 if [ "$RUNTIME_ENV_CHANGED" = true ]; then FORCE_RESTART=true; fi
 migrate_systemd_entrypoint
 migrate_autodeploy_entrypoint
@@ -298,7 +323,11 @@ TARGETED_TESTS=(
   tests/architecture/test_canonical_bo_ownership.py
   tests/architecture/test_lightsail_release_contract.py
   tests/infra/test_supabase_trade_replication.py
+  tests/infra/test_daily_log_archive.py
   tests/infra/test_scheduled_tasks.py
+  tests/utils/test_market_hours.py
+  tests/core/test_eod_flatten_schedule.py
+  tests/strategies/test_candidate_risk_affordability.py
   tests/test_execution_path_contract.py
   tests/execution/test_runtime_order_facade.py
   tests/execution/test_runtime_bracket_facade.py

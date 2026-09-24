@@ -87,6 +87,20 @@ def test_safe_end_env(monkeypatch):
     assert reloaded.is_safe_entry_window() is True
 
 
+def test_safe_end_env_cannot_extend_into_eod_flatten_window(monkeypatch):
+    monkeypatch.setenv("SAFE_END_TIME", "15:25")
+    reloaded = importlib.reload(market_hours)
+
+    assert reloaded.SAFE_END < reloaded.EOD_FLATTEN_TIME
+
+    monkeypatch.setattr(
+        reloaded,
+        "_now_ist",
+        lambda: datetime(2026, 5, 21, 15, 24, tzinfo=reloaded.IST),
+    )
+    assert reloaded.is_safe_entry_window() is False
+
+
 def test_live_mode_disables_offhours_override(monkeypatch):
     monkeypatch.setenv("ALLOW_OFFHOURS_TESTING", "true")
     monkeypatch.setenv("SESSION_ALLOW_OUT_OF_HOURS", "true")

@@ -4816,14 +4816,20 @@ class StrategyRunner:
             decisions[ranked_symbol] = capacity_details
             self._logger.info(
                 "CANDIDATE_CAPACITY_DECISION symbol=%s affordable=%s "
-                "determinate=%s reason=%s required=%s executable_capacity=%s "
-                "trace_id=%s",
+                "determinate=%s reason=%s capacity_blocker=%s "
+                "cash_required=%s executable_capacity=%s "
+                "plan_cost_inclusive_risk=%s effective_risk_budget=%s "
+                "remaining_daily_risk_budget=%s trace_id=%s",
                 ranked_symbol,
                 capacity.affordable,
                 capacity.determinate,
                 capacity.reason,
+                capacity.capacity_blocker,
                 capacity.required,
                 capacity.executable_capacity,
+                capacity.plan_cost_inclusive_risk,
+                capacity.effective_one_lot_risk_budget,
+                capacity.remaining_daily_risk_budget,
                 trace_id,
                 extra={
                     "event": "CANDIDATE_CAPACITY_DECISION",
