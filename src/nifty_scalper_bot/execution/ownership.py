@@ -389,7 +389,9 @@ class BoundBracketManager(RuntimeBracketManager):
             depth_age = (
                 None if quote is None else max(time.time() - float(quote[2]), 0.0)
             )
-            depth_threshold = float(getattr(self, "_exit_quote_max_age", 3.0) or 0.0)
+            depth_threshold = float(
+                getattr(self, "_exit_quote_max_age", 3.0) or 0.0
+            )
             depth_stale = (
                 depth_threshold > 0.0
                 and (depth_age is None or depth_age > depth_threshold)
