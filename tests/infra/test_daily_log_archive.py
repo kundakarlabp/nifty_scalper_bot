@@ -35,10 +35,13 @@ def test_archive_snapshots_complete_session_and_finalizes_after_close() -> None:
 
 
 def test_archive_skips_before_market_open() -> None:
+    def fail_read(*_args):
+        raise AssertionError("must not read")
+
     archiver = DailyLogArchiver(
         endpoint_url="https://example.test/archive",
         transport=lambda *_args: {"ok": True},
-        log_reader=lambda *_args: (_ for _ in ()).throw(\n            AssertionError("must not read")\n        ),
+        log_reader=fail_read,
     )
 
     result = archiver.archive_once(datetime(2026, 9, 24, 9, 0, tzinfo=IST))
