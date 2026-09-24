@@ -17,6 +17,23 @@ from nifty_scalper_bot.config.env_utils import parse_float_env
 LOGGER = logging.getLogger(__name__)
 _UNUSABLE_QUOTE_TIMESTAMP_QUALITIES = {"synthetic", "unknown", "invalid"}
 _TRUTHY = {"1", "true", "yes", "y", "on"}
+_PNL_DIAGNOSTIC_REASONS = {
+    "pnl_baseline_uninitialized",
+    "pnl_session_date_unverified",
+    "pnl_reconciliation_mismatch",
+}
+
+
+def _reason_token(value: object) -> str:
+    text = str(value or "").strip()
+    if ":" in text:
+        text = text.split(":", 1)[-1]
+    return text
+
+
+def is_pnl_diagnostic_reason(value: object) -> bool:
+    """Return True only for P&L states that are diagnostic, not entry blockers."""
+    return _reason_token(value) in _PNL_DIAGNOSTIC_REASONS
 
 
 def _env_int(name: str, default: int, minimum: int = 1) -> int:
@@ -267,7 +284,12 @@ def normalize_readiness_blockers(
 ) -> ReadinessDecision:
     """Apply deterministic readiness blocker priority and closed-market dominance."""
 
-    canonical = [b for b in (_canonical_blocker(item) for item in blockers or []) if b]
+    filtered_blockers = [
+        item for item in (blockers or []) if not is_pnl_diagnostic_reason(item)
+    ]
+    canonical = [
+        b for b in (_canonical_blocker(item) for item in filtered_blockers) if b
+    ]
     market_name = _normalize_market_state_name(market_state)
     emergency_state = emergency_state or {}
     broker_state = broker_state or {}
