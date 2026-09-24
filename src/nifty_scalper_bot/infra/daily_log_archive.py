@@ -25,10 +25,10 @@ Transport = Callable[[str, Mapping[str, Any], float], Mapping[str, Any]]
 
 def archive_interval_seconds() -> float:
     try:
-        raw = os.getenv("SUPABASE_LOG_ARCHIVE_INTERVAL_SECONDS", "300")\n        return max(60.0, float(raw))
+        raw = os.getenv("SUPABASE_LOG_ARCHIVE_INTERVAL_SECONDS", "300")
+        return max(60.0, float(raw))
     except (TypeError, ValueError):
         return 300.0
-
 
 def build_daily_log_archiver() -> "DailyLogArchiver | None":
     raw = os.getenv("SUPABASE_LOG_ARCHIVE_ENABLED", "false").strip().lower()
