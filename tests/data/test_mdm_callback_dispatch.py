@@ -235,7 +235,9 @@ def test_ws_tick_still_reaches_subscribers_when_cache_rejects_older_event() -> N
     assert mdm._mdm_selected_tick_count >= 1
 
 
-def test_depth_refresh_reasserts_full_mode_and_schedules_rest(monkeypatch) -> None:
+def test_depth_refresh_reasserts_full_mode_without_rest_when_ws_recovery_dispatches(
+    monkeypatch,
+) -> None:
     symbol = "NFO:NIFTY26SEP23100CE"
     token = 123
     mdm = MarketDataManager(DummyBroker(), websocket=None)
@@ -256,4 +258,65 @@ def test_depth_refresh_reasserts_full_mode_and_schedules_rest(monkeypatch) -> No
     assert mdm.request_depth_refresh(symbol, reason="bracket_depth_stale") is True
 
     assert mode_calls == [[token]]
+    assert scheduled == []
+
+
+def test_depth_refresh_uses_rest_only_when_ws_full_reassertion_cannot_dispatch(
+    monkeypatch,
+) -> None:
+    symbol = "NFO:NIFTY26SEP23100CE"
+    token = 123
+    mdm = MarketDataManager(DummyBroker(), websocket=None)
+    mdm.register_symbol(symbol, token)
+    scheduled: list[str] = []
+    mdm._ws = type(
+        "_Ws",
+        (),
+        {"reassert_full_mode": lambda _self, _tokens: False},
+    )()
+    monkeypatch.setattr(mdm, "_schedule_rest_refresh", scheduled.append)
+
+    assert mdm.request_depth_refresh(symbol, reason="bracket_depth_stale") is True
+
     assert scheduled == [symbol]
+
+
+def test_same_timestamp_ws_full_depth_change_reaches_subscribers() -> None:
+    symbol = "NFO:NIFTY26SEP23100CE"
+    token = 123
+    mdm = MarketDataManager(DummyBroker(), websocket=None)
+    mdm.register_symbol(symbol, token)
+    seen: list[dict[str, Any]] = []
+
+    def callback(tick: dict[str, Any]) -> None:
+        seen.append(tick)
+
+    mdm.subscribe(symbol, callback)
+    exchange_timestamp = datetime.now(timezone.utc)
+    base_tick = {
+        "instrument_token": token,
+        "last_price": 100.0,
+        "volume_traded_today": 1_000,
+        "exchange_timestamp": exchange_timestamp,
+        "timestamp": exchange_timestamp,
+        "depth": {
+            "buy": [{"price": 99.90, "quantity": 65}],
+            "sell": [{"price": 100.10, "quantity": 65}],
+        },
+    }
+    mdm._process_queued_tick(dict(base_tick))
+
+    changed_depth = {
+        **base_tick,
+        "depth": {
+            "buy": [{"price": 99.95, "quantity": 130}],
+            "sell": [{"price": 100.05, "quantity": 195}],
+        },
+    }
+    mdm._process_queued_tick(changed_depth)
+
+    assert len(seen) == 2
+    assert seen[-1]["bid"] == 99.95
+    assert seen[-1]["ask"] == 100.05
+    assert seen[-1]["depth"]["buy"][0]["quantity"] == 130
+    assert seen[-1]["depth"]["sell"][0]["quantity"] == 195
