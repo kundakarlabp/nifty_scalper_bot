@@ -6657,7 +6657,6 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             background_tasks = start_background_tasks(
                 order_manager,
                 LOGGER,
-                trade_journal=trade_journal,
             )
             ctx_ref["background_tasks_started"] = True
             LOGGER.info(
