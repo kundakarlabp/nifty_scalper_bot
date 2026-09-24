@@ -209,10 +209,7 @@ def test_positions_confirm_local_pnl_when_margins_m2m_stays_zero(tmp_path) -> No
         "broker_positions_vs_strategy_difference"
     ] == pytest.approx(0.0)
     assert manager.get_broker_account_realized_pnl() == pytest.approx(-39.0)
-    assert (
-        manager.pnl_reconciliation_snapshot()["broker_account_pnl_status"]
-        == "matched"
-    )
+    assert manager.pnl_reconciliation_snapshot()["broker_account_pnl_status"] == "matched"
 
 
 def test_tradebook_realized_pnl_preserves_closed_profit_with_open_residual() -> None:
