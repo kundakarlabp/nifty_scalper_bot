@@ -87,6 +87,7 @@ def test_dynamic_subscription_serializes_subscribe_before_full_mode() -> None:
         ("set_mode", ("full", [101])),
     ]
 
+
 def test_reassert_full_mode_does_not_resubscribe_existing_token() -> None:
     calls: list[tuple[str, object]] = []
     jobs: list[Callable[[], Any]] = []
@@ -108,4 +109,3 @@ def test_reassert_full_mode_does_not_resubscribe_existing_token() -> None:
     jobs[0]()
 
     assert calls == [("set_mode", ("full", [101]))]
-
