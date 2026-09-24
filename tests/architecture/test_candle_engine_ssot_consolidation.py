@@ -81,3 +81,18 @@ async def test_order_and_datahub_layers_still_do_not_own_history() -> None:
     assert "_history_cache" not in datahub
     for forbidden in ("CandleEngine(", "ensure_history(", "historical_data("):
         assert forbidden not in order_manager
+
+
+async def test_dynamic_context_history_deferral_is_native_not_app_monkeypatch() -> None:
+    runtime = (SRC / "core" / "runtime_history_event_loop_hardening.py").read_text(
+        encoding="utf-8"
+    )
+    dynamic = (SRC / "core" / "strategy_runner_dynamic_universe_safety.py").read_text(
+        encoding="utf-8"
+    )
+    app = (SRC / "core" / "app.py").read_text(encoding="utf-8")
+
+    assert "def apply_app_patch(" not in runtime
+    assert "app_module.ensure_symbol_runtime_history =" not in runtime
+    assert "_apply_runtime_history_patch" not in dynamic
+    assert "maybe_defer_dynamic_context_history" in app
