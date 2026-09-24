@@ -322,6 +322,26 @@ class RuntimeBracketManager(LedgerBracketManager):
             )
             return False
 
+        # Broker updates are at-least-once. Once this exact exit order has
+        # already terminalized the bracket, a repeated fill callback is an
+        # idempotent success and must not emit a second EXIT_FILLED event.
+        with self._lock:
+            already_closed = (
+                str(getattr(bracket, "exit_state", "") or "")
+                == _core.BracketExitLifecycle.CLOSED.value
+                and int(getattr(bracket, "remaining_quantity", 0) or 0) <= 0
+                and bool(getattr(bracket, "exit_executed", False))
+            )
+            known_exit_order = order_id == str(
+                getattr(bracket, "exit_order_id", "") or ""
+            ) or order_id in {
+                str(value)
+                for value in getattr(bracket, "linked_exit_order_ids", ())
+                if value
+            }
+        if already_closed and known_exit_order:
+            return True
+
         payload = payload if isinstance(payload, Mapping) else {}
         try:
             quantity = max(
