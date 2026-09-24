@@ -91,12 +91,10 @@ def test_pnl_diagnostics_do_not_block_live_readiness() -> None:
 
 def test_canonical_app_pnl_diagnostics_are_filtered_before_arming() -> None:
     app_source = Path("src/nifty_scalper_bot/core/app.py").read_text(encoding="utf-8")
-    readiness_source = Path(
-        "src/nifty_scalper_bot/execution/readiness.py"
-    ).read_text(encoding="utf-8")
-    ownership_source = Path(
-        "src/nifty_scalper_bot/execution/ownership.py"
-    ).read_text(encoding="utf-8")
+    readiness_path = Path("src/nifty_scalper_bot/execution/readiness.py")
+    readiness_source = readiness_path.read_text(encoding="utf-8")
+    ownership_path = Path("src/nifty_scalper_bot/execution/ownership.py")
+    ownership_source = ownership_path.read_text(encoding="utf-8")
 
     assert "current_pnl_reconciliation_blocker" in app_source
     assert "missing.append(str(pnl_blocker))" in app_source
