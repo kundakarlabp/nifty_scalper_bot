@@ -13,6 +13,21 @@ class _TickProvider:
         return dict(self.quote)
 
 
+class _PullTrackingDataHub(_TickProvider):
+    def __init__(self) -> None:
+        super().__init__({})
+        self.pull_attempts = 0
+
+    def get_quote(
+        self,
+        _symbol: str,
+        allow_pull: bool = True,
+    ) -> dict[str, object] | None:
+        if allow_pull:
+            self.pull_attempts += 1
+        return None
+
+
 def _manager(*, data_hub: _TickProvider, mdm: _TickProvider) -> OrderManager:
     manager = object.__new__(OrderManager)
     manager._data_hub = data_hub
@@ -199,3 +214,18 @@ def test_live_entry_keeps_depth_quantity_guard_for_zerodha_depth_quote() -> None
 
     assert rejection is not None
     assert rejection.reason == "entry_executable_depth_insufficient"
+
+
+def test_order_preflight_does_not_trigger_http_pull_before_cached_ws_lookup() -> None:
+    symbol = "NFO:NIFTY26AUG24050PE"
+    data_hub = _PullTrackingDataHub()
+    manager = _manager(
+        data_hub=data_hub,
+        mdm=_TickProvider(_depth_quote(symbol, marker="mdm_ws_full")),
+    )
+
+    quote = manager._get_latest_quote_safe(symbol)
+
+    assert quote is not None
+    assert quote["marker"] == "mdm_ws_full"
+    assert data_hub.pull_attempts == 0
