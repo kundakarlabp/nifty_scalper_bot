@@ -119,5 +119,8 @@ def test_explicit_old_trading_date_resets_local_session_on_broker_refresh(tmp_pa
     assert manager.get_realized_pnl() == pytest.approx(0.0)
     assert snapshot["strategy_realized"] == pytest.approx(0.0)
     assert snapshot["account_realized"] == pytest.approx(50.0)
-    assert snapshot["difference"] == pytest.approx(50.0)
+    assert snapshot["broker_realized_evidence"] == pytest.approx(0.0)
+    assert snapshot["broker_realized_evidence_source"] == "zerodha_positions_day"
+    assert snapshot["margin_vs_strategy_difference"] == pytest.approx(50.0)
+    assert snapshot["difference"] == pytest.approx(0.0)
     assert manager._pnl_trading_date == manager._trading_date_ist()
