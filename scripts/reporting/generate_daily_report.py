@@ -499,8 +499,8 @@ def summarise_completed_trades(
 
     measured = _measured_trades(trades)
     score_buckets, score_coverage = _score_summary(measured)
-    quality_component_buckets, quality_component_coverage = (
-        _quality_component_summary(measured)
+    quality_component_buckets, quality_component_coverage = _quality_component_summary(
+        measured
     )
     summary = {
         "groups": groups,
