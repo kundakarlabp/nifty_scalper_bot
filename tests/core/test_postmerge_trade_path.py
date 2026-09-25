@@ -157,7 +157,7 @@ def test_opposite_trigger_does_not_receive_quality_confirmation(monkeypatch) -> 
     assert decision.reason == "conflicting_trigger_direction"
 
 
-def _range_vwap_context_candidate(
+def _trend_vwap_context_candidate(
     manager: StrategyManager,
     *,
     direction_score: float,
@@ -168,7 +168,7 @@ def _range_vwap_context_candidate(
         raw_score=8.0,
         weighted_score=6.4,
         confidence=0.80,
-        regime_name="RANGE",
+        regime_name="TREND",
     )
     vwap[0].metadata.update(
         {
@@ -198,7 +198,7 @@ def _range_vwap_context_candidate(
     return result
 
 
-def test_context_confirmed_range_vwap_still_fails_closed_on_weak_independent_alpha(
+def test_context_confirmed_trend_vwap_still_fails_closed_on_weak_independent_alpha(
     monkeypatch,
 ) -> None:
     """Manager qualification must never bypass Runner's independent VWAP alpha floor."""
@@ -208,7 +208,7 @@ def test_context_confirmed_range_vwap_still_fails_closed_on_weak_independent_alp
     manager._last_no_signal_decision_by_symbol = {}
     manager._compute_trade_quality_score = lambda *args, **kwargs: (10.0, {})
 
-    candidate = _range_vwap_context_candidate(
+    candidate = _trend_vwap_context_candidate(
         manager,
         direction_score=8.0,
         independent_setup_score=6.0,
@@ -224,17 +224,17 @@ def test_context_confirmed_range_vwap_still_fails_closed_on_weak_independent_alp
     assert "alpha_below_threshold" in quality.reasons
 
 
-def test_context_confirmed_range_vwap_can_clear_runner_with_strong_independent_alpha(
+def test_context_confirmed_trend_vwap_can_clear_runner_with_strong_independent_alpha(
     monkeypatch,
 ) -> None:
-    """The RANGE confirmation path remains reachable without weakening quality."""
+    """The permitted TREND path reaches Runner without weakening quality."""
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     monkeypatch.setenv("ENABLE_LIVE", "true")
     manager = StrategyManager.__new__(StrategyManager)
     manager._last_no_signal_decision_by_symbol = {}
     manager._compute_trade_quality_score = lambda *args, **kwargs: (10.0, {})
 
-    candidate = _range_vwap_context_candidate(
+    candidate = _trend_vwap_context_candidate(
         manager,
         direction_score=9.0,
         independent_setup_score=6.0,
