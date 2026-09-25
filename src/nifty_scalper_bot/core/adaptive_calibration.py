@@ -13,6 +13,7 @@ WalkForwardEvaluator = Callable[
     [Sequence[Mapping[str, Any]], Sequence[Mapping[str, Any]]],
     Sequence[float],
 ]
+ParameterCandidateEvaluator = Callable[[Mapping[str, float]], float]
 
 
 @dataclass(frozen=True, slots=True)
@@ -268,10 +269,12 @@ class WalkForwardOptimizer:
         regime: str,
         stats: TradeStats,
         current: dict[str, float],
+        *,
+        candidate_evaluator: ParameterCandidateEvaluator | None = None,
     ) -> dict[str, float]:
-        """Return research-tuned parameters when updates are explicitly enabled."""
+        """Return tuned parameters only from candidate-specific research evidence."""
 
-        if not self.allow_parameter_updates:
+        if not self.allow_parameter_updates or candidate_evaluator is None:
             return current
         if strategy in self._frozen_strategies or stats.rolling_sharpe < 0:
             self._frozen_strategies.add(strategy)
@@ -293,7 +296,26 @@ class WalkForwardOptimizer:
                             "spread_threshold_pct": max(0.01, sp + ds),
                         }
                     )
-        best = max(candidates, key=lambda p: self._objective(stats, p))
+        scored_candidates = [
+            (float(candidate_evaluator(candidate)), candidate)
+            for candidate in candidates
+        ]
+        current_score = next(
+            (
+                score
+                for score, candidate in scored_candidates
+                if candidate == current
+            ),
+            None,
+        )
+        best_score, best = max(scored_candidates, key=lambda item: item[0])
+        if current_score is not None and best_score <= current_score:
+            return current
+        if max(score for score, _ in scored_candidates) == min(
+            score for score, _ in scored_candidates
+        ):
+            return current
+
         prev = self._params.get(strategy, current)
         blended = {
             key: (1.0 - self.alpha) * float(prev.get(key, value))
@@ -320,9 +342,3 @@ class WalkForwardOptimizer:
             for key, value in target.items()
         }
 
-    @staticmethod
-    def _objective(stats: TradeStats, params: dict[str, float]) -> float:
-        """Objective score. Args: stats,params. Returns: float. Raises: None."""
-
-        spread_penalty = params["spread_threshold_pct"] * 0.2
-        return stats.rolling_sharpe + stats.win_rate - spread_penalty
