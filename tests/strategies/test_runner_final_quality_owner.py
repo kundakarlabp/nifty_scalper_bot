@@ -109,3 +109,23 @@ def test_vwap_runner_uses_canonical_metadata_quality_adapter() -> None:
     assert 'quality.components.get("alpha_score", quality.final_score)' in runner_source
     assert '"alpha_score": alpha_score' in runner_source
     assert "alpha_score=%.2f threshold=%.2f" in runner_source
+
+
+
+def test_primary_trigger_alpha_floor_cannot_be_rescued_by_execution_quality(monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+
+    for strategy_name, weak_alpha in (("ORBPro", 7.3), ("SMC", 6.9)):
+        quality = score_signal_quality(
+            direction_score=weak_alpha,
+            strategy_score=weak_alpha,
+            option_score=10.0,
+            data_score=10.0,
+            rr_score=10.0,
+            strategy_name=strategy_name,
+        )
+
+        assert quality.final_score > quality.components["threshold"]
+        assert quality.components["alpha_score"] < quality.components["threshold"]
+        assert quality.allowed is False
+        assert "alpha_below_threshold" in quality.reasons
