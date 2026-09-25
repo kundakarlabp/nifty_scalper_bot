@@ -123,6 +123,7 @@ def test_smc_native_live_core_plus_direction_does_not_auto_pass(monkeypatch) -> 
     strategy = SMCStrategy(SMCStrategyConfig(), indicator_engine=None)
     now = datetime(2026, 9, 11, 5, 0, tzinfo=timezone.utc)
     snapshot = _smc_snapshot(now)
+    snapshot["volume_ratio"] = 2.2
     monkeypatch.setattr(strategy, "_underlying_snapshot", lambda indicators: snapshot)
     strategy._events[("NFO:NIFTY26SEPFUT", "CE")] = _smc_event(
         now, volume_confirmation=False
@@ -171,6 +172,8 @@ def test_smc_native_independent_confirmation_reaches_live_floor(monkeypatch) -> 
     assert signal.metadata["setup_min"] == 6.5
     assert signal.metadata["setup_pass"] is True
     assert signal.metadata["smc_quality_independent_confirmation"] is True
+    assert signal.metadata["sweep_volume_confirmation"] is False
+    assert signal.metadata["confirmation_volume_confirmation"] is True
 
 
 def _ready_vwap_indicators() -> dict[str, object]:
