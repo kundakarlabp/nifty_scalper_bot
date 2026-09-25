@@ -4566,11 +4566,14 @@ class StrategyManager(_BaseStrategyManager):
                 and not vetoed
             )
             setup_min = _safe_float_value(metadata.get("setup_min"))
+            requires_orderflow_confirmation = (
+                metadata.get("requires_orderflow_confirmation") is True
+            )
             canonical_smc_setup_pass = bool(
                 str(best_vote.strategy or "").strip().lower() == "smc"
                 and metadata.get("setup_pass") is True
                 and metadata.get("preliminary_only") is True
-                and metadata.get("requires_orderflow_confirmation") is True
+                and requires_orderflow_confirmation
                 and metadata.get("requires_runner_final_score") is True
                 and setup_min is not None
                 and raw_trigger_score >= setup_min
@@ -4588,7 +4591,8 @@ class StrategyManager(_BaseStrategyManager):
                 self._env_bool("STRATEGY_ALLOW_SINGLE_VOTE_SELECTED_OPTION", False),
             )
             high_conviction_allowed = bool(
-                weighted_trigger_score >= single_high
+                not requires_orderflow_confirmation
+                and weighted_trigger_score >= single_high
                 and selected_ok
                 and not vetoed
                 and allow_high_conviction
@@ -4597,7 +4601,12 @@ class StrategyManager(_BaseStrategyManager):
             # cleared score/confidence/veto gates is the core scalp this platform
             # exists to take. Allow it without the global scalp flag, since
             # selected_option is a stronger guarantee than mere near_atm.
-            selected_option_scalp_allowed = bool(threshold_passed and selected_option and allow_selected_option)
+            selected_option_scalp_allowed = bool(
+                not requires_orderflow_confirmation
+                and threshold_passed
+                and selected_option
+                and allow_selected_option
+            )
             # Single-vote (no consensus) is riskier, so a lone selected-option scalp
             # must clear a high score floor (default 9.0) on top of the normal gates.
             # This keeps unconfirmed single-vote trades to only the strongest signals.
@@ -4788,8 +4797,11 @@ class StrategyManager(_BaseStrategyManager):
                 )
 
             scalp_fallback_allowed = bool(
-                (allow_scalp_single and threshold_passed)
-                or selected_option_scalp_allowed
+                not requires_orderflow_confirmation
+                and (
+                    (allow_scalp_single and threshold_passed)
+                    or selected_option_scalp_allowed
+                )
             )
             final_allowed = bool(
                 high_conviction_allowed
@@ -4815,7 +4827,7 @@ class StrategyManager(_BaseStrategyManager):
                 elif vetoed:
                     blocked_reason = "hard_context_veto"
                 elif (
-                    canonical_smc_setup_pass
+                    requires_orderflow_confirmation
                     and not qualifying_context_votes
                 ):
                     blocked_reason = "single_trigger_context_confirmation_invalid"
@@ -4930,7 +4942,8 @@ class StrategyManager(_BaseStrategyManager):
                     switch_spread_pct = 999.0
                 switch_min_score = 8.0 if best_vote.strategy == "OrderFlow" else 8.5
                 switch_allowed = (
-                    allow_candidate_switch
+                    not requires_orderflow_confirmation
+                    and allow_candidate_switch
                     and (strike_distance_from_atm is not None)
                     and weighted_trigger_score >= switch_min_score
                     and quote_depth_valid
@@ -4953,7 +4966,7 @@ class StrategyManager(_BaseStrategyManager):
                     elif vetoed:
                         blocked_reason = "hard_context_veto"
                     elif (
-                        canonical_smc_setup_pass
+                        requires_orderflow_confirmation
                         and not qualifying_context_votes
                     ):
                         blocked_reason = "single_trigger_context_confirmation_invalid"
