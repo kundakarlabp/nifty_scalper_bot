@@ -193,7 +193,17 @@ def _execution_runner(monkeypatch, *, ce_ok=True, pe_ok=False):
             option_score=10.0,
             data_score=10.0,
             rr_score=10.0,
-            components={"threshold": 0.0},
+            components={
+                "threshold": 7.5,
+                "final_score": 10.0,
+                "alpha_score": 9.5,
+                "direction_score": 10.0,
+                "strategy_score": 9.0,
+                "option_score": 8.5,
+                "data_score": 9.0,
+                "rr_score": 8.0,
+                "normalized_strategy_name": "test",
+            },
             reasons=[],
         ),
     )
@@ -331,6 +341,17 @@ def test_entry_path_allows_ready_ce_candidate_and_submits_order(
     assert result.accepted is True
     assert len(runner._order_manager.plans) == 1
     assert runner._order_manager.plans[0].symbol == "NFO:CE"
+    assert runner._order_manager.plans[0].trade_provenance["signal_quality"] == {
+        "threshold": 7.5,
+        "final_score": 10.0,
+        "alpha_score": 9.5,
+        "direction_score": 10.0,
+        "strategy_score": 9.0,
+        "option_score": 8.5,
+        "data_score": 9.0,
+        "rr_score": 8.0,
+        "normalized_strategy_name": "test",
+    }
     assert runner._accepted_strategy_notifications == [
         ("test", "CE", "test:CE:setup-1")
     ]

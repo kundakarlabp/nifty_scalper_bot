@@ -21359,6 +21359,11 @@ class StrategyRunner:
                         "strategy_profile_version", "unknown"
                     ),
                     "final_score": metadata.get("final_score"),
+                    "signal_quality": (
+                        dict(metadata.get("signal_quality") or {})
+                        if isinstance(metadata.get("signal_quality"), Mapping)
+                        else {}
+                    ),
                     "entry_arrival_price": price,
                     "entry_quote_bid": selected_snapshot.get("bid"),
                     "entry_quote_ask": selected_snapshot.get("ask"),
