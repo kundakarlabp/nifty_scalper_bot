@@ -710,7 +710,9 @@ def _append_observational_sections(
         ]
     )
     if not confirmation_rows:
-        lines.append("| N/A | N/A | N/A | N/A | 0 | N/A | N/A | N/A | N/A | N/A | N/A |")
+        lines.append(
+            "| N/A | N/A | N/A | N/A | 0 | N/A | N/A | N/A | N/A | N/A | N/A |"
+        )
     for row in confirmation_rows:
         lines.append(
             "| "
