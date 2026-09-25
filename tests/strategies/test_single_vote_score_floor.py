@@ -674,3 +674,49 @@ async def test_weak_underlying_disagreement_cannot_promote_single_trigger(monkey
     assert result is None
     decision = manager._last_no_signal_decision_by_symbol["NFO:NIFTY2670724050CE"]
     assert decision.reason == "single_trigger_context_confirmation_invalid"
+
+
+async def test_smc_required_orderflow_cannot_be_bypassed_by_single_vote_overrides(
+    monkeypatch,
+) -> None:
+    """Explicit SMC OrderFlow confirmation must outrank generic single-vote overrides."""
+    override_envs = (
+        "STRATEGY_ALLOW_HIGH_CONVICTION_SINGLE_VOTE",
+        "STRATEGY_ALLOW_SELECTED_OPTION_SINGLE_VOTE",
+        "STRATEGY_ALLOW_SINGLE_VOTE_SCALP",
+        "STRATEGY_ALLOW_CANDIDATE_SWITCH_ON_HIGH_SCORE",
+    )
+
+    for enabled_override in override_envs:
+        with monkeypatch.context() as patch:
+            patch.setenv("EXECUTION_MODE", "LIVE")
+            patch.setenv("ENABLE_LIVE", "true")
+            for name in override_envs:
+                patch.setenv(name, "false")
+            patch.setenv(enabled_override, "true")
+
+            manager = _manager_probe()
+            trigger = _signal_vote(strategy="SMC", raw_score=10.0, weighted_score=10.0)
+            trigger[0].metadata.update(
+                {
+                    "strategy": "SMC",
+                    "setup_pass": True,
+                    "setup_min": 6.5,
+                    "preliminary_only": True,
+                    "requires_orderflow_confirmation": True,
+                    "requires_runner_final_score": True,
+                    "is_selected_option": True,
+                }
+            )
+
+            result = manager._combine_strategy_votes(
+                symbol="NFO:NIFTY2670724050CE",
+                signals=[trigger],
+                indicators=_valid_entry_context(),
+            )
+
+            assert result is None, enabled_override
+            decision = manager._last_no_signal_decision_by_symbol[
+                "NFO:NIFTY2670724050CE"
+            ]
+            assert decision.reason == "single_trigger_context_confirmation_invalid"
