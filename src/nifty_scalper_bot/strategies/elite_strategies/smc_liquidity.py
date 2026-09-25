@@ -665,6 +665,15 @@ class SMCStrategy(EliteStrategy):
                 indicators.get("underlying_direction_bias") or ""
             ).upper()
             effective_direction = underlying_direction or direction
+            underlying_direction_confidence = max(
+                0.0,
+                min(
+                    1.0,
+                    _safe_float(indicators.get("underlying_direction_confidence"))
+                    or 0.0,
+                ),
+            )
+            context_fresh = indicators.get("context_fresh") is not False
             execution_mode = str(
                 os.getenv("EXECUTION_MODE", "SHADOW") or "SHADOW"
             ).strip().upper()
@@ -820,30 +829,41 @@ class SMCStrategy(EliteStrategy):
                 # quality live entry. Independent participation/structure/retest
                 # evidence must lift the setup above the live admission floor.
                 score = 4.0
+                independent_setup_score = 4.0
                 reasons = [
                     "underlying_liquidity_sweep",
                     "reclaim",
                     "displacement_confirmation",
                 ]
+                independent_setup_reasons = list(reasons)
                 if direction_aligned:
                     score += 1.5
                     reasons.append("direction_alignment")
                 if bool(event["volume_confirmation"]):
                     score += 1.0
+                    independent_setup_score += 1.0
                     reasons.append("volume_confirmation")
+                    independent_setup_reasons.append("volume_confirmation")
                 if structure_confirmed:
                     score += 1.0
+                    independent_setup_score += 1.0
                     reasons.append("structure_confirmation")
+                    independent_setup_reasons.append("structure_confirmation")
                 if retest_confirmed or premium_reclaim:
                     score += 0.5
+                    independent_setup_score += 0.5
                     if retest_confirmed:
                         reasons.append("retest_mitigation")
+                        independent_setup_reasons.append("retest_mitigation")
                     if premium_reclaim:
                         reasons.append("premium_reclaim_support")
+                        independent_setup_reasons.append("premium_reclaim_support")
                 depth_atr = float(event["depth_atr"])
                 if 0.12 <= depth_atr <= 0.50:
                     score += 0.5
+                    independent_setup_score += 0.5
                     reasons.append("balanced_sweep_depth")
+                    independent_setup_reasons.append("balanced_sweep_depth")
 
                 independent_quality_confirmation = bool(
                     bool(event["volume_confirmation"])
@@ -853,6 +873,14 @@ class SMCStrategy(EliteStrategy):
                     or 0.12 <= depth_atr <= 0.50
                 )
                 strategy_score = max(0.0, min(10.0, score))
+                independent_setup_score = max(
+                    0.0, min(10.0, independent_setup_score)
+                )
+                direction_score = (
+                    round(10.0 * underlying_direction_confidence, 3)
+                    if direction_aligned and context_fresh
+                    else 0.0
+                )
                 min_score = float(
                     os.getenv("SMC_MIN_SCORE_LIVE", "6.5")
                     if is_live
@@ -910,7 +938,9 @@ class SMCStrategy(EliteStrategy):
                         if underlying_direction in {"CE", "PE"}
                         else None
                     ),
+                    "underlying_direction_confidence": underlying_direction_confidence,
                     "context_age_seconds": context_age_seconds,
+                    "context_fresh": context_fresh,
                     "source_domain": "underlying_price",
                     "structure_source": snapshot["source"],
                     "structure_symbol": underlying_symbol,
@@ -929,8 +959,10 @@ class SMCStrategy(EliteStrategy):
                     "setup_score": strategy_score,
                     "setup_min": min_score,
                     "setup_pass": True,
-                    "direction_score": strategy_score,
+                    "direction_score": direction_score,
                     "strategy_score": strategy_score,
+                    "independent_setup_score": round(independent_setup_score, 3),
+                    "independent_setup_reasons": independent_setup_reasons,
                     "data_score": 8.0,
                     "score_reasons": reasons,
                     "setup_quality": strategy_score,
