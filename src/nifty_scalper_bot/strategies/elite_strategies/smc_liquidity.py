@@ -108,8 +108,6 @@ class SMCStrategy(EliteStrategy):
             "atr",
             "direction_bias",
             "underlying_direction_bias",
-            "underlying_direction_confidence",
-            "context_fresh",
             "bos_confirmed",
             "choch_confirmed",
             "retest_confirmed",
