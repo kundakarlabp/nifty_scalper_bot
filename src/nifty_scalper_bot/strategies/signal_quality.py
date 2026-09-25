@@ -294,7 +294,11 @@ def score_signal_quality(
     normalized_strategy_name = normalize_strategy_name(strategy_name)
     threshold = trigger_threshold(strategy_name=normalized_strategy_name)
     context_only = normalized_strategy_name in CONTEXT_ONLY_STRATEGIES
-    alpha_floor_required = normalized_strategy_name == "vwap_pro"
+    alpha_floor_required = normalized_strategy_name in {
+        "vwap_pro",
+        "orb_pro",
+        "smc_lite",
+    }
     reasons: list[str] = []
     if context_only:
         reasons.append("context_only_strategy")
