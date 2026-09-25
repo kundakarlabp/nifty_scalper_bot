@@ -238,7 +238,9 @@ def _quality_component_summary(
     measured: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     components = ("alpha_score", "direction_score", "strategy_score")
-    grouped: dict[tuple[str, str, str, int], list[dict[str, Any]]] = defaultdict(list)
+    grouped: dict[tuple[str, str, str, int], list[dict[str, Any]]] = defaultdict(
+        list
+    )
     component_values = {component: 0 for component in components}
     trades_with_signal_quality = 0
 
@@ -247,7 +249,9 @@ def _quality_component_summary(
         if not isinstance(quality, Mapping):
             continue
         trades_with_signal_quality += 1
-        strategy = str(trade.get("strategy_name") or "UNKNOWN").strip() or "UNKNOWN"
+        strategy = (
+            str(trade.get("strategy_name") or "UNKNOWN").strip() or "UNKNOWN"
+        )
         regime = str(trade.get("regime") or "UNKNOWN").strip() or "UNKNOWN"
         for component in components:
             score = _number(quality.get(component))
@@ -578,7 +582,9 @@ def _append_observational_sections(
         ]
     )
     if not component_rows:
-        lines.append("| N/A | N/A | N/A | N/A | 0 | N/A | N/A | N/A | N/A |")
+        lines.append(
+            "| N/A | N/A | N/A | N/A | 0 | N/A | N/A | N/A | N/A |"
+        )
     for row in component_rows:
         lines.append(
             "| "
