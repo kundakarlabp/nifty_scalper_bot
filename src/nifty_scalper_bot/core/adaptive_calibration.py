@@ -301,19 +301,18 @@ class WalkForwardOptimizer:
                             "spread_threshold_pct": max(0.01, sp + ds),
                         }
                     )
-        scored_candidates: list[tuple[float, dict[str, float]]] = []
+        current_score: float | None = None
+        best_score: float | None = None
+        best: dict[str, float] | None = None
         for candidate in candidates:
             score = float(candidate_evaluator(candidate))
-            scored_candidates.append((score, candidate))
-        current_score = next(
-            (
-                score
-                for score, candidate in scored_candidates
-                if candidate == current_candidate
-            ),
-            None,
-        )
-        best_score, best = max(scored_candidates, key=lambda item: item[0])
+            if candidate == current_candidate:
+                current_score = score
+            if best_score is None or score > best_score:
+                best_score = score
+                best = candidate
+        if best is None or best_score is None:
+            return current
         if current_score is not None and best_score <= current_score:
             return current
 
