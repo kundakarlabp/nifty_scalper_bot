@@ -91,6 +91,8 @@ def _indicators(side: str = "CE", **overrides: Any) -> dict[str, Any]:
         "option_history_count": 10,
         "direction_bias": side,
         "underlying_direction_bias": side,
+        "underlying_direction_confidence": 0.65,
+        "context_fresh": True,
         "futures_symbol": FUTURES,
         "spot_symbol": SPOT,
         "premium_reclaim": True,
@@ -183,6 +185,12 @@ def test_bullish_underlying_sweep_requires_later_confirmation_bar(monkeypatch) -
     assert signal.metadata["reclaim_distance_points"] > 0
     assert signal.metadata["requires_orderflow_confirmation"] is True
     assert signal.metadata["orderflow_confirmation_owner"] == "StrategyManager"
+    assert signal.metadata["direction_score"] == 6.5
+    assert (
+        signal.metadata["independent_setup_score"]
+        == signal.metadata["strategy_score"] - 1.5
+    )
+    assert "direction_alignment" in signal.metadata["score_reasons"]
     assert signal.metadata["underlying_invalidation_level"] < 23974.0
 
 
@@ -337,7 +345,7 @@ def test_volume_spike_config_is_consumed_as_quality_confirmation(monkeypatch) ->
         high=23991.0,
         low=23974.0,
         close=23984.0,
-        volume=2500.0,
+        volume=1100.0,
     )
     rows.append(sweep)
     assert strategy.generate_signal(CE, _indicators(latest_bar_ts=sweep["timestamp"]), 102.0) is None
@@ -350,6 +358,8 @@ def test_volume_spike_config_is_consumed_as_quality_confirmation(monkeypatch) ->
         103.0,
     )
     assert signal is not None
+    assert signal.metadata["sweep_volume_confirmation"] is False
+    assert signal.metadata["confirmation_volume_confirmation"] is True
     assert signal.metadata["volume_confirmation"] is True
     assert signal.metadata["volume_spike_threshold"] == 1.5
     assert "volume_confirmation" in signal.metadata["score_reasons"]

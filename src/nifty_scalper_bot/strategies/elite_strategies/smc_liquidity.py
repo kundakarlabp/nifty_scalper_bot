@@ -491,6 +491,8 @@ class SMCStrategy(EliteStrategy):
             "reclaim_atr": float(desired["reclaim_atr"]),
             "volume_ratio": volume_ratio,
             "volume_confirmation": volume_confirmation,
+            "sweep_volume_ratio": volume_ratio,
+            "sweep_volume_confirmation": volume_confirmation,
             "effective_min_sweep_points": float(
                 self.last_sweep_diagnostics["effective_min_sweep_points"]
             ),
@@ -814,12 +816,31 @@ class SMCStrategy(EliteStrategy):
                     effective_direction in {"CE", "PE"}
                     and effective_direction == contract_side
                 )
+                try:
+                    underlying_direction_confidence = max(
+                        0.0,
+                        min(
+                            1.0,
+                            float(
+                                indicators.get("underlying_direction_confidence") or 0.0
+                            ),
+                        ),
+                    )
+                except (TypeError, ValueError):
+                    underlying_direction_confidence = 0.0
+                context_fresh = bool(indicators.get("context_fresh"))
+                direction_score = (
+                    round(10.0 * underlying_direction_confidence, 3)
+                    if direction_aligned and context_fresh
+                    else 0.0
+                )
 
                 # One canonical score lives here. Core sweep/reclaim/displacement
                 # proves the setup exists but does not, by itself, make a high-
                 # quality live entry. Independent participation/structure/retest
                 # evidence must lift the setup above the live admission floor.
                 score = 4.0
+                independent_setup_score = 4.0
                 reasons = [
                     "underlying_liquidity_sweep",
                     "reclaim",
@@ -828,31 +849,49 @@ class SMCStrategy(EliteStrategy):
                 if direction_aligned:
                     score += 1.5
                     reasons.append("direction_alignment")
-                if bool(event["volume_confirmation"]):
+
+                volume_threshold = max(0.0, float(self._cfg.volume_spike_mult or 0.0))
+                confirmation_volume_ratio = float(snapshot.get("volume_ratio") or 0.0)
+                confirmation_volume_confirmation = bool(
+                    volume_threshold > 0
+                    and confirmation_volume_ratio >= volume_threshold
+                )
+                if confirmation_volume_confirmation:
                     score += 1.0
+                    independent_setup_score += 1.0
                     reasons.append("volume_confirmation")
                 if structure_confirmed:
                     score += 1.0
+                    independent_setup_score += 1.0
                     reasons.append("structure_confirmation")
-                if retest_confirmed or premium_reclaim:
+                if retest_confirmed:
                     score += 0.5
-                    if retest_confirmed:
-                        reasons.append("retest_mitigation")
-                    if premium_reclaim:
-                        reasons.append("premium_reclaim_support")
+                    independent_setup_score += 0.5
+                    reasons.append("retest_mitigation")
+                if premium_reclaim:
+                    reasons.append("premium_reclaim_context")
                 depth_atr = float(event["depth_atr"])
                 if 0.12 <= depth_atr <= 0.50:
                     score += 0.5
+                    independent_setup_score += 0.5
                     reasons.append("balanced_sweep_depth")
 
                 independent_quality_confirmation = bool(
-                    bool(event["volume_confirmation"])
+                    confirmation_volume_confirmation
                     or structure_confirmed
                     or retest_confirmed
-                    or premium_reclaim
                     or 0.12 <= depth_atr <= 0.50
                 )
+                sweep_volume_ratio = _safe_float(event.get("sweep_volume_ratio"))
+                if sweep_volume_ratio is None:
+                    sweep_volume_ratio = _safe_float(event.get("volume_ratio")) or 0.0
+                sweep_volume_confirmation = bool(
+                    event.get("sweep_volume_confirmation")
+                    if event.get("sweep_volume_confirmation") is not None
+                    else event.get("volume_confirmation")
+                )
                 strategy_score = max(0.0, min(10.0, score))
+                independent_setup_score = max(0.0, min(10.0, independent_setup_score))
                 min_score = float(
                     os.getenv("SMC_MIN_SCORE_LIVE", "6.5")
                     if is_live
@@ -929,8 +968,9 @@ class SMCStrategy(EliteStrategy):
                     "setup_score": strategy_score,
                     "setup_min": min_score,
                     "setup_pass": True,
-                    "direction_score": strategy_score,
+                    "direction_score": direction_score,
                     "strategy_score": strategy_score,
+                    "independent_setup_score": round(independent_setup_score, 3),
                     "data_score": 8.0,
                     "score_reasons": reasons,
                     "setup_quality": strategy_score,
@@ -957,9 +997,13 @@ class SMCStrategy(EliteStrategy):
                     "structure_confirmation_used": structure_confirmed,
                     "premium_reclaim_used": premium_reclaim,
                     "retest_confirmed": retest_confirmed,
-                    "volume_ratio": float(event["volume_ratio"]),
-                    "volume_confirmation": bool(
-                        event["volume_confirmation"]
+                    "volume_ratio": confirmation_volume_ratio,
+                    "volume_confirmation": confirmation_volume_confirmation,
+                    "sweep_volume_ratio": sweep_volume_ratio,
+                    "sweep_volume_confirmation": sweep_volume_confirmation,
+                    "confirmation_volume_ratio": confirmation_volume_ratio,
+                    "confirmation_volume_confirmation": (
+                        confirmation_volume_confirmation
                     ),
                     "volume_spike_threshold": float(
                         self._cfg.volume_spike_mult

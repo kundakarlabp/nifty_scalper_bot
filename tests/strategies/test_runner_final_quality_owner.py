@@ -104,7 +104,7 @@ def test_vwap_runner_uses_canonical_metadata_quality_adapter() -> None:
 
     assert "score_signal_metadata(" in runner_source
     assert "strategy_score_for_quality" not in runner_source
-    assert 'strategy_key == "vwap_pro"' in quality_source
+    assert 'strategy_key in {"vwap_pro", "smc_lite"}' in quality_source
     assert '"independent_setup_score"' in quality_source
     assert 'quality.components.get("alpha_score", quality.final_score)' in runner_source
     assert '"alpha_score": alpha_score' in runner_source

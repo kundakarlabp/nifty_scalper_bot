@@ -278,13 +278,19 @@ def _enrich_smc_pre_strategy(
 
     tolerance = max(abs(premium_current) * 0.003, 0.05)
     recent_bars = ohlcv[-5:]
-    retest_confirmed = False
+    structure_retest_confirmed = False
     if latest_high is not None and side in {"", "CE"}:
-        retest_confirmed = any(abs(bar["low"] - latest_high) <= tolerance or abs(bar["close"] - latest_high) <= tolerance for bar in recent_bars)
-    if not retest_confirmed and latest_low is not None and side in {"", "PE"}:
-        retest_confirmed = any(abs(bar["high"] - latest_low) <= tolerance or abs(bar["close"] - latest_low) <= tolerance for bar in recent_bars)
-    if not retest_confirmed and premium_vwap is not None:
-        retest_confirmed = any(bar["low"] - tolerance <= premium_vwap <= bar["high"] + tolerance for bar in recent_bars)
+        structure_retest_confirmed = any(abs(bar["low"] - latest_high) <= tolerance or abs(bar["close"] - latest_high) <= tolerance for bar in recent_bars)
+    if not structure_retest_confirmed and latest_low is not None and side in {"", "PE"}:
+        structure_retest_confirmed = any(abs(bar["high"] - latest_low) <= tolerance or abs(bar["close"] - latest_low) <= tolerance for bar in recent_bars)
+    vwap_retest_context = bool(
+        premium_vwap is not None
+        and any(
+            bar["low"] - tolerance <= premium_vwap <= bar["high"] + tolerance
+            for bar in recent_bars
+        )
+    )
+    retest_confirmed = structure_retest_confirmed
 
     current_body = abs(latest["close"] - latest["open"])
     previous_body = abs(previous["close"] - previous["open"])
@@ -303,6 +309,8 @@ def _enrich_smc_pre_strategy(
         "choch_confirmed": choch_confirmed,
         "choch_side": choch_side,
         "retest_confirmed": retest_confirmed,
+        "structure_retest_confirmed": structure_retest_confirmed,
+        "vwap_retest_context": vwap_retest_context,
         "premium_current": premium_current,
         "premium_prev_close": premium_prev_close,
         "premium_vwap": premium_vwap,
@@ -329,7 +337,7 @@ def _enrich_smc_pre_strategy(
     log_throttled(
         log,
         f"smc_feature_enriched:{symbol}",
-        "SMC_FEATURE_ENRICHED symbol=%s feature_completeness=%.3f presence_ratio=%.3f positive_feature_count=%s positive_features=%s swing_high=%s swing_low=%s premium_current=%s premium_vwap=%s premium_reclaim=%s bos_confirmed=%s choch_confirmed=%s retest_confirmed=%s",
+        "SMC_FEATURE_ENRICHED symbol=%s feature_completeness=%.3f presence_ratio=%.3f positive_feature_count=%s positive_features=%s swing_high=%s swing_low=%s premium_current=%s premium_vwap=%s premium_reclaim=%s bos_confirmed=%s choch_confirmed=%s retest_confirmed=%s structure_retest_confirmed=%s vwap_retest_context=%s",
         symbol,
         presence_ratio,
         presence_ratio,
@@ -343,9 +351,11 @@ def _enrich_smc_pre_strategy(
         enriched.get("bos_confirmed"),
         enriched.get("choch_confirmed"),
         enriched.get("retest_confirmed"),
+        enriched.get("structure_retest_confirmed"),
+        enriched.get("vwap_retest_context"),
         interval_sec=30.0,
         level=logging.INFO,
-        extra={"event": "SMC_FEATURE_ENRICHED", "symbol": symbol, "feature_completeness": presence_ratio, "presence_ratio": presence_ratio, "positive_feature_count": positive_feature_count, "positive_features": positive_features},
+        extra={"event": "SMC_FEATURE_ENRICHED", "symbol": symbol, "feature_completeness": presence_ratio, "presence_ratio": presence_ratio, "positive_feature_count": positive_feature_count, "positive_features": positive_features, "structure_retest_confirmed": structure_retest_confirmed, "vwap_retest_context": vwap_retest_context},
     )
     return enriched
 
