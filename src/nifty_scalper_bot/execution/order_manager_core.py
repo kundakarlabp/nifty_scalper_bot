@@ -2011,8 +2011,7 @@ class OrderManager:
             "bid_size": 0.0,
             "ask_size": 0.0,
         }
-        mdm = self._data_hub or self._market_data
-        if mdm is None:
+        if self._data_hub is None and self._market_data is None:
             self._logger.info(
                 "Condition met: depth_unavailable",
                 extra={
@@ -2023,7 +2022,7 @@ class OrderManager:
             )
             return snapshot
         try:
-            quote = mdm.get_quote(symbol) or {}
+            quote = self._get_latest_quote_safe(symbol) or {}
         except Exception as exc:  # noqa: BLE001
             self._logger.error(
                 "Failure in get_best_bid_ask_depth: %s",
@@ -2138,11 +2137,10 @@ class OrderManager:
         )
         if price is None or price <= 0:
             return 0
-        mdm = self._data_hub or self._market_data
-        if mdm is None:
+        if self._data_hub is None and self._market_data is None:
             return 0
         try:
-            quote = mdm.get_quote(symbol) or {}
+            quote = self._get_latest_quote_safe(symbol) or {}
         except Exception as exc:  # noqa: BLE001
             self._logger.error(
                 "Failure in calculate_queue_position: %s",
@@ -2235,11 +2233,10 @@ class OrderManager:
                 "quantity": quantity,
             },
         )
-        mdm = self._data_hub or self._market_data
-        if mdm is None or quantity <= 0:
+        if (self._data_hub is None and self._market_data is None) or quantity <= 0:
             return (None, None, None)
         try:
-            quote = mdm.get_quote(symbol) or {}
+            quote = self._get_latest_quote_safe(symbol) or {}
         except Exception as exc:  # noqa: BLE001
             self._logger.error(
                 "Failure in _estimate_order_slippage: %s",

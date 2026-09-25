@@ -3484,7 +3484,7 @@ class MarketDataManager:
                 mode_dispatched = bool(reassert([int(resolved.instrument_token)]))
 
         rest_dispatched = False
-        if self._should_refresh_symbol(canonical):
+        if not mode_dispatched and self._should_refresh_symbol(canonical):
             self._schedule_rest_refresh(canonical)
             rest_dispatched = True
 
@@ -9001,6 +9001,12 @@ class MarketDataManager:
             if pd.isna(tick_ts):
                 return
 
+            quote_fields = self._extract_depth_quote_fields(raw)
+            quote_snapshot = {
+                key: quote_fields.get(key)
+                for key in ("bid", "ask", "bid_qty", "ask_qty", "depth")
+            }
+            current_volume = raw.get("volume_traded_today") or raw.get("volume_traded")
             last_ts = self._last_tick_ts.get(symbol)
             if last_ts is not None:
                 last_ts = pd.to_datetime(last_ts, utc=True, errors="coerce")
@@ -9016,11 +9022,10 @@ class MarketDataManager:
                 if not pd.isna(last_ts) and tick_ts == last_ts:
                     last_snapshot = self._last_tick_snapshot.get(symbol, {})
                     same_price = float(last_snapshot.get("ltp", -1)) == float(tick.ltp)
-                    same_volume = last_snapshot.get("volume") == raw.get(
-                        "volume_traded_today"
-                    )
+                    same_volume = last_snapshot.get("volume") == current_volume
+                    same_quote = last_snapshot.get("quote") == quote_snapshot
 
-                    if same_price and same_volume:
+                    if same_price and same_volume and same_quote:
                         self._logger.debug(
                             "MDM_TICK_DROPPED reason=duplicate_tick symbol=%s ts=%s",
                             symbol,
@@ -9031,7 +9036,8 @@ class MarketDataManager:
             stage_started = time.perf_counter()
             self._last_tick_snapshot[symbol] = {
                 "ltp": tick.ltp,
-                "volume": raw.get("volume_traded_today") or raw.get("volume_traded"),
+                "volume": current_volume,
+                "quote": quote_snapshot,
             }
             self._last_tick_ts[symbol] = tick_ts
             duration_ms = (time.perf_counter() - stage_started) * 1000.0
@@ -9059,7 +9065,6 @@ class MarketDataManager:
             # StrategyRunner's per-symbol callbacks) were registered in _subscribers
             # but NEVER called from the WS path — _store_tick only cached the tick.
             # _emit_tick is the correct call; it was defined but never invoked.
-            quote_fields = self._extract_depth_quote_fields(raw)
             raw_safe = to_json_safe(dict(raw))
             tick_safe = tick.to_dict()
             tick_dict = {**raw_safe, **tick_safe, **quote_fields}

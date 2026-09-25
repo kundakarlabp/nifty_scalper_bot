@@ -13,6 +13,21 @@ class _TickProvider:
         return dict(self.quote)
 
 
+class _PullTrackingDataHub(_TickProvider):
+    def __init__(self) -> None:
+        super().__init__({})
+        self.pull_attempts = 0
+
+    def get_quote(
+        self,
+        _symbol: str,
+        allow_pull: bool = True,
+    ) -> dict[str, object] | None:
+        if allow_pull:
+            self.pull_attempts += 1
+        return None
+
+
 def _manager(*, data_hub: _TickProvider, mdm: _TickProvider) -> OrderManager:
     manager = object.__new__(OrderManager)
     manager._data_hub = data_hub
@@ -199,3 +214,54 @@ def test_live_entry_keeps_depth_quantity_guard_for_zerodha_depth_quote() -> None
 
     assert rejection is not None
     assert rejection.reason == "entry_executable_depth_insufficient"
+
+
+def test_order_preflight_does_not_trigger_http_pull_before_cached_ws_lookup() -> None:
+    symbol = "NFO:NIFTY26AUG24050PE"
+    data_hub = _PullTrackingDataHub()
+    manager = _manager(
+        data_hub=data_hub,
+        mdm=_TickProvider(_depth_quote(symbol, marker="mdm_ws_full")),
+    )
+
+    quote = manager._get_latest_quote_safe(symbol)
+
+    assert quote is not None
+    assert quote["marker"] == "mdm_ws_full"
+    assert data_hub.pull_attempts == 0
+
+
+def test_execution_depth_helpers_use_cached_ws_full_quote_only() -> None:
+    symbol = "NFO:NIFTY26AUG24050PE"
+    data_hub = _PullTrackingDataHub()
+    manager = _manager(
+        data_hub=data_hub,
+        mdm=_TickProvider(_depth_quote(symbol, bid_qty=130, ask_qty=195)),
+    )
+
+    class _Logger:
+        def debug(self, *_args, **_kwargs) -> None:
+            return None
+
+        def info(self, *_args, **_kwargs) -> None:
+            return None
+
+        def error(self, *_args, **_kwargs) -> None:
+            return None
+
+    manager._logger = _Logger()
+    manager._history = []
+
+    depth = manager.get_best_bid_ask_depth(symbol)
+    queue = manager.calculate_queue_position(symbol, "BUY", 100.10)
+    average, slippage, historical = manager._estimate_order_slippage(symbol, "BUY", 65)
+
+    assert depth["bid"] == 99.90
+    assert depth["ask"] == 100.10
+    assert depth["bid_size"] == 130.0
+    assert depth["ask_size"] == 195.0
+    assert queue >= 195
+    assert average == 100.10
+    assert slippage == 0.0
+    assert historical is None
+    assert data_hub.pull_attempts == 0

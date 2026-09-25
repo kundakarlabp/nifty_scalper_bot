@@ -52,7 +52,6 @@ _runtime._enrich_trade_plan_exit_provenance = _enrich_trade_plan_exit_provenance
 RuntimeOrderManager = _runtime.RuntimeOrderManager
 
 _original_extract_quote_diagnostics = RuntimeOrderManager._extract_quote_diagnostics
-_original_get_latest_quote_safe = RuntimeOrderManager._get_latest_quote_safe
 
 
 def _depth_top_quantity(quote, side):
@@ -148,12 +147,44 @@ def _quote_execution_rank(manager, quote):
     return 2 if bid_qty > 0 and ask_qty > 0 else 1
 
 
+def _cached_quote(provider, symbol):
+    """Read cached quote evidence without triggering broker/HTTP pulls."""
+    getter = getattr(provider, "get_latest_tick", None)
+    if callable(getter):
+        try:
+            quote = getter(symbol)
+        except Exception:
+            quote = None
+        if isinstance(quote, Mapping) and quote:
+            return quote
+
+    getter = getattr(provider, "get_quote", None)
+    if callable(getter):
+        try:
+            quote = getter(symbol, allow_pull=False)
+        except TypeError:
+            quote = None
+        except Exception:
+            quote = None
+        if isinstance(quote, Mapping) and quote:
+            return quote
+
+    getter = getattr(provider, "get_tick", None)
+    if callable(getter):
+        try:
+            quote = getter(symbol)
+        except Exception:
+            quote = None
+        if isinstance(quote, Mapping) and quote:
+            return quote
+    return None
+
+
 def _get_latest_quote_freshest_cached(self, symbol):
-    """Prefer executable cached evidence, then freshness, preserving stale guards."""
-    primary = _original_get_latest_quote_safe(self, symbol)
-    best = primary if isinstance(primary, Mapping) else None
-    best_age = _quote_age_ms(self, best)
-    best_rank = _quote_execution_rank(self, best)
+    """Prefer executable cached evidence, then freshness; never pull implicitly."""
+    best = None
+    best_age = None
+    best_rank = 0
     normalized_symbol = _core.normalize_symbol(symbol)
     seen_providers: set[int] = set()
 
@@ -168,13 +199,7 @@ def _get_latest_quote_freshest_cached(self, symbol):
         if provider is None or id(provider) in seen_providers:
             continue
         seen_providers.add(id(provider))
-        getter = getattr(provider, "get_latest_tick", None)
-        if not callable(getter):
-            continue
-        try:
-            candidate = getter(symbol)
-        except Exception:
-            continue
+        candidate = _cached_quote(provider, symbol)
         if not isinstance(candidate, Mapping) or not candidate:
             continue
         candidate_symbol = str(candidate.get("symbol") or "").strip()
