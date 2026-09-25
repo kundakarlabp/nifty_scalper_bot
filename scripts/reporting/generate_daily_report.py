@@ -718,9 +718,7 @@ def _append_observational_sections(
                 [
                     str(row.get("strategy", "UNKNOWN")).replace("|", "/"),
                     str(row.get("regime", "UNKNOWN")).replace("|", "/"),
-                    str(row.get("confirmation_strategy", "UNKNOWN")).replace(
-                        "|", "/"
-                    ),
+                    str(row.get("confirmation_strategy", "UNKNOWN")).replace("|", "/"),
                     str(row.get("flow_source", "UNKNOWN")).replace("|", "/"),
                     str(row.get("measured_trades", 0)),
                     _display(row.get("win_rate_pct"), suffix="%"),
