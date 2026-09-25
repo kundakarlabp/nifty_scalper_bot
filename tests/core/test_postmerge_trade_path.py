@@ -8,7 +8,6 @@ from nifty_scalper_bot.core.strategy_manager import (
     StrategyVote,
 )
 from nifty_scalper_bot.data.market_data_manager import MarketDataManager
-from nifty_scalper_bot.strategies.signal_quality import score_signal_metadata
 
 _SYMBOL = "NFO:NIFTY2670724050CE"
 
@@ -160,7 +159,7 @@ def test_opposite_trigger_does_not_receive_quality_confirmation(monkeypatch) -> 
 def test_range_vwap_orderflow_context_is_blocked_before_runner(
     monkeypatch,
 ) -> None:
-    """RANGE VWAP requires an independent trigger; OrderFlow context cannot promote it."""
+    """RANGE VWAP requires an independent trigger; context cannot promote it."""
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     monkeypatch.setenv("ENABLE_LIVE", "true")
     manager = StrategyManager.__new__(StrategyManager)
