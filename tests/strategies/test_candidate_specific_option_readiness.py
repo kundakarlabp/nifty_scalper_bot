@@ -777,3 +777,48 @@ def test_live_candidate_falls_back_when_signal_contract_unaffordable() -> None:
 
     assert decisions[signal_contract.symbol]["affordable"] is False
     assert selected is affordable_neighbor
+
+
+def test_entry_plan_preserves_context_confirmation_provenance(monkeypatch) -> None:
+    runner, _ = _execution_runner(monkeypatch, ce_ok=True, pe_ok=False)
+    signal = _signal("NFO:CE")
+    signal.metadata.update(
+        {
+            "approval_path": "single_trigger_context_confirmed",
+            "context_confirmation_strategies": ["OrderFlow"],
+            "context_confirmation_evidence": [
+                {
+                    "strategy": "OrderFlow",
+                    "raw_score": 9.0,
+                    "confidence": 0.85,
+                    "flow_confirmation_source": "temporal_ofi",
+                    "ofi_1s_normalized": 0.22,
+                    "depth_imbalance": 0.28,
+                }
+            ],
+        }
+    )
+
+    result = runner._handle_entry_signal_inner(
+        signal,
+        "NSE:NIFTY",
+        "NFO:CE",
+        100.0,
+        datetime.now(timezone.utc),
+        trace_id="confirmation-trace",
+    )
+
+    assert result.accepted is True
+    provenance = runner._order_manager.plans[0].trade_provenance
+    assert provenance["approval_path"] == "single_trigger_context_confirmed"
+    assert provenance["context_confirmation_strategies"] == ["OrderFlow"]
+    assert provenance["context_confirmation_evidence"] == [
+        {
+            "strategy": "OrderFlow",
+            "raw_score": 9.0,
+            "confidence": 0.85,
+            "flow_confirmation_source": "temporal_ofi",
+            "ofi_1s_normalized": 0.22,
+            "depth_imbalance": 0.28,
+        }
+    ]
