@@ -227,7 +227,7 @@ def test_context_confirmed_trend_vwap_still_fails_closed_on_weak_independent_alp
 def test_context_confirmed_trend_vwap_can_clear_runner_with_strong_independent_alpha(
     monkeypatch,
 ) -> None:
-    """The permitted TREND confirmation path remains reachable without weakening quality."""
+    """The permitted TREND path reaches Runner without weakening quality."""
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     monkeypatch.setenv("ENABLE_LIVE", "true")
     manager = StrategyManager.__new__(StrategyManager)
