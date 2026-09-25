@@ -347,7 +347,7 @@ def score_signal_metadata(
     payload = dict(metadata or {})
     strategy_key = normalize_strategy_name(strategy_name)
     strategy_score = payload.get("strategy_score", 0.0)
-    if strategy_key == "vwap_pro":
+    if strategy_key in {"vwap_pro", "orb_pro", "smc_lite"}:
         strategy_score = payload.get("independent_setup_score", strategy_score)
 
     def _score(key: str, value: object = 0.0) -> float:

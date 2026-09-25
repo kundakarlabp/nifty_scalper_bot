@@ -27,9 +27,10 @@ def test_signal_quality_has_no_dead_alternate_scoring_engine() -> None:
     assert "def rejection_cooldown(" not in source
 
 
-def test_orb_pro_publishes_native_direction_evidence() -> None:
+def test_orb_pro_publishes_independent_direction_evidence() -> None:
     source = _ORB.read_text(encoding="utf-8")
-    assert '"direction_score": strategy_score' in source
+    assert '"direction_score": direction_score' in source
+    assert '"independent_setup_score": round(independent_setup_score, 3)' in source
 
 
 def test_signal_quality_allowed_owns_threshold_and_direction(monkeypatch) -> None:
@@ -104,7 +105,7 @@ def test_vwap_runner_uses_canonical_metadata_quality_adapter() -> None:
 
     assert "score_signal_metadata(" in runner_source
     assert "strategy_score_for_quality" not in runner_source
-    assert 'strategy_key == "vwap_pro"' in quality_source
+    assert 'strategy_key in {"vwap_pro", "orb_pro", "smc_lite"}' in quality_source
     assert '"independent_setup_score"' in quality_source
     assert 'quality.components.get("alpha_score", quality.final_score)' in runner_source
     assert '"alpha_score": alpha_score' in runner_source
