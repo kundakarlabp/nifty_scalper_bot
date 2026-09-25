@@ -30,9 +30,7 @@ def test_regime_change_blend() -> None:
         "trend",
         stats,
         current,
-        candidate_evaluator=lambda params: -abs(
-            params["momentum_z_threshold"] - 0.9
-        ),
+        candidate_evaluator=lambda params: -abs(params["momentum_z_threshold"] - 0.9),
     )
     shifted = opt.on_regime_change("s1", "trend", current)
     assert shifted.keys() == tuned.keys()
@@ -99,9 +97,7 @@ def test_negative_strategy_does_not_freeze_other_research_strategy() -> None:
         "trend",
         winning,
         current,
-        candidate_evaluator=lambda params: -abs(
-            params["momentum_z_threshold"] - 0.9
-        ),
+        candidate_evaluator=lambda params: -abs(params["momentum_z_threshold"] - 0.9),
     )
 
     assert "loser" in opt._frozen_strategies
