@@ -288,6 +288,89 @@ def _quality_component_summary(
     }
 
 
+def _microstructure_confirmation_summary(
+    measured: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    grouped: dict[
+        tuple[str, str, str, str],
+        list[tuple[dict[str, Any], Mapping[str, Any]]],
+    ] = defaultdict(list)
+    trades_with_confirmation_evidence = 0
+    confirmation_observations = 0
+
+    for trade in measured:
+        evidence_items = trade.get("context_confirmation_evidence")
+        if not isinstance(evidence_items, list):
+            continue
+        trade_has_evidence = False
+        seen_groups: set[tuple[str, str, str, str]] = set()
+        strategy = str(trade.get("strategy_name") or "UNKNOWN").strip() or "UNKNOWN"
+        regime = str(trade.get("regime") or "UNKNOWN").strip() or "UNKNOWN"
+        for evidence in evidence_items:
+            if not isinstance(evidence, Mapping):
+                continue
+            confirmation_strategy = (
+                str(evidence.get("strategy") or "UNKNOWN").strip() or "UNKNOWN"
+            )
+            flow_source = (
+                str(evidence.get("flow_confirmation_source") or "UNKNOWN").strip()
+                or "UNKNOWN"
+            )
+            key = (strategy, regime, confirmation_strategy, flow_source)
+            if key in seen_groups:
+                continue
+            grouped[key].append((trade, evidence))
+            seen_groups.add(key)
+            confirmation_observations += 1
+            trade_has_evidence = True
+        if trade_has_evidence:
+            trades_with_confirmation_evidence += 1
+
+    rows: list[dict[str, Any]] = []
+    for key, observations in sorted(grouped.items()):
+        strategy, regime, confirmation_strategy, flow_source = key
+        trades = [trade for trade, _evidence in observations]
+        net_values = [_number(trade.get("net_pnl")) or 0.0 for trade in trades]
+
+        def _average(field: str) -> float | None:
+            values = [
+                value
+                for _trade, evidence in observations
+                if (value := _number(evidence.get(field))) is not None
+            ]
+            return round(sum(values) / len(values), 3) if values else None
+
+        rows.append(
+            {
+                "strategy": strategy,
+                "regime": regime,
+                "confirmation_strategy": confirmation_strategy,
+                "flow_source": flow_source,
+                "measured_trades": len(trades),
+                "wins": sum(value > 0 for value in net_values),
+                "win_rate_pct": round(
+                    sum(value > 0 for value in net_values) / len(trades) * 100.0,
+                    1,
+                ),
+                "average_net_pnl": round(sum(net_values) / len(trades), 2),
+                "profit_factor": _profit_factor(net_values),
+                "max_drawdown": _max_drawdown(trades),
+                "average_raw_score": _average("raw_score"),
+                "average_confirmation_confidence": _average("confidence"),
+                "average_ofi_1s_normalized": _average("ofi_1s_normalized"),
+                "average_depth_imbalance": _average("depth_imbalance"),
+                "average_spread_pct": _average("spread_pct"),
+                "average_tick_age_ms": _average("tick_age_ms"),
+            }
+        )
+
+    return rows, {
+        "measured_trades": len(measured),
+        "trades_with_confirmation_evidence": trades_with_confirmation_evidence,
+        "confirmation_observations": confirmation_observations,
+    }
+
+
 def _metric_summary(values: list[float]) -> dict[str, Any]:
     ordered = sorted(values)
     percentile_index = max(0, math.ceil(len(ordered) * 0.95) - 1)
@@ -502,6 +585,10 @@ def summarise_completed_trades(
     quality_component_buckets, quality_component_coverage = _quality_component_summary(
         measured
     )
+    (
+        microstructure_confirmation_outcomes,
+        microstructure_confirmation_coverage,
+    ) = _microstructure_confirmation_summary(measured)
     summary = {
         "groups": groups,
         "totals": {
@@ -516,6 +603,8 @@ def summarise_completed_trades(
         "score_coverage": score_coverage,
         "quality_component_buckets": quality_component_buckets,
         "quality_component_coverage": quality_component_coverage,
+        "microstructure_confirmation_outcomes": microstructure_confirmation_outcomes,
+        "microstructure_confirmation_coverage": microstructure_confirmation_coverage,
         "execution_quality": _execution_summary(measured),
         "exit_quality": _exit_summary(measured),
     }
@@ -597,6 +686,47 @@ def _append_observational_sections(
                     _display(row.get("average_net_pnl")),
                     _display(row.get("profit_factor")),
                     _display(row.get("max_drawdown")),
+                ]
+            )
+            + " |"
+        )
+
+    confirmation_coverage = summary.get("microstructure_confirmation_coverage", {})
+    confirmation_rows = summary.get("microstructure_confirmation_outcomes", [])
+    lines.extend(
+        [
+            "",
+            "## Microstructure Confirmation Outcomes (observational)",
+            "",
+            f"Confirmation-evidence coverage: **"
+            f"{int(confirmation_coverage.get('trades_with_confirmation_evidence', 0))}/"
+            f"{int(confirmation_coverage.get('measured_trades', 0))}** measured trades",
+            "",
+            "| Strategy | Regime | Confirm | Flow | Trades | Win rate | Avg net P&L | "
+            "Profit factor | Avg OFI 1s | Avg depth | Avg spread % |",
+            "|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|",
+        ]
+    )
+    if not confirmation_rows:
+        lines.append(
+            "| N/A | N/A | N/A | N/A | 0 | N/A | N/A | N/A | N/A | N/A | N/A |"
+        )
+    for row in confirmation_rows:
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    str(row.get("strategy", "UNKNOWN")).replace("|", "/"),
+                    str(row.get("regime", "UNKNOWN")).replace("|", "/"),
+                    str(row.get("confirmation_strategy", "UNKNOWN")).replace("|", "/"),
+                    str(row.get("flow_source", "UNKNOWN")).replace("|", "/"),
+                    str(row.get("measured_trades", 0)),
+                    _display(row.get("win_rate_pct"), suffix="%"),
+                    _display(row.get("average_net_pnl")),
+                    _display(row.get("profit_factor")),
+                    _display(row.get("average_ofi_1s_normalized")),
+                    _display(row.get("average_depth_imbalance")),
+                    _display(row.get("average_spread_pct")),
                 ]
             )
             + " |"

@@ -750,3 +750,114 @@ def test_daily_report_calibrates_independent_alpha_components() -> None:
         "100.0 | 3.0 | 100.0 |"
     )
     assert expected_row in report
+
+
+def test_daily_report_summarises_microstructure_confirmation_outcomes() -> None:
+    module = _load_daily_report_module()
+    trades = [
+        {
+            "strategy_name": "SMC",
+            "regime": "TREND",
+            "bracket_id": "smc-ofi-1",
+            "net_pnl": 250.0,
+            "ledger_complete": True,
+            "closed_timestamp": 1.0,
+            "context_confirmation_evidence": [
+                {
+                    "strategy": "OrderFlow",
+                    "raw_score": 9.0,
+                    "confidence": 0.90,
+                    "flow_confirmation_source": "temporal_ofi",
+                    "ofi_1s_normalized": 0.25,
+                    "depth_imbalance": 0.30,
+                    "spread_pct": 0.20,
+                    "tick_age_ms": 100.0,
+                }
+            ],
+        },
+        {
+            "strategy_name": "SMC",
+            "regime": "TREND",
+            "bracket_id": "smc-ofi-2",
+            "net_pnl": -50.0,
+            "ledger_complete": True,
+            "closed_timestamp": 2.0,
+            "context_confirmation_evidence": [
+                {
+                    "strategy": "OrderFlow",
+                    "raw_score": 8.0,
+                    "confidence": 0.80,
+                    "flow_confirmation_source": "temporal_ofi",
+                    "ofi_1s_normalized": 0.15,
+                    "depth_imbalance": 0.20,
+                    "spread_pct": 0.30,
+                    "tick_age_ms": 200.0,
+                }
+            ],
+        },
+        {
+            "strategy_name": "ORBPro",
+            "regime": "RANGE",
+            "bracket_id": "orb-tick-1",
+            "net_pnl": 100.0,
+            "ledger_complete": True,
+            "closed_timestamp": 3.0,
+            "context_confirmation_evidence": [
+                {
+                    "strategy": "OrderFlow",
+                    "raw_score": 8.5,
+                    "confidence": 0.82,
+                    "flow_confirmation_source": "tick_direction",
+                    "depth_imbalance": 0.18,
+                    "spread_pct": 0.25,
+                    "tick_age_ms": 150.0,
+                }
+            ],
+        },
+        {
+            "strategy_name": "VWAPPro",
+            "regime": "TREND",
+            "bracket_id": "legacy-no-context",
+            "net_pnl": 25.0,
+            "ledger_complete": True,
+            "closed_timestamp": 4.0,
+        },
+    ]
+
+    summary = module.summarise_completed_trades(trades)
+
+    assert summary["microstructure_confirmation_coverage"] == {
+        "measured_trades": 4,
+        "trades_with_confirmation_evidence": 3,
+        "confirmation_observations": 3,
+    }
+    rows = summary["microstructure_confirmation_outcomes"]
+    assert {
+        "strategy": "SMC",
+        "regime": "TREND",
+        "confirmation_strategy": "OrderFlow",
+        "flow_source": "temporal_ofi",
+        "measured_trades": 2,
+        "wins": 1,
+        "win_rate_pct": 50.0,
+        "average_net_pnl": 100.0,
+        "profit_factor": 5.0,
+        "max_drawdown": 50.0,
+        "average_raw_score": 8.5,
+        "average_confirmation_confidence": 0.85,
+        "average_ofi_1s_normalized": 0.2,
+        "average_depth_imbalance": 0.25,
+        "average_spread_pct": 0.25,
+        "average_tick_age_ms": 150.0,
+    } in rows
+
+    report = module.build_trade_outcome_report(
+        summary,
+        report_date="2026-07-31",
+        timezone_name="Asia/Kolkata",
+    )
+    assert "## Microstructure Confirmation Outcomes (observational)" in report
+    assert (
+        "| SMC | TREND | OrderFlow | temporal_ofi | 2 | 50.0% | "
+        "100.0 | 5.0 | 0.2 | 0.25 | 0.25 |"
+    ) in report
