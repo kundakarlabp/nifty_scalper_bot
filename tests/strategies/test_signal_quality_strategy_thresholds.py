@@ -1,4 +1,7 @@
-from nifty_scalper_bot.strategies.signal_quality import score_signal_metadata, score_signal_quality
+from nifty_scalper_bot.strategies.signal_quality import (
+    score_signal_metadata,
+    score_signal_quality,
+)
 
 
 def test_strategy_threshold_aliases_live(monkeypatch):
@@ -60,7 +63,6 @@ def test_strategy_threshold_aliases_live(monkeypatch):
     )
     assert orb.components["threshold"] == 7.4
     assert orb.allowed
-
 
 
 def test_smc_runner_uses_independent_setup_score(monkeypatch):
