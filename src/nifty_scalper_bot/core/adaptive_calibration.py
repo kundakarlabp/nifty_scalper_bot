@@ -302,7 +302,11 @@ class WalkForwardOptimizer:
                         }
                     )
         scored_candidates = [
-            (float(candidate_evaluator(candidate)), candidate) for candidate in candidates
+            (
+                float(candidate_evaluator(candidate)),
+                candidate,
+            )
+            for candidate in candidates
         ]
         current_score = next(
             (
