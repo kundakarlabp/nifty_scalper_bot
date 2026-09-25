@@ -237,7 +237,7 @@ def _runtime_hardening_install_proof(
             == "nifty_scalper_bot.strategies.runner"
         ),
         "strategy_context_fast_path": bool(
-            getattr(StrategyManager, "_context_only_fast_path_installed", False)
+            getattr(StrategyManager, "_context_only_fast_path_native", False)
         ),
         "off_market_controller": bool(
             getattr(UniverseController, "_off_market_basket_safety_installed", False)
@@ -285,9 +285,6 @@ def _apply_app_runtime_patches(app_module: Any) -> dict[str, bool]:
     from nifty_scalper_bot.core.session_boundary_rearm import (
         apply_app_patch as _session_boundary_adapter,
     )
-    from nifty_scalper_bot.core.strategy_context_fast_path import (
-        apply_patches as _strategy_context_fast_path_adapter,
-    )
     from nifty_scalper_bot.core.strategy_runner_dynamic_universe_safety import (
         apply_patches as _dynamic_universe_adapter,
     )
@@ -295,7 +292,6 @@ def _apply_app_runtime_patches(app_module: Any) -> dict[str, bool]:
     _dynamic_universe_adapter()
     _live_ws_receipt_adapter()
     runtime_reliability_state = _runtime_reliability_adapter()
-    _strategy_context_fast_path_adapter()
     _off_market_controller_adapter()
     _off_market_app_adapter(app_module)
     _session_boundary_adapter(app_module)
