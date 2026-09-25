@@ -157,25 +157,30 @@ def test_opposite_trigger_does_not_receive_quality_confirmation(monkeypatch) -> 
     assert decision.reason == "conflicting_trigger_direction"
 
 
-def _range_vwap_context_candidate(
-    manager: StrategyManager,
-    *,
-    direction_score: float,
-    independent_setup_score: float,
-) -> Signal:
+def test_range_vwap_orderflow_context_is_blocked_before_runner(
+    monkeypatch,
+) -> None:
+    """RANGE VWAP requires an independent trigger; OrderFlow context cannot promote it."""
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    manager = StrategyManager.__new__(StrategyManager)
+    manager._last_no_signal_decision_by_symbol = {}
+    manager._compute_trade_quality_score = lambda *args, **kwargs: (10.0, {})
+
     vwap = _signal_vote(
         "VWAPPro",
         raw_score=8.0,
         weighted_score=6.4,
-        confidence=0.80,
+        confidence=0.85,
+        role="trigger",
         regime_name="RANGE",
     )
     vwap[0].metadata.update(
         {
             "strategy_name": "VWAPPro",
-            "direction_score": direction_score,
+            "direction_score": 9.0,
             "strategy_score": 8.0,
-            "independent_setup_score": independent_setup_score,
+            "independent_setup_score": 6.0,
             "option_score": 9.0,
             "data_score": 9.0,
             "rr_score": 9.0,
@@ -188,64 +193,17 @@ def _range_vwap_context_candidate(
         confidence=0.80,
         role="context",
     )
+
     result = manager._combine_strategy_votes(
         symbol=_SYMBOL,
         signals=[vwap, orderflow],
         indicators=_live_indicators(),
     )
-    assert result is not None
-    assert result.metadata["approval_path"] == "single_trigger_context_confirmed"
-    return result
 
-
-def test_context_confirmed_range_vwap_still_fails_closed_on_weak_independent_alpha(
-    monkeypatch,
-) -> None:
-    """Manager qualification must never bypass Runner's independent VWAP alpha floor."""
-    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
-    monkeypatch.setenv("ENABLE_LIVE", "true")
-    manager = StrategyManager.__new__(StrategyManager)
-    manager._last_no_signal_decision_by_symbol = {}
-    manager._compute_trade_quality_score = lambda *args, **kwargs: (10.0, {})
-
-    candidate = _range_vwap_context_candidate(
-        manager,
-        direction_score=8.0,
-        independent_setup_score=6.0,
-    )
-    quality = score_signal_metadata(
-        candidate.metadata,
-        strategy_name="VWAPPro",
-    )
-
-    assert quality.final_score >= quality.components["threshold"]
-    assert quality.components["alpha_score"] < quality.components["threshold"]
-    assert quality.allowed is False
-    assert "alpha_below_threshold" in quality.reasons
-
-
-def test_context_confirmed_range_vwap_can_clear_runner_with_strong_independent_alpha(
-    monkeypatch,
-) -> None:
-    """The RANGE confirmation path remains reachable without weakening quality."""
-    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
-    monkeypatch.setenv("ENABLE_LIVE", "true")
-    manager = StrategyManager.__new__(StrategyManager)
-    manager._last_no_signal_decision_by_symbol = {}
-    manager._compute_trade_quality_score = lambda *args, **kwargs: (10.0, {})
-
-    candidate = _range_vwap_context_candidate(
-        manager,
-        direction_score=9.0,
-        independent_setup_score=6.0,
-    )
-    quality = score_signal_metadata(
-        candidate.metadata,
-        strategy_name="VWAPPro",
-    )
-
-    assert quality.components["alpha_score"] >= quality.components["threshold"]
-    assert quality.allowed is True
+    assert result is None
+    decision = manager.get_last_no_signal_decision(_SYMBOL)
+    assert decision is not None
+    assert decision.final_block_reason == "single_trigger_context_confirmation_invalid"
 
 
 def _wired_mdm() -> tuple[MarketDataManager, str, str]:
