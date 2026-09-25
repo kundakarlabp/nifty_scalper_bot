@@ -202,7 +202,7 @@ def test_range_vwap_orderflow_context_is_blocked_before_runner(
     assert result is None
     decision = manager.get_last_no_signal_decision(_SYMBOL)
     assert decision is not None
-    assert decision.final_block_reason == "single_trigger_context_confirmation_invalid"
+    assert decision.reason == "single_trigger_context_confirmation_invalid"
 
 
 def _wired_mdm() -> tuple[MarketDataManager, str, str]:
