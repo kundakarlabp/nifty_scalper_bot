@@ -254,9 +254,7 @@ def test_execution_depth_helpers_use_cached_ws_full_quote_only() -> None:
 
     depth = manager.get_best_bid_ask_depth(symbol)
     queue = manager.calculate_queue_position(symbol, "BUY", 100.10)
-    average, slippage, historical = manager._estimate_order_slippage(
-        symbol, "BUY", 65
-    )
+    average, slippage, historical = manager._estimate_order_slippage(symbol, "BUY", 65)
 
     assert depth["bid"] == 99.90
     assert depth["ask"] == 100.10
