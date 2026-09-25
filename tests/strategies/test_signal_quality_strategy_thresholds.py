@@ -1,4 +1,4 @@
-from nifty_scalper_bot.strategies.signal_quality import score_signal_quality
+from nifty_scalper_bot.strategies.signal_quality import score_signal_metadata, score_signal_quality
 
 
 def test_strategy_threshold_aliases_live(monkeypatch):
@@ -60,3 +60,24 @@ def test_strategy_threshold_aliases_live(monkeypatch):
     )
     assert orb.components["threshold"] == 7.4
     assert orb.allowed
+
+
+
+def test_smc_runner_uses_independent_setup_score(monkeypatch):
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    quality = score_signal_metadata(
+        {
+            "direction_score": 6.5,
+            "strategy_score": 7.5,
+            "independent_setup_score": 6.0,
+            "option_score": 10.0,
+            "data_score": 10.0,
+            "rr_score": 10.0,
+        },
+        strategy_name="SMC",
+    )
+
+    assert quality.direction_score == 6.5
+    assert quality.strategy_score == 6.0
+    assert quality.components["threshold"] == 7.0
+    assert quality.allowed is True
