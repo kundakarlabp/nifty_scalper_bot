@@ -882,6 +882,14 @@ class SMCStrategy(EliteStrategy):
                     or retest_confirmed
                     or 0.12 <= depth_atr <= 0.50
                 )
+                sweep_volume_ratio = _safe_float(event.get("sweep_volume_ratio"))
+                if sweep_volume_ratio is None:
+                    sweep_volume_ratio = _safe_float(event.get("volume_ratio")) or 0.0
+                sweep_volume_confirmation = bool(
+                    event.get("sweep_volume_confirmation")
+                    if event.get("sweep_volume_confirmation") is not None
+                    else event.get("volume_confirmation")
+                )
                 strategy_score = max(0.0, min(10.0, score))
                 independent_setup_score = max(0.0, min(10.0, independent_setup_score))
                 min_score = float(
@@ -991,16 +999,8 @@ class SMCStrategy(EliteStrategy):
                     "retest_confirmed": retest_confirmed,
                     "volume_ratio": confirmation_volume_ratio,
                     "volume_confirmation": confirmation_volume_confirmation,
-                    "sweep_volume_ratio": float(
-                        event.get("sweep_volume_ratio")
-                        if event.get("sweep_volume_ratio") is not None
-                        else event.get("volume_ratio") or 0.0
-                    ),
-                    "sweep_volume_confirmation": bool(
-                        event.get("sweep_volume_confirmation")
-                        if event.get("sweep_volume_confirmation") is not None
-                        else event.get("volume_confirmation")
-                    ),
+                    "sweep_volume_ratio": sweep_volume_ratio,
+                    "sweep_volume_confirmation": sweep_volume_confirmation,
                     "confirmation_volume_ratio": confirmation_volume_ratio,
                     "confirmation_volume_confirmation": (
                         confirmation_volume_confirmation
