@@ -182,9 +182,13 @@ class BoundBracketManager(RuntimeBracketManager):
         exchange_ts: float | None = None,
         *,
         defer_submission: bool = False,
+        tick: Mapping[str, Any] | None = None,
     ) -> None:
-        """Preserve executable bid/ask before native bracket tick evaluation."""
-        self._capture_same_tick_cached_quote(symbol, ltp, exchange_ts)
+        """Preserve executable bid/ask from the exact normalized protection tick."""
+        if isinstance(tick, Mapping):
+            self._capture_exit_quote(normalize_symbol(symbol), tick)
+        else:
+            self._capture_same_tick_cached_quote(symbol, ltp, exchange_ts)
         super().on_tick(
             symbol,
             ltp,
