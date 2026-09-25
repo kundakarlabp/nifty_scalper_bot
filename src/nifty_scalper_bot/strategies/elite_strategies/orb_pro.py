@@ -381,8 +381,8 @@ class ORBProStrategy(EliteStrategy):
         volume_ratio: float,
         opening_range_atr: float,
         indicators: Mapping[str, Any],
-    ) -> tuple[float, list[str], bool, float, float]:
-        """Score independent ORB quality domains once on a common 0..10 scale."""
+    ) -> tuple[float, list[str], float, list[str], bool, float, float]:
+        """Score ORB trigger quality and native setup quality independently."""
         score = 5.0
         independent_setup_score = 5.0
         reasons = [
