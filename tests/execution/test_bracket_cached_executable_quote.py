@@ -40,6 +40,72 @@ def test_runtime_on_tick_recovers_same_tick_executable_quote_from_ssot() -> None
     assert manager._exit_quotes[symbol][:2] == (99.25, 99.55)
 
 
+def test_runtime_on_tick_uses_explicit_full_tick_when_cache_has_advanced() -> None:
+    symbol = "NFO:NIFTY26AUG24050PE"
+    manager = _manager(
+        _CachedMarketData(
+            {
+                "symbol": symbol,
+                "ltp": 99.70,
+                "bid": 99.45,
+                "ask": 99.75,
+                "timestamp": 1_001.0,
+                "source": "ws",
+            }
+        )
+    )
+    full_tick = {
+        "symbol": symbol,
+        "ltp": 99.50,
+        "bid": 99.25,
+        "ask": 99.55,
+        "timestamp": 1_000.0,
+        "source": "ws",
+    }
+
+    manager.on_tick(
+        symbol,
+        99.50,
+        exchange_ts=1_000.0,
+        defer_submission=True,
+        tick=full_tick,
+    )
+
+    assert manager._exit_quotes[symbol][:2] == (99.25, 99.55)
+
+
+def test_runtime_on_tick_falls_back_to_same_tick_cache_when_tick_has_no_depth() -> None:
+    symbol = "NFO:NIFTY26AUG24050PE"
+    manager = _manager(
+        _CachedMarketData(
+            {
+                "symbol": symbol,
+                "ltp": 99.50,
+                "bid": 99.25,
+                "ask": 99.55,
+                "timestamp": 1_000.0,
+                "source": "ws",
+            }
+        )
+    )
+    projected_tick = {
+        "symbol": symbol,
+        "ltp": 99.50,
+        "timestamp": 1_000.0,
+        "source": "ws",
+    }
+
+    manager.on_tick(
+        symbol,
+        99.50,
+        exchange_ts=1_000.0,
+        defer_submission=True,
+        tick=projected_tick,
+    )
+
+    assert manager._exit_quotes[symbol][:2] == (99.25, 99.55)
+
+
 def test_runtime_on_tick_does_not_mix_quote_from_different_tick() -> None:
     symbol = "NFO:NIFTY26AUG24050PE"
     manager = _manager(

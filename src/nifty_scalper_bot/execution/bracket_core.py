@@ -2167,15 +2167,16 @@ class BracketManager:
             )
             self._fire_exits_batch(exits_to_fire)
 
-    def _capture_exit_quote(self, symbol: str, tick: Mapping[str, Any]) -> None:
-        """Cache the executable bid/ask for a symbol from a full tick."""
+    def _capture_exit_quote(self, symbol: str, tick: Mapping[str, Any]) -> bool:
+        """Cache executable bid/ask from a full tick and report capture success."""
         try:
             bid, ask, _spread, source = resolve_quote_bid_ask_spread(tick)
         except Exception:  # noqa: BLE001 - a malformed tick must not stop exits
-            return
+            return False
         if source == "missing" or not bid or not ask or bid <= 0 or ask < bid:
-            return
+            return False
         self._exit_quotes[symbol] = (float(bid), float(ask), time.time())
+        return True
 
     def _executable_exit_price(
         self, bracket: BracketState, ltp: float

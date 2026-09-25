@@ -8661,6 +8661,7 @@ class StrategyRunner:
                         _ltp,
                         tick_exchange_epoch(tick),
                         defer_submission=True,
+                        tick=tick,
                     )
                     tick_err_map = getattr(
                         self._bracket_manager, "_tick_error_logged", None

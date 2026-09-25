@@ -337,6 +337,38 @@ def test_position_management_route_runs_only_protection_inline(monkeypatch):
         _stop_loop(loop, thread)
 
 
+def test_position_protection_forwards_same_full_tick_to_bracket(monkeypatch):
+    runner_obj, _strategy_manager, _risk, _order, _selected_ce = _underlying_runner(
+        monkeypatch
+    )
+    captured: dict[str, object] = {}
+
+    def _on_tick(sym, ltp, ts, **kwargs):
+        captured["symbol"] = sym
+        captured["ltp"] = ltp
+        captured["tick"] = kwargs.get("tick")
+
+    runner_obj._bracket_manager = SimpleNamespace(on_tick=_on_tick)
+    tick = {
+        "symbol": UNDERLYING_SYMBOL,
+        "last_price": 24000.0,
+        "bid": 23999.95,
+        "ask": 24000.05,
+        "depth": {
+            "buy": [{"price": 23999.95, "quantity": 100}],
+            "sell": [{"price": 24000.05, "quantity": 120}],
+        },
+        "timestamp": time.time(),
+        "source": "ws",
+    }
+
+    runner_obj._handle_position_tick_protection(UNDERLYING_SYMBOL, tick)
+
+    assert captured["symbol"] == UNDERLYING_SYMBOL
+    assert captured["ltp"] == 24000.0
+    assert captured["tick"] is tick
+
+
 def test_position_tick_protection_not_executed_twice(monkeypatch):
     """Test G: one tick must produce exactly one protective lifecycle update,
     even though protection runs at ingestion and the heavy body later runs on
