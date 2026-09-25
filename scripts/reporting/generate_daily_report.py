@@ -691,9 +691,7 @@ def _append_observational_sections(
             + " |"
         )
 
-    confirmation_coverage = summary.get(
-        "microstructure_confirmation_coverage", {}
-    )
+    confirmation_coverage = summary.get("microstructure_confirmation_coverage", {})
     confirmation_rows = summary.get("microstructure_confirmation_outcomes", [])
     lines.extend(
         [
