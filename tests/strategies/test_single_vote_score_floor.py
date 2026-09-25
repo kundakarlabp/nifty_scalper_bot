@@ -350,9 +350,10 @@ async def test_range_vwap_trigger_cannot_use_orderflow_as_only_confirmation(
     )
 
 
-async def test_strong_range_vwap_trigger_can_use_strong_orderflow_confirmation(
+async def test_strong_range_vwap_trigger_still_requires_independent_trigger(
     monkeypatch,
 ) -> None:
+    """RANGE VWAP continuation cannot be rescued by context-only OrderFlow."""
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     monkeypatch.setenv("ENABLE_LIVE", "true")
     monkeypatch.delenv("STRATEGY_ALLOW_SINGLE_VOTE_SCALP", raising=False)
@@ -360,11 +361,11 @@ async def test_strong_range_vwap_trigger_can_use_strong_orderflow_confirmation(
     manager = _manager_probe()
     trigger = _signal_vote(
         strategy="VWAPPro",
-        raw_score=8.0,
-        weighted_score=6.4,
+        raw_score=9.0,
+        weighted_score=7.2,
         regime_name="RANGE",
     )
-    context = _context_vote(score=8.0, confidence=0.80)
+    context = _context_vote(score=10.0, confidence=0.90)
 
     result = manager._combine_strategy_votes(
         symbol="NFO:NIFTY2670724050CE",
@@ -372,11 +373,9 @@ async def test_strong_range_vwap_trigger_can_use_strong_orderflow_confirmation(
         indicators=_valid_entry_context(),
     )
 
-    assert result is not None
-    assert result.metadata["approval_path"] == "single_trigger_context_confirmed"
-    assert result.metadata["context_confirmation_strategies"] == ["OrderFlow"]
-    assert result.metadata["regime_weight"] == 0.8
-    assert result.metadata["final_trade_score"] >= 7.0
+    assert result is None
+    decision = manager._last_no_signal_decision_by_symbol["NFO:NIFTY2670724050CE"]
+    assert decision.reason == "single_trigger_context_confirmation_invalid"
 
 
 async def test_trend_vwap_trigger_can_use_fresh_orderflow_confirmation(
