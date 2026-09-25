@@ -4671,13 +4671,10 @@ class StrategyManager(_BaseStrategyManager):
             if ambiguous_underlying:
                 qualifying_context_votes = []
 
-            # VWAPPro is a continuation/pullback trigger. In a non-trending
-            # regime, weak context-only OrderFlow evidence must not manufacture
-            # a second alpha leg. RANGE is the narrow exception: the actually
-            # selected option may use fresh same-side OrderFlow confirmation
-            # only when both the VWAP trigger and context already clear the
-            # strong context score/confidence floors. VOLATILE/UNKNOWN regimes
-            # still require an independent trigger such as SMC/ORB.
+            # VWAPPro is a continuation/pullback trigger. Context-only OrderFlow
+            # may confirm it only in a TREND regime. In RANGE/VOLATILE/UNKNOWN,
+            # same-side microstructure is correlated context, not an independent
+            # alpha leg; an independent trigger such as SMC/ORB is required.
             best_vote_metadata = dict(best_vote.metadata or {})
             trigger_regime_name = str(
                 best_vote_metadata.get("regime_name")
@@ -4696,18 +4693,9 @@ class StrategyManager(_BaseStrategyManager):
                 .lower()
                 == "vwap_continuation_pullback"
             )
-            range_vwap_strong_context_confirmation = bool(
-                vwap_continuation_trigger
-                and trigger_regime_name == MarketRegime.RANGE.value
-                and selected_option
-                and raw_trigger_score >= context_confirm_min_score
-                and float(best_vote.confidence) >= context_confirm_min_confidence
-                and qualifying_context_votes
-            )
             if (
                 vwap_continuation_trigger
                 and trigger_regime_name != MarketRegime.TREND.value
-                and not range_vwap_strong_context_confirmation
             ):
                 qualifying_context_votes = []
                 log_throttled(
