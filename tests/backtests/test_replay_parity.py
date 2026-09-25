@@ -648,7 +648,8 @@ def test_daily_report_builds_entry_attempt_funnel_without_assuming_fills(
     assert "not assumed to be an unfilled or losing trade" in report
 
 
-def test_daily_report_calibrates_independent_alpha_components(\n    ) -> None:\n    module = _load_daily_report_module()
+def test_daily_report_calibrates_independent_alpha_components() -> None:
+    module = _load_daily_report_module()
     trades = [
         {
             "strategy_name": "ORBPro",
@@ -735,4 +736,8 @@ def test_daily_report_calibrates_independent_alpha_components(\n    ) -> None:\n
         timezone_name="Asia/Kolkata",
     )
     assert "## Alpha Component Calibration (observational)" in report
-    expected_row = (\n        "| ORBPro | TREND | alpha_score | 8.0–<9.0 | 2 | 50.0% | "\n        "100.0 | 3.0 | 100.0 |"\n    )\n    assert expected_row in report\n
+    expected_row = (
+        "| ORBPro | TREND | alpha_score | 8.0–<9.0 | 2 | 50.0% | "
+        "100.0 | 3.0 | 100.0 |"
+    )
+    assert expected_row in report
