@@ -91,7 +91,6 @@ def test_context_fast_path_fails_closed_to_empty_indicator_mapping() -> None:
     assert indicators["price"] == 24451.0
 
 
-
 def test_strategy_context_fast_path_is_native_not_runtime_replacement() -> None:
     helper_source = inspect.getsource(context_fast_path_module)
     manager_source = inspect.getsource(strategy_manager_module)
