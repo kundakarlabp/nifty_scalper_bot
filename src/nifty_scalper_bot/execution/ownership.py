@@ -185,9 +185,10 @@ class BoundBracketManager(RuntimeBracketManager):
         tick: Mapping[str, Any] | None = None,
     ) -> None:
         """Preserve executable bid/ask from the exact normalized protection tick."""
+        captured = False
         if isinstance(tick, Mapping):
-            self._capture_exit_quote(normalize_symbol(symbol), tick)
-        else:
+            captured = self._capture_exit_quote(normalize_symbol(symbol), tick)
+        if not captured:
             self._capture_same_tick_cached_quote(symbol, ltp, exchange_ts)
         super().on_tick(
             symbol,
