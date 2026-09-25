@@ -224,3 +224,30 @@ def test_optimizer_uses_candidate_specific_evaluator() -> None:
         "microvol_percentile": pytest.approx(55.0),
         "spread_threshold_pct": pytest.approx(0.15),
     }
+
+
+def test_optimizer_does_not_drift_on_equal_candidate_scores() -> None:
+    stats = AdaptiveParameterStore(window_trades=10).record_trade("s1", 10.0)
+    current = {
+        "momentum_z_threshold": 1.0,
+        "microvol_percentile": 60.0,
+        "spread_threshold_pct": 0.2,
+        "unrelated_research_field": 42.0,
+    }
+    opt = WalkForwardOptimizer(
+        recalibrate_every=1,
+        alpha=1.0,
+        allow_parameter_updates=True,
+    )
+
+    tuned = opt.optimize(
+        "s1",
+        "trend",
+        stats,
+        current,
+        candidate_evaluator=lambda _params: 1.0,
+    )
+
+    assert tuned == current
+    assert opt._params == {}
+    assert opt._regime_params == {}
