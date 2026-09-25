@@ -84,7 +84,16 @@ def test_negative_strategy_does_not_freeze_other_research_strategy() -> None:
     }
     opt = WalkForwardOptimizer(recalibrate_every=1, allow_parameter_updates=True)
 
-    assert opt.optimize("loser", "trend", losing, current) == current
+    assert (
+        opt.optimize(
+            "loser",
+            "trend",
+            losing,
+            current,
+            candidate_evaluator=lambda _params: 0.0,
+        )
+        == current
+    )
     tuned = opt.optimize(
         "winner",
         "trend",
@@ -169,6 +178,8 @@ def test_enabled_optimizer_still_fails_closed_without_candidate_evaluator() -> N
     assert opt.optimize("s1", "trend", stats, current) == current
     assert opt._params == {}
     assert opt._regime_params == {}
+    assert opt._frozen_strategies == set()
+    assert opt.risk_scale == 1.0
 
 
 def test_optimizer_uses_candidate_specific_evaluator() -> None:
