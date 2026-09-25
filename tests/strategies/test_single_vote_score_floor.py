@@ -301,6 +301,16 @@ async def test_selected_smc_trigger_uses_fresh_same_side_orderflow_confirmation(
     trigger = _signal_vote(strategy="SMC", raw_score=8.0, weighted_score=8.0)
     trigger[0].metadata.update({"strategy": "SMC", "is_selected_option": True})
     context = _context_vote(score=10.0, confidence=0.85)
+    context[1].metadata.update(
+        {
+            "flow_confirmation_source": "temporal_ofi",
+            "ofi_1s_normalized": 0.24,
+            "ofi_3s_normalized": 0.19,
+            "depth_imbalance": 0.31,
+            "spread_pct": 0.18,
+            "tick_age_ms": 120.0,
+        }
+    )
 
     result = manager._combine_strategy_votes(
         symbol="NFO:NIFTY2670724050CE",
@@ -311,6 +321,19 @@ async def test_selected_smc_trigger_uses_fresh_same_side_orderflow_confirmation(
     assert result is not None
     assert result.metadata["approval_path"] == "single_trigger_context_confirmed"
     assert result.metadata["context_confirmation_strategies"] == ["OrderFlow"]
+    assert result.metadata["context_confirmation_evidence"] == [
+        {
+            "strategy": "OrderFlow",
+            "raw_score": 10.0,
+            "confidence": 0.85,
+            "flow_confirmation_source": "temporal_ofi",
+            "ofi_1s_normalized": 0.24,
+            "ofi_3s_normalized": 0.19,
+            "depth_imbalance": 0.31,
+            "spread_pct": 0.18,
+            "tick_age_ms": 120.0,
+        }
+    ]
     assert result.metadata["final_trade_score"] >= 9.0
 
 

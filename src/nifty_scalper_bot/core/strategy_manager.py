@@ -4907,6 +4907,29 @@ class StrategyManager(_BaseStrategyManager):
                 metadata["context_confirmation_strategies"] = [
                     vote.strategy for vote in qualifying_context_votes
                 ]
+                context_confirmation_evidence = []
+                for vote in qualifying_context_votes:
+                    vote_metadata = dict(vote.metadata or {})
+                    evidence = {
+                        "strategy": vote.strategy,
+                        "raw_score": round(self._extract_raw_score(vote), 3),
+                        "confidence": round(float(vote.confidence), 3),
+                    }
+                    for key in (
+                        "flow_confirmation_source",
+                        "ofi_1s_normalized",
+                        "ofi_3s_normalized",
+                        "depth_imbalance",
+                        "spread_pct",
+                        "tick_age_ms",
+                    ):
+                        value = vote_metadata.get(key)
+                        if value is not None:
+                            evidence[key] = value
+                    context_confirmation_evidence.append(evidence)
+                metadata["context_confirmation_evidence"] = (
+                    context_confirmation_evidence
+                )
                 metadata["context_confirmation_final_score"] = round(
                     context_confirmed_final_score, 3
                 )
