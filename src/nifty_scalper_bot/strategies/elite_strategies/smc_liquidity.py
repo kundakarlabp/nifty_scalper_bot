@@ -821,7 +821,9 @@ class SMCStrategy(EliteStrategy):
                         0.0,
                         min(
                             1.0,
-                            float(indicators.get("underlying_direction_confidence") or 0.0),
+                            float(
+                                indicators.get("underlying_direction_confidence") or 0.0
+                            ),
                         ),
                     )
                 except (TypeError, ValueError):
