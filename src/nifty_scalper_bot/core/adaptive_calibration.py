@@ -301,13 +301,10 @@ class WalkForwardOptimizer:
                             "spread_threshold_pct": max(0.01, sp + ds),
                         }
                     )
-        scored_candidates = [
-            (
-                float(candidate_evaluator(candidate)),
-                candidate,
-            )
-            for candidate in candidates
-        ]
+        scored_candidates: list[tuple[float, dict[str, float]]] = []
+        for candidate in candidates:
+            score = float(candidate_evaluator(candidate))
+            scored_candidates.append((score, candidate))
         current_score = next(
             (
                 score
