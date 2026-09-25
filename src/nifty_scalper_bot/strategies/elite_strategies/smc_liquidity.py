@@ -665,13 +665,11 @@ class SMCStrategy(EliteStrategy):
                 indicators.get("underlying_direction_bias") or ""
             ).upper()
             effective_direction = underlying_direction or direction
+            raw_direction_confidence = _safe_float(
+                indicators.get("underlying_direction_confidence")
+            )
             underlying_direction_confidence = max(
-                0.0,
-                min(
-                    1.0,
-                    _safe_float(indicators.get("underlying_direction_confidence"))
-                    or 0.0,
-                ),
+                0.0, min(1.0, raw_direction_confidence or 0.0)
             )
             context_fresh = indicators.get("context_fresh") is not False
             execution_mode = str(
@@ -873,9 +871,7 @@ class SMCStrategy(EliteStrategy):
                     or 0.12 <= depth_atr <= 0.50
                 )
                 strategy_score = max(0.0, min(10.0, score))
-                independent_setup_score = max(
-                    0.0, min(10.0, independent_setup_score)
-                )
+                independent_setup_score = max(0.0, min(10.0, independent_setup_score))
                 direction_score = (
                     round(10.0 * underlying_direction_confidence, 3)
                     if direction_aligned and context_fresh
