@@ -21364,6 +21364,13 @@ class StrategyRunner:
                         if isinstance(metadata.get("signal_quality"), Mapping)
                         else {}
                     ),
+                    "approval_path": metadata.get("approval_path"),
+                    "context_confirmation_strategies": metadata.get(
+                        "context_confirmation_strategies"
+                    ),
+                    "context_confirmation_evidence": metadata.get(
+                        "context_confirmation_evidence"
+                    ),
                     "entry_arrival_price": price,
                     "entry_quote_bid": selected_snapshot.get("bid"),
                     "entry_quote_ask": selected_snapshot.get("ask"),
