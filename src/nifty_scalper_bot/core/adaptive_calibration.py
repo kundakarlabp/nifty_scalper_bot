@@ -285,6 +285,11 @@ class WalkForwardOptimizer:
         mz = current.get("momentum_z_threshold", 0.5)
         mv = current.get("microvol_percentile", 60.0)
         sp = current.get("spread_threshold_pct", 0.3)
+        current_candidate = {
+            "momentum_z_threshold": max(0.1, mz),
+            "microvol_percentile": min(95.0, max(5.0, mv)),
+            "spread_threshold_pct": max(0.01, sp),
+        }
         candidates: list[dict[str, float]] = []
         for dm in (-0.1, 0.0, 0.1):
             for dv in (-5.0, 0.0, 5.0):
@@ -304,16 +309,12 @@ class WalkForwardOptimizer:
             (
                 score
                 for score, candidate in scored_candidates
-                if candidate == current
+                if candidate == current_candidate
             ),
             None,
         )
         best_score, best = max(scored_candidates, key=lambda item: item[0])
         if current_score is not None and best_score <= current_score:
-            return current
-        if max(score for score, _ in scored_candidates) == min(
-            score for score, _ in scored_candidates
-        ):
             return current
 
         prev = self._params.get(strategy, current)
