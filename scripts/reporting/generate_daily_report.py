@@ -234,6 +234,60 @@ def _score_summary(
     }
 
 
+def _quality_component_summary(
+    measured: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    components = ("alpha_score", "direction_score", "strategy_score")
+    grouped: dict[tuple[str, str, str, int], list[dict[str, Any]]] = defaultdict(list)
+    component_values = {component: 0 for component in components}
+    trades_with_signal_quality = 0
+
+    for trade in measured:
+        quality = trade.get("signal_quality")
+        if not isinstance(quality, Mapping):
+            continue
+        quality_values = {
+            component: _number(quality.get(component)) for component in components
+        }
+        if not any(score is not None for score in quality_values.values()):
+            continue
+        trades_with_signal_quality += 1
+        strategy = str(trade.get("strategy_name") or "UNKNOWN").strip() or "UNKNOWN"
+        regime = str(trade.get("regime") or "UNKNOWN").strip() or "UNKNOWN"
+        for component, score in quality_values.items():
+            if score is None:
+                continue
+            component_values[component] += 1
+            grouped[(strategy, regime, component, math.floor(score))].append(trade)
+
+    rows: list[dict[str, Any]] = []
+    for (strategy, regime, component, lower), trades in sorted(grouped.items()):
+        net_values = [_number(trade.get("net_pnl")) or 0.0 for trade in trades]
+        rows.append(
+            {
+                "strategy": strategy,
+                "regime": regime,
+                "component": component,
+                "score_bucket": f"{lower:.1f}–<{lower + 1:.1f}",
+                "measured_trades": len(trades),
+                "wins": sum(value > 0 for value in net_values),
+                "win_rate_pct": round(
+                    sum(value > 0 for value in net_values) / len(trades) * 100.0,
+                    1,
+                ),
+                "average_net_pnl": round(sum(net_values) / len(trades), 2),
+                "profit_factor": _profit_factor(net_values),
+                "max_drawdown": _max_drawdown(trades),
+            }
+        )
+
+    return rows, {
+        "measured_trades": len(measured),
+        "trades_with_signal_quality": trades_with_signal_quality,
+        "component_values": component_values,
+    }
+
+
 def _metric_summary(values: list[float]) -> dict[str, Any]:
     ordered = sorted(values)
     percentile_index = max(0, math.ceil(len(ordered) * 0.95) - 1)
@@ -445,6 +499,9 @@ def summarise_completed_trades(
 
     measured = _measured_trades(trades)
     score_buckets, score_coverage = _score_summary(measured)
+    quality_component_buckets, quality_component_coverage = _quality_component_summary(
+        measured
+    )
     summary = {
         "groups": groups,
         "totals": {
@@ -457,6 +514,8 @@ def summarise_completed_trades(
         },
         "score_buckets": score_buckets,
         "score_coverage": score_coverage,
+        "quality_component_buckets": quality_component_buckets,
+        "quality_component_coverage": quality_component_coverage,
         "execution_quality": _execution_summary(measured),
         "exit_quality": _exit_summary(measured),
     }
@@ -501,6 +560,43 @@ def _append_observational_sections(
                     _display(bucket.get("average_net_pnl")),
                     _display(bucket.get("profit_factor")),
                     _display(bucket.get("max_drawdown")),
+                ]
+            )
+            + " |"
+        )
+
+    component_coverage = summary.get("quality_component_coverage", {})
+    component_rows = summary.get("quality_component_buckets", [])
+    lines.extend(
+        [
+            "",
+            "## Alpha Component Calibration (observational)",
+            "",
+            f"Approved-quality coverage: **"
+            f"{int(component_coverage.get('trades_with_signal_quality', 0))}/"
+            f"{int(component_coverage.get('measured_trades', 0))}** measured trades",
+            "",
+            "| Strategy | Regime | Component | Score bucket | Trades | Win rate | "
+            "Avg net P&L | Profit factor | Max drawdown |",
+            "|---|---|---|---|---:|---:|---:|---:|---:|",
+        ]
+    )
+    if not component_rows:
+        lines.append("| N/A | N/A | N/A | N/A | 0 | N/A | N/A | N/A | N/A |")
+    for row in component_rows:
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    str(row.get("strategy", "UNKNOWN")).replace("|", "/"),
+                    str(row.get("regime", "UNKNOWN")).replace("|", "/"),
+                    str(row.get("component", "N/A")),
+                    str(row.get("score_bucket", "N/A")),
+                    str(row.get("measured_trades", 0)),
+                    _display(row.get("win_rate_pct"), suffix="%"),
+                    _display(row.get("average_net_pnl")),
+                    _display(row.get("profit_factor")),
+                    _display(row.get("max_drawdown")),
                 ]
             )
             + " |"

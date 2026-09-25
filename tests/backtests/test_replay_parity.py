@@ -646,3 +646,107 @@ def test_daily_report_builds_entry_attempt_funnel_without_assuming_fills(
     assert "| Candidates evaluated | 5 |" in report
     assert "| Submitted without fill confirmation | 1 |" in report
     assert "not assumed to be an unfilled or losing trade" in report
+
+
+def test_daily_report_calibrates_independent_alpha_components() -> None:
+    module = _load_daily_report_module()
+    trades = [
+        {
+            "strategy_name": "ORBPro",
+            "regime": "TREND",
+            "bracket_id": "orb-1",
+            "net_pnl": 300.0,
+            "ledger_complete": True,
+            "closed_timestamp": 1.0,
+            "signal_quality": {
+                "alpha_score": 8.4,
+                "direction_score": 8.7,
+                "strategy_score": 7.6,
+            },
+        },
+        {
+            "strategy_name": "ORBPro",
+            "regime": "TREND",
+            "bracket_id": "orb-2",
+            "net_pnl": -100.0,
+            "ledger_complete": True,
+            "closed_timestamp": 2.0,
+            "signal_quality": {
+                "alpha_score": 8.8,
+                "direction_score": 8.2,
+                "strategy_score": 7.9,
+            },
+        },
+        {
+            "strategy_name": "SMC",
+            "regime": "RANGE",
+            "bracket_id": "smc-1",
+            "net_pnl": 120.0,
+            "ledger_complete": True,
+            "closed_timestamp": 3.0,
+            "signal_quality": {
+                "alpha_score": 7.2,
+                "direction_score": 8.1,
+                "strategy_score": 6.4,
+            },
+        },
+        {
+            "strategy_name": "VWAPPro",
+            "regime": "TREND",
+            "bracket_id": "legacy-1",
+            "net_pnl": -50.0,
+            "ledger_complete": True,
+            "closed_timestamp": 4.0,
+            "signal_quality": {},
+        },
+    ]
+
+    summary = module.summarise_completed_trades(trades)
+    rows = summary["quality_component_buckets"]
+    coverage = summary["quality_component_coverage"]
+
+    assert coverage == {
+        "measured_trades": 4,
+        "trades_with_signal_quality": 3,
+        "component_values": {
+            "alpha_score": 3,
+            "direction_score": 3,
+            "strategy_score": 3,
+        },
+    }
+    assert {
+        "strategy": "ORBPro",
+        "regime": "TREND",
+        "component": "alpha_score",
+        "score_bucket": "8.0–<9.0",
+        "measured_trades": 2,
+        "wins": 1,
+        "win_rate_pct": 50.0,
+        "average_net_pnl": 100.0,
+        "profit_factor": 3.0,
+        "max_drawdown": 100.0,
+    } in rows
+    assert {
+        "strategy": "SMC",
+        "regime": "RANGE",
+        "component": "strategy_score",
+        "score_bucket": "6.0–<7.0",
+        "measured_trades": 1,
+        "wins": 1,
+        "win_rate_pct": 100.0,
+        "average_net_pnl": 120.0,
+        "profit_factor": None,
+        "max_drawdown": 0.0,
+    } in rows
+
+    report = module.build_trade_outcome_report(
+        summary,
+        report_date="2026-07-31",
+        timezone_name="Asia/Kolkata",
+    )
+    assert "## Alpha Component Calibration (observational)" in report
+    expected_row = (
+        "| ORBPro | TREND | alpha_score | 8.0–<9.0 | 2 | 50.0% | "
+        "100.0 | 3.0 | 100.0 |"
+    )
+    assert expected_row in report
