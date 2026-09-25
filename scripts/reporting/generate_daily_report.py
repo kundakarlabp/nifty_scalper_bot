@@ -248,13 +248,17 @@ def _quality_component_summary(
         quality = trade.get("signal_quality")
         if not isinstance(quality, Mapping):
             continue
+        quality_values = {
+            component: _number(quality.get(component)) for component in components
+        }
+        if not any(score is not None for score in quality_values.values()):
+            continue
         trades_with_signal_quality += 1
         strategy = (
             str(trade.get("strategy_name") or "UNKNOWN").strip() or "UNKNOWN"
         )
         regime = str(trade.get("regime") or "UNKNOWN").strip() or "UNKNOWN"
-        for component in components:
-            score = _number(quality.get(component))
+        for component, score in quality_values.items():
             if score is None:
                 continue
             component_values[component] += 1
