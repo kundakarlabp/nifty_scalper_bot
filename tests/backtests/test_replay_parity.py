@@ -690,6 +690,15 @@ def test_daily_report_calibrates_independent_alpha_components() -> None:
                 "strategy_score": 6.4,
             },
         },
+        {
+            "strategy_name": "VWAPPro",
+            "regime": "TREND",
+            "bracket_id": "legacy-1",
+            "net_pnl": -50.0,
+            "ledger_complete": True,
+            "closed_timestamp": 4.0,
+            "signal_quality": {},
+        },
     ]
 
     summary = module.summarise_completed_trades(trades)
@@ -697,7 +706,7 @@ def test_daily_report_calibrates_independent_alpha_components() -> None:
     coverage = summary["quality_component_coverage"]
 
     assert coverage == {
-        "measured_trades": 3,
+        "measured_trades": 4,
         "trades_with_signal_quality": 3,
         "component_values": {
             "alpha_score": 3,
