@@ -53,6 +53,7 @@ from nifty_scalper_bot.strategies.signal_quality import infer_option_side
 from nifty_scalper_bot.core.strategy_context_builder import (
     build_strategy_history_context,
 )
+from nifty_scalper_bot.core.strategy_context_fast_path import _generate_context_only
 from nifty_scalper_bot.strategies.signal_generator import Signal
 from nifty_scalper_bot.strategies.signal_generator import (
     StrategyManager as _BaseStrategyManager,
@@ -1303,6 +1304,8 @@ class StrategyScore:
 
 class StrategyManager(_BaseStrategyManager):
     """Augment the base manager with performance scoring and allocations."""
+
+    _context_only_fast_path_native = True
 
     def __init__(
         self,
@@ -2636,6 +2639,9 @@ class StrategyManager(_BaseStrategyManager):
         """
 
         symbol = normalize_symbol(symbol)
+        symbol_role = classify_symbol_role(symbol)
+        if symbol_role in {"spot_context", "futures_context"}:
+            return _generate_context_only(self, symbol, current_price, symbol_role)
         symbol_norm = str(symbol or "").strip().upper()
         self._last_no_signal_decision_by_symbol.pop(symbol_norm, None)
         log.debug(
@@ -2688,7 +2694,6 @@ class StrategyManager(_BaseStrategyManager):
                     "indicators_raw_type": type(indicators_raw).__name__,
                 },
             )
-        symbol_role = classify_symbol_role(symbol)
         indicators["symbol_role"] = symbol_role
         history_ctx = build_strategy_history_context(
             symbol=symbol,
