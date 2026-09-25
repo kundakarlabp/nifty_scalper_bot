@@ -384,20 +384,26 @@ class ORBProStrategy(EliteStrategy):
     ) -> tuple[float, list[str], bool, float, float]:
         """Score independent ORB quality domains once on a common 0..10 scale."""
         score = 5.0
+        independent_setup_score = 5.0
         reasons = [
             "underlying_opening_range_complete",
             "fresh_underlying_breakout",
             "breakout_event_confirmed",
         ]
+        independent_setup_reasons = list(reasons)
         if direction == side:
             score += 1.0
             reasons.append("underlying_direction_alignment")
         if volume_ratio >= _env_float("ORB_VOLUME_CONFIRM_RATIO", 1.2):
             score += 1.0
+            independent_setup_score += 1.0
             reasons.append("underlying_volume_confirmation")
+            independent_setup_reasons.append("underlying_volume_confirmation")
         if penetration_atr >= _env_float("ORB_PENETRATION_CONFIRM_ATR", 0.2):
             score += 1.0
+            independent_setup_score += 1.0
             reasons.append("normalized_breakout_penetration")
+            independent_setup_reasons.append("normalized_breakout_penetration")
         slope = _safe_float(indicators.get("futures_vwap_slope"))
         if slope is not None and (
             (side == "CE" and slope > 0) or (side == "PE" and slope < 0)
@@ -411,10 +417,14 @@ class ORBProStrategy(EliteStrategy):
         balanced_range = balanced_min <= opening_range_atr <= balanced_max
         if balanced_range:
             score += 1.0
+            independent_setup_score += 1.0
             reasons.append("balanced_opening_range")
+            independent_setup_reasons.append("balanced_opening_range")
         return (
             max(0.0, min(10.0, score)),
             reasons,
+            max(0.0, min(10.0, independent_setup_score)),
+            independent_setup_reasons,
             balanced_range,
             balanced_min,
             balanced_max,
@@ -464,6 +474,8 @@ class ORBProStrategy(EliteStrategy):
         (
             strategy_score,
             reasons,
+            independent_setup_score,
+            independent_setup_reasons,
             balanced_range,
             balanced_min,
             balanced_max,
@@ -476,6 +488,19 @@ class ORBProStrategy(EliteStrategy):
             indicators=indicators,
         )
         reasons.append("retest_hold" if branch == "retest" else "momentum_acceptance")
+        underlying_direction_confidence = max(
+            0.0,
+            min(
+                1.0,
+                _safe_float(indicators.get("underlying_direction_confidence")) or 0.0,
+            ),
+        )
+        context_fresh = indicators.get("context_fresh") is not False
+        direction_score = (
+            round(10.0 * underlying_direction_confidence, 3)
+            if direction == side and context_fresh
+            else 0.0
+        )
         is_live = str(os.getenv("EXECUTION_MODE", "SHADOW") or "SHADOW").strip().upper() == "LIVE"
         min_score = _env_float(
             "ORB_QUALITY_MIN_SCORE_LIVE" if is_live else "ORB_QUALITY_MIN_SCORE_SHADOW",
@@ -541,8 +566,12 @@ class ORBProStrategy(EliteStrategy):
             "setup_score": strategy_score,
             "setup_min": min_score,
             "setup_pass": True,
-            "direction_score": strategy_score,
+            "direction_score": direction_score,
             "strategy_score": strategy_score,
+            "independent_setup_score": round(independent_setup_score, 3),
+            "independent_setup_reasons": independent_setup_reasons,
+            "underlying_direction_confidence": underlying_direction_confidence,
+            "context_fresh": context_fresh,
             "setup_quality": strategy_score,
             "confidence_semantics": "setup_quality_fraction_not_probability",
             "score_reasons": reasons,
