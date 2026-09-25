@@ -186,7 +186,10 @@ def test_bullish_underlying_sweep_requires_later_confirmation_bar(monkeypatch) -
     assert signal.metadata["requires_orderflow_confirmation"] is True
     assert signal.metadata["orderflow_confirmation_owner"] == "StrategyManager"
     assert signal.metadata["direction_score"] == 6.5
-    assert signal.metadata["independent_setup_score"] == signal.metadata["strategy_score"] - 1.5
+    assert (
+        signal.metadata["independent_setup_score"]
+        == signal.metadata["strategy_score"] - 1.5
+    )
     assert "direction_alignment" in signal.metadata["score_reasons"]
     assert signal.metadata["underlying_invalidation_level"] < 23974.0
 
