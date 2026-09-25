@@ -821,10 +821,7 @@ class SMCStrategy(EliteStrategy):
                         0.0,
                         min(
                             1.0,
-                            float(
-                                indicators.get("underlying_direction_confidence")
-                                or 0.0
-                            ),
+                            float(indicators.get("underlying_direction_confidence") or 0.0),
                         ),
                     )
                 except (TypeError, ValueError):
@@ -851,12 +848,8 @@ class SMCStrategy(EliteStrategy):
                     score += 1.5
                     reasons.append("direction_alignment")
 
-                volume_threshold = max(
-                    0.0, float(self._cfg.volume_spike_mult or 0.0)
-                )
-                confirmation_volume_ratio = float(
-                    snapshot.get("volume_ratio") or 0.0
-                )
+                volume_threshold = max(0.0, float(self._cfg.volume_spike_mult or 0.0))
+                confirmation_volume_ratio = float(snapshot.get("volume_ratio") or 0.0)
                 confirmation_volume_confirmation = bool(
                     volume_threshold > 0
                     and confirmation_volume_ratio >= volume_threshold
@@ -888,9 +881,7 @@ class SMCStrategy(EliteStrategy):
                     or 0.12 <= depth_atr <= 0.50
                 )
                 strategy_score = max(0.0, min(10.0, score))
-                independent_setup_score = max(
-                    0.0, min(10.0, independent_setup_score)
-                )
+                independent_setup_score = max(0.0, min(10.0, independent_setup_score))
                 min_score = float(
                     os.getenv("SMC_MIN_SCORE_LIVE", "6.5")
                     if is_live
@@ -969,9 +960,7 @@ class SMCStrategy(EliteStrategy):
                     "setup_pass": True,
                     "direction_score": direction_score,
                     "strategy_score": strategy_score,
-                    "independent_setup_score": round(
-                        independent_setup_score, 3
-                    ),
+                    "independent_setup_score": round(independent_setup_score, 3),
                     "data_score": 8.0,
                     "score_reasons": reasons,
                     "setup_quality": strategy_score,
