@@ -313,16 +313,10 @@ class LiveSimSystem:
     def _drain_market_data(self) -> None:
         self.market_data._drain_tick_queue_sync()  # noqa: SLF001
         self._maybe_generate_and_submit_entry()
-        self.bracket_manager.on_tick(
-            self.scenario.ce_symbol,
-            float(
-                self.market_data._latest_ticks.get(
-                    self.scenario.ce_symbol, {}
-                ).get(  # noqa: SLF001
-                    "ltp", self.scenario.entry_price
-                )
-            ),
-        )
+        # Production has one canonical protection path:
+        # MDM -> Runner -> BracketManager. Wait for its async exit worker
+        # instead of injecting a duplicate bracket tick in the simulator.
+        self.bracket_manager._exit_dispatch_queue.join()  # noqa: SLF001
 
     def _maybe_generate_and_submit_entry(self) -> None:
         symbol = self.scenario.ce_symbol
