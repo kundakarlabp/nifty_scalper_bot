@@ -10,7 +10,11 @@ from nifty_scalper_bot.strategies.elite_strategies.orb_pro import ORBProStrategy
 from nifty_scalper_bot.strategies.elite_strategies.smc_liquidity import SMCStrategy
 from nifty_scalper_bot.strategies.signal_quality import score_signal_metadata
 
-from .test_strategy_quality_contract_v2 import _orb_snapshot, _smc_event, _smc_snapshot
+from .test_strategy_quality_contract_v2 import (
+    _orb_snapshot,
+    _smc_event,
+    _smc_snapshot,
+)
 
 
 def test_orb_direction_and_setup_alpha_are_independent(monkeypatch) -> None:
