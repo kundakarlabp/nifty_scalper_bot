@@ -5,6 +5,7 @@ WORKFLOWS = ROOT / ".github" / "workflows"
 EXPECTED_WORKFLOWS = {
     "agent-context.yml",
     "ci.yml",
+    "failure-memory-candidates.yml",
     "slow-suite-weekly.yml",
 }
 
@@ -42,3 +43,14 @@ def test_no_one_off_patch_or_branch_specific_ci_remains() -> None:
     assert "strategy-stall-production" not in combined
     assert "feat/market-aware-execution-optimisations" not in combined
     assert "git push origin HEAD:fix/" not in combined
+
+def test_failure_memory_workflow_is_read_only() -> None:
+    text = (WORKFLOWS / "failure-memory-candidates.yml").read_text(encoding="utf-8")
+
+    assert "actions: read" in text
+    assert "contents: read" in text
+    assert "contents: write" not in text
+    assert "pull-requests: write" not in text
+    assert "issues: write" not in text
+    assert "agent_failure_learn.py" in text
+
