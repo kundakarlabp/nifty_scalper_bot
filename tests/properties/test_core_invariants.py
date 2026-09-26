@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import pytest
 from hypothesis import given, settings, strategies as st
+import pytest
 
 from nifty_scalper_bot.execution.position_snapshot import (
     PositionSnapshotError,
