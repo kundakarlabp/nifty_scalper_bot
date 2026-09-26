@@ -74,3 +74,34 @@ def test_specialist_skills_are_routed_from_agent_start_here() -> None:
         "strategy-research-validation",
     }:
         assert f"`{name}`" in router
+
+def test_engineering_failure_memory_is_wired_into_agent_workflows() -> None:
+    memory_path = ROOT / "docs" / "ENGINEERING_FAILURE_PATTERNS.md"
+    memory = memory_path.read_text(encoding="utf-8")
+    for pattern_id in {
+        "FMT-001",
+        "LINT-001",
+        "TYPE-001",
+        "SYNTAX-001",
+        "SCOPE-001",
+        "TEST-001",
+        "TEST-002",
+        "GIT-001",
+        "DATA-001",
+        "STRAT-001",
+        "ARCH-001",
+        "ORDER-001",
+        "OBS-001",
+    }:
+        assert pattern_id in memory
+
+    for relative_path in (
+        "AGENTS.md",
+        "docs/AGENT_START_HERE.md",
+        "docs/CHATGPT_CODE_WORKFLOW.md",
+        ".agents/skills/tdd-trading-changes/SKILL.md",
+        ".agents/skills/pre-merge-trading-review/SKILL.md",
+    ):
+        text = (ROOT / relative_path).read_text(encoding="utf-8")
+        assert "docs/ENGINEERING_FAILURE_PATTERNS.md" in text
+
