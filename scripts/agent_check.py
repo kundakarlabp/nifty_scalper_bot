@@ -31,7 +31,7 @@ HIGH_RISK_MARKERS = (
 )
 
 E2E_COMMAND = (
-    'python -m pytest -q tests/e2e/live_sim '
+    "python -m pytest -q tests/e2e/live_sim "
     '-m "simulation_component or live_runtime_e2e or e2e_live_sim"'
 )
 
@@ -152,8 +152,7 @@ def classify_risk(
         return "high", reasons
 
     docs_only = bool(lowered) and all(
-        path.endswith((".md", ".txt", ".rst"))
-        or path.startswith(".agents/")
+        path.endswith((".md", ".txt", ".rst")) or path.startswith(".agents/")
         for path in lowered
     )
     if docs_only:
@@ -208,9 +207,8 @@ def build(
     commands: list[str] = []
     if _has_python_changes(normalized):
         commands.append("python -m compileall -q src dashboard scripts")
-    if _has_production_python(normalized) and (
-        root / "scripts" / "architecture_lint.py"
-    ).exists():
+    architecture_lint = root / "scripts" / "architecture_lint.py"
+    if _has_production_python(normalized) and architecture_lint.exists():
         commands.append("python scripts/architecture_lint.py")
     commands.append(
         "python -m pytest -q " + " ".join(tests)
@@ -435,11 +433,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.files or changed_from_git(root, args.base_ref),
         base_ref=args.base_ref,
     )
-    output = (
-        json.dumps(asdict(plan), indent=2)
-        if args.format == "json"
-        else markdown(plan)
-    )
+    output = json.dumps(asdict(plan), indent=2) if args.format == "json" else markdown(plan)
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(output.rstrip() + "\n", encoding="utf-8")
