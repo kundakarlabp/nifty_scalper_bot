@@ -231,6 +231,7 @@ def test_agent_check_runs_delta_quality_before_compile_and_tests(
     assert calls[3][1:5] == ["-m", "compileall", "-q", "src"]
     assert calls[4][0] == sys.executable
 
+
 def test_agent_check_high_risk_adds_e2e_when_available(tmp_path: Path) -> None:
     root = _sample_repo(tmp_path)
     (root / "tests" / "data").mkdir()
@@ -255,4 +256,3 @@ def test_agent_check_medium_tooling_change_skips_e2e(tmp_path: Path) -> None:
 
     assert plan.risk_level == "medium"
     assert module.E2E_COMMAND not in plan.commands
-
