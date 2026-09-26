@@ -122,8 +122,7 @@ def inspect_repository(root: Path) -> list[Violation]:
 
 def _format_text(violations: Iterable[Violation]) -> str:
     rows = [
-        f"{item.rule}: {item.path}:{item.line}: {item.detail}"
-        for item in violations
+        f"{item.rule}: {item.path}:{item.line}: {item.detail}" for item in violations
     ]
     return "\n".join(rows)
 
