@@ -247,4 +247,3 @@ def test_optimizer_does_not_drift_on_equal_candidate_scores() -> None:
     assert tuned == current
     assert opt._params == {}
     assert opt._regime_params == {}
-
