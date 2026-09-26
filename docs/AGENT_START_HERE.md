@@ -20,6 +20,10 @@ Use the smallest amount of repository context that can safely answer the task.
 | Task | Primary skill | Add only when needed |
 |---|---|---|
 | Runtime bug, failed test, stale data, wrong signal, duplicate order, unexplained no-trade state | `diagnosing-trading-bugs` | `runtime-contract-validation` for boundary payloads; `codebase-design` for ownership/seam defects |
+| WebSocket FULL/depth/freshness/fallback/subscription propagation problem | `market-data-path-audit` | `diagnosing-trading-bugs` when a concrete defect must be reproduced and fixed |
+| Strategy logic, score/threshold optimization, profitability claim, backtest or walk-forward review | `strategy-research-validation` | `tdd-trading-changes` only after a specific supported behavior change is selected |
+| Live bot status, logs, deployed-SHA check, production degradation or incident diagnosis | `live-runtime-diagnosis` | `diagnosing-trading-bugs` only after production evidence identifies a reproducible code defect |
+| Retired module, legacy alias, dead wiring, duplicate wrapper or compatibility cleanup | `architecture-cleanup` | `codebase-design` when ownership/interface redesign is actually required |
 | Well-scoped behavior change with known owner | `tdd-trading-changes` | `runtime-contract-validation` or `codebase-design` only if the change crosses those concerns |
 | Ownership, SSOT, module/interface or duplicate-path change | `codebase-design` | `tdd-trading-changes` once the design is resolved |
 | External/broker/config/cross-module payload change | `runtime-contract-validation` | `tdd-trading-changes` for implementation |
