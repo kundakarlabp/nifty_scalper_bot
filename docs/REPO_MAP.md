@@ -19,9 +19,11 @@ For owner-created issues titled `[Agent Context] ...`, GitHub Actions automatica
 | `tests/` | Unit, architecture, integration, execution-safety, and deployment tests |
 | `dashboard/` | Streamlit operations console |
 | `deploy/`, `ops/` | AWS Lightsail and operational scripts |
-| `scripts/` | Repository tooling, including agent context and validation planning |
+| `scripts/` | Repository tooling, including agent context, validation, merge, and benchmark commands |
 | `.agents/skills/` | Task-specific debugging, TDD, design, review, and worklog workflows |
-| `docs/` | Architecture, operational, and agent-reference material |
+| `docs/` | Architecture, operational, agent-reference, and machine-readable contract material |
+| `benchmarks/agent/` | Historical regression benchmark manifest for coding-agent changes |
+| `tests/fixtures/replay/` | Sanitized deterministic golden replay inputs |
 
 ## Authoritative runtime path
 
@@ -98,6 +100,9 @@ Do not bypass this flow. Options are the only tradable instruments. Spot is dire
 - `backtesting/parity.py` — canonical live-vs-replay parity checks.
 - `backtesting/premium_decay_backtest.py` — premium-decay strategy backtest harness.
 - `backtest/` — legacy import-compatibility shims only; new internal code must use `backtesting/`.
+- `tests/fixtures/replay/golden_market_path.csv` — canonical sanitized market-path replay fixture.
+- `benchmarks/agent/historical_regressions.json` — historical engineering regression benchmark.
+- `docs/contracts/contract_manifest.json` — machine-readable cross-module contract index.
 
 ## Source-to-test navigation
 
@@ -157,6 +162,13 @@ Generate a focused validation plan:
 
 ```bash
 python scripts/agent_check.py --files path/to/changed.py --output /tmp/agent-check.md
+```
+
+Validate or run historical regression cases:
+
+```bash
+python scripts/agent_benchmark.py --validate
+python scripts/agent_benchmark.py --case <case-id> --run
 ```
 
 Final validation remains:
