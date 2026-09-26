@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 from hypothesis import given, settings, strategies as st
-import pytest
-
 from nifty_scalper_bot.execution.position_snapshot import (
     PositionSnapshotError,
     decode_position_snapshot,
@@ -146,5 +144,9 @@ def test_position_snapshot_rejects_duplicate_authority_rows(quantity: int) -> No
         ]
     }
 
-    with pytest.raises(PositionSnapshotError, match="duplicate broker position row"):
+    try:
         decode_position_snapshot(payload)
+    except PositionSnapshotError as exc:
+        assert "duplicate broker position row" in str(exc)
+    else:
+        raise AssertionError("duplicate broker position rows must fail closed")
