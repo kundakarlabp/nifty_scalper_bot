@@ -105,4 +105,3 @@ def test_engineering_failure_memory_is_wired_into_agent_workflows() -> None:
     ):
         text = (ROOT / relative_path).read_text(encoding="utf-8")
         assert "docs/ENGINEERING_FAILURE_PATTERNS.md" in text
-
