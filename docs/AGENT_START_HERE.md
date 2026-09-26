@@ -29,6 +29,7 @@ Use the smallest amount of repository context that can safely answer the task.
 | Well-scoped behavior change with known owner | `tdd-trading-changes` | `runtime-contract-validation` or `codebase-design` only if the change crosses those concerns |
 | Ownership, SSOT, module/interface or duplicate-path change | `codebase-design` | `tdd-trading-changes` once the design is resolved |
 | External/broker/config/cross-module payload change | `runtime-contract-validation` | `tdd-trading-changes` for implementation |
+| Machine-readable contract, replay fixture, property invariant, or historical regression benchmark | `runtime-contract-validation` | `strategy-research-validation` when strategy/backtest semantics are involved |
 | Fuzzy or safety-critical proposal | `grill-trading-plan` | `domain-modeling-trading` only when terminology/state ownership is genuinely unclear |
 | Durable requirements or multi-PR decomposition explicitly needed | `to-prd-trading-change` / `to-issues-trading-change` | Do not use for a narrow bug fix |
 | PR/diff review | `pre-merge-trading-review` | none by default |
@@ -63,6 +64,12 @@ Execute the risk-aware fast validation ring:
 
 ```bash
 python scripts/agent_check.py --files path/to/changed.py --run focused
+```
+
+For changes related to a known historical regression, select the smallest relevant benchmark case:
+
+```bash
+python scripts/agent_benchmark.py --case <case-id> --run
 ```
 
 Execute focused checks plus the complete suite before merge when the environment supports it:
