@@ -86,11 +86,17 @@ class ChronologicalWalkForward:
     train_size: int
     validation_size: int
     test_size: int
+    min_validation_trades: int
     step_size: int | None = None
     timestamp_field: str = "timestamp"
 
     def __post_init__(self) -> None:
-        for name in ("train_size", "validation_size", "test_size"):
+        for name in (
+            "train_size",
+            "validation_size",
+            "test_size",
+            "min_validation_trades",
+        ):
             if int(getattr(self, name)) <= 0:
                 raise ValueError(f"{name} must be positive")
         if self.step_size is not None:
@@ -150,12 +156,15 @@ class ChronologicalWalkForward:
             eligible_results = {
                 name: result
                 for name, result in validation_results.items()
-                if result[0].trade_count > 0
+                if result[0].trade_count >= self.min_validation_trades
             }
             selected_name = "baseline"
             selected_validation = baseline_validation
             selected_evaluator = baseline
-            if baseline_validation.trade_count > 0 and eligible_results:
+            if (
+                baseline_validation.trade_count >= self.min_validation_trades
+                and eligible_results
+            ):
                 candidate_name, (
                     candidate_validation,
                     candidate_evaluator,
