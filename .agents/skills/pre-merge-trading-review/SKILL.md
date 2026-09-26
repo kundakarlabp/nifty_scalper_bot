@@ -104,14 +104,15 @@ Reject vague logs such as `not ready`, `failed`, or `no signal` without stage an
 
 ## 8. Validation evidence
 
-Require the exact commands and results. At minimum, expect:
+Before reviewing broad test results, confirm the change did not repeat a known pattern from `docs/ENGINEERING_FAILURE_PATTERNS.md`.
+
+For Python changes, require the repository preflight:
 
 ```bash
-python -m compileall -q src
-pytest -q
+python scripts/agent_check.py --files <changed files> --run focused
 ```
 
-Also require focused suites for the affected area. When external dependencies prevent execution, the PR must state what ran, what failed, why, and whether the failure is related.
+This must pass the existing delta-aware Ruff/Black/mypy checks, compilation, and focused tests. Then require the complete suite/final-head CI. When external dependencies prevent execution, the PR must state what ran, what failed, why, and whether the failure is related.
 
 Do not treat tests as valid when mocks bypass the production seam or when a test could place a live order.
 
