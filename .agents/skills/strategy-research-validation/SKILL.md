@@ -95,6 +95,17 @@ Use evidence labels instead of profitability claims:
 
 Do not call a strategy `profitable`, `validated alpha`, or `improved` solely from an in-sample or single-period result.
 
+## Repository validation assets
+
+Before accepting a strategy or scoring change:
+
+- run the canonical replay/parity tests;
+- use `tests/fixtures/replay/golden_market_path.csv` when the change could affect live-equivalent data ingestion;
+- run relevant cases from `benchmarks/agent/historical_regressions.json` with `scripts/agent_benchmark.py --case <id> --run`;
+- preserve machine-readable boundary contracts under `docs/contracts/`.
+
+These are engineering-regression checks, not evidence of alpha or profitability.
+
 ## Implementation rule
 
 If evidence supports a code change:
