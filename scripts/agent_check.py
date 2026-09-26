@@ -65,6 +65,25 @@ RULES = (
         ),
     ),
     (
+        "validation-assets",
+        (
+            "docs/contracts/",
+            "tests/fixtures/contracts/",
+            "tests/fixtures/replay/",
+            "benchmarks/agent/",
+            "scripts/agent_benchmark.py",
+            "tests/contracts/",
+            "tests/properties/",
+            "test_golden_replay_path.py",
+        ),
+        (
+            "tests/contracts",
+            "tests/properties",
+            "tests/backtests/test_golden_replay_path.py",
+            "tests/tools/test_agent_benchmark.py",
+        ),
+    ),
+    (
         "agent-tooling",
         (
             "agents.md",
