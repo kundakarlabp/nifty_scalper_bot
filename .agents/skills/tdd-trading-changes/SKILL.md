@@ -27,6 +27,8 @@ Each cycle must produce a usable, reviewable increment.
 
 ## Before coding
 
+For Python changes, read the matching entries in `docs/ENGINEERING_FAILURE_PATTERNS.md`. Apply the prevention rule while editing; do not wait for CI to reveal a known Black/Ruff/mypy/test-harness pattern.
+
 Define:
 
 - the public interface being changed
@@ -102,11 +104,18 @@ Never refactor while red. After all relevant tests pass:
 
 ## Completion
 
-Run the validation required by `AGENTS.md`, including at minimum:
+Run the repository quality preflight before broad tests:
 
 ```bash
-python -m compileall -q src
-pytest -q
+python scripts/agent_check.py --files <changed files> --run focused
+```
+
+This runs the existing delta-aware Ruff, Black, and mypy checkers first, then compilation and focused tests. It is specifically intended to catch recurring quality mistakes before PR publication.
+
+Then run the validation required by `AGENTS.md`, including the complete suite through:
+
+```bash
+python scripts/agent_check.py --files <changed files> --run full
 ```
 
 When the complete suite cannot run, report exactly what ran, what failed, why it failed, and whether the failure is related to the change.

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """File purpose: Build or execute a focused validation plan for repository changes.
 Key responsibilities: Classify changed files, select existing tests, and keep the full suite mandatory before merge.
-Operational constraints: Never execute broker or runtime entry points; run only generated compile/test commands.
+Operational constraints: Never execute broker or runtime entry points; run only
+repository quality, compile, and test commands.
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ from pathlib import Path
 import shlex
 import subprocess
 import sys
+import tempfile
 from typing import Sequence
 
 RULES = (
@@ -52,7 +54,10 @@ RULES = (
             "copilot-instructions.md",
             "repo_map.md",
             "agent_start_here.md",
+            "agent_tooling_design.md",
             "ai_optimization_workflow.md",
+            "chatgpt_code_workflow.md",
+            "engineering_failure_patterns.md",
             "scripts/agent_",
         ),
         (
@@ -70,6 +75,7 @@ class Plan:
     focused_tests: tuple[str, ...]
     commands: tuple[str, ...]
     full_suite_required: bool = True
+    base_ref: str = "origin/main"
 
 
 def changed_from_git(root: Path, base_ref: str) -> list[str]:
@@ -109,7 +115,12 @@ def normalize_files(root: Path, files: Sequence[str]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(normalized))
 
 
-def build(root: Path, files: Sequence[str]) -> Plan:
+def build(
+    root: Path,
+    files: Sequence[str],
+    *,
+    base_ref: str = "origin/main",
+) -> Plan:
     normalized = normalize_files(root, files)
     lowered = [item.lower() for item in normalized]
     areas: list[str] = []
@@ -130,7 +141,7 @@ def build(root: Path, files: Sequence[str]) -> Plan:
             if (root / candidate).exists()
         )
     tests = list(dict.fromkeys(tests))
-    commands = ["python -m compileall -q src dashboard"]
+    commands = ["python -m compileall -q src dashboard scripts"]
     commands.append(
         "python -m pytest -q " + " ".join(tests)
         if tests
@@ -142,6 +153,7 @@ def build(root: Path, files: Sequence[str]) -> Plan:
         tuple(areas or ["unclassified"]),
         tuple(tests),
         tuple(commands),
+        base_ref=base_ref,
     )
 
 
@@ -154,8 +166,88 @@ def commands_for_run(plan: Plan, scope: str) -> tuple[str, ...]:
     raise ValueError(f"Unsupported validation scope: {scope}")
 
 
+def _changed_python_files(plan: Plan) -> tuple[str, ...]:
+    """Return changed Python paths covered by the repository quality gate."""
+    prefixes = ("src/", "dashboard/", "scripts/", "tests/")
+    return tuple(
+        path
+        for path in plan.changed_files
+        if path.endswith(".py") and path.startswith(prefixes)
+    )
+
+
+def run_quality_checks(root: Path, plan: Plan) -> int:
+    """Run the repository's delta-aware quality checks before compile/tests."""
+    python_files = _changed_python_files(plan)
+    checkers = tuple(
+        root / path
+        for path in (
+            "scripts/check_changed_ruff.py",
+            "scripts/check_changed_black.py",
+            "scripts/check_changed_mypy.py",
+        )
+        if (root / path).exists()
+    )
+    if not python_files or not checkers:
+        return 0
+
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        prefix="agent-changed-python-",
+        suffix=".txt",
+        delete=False,
+    ) as manifest:
+        manifest.write("\n".join(python_files) + "\n")
+        manifest_path = Path(manifest.name)
+
+    try:
+        for checker in checkers:
+            argv = [
+                sys.executable,
+                str(checker),
+                "--base",
+                plan.base_ref,
+                "--files-from",
+                str(manifest_path),
+            ]
+            print(
+                "+ " + " ".join(shlex.quote(part) for part in argv),
+                file=sys.stderr,
+            )
+            try:
+                result = subprocess.run(
+                    argv,
+                    cwd=root,
+                    check=False,
+                    stdout=sys.stderr,
+                    stderr=sys.stderr,
+                )
+            except OSError as exc:
+                print(
+                    f"ERROR: failed to execute {checker.name!r}: {exc}",
+                    file=sys.stderr,
+                )
+                return 2
+            if result.returncode != 0:
+                print(
+                    "ERROR: changed-file quality check failed "
+                    f"with exit code {result.returncode}: {checker.name}",
+                    file=sys.stderr,
+                )
+                return result.returncode
+    finally:
+        manifest_path.unlink(missing_ok=True)
+
+    return 0
+
+
 def run_plan(root: Path, plan: Plan, scope: str) -> int:
-    """Execute generated compile/test commands without invoking runtime entry points."""
+    """Run changed-file quality checks, then the requested compile/test ring."""
+    quality_result = run_quality_checks(root, plan)
+    if quality_result != 0:
+        return quality_result
+
     for command in commands_for_run(plan, scope):
         argv = shlex.split(command)
         if argv and argv[0] == "python":
@@ -200,6 +292,24 @@ def markdown(plan: Plan) -> str:
     lines.extend(f"- `{item}`" for item in plan.focused_tests)
     if not plan.focused_tests:
         lines.append("- Architecture checks are the safe minimum.")
+    quality_files = _changed_python_files(plan)
+    if quality_files:
+        lines.extend(
+            [
+                "",
+                "## Changed-Python quality",
+                "",
+                f"- Base: `{plan.base_ref}`",
+                (
+                    "- `--run focused` and `--run full` first execute the "
+                    "existing delta-aware Ruff, Black and mypy checkers."
+                ),
+                (
+                    "- These reject newly introduced quality debt without "
+                    "forcing unrelated legacy cleanup."
+                ),
+            ]
+        )
     lines.extend(
         [
             "",
@@ -209,7 +319,11 @@ def markdown(plan: Plan) -> str:
             *plan.commands,
             "```",
             "",
-            "> Use `--run focused` for the fast feedback ring. Use `--run full` before merge when the environment supports the complete suite.",
+            (
+                "> Use `--run focused` for changed-file quality plus the fast "
+                "compile/test ring. Use `--run full` for the same quality gate "
+                "plus the complete suite before merge."
+            ),
             "",
         ]
     )
@@ -237,7 +351,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not (root / "src").exists() or not (root / "tests").exists():
         print(f"ERROR: {root} is not the repository root", file=sys.stderr)
         return 2
-    plan = build(root, args.files or changed_from_git(root, args.base_ref))
+    plan = build(
+        root,
+        args.files or changed_from_git(root, args.base_ref),
+        base_ref=args.base_ref,
+    )
     output = (
         json.dumps(asdict(plan), indent=2)
         if args.format == "json"

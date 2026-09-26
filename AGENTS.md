@@ -129,6 +129,7 @@ Change discipline
 Before a non-trivial edit:
 
 read the closest applicable AGENTS.md;
+for Python/tooling work, consult only the relevant entries in `docs/ENGINEERING_FAILURE_PATTERNS.md` so known formatter, lint, typing, test-harness, and merge mistakes are not reintroduced;
 trace the relevant runtime path and reproduce the problem when feasible;
 identify the owner and affected interfaces;
 define the smallest coherent change and regression test;
@@ -136,6 +137,10 @@ check whether NIMS-Chrome or another declared integration is actually affected.
 Prefer existing owners and public interfaces. Do not add dependencies, helper modules, broad refactors, or compatibility layers unless necessary for the requested outcome.
 
 Do not modify unrelated files. Preserve existing user changes.
+
+For every coherent Python edit, run the changed-file quality gate before broad tests. Prefer `python scripts/agent_check.py --files <changed files> --run focused`; it reuses the repository's delta-aware Ruff, Black, and mypy checks before compilation and focused tests. Do not wait for remote CI to discover locally detectable style/type errors.
+
+When a failure pattern recurs, encode the prevention at the lowest durable layer: formatter/linter/type checker, regression/architecture test, agent tooling, then concise documentation. Do not grow prompts with one-off anecdotes.
 
 Proof discipline:
 

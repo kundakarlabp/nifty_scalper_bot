@@ -93,11 +93,27 @@ The connected GitHub application already supports authorized repository reads an
 - Context ranking does not override `AGENTS.md` ownership or trading invariants.
 - Focused validation is advisory; the complete CI suite remains mandatory before merge.
 
+## Institutional engineering memory
+
+Recurring coding-agent failures are captured in `docs/ENGINEERING_FAILURE_PATTERNS.md`. Add a pattern only after the root mechanism is understood and the failure is repeated, costly, safety-relevant, or easy to reintroduce.
+
+Prefer prevention in this order:
+
+```text
+formatter/linter/type checker
+→ focused regression or architecture test
+→ agent tooling
+→ concise failure-pattern note
+```
+
+The document should shrink when automation makes a prose warning unnecessary. It is not a chronological incident log.
+
 ## Maintenance
 
 When architecture changes:
 
 1. Update `docs/REPO_MAP.md` and `AGENTS.md` in the same PR.
 2. Extend the area-to-test mapping in `scripts/agent_check.py`.
-3. Add a tooling regression test if ranking or classification changes.
-4. Keep the global repository contract compact; detailed procedures belong in skill files and these tooling documents.
+3. Add a tooling regression test if ranking, classification, or quality-preflight behavior changes.
+4. Record a durable failure pattern only when it meets the institutional-memory criteria above.
+5. Keep the global repository contract compact; detailed procedures belong in skill files and these tooling documents.

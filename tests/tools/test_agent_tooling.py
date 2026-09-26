@@ -119,6 +119,7 @@ def test_agent_check_builds_focused_plan(tmp_path: Path) -> None:
     assert "streaming" in payload["areas"]
     assert "tests/streaming" in payload["focused_tests"]
     assert payload["full_suite_required"] is True
+    assert payload["base_ref"] == "origin/main"
     assert payload["commands"][-1] == "python -m pytest -q"
 
 
@@ -134,6 +135,7 @@ def test_agent_check_routes_agent_docs_to_tooling_tests(tmp_path: Path) -> None:
             "--files",
             "docs/AGENT_START_HERE.md",
             "docs/AI_OPTIMIZATION_WORKFLOW.md",
+            "docs/ENGINEERING_FAILURE_PATTERNS.md",
             "--format",
             "json",
         ],
@@ -179,3 +181,48 @@ def test_agent_check_run_scope_executes_only_requested_ring(
     calls.clear()
     assert module.run_plan(root, plan, "full") == 0
     assert len(calls) == 3
+
+
+def test_agent_check_runs_delta_quality_before_compile_and_tests(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = _sample_repo(tmp_path)
+    scripts = root / "scripts"
+    scripts.mkdir()
+    checker_names = (
+        "check_changed_ruff.py",
+        "check_changed_black.py",
+        "check_changed_mypy.py",
+    )
+    for name in checker_names:
+        (scripts / name).write_text("# test checker\n", encoding="utf-8")
+
+    module = _load_check_module()
+    plan = module.Plan(
+        changed_files=("src/nifty_scalper_bot/streaming/websocket_manager.py",),
+        areas=("streaming",),
+        focused_tests=("tests/streaming",),
+        commands=(
+            "python -m compileall -q src dashboard",
+            "python -m pytest -q tests/streaming",
+            "python -m pytest -q",
+        ),
+        base_ref="origin/main",
+    )
+    calls: list[list[str]] = []
+
+    class Result:
+        returncode = 0
+
+    def fake_run(argv, **_kwargs):
+        calls.append(argv)
+        return Result()
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    assert module.run_plan(root, plan, "focused") == 0
+    assert [Path(call[1]).name for call in calls[:3]] == list(checker_names)
+    assert all("--base" in call and "origin/main" in call for call in calls[:3])
+    assert calls[3][0] == sys.executable
+    assert calls[3][1:5] == ["-m", "compileall", "-q", "src"]
+    assert calls[4][0] == sys.executable
