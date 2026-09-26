@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "risk_snapshot",
+  "title": "Runtime risk snapshot",
+  "type": "object",
+  "required": [
+    "daily_realized",
+    "daily_loss_limit",
+    "day_loss",
+    "max_day_loss",
+    "losses_in_row",
+    "cooldown_remaining",
+    "breaker_tripped",
+    "shadow_forced",
+    "per_trade_risk_pct",
+    "timestamp"
+  ],
+  "properties": {
+    "daily_realized": {
+      "type": "number"
+    },
+    "daily_loss_limit": {
+      "type": "number",
+      "minimum": 0
+    },
+    "day_loss": {
+      "type": "number",
+      "minimum": 0
+    },
+    "max_day_loss": {
+      "type": "number",
+      "minimum": 0
+    },
+    "losses_in_row": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "cooldown_remaining": {
+      "type": "number",
+      "minimum": 0
+    },
+    "breaker_tripped": {
+      "type": "boolean"
+    },
+    "breaker_reason": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "shadow_forced": {
+      "type": "boolean"
+    },
+    "per_trade_risk_pct": {
+      "type": "number",
+      "minimum": 0
+    },
+    "last_rejection": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "additionalProperties": true
+}
