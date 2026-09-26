@@ -131,6 +131,7 @@ def test_chronological_walk_forward_keeps_test_untouched() -> None:
         validation_size=2,
         test_size=2,
         min_validation_trades=1,
+        min_validation_expectancy_improvement=0.0,
     ).evaluate(
         records,
         baseline=evaluator("baseline"),
@@ -161,7 +162,13 @@ def test_chronological_walk_forward_rejects_unsorted_records() -> None:
         return [0.0 for _ in evaluation]
 
     with pytest.raises(ValueError, match="chronological"):
-        ChronologicalWalkForward(1, 1, 1, min_validation_trades=1).evaluate(
+        ChronologicalWalkForward(
+            1,
+            1,
+            1,
+            min_validation_trades=1,
+            min_validation_expectancy_improvement=0.0,
+        ).evaluate(
             records,
             baseline=evaluator,
             candidates={"candidate": evaluator},
@@ -277,6 +284,7 @@ def test_walk_forward_rejects_zero_trade_validation_candidate() -> None:
         validation_size=2,
         test_size=2,
         min_validation_trades=1,
+        min_validation_expectancy_improvement=0.0,
     ).evaluate(
         records,
         baseline=baseline,
@@ -313,6 +321,7 @@ def test_walk_forward_requires_validation_improvement_over_baseline() -> None:
         validation_size=2,
         test_size=2,
         min_validation_trades=1,
+        min_validation_expectancy_improvement=0.0,
     ).evaluate(
         records,
         baseline=baseline,
@@ -333,6 +342,7 @@ def test_walk_forward_rejects_overlapping_test_windows() -> None:
             validation_size=2,
             test_size=3,
             min_validation_trades=1,
+        min_validation_expectancy_improvement=0.0,
             step_size=2,
         )
 
@@ -356,6 +366,7 @@ def test_walk_forward_respects_declared_validation_trade_floor() -> None:
         validation_size=2,
         test_size=2,
         min_validation_trades=2,
+        min_validation_expectancy_improvement=0.0,
     ).evaluate(
         records,
         baseline=baseline,
@@ -376,6 +387,7 @@ def test_walk_forward_rejects_nonpositive_validation_trade_floor() -> None:
             validation_size=2,
             test_size=2,
             min_validation_trades=0,
+        min_validation_expectancy_improvement=0.0,
         )
 
 
@@ -424,3 +436,79 @@ def test_optimizer_fails_closed_on_nonfinite_candidate_score() -> None:
     assert opt._params == {}
     assert opt._regime_params == {}
     assert opt.risk_scale == 1.0
+
+
+def test_walk_forward_requires_declared_expectancy_margin() -> None:
+    records = [{"timestamp": float(index)} for index in range(6)]
+    candidate_test_calls = 0
+
+    def baseline(_fit, evaluation):
+        return [1.0 for _ in evaluation]
+
+    def marginal_candidate(_fit, evaluation):
+        nonlocal candidate_test_calls
+        if evaluation[0]["timestamp"] >= 4.0:
+            candidate_test_calls += 1
+            return [100.0 for _ in evaluation]
+        return [1.04 for _ in evaluation]
+
+    result = ChronologicalWalkForward(
+        train_size=2,
+        validation_size=2,
+        test_size=2,
+        min_validation_trades=1,
+        min_validation_expectancy_improvement=0.05,
+    ).evaluate(
+        records,
+        baseline=baseline,
+        candidates={"marginal": marginal_candidate},
+    )
+
+    assert result.folds[0].selected_candidate == "baseline"
+    assert result.folds[0].candidate_test == result.folds[0].baseline_test
+    assert candidate_test_calls == 0
+
+
+def test_walk_forward_selects_candidate_clearing_expectancy_margin() -> None:
+    records = [{"timestamp": float(index)} for index in range(6)]
+
+    def baseline(_fit, evaluation):
+        return [1.0 for _ in evaluation]
+
+    def candidate(_fit, evaluation):
+        if evaluation[0]["timestamp"] >= 4.0:
+            return [2.0 for _ in evaluation]
+        return [1.06 for _ in evaluation]
+
+    result = ChronologicalWalkForward(
+        train_size=2,
+        validation_size=2,
+        test_size=2,
+        min_validation_trades=1,
+        min_validation_expectancy_improvement=0.05,
+    ).evaluate(
+        records,
+        baseline=baseline,
+        candidates={"candidate": candidate},
+    )
+
+    assert result.folds[0].selected_candidate == "candidate"
+    assert result.folds[0].candidate_test.total_net_pnl == 4.0
+
+
+@pytest.mark.parametrize(
+    "bad_margin",
+    [-0.01, float("nan"), float("inf"), float("-inf")],
+)
+def test_walk_forward_rejects_invalid_expectancy_margin(bad_margin: float) -> None:
+    with pytest.raises(
+        ValueError,
+        match="min_validation_expectancy_improvement must be finite and non-negative",
+    ):
+        ChronologicalWalkForward(
+            train_size=2,
+            validation_size=2,
+            test_size=2,
+            min_validation_trades=1,
+            min_validation_expectancy_improvement=bad_margin,
+        )
