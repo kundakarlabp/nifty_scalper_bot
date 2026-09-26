@@ -313,3 +313,13 @@ def test_walk_forward_requires_validation_improvement_over_baseline() -> None:
     assert result.folds[0].candidate_test.total_net_pnl == 2.0
     assert result.aggregate_candidate.total_net_pnl == 2.0
     assert weaker_test_calls == 0
+
+
+def test_walk_forward_rejects_overlapping_test_windows() -> None:
+    with pytest.raises(ValueError, match="step_size must be at least test_size"):
+        ChronologicalWalkForward(
+            train_size=4,
+            validation_size=2,
+            test_size=3,
+            step_size=2,
+        )
