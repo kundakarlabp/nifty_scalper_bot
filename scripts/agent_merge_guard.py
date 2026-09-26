@@ -33,11 +33,14 @@ def verify(
     current_base = _rev_parse(root, base_ref)
     current_head = _rev_parse(root, head_ref)
     merge_base = _rev_parse(root, f"{base_ref}^{{commit}}")
-    ancestry = subprocess.run(
-        ["git", "merge-base", "--is-ancestor", current_base, current_head],
-        cwd=root,
-        check=False,
-    ).returncode == 0
+    ancestry = (
+        subprocess.run(
+            ["git", "merge-base", "--is-ancestor", current_base, current_head],
+            cwd=root,
+            check=False,
+        ).returncode
+        == 0
+    )
 
     checks = {
         "base_matches": current_base == validated_base,
