@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from hypothesis import given, settings, strategies as st
+
 from nifty_scalper_bot.execution.position_snapshot import (
     PositionSnapshotError,
     decode_position_snapshot,
