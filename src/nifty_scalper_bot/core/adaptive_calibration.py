@@ -67,7 +67,10 @@ class WalkForwardFold:
     test_start: Any
     test_end: Any
     selected_candidate: str
+    baseline_validation: PerformanceSummary
     selected_validation: PerformanceSummary
+    validation_candidate_count: int
+    eligible_validation_candidate_count: int
     baseline_test: PerformanceSummary
     candidate_test: PerformanceSummary
 
@@ -202,7 +205,10 @@ class ChronologicalWalkForward:
                     test_start=timestamps[validation_end],
                     test_end=timestamps[test_end - 1],
                     selected_candidate=selected_name,
+                    baseline_validation=baseline_validation,
                     selected_validation=selected_validation,
+                    validation_candidate_count=len(validation_results),
+                    eligible_validation_candidate_count=len(eligible_results),
                     baseline_test=PerformanceSummary.from_pnl(baseline_test_pnl),
                     candidate_test=PerformanceSummary.from_pnl(candidate_test_pnl),
                 )
