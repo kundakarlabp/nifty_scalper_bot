@@ -256,3 +256,20 @@ def test_agent_check_medium_tooling_change_skips_e2e(tmp_path: Path) -> None:
 
     assert plan.risk_level == "medium"
     assert module.E2E_COMMAND not in plan.commands
+
+def test_agent_check_routes_validation_assets_to_focused_tests(tmp_path: Path) -> None:
+    root = _sample_repo(tmp_path)
+    (root / "tests" / "contracts").mkdir()
+    (root / "tests" / "properties").mkdir()
+    (root / "tests" / "backtests").mkdir()
+    (root / "tests" / "tools").mkdir()
+    module = _load_check_module()
+
+    plan = module.build(root, ["docs/contracts/trade_plan.schema.json"])
+
+    assert "validation-assets" in plan.areas
+    assert "tests/contracts" in plan.focused_tests
+    assert "tests/properties" in plan.focused_tests
+    assert "tests/backtests/test_golden_replay_path.py" in plan.focused_tests
+    assert "tests/tools/test_agent_benchmark.py" in plan.focused_tests
+
