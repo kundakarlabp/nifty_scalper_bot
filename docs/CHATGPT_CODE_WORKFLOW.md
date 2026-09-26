@@ -14,6 +14,8 @@ Read only these files first:
 
 Then load one primary skill from `docs/AGENT_START_HERE.md`. Use a specialist skill only when the task actually matches it; do not load the entire catalog.
 
+For Python/tooling changes, use `docs/ENGINEERING_FAILURE_PATTERNS.md` as the repository's institutional memory. Read only matching pattern IDs. Prefer the automated prevention/detector described there over adding more prompt text.
+
 For a non-trivial error or enhancement, create one GitHub issue with a title beginning:
 
 ```text
@@ -88,7 +90,15 @@ python scripts/agent_check.py \
   --output /tmp/agent-check.md
 ```
 
-These tools only inspect repository structure and produce plans. They do not place orders or start the trading runtime.
+Execute the focused ring before publishing Python changes:
+
+```bash
+python scripts/agent_check.py \
+  --files src/nifty_scalper_bot/streaming/websocket_manager.py \
+  --run focused
+```
+
+The focused ring now runs delta-aware Ruff, Black, and mypy checks before compilation and affected tests. These tools never place orders or start the trading runtime.
 
 ## Validation and merge rule
 
