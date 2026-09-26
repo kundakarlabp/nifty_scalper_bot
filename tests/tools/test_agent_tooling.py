@@ -182,6 +182,7 @@ def test_agent_check_run_scope_executes_only_requested_ring(
     assert module.run_plan(root, plan, "full") == 0
     assert len(calls) == 3
 
+
 def test_agent_check_runs_delta_quality_before_compile_and_tests(
     tmp_path: Path, monkeypatch
 ) -> None:
