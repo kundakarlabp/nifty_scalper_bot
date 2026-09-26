@@ -247,3 +247,69 @@ def test_optimizer_does_not_drift_on_equal_candidate_scores() -> None:
     assert tuned == current
     assert opt._params == {}
     assert opt._regime_params == {}
+
+
+def test_walk_forward_rejects_zero_trade_validation_candidate() -> None:
+    records = [{"timestamp": float(index)} for index in range(6)]
+    baseline_test_calls = 0
+    empty_test_calls = 0
+
+    def baseline(_fit, evaluation):
+        nonlocal baseline_test_calls
+        if evaluation[0]["timestamp"] >= 4.0:
+            baseline_test_calls += 1
+        return [-1.0 for _ in evaluation]
+
+    def empty_candidate(_fit, evaluation):
+        nonlocal empty_test_calls
+        if evaluation[0]["timestamp"] >= 4.0:
+            empty_test_calls += 1
+        return []
+
+    result = ChronologicalWalkForward(
+        train_size=2,
+        validation_size=2,
+        test_size=2,
+    ).evaluate(
+        records,
+        baseline=baseline,
+        candidates={"empty": empty_candidate},
+    )
+
+    assert result.folds[0].selected_candidate == "baseline"
+    assert result.folds[0].selected_validation.trade_count == 2
+    assert result.folds[0].candidate_test == result.folds[0].baseline_test
+    assert result.aggregate_candidate == result.aggregate_baseline
+    assert baseline_test_calls == 1
+    assert empty_test_calls == 0
+
+
+def test_walk_forward_requires_validation_improvement_over_baseline() -> None:
+    records = [{"timestamp": float(index)} for index in range(6)]
+    weaker_test_calls = 0
+
+    def baseline(_fit, evaluation):
+        return [1.0 for _ in evaluation]
+
+    def weaker_candidate(_fit, evaluation):
+        nonlocal weaker_test_calls
+        if evaluation[0]["timestamp"] >= 4.0:
+            weaker_test_calls += 1
+            return [100.0 for _ in evaluation]
+        return [0.5 for _ in evaluation]
+
+    result = ChronologicalWalkForward(
+        train_size=2,
+        validation_size=2,
+        test_size=2,
+    ).evaluate(
+        records,
+        baseline=baseline,
+        candidates={"weaker": weaker_candidate},
+    )
+
+    assert result.folds[0].selected_candidate == "baseline"
+    assert result.folds[0].selected_validation.expectancy == 1.0
+    assert result.folds[0].candidate_test.total_net_pnl == 2.0
+    assert result.aggregate_candidate.total_net_pnl == 2.0
+    assert weaker_test_calls == 0
