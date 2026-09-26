@@ -75,6 +75,7 @@ def test_specialist_skills_are_routed_from_agent_start_here() -> None:
     }:
         assert f"`{name}`" in router
 
+
 def test_engineering_failure_memory_is_wired_into_agent_workflows() -> None:
     memory_path = ROOT / "docs" / "ENGINEERING_FAILURE_PATTERNS.md"
     memory = memory_path.read_text(encoding="utf-8")
