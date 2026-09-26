@@ -1,0 +1,14 @@
+{
+  "daily_realized": -350,
+  "daily_loss_limit": 1500,
+  "day_loss": 350,
+  "max_day_loss": 1500,
+  "losses_in_row": 1,
+  "cooldown_remaining": 0,
+  "breaker_tripped": false,
+  "breaker_reason": null,
+  "shadow_forced": false,
+  "per_trade_risk_pct": 1,
+  "last_rejection": null,
+  "timestamp": "2026-09-24T09:16:00+05:30"
+}
