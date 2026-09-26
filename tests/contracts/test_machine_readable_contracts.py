@@ -32,13 +32,13 @@ def _matches_type(value: object, expected: str) -> bool:
 def _validate(schema: dict[str, Any], value: Any, path: str = "$") -> None:
     expected = schema.get("type")
     if isinstance(expected, list):
-        assert any(_matches_type(value, item) for item in expected), (
-            f"{path}: {type(value).__name__} not in {expected}"
-        )
+        assert any(
+            _matches_type(value, item) for item in expected
+        ), f"{path}: {type(value).__name__} not in {expected}"
     elif isinstance(expected, str):
-        assert _matches_type(value, expected), (
-            f"{path}: {type(value).__name__} != {expected}"
-        )
+        assert _matches_type(
+            value, expected
+        ), f"{path}: {type(value).__name__} != {expected}"
 
     if "enum" in schema:
         assert value in schema["enum"], f"{path}: {value!r} not in enum"
