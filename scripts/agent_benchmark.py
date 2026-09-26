@@ -5,9 +5,9 @@ from __future__ import annotations
 
 import argparse
 import json
-from pathlib import Path
 import subprocess
 import sys
+from pathlib import Path
 from typing import Any
 
 DEFAULT_MANIFEST = Path("benchmarks/agent/historical_regressions.json")
