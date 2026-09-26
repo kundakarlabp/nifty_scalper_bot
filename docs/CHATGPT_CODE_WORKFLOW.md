@@ -98,7 +98,7 @@ python scripts/agent_check.py \
   --run focused
 ```
 
-The focused ring now runs delta-aware Ruff, Black, and mypy checks before compilation and affected tests. These tools never place orders or start the trading runtime.
+The focused ring is risk-aware: it runs delta-aware Ruff, Black, and mypy checks first, adds architecture ownership validation for production code, and adds deterministic broker-free E2E for high-risk paths. These tools never place orders or start the trading runtime.
 
 ## Validation and merge rule
 
@@ -111,7 +111,7 @@ Focused tests provide fast feedback but never replace the full suite. A PR may b
 - all valid review threads are resolved
 - CI passes on the final PR head
 
-When the task explicitly asks ChatGPT to merge after validation, ChatGPT may squash-merge after these conditions are met. Otherwise, leave the PR open for review.
+When the task explicitly asks ChatGPT to merge after validation, verify the exact validated base/head with `scripts/agent_merge_guard.py` immediately before squash merge. If the base or head moved, refresh and rerun final-head CI. Otherwise, leave the PR open for review.
 
 ## Access and confidentiality
 
