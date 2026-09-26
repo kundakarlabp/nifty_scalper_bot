@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from hypothesis import given, settings, strategies as st
+import hypothesis
+import hypothesis.strategies as st
 
 from nifty_scalper_bot.execution.position_snapshot import (
     PositionSnapshotError,
@@ -9,8 +10,8 @@ from nifty_scalper_bot.execution.position_snapshot import (
 from nifty_scalper_bot.risk.position_sizing import PositionSizer
 
 
-@settings(max_examples=50, deadline=None)
-@given(
+@hypothesis.settings(max_examples=50, deadline=None)
+@hypothesis.given(
     equity=st.floats(
         min_value=1_000.0,
         max_value=1_000_000.0,
@@ -100,8 +101,8 @@ def test_position_sizer_preserves_lot_and_margin_invariants(
     assert result.qty <= affordable_lots * lot_size
 
 
-@settings(max_examples=50, deadline=None)
-@given(
+@hypothesis.settings(max_examples=50, deadline=None)
+@hypothesis.given(
     rows=st.lists(
         st.tuples(
             st.integers(min_value=1, max_value=999_999),
@@ -135,8 +136,8 @@ def test_position_snapshot_round_trips_integral_broker_quantities(
     assert snapshot.all_flat is all(quantity == 0 for _, quantity in rows)
 
 
-@settings(max_examples=30, deadline=None)
-@given(quantity=st.integers(min_value=-10_000, max_value=10_000))
+@hypothesis.settings(max_examples=30, deadline=None)
+@hypothesis.given(quantity=st.integers(min_value=-10_000, max_value=10_000))
 def test_position_snapshot_rejects_duplicate_authority_rows(quantity: int) -> None:
     payload = {
         "net": [
