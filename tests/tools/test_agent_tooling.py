@@ -264,6 +264,14 @@ def test_agent_check_routes_validation_assets_to_focused_tests(tmp_path: Path) -
     (root / "tests" / "properties").mkdir()
     (root / "tests" / "backtests").mkdir()
     (root / "tests" / "tools").mkdir()
+    (root / "tests" / "backtests" / "test_golden_replay_path.py").write_text(
+        "# fixture\n",
+        encoding="utf-8",
+    )
+    (root / "tests" / "tools" / "test_agent_benchmark.py").write_text(
+        "# fixture\n",
+        encoding="utf-8",
+    )
     module = _load_check_module()
 
     plan = module.build(root, ["docs/contracts/trade_plan.schema.json"])
