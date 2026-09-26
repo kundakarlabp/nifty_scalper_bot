@@ -53,7 +53,10 @@ RULES = (
             "copilot-instructions.md",
             "repo_map.md",
             "agent_start_here.md",
+            "agent_tooling_design.md",
             "ai_optimization_workflow.md",
+            "chatgpt_code_workflow.md",
+            "engineering_failure_patterns.md",
             "scripts/agent_",
         ),
         (
