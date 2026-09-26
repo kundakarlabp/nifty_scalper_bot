@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "trade_plan",
+  "title": "Trade plan",
+  "type": "object",
+  "required": [
+    "symbol",
+    "side",
+    "quantity",
+    "entry_price",
+    "stop_loss",
+    "take_profit"
+  ],
+  "properties": {
+    "symbol": {
+      "type": "string",
+      "minLength": 1
+    },
+    "side": {
+      "type": "string",
+      "enum": [
+        "BUY",
+        "SELL"
+      ]
+    },
+    "quantity": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "entry_price": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "stop_loss": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "take_profit": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "intent": {
+      "type": "string"
+    },
+    "trace_id": {
+      "type": "string"
+    },
+    "signal_id": {
+      "type": "string"
+    },
+    "trade_lifecycle_id": {
+      "type": "string"
+    },
+    "requested_lots": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "resolved_lot_size": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "strategy_name": {
+      "type": "string"
+    },
+    "trade_provenance": {
+      "type": "object"
+    }
+  },
+  "additionalProperties": true
+}
