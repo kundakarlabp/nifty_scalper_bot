@@ -71,6 +71,7 @@ class WalkForwardFold:
     selected_validation: PerformanceSummary
     validation_candidate_count: int
     eligible_validation_candidate_count: int
+    required_validation_expectancy_improvement: float
     baseline_test: PerformanceSummary
     candidate_test: PerformanceSummary
 
@@ -92,6 +93,7 @@ class ChronologicalWalkForward:
     validation_size: int
     test_size: int
     min_validation_trades: int
+    min_validation_expectancy_improvement: float
     step_size: int | None = None
     timestamp_field: str = "timestamp"
 
@@ -104,6 +106,11 @@ class ChronologicalWalkForward:
         ):
             if int(getattr(self, name)) <= 0:
                 raise ValueError(f"{name} must be positive")
+        resolved_margin = float(self.min_validation_expectancy_improvement)
+        if not isfinite(resolved_margin) or resolved_margin < 0:
+            raise ValueError(
+                "min_validation_expectancy_improvement must be finite and non-negative"
+            )
         if self.step_size is not None:
             if int(self.step_size) <= 0:
                 raise ValueError("step_size must be positive")
@@ -181,7 +188,11 @@ class ChronologicalWalkForward:
                         item[0],
                     ),
                 )
-                if candidate_validation.expectancy > baseline_validation.expectancy:
+                if (
+                    candidate_validation.expectancy
+                    > baseline_validation.expectancy
+                    + self.min_validation_expectancy_improvement
+                ):
                     selected_name = candidate_name
                     selected_validation = candidate_validation
                     selected_evaluator = candidate_evaluator
@@ -209,6 +220,9 @@ class ChronologicalWalkForward:
                     selected_validation=selected_validation,
                     validation_candidate_count=len(validation_results),
                     eligible_validation_candidate_count=len(eligible_results),
+                    required_validation_expectancy_improvement=float(
+                        self.min_validation_expectancy_improvement
+                    ),
                     baseline_test=PerformanceSummary.from_pnl(baseline_test_pnl),
                     candidate_test=PerformanceSummary.from_pnl(candidate_test_pnl),
                 )
