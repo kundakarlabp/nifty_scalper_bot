@@ -41,6 +41,8 @@ jobs:
           python -m pip install -r dashboard/requirements.txt -q
       - name: Compile production, dashboard and tooling
         run: python -m compileall -q src dashboard scripts
+      - name: Enforce architecture ownership
+        run: python scripts/architecture_lint.py
       - name: Resolve changed Python files
         id: changed
         shell: bash
