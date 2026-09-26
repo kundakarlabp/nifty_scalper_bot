@@ -12,6 +12,8 @@ Read only these files first:
 2. `docs/REPO_MAP.md`
 3. `.agents/skills/README.md`
 
+Then load one primary skill from `docs/AGENT_START_HERE.md`. Use a specialist skill only when the task actually matches it; do not load the entire catalog.
+
 For a non-trivial error or enhancement, create one GitHub issue with a title beginning:
 
 ```text
@@ -60,6 +62,13 @@ Untouched areas: optional
 ```
 
 Exact error text, event names, class names, function names, Telegram messages, and CI failures are more useful than broad requests such as “optimize everything.”
+
+For recurring specialist work, prefer these repository procedures instead of restating a large prompt:
+
+- `market-data-path-audit` — end-to-end WebSocket FULL/depth/freshness/fallback integrity
+- `strategy-research-validation` — strategy logic, evidence, realistic backtesting, and walk-forward validation
+- `live-runtime-diagnosis` — read-only production health/status/snapshot/log diagnosis
+- `architecture-cleanup` — proven-safe removal of retired or duplicate architecture
 
 ## Repository-side commands
 
