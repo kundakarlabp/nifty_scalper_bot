@@ -64,9 +64,25 @@ Preserve through the data path:
 
 symbol, token, timestamp, timestamp_ms, bid, ask, spread,
 depth, OI, source, freshness, stale state, tradable_quote
+
+Market-data invariants:
+
+- Normalize broker/WebSocket data at the owning boundary; do not repeatedly reshape it downstream.
+- Freshness ordering is monotonic: older polling, synthetic, cached, or LTP-only data cannot overwrite fresher WebSocket FULL state.
+- A degraded quote remains explicitly degraded; the presence of an LTP alone must not silently make it tradable when bid/ask/depth is required.
+- Reconnect, basket rotation, and fallback recovery must preserve symbol/token identity and required subscriptions.
+
 Do not evaluate a strategy until its explicitly required data is ready.
 
 Missing optional context should reduce confidence, not automatically block trading, unless the active strategy declares that context mandatory.
+
+Strategy and research invariants:
+
+- Underlying direction must come from the repository's canonical direction/context authority; option-premium data must not independently authorize underlying direction.
+- No future-bar, incomplete-bar, look-ahead, or test-period leakage may influence a live-equivalent signal.
+- Identical prepared inputs and state must produce deterministic strategy decisions.
+- Strategies may score and explain candidates but must not place orders, select contracts, or fetch broker data directly.
+- Parameter or scoring changes require comparison with the current validated baseline using realistic costs and chronological out-of-sample evidence. Code correctness alone is not evidence of profitability.
 
 Blockers and gates
 Use the sequence:
@@ -100,6 +116,13 @@ margin_lots = available_margin / margin_per_lot
 final_lots = min(risk_lots, margin_lots)
 If fewer than one valid lot can be traded, skip and record the exact reason.
 
+Order-state invariants:
+
+- Duplicate entry intent must remain idempotent across retries, reconnects, and delayed acknowledgements.
+- Actual broker fills/positions own executed quantity; requested quantity is not proof of a fill.
+- Rejected, cancelled, timed-out, or partially filled orders must not be represented as clean active positions or successful completion.
+- Exit/bracket logic must operate on reconciled position state and must not create an independent placement path.
+
 Do not enable live execution, modify credentials, or weaken production risk limits without explicit authorization.
 
 Change discipline
@@ -113,6 +136,14 @@ check whether NIMS-Chrome or another declared integration is actually affected.
 Prefer existing owners and public interfaces. Do not add dependencies, helper modules, broad refactors, or compatibility layers unless necessary for the requested outcome.
 
 Do not modify unrelated files. Preserve existing user changes.
+
+Proof discipline:
+
+- Never report a test, backtest, deployment, merge, log state, or production fix as verified unless the stated check was actually observed.
+- Distinguish repository/code evidence from current production evidence.
+- Prefer one primary task skill; add a specialist skill only when the task crosses that concern.
+- For market-data integrity, strategy research, live-runtime diagnosis, or architecture cleanup, use the corresponding repository skill instead of inventing a parallel procedure.
+- If evidence is unavailable or contradictory, label the result unknown/blocked rather than filling the gap with inference.
 
 When ownership or runtime behavior changes, update the appropriate architecture documentation. Use top-of-file role notes only where they clarify a non-obvious boundary; do not add repetitive boilerplate to every file.
 
