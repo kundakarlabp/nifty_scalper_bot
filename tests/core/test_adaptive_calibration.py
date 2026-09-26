@@ -25,7 +25,13 @@ def test_regime_change_blend() -> None:
         "microvol_percentile": 60.0,
         "spread_threshold_pct": 0.2,
     }
-    tuned = opt.optimize("s1", "trend", stats, current)
+    tuned = opt.optimize(
+        "s1",
+        "trend",
+        stats,
+        current,
+        candidate_evaluator=lambda params: -abs(params["momentum_z_threshold"] - 0.9),
+    )
     shifted = opt.on_regime_change("s1", "trend", current)
     assert shifted.keys() == tuned.keys()
 
@@ -52,7 +58,13 @@ def test_disabled_optimizer_does_not_load_cached_regime_parameters() -> None:
         "spread_threshold_pct": 0.2,
     }
     opt = WalkForwardOptimizer(allow_parameter_updates=True)
-    opt.optimize("s1", "trend", stats, current)
+    opt.optimize(
+        "s1",
+        "trend",
+        stats,
+        current,
+        candidate_evaluator=lambda params: -params["spread_threshold_pct"],
+    )
     opt.allow_parameter_updates = False
 
     assert opt.on_regime_change("s1", "trend", current) == current
@@ -70,8 +82,23 @@ def test_negative_strategy_does_not_freeze_other_research_strategy() -> None:
     }
     opt = WalkForwardOptimizer(recalibrate_every=1, allow_parameter_updates=True)
 
-    assert opt.optimize("loser", "trend", losing, current) == current
-    tuned = opt.optimize("winner", "trend", winning, current)
+    assert (
+        opt.optimize(
+            "loser",
+            "trend",
+            losing,
+            current,
+            candidate_evaluator=lambda _params: 0.0,
+        )
+        == current
+    )
+    tuned = opt.optimize(
+        "winner",
+        "trend",
+        winning,
+        current,
+        candidate_evaluator=lambda params: -abs(params["momentum_z_threshold"] - 0.9),
+    )
 
     assert "loser" in opt._frozen_strategies
     assert "winner" not in opt._frozen_strategies
@@ -133,3 +160,90 @@ def test_chronological_walk_forward_rejects_unsorted_records() -> None:
             baseline=evaluator,
             candidates={"candidate": evaluator},
         )
+
+
+def test_enabled_optimizer_still_fails_closed_without_candidate_evaluator() -> None:
+    stats = AdaptiveParameterStore(window_trades=10).record_trade("s1", 10.0)
+    current = {
+        "momentum_z_threshold": 1.0,
+        "microvol_percentile": 60.0,
+        "spread_threshold_pct": 0.2,
+    }
+    opt = WalkForwardOptimizer(recalibrate_every=1, allow_parameter_updates=True)
+
+    assert opt.optimize("s1", "trend", stats, current) == current
+    assert opt._params == {}
+    assert opt._regime_params == {}
+    assert opt._frozen_strategies == set()
+    assert opt.risk_scale == 1.0
+
+
+def test_optimizer_uses_candidate_specific_evaluator() -> None:
+    stats = AdaptiveParameterStore(window_trades=10).record_trade("s1", 10.0)
+    current = {
+        "momentum_z_threshold": 1.0,
+        "microvol_percentile": 60.0,
+        "spread_threshold_pct": 0.2,
+    }
+    seen: list[tuple[float, float, float]] = []
+    opt = WalkForwardOptimizer(
+        recalibrate_every=1,
+        alpha=1.0,
+        allow_parameter_updates=True,
+    )
+
+    def candidate_evaluator(params):
+        seen.append(
+            (
+                params["momentum_z_threshold"],
+                params["microvol_percentile"],
+                params["spread_threshold_pct"],
+            )
+        )
+        return -(
+            abs(params["momentum_z_threshold"] - 0.9)
+            + abs(params["microvol_percentile"] - 55.0) / 10.0
+            + abs(params["spread_threshold_pct"] - 0.15)
+        )
+
+    tuned = opt.optimize(
+        "s1",
+        "trend",
+        stats,
+        current,
+        candidate_evaluator=candidate_evaluator,
+    )
+
+    assert len(seen) == 27
+    assert tuned == {
+        "momentum_z_threshold": pytest.approx(0.9),
+        "microvol_percentile": pytest.approx(55.0),
+        "spread_threshold_pct": pytest.approx(0.15),
+    }
+
+
+def test_optimizer_does_not_drift_on_equal_candidate_scores() -> None:
+    stats = AdaptiveParameterStore(window_trades=10).record_trade("s1", 10.0)
+    current = {
+        "momentum_z_threshold": 1.0,
+        "microvol_percentile": 60.0,
+        "spread_threshold_pct": 0.2,
+        "unrelated_research_field": 42.0,
+    }
+    opt = WalkForwardOptimizer(
+        recalibrate_every=1,
+        alpha=1.0,
+        allow_parameter_updates=True,
+    )
+
+    tuned = opt.optimize(
+        "s1",
+        "trend",
+        stats,
+        current,
+        candidate_evaluator=lambda _params: 1.0,
+    )
+
+    assert tuned == current
+    assert opt._params == {}
+    assert opt._regime_params == {}
