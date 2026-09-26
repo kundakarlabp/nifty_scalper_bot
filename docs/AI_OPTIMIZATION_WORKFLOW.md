@@ -1,6 +1,6 @@
 # AI Optimization Workflow for NIFTY Scalper Bot
 
-This document defines the safe workflow for ChatGPT, Codex, Copilot, Claude Code, and human reviewers working on this repository.
+This document defines the safe workflow for ChatGPT/Codex and human reviewers working on this repository.
 
 The goal is evidence-based optimization of the NIFTY options scalper without broad refactoring, duplicated ownership, or speculative profit optimization.
 
@@ -42,6 +42,10 @@ Do **not** automatically load or execute the full skill catalog. Skills are sele
 | Task | Primary skill | Optional secondary skill |
 |---|---|---|
 | Runtime symptom, failed test, stale data, wrong signal, duplicate order, no-trade state | `diagnosing-trading-bugs` | `runtime-contract-validation` for payload/boundary issues; `codebase-design` for ownership defects |
+| End-to-end quote/depth/freshness/subscription propagation | `market-data-path-audit` | `diagnosing-trading-bugs` for the specific red-capable defect |
+| Strategy/scoring/parameter research or backtest validity | `strategy-research-validation` | `tdd-trading-changes` only for the selected evidence-supported code slice |
+| Current production state or incident diagnosis | `live-runtime-diagnosis` | `diagnosing-trading-bugs` only when evidence points to a code defect |
+| Retired/duplicate architecture cleanup | `architecture-cleanup` | `codebase-design` only when the surviving owner/interface must change |
 | Well-scoped behavior change | `tdd-trading-changes` | `runtime-contract-validation` or `codebase-design` only when needed |
 | Ownership, SSOT, interface, seam, or duplicate-path change | `codebase-design` | `tdd-trading-changes` for implementation |
 | Broker/config/external/cross-module contract change | `runtime-contract-validation` | `tdd-trading-changes` for implementation |

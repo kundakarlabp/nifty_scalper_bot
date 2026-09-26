@@ -1,6 +1,6 @@
 # Repository-scoped coding skills
 
-These task-specific skills supplement the repository contract for ChatGPT, GitHub Copilot, Codex-compatible tools, and human reviewers.
+These task-specific skills supplement the repository contract for ChatGPT/Codex and human reviewers.
 
 ## Fast start
 
@@ -16,6 +16,10 @@ Read `docs/AGENT_START_HERE.md` and `docs/REPO_MAP.md`. For non-trivial work, ge
 | `to-issues-trading-change` | Split a resolved PRD into small vertical implementation slices | `$to-issues-trading-change` |
 | `runtime-contract-validation` | Validate external and cross-module contracts before data/strategy/execution changes | `$runtime-contract-validation` |
 | `diagnosing-trading-bugs` | Deterministic diagnosis of runtime, data, signal, broker, and order-state failures | `$diagnosing-trading-bugs` |
+| `market-data-path-audit` | Trace WebSocket FULL quote/depth/freshness/subscription integrity end to end | `$market-data-path-audit` |
+| `strategy-research-validation` | Separate code correctness from strategy evidence; validate costs, holdouts, and walk-forward results | `$strategy-research-validation` |
+| `live-runtime-diagnosis` | Read-only diagnosis of deployed health, status, snapshots, filtered logs, and incidents | `$live-runtime-diagnosis` |
+| `architecture-cleanup` | Prove and remove retired modules, aliases, wrappers, and duplicate architecture safely | `$architecture-cleanup` |
 | `tdd-trading-changes` | Test-first implementation using one behavior slice at a time | `$tdd-trading-changes` |
 | `codebase-design` | Module/interface/seam design while preserving repository ownership | `$codebase-design` |
 | `pre-merge-trading-review` | Trading-specific code, backtest, risk, execution, deployment, and merge review | `$pre-merge-trading-review` |
@@ -32,6 +36,22 @@ runtime symptom / failed test
 → diagnosing-trading-bugs
 → add runtime-contract-validation only for a boundary/schema issue
 → add codebase-design only for ownership/interface defects
+
+market-data propagation / depth / stale quote / fallback
+→ market-data-path-audit
+→ add diagnosing-trading-bugs only when reproducing and fixing a concrete defect
+
+strategy/scoring/parameter research or backtest
+→ strategy-research-validation
+→ move to tdd-trading-changes only after selecting one supported code change
+
+live production status / incident
+→ live-runtime-diagnosis
+→ stay read-only unless a separate authorized change is required
+
+retired/duplicate architecture cleanup
+→ architecture-cleanup
+→ add codebase-design only when the surviving owner/interface must change
 
 well-scoped behavior change
 → tdd-trading-changes
