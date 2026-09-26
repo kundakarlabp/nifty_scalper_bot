@@ -433,7 +433,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.files or changed_from_git(root, args.base_ref),
         base_ref=args.base_ref,
     )
-    output = json.dumps(asdict(plan), indent=2) if args.format == "json" else markdown(plan)
+    if args.format == "json":
+        output = json.dumps(asdict(plan), indent=2)
+    else:
+        output = markdown(plan)
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(output.rstrip() + "\n", encoding="utf-8")
