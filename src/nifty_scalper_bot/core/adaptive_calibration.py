@@ -93,8 +93,11 @@ class ChronologicalWalkForward:
         for name in ("train_size", "validation_size", "test_size"):
             if int(getattr(self, name)) <= 0:
                 raise ValueError(f"{name} must be positive")
-        if self.step_size is not None and int(self.step_size) <= 0:
-            raise ValueError("step_size must be positive")
+        if self.step_size is not None:
+            if int(self.step_size) <= 0:
+                raise ValueError("step_size must be positive")
+            if int(self.step_size) < int(self.test_size):
+                raise ValueError("step_size must be at least test_size")
 
     def evaluate(
         self,
