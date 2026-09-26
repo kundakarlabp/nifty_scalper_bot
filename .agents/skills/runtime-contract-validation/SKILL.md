@@ -11,6 +11,8 @@ Use this skill to prevent malformed or stale external data from reaching strateg
 
 All external or unstable input is unknown until validated.
 
+Before inventing a new shape, check `docs/contracts/contract_manifest.json`. For documented cross-module contracts, update the owning schema and sample in the same PR as the runtime-owner change. The schemas describe existing owners; they do not create new runtime models.
+
 Validate at these boundaries:
 
 ```text
