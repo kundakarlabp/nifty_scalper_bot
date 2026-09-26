@@ -76,6 +76,7 @@ def test_black_debt_on_changed_lines_fails(tmp_path: Path, monkeypatch) -> None:
     assert ok is False
     assert "Black would modify newly changed lines" in message
 
+
 def test_git_changed_ranges_compares_base_to_worktree(monkeypatch) -> None:
     calls: list[tuple[str, ...]] = []
 
