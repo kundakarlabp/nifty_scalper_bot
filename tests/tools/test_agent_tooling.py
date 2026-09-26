@@ -135,6 +135,7 @@ def test_agent_check_routes_agent_docs_to_tooling_tests(tmp_path: Path) -> None:
             "--files",
             "docs/AGENT_START_HERE.md",
             "docs/AI_OPTIMIZATION_WORKFLOW.md",
+            "docs/ENGINEERING_FAILURE_PATTERNS.md",
             "--format",
             "json",
         ],
