@@ -145,7 +145,7 @@ def _git_changed_ranges(base: str, path: Path) -> list[tuple[int, int]]:
         "diff",
         "--unified=0",
         "--diff-filter=ACMR",
-        f"{base}...HEAD",
+        base,
         "--",
         path.as_posix(),
     )
