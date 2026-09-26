@@ -167,7 +167,7 @@ Pre-merge ring:
 python scripts/agent_check.py --files path/to/changed.py --run full
 ```
 
-`focused` runs compilation plus the selected affected-area tests. `full` also runs the complete repository suite. Final-head CI remains authoritative before merge.
+`focused` is risk-aware: changed-file quality always runs for changed Python, production changes also run architecture ownership checks, and high-risk paths add deterministic E2E. `full` also runs the complete repository suite. Final-head CI remains authoritative before merge.
 
 For documentation-only changes, review the changed paths and ensure no production trading files are touched.
 

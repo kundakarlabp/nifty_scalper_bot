@@ -17,6 +17,24 @@ import sys
 import tempfile
 from typing import Sequence
 
+HIGH_RISK_MARKERS = (
+    "src/nifty_scalper_bot/core/app.py",
+    "src/nifty_scalper_bot/core/instrument_manager.py",
+    "src/nifty_scalper_bot/data/market_data_manager.py",
+    "src/nifty_scalper_bot/streaming/websocket_manager.py",
+    "src/nifty_scalper_bot/strategies/runner.py",
+    "src/nifty_scalper_bot/risk/",
+    "src/nifty_scalper_bot/execution/",
+    "deploy/",
+    "ops/",
+    "railway.toml",
+)
+
+E2E_COMMAND = (
+    "python -m pytest -q tests/e2e/live_sim "
+    '-m "simulation_component or live_runtime_e2e or e2e_live_sim"'
+)
+
 RULES = (
     ("streaming", ("/streaming/", "websocket"), ("tests/streaming", "tests/data")),
     (
@@ -58,6 +76,8 @@ RULES = (
             "ai_optimization_workflow.md",
             "chatgpt_code_workflow.md",
             "engineering_failure_patterns.md",
+            "pull_request_template.md",
+            "architecture_lint.py",
             "scripts/agent_",
         ),
         (
@@ -76,6 +96,8 @@ class Plan:
     commands: tuple[str, ...]
     full_suite_required: bool = True
     base_ref: str = "origin/main"
+    risk_level: str = "medium"
+    risk_reasons: tuple[str, ...] = ()
 
 
 def changed_from_git(root: Path, base_ref: str) -> list[str]:
@@ -115,6 +137,44 @@ def normalize_files(root: Path, files: Sequence[str]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(normalized))
 
 
+def classify_risk(
+    files: Sequence[str],
+    areas: Sequence[str],
+) -> tuple[str, tuple[str, ...]]:
+    """Classify change risk for fast local validation; final CI remains mandatory."""
+    lowered = tuple(path.lower() for path in files)
+    reasons = tuple(
+        marker
+        for marker in HIGH_RISK_MARKERS
+        if any(marker in path for path in lowered)
+    )
+    if reasons:
+        return "high", reasons
+
+    docs_only = bool(lowered) and all(
+        path.endswith((".md", ".txt", ".rst")) or path.startswith(".agents/")
+        for path in lowered
+    )
+    if docs_only:
+        return "low", ("documentation-or-skill-only",)
+
+    if set(areas).issubset({"agent-tooling", "dashboard", "unclassified"}):
+        return "medium", ("non-trading-runtime-change",)
+
+    return "medium", ("production-or-test-change",)
+
+
+def _has_python_changes(files: Sequence[str]) -> bool:
+    return any(path.endswith(".py") for path in files)
+
+
+def _has_production_python(files: Sequence[str]) -> bool:
+    return any(
+        path.startswith("src/nifty_scalper_bot/") and path.endswith(".py")
+        for path in files
+    )
+
+
 def build(
     root: Path,
     files: Sequence[str],
@@ -141,19 +201,31 @@ def build(
             if (root / candidate).exists()
         )
     tests = list(dict.fromkeys(tests))
-    commands = ["python -m compileall -q src dashboard scripts"]
+    area_tuple = tuple(areas or ["unclassified"])
+    risk_level, risk_reasons = classify_risk(normalized, area_tuple)
+
+    commands: list[str] = []
+    if _has_python_changes(normalized):
+        commands.append("python -m compileall -q src dashboard scripts")
+    architecture_lint = root / "scripts" / "architecture_lint.py"
+    if _has_production_python(normalized) and architecture_lint.exists():
+        commands.append("python scripts/architecture_lint.py")
     commands.append(
         "python -m pytest -q " + " ".join(tests)
         if tests
         else "python -m pytest -q tests/architecture"
     )
+    if risk_level == "high" and (root / "tests" / "e2e" / "live_sim").exists():
+        commands.append(E2E_COMMAND)
     commands.append("python -m pytest -q")
     return Plan(
         normalized,
-        tuple(areas or ["unclassified"]),
+        area_tuple,
         tuple(tests),
         tuple(commands),
         base_ref=base_ref,
+        risk_level=risk_level,
+        risk_reasons=risk_reasons,
     )
 
 
@@ -285,6 +357,11 @@ def markdown(plan: Plan) -> str:
             "",
             *(f"- `{item}`" for item in plan.areas),
             "",
+            "## Risk",
+            "",
+            f"- Level: **{plan.risk_level.upper()}**",
+            *(f"- Reason: `{item}`" for item in plan.risk_reasons),
+            "",
             "## Focused tests",
             "",
         ]
@@ -356,11 +433,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.files or changed_from_git(root, args.base_ref),
         base_ref=args.base_ref,
     )
-    output = (
-        json.dumps(asdict(plan), indent=2)
-        if args.format == "json"
-        else markdown(plan)
-    )
+    if args.format == "json":
+        output = json.dumps(asdict(plan), indent=2)
+    else:
+        output = markdown(plan)
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(output.rstrip() + "\n", encoding="utf-8")

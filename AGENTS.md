@@ -1,239 +1,150 @@
-NIFTY Scalper Bot — Repository Guidance
-Mission
-Maintain a deterministic, observable, capital-protective Python 3.12+ NIFTY options trading system using Zerodha KiteConnect, live market data, Telegram controls, strategy gating, risk management, and automated execution.
+# NIFTY Scalper Bot — repository contract
 
-Capital protection takes priority over trade frequency and apparent profitability.
+## Mission
 
-Success means:
+Maintain a deterministic, observable, capital-protective Python NIFTY options trading system.
 
-only valid NIFTY option contracts can reach execution;
-market data and readiness states are explicit;
-strategies consume prepared context;
-risk and broker constraints cannot be bypassed;
-failures and blocks are actionable;
-changed behavior is covered by focused validation.
-Do not optimize for guaranteed profitability. Strategy performance must be evaluated separately through reproducible backtesting, costs, slippage, out-of-sample testing, paper trading, and live metrics.
+Capital protection, data correctness, and broker-state truth take priority over trade frequency or apparent profitability.
 
-Product boundaries
-Trade NIFTY options only.
-NIFTY spot and futures are context only.
-Never place spot or futures orders.
-Every executable signal must resolve to a broker-validated NIFTY option symbol and instrument token.
-Prefer fewer valid trades over noisy signals.
-Do not weaken safety controls to increase trade count.
-Source-of-truth ownership
-Domain	Owner
-Instrument discovery, contracts, symbol/token mapping	core/instrument_manager.py
-Runtime basket commit	core/app.py
-Subscription, quote, depth, OI and hydration state	data/market_data_manager.py
-Tick-to-OHLC bars	data/candle_engine.py
-Strategy-facing data facade	data/data_hub.py
-Strategy orchestration and evaluation	core/strategy_manager.py, strategies/*
-Risk policy and sizing	risk/*
-Order construction and broker execution	execution/*
-Telegram controls and diagnostics	notifications/*
-Do not create competing selectors, instrument caches, contract generators, readiness owners, or execution paths.
+## Product boundaries
 
-Strategies must not:
+- Trade **NIFTY options only**.
+- NIFTY spot and futures are context only; never place spot/futures orders.
+- Every executable signal must resolve to a broker-validated option symbol and token.
+- Never weaken readiness, risk, broker, or execution safeguards to increase trade count.
+- Strategy profitability claims require reproducible costs, slippage, chronological out-of-sample evidence, paper/shadow evidence, and live observation where appropriate.
 
-select or generate contracts;
-fetch broker instruments;
-call broker historical data in the live evaluation loop;
-bypass data, risk, or execution readiness.
-Execution must not bypass:
+## Canonical ownership
 
-execution mode;
-instrument validation;
-risk and daily-loss limits;
-margin and lot-size checks;
-open-position and cooldown checks;
-SL/TP validation;
-broker order-state confirmation.
-Runtime flow
-InstrumentManager selects validated basket
+| Concern | Owner |
+|---|---|
+| Contract discovery, expiry/strike selection, symbol/token mapping | `core/instrument_manager.py` |
+| Runtime basket commit and subsystem wiring | `core/app.py` |
+| Subscriptions, quote/depth/OI, freshness and OHLC hydration | `data/market_data_manager.py` |
+| Tick-to-OHLC construction | `data/candle_engine.py` |
+| Strategy-facing market-data reads | `data/data_hub.py` |
+| Strategy orchestration/evaluation | `core/strategy_manager.py`, `strategies/*` |
+| Risk limits and sizing | `risk/*` |
+| Live placement and broker lifecycle | `execution/order_manager.py` |
+| Position/pending-order state | `execution/position_manager.py` |
+| Protective exits/trailing/recovery | `execution/bracket_manager.py` |
+| Operator commands/diagnostics | `notifications/*` |
+
+Do not create competing selectors, instrument caches, history owners, readiness owners, position owners, or execution paths.
+
+## Runtime path
+
+```text
+InstrumentManager
 → App commits active basket
-→ MarketDataManager subscribes and hydrates
+→ MarketDataManager subscribes/hydrates
 → CandleEngine builds bars
 → DataHub exposes prepared context
-→ StrategyManager evaluates option candidates
-→ Risk validates and sizes
-→ Execution submits option orders
-WebSocket FULL data is primary. Polling is fallback and must not overwrite fresher FULL-depth data.
+→ StrategyManager / StrategyRunner evaluate
+→ Risk validates/sizes
+→ OrderManager submits/reconciles
+→ PositionManager owns position state
+→ BracketManager manages exits
+```
 
-Preserve through the data path:
+## Hard invariants
 
-symbol, token, timestamp, timestamp_ms, bid, ask, spread,
-depth, OI, source, freshness, stale state, tradable_quote
+### Market data
 
-Market-data invariants:
+- WebSocket FULL data is the primary live source.
+- Preserve symbol/token identity, timestamps, bid/ask/spread, depth, OI, source, freshness, stale state, and tradable-quote state where required.
+- Normalize at the owning boundary; do not repeatedly reshape data downstream.
+- Freshness is monotonic: older polling, cached, synthetic, or LTP-only data cannot overwrite fresher FULL data.
+- A degraded quote remains explicitly degraded.
+- Reconnect and basket rotation must restore the correct subscriptions.
 
-- Normalize broker/WebSocket data at the owning boundary; do not repeatedly reshape it downstream.
-- Freshness ordering is monotonic: older polling, synthetic, cached, or LTP-only data cannot overwrite fresher WebSocket FULL state.
-- A degraded quote remains explicitly degraded; the presence of an LTP alone must not silently make it tradable when bid/ask/depth is required.
-- Reconnect, basket rotation, and fallback recovery must preserve symbol/token identity and required subscriptions.
+### Strategy
 
-Do not evaluate a strategy until its explicitly required data is ready.
+- Strategies consume prepared context; they do not select contracts, fetch broker instruments/history, or place orders.
+- Underlying direction comes from the canonical direction/context authority, not option-premium direction alone.
+- No future bar, incomplete-bar leakage, test-period leakage, or look-ahead.
+- Identical prepared input/state must produce deterministic decisions.
+- Missing optional context may reduce confidence; it must not become a new hard blocker unless explicitly required by the active strategy.
 
-Missing optional context should reduce confidence, not automatically block trading, unless the active strategy declares that context mandatory.
+### Risk and execution
 
-Strategy and research invariants:
+For a BUY:
 
-- Underlying direction must come from the repository's canonical direction/context authority; option-premium data must not independently authorize underlying direction.
-- No future-bar, incomplete-bar, look-ahead, or test-period leakage may influence a live-equivalent signal.
-- Identical prepared inputs and state must produce deterministic strategy decisions.
-- Strategies may score and explain candidates but must not place orders, select contracts, or fetch broker data directly.
-- Parameter or scoring changes require comparison with the current validated baseline using realistic costs and chronological out-of-sample evidence. Code correctness alone is not evidence of profitability.
+```text
+stop_loss < confirmed_entry_or_fill < take_profit
+```
 
-Blockers and gates
-Use the sequence:
+Position size is bounded by both risk and available margin.
 
+- Broker-confirmed fills/positions own executed quantity.
+- Requested or acknowledged quantity is not proof of a fill.
+- Duplicate entry intent must remain idempotent.
+- Rejected/cancelled/timed-out/partial orders must remain explicit.
+- Exit/bracket logic uses reconciled position state and cannot create an independent entry path.
+- Failed broker operations must never be reported as success.
+
+### Blockers and observability
+
+Use the gate sequence:
+
+```text
 data → strategy → risk → execution
-A gate must protect an actual invariant and have one owner. Before adding a gate, check whether the same condition already exists or whether the upstream state should be fixed instead.
+```
 
-Every blocked candidate must expose:
+Every material block should identify stage, symbol, reason/code, expected value, observed value, recoverability, and owner where available. Fix the earliest incorrect layer rather than adding downstream compensating gates.
 
-stage
-symbol
-blocker_code
-required_value
-actual_value
-recoverable
-owner
-Reuse existing blocker codes. Add a new code only when no current code accurately represents the condition.
+## Change discipline
 
-A healthy runtime must not become a permanent no-trade system because of duplicated, contradictory, or nonessential gates.
-
-Risk and order invariants
-For a BUY order:
-
-stop_loss < execution_or_fill_price < take_profit
-Anchor SL/TP to the confirmed execution/fill price when required by the order workflow.
-
-Position size is limited by both risk and margin:
-
-risk_lots = risk_amount / risk_per_lot
-margin_lots = available_margin / margin_per_lot
-final_lots = min(risk_lots, margin_lots)
-If fewer than one valid lot can be traded, skip and record the exact reason.
-
-Order-state invariants:
-
-- Duplicate entry intent must remain idempotent across retries, reconnects, and delayed acknowledgements.
-- Actual broker fills/positions own executed quantity; requested quantity is not proof of a fill.
-- Rejected, cancelled, timed-out, or partially filled orders must not be represented as clean active positions or successful completion.
-- Exit/bracket logic must operate on reconciled position state and must not create an independent placement path.
-
-Do not enable live execution, modify credentials, or weaken production risk limits without explicit authorization.
-
-Change discipline
 Before a non-trivial edit:
 
-read the closest applicable AGENTS.md;
-for Python/tooling work, consult only the relevant entries in `docs/ENGINEERING_FAILURE_PATTERNS.md` so known formatter, lint, typing, test-harness, and merge mistakes are not reintroduced;
-trace the relevant runtime path and reproduce the problem when feasible;
-identify the owner and affected interfaces;
-define the smallest coherent change and regression test;
-check whether NIMS-Chrome or another declared integration is actually affected.
-Prefer existing owners and public interfaces. Do not add dependencies, helper modules, broad refactors, or compatibility layers unless necessary for the requested outcome.
+1. Read `docs/AGENT_START_HERE.md` and `docs/REPO_MAP.md`.
+2. Use `scripts/agent_context.py` to rank relevant files/tests when the location is not already obvious.
+3. Load one primary skill; add another only when the task genuinely crosses concerns.
+4. Read only matching entries from `docs/ENGINEERING_FAILURE_PATTERNS.md`.
+5. Trace symptom → owner → downstream safety effect.
+6. Define one observable invariant and the smallest coherent change.
+7. Add or identify a regression that proves the defect when practical.
+8. Do not mix unrelated cleanup, strategy tuning, architecture changes, and runtime fixes.
 
-Do not modify unrelated files. Preserve existing user changes.
+Prefer existing owners/public interfaces. Do not add helpers, wrappers, compatibility layers, dependencies, or managers unless the requested behavior cannot be expressed cleanly through the existing architecture.
 
-For every coherent Python edit, run the changed-file quality gate before broad tests. Prefer `python scripts/agent_check.py --files <changed files> --run focused`; it reuses the repository's delta-aware Ruff, Black, and mypy checks before compilation and focused tests. Do not wait for remote CI to discover locally detectable style/type errors.
+## Validation
 
-When a failure pattern recurs, encode the prevention at the lowest durable layer: formatter/linter/type checker, regression/architecture test, agent tooling, then concise documentation. Do not grow prompts with one-off anecdotes.
+Use the repository tooling rather than hand-building validation commands:
 
-Proof discipline:
+```bash
+python scripts/agent_check.py --files <changed files> --run focused
+python scripts/agent_check.py --files <changed files> --run full
+```
 
-- Never report a test, backtest, deployment, merge, log state, or production fix as verified unless the stated check was actually observed.
-- Distinguish repository/code evidence from current production evidence.
-- Prefer one primary task skill; add a specialist skill only when the task crosses that concern.
-- For market-data integrity, strategy research, live-runtime diagnosis, or architecture cleanup, use the corresponding repository skill instead of inventing a parallel procedure.
-- If evidence is unavailable or contradictory, label the result unknown/blocked rather than filling the gap with inference.
+The focused ring is risk-aware and runs changed-file quality checks before affected tests. Final-head GitHub CI remains authoritative before merge.
 
-When ownership or runtime behavior changes, update the appropriate architecture documentation. Use top-of-file role notes only where they clarify a non-obvious boundary; do not add repetitive boilerplate to every file.
+Before merge, use the merge guard with the exact validated base/head SHAs:
 
-Validated correction and publishing workflow
-For requested code fixes, use the repository's established one-issue-at-a-time workflow:
+```bash
+python scripts/agent_merge_guard.py \
+  --validated-base <base-sha> \
+  --validated-head <head-sha>
+```
 
-1. Resolve the current authoritative `main` commit through GitHub and start from that exact commit in a clean branch/worktree. Do not edit a stale or dirty checkout, and do not include runtime artifacts such as `positions.json`, caches, logs, or generated data.
-2. Deep-trace the failing path before editing: observed log/test symptom → entry point → owning component → downstream safety effect. Read the complete relevant functions and adjacent interfaces; distinguish the root code defect from data, environment, timing, and test-fixture failures.
-3. Define one small behavioral invariant and first add or identify a regression that fails for the defect. Reuse the existing owner, interface, cache, configuration, and journal. Prefer a few coherent lines over a new helper/module, broad refactor, duplicated mechanism, weakened threshold, or unrelated optimization.
-4. Validate in widening rings: focused regression, adjacent module/suite, production-file compilation, changed-file Ruff/Black/mypy where configured, then the complete repository suite. Preserve the exact commands and results for the PR.
-5. Treat environment-only dependency failures and suspected timing/order-sensitive failures as evidence to investigate, not automatic code failures. Reproduce the failing test alone and rerun the remaining suite when justified. Never hide a genuine regression or describe an unrun suite as passing.
-6. Commit and publish only the intended validated files. Confirm the remote branch is based on the authoritative `main` commit and that every remote blob matches the locally tested blob before opening the PR.
-7. Open one focused PR with the root cause, behavior change, preserved behavior, and validation. Hold merge until all required GitHub workflows are successful, including full-suite, execution-safety, market-aware/E2E, and changed-code quality jobs when present.
-8. Merge the unchanged validated head, verify the resulting `main` commit, then start the next correction from that merge. Do not stack several unmerged trading-path fixes.
+Never claim a test, replay, backtest, deployment, production state, or merge is verified unless it was actually observed.
 
-GitHub access fallback:
+## Skills and deeper procedures
 
-- Local `git`/`gh` is useful but is not the only valid publishing path for this repository.
-- If `gh` is missing, unauthenticated, or local push credentials are unavailable, first check the authenticated GitHub connector and repository permissions.
-- When the connector has access, use its Git data and pull-request operations to create the branch, blobs/tree/commit, update the ref, open the PR, inspect workflow status/logs, and merge. Verify exact blob equality against the locally validated files.
-- Do not stop or ask the user to install `gh` merely because the CLI path is unavailable while the authenticated connector can complete the work safely.
-- Report a publishing blocker only after both the local GitHub path and the connector path are unavailable or require user authentication/authority. A dirty or stale checkout is not a blocker; preserve it and create a clean worktree from the authoritative commit.
+- Routing: `docs/AGENT_START_HERE.md`
+- Architecture/navigation: `docs/REPO_MAP.md`
+- ChatGPT/GitHub workflow: `docs/CHATGPT_CODE_WORKFLOW.md`
+- Optimization workflow: `docs/AI_OPTIMIZATION_WORKFLOW.md`
+- Recurring failures: `docs/ENGINEERING_FAILURE_PATTERNS.md`
+- Tooling design: `docs/AGENT_TOOLING_DESIGN.md`
+- Specialist skills: `.agents/skills/README.md`
 
-Cross-repository integration
-NIMS-Chrome is a dependent repository only when the requested behavior crosses a shared interface, configuration, schema, messaging protocol, deployment contract, or user workflow.
+Keep this file compact. Detailed procedures belong in those documents/skills and executable guards.
 
-For such tasks:
+## Production and secrets
 
-trace the integration before editing;
-identify the contract owner;
-update all repositories required for a complete compatible change;
-avoid speculative edits in unaffected repositories;
-validate both sides of the boundary;
-report repositories that were unavailable or not validated.
-Error handling and observability
-Never suppress failures or return false success.
+Production diagnosis is read-only by default. Do not restart, redeploy, enable live execution, change credentials, or weaken risk limits merely to inspect state.
 
-At process boundaries, a broad exception is acceptable only when it provides:
+Never commit or print secrets, tokens, broker session material, private account data, or operator-only credentials.
 
-stage and symbol/context;
-actionable error details;
-safe fallback or fail-closed behavior;
-correct success/failure state.
-Do not log secrets, tokens, credentials, or sensitive account data.
-
-Validation
-Run the smallest relevant checks first, followed by broader checks when proportionate to the change.
-
-Standard checks:
-
-python -m compileall -q src
-pytest -q
-Useful focused suites:
-
-pytest -q tests/data
-pytest -q tests/strategies
-pytest -q tests/core/test_strategy_manager_context_to_option_propagation.py
-pytest -q tests/execution tests/risk
-Add regression coverage for recurring architectural failures, including:
-
-no spot/futures execution;
-no manual live contract generation;
-no option-derived futures selection;
-no broker-instrument access from strategies;
-active-basket-only subscriptions;
-no contract selection in DataHub;
-explicit hydration blockers;
-no bypass of risk or execution gates.
-Report the commands actually run and their results. If a check cannot run, state why and perform the best available alternative.
-
-Completion criteria
-A change is complete when:
-
-the requested behavior is implemented;
-ownership remains unambiguous;
-option-only execution is preserved;
-failure behavior is explicit;
-focused regression coverage exists;
-relevant validation passes or the limitation is reported;
-affected documentation and integration contracts are consistent.
-Final implementation report:
-
-Outcome:
-Files changed:
-Validation:
-Cross-repository impact:
-Remaining risk:
-For diagnosis-only work, report prioritized findings and evidence without editing files.
+Cross-repository edits are required only when the requested behavior changes a real shared interface, schema, protocol, deployment contract, or user workflow.

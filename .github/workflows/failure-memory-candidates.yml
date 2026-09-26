@@ -1,0 +1,35 @@
+name: Failure memory candidates
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  summarize:
+    if: ${{ github.event.workflow_run.conclusion == 'failure' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Collect failed CI log lines
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: >-
+          gh run view ${{ github.event.workflow_run.id }}
+          --repo ${{ github.repository }}
+          --log-failed
+          > /tmp/ci-failed.log || true
+      - name: Classify known failure patterns
+        run: |
+          python scripts/agent_failure_learn.py /tmp/ci-failed.log             --threshold 2             --format text | tee /tmp/failure-memory.txt
+          cat /tmp/failure-memory.txt >> "$GITHUB_STEP_SUMMARY"

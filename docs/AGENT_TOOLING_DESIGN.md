@@ -85,6 +85,16 @@ A token changes authorization, not code understanding. It does not automatically
 
 The connected GitHub application already supports authorized repository reads and writes in ChatGPT. The principal efficiency gains come from reducing discovery and context volume, not from changing the credential mechanism.
 
+## Executable guardrails
+
+- `scripts/agent_check.py` classifies change risk and selects the smallest safe validation ring.
+- `scripts/architecture_lint.py` enforces mechanically provable ownership boundaries.
+- `scripts/agent_merge_guard.py` rejects stale validated base/head combinations before merge.
+- `scripts/agent_failure_learn.py` classifies repeated CI failures without mutating repository memory.
+- `.github/workflows/failure-memory-candidates.yml` surfaces learning candidates after failed CI.
+
+These tools turn recurring reasoning into deterministic repository feedback.
+
 ## Safety boundaries
 
 - Generated context never imports or executes bot source.

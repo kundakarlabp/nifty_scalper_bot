@@ -14,7 +14,8 @@ Use the smallest amount of repository context that can safely answer the task.
 3. Load **one primary skill** for the task. Add a secondary skill only when the task actually crosses that concern.
 4. For Python/tooling edits, scan the matching entries in `docs/ENGINEERING_FAILURE_PATTERNS.md`; do not load unrelated patterns.
 5. Read full `AGENTS.md` before editing a high-risk runtime path.
-6. Validate the changed surface first. `agent_check.py --run focused` runs delta-aware Ruff/Black/mypy before compile/tests; require full validation and final-head CI before merge.
+6. Validate the changed surface first. `agent_check.py` classifies risk, runs delta-aware Ruff/Black/mypy, and adds architecture/E2E checks when warranted.
+7. Require full validation and final-head CI before merge, then run `agent_merge_guard.py` against the exact validated base/head.
 
 ## Minimal skill routing
 
@@ -58,7 +59,7 @@ Generate a focused validation plan:
 python scripts/agent_check.py --files path/to/changed.py
 ```
 
-Execute the fast validation ring:
+Execute the risk-aware fast validation ring:
 
 ```bash
 python scripts/agent_check.py --files path/to/changed.py --run focused
