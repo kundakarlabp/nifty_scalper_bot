@@ -75,3 +75,23 @@ def test_black_debt_on_changed_lines_fails(tmp_path: Path, monkeypatch) -> None:
 
     assert ok is False
     assert "Black would modify newly changed lines" in message
+
+def test_git_changed_ranges_compares_base_to_worktree(monkeypatch) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    class Result:
+        returncode = 0
+        stdout = "@@ -1 +1 @@\n"
+        stderr = ""
+
+    def fake_run(*args: str, **_kwargs):
+        calls.append(args)
+        return Result()
+
+    monkeypatch.setattr(_MODULE, "_run", fake_run)
+
+    assert _MODULE._git_changed_ranges("origin/main", Path("sample.py")) == [(1, 1)]
+    assert calls
+    assert "origin/main" in calls[0]
+    assert "HEAD" not in calls[0]
+
