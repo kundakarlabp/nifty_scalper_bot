@@ -5,6 +5,8 @@ import pytest
 from nifty_scalper_bot.core.adaptive_calibration import (
     AdaptiveParameterStore,
     ChronologicalWalkForward,
+    PerformanceSummary,
+    TradeStats,
     WalkForwardOptimizer,
 )
 
@@ -367,3 +369,50 @@ def test_walk_forward_rejects_nonpositive_validation_trade_floor() -> None:
             test_size=2,
             min_validation_trades=0,
         )
+
+
+@pytest.mark.parametrize("bad_pnl", [float("nan"), float("inf"), float("-inf")])
+def test_performance_summary_rejects_nonfinite_pnl(bad_pnl: float) -> None:
+    with pytest.raises(ValueError, match="pnl values must be finite"):
+        PerformanceSummary.from_pnl([1.0, bad_pnl])
+
+
+@pytest.mark.parametrize("bad_pnl", [float("nan"), float("inf"), float("-inf")])
+def test_adaptive_store_rejects_nonfinite_pnl(bad_pnl: float) -> None:
+    store = AdaptiveParameterStore(window_trades=10)
+
+    with pytest.raises(ValueError, match="pnl must be finite"):
+        store.record_trade("s1", bad_pnl)
+
+    assert store.get_stats("s1") == TradeStats()
+
+
+def test_optimizer_fails_closed_on_nonfinite_candidate_score() -> None:
+    stats = TradeStats(
+        win_rate=0.6,
+        rolling_sharpe=1.0,
+        max_drawdown=10.0,
+    )
+    current = {
+        "momentum_z_threshold": 1.0,
+        "microvol_percentile": 60.0,
+        "spread_threshold_pct": 0.2,
+    }
+    opt = WalkForwardOptimizer(
+        alpha=1.0,
+        drawdown_threshold=1.0,
+        allow_parameter_updates=True,
+    )
+
+    tuned = opt.optimize(
+        "s1",
+        "trend",
+        stats,
+        current,
+        candidate_evaluator=lambda _params: float("nan"),
+    )
+
+    assert tuned == current
+    assert opt._params == {}
+    assert opt._regime_params == {}
+    assert opt.risk_scale == 1.0
