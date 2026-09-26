@@ -141,6 +141,9 @@ def test_chronological_walk_forward_keeps_test_untouched() -> None:
     )
 
     assert len(result.folds) == 2
+    assert result.folds[0].baseline_validation.total_net_pnl == 2.0
+    assert result.folds[0].validation_candidate_count == 2
+    assert result.folds[0].eligible_validation_candidate_count == 2
     assert result.folds[0].selected_candidate == "overfit"
     assert result.folds[0].candidate_test.total_net_pnl == -10.0
     assert result.folds[0].baseline_test.total_net_pnl == 2.0
@@ -281,6 +284,9 @@ def test_walk_forward_rejects_zero_trade_validation_candidate() -> None:
     )
 
     assert result.folds[0].selected_candidate == "baseline"
+    assert result.folds[0].baseline_validation.trade_count == 2
+    assert result.folds[0].validation_candidate_count == 1
+    assert result.folds[0].eligible_validation_candidate_count == 0
     assert result.folds[0].selected_validation.trade_count == 2
     assert result.folds[0].candidate_test == result.folds[0].baseline_test
     assert result.aggregate_candidate == result.aggregate_baseline
@@ -357,6 +363,8 @@ def test_walk_forward_respects_declared_validation_trade_floor() -> None:
     )
 
     assert result.folds[0].selected_candidate == "baseline"
+    assert result.folds[0].validation_candidate_count == 1
+    assert result.folds[0].eligible_validation_candidate_count == 0
     assert result.folds[0].candidate_test == result.folds[0].baseline_test
     assert sparse_test_calls == 0
 
