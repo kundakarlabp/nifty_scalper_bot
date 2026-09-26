@@ -39,9 +39,7 @@ async def test_backticked_repository_doc_links_exist() -> None:
 
 
 async def test_pr_template_requires_validation_and_residual_risk() -> None:
-    text = (ROOT / ".github" / "pull_request_template.md").read_text(
-        encoding="utf-8"
-    )
+    text = (ROOT / ".github" / "pull_request_template.md").read_text(encoding="utf-8")
     for heading in (
         "## Objective",
         "## Root cause / rationale",
