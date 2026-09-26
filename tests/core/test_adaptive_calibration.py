@@ -128,6 +128,7 @@ def test_chronological_walk_forward_keeps_test_untouched() -> None:
         train_size=4,
         validation_size=2,
         test_size=2,
+        min_validation_trades=1,
     ).evaluate(
         records,
         baseline=evaluator("baseline"),
@@ -155,7 +156,7 @@ def test_chronological_walk_forward_rejects_unsorted_records() -> None:
         return [0.0 for _ in evaluation]
 
     with pytest.raises(ValueError, match="chronological"):
-        ChronologicalWalkForward(1, 1, 1).evaluate(
+        ChronologicalWalkForward(1, 1, 1, min_validation_trades=1).evaluate(
             records,
             baseline=evaluator,
             candidates={"candidate": evaluator},
@@ -270,6 +271,7 @@ def test_walk_forward_rejects_zero_trade_validation_candidate() -> None:
         train_size=2,
         validation_size=2,
         test_size=2,
+        min_validation_trades=1,
     ).evaluate(
         records,
         baseline=baseline,
@@ -302,6 +304,7 @@ def test_walk_forward_requires_validation_improvement_over_baseline() -> None:
         train_size=2,
         validation_size=2,
         test_size=2,
+        min_validation_trades=1,
     ).evaluate(
         records,
         baseline=baseline,
@@ -321,5 +324,46 @@ def test_walk_forward_rejects_overlapping_test_windows() -> None:
             train_size=4,
             validation_size=2,
             test_size=3,
+            min_validation_trades=1,
             step_size=2,
+        )
+
+
+def test_walk_forward_respects_declared_validation_trade_floor() -> None:
+    records = [{"timestamp": float(index)} for index in range(6)]
+    sparse_test_calls = 0
+
+    def baseline(_fit, evaluation):
+        return [1.0 for _ in evaluation]
+
+    def sparse_candidate(_fit, evaluation):
+        nonlocal sparse_test_calls
+        if evaluation[0]["timestamp"] >= 4.0:
+            sparse_test_calls += 1
+            return [100.0]
+        return [10.0]
+
+    result = ChronologicalWalkForward(
+        train_size=2,
+        validation_size=2,
+        test_size=2,
+        min_validation_trades=2,
+    ).evaluate(
+        records,
+        baseline=baseline,
+        candidates={"sparse": sparse_candidate},
+    )
+
+    assert result.folds[0].selected_candidate == "baseline"
+    assert result.folds[0].candidate_test == result.folds[0].baseline_test
+    assert sparse_test_calls == 0
+
+
+def test_walk_forward_rejects_nonpositive_validation_trade_floor() -> None:
+    with pytest.raises(ValueError, match="min_validation_trades must be positive"):
+        ChronologicalWalkForward(
+            train_size=2,
+            validation_size=2,
+            test_size=2,
+            min_validation_trades=0,
         )
