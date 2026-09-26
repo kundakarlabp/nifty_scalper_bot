@@ -341,4 +341,3 @@ class WalkForwardOptimizer:
             + self.alpha * float(value)
             for key, value in target.items()
         }
-
