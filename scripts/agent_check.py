@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """File purpose: Build or execute a focused validation plan for repository changes.
 Key responsibilities: Classify changed files, select existing tests, and keep the full suite mandatory before merge.
-Operational constraints: Never execute broker or runtime entry points; run only repository quality, compile, and test commands.
+Operational constraints: Never execute broker or runtime entry points; run only
+repository quality, compile, and test commands.
 """
 
 from __future__ import annotations
