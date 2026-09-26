@@ -1,0 +1,15 @@
+{
+  "rows": [
+    {
+      "symbol": "NFO:NIFTY2692424500CE",
+      "quantity": 65,
+      "raw": {
+        "tradingsymbol": "NIFTY2692424500CE",
+        "quantity": 65,
+        "product": "MIS"
+      }
+    }
+  ],
+  "source": "net",
+  "fetched_at": 1790221560
+}
