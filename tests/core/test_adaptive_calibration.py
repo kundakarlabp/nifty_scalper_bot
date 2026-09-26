@@ -342,7 +342,7 @@ def test_walk_forward_rejects_overlapping_test_windows() -> None:
             validation_size=2,
             test_size=3,
             min_validation_trades=1,
-        min_validation_expectancy_improvement=0.0,
+            min_validation_expectancy_improvement=0.0,
             step_size=2,
         )
 
@@ -387,7 +387,7 @@ def test_walk_forward_rejects_nonpositive_validation_trade_floor() -> None:
             validation_size=2,
             test_size=2,
             min_validation_trades=0,
-        min_validation_expectancy_improvement=0.0,
+            min_validation_expectancy_improvement=0.0,
         )
 
 
@@ -465,6 +465,7 @@ def test_walk_forward_requires_declared_expectancy_margin() -> None:
     )
 
     assert result.folds[0].selected_candidate == "baseline"
+    assert result.folds[0].required_validation_expectancy_improvement == 0.05
     assert result.folds[0].candidate_test == result.folds[0].baseline_test
     assert candidate_test_calls == 0
 
