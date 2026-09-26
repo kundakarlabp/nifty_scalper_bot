@@ -177,7 +177,7 @@ Focused test → adjacent suite → full suite. Compare the failure signature ac
 
 **Earliest detector**
 
-Compare the current `main` SHA, PR base SHA, and PR head SHA immediately before merge.
+Run `scripts/agent_merge_guard.py --validated-base <sha> --validated-head <sha>` immediately before merge. It fails closed when the target base or validated head moved.
 
 ## Recurring bot-engineering patterns
 
@@ -228,6 +228,12 @@ python scripts/agent_check.py --files <changed files> --run full
 ```
 
 GitHub final-head CI remains authoritative before merge.
+
+## Controlled learning from CI
+
+Failed CI runs are summarized by `.github/workflows/failure-memory-candidates.yml`. The workflow feeds failed log lines to `scripts/agent_failure_learn.py`, which only reports known-pattern candidates. It never edits this document automatically.
+
+Use repeated candidates as evidence to add or strengthen an executable guard first. Promote a new prose pattern only after root-cause review.
 
 ## Maintaining this memory
 
