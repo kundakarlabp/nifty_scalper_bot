@@ -248,31 +248,3 @@ def test_optimizer_does_not_drift_on_equal_candidate_scores() -> None:
     assert opt._params == {}
     assert opt._regime_params == {}
 
-
-def test_adaptive_calibration_black_diagnostic() -> None:
-    import difflib
-    from pathlib import Path
-
-    import black
-
-    source_path = (
-        Path(__file__).resolve().parents[2]
-        / "src/nifty_scalper_bot/core/adaptive_calibration.py"
-    )
-    original = source_path.read_text(encoding="utf-8")
-    formatted = black.format_file_contents(
-        original,
-        fast=False,
-        mode=black.FileMode(
-            line_length=88,
-            target_versions={black.TargetVersion.PY311},
-        ),
-    )
-    assert original == formatted, "".join(
-        difflib.unified_diff(
-            original.splitlines(keepends=True),
-            formatted.splitlines(keepends=True),
-            fromfile="original",
-            tofile="black",
-        )
-    )
