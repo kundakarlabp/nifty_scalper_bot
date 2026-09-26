@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "position_snapshot",
+  "title": "Authoritative broker position snapshot",
+  "type": "object",
+  "required": [
+    "rows",
+    "source",
+    "fetched_at"
+  ],
+  "properties": {
+    "rows": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "symbol",
+          "quantity",
+          "raw"
+        ],
+        "properties": {
+          "symbol": {
+            "type": "string",
+            "minLength": 1
+          },
+          "quantity": {
+            "type": "integer"
+          },
+          "raw": {
+            "type": "object"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "source": {
+      "type": "string",
+      "minLength": 1
+    },
+    "fetched_at": {
+      "type": "number",
+      "minimum": 0
+    }
+  },
+  "additionalProperties": false
+}

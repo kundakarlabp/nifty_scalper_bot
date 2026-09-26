@@ -95,6 +95,16 @@ The connected GitHub application already supports authorized repository reads an
 
 These tools turn recurring reasoning into deterministic repository feedback.
 
+## Validation assets
+
+- `docs/contracts/contract_manifest.json` indexes machine-readable boundary contracts and executable samples.
+- `tests/fixtures/replay/golden_market_path.csv` is the canonical sanitized market-path replay fixture.
+- `tests/properties/` uses generated inputs to test deterministic invariants rather than only hand-picked examples.
+- `benchmarks/agent/historical_regressions.json` is the historical coding-agent regression set.
+- `scripts/agent_benchmark.py` validates or runs selected historical regression cases without starting the live runtime.
+
+These assets extend existing runtime owners and replay infrastructure; they are not parallel production systems.
+
 ## Safety boundaries
 
 - Generated context never imports or executes bot source.

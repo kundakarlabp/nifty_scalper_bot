@@ -73,6 +73,12 @@ Do not infer correctness from an upstream object alone. Prove the required field
    - readiness uses the canonical freshness/quality state
    - execution and bracket logic consume the same authoritative current quote contract where required
 
+## Golden replay
+
+For a market-data defect that can be represented safely, extend or derive a minimal case from `tests/fixtures/replay/golden_market_path.csv` and run it through the existing `ReplayHarness`. Keep the fixture sanitized, deterministic, and broker-free. Do not create a second replay engine.
+
+The documented tick contract is `docs/contracts/canonical_market_tick.schema.json`; use it to check stable field meaning while the live implementation remains authoritative.
+
 ## Regression matrix
 
 Add the smallest tests needed for the defect, selecting from:

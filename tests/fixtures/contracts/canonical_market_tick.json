@@ -1,0 +1,35 @@
+{
+  "symbol": "NFO:NIFTY2692424500CE",
+  "instrument_token": 111001,
+  "timestamp": "2026-09-24T09:16:00+05:30",
+  "timestamp_ms": 1790221560000,
+  "last_price": 101.5,
+  "ltp": 101.5,
+  "bid": 101.4,
+  "ask": 101.6,
+  "spread": 0.2,
+  "bid_quantity": 650,
+  "ask_quantity": 585,
+  "depth": {
+    "buy": [
+      {
+        "price": 101.4,
+        "quantity": 650
+      }
+    ],
+    "sell": [
+      {
+        "price": 101.6,
+        "quantity": 585
+      }
+    ]
+  },
+  "oi": 125000,
+  "source": "websocket_full",
+  "freshness": {
+    "age_ms": 45
+  },
+  "stale": false,
+  "tradable_quote": true,
+  "trace_id": "sample:tick:1"
+}

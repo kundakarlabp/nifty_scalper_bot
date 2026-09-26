@@ -1,0 +1,23 @@
+{
+  "snapshots": [
+    {
+      "available_from": "2026-09-24T09:15:00+05:30",
+      "basket": {
+        "basket_version": "golden-v1",
+        "selected_ce": "NFO:NIFTY26O0124900CE",
+        "selected_ce_token": 111001,
+        "selected_pe": "NFO:NIFTY26O0124900PE",
+        "selected_pe_token": 111002,
+        "option_expiry": "2026-10-01",
+        "option_symbols": [
+          "NFO:NIFTY26O0124900CE",
+          "NFO:NIFTY26O0124900PE"
+        ],
+        "option_tokens": [
+          111001,
+          111002
+        ]
+      }
+    }
+  ]
+}

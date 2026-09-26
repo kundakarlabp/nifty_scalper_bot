@@ -1,0 +1,86 @@
+{
+  "version": 1,
+  "purpose": "Offline benchmark of historically important regressions for coding-agent changes.",
+  "cases": [
+    {
+      "id": "market-data-freshness",
+      "category": "market-data",
+      "symptom": "Fresher WebSocket quote is replaced or ignored in favor of stale/lower-quality data.",
+      "invariant": "Fresh canonical quote/depth remains authoritative downstream.",
+      "skill": "market-data-path-audit",
+      "pytest_targets": [
+        "tests/execution/test_order_manager_freshest_cached_quote.py"
+      ]
+    },
+    {
+      "id": "live-entry-quote-evidence",
+      "category": "execution",
+      "symptom": "LTP-only or insufficient-depth quote reaches live entry.",
+      "invariant": "Live entry requires executable bid/ask/depth evidence.",
+      "skill": "diagnosing-trading-bugs",
+      "pytest_targets": [
+        "tests/execution/test_order_manager_trade_plan.py"
+      ]
+    },
+    {
+      "id": "partial-fill-quantity-truth",
+      "category": "execution",
+      "symptom": "Requested quantity is treated as broker-filled quantity after partial fill.",
+      "invariant": "Broker fill/pending quantities remain execution truth.",
+      "skill": "diagnosing-trading-bugs",
+      "pytest_targets": [
+        "tests/execution/test_order_manager_trade_plan.py"
+      ]
+    },
+    {
+      "id": "duplicate-position-authority",
+      "category": "execution",
+      "symptom": "Ambiguous duplicate broker-position rows are accepted as authoritative.",
+      "invariant": "Malformed or ambiguous broker position snapshots fail closed.",
+      "skill": "runtime-contract-validation",
+      "pytest_targets": [
+        "tests/execution/test_execution_safety_audit_fixes.py"
+      ]
+    },
+    {
+      "id": "strategy-bypass-architecture",
+      "category": "architecture",
+      "symptom": "Strategy bypasses canonical TradePlan/order ownership.",
+      "invariant": "Live-capable strategy code cannot create an independent execution path.",
+      "skill": "architecture-cleanup",
+      "pytest_targets": [
+        "tests/architecture/test_canonical_bo_ownership.py"
+      ]
+    },
+    {
+      "id": "replay-parity",
+      "category": "backtest",
+      "symptom": "Historical/backtest path diverges from the live-equivalent component pipeline.",
+      "invariant": "Replay parity reports drift instead of silently accepting it.",
+      "skill": "strategy-research-validation",
+      "pytest_targets": [
+        "tests/backtests/test_replay_parity.py"
+      ]
+    },
+    {
+      "id": "risk-budget-sizing",
+      "category": "risk",
+      "symptom": "Position sizing breaches per-trade or remaining daily loss budget.",
+      "invariant": "No lot is admitted when stop-risk exceeds the canonical budget.",
+      "skill": "strategy-research-validation",
+      "pytest_targets": [
+        "tests/risk/test_risk_rejection_codes.py"
+      ]
+    },
+    {
+      "id": "trade-plan-identity",
+      "category": "execution",
+      "symptom": "Order plan identity or lifecycle provenance drifts before broker submission.",
+      "invariant": "Executable plan identity remains canonical through entry gating.",
+      "skill": "runtime-contract-validation",
+      "pytest_targets": [
+        "tests/execution/test_trade_plan_identity_guard.py"
+      ]
+    }
+  ]
+}

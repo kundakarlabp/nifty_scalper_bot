@@ -1,0 +1,19 @@
+{
+  "symbol": "NFO:NIFTY2692424500CE",
+  "side": "BUY",
+  "quantity": 65,
+  "entry_price": 101.6,
+  "stop_loss": 96.6,
+  "take_profit": 111.6,
+  "intent": "ENTRY",
+  "trace_id": "sample:trade:1",
+  "signal_id": "signal:1",
+  "trade_lifecycle_id": "lifecycle:1",
+  "requested_lots": 1,
+  "resolved_lot_size": 65,
+  "strategy_name": "VWAPPro",
+  "trade_provenance": {
+    "setup_name": "continuation_pullback",
+    "regime": "TREND"
+  }
+}

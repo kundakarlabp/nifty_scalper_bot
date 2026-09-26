@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "canonical_market_tick",
+  "title": "Canonical market tick",
+  "type": "object",
+  "required": [
+    "symbol",
+    "timestamp",
+    "source",
+    "last_price",
+    "ltp"
+  ],
+  "properties": {
+    "symbol": {
+      "type": "string",
+      "minLength": 1
+    },
+    "instrument_token": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "timestamp_ms": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "last_price": {
+      "type": "number",
+      "minimum": 0
+    },
+    "ltp": {
+      "type": "number",
+      "minimum": 0
+    },
+    "bid": {
+      "type": "number",
+      "minimum": 0
+    },
+    "ask": {
+      "type": "number",
+      "minimum": 0
+    },
+    "spread": {
+      "type": "number",
+      "minimum": 0
+    },
+    "bid_quantity": {
+      "type": "number",
+      "minimum": 0
+    },
+    "ask_quantity": {
+      "type": "number",
+      "minimum": 0
+    },
+    "depth": {
+      "type": "object"
+    },
+    "oi": {
+      "type": "number"
+    },
+    "source": {
+      "type": "string",
+      "minLength": 1
+    },
+    "freshness": {
+      "type": "object"
+    },
+    "stale": {
+      "type": "boolean"
+    },
+    "tradable_quote": {
+      "type": "boolean"
+    },
+    "trace_id": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": true
+}
