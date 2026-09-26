@@ -7,13 +7,17 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 SKILLS_ROOT = ROOT / ".agents" / "skills"
 EXPECTED_SKILLS = {
+    "architecture-cleanup",
     "codebase-design",
     "diagnosing-trading-bugs",
     "domain-modeling-trading",
     "grill-trading-plan",
+    "live-runtime-diagnosis",
+    "market-data-path-audit",
     "pre-merge-trading-review",
     "runtime-contract-validation",
     "session-worklog",
+    "strategy-research-validation",
     "tdd-trading-changes",
     "to-issues-trading-change",
     "to-prd-trading-change",
@@ -59,3 +63,14 @@ def test_skill_readme_routes_all_installed_skills() -> None:
     for name in EXPECTED_SKILLS:
         assert f"`{name}`" in readme
     assert "kundakarlabp/dr-bhanu-prasad" in readme
+
+
+def test_specialist_skills_are_routed_from_agent_start_here() -> None:
+    router = (ROOT / "docs" / "AGENT_START_HERE.md").read_text(encoding="utf-8")
+    for name in {
+        "architecture-cleanup",
+        "live-runtime-diagnosis",
+        "market-data-path-audit",
+        "strategy-research-validation",
+    }:
+        assert f"`{name}`" in router
