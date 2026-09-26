@@ -76,6 +76,8 @@ RULES = (
             "ai_optimization_workflow.md",
             "chatgpt_code_workflow.md",
             "engineering_failure_patterns.md",
+            "pull_request_template.md",
+            "architecture_lint.py",
             "scripts/agent_",
         ),
         (
