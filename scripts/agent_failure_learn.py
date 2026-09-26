@@ -4,11 +4,11 @@
 from __future__ import annotations
 
 import argparse
-from collections import Counter
 import json
-from pathlib import Path
 import re
 import sys
+from collections import Counter
+from pathlib import Path
 from typing import Iterable
 
 PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
@@ -18,7 +18,10 @@ PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("SYNTAX-001", re.compile(r"syntaxerror|indentationerror|compileall", re.I)),
     (
         "TEST-002",
-        re.compile(r"flaky|timing|timeout|stale.*tick|passes? alone|order-sensitive", re.I),
+        re.compile(
+            r"flaky|timing|timeout|stale.*tick|passes? alone|order-sensitive",
+            re.I,
+        ),
     ),
     (
         "GIT-001",
