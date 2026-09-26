@@ -120,6 +120,8 @@ def test_agent_check_builds_focused_plan(tmp_path: Path) -> None:
     assert "tests/streaming" in payload["focused_tests"]
     assert payload["full_suite_required"] is True
     assert payload["base_ref"] == "origin/main"
+    assert payload["risk_level"] == "high"
+    assert any("websocket_manager.py" in item for item in payload["risk_reasons"])
     assert payload["commands"][-1] == "python -m pytest -q"
 
 
@@ -146,6 +148,8 @@ def test_agent_check_routes_agent_docs_to_tooling_tests(tmp_path: Path) -> None:
     payload = json.loads(result.stdout)
     assert "agent-tooling" in payload["areas"]
     assert "tests/tools" in payload["focused_tests"]
+    assert payload["risk_level"] == "low"
+    assert not any("compileall" in command for command in payload["commands"])
 
 
 def test_agent_check_run_scope_executes_only_requested_ring(
@@ -226,3 +230,29 @@ def test_agent_check_runs_delta_quality_before_compile_and_tests(
     assert calls[3][0] == sys.executable
     assert calls[3][1:5] == ["-m", "compileall", "-q", "src"]
     assert calls[4][0] == sys.executable
+
+def test_agent_check_high_risk_adds_e2e_when_available(tmp_path: Path) -> None:
+    root = _sample_repo(tmp_path)
+    (root / "tests" / "data").mkdir()
+    (root / "tests" / "e2e" / "live_sim").mkdir(parents=True)
+    module = _load_check_module()
+
+    plan = module.build(
+        root,
+        ["src/nifty_scalper_bot/streaming/websocket_manager.py"],
+    )
+
+    assert plan.risk_level == "high"
+    assert module.E2E_COMMAND in plan.commands
+
+
+def test_agent_check_medium_tooling_change_skips_e2e(tmp_path: Path) -> None:
+    root = _sample_repo(tmp_path)
+    (root / "tests" / "tools").mkdir()
+    module = _load_check_module()
+
+    plan = module.build(root, ["scripts/agent_check.py"])
+
+    assert plan.risk_level == "medium"
+    assert module.E2E_COMMAND not in plan.commands
+
