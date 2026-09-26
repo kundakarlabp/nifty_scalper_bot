@@ -91,11 +91,10 @@ def main(argv: list[str] | None = None) -> int:
     payload = load_manifest(root, args.manifest)
     errors = validate_manifest(root, payload)
     case_ids = set(args.case)
-    known_ids = {
-        str(case["id"])
-        for case in payload.get("cases", [])
-        if isinstance(case, dict)
-    }
+    known_ids: set[str] = set()
+    for case in payload.get("cases", []):
+        if isinstance(case, dict):
+            known_ids.add(str(case["id"]))
     unknown = sorted(case_ids - known_ids)
     errors.extend(f"unknown case id: {item}" for item in unknown)
 
