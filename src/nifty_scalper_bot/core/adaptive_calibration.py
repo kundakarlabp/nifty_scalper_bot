@@ -134,6 +134,9 @@ class ChronologicalWalkForward:
             validation = observations[train_end:validation_end]
             test = observations[validation_end:test_end]
 
+            baseline_validation = PerformanceSummary.from_pnl(
+                baseline(train, validation)
+            )
             validation_results = {
                 name: (
                     PerformanceSummary.from_pnl(evaluator(train, validation)),
@@ -141,17 +144,38 @@ class ChronologicalWalkForward:
                 )
                 for name, evaluator in sorted(candidates.items())
             }
-            selected_name, (selected_validation, selected_evaluator) = max(
-                validation_results.items(),
-                key=lambda item: (
-                    item[1][0].expectancy,
-                    item[1][0].total_net_pnl,
-                    item[0],
-                ),
-            )
+            eligible_results = {
+                name: result
+                for name, result in validation_results.items()
+                if result[0].trade_count > 0
+            }
+            selected_name = "baseline"
+            selected_validation = baseline_validation
+            selected_evaluator = baseline
+            if baseline_validation.trade_count > 0 and eligible_results:
+                candidate_name, (
+                    candidate_validation,
+                    candidate_evaluator,
+                ) = max(
+                    eligible_results.items(),
+                    key=lambda item: (
+                        item[1][0].expectancy,
+                        item[1][0].total_net_pnl,
+                        item[0],
+                    ),
+                )
+                if candidate_validation.expectancy > baseline_validation.expectancy:
+                    selected_name = candidate_name
+                    selected_validation = candidate_validation
+                    selected_evaluator = candidate_evaluator
+
             fit_for_test = [*train, *validation]
             baseline_test_pnl = list(baseline(fit_for_test, test))
-            candidate_test_pnl = list(selected_evaluator(fit_for_test, test))
+            candidate_test_pnl = (
+                list(baseline_test_pnl)
+                if selected_name == "baseline"
+                else list(selected_evaluator(fit_for_test, test))
+            )
             aggregate_baseline.extend(float(value) for value in baseline_test_pnl)
             aggregate_candidate.extend(float(value) for value in candidate_test_pnl)
             fold_results.append(
