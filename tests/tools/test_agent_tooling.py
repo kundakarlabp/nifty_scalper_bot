@@ -226,4 +226,3 @@ def test_agent_check_runs_delta_quality_before_compile_and_tests(
     assert calls[3][0] == sys.executable
     assert calls[3][1:5] == ["-m", "compileall", "-q", "src"]
     assert calls[4][0] == sys.executable
-
