@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from math import sqrt
+from math import isfinite, sqrt
 from statistics import mean, pstdev
 from typing import Any, Deque
 
@@ -30,6 +30,8 @@ class PerformanceSummary:
     @classmethod
     def from_pnl(cls, pnl: Sequence[float]) -> "PerformanceSummary":
         values = [float(value) for value in pnl]
+        if any(not isfinite(value) for value in values):
+            raise ValueError("pnl values must be finite")
         wins = [value for value in values if value > 0]
         losses = [value for value in values if value < 0]
         equity = 0.0
@@ -239,10 +241,13 @@ class AdaptiveParameterStore:
     def record_trade(self, strategy: str, pnl: float) -> TradeStats:
         """Record strategy P&L and return its updated statistics."""
 
+        resolved_pnl = float(pnl)
+        if not isfinite(resolved_pnl):
+            raise ValueError("pnl must be finite")
         bucket = self._pnl.setdefault(
             strategy, deque(maxlen=max(1, self.window_trades))
         )
-        bucket.append(float(pnl))
+        bucket.append(resolved_pnl)
         values = list(bucket)
         wins = [v for v in values if v > 0]
         losses = [abs(v) for v in values if v < 0]
@@ -315,9 +320,6 @@ class WalkForwardOptimizer:
         if strategy in self._frozen_strategies or stats.rolling_sharpe < 0:
             self._frozen_strategies.add(strategy)
             return current
-        if self.drawdown_threshold > 0 and stats.max_drawdown > self.drawdown_threshold:
-            self.risk_scale = min(self.risk_scale, 0.5)
-
         mz = current.get("momentum_z_threshold", 0.5)
         mv = current.get("microvol_percentile", 60.0)
         sp = current.get("spread_threshold_pct", 0.3)
@@ -342,6 +344,8 @@ class WalkForwardOptimizer:
         best: dict[str, float] | None = None
         for candidate in candidates:
             score = float(candidate_evaluator(candidate))
+            if not isfinite(score):
+                return current
             if candidate == current_candidate:
                 current_score = score
             if best_score is None or score > best_score:
@@ -351,6 +355,8 @@ class WalkForwardOptimizer:
             return current
         if current_score is not None and best_score <= current_score:
             return current
+        if self.drawdown_threshold > 0 and stats.max_drawdown > self.drawdown_threshold:
+            self.risk_scale = min(self.risk_scale, 0.5)
 
         prev = self._params.get(strategy, current)
         blended = {
