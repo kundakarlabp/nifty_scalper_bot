@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """File purpose: Build or execute a focused validation plan for repository changes.
 Key responsibilities: Classify changed files, select existing tests, and keep the full suite mandatory before merge.
-Operational constraints: Never execute broker or runtime entry points; run only generated compile/test commands.
+Operational constraints: Never execute broker or runtime entry points; run only repository quality, compile, and test commands.
 """
 
 from __future__ import annotations
@@ -137,7 +137,7 @@ def build(
             if (root / candidate).exists()
         )
     tests = list(dict.fromkeys(tests))
-    commands = ["python -m compileall -q src dashboard"]
+    commands = ["python -m compileall -q src dashboard scripts"]
     commands.append(
         "python -m pytest -q " + " ".join(tests)
         if tests
@@ -296,8 +296,14 @@ def markdown(plan: Plan) -> str:
                 "## Changed-Python quality",
                 "",
                 f"- Base: `{plan.base_ref}`",
-                "- `--run focused` and `--run full` first execute the existing delta-aware Ruff, Black and mypy checkers.",
-                "- These reject newly introduced quality debt without forcing unrelated legacy cleanup.",
+                (
+                    "- `--run focused` and `--run full` first execute the "
+                    "existing delta-aware Ruff, Black and mypy checkers."
+                ),
+                (
+                    "- These reject newly introduced quality debt without "
+                    "forcing unrelated legacy cleanup."
+                ),
             ]
         )
     lines.extend(
@@ -309,7 +315,11 @@ def markdown(plan: Plan) -> str:
             *plan.commands,
             "```",
             "",
-            "> Use `--run focused` for changed-file quality plus the fast compile/test ring. Use `--run full` for the same quality gate plus the complete suite before merge.",
+            (
+                "> Use `--run focused` for changed-file quality plus the fast "
+                "compile/test ring. Use `--run full` for the same quality gate "
+                "plus the complete suite before merge."
+            ),
             "",
         ]
     )
