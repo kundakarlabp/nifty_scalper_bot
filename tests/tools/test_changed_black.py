@@ -95,4 +95,3 @@ def test_git_changed_ranges_compares_base_to_worktree(monkeypatch) -> None:
     assert calls
     assert "origin/main" in calls[0]
     assert "HEAD" not in calls[0]
-
