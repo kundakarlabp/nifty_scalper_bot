@@ -101,7 +101,7 @@ Before accepting a strategy or scoring change:
 
 - run the canonical replay/parity tests;
 - use `tests/fixtures/replay/golden_market_path.csv` when the change could affect live-equivalent data ingestion;
-- run relevant cases from `benchmarks/agent/historical_regressions.json` with `scripts/agent_benchmark.py --case <id> --run`;
+- run relevant cases from `benchmarks/agent/historical_regressions.json` with `scripts/agent_task.py check --files <changed files>`;
 - preserve machine-readable boundary contracts under `docs/contracts/`.
 
 These are engineering-regression checks, not evidence of alpha or profitability.
