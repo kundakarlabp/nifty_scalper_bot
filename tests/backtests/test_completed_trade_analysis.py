@@ -10,6 +10,7 @@ from nifty_scalper_bot.backtesting.completed_trade_analysis import (
     execution_data_quality,
     post_cost_attribution_groups,
     summarize_completed_trades,
+    walk_forward_stability,
 )
 
 
@@ -170,6 +171,57 @@ def test_walk_forward_rejects_non_positive_window_sizes() -> None:
         chronological_walk_forward((), min_train_trades=0, test_trades=1)
     with pytest.raises(ValueError, match="test_trades"):
         chronological_walk_forward((), min_train_trades=1, test_trades=0)
+
+
+def test_walk_forward_stability_requires_minimum_oos_fold_coverage() -> None:
+    trades = canonicalize_completed_trades(
+        [
+            _trade(
+                f"t{index}",
+                float(index),
+                gross_pnl=float(index + 20),
+                net_pnl=float(index),
+            )
+            for index in range(1, 7)
+        ]
+    )
+    folds = chronological_walk_forward(trades, min_train_trades=4, test_trades=2)
+
+    stability = walk_forward_stability(folds, minimum_folds=2)
+
+    assert stability.ready is False
+    assert stability.fold_count == 1
+    assert stability.blockers == ("insufficient_oos_folds:1<2",)
+
+
+def test_walk_forward_stability_reports_oos_consistency_without_verdict() -> None:
+    trades = canonicalize_completed_trades(
+        [
+            _trade("t1", 1.0, gross_pnl=21.0, net_pnl=1.0),
+            _trade("t2", 2.0, gross_pnl=22.0, net_pnl=2.0),
+            _trade("t3", 3.0, gross_pnl=23.0, net_pnl=3.0),
+            _trade("t4", 4.0, gross_pnl=24.0, net_pnl=4.0),
+            _trade("t5", 5.0, gross_pnl=30.0, net_pnl=10.0),
+            _trade("t6", 6.0, gross_pnl=30.0, net_pnl=10.0),
+            _trade("t7", 7.0, gross_pnl=10.0, net_pnl=-10.0),
+            _trade("t8", 8.0, gross_pnl=10.0, net_pnl=-10.0),
+        ]
+    )
+    folds = chronological_walk_forward(trades, min_train_trades=4, test_trades=2)
+
+    stability = walk_forward_stability(folds, minimum_folds=2)
+
+    assert stability.ready is True
+    assert stability.fold_count == 2
+    assert stability.positive_oos_folds == 1
+    assert stability.positive_oos_fraction == 0.5
+    assert stability.aggregate_oos.trade_count == 4
+    assert stability.aggregate_oos.net_pnl == 0.0
+
+
+def test_walk_forward_stability_rejects_invalid_minimum_folds() -> None:
+    with pytest.raises(ValueError, match="minimum_folds"):
+        walk_forward_stability((), minimum_folds=0)
 
 
 def test_summary_uses_post_cost_net_pnl() -> None:
