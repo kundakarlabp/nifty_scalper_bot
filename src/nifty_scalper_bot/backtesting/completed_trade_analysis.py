@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from nifty_scalper_bot.backtesting.research_validation import bootstrap_mean_interval
+
 
 @dataclass(frozen=True, slots=True)
 class CanonicalCompletedTrade:
@@ -25,6 +27,8 @@ class CanonicalCompletedTrade:
     strategy: str
     gross_pnl: float
     estimated_costs: float
+    effective_costs: float
+    cost_source: str
     net_pnl: float
     exit_reason: str
     outcome: Mapping[str, Any]
@@ -37,6 +41,8 @@ class CompletedTradeSummary:
     trade_count: int
     gross_pnl: float
     estimated_costs: float
+    effective_costs: float
+    broker_cost_trade_count: int
     net_pnl: float
     expectancy: float
     win_rate: float
@@ -109,6 +115,38 @@ class AttributionGroup:
     setup_name: str
     confirmation_type: str
     summary: CompletedTradeSummary
+
+
+@dataclass(frozen=True, slots=True)
+class ScoreCalibrationBin:
+    """Observed post-cost outcomes for one canonical score interval."""
+
+    lower: float
+    upper: float
+    trade_count: int
+    r_trade_count: int
+    mean_score: float
+    net_expectancy: float
+    net_expectancy_ci_lower: float
+    net_expectancy_ci_upper: float
+    mean_r: float | None
+    mean_r_ci_lower: float | None
+    mean_r_ci_upper: float | None
+    win_rate: float
+    evidence_ready: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ScoreCalibrationReport:
+    """Descriptive score-to-outcome calibration without threshold selection."""
+
+    score_key: str
+    total_trades: int
+    scored_trades: int
+    r_scored_trades: int
+    minimum_trades_per_bin: int
+    bins: tuple[ScoreCalibrationBin, ...]
+    blockers: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -256,6 +294,117 @@ def _confirmation_type(outcome: Mapping[str, Any]) -> str:
     return "unknown"
 
 
+def calibrate_signal_scores(
+    trades: Sequence[CanonicalCompletedTrade],
+    *,
+    score_key: str = "alpha_score",
+    bin_width: float = 1.0,
+    minimum_trades_per_bin: int = 10,
+    bootstrap_samples: int = 2000,
+    seed: int = 0,
+) -> ScoreCalibrationReport:
+    """Map canonical score bins to post-cost expectancy and R uncertainty."""
+
+    width = float(bin_width)
+    minimum = int(minimum_trades_per_bin)
+    if not math.isfinite(width) or width <= 0 or width > 10:
+        raise ValueError("bin_width must be within (0, 10]")
+    if minimum <= 0:
+        raise ValueError("minimum_trades_per_bin must be positive")
+
+    grouped: dict[int, list[tuple[float, CanonicalCompletedTrade, float | None]]] = {}
+    scored = 0
+    r_scored = 0
+    invalid_scores = 0
+    for trade in trades:
+        quality = trade.outcome.get("signal_quality")
+        if not isinstance(quality, Mapping):
+            continue
+        raw_score = quality.get(score_key)
+        if raw_score is None:
+            continue
+        try:
+            score = float(raw_score)
+        except (TypeError, ValueError):
+            invalid_scores += 1
+            continue
+        if not math.isfinite(score) or not 0.0 <= score <= 10.0:
+            invalid_scores += 1
+            continue
+        r_multiple = trade.outcome.get("r_multiple")
+        try:
+            r_value = float(r_multiple) if r_multiple is not None else None
+        except (TypeError, ValueError):
+            r_value = None
+        if r_value is not None and not math.isfinite(r_value):
+            r_value = None
+        if r_value is not None:
+            r_scored += 1
+        scored += 1
+        bin_index = min(int(score / width), max(0, math.ceil(10.0 / width) - 1))
+        grouped.setdefault(bin_index, []).append((score, trade, r_value))
+
+    bins: list[ScoreCalibrationBin] = []
+    for bin_index, sample in sorted(grouped.items()):
+        scores = [item[0] for item in sample]
+        net_values = [item[1].net_pnl for item in sample]
+        r_values = [item[2] for item in sample if item[2] is not None]
+        net_interval = bootstrap_mean_interval(
+            net_values,
+            samples=bootstrap_samples,
+            seed=seed + bin_index,
+        )
+        r_interval = (
+            bootstrap_mean_interval(
+                r_values,
+                samples=bootstrap_samples,
+                seed=seed + 10_000 + bin_index,
+            )
+            if r_values
+            else None
+        )
+        lower = bin_index * width
+        upper = min(10.0, lower + width)
+        bins.append(
+            ScoreCalibrationBin(
+                lower=round(lower, 4),
+                upper=round(upper, 4),
+                trade_count=len(sample),
+                r_trade_count=len(r_values),
+                mean_score=round(sum(scores) / len(scores), 4),
+                net_expectancy=round(net_interval.estimate, 4),
+                net_expectancy_ci_lower=round(net_interval.lower, 4),
+                net_expectancy_ci_upper=round(net_interval.upper, 4),
+                mean_r=round(r_interval.estimate, 4) if r_interval else None,
+                mean_r_ci_lower=round(r_interval.lower, 4) if r_interval else None,
+                mean_r_ci_upper=round(r_interval.upper, 4) if r_interval else None,
+                win_rate=round(
+                    sum(value > 0 for value in net_values) / len(net_values),
+                    4,
+                ),
+                evidence_ready=len(sample) >= minimum,
+            )
+        )
+
+    blockers: list[str] = []
+    if scored == 0:
+        blockers.append(f"missing_score:{score_key}")
+    if invalid_scores:
+        blockers.append(f"invalid_score:{score_key}:{invalid_scores}")
+    underpowered = sum(not item.evidence_ready for item in bins)
+    if underpowered:
+        blockers.append(f"underpowered_bins:{underpowered}")
+    return ScoreCalibrationReport(
+        score_key=score_key,
+        total_trades=len(trades),
+        scored_trades=scored,
+        r_scored_trades=r_scored,
+        minimum_trades_per_bin=minimum,
+        bins=tuple(bins),
+        blockers=tuple(blockers),
+    )
+
+
 def post_cost_attribution_groups(
     trades: Sequence[CanonicalCompletedTrade],
 ) -> tuple[AttributionGroup, ...]:
@@ -287,6 +436,7 @@ def canonicalize_completed_trades(
     rows: Sequence[Mapping[str, Any]],
     *,
     net_identity_tolerance: float = 0.02,
+    allow_estimated_costs: bool = False,
 ) -> tuple[CanonicalCompletedTrade, ...]:
     """Return one validated row per CLOSED, ledger-complete economic trade.
 
@@ -318,11 +468,32 @@ def canonicalize_completed_trades(
             row.get("estimated_costs"),
             field="estimated_costs",
         )
+        outcome = _outcome(row)
+        cost_source = str(outcome.get("cost_source") or "estimated_model").strip()
+        effective_payload = outcome.get("effective_costs")
+        if cost_source == "broker_virtual_contract_note":
+            if not isinstance(effective_payload, Mapping):
+                raise ValueError(
+                    f"broker-calculated costs missing from completed trade: {trade_id}"
+                )
+            effective_costs = _finite_number(
+                effective_payload.get("total"),
+                field="effective_costs.total",
+            )
+        elif allow_estimated_costs:
+            effective_costs = estimated_costs
+            cost_source = "estimated_model"
+        else:
+            raise ValueError(
+                "broker-calculated costs required for canonical research dataset: "
+                f"{trade_id}"
+            )
+
         net_pnl = _finite_number(row.get("net_pnl"), field="net_pnl")
-        expected_net = gross_pnl - estimated_costs
+        expected_net = gross_pnl - effective_costs
         if abs(expected_net - net_pnl) > tolerance:
             raise ValueError(
-                "completed trade violates gross_pnl - estimated_costs = net_pnl "
+                "completed trade violates gross_pnl - effective_costs = net_pnl "
                 f"within tolerance: {trade_id}"
             )
 
@@ -333,9 +504,11 @@ def canonicalize_completed_trades(
                 strategy=_canonical_strategy(row.get("strategy")),
                 gross_pnl=gross_pnl,
                 estimated_costs=estimated_costs,
+                effective_costs=effective_costs,
+                cost_source=cost_source,
                 net_pnl=net_pnl,
                 exit_reason=str(row.get("exit_reason") or "").strip(),
-                outcome=_outcome(row),
+                outcome=outcome,
             )
         )
 
@@ -346,7 +519,7 @@ def canonicalize_completed_trades(
 def summarize_completed_trades(
     trades: Sequence[CanonicalCompletedTrade],
 ) -> CompletedTradeSummary:
-    """Summarize realized economics using net P&L after estimated costs."""
+    """Summarize realized economics using the effective post-cost net P&L."""
 
     values = [float(trade.net_pnl) for trade in trades]
     wins = [value for value in values if value > 0]
@@ -367,6 +540,10 @@ def summarize_completed_trades(
         trade_count=count,
         gross_pnl=round(sum(trade.gross_pnl for trade in trades), 2),
         estimated_costs=round(sum(trade.estimated_costs for trade in trades), 2),
+        effective_costs=round(sum(trade.effective_costs for trade in trades), 2),
+        broker_cost_trade_count=sum(
+            trade.cost_source == "broker_virtual_contract_note" for trade in trades
+        ),
         net_pnl=round(sum(values), 2),
         expectancy=round(sum(values) / count, 4) if count else 0.0,
         win_rate=round(len(wins) / count, 4) if count else 0.0,
@@ -481,6 +658,12 @@ def walk_forward_stability(
         estimated_costs=round(
             sum(fold.test_summary.estimated_costs for fold in folds), 2
         ),
+        effective_costs=round(
+            sum(fold.test_summary.effective_costs for fold in folds), 2
+        ),
+        broker_cost_trade_count=sum(
+            fold.test_summary.broker_cost_trade_count for fold in folds
+        ),
         net_pnl=round(sum(fold.test_summary.net_pnl for fold in folds), 2),
         expectancy=(
             round(
@@ -585,7 +768,10 @@ __all__ = [
     "WalkForwardFold",
     "WalkForwardStability",
     "ExecutionDataQuality",
+    "ScoreCalibrationBin",
+    "ScoreCalibrationReport",
     "attribution_readiness",
+    "calibrate_signal_scores",
     "execution_data_quality",
     "canonicalize_completed_trades",
     "chronological_post_cost_blocks",

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sqlite3
 import sys
 from dataclasses import asdict
@@ -17,10 +18,15 @@ if str(SRC_PATH) not in sys.path:
 
 from nifty_scalper_bot.backtesting.completed_trade_analysis import (  # noqa: E402
     attribution_readiness,
+    calibrate_signal_scores,
     canonicalize_completed_trades,
     chronological_post_cost_blocks,
     execution_data_quality,
     summarize_completed_trades,
+)
+from nifty_scalper_bot.backtesting.research_validation import (  # noqa: E402
+    combinatorial_purged_pbo,
+    deflated_sharpe_ratio,
 )
 
 
@@ -58,14 +64,60 @@ def build_analysis(
     *,
     block_size: int,
     components: tuple[str, ...],
+    allow_estimated_costs: bool = False,
+    selection_trials: int | None = None,
 ) -> dict[str, Any]:
     """Build a machine-readable evidence report from canonical ledger rows."""
 
-    trades = canonicalize_completed_trades(rows)
+    trades = canonicalize_completed_trades(
+        rows,
+        allow_estimated_costs=allow_estimated_costs,
+    )
     overall = summarize_completed_trades(trades)
     blocks = chronological_post_cost_blocks(trades, block_size=block_size)
     readiness = attribution_readiness(trades, required_components=components)
     execution_quality = execution_data_quality(trades)
+    score_calibration = {
+        key: asdict(
+            calibrate_signal_scores(
+                trades,
+                score_key=key,
+                minimum_trades_per_bin=10,
+            )
+        )
+        for key in ("alpha_score", "final_score", "strategy_score")
+    }
+    r_values: list[float] = []
+    for trade in trades:
+        raw_r = trade.outcome.get("r_multiple")
+        try:
+            resolved_r = float(raw_r)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(resolved_r):
+            r_values.append(resolved_r)
+    dsr: dict[str, Any]
+    if selection_trials is None:
+        dsr = {
+            "ready": False,
+            "reason": "selection_trial_count_not_supplied",
+        }
+    elif len(r_values) < 3:
+        dsr = {
+            "ready": False,
+            "reason": "insufficient_r_multiple_observations",
+            "observations": len(r_values),
+        }
+    else:
+        dsr = {
+            "ready": True,
+            **asdict(
+                deflated_sharpe_ratio(
+                    r_values,
+                    trials=selection_trials,
+                )
+            ),
+        }
     return {
         "dataset": {
             "canonical_completed_trades": len(trades),
@@ -85,6 +137,15 @@ def build_analysis(
             for block in blocks
         ],
         "execution_data_quality": asdict(execution_quality),
+        "cost_evidence": {
+            "broker_cost_trades": overall.broker_cost_trade_count,
+            "total_trades": overall.trade_count,
+            "all_broker_costed": (
+                overall.broker_cost_trade_count == overall.trade_count
+            ),
+        },
+        "score_calibration": score_calibration,
+        "deflated_sharpe": dsr,
         "attribution": {
             "ready": readiness.ready,
             "coverage": {
@@ -103,10 +164,74 @@ def build_analysis(
     }
 
 
+def load_candidate_returns(path: Path) -> dict[str, list[float]]:
+    """Load aligned candidate post-cost return/R series from JSON."""
+
+    payload = json.loads(path.expanduser().read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("candidate returns JSON must be an object")
+    candidates: dict[str, list[float]] = {}
+    for name, values in payload.items():
+        if not isinstance(values, list):
+            raise ValueError(f"candidate {name!r} must be a JSON array")
+        candidates[str(name)] = [float(value) for value in values]
+    return candidates
+
+
+def build_candidate_validation(
+    candidates: dict[str, list[float]],
+    *,
+    n_groups: int,
+    n_test_groups: int,
+    purge_observations: int,
+    embargo_observations: int,
+) -> dict[str, Any]:
+    """Build PBO and candidate-wise DSR evidence from aligned alternatives."""
+
+    pbo = combinatorial_purged_pbo(
+        candidates,
+        n_groups=n_groups,
+        n_test_groups=n_test_groups,
+        purge_observations=purge_observations,
+        embargo_observations=embargo_observations,
+    )
+    trial_count = len(candidates)
+    dsr = {
+        name: asdict(deflated_sharpe_ratio(values, trials=trial_count))
+        for name, values in sorted(candidates.items())
+        if len(values) >= 3
+    }
+    return {
+        "pbo": asdict(pbo),
+        "deflated_sharpe_by_candidate": dsr,
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--trades-db", type=Path, required=True)
     parser.add_argument("--block-size", type=int, default=20)
+    parser.add_argument(
+        "--allow-estimated-costs",
+        action="store_true",
+        help=(
+            "Explicit legacy-audit override; canonical research requires broker costs."
+        ),
+    )
+    parser.add_argument(
+        "--selection-trials",
+        type=int,
+        help="Actual number of parameter/strategy trials used for DSR deflation.",
+    )
+    parser.add_argument(
+        "--candidate-returns-json",
+        type=Path,
+        help="JSON object of aligned candidate post-cost return/R series for PBO.",
+    )
+    parser.add_argument("--pbo-groups", type=int, default=6)
+    parser.add_argument("--pbo-test-groups", type=int, default=3)
+    parser.add_argument("--pbo-purge-observations", type=int, default=0)
+    parser.add_argument("--pbo-embargo-observations", type=int, default=0)
     parser.add_argument(
         "--component",
         action="append",
@@ -121,6 +246,22 @@ def main(argv: list[str] | None = None) -> int:
             rows,
             block_size=args.block_size,
             components=components,
+            allow_estimated_costs=args.allow_estimated_costs,
+            selection_trials=args.selection_trials,
+        )
+        report["candidate_validation"] = (
+            build_candidate_validation(
+                load_candidate_returns(args.candidate_returns_json),
+                n_groups=args.pbo_groups,
+                n_test_groups=args.pbo_test_groups,
+                purge_observations=args.pbo_purge_observations,
+                embargo_observations=args.pbo_embargo_observations,
+            )
+            if args.candidate_returns_json is not None
+            else {
+                "ready": False,
+                "reason": "candidate_returns_not_supplied",
+            }
         )
     except Exception as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, sort_keys=True))

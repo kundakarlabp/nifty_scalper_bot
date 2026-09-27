@@ -483,6 +483,122 @@ class LedgerBracketManager(CanonicalBracketManager):
             )
         return None
 
+    def _broker_costs_for_confirmed_fills(
+        self,
+        bracket: Any,
+        fills: list[FillLeg],
+    ) -> dict[str, Any] | None:
+        """Return broker-calculated charges for the exact confirmed fill orders."""
+
+        broker = getattr(self.order_manager, "_broker", None)
+        getter = getattr(broker, "get_order_charges", None) if broker is not None else None
+        if not callable(getter) or not fills:
+            return None
+
+        grouped: dict[str, list[FillLeg]] = {}
+        for fill in fills:
+            order_id = str(fill.order_id or "").strip()
+            if order_id:
+                grouped.setdefault(order_id, []).append(fill)
+        if not grouped:
+            return None
+
+        symbol = str(getattr(bracket, "symbol", "") or "").strip()
+        if ":" in symbol:
+            exchange_hint, tradingsymbol_hint = symbol.split(":", 1)
+        else:
+            exchange_hint, tradingsymbol_hint = "NFO", symbol
+        orders: list[dict[str, Any]] = []
+        for order_id, legs in grouped.items():
+            quantity = sum(int(leg.quantity) for leg in legs)
+            if quantity <= 0:
+                return None
+            sides = {str(leg.side).upper() for leg in legs}
+            if len(sides) != 1:
+                return None
+            average_price = sum(
+                float(leg.price) * int(leg.quantity) for leg in legs
+            ) / quantity
+            status: Mapping[str, Any] = {}
+            with suppress(Exception):
+                status = self._get_broker_order_status(order_id)
+            exchange = str(status.get("exchange") or exchange_hint or "NFO").upper()
+            tradingsymbol = str(
+                status.get("tradingsymbol") or tradingsymbol_hint
+            ).strip()
+            if not tradingsymbol:
+                return None
+            orders.append(
+                {
+                    "order_id": order_id,
+                    "exchange": exchange,
+                    "tradingsymbol": tradingsymbol,
+                    "transaction_type": next(iter(sides)),
+                    "variety": str(status.get("variety") or "regular"),
+                    "product": str(status.get("product") or "MIS"),
+                    "order_type": str(status.get("order_type") or "MARKET").upper(),
+                    "quantity": quantity,
+                    "average_price": round(average_price, 8),
+                }
+            )
+
+        try:
+            charged_orders = getter(orders)
+        except Exception as exc:  # noqa: BLE001 - closed-trade accounting fallback
+            _core.LOGGER.warning(
+                "BROKER_COST_RECONCILIATION_UNAVAILABLE bracket_id=%s error=%s",
+                getattr(bracket, "bracket_id", None),
+                exc,
+                extra={
+                    "event": "BROKER_COST_RECONCILIATION_UNAVAILABLE",
+                    "bracket_id": str(getattr(bracket, "bracket_id", "") or ""),
+                    "error_type": type(exc).__name__,
+                },
+            )
+            return None
+        if not isinstance(charged_orders, list) or len(charged_orders) != len(orders):
+            return None
+
+        totals = {
+            "transaction_tax": 0.0,
+            "exchange_turnover_charge": 0.0,
+            "sebi_turnover_charge": 0.0,
+            "brokerage": 0.0,
+            "stamp_duty": 0.0,
+            "gst": 0.0,
+            "total": 0.0,
+        }
+        for item in charged_orders:
+            if not isinstance(item, Mapping):
+                return None
+            charges = item.get("charges")
+            if not isinstance(charges, Mapping):
+                return None
+            gst = charges.get("gst")
+            gst_total = gst.get("total") if isinstance(gst, Mapping) else None
+            values = {
+                "transaction_tax": charges.get("transaction_tax"),
+                "exchange_turnover_charge": charges.get("exchange_turnover_charge"),
+                "sebi_turnover_charge": charges.get("sebi_turnover_charge"),
+                "brokerage": charges.get("brokerage"),
+                "stamp_duty": charges.get("stamp_duty"),
+                "gst": gst_total,
+                "total": charges.get("total"),
+            }
+            for key, value in values.items():
+                try:
+                    number = float(value)
+                except (TypeError, ValueError):
+                    return None
+                if not math.isfinite(number) or number < 0:
+                    return None
+                totals[key] += number
+        return {
+            **{key: round(value, 6) for key, value in totals.items()},
+            "order_count": len(orders),
+            "source": "zerodha_virtual_contract_note",
+        }
+
     def _completed_trade_outcome(
         self,
         bracket: Any,
@@ -509,6 +625,7 @@ class LedgerBracketManager(CanonicalBracketManager):
             or getattr(bracket, "quantity", 0)
             or 0
         )
+        fills: list[FillLeg] = []
         executed_orders = 2
         if self._fill_ledger is not None:
             with suppress(Exception):
@@ -524,6 +641,13 @@ class LedgerBracketManager(CanonicalBracketManager):
                     ),
                 )
         costs = None
+        broker_costs = self._broker_costs_for_confirmed_fills(bracket, fills)
+        effective_costs: Mapping[str, Any] | None = broker_costs
+        cost_source = (
+            "broker_virtual_contract_note"
+            if broker_costs is not None
+            else "estimated_model"
+        )
         net_pnl = gross_pnl
         if (
             gross_pnl is not None
@@ -537,7 +661,10 @@ class LedgerBracketManager(CanonicalBracketManager):
                 quantity=quantity,
                 executed_orders=executed_orders,
             )
-            net_pnl = round(float(gross_pnl) - costs.total, 2)
+            if effective_costs is None:
+                effective_costs = asdict(costs)
+            effective_total = float(effective_costs.get("total") or 0.0)
+            net_pnl = round(float(gross_pnl) - effective_total, 2)
 
         side = str(getattr(bracket, "side", "BUY") or "BUY").upper()
         high = float(
@@ -687,6 +814,22 @@ class LedgerBracketManager(CanonicalBracketManager):
             ),
             "gross_pnl": gross_pnl,
             "estimated_costs": asdict(costs) if costs is not None else None,
+            "broker_costs": broker_costs,
+            "effective_costs": (
+                dict(effective_costs) if effective_costs is not None else None
+            ),
+            "cost_source": cost_source if costs is not None else None,
+            "cost_reconciliation": (
+                {
+                    "estimated_total": round(float(costs.total), 6),
+                    "broker_total": round(float(broker_costs["total"]), 6),
+                    "difference": round(
+                        float(broker_costs["total"]) - float(costs.total), 6
+                    ),
+                }
+                if costs is not None and broker_costs is not None
+                else None
+            ),
             "net_pnl": net_pnl,
             "initial_risk_points": (
                 round(initial_risk, 4) if initial_risk > 0 else None

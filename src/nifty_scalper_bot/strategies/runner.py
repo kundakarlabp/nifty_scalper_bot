@@ -1361,9 +1361,6 @@ class StrategyRunner:
         )
         self._vwap_sl_pct = float(os.getenv("VWAP_SL_PCT", "1.5"))
         self._vwap_tp_pct = float(os.getenv("VWAP_TP_PCT", "2.0"))
-        self._global_min_signal_confidence = float(
-            os.getenv("GLOBAL_MIN_SIGNAL_CONFIDENCE", "0.45")
-        )
         self._max_nifty_positions = int(os.getenv("MAX_NIFTY_POSITIONS", "1"))
         self._last_regime_by_symbol: dict[str, MarketRegime] = {}
         self._last_regime_inputs_by_symbol: dict[str, dict[str, Any]] = {}
@@ -1456,11 +1453,15 @@ class StrategyRunner:
                     None,
                 )
                 if callable(circuit) and completed_net_pnl is not None:
-                    estimated = outcome.get("estimated_costs")
+                    effective_costs = outcome.get("effective_costs")
+                    if not isinstance(effective_costs, Mapping):
+                        effective_costs = outcome.get("estimated_costs")
                     cost_total = 0.0
-                    if isinstance(estimated, Mapping):
+                    if isinstance(effective_costs, Mapping):
                         try:
-                            candidate_cost_total = float(estimated.get("total") or 0.0)
+                            candidate_cost_total = float(
+                                effective_costs.get("total") or 0.0
+                            )
                         except (TypeError, ValueError):
                             candidate_cost_total = 0.0
                         if math.isfinite(candidate_cost_total):

@@ -61,34 +61,25 @@ def test_core_app_direct_import_reuses_single_hook_and_still_patches_app() -> No
     assert not hasattr(app_module, "_polling_failover_runtime_patch_installed")
 
 
-def test_datahub_import_hook_is_not_duplicated_by_repeated_imports() -> None:
+def test_data_package_reloads_never_install_datahub_import_hook() -> None:
     _reset_data_modules()
     before = _hook_count(DATA_HOOK_ATTR)
 
     data_pkg = importlib.import_module("nifty_scalper_bot.data")
-    first = _hook_count(DATA_HOOK_ATTR)
 
-    assert first == max(before, 1)
-    assert first <= 1
-
+    assert _hook_count(DATA_HOOK_ATTR) == before == 0
     for _ in range(3):
         data_pkg = importlib.reload(data_pkg)
-        assert _hook_count(DATA_HOOK_ATTR) == first
-
-    for _ in range(3):
-        _reset_data_modules()
-        importlib.import_module("nifty_scalper_bot.data")
-        assert _hook_count(DATA_HOOK_ATTR) == first
+        assert _hook_count(DATA_HOOK_ATTR) == 0
 
 
-def test_direct_datahub_import_reuses_single_hook_and_still_patches_datahub() -> None:
+def test_direct_datahub_import_uses_native_guard_without_hook() -> None:
     _reset_data_modules()
     importlib.import_module("nifty_scalper_bot.data")
-    hook_count = _hook_count(DATA_HOOK_ATTR)
 
     datahub_module = importlib.import_module("nifty_scalper_bot.data.data_hub")
 
-    assert _hook_count(DATA_HOOK_ATTR) == hook_count == 1
+    assert _hook_count(DATA_HOOK_ATTR) == 0
     assert (
         getattr(
             datahub_module.DataHub,
@@ -96,4 +87,7 @@ def test_direct_datahub_import_reuses_single_hook_and_still_patches_datahub() ->
             False,
         )
         is True
+    )
+    assert datahub_module.DataHub.store_quote.__module__ == (
+        "nifty_scalper_bot.data.data_hub"
     )

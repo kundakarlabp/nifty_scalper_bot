@@ -10,9 +10,9 @@ def test_install_proof_display_reports_all_installed() -> None:
         "datahub_synthetic_guard_installed": True,
         "polling_failover_native_owner": True,
         "core_app_import_hook_installed": True,
-        "datahub_import_hook_installed": True,
+        "datahub_import_hook_installed": False,
         "all_required_installed": True,
-        "import_hook_counts": {"core_app": 1, "datahub": 1},
+        "import_hook_counts": {"core_app": 1, "datahub": 0},
     }
 
     display = install_proof_display(proof)
@@ -21,7 +21,7 @@ def test_install_proof_display_reports_all_installed() -> None:
     assert display["css"] == "ok"
     assert display["all_installed"] is True
     assert display["missing"] == []
-    assert display["hook_counts"] == {"core_app": 1, "datahub": 1}
+    assert display["hook_counts"] == {"core_app": 1, "datahub": 0}
 
 
 def test_install_proof_display_lists_missing_items() -> None:
@@ -41,7 +41,7 @@ def test_install_proof_display_lists_missing_items() -> None:
     assert display["label"] == "HARDENING INCOMPLETE"
     assert display["css"] == "bad"
     assert display["all_installed"] is False
-    assert display["missing"] == ["WebSocket", "Polling failover", "DataHub hook"]
+    assert display["missing"] == ["WebSocket", "Polling failover"]
 
 
 def test_install_proof_display_unknown_when_missing() -> None:

@@ -8,6 +8,7 @@ from typing import Any, Mapping, cast
 
 from nifty_scalper_bot.config.entry_policy import resolve_entry_policy
 from nifty_scalper_bot.config.regime_ontology import MarketRegime, normalize_regime
+from nifty_scalper_bot.config.score_scale import resolve_score_setting
 from nifty_scalper_bot.config.strategy_taxonomy import (
     is_context_only_strategy,
     normalize_strategy_name,
@@ -153,57 +154,38 @@ def missing_score_components(metadata: dict[str, object] | None) -> list[str]:
     return [key for key in REQUIRED_SCORE_COMPONENTS if payload.get(key) is None]
 
 
-def _parse_score_threshold(raw: object) -> float | None:
-    """Normalize configured threshold values to the internal 0..10 scale."""
-    try:
-        token = str(raw).strip()
-        if not token:
-            return None
-        if token.endswith("%"):
-            token = token[:-1].strip()
-        value = float(token)
-    except (TypeError, ValueError):
-        return None
-    if value <= 0:
-        return None
-    if value <= 1.0:
-        value *= 10.0
-    elif value > 10.0 and value <= 100.0:
-        value /= 10.0
-    elif value > 100.0:
-        return None
-    return max(0.0, min(10.0, round(value, 3)))
-
-
-def _normalise_score_threshold(raw: object, default: float) -> float:
-    parsed = _parse_score_threshold(raw)
-    if parsed is None:
-        return max(0.0, min(10.0, round(float(default), 3)))
-    return parsed
-
-
 def _env_score_threshold(
-    primary_env: str,
-    legacy_env: str | None,
+    canonical_env: str,
+    legacy_envs: tuple[str, ...],
     default_value: float,
 ) -> float:
-    value = os.getenv(primary_env)
-    if value is None and legacy_env:
-        value = os.getenv(legacy_env)
-    if value is None:
-        return max(0.0, min(10.0, round(float(default_value), 3)))
-    return _normalise_score_threshold(value, default_value)
+    """Resolve one trigger threshold onto the canonical 0..10 score scale."""
+
+    return resolve_score_setting(
+        os.environ,
+        canonical_key=canonical_env,
+        legacy_keys=legacy_envs,
+        default=default_value,
+    )
 
 
 def _global_score_floor() -> float | None:
-    raw = os.getenv("GLOBAL_MIN_SIGNAL_CONFIDENCE")
-    if raw is None:
+    if (
+        "GLOBAL_MIN_SIGNAL_SCORE" not in os.environ
+        and "GLOBAL_MIN_SIGNAL_CONFIDENCE" not in os.environ
+    ):
         return None
-    return _parse_score_threshold(raw)
+    return resolve_score_setting(
+        os.environ,
+        canonical_key="GLOBAL_MIN_SIGNAL_SCORE",
+        legacy_keys=("GLOBAL_MIN_SIGNAL_CONFIDENCE",),
+        default=0.0,
+    )
 
 
 def trigger_threshold(strategy_name: str | None, mode: str | None = None) -> float:
-    """Return the strategy trigger threshold on the internal 0..10 scale."""
+    """Return the strategy trigger threshold on the canonical 0..10 scale."""
+
     effective_mode = str(mode or os.getenv("EXECUTION_MODE", "SHADOW")).strip().upper()
     strategy_key = normalize_strategy_name(strategy_name)
     is_live = effective_mode == "LIVE"
@@ -211,24 +193,42 @@ def trigger_threshold(strategy_name: str | None, mode: str | None = None) -> flo
         "vwap_pro": (
             7.5,
             6.5,
-            "TRIGGER_VWAP_PRO_LIVE_MIN",
-            "SIGNAL_MIN_SCORE_LIVE_VWAP_PRO",
+            "TRIGGER_VWAP_PRO_LIVE_MIN_SCORE",
+            ("TRIGGER_VWAP_PRO_LIVE_MIN", "SIGNAL_MIN_SCORE_LIVE_VWAP_PRO"),
         ),
         "premium_squeeze": (
             7.4,
             6.4,
-            "TRIGGER_PREMIUM_SQUEEZE_LIVE_MIN",
-            "SIGNAL_MIN_SCORE_LIVE_PREMIUM_SQUEEZE",
+            "TRIGGER_PREMIUM_SQUEEZE_LIVE_MIN_SCORE",
+            (
+                "TRIGGER_PREMIUM_SQUEEZE_LIVE_MIN",
+                "SIGNAL_MIN_SCORE_LIVE_PREMIUM_SQUEEZE",
+            ),
         ),
-        "smc_lite": (7.0, 6.0, "TRIGGER_SMC_LIVE_MIN", None),
-        "orb_pro": (7.4, 6.4, "TRIGGER_ORB_PRO_LIVE_MIN", None),
+        "smc_lite": (
+            7.0,
+            6.0,
+            "TRIGGER_SMC_LIVE_MIN_SCORE",
+            ("TRIGGER_SMC_LIVE_MIN",),
+        ),
+        "orb_pro": (
+            7.4,
+            6.4,
+            "TRIGGER_ORB_PRO_LIVE_MIN_SCORE",
+            ("TRIGGER_ORB_PRO_LIVE_MIN",),
+        ),
     }
-    live_default, paper_default, primary_env, legacy_env = defaults.get(
+    live_default, paper_default, canonical_env, legacy_envs = defaults.get(
         strategy_key,
-        (8.0, 6.5, "SIGNAL_MIN_SCORE_LIVE", None),
+        (
+            8.0,
+            6.5,
+            "TRIGGER_DEFAULT_LIVE_MIN_SCORE",
+            ("SIGNAL_MIN_SCORE_LIVE",),
+        ),
     )
     default_value = live_default if is_live else paper_default
-    threshold = _env_score_threshold(primary_env, legacy_env, default_value)
+    threshold = _env_score_threshold(canonical_env, legacy_envs, default_value)
     global_floor = _global_score_floor()
     if global_floor is not None:
         threshold = max(threshold, global_floor)
