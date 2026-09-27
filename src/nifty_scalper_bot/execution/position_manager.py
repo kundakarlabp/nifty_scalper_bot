@@ -4402,7 +4402,7 @@ class PositionManager:
                     position.order_id = order.order_id
                 if order.pre_order_quantity == 0 and position.order_id == order.order_id:
                     fill_basis = float(
-                        order.last_cumulative_average_price
+                        cumulative_avg
                         or order.fill_price
                         or fill_price
                         or 0.0
