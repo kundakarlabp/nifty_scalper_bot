@@ -293,6 +293,10 @@ _OPTION_RE = re.compile(
 class DataHub:
     """Market data single source of truth."""
 
+    # Timestamp-quality hardening is owned natively by this class. The former
+    # package import hook is intentionally retired.
+    _synthetic_timestamp_guard_installed = True
+
     @staticmethod
     def normalize(symbol: Any) -> str:
         """Return the exchange-qualified canonical form of ``symbol``.
