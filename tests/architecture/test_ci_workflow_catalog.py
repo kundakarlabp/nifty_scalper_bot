@@ -22,8 +22,14 @@ def test_ci_is_read_only_and_deduplicates_e2e_markers() -> None:
     assert "contents: write" not in text
     assert "branches: [main]" in text
     assert "changed-code-quality:" in text
+    assert "normal-test-shard:" in text
     assert "tests:" in text
     assert "e2e-simulation:" in text
+    assert "needs: normal-test-shard" in text
+    assert "NORMAL_SHARDS_RESULT" in text
+    assert "scripts/ci_test_shard.py" in text
+    assert "fail-fast: false" in text
+    assert "shard: [0, 1, 2, 3]" in text
 
     normal_suite = (
         "not slow and not simulation_component and not live_runtime_e2e "
@@ -54,3 +60,13 @@ def test_failure_memory_workflow_is_read_only() -> None:
     assert "pull-requests: write" not in text
     assert "issues: write" not in text
     assert "agent_failure_learn.py" in text
+
+
+def test_ci_normal_test_shards_preserve_one_stable_aggregate_gate() -> None:
+    text = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
+
+    assert "name: normal-tests-${{ matrix.shard }}" in text
+    assert "name: tests" in text
+    assert 'test "$NORMAL_SHARDS_RESULT" = "success"' in text
+    assert "${{ strategy.job-index }}" in text
+    assert "${{ strategy.job-total }}" in text
