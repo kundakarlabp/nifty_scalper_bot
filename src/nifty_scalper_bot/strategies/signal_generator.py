@@ -1323,7 +1323,7 @@ class StrategyManager:
                         new_conf = min(new_conf, 0.99)  # Cap at 0.99
                         signal = dataclasses.replace(signal, confidence=new_conf)
 
-                     # Tag metadata and collect
+                    # Tag metadata and collect
                     all_signals.append(
                         signal.with_metadata(
                             indicators=indicators,
