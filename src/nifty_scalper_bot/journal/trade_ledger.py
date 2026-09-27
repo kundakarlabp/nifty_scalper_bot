@@ -298,16 +298,14 @@ def materialize_trade_events(
 
 def load_completed_trade_feedback(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     """Return canonical completed-trade feedback in chronological order."""
-    rows = conn.execute(
-        """
+    rows = conn.execute("""
         SELECT trade_id, strategy, net_pnl, closed_at, updated_at, outcome_json
         FROM trade_ledger
         WHERE state = 'CLOSED'
           AND ledger_complete = 1
           AND net_pnl IS NOT NULL
         ORDER BY COALESCE(closed_at, updated_at), trade_id
-        """
-    ).fetchall()
+        """).fetchall()
     feedback: list[dict[str, Any]] = []
     for row in rows:
         trade_id = _text(row[0])
