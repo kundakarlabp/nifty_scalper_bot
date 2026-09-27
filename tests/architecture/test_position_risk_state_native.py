@@ -24,7 +24,15 @@ def test_position_risk_state_is_native_not_package_patch() -> None:
 
 
 def test_position_manager_broker_sync_owns_risk_pnl_reconciliation() -> None:
-    source = inspect.getsource(PositionManager.synchronize_with_broker)
+    source = Path(
+        "src/nifty_scalper_bot/execution/position_manager.py"
+    ).read_text(encoding="utf-8")
 
-    assert "_maybe_seed_pnl_session_baseline" in source
-    assert "_reconcile_local_pnl_to_broker_snapshot" in source
+    sync_start = source.index("    def synchronize_with_broker(")
+    sync_end = source.index(
+        "    def _synchronize_managed_positions_from_broker(",
+        sync_start,
+    )
+    native_sync = source[sync_start:sync_end]
+    assert "_maybe_seed_pnl_session_baseline" in native_sync
+    assert "_reconcile_local_pnl_to_broker_snapshot" in native_sync
