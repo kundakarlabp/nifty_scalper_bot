@@ -85,11 +85,11 @@ jobs:
   normal-test-shard:
     name: normal-tests-${{ matrix.shard }}
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 6
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3]
+        shard: [0]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -114,7 +114,8 @@ jobs:
           fi
           printf 'Normal test shard %s/%s: %s files\n' \
             "${{ strategy.job-index }}" "${{ strategy.job-total }}" "${#files[@]}"
-          python -m pytest -q "${files[@]}" \
+          timeout 180s python -m pytest -vv "${files[@]}" \
+            -o faulthandler_timeout=20 \
             -m "not slow and not simulation_component and not live_runtime_e2e and not e2e_live_sim"
 
   tests:
