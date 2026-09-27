@@ -38,7 +38,7 @@ class _DataHub:
 
 
 def test_runtime_install_proof_uses_context_instances(monkeypatch) -> None:
-    monkeypatch.setattr(sys, "meta_path", [_CoreHook(), _DataHubHook(), _PlainFinder()])
+    monkeypatch.setattr(sys, "meta_path", [_CoreHook(), _PlainFinder()])
     ctx = SimpleNamespace(
         market_data_manager=_Mdm(),
         websocket_manager=_Ws(),
@@ -51,18 +51,19 @@ def test_runtime_install_proof_uses_context_instances(monkeypatch) -> None:
     assert proof["websocket_hardened"] is True
     assert proof["datahub_synthetic_guard_installed"] is True
     assert proof["core_app_import_hook_installed"] is True
-    assert proof["datahub_import_hook_installed"] is True
-    assert proof["import_hook_counts"] == {"core_app": 1, "datahub": 1}
+    assert proof["datahub_import_hook_installed"] is False
+    assert proof["import_hook_counts"] == {"core_app": 1, "datahub": 0}
 
 
 def test_runtime_install_proof_reports_duplicate_import_hooks(monkeypatch) -> None:
-    monkeypatch.setattr(sys, "meta_path", [_CoreHook(), _CoreHook(), _DataHubHook()])
+    monkeypatch.setattr(sys, "meta_path", [_CoreHook(), _CoreHook()])
 
     proof = build_runtime_install_proof(None)
 
     assert proof["core_app_import_hook_installed"] is False
-    assert proof["datahub_import_hook_installed"] is True
+    assert proof["datahub_import_hook_installed"] is False
     assert proof["import_hook_counts"]["core_app"] == 2
+    assert proof["import_hook_counts"]["datahub"] == 0
 
 
 def test_runtime_install_proof_all_required_requires_every_marker(monkeypatch) -> None:
@@ -149,20 +150,7 @@ def test_runtime_install_proof_rejects_native_datahub_wrong_method_owner(
     assert proof["datahub_hardening_mode"] == "invalid_native_ownership"
 
 
-def test_runtime_install_proof_unloaded_datahub_one_hook_is_import_hook_mode(
-    monkeypatch,
-) -> None:
-    monkeypatch.delitem(sys.modules, "nifty_scalper_bot.data.data_hub", raising=False)
-    monkeypatch.setattr(sys, "meta_path", [_CoreHook(), _DataHubHook()])
-
-    proof = build_runtime_install_proof(None)
-
-    assert proof["datahub_import_hook_required"] is True
-    assert proof["datahub_hardening_satisfied"] is True
-    assert proof["datahub_hardening_mode"] == "import_hook"
-
-
-def test_runtime_install_proof_unloaded_datahub_missing_hook_is_missing(
+def test_runtime_install_proof_unloaded_datahub_needs_no_import_hook(
     monkeypatch,
 ) -> None:
     monkeypatch.delitem(sys.modules, "nifty_scalper_bot.data.data_hub", raising=False)
@@ -170,16 +158,8 @@ def test_runtime_install_proof_unloaded_datahub_missing_hook_is_missing(
 
     proof = build_runtime_install_proof(None)
 
-    assert proof["datahub_import_hook_required"] is True
-    assert proof["datahub_hardening_satisfied"] is False
-    assert proof["datahub_hardening_mode"] == "missing"
-
-
-def test_runtime_install_proof_duplicate_datahub_hook_is_duplicate(monkeypatch) -> None:
-    monkeypatch.delitem(sys.modules, "nifty_scalper_bot.data.data_hub", raising=False)
-    monkeypatch.setattr(sys, "meta_path", [_CoreHook(), _DataHubHook(), _DataHubHook()])
-
-    proof = build_runtime_install_proof(None)
-
-    assert proof["datahub_hardening_satisfied"] is False
-    assert proof["datahub_hardening_mode"] == "duplicate_hook"
+    assert proof["datahub_import_hook_required"] is False
+    assert proof["datahub_import_hook_installed"] is False
+    assert proof["import_hook_counts"]["datahub"] == 0
+    assert proof["datahub_hardening_satisfied"] is True
+    assert proof["datahub_hardening_mode"] == "native_not_loaded"
