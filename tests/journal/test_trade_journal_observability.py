@@ -804,3 +804,82 @@ def test_historical_backfill_skips_malformed_event_json(tmp_path) -> None:
             ).fetchone()[0]
             == "CLOSED"
         )
+
+
+def test_completed_trade_feedback_loader_uses_only_complete_finite_rows(
+    tmp_path,
+) -> None:
+    db_path = tmp_path / "journal.db"
+    journal = TradeJournal(str(db_path))
+
+    events = [
+        journal._normalize_event(
+            {
+                "event_type": "BRACKET_CLOSED",
+                "timestamp": 30.0,
+                "symbol": "NFO:NIFTYCE",
+                "meta": {
+                    "trade_id": "trade-3",
+                    "completed_trade": {
+                        "strategy_name": "SMC",
+                        "regime": "RANGE",
+                        "net_pnl": 30.0,
+                        "ledger_complete": True,
+                    },
+                },
+            }
+        ),
+        journal._normalize_event(
+            {
+                "event_type": "BRACKET_CLOSED",
+                "timestamp": 10.0,
+                "symbol": "NFO:NIFTYPE",
+                "meta": {
+                    "trade_id": "trade-1",
+                    "completed_trade": {
+                        "strategy_name": "VWAPPro",
+                        "regime": "TREND",
+                        "net_pnl": -20.0,
+                        "ledger_complete": True,
+                    },
+                },
+            }
+        ),
+        journal._normalize_event(
+            {
+                "event_type": "BRACKET_CLOSED",
+                "timestamp": 20.0,
+                "symbol": "NFO:NIFTYCE",
+                "meta": {
+                    "trade_id": "trade-incomplete",
+                    "completed_trade": {
+                        "strategy_name": "ORBPro",
+                        "regime": "TREND",
+                        "net_pnl": 999.0,
+                        "ledger_complete": False,
+                    },
+                },
+            }
+        ),
+    ]
+
+    conn = journal._flush_batch(events, None)
+    assert conn is not None
+    conn.close()
+
+    assert journal.load_completed_trade_feedback() == [
+        {
+            "trade_id": "trade-1",
+            "strategy": "VWAPPro",
+            "net_pnl": -20.0,
+            "regime": "TREND",
+            "closed_at": 10.0,
+        },
+        {
+            "trade_id": "trade-3",
+            "strategy": "SMC",
+            "net_pnl": 30.0,
+            "regime": "RANGE",
+            "closed_at": 30.0,
+        },
+    ]

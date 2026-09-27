@@ -296,6 +296,43 @@ def materialize_trade_events(
         conn.executemany(_UPSERT_SQL, materialized)
 
 
+def load_completed_trade_feedback(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Return canonical completed-trade feedback in chronological order."""
+    rows = conn.execute("""
+        SELECT trade_id, strategy, net_pnl, closed_at, updated_at, outcome_json
+        FROM trade_ledger
+        WHERE state = 'CLOSED'
+          AND ledger_complete = 1
+          AND net_pnl IS NOT NULL
+        ORDER BY COALESCE(closed_at, updated_at), trade_id
+        """).fetchall()
+    feedback: list[dict[str, Any]] = []
+    for row in rows:
+        trade_id = _text(row[0])
+        strategy = _text(row[1])
+        net_pnl = _number(row[2])
+        if trade_id is None or strategy is None or net_pnl is None:
+            continue
+        outcome: Mapping[str, Any] = {}
+        if row[5]:
+            try:
+                decoded = json.loads(str(row[5]))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                decoded = None
+            if isinstance(decoded, Mapping):
+                outcome = decoded
+        feedback.append(
+            {
+                "trade_id": trade_id,
+                "strategy": strategy,
+                "net_pnl": net_pnl,
+                "regime": _text(outcome.get("regime")),
+                "closed_at": _first_number(row[3], row[4]),
+            }
+        )
+    return feedback
+
+
 def _build_trade_row(event: Mapping[str, Any]) -> dict[str, Any] | None:
     trade_id = _text(event.get("trade_id"))
     if trade_id is None:
@@ -469,4 +506,8 @@ def _first_number(*values: Any) -> float | None:
     return None
 
 
-__all__ = ["ensure_trade_ledger_schema", "materialize_trade_events"]
+__all__ = [
+    "ensure_trade_ledger_schema",
+    "load_completed_trade_feedback",
+    "materialize_trade_events",
+]
