@@ -1475,7 +1475,6 @@ class StrategyManager(_BaseStrategyManager):
         resolved_pnl = float(pnl)
         if not isfinite(resolved_pnl):
             raise ValueError("pnl must be finite")
-        perf = self._performance.setdefault(strategy_name, StrategyPerformance())
         regime_label: str | None = None
         if metadata is not None:
             try:
@@ -1490,8 +1489,11 @@ class StrategyManager(_BaseStrategyManager):
                 )
         if regime_label is None:
             regime_label = self._regime_state.regime
-        perf.record(resolved_pnl, regime=regime_label)
-        self._adaptive_store.record_trade(strategy_name, resolved_pnl)
+        self._record_performance_observation(
+            strategy_name,
+            resolved_pnl,
+            regime_label=regime_label,
+        )
         if metadata:
             log.info(
                 "Condition met: strategy_trade_recorded",
@@ -1502,7 +1504,63 @@ class StrategyManager(_BaseStrategyManager):
                     "metadata": dict(metadata),
                 },
             )
+
+    def _record_performance_observation(
+        self,
+        strategy_name: str,
+        pnl: float,
+        *,
+        regime_label: str | None,
+    ) -> None:
+        perf = self._performance.setdefault(strategy_name, StrategyPerformance())
+        perf.record(pnl, regime=regime_label)
+        self._adaptive_store.record_trade(strategy_name, pnl)
         self._score_cache.pop(strategy_name, None)
+
+    def restore_performance_history(
+        self,
+        outcomes: t.Sequence[t.Mapping[str, t.Any]],
+    ) -> int:
+        """Restore bounded completed-trade history before live feedback begins."""
+
+        if any(performance.trades > 0 for performance in self._performance.values()):
+            raise RuntimeError("performance history already initialised")
+
+        restored = 0
+        for outcome in outcomes:
+            strategy_name = str(outcome.get("strategy") or "").strip()
+            if not strategy_name:
+                continue
+            try:
+                resolved_pnl = float(outcome.get("net_pnl"))
+            except (TypeError, ValueError):
+                continue
+            if not isfinite(resolved_pnl):
+                continue
+            candidate_regime = outcome.get("regime")
+            regime_label = (
+                str(candidate_regime).strip()
+                if isinstance(candidate_regime, str) and candidate_regime.strip()
+                else None
+            )
+            self._record_performance_observation(
+                strategy_name,
+                resolved_pnl,
+                regime_label=regime_label,
+            )
+            restored += 1
+
+        log.info(
+            "STRATEGY_PERFORMANCE_HISTORY_RESTORED trades=%d strategies=%d",
+            restored,
+            len(self._performance),
+            extra={
+                "event": "strategy_performance_history_restored",
+                "trades": restored,
+                "strategies": len(self._performance),
+            },
+        )
+        return restored
 
     def notify_entry_accepted(
         self,

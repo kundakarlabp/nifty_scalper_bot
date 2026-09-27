@@ -73,6 +73,7 @@ import pandas as pd
 import pytz
 from nifty_scalper_bot.config.env_utils import parse_float_env
 from nifty_scalper_bot.journal.trade_journal import TradeJournal
+from nifty_scalper_bot.journal.trade_ledger import load_completed_strategy_history
 from nifty_scalper_bot.utils.smart_symbol import is_nse_trading_day
 
 from nifty_scalper_bot.config.paths import get_data_dir
@@ -1486,7 +1487,6 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from nifty_scalper_bot.config.base import AppConfig
-from nifty_scalper_bot.config.paths import get_data_dir
 from nifty_scalper_bot.config.settings import Settings, get_settings
 from nifty_scalper_bot.core.market_regime_manager import MarketRegimeManager
 from nifty_scalper_bot.core.message_bus import Message, MessageBus, MessageType
@@ -6481,6 +6481,22 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         regime_bias_map=regime_bias_map,
         market_regime_manager=market_regime_manager,
     )
+    try:
+        strategy_history = load_completed_strategy_history(
+            trade_journal.db_path,
+            strategy_names=[
+                str(getattr(strategy, "name", "") or "")
+                for strategy in strategy_instances
+            ],
+        )
+        strategy_manager.restore_performance_history(strategy_history)
+    except Exception as exc:  # noqa: BLE001 - history restore must not block startup
+        LOGGER.error(
+            "strategy_performance_history_restore_failed: %s",
+            exc,
+            extra={"event": "strategy_performance_history_restore_failed"},
+            exc_info=exc,
+        )
     strategy_profile = build_production_strategy_profile(
         settings=settings,
         strategies=elite_strategies,

@@ -12,6 +12,7 @@ import math
 import sqlite3
 import time
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import Any
 
 _TRADE_STATES = {
@@ -285,6 +286,70 @@ def ensure_trade_ledger_schema(conn: sqlite3.Connection) -> None:
     )
 
 
+def load_completed_strategy_history(
+    db_path: str | Path,
+    *,
+    strategy_names: Sequence[str],
+) -> list[dict[str, Any]]:
+    """Load all ledger-complete net outcomes needed for exact state restoration."""
+
+    names = [
+        name
+        for name in dict.fromkeys(str(item).strip() for item in strategy_names)
+        if name
+    ]
+    resolved = Path(db_path).expanduser().resolve()
+    if not names or not resolved.exists():
+        return []
+
+    placeholders = ", ".join("?" for _ in names)
+    uri = f"{resolved.as_uri()}?mode=ro"
+    try:
+        with sqlite3.connect(uri, uri=True) as connection:
+            rows = connection.execute(
+                f"""
+                SELECT trade_id, strategy, net_pnl, closed_at, outcome_json
+                FROM trade_ledger
+                WHERE state = 'CLOSED'
+                  AND ledger_complete = 1
+                  AND strategy IN ({placeholders})
+                  AND net_pnl IS NOT NULL
+                  AND closed_at IS NOT NULL
+                ORDER BY closed_at, trade_id
+                """,
+                names,
+            ).fetchall()
+    except sqlite3.OperationalError as exc:
+        if "no such table: trade_ledger" in str(exc).lower():
+            return []
+        raise
+
+    history: list[dict[str, Any]] = []
+    for trade_id, strategy, net_pnl, closed_at, outcome_json in rows:
+        resolved_pnl = _number(net_pnl)
+        resolved_closed_at = _number(closed_at)
+        if resolved_pnl is None or resolved_closed_at is None:
+            continue
+        regime = None
+        if outcome_json:
+            try:
+                outcome = json.loads(str(outcome_json))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                outcome = {}
+            if isinstance(outcome, Mapping):
+                regime = _text(outcome.get("regime"))
+        history.append(
+            {
+                "trade_id": str(trade_id),
+                "strategy": str(strategy),
+                "net_pnl": resolved_pnl,
+                "closed_at": resolved_closed_at,
+                "regime": regime,
+            }
+        )
+    return history
+
+
 def materialize_trade_events(
     conn: sqlite3.Connection,
     events: Sequence[Mapping[str, Any]],
@@ -469,4 +534,8 @@ def _first_number(*values: Any) -> float | None:
     return None
 
 
-__all__ = ["ensure_trade_ledger_schema", "materialize_trade_events"]
+__all__ = [
+    "ensure_trade_ledger_schema",
+    "load_completed_strategy_history",
+    "materialize_trade_events",
+]
