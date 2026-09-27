@@ -235,6 +235,42 @@ def test_optimizer_uses_candidate_specific_evaluator() -> None:
     }
 
 
+def test_optimizer_evaluates_unique_candidates_after_boundary_clamping() -> None:
+    stats = AdaptiveParameterStore(window_trades=10).record_trade("s1", 10.0)
+    current = {
+        "momentum_z_threshold": 0.1,
+        "microvol_percentile": 5.0,
+        "spread_threshold_pct": 0.01,
+    }
+    seen: list[tuple[float, float, float]] = []
+    opt = WalkForwardOptimizer(
+        recalibrate_every=1,
+        alpha=1.0,
+        allow_parameter_updates=True,
+    )
+
+    def candidate_evaluator(params):
+        candidate = (
+            params["momentum_z_threshold"],
+            params["microvol_percentile"],
+            params["spread_threshold_pct"],
+        )
+        seen.append(candidate)
+        return sum(candidate)
+
+    opt.optimize(
+        "s1",
+        "trend",
+        stats,
+        current,
+        candidate_evaluator=candidate_evaluator,
+    )
+
+    assert len(seen) == 8
+    assert len(set(seen)) == 8
+    assert seen.count((0.1, 5.0, 0.01)) == 1
+
+
 def test_optimizer_does_not_drift_on_equal_candidate_scores() -> None:
     stats = AdaptiveParameterStore(window_trades=10).record_trade("s1", 10.0)
     current = {
