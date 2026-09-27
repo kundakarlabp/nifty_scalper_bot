@@ -1456,11 +1456,15 @@ class StrategyRunner:
                     None,
                 )
                 if callable(circuit) and completed_net_pnl is not None:
-                    estimated = outcome.get("estimated_costs")
+                    effective_costs = outcome.get("effective_costs")
+                    if not isinstance(effective_costs, Mapping):
+                        effective_costs = outcome.get("estimated_costs")
                     cost_total = 0.0
-                    if isinstance(estimated, Mapping):
+                    if isinstance(effective_costs, Mapping):
                         try:
-                            candidate_cost_total = float(estimated.get("total") or 0.0)
+                            candidate_cost_total = float(
+                                effective_costs.get("total") or 0.0
+                            )
                         except (TypeError, ValueError):
                             candidate_cost_total = 0.0
                         if math.isfinite(candidate_cost_total):
