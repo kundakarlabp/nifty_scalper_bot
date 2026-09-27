@@ -349,16 +349,24 @@ class WalkForwardOptimizer:
             "spread_threshold_pct": max(0.01, sp),
         }
         candidates: list[dict[str, float]] = []
+        seen_candidates: set[tuple[float, float, float]] = set()
         for dm in (-0.1, 0.0, 0.1):
             for dv in (-5.0, 0.0, 5.0):
                 for ds in (-0.05, 0.0, 0.05):
-                    candidates.append(
-                        {
-                            "momentum_z_threshold": max(0.1, mz + dm),
-                            "microvol_percentile": min(95.0, max(5.0, mv + dv)),
-                            "spread_threshold_pct": max(0.01, sp + ds),
-                        }
+                    candidate = {
+                        "momentum_z_threshold": max(0.1, mz + dm),
+                        "microvol_percentile": min(95.0, max(5.0, mv + dv)),
+                        "spread_threshold_pct": max(0.01, sp + ds),
+                    }
+                    key = (
+                        candidate["momentum_z_threshold"],
+                        candidate["microvol_percentile"],
+                        candidate["spread_threshold_pct"],
                     )
+                    if key in seen_candidates:
+                        continue
+                    seen_candidates.add(key)
+                    candidates.append(candidate)
         current_score: float | None = None
         best_score: float | None = None
         best: dict[str, float] | None = None
