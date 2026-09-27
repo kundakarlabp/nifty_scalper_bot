@@ -7,8 +7,8 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping, cast
 
 from nifty_scalper_bot.config.entry_policy import resolve_entry_policy
-from nifty_scalper_bot.config.score_scale import resolve_score_setting
 from nifty_scalper_bot.config.regime_ontology import MarketRegime, normalize_regime
+from nifty_scalper_bot.config.score_scale import resolve_score_setting
 from nifty_scalper_bot.config.strategy_taxonomy import (
     is_context_only_strategy,
     normalize_strategy_name,
