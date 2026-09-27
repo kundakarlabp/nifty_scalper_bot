@@ -54,6 +54,7 @@ def test_agent_task_check_runs_style_validation_and_relevant_benchmarks(
         return _Result()
 
     monkeypatch.setattr(module, "_python", fake_python)
+    monkeypatch.setattr(module, "_syntax_preflight", lambda root: 0)
 
     result = module._validate(
         ROOT,
@@ -75,6 +76,32 @@ def test_agent_task_check_runs_style_validation_and_relevant_benchmarks(
     assert "focused" in calls[2][1]
     assert "--area" in calls[3][1]
     assert "market-data" in calls[3][1]
+
+
+def test_agent_task_fails_before_style_mutation_when_python_does_not_compile(
+    monkeypatch,
+) -> None:
+    module = _load_task_module()
+    calls: list[str] = []
+
+    monkeypatch.setattr(module, "_syntax_preflight", lambda root: 1)
+
+    def fake_python(root, script, *args, capture_output=False):
+        calls.append(script)
+        return _Result()
+
+    monkeypatch.setattr(module, "_python", fake_python)
+
+    result = module._validate(
+        ROOT,
+        base_ref="origin/main",
+        files=("src/nifty_scalper_bot/strategies/signal_generator.py",),
+        scope="focused",
+        style_fix=True,
+    )
+
+    assert result == 1
+    assert calls == []
 
 
 def test_agent_task_skips_benchmark_execution_when_no_case_matches(monkeypatch) -> None:
