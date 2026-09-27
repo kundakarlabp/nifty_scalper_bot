@@ -145,7 +145,7 @@ def _has_signal_quality(outcome: Mapping[str, Any]) -> bool:
         return False
     for field in ("alpha_score", "strategy_score"):
         value = quality.get(field)
-        if isinstance(value, bool):
+        if value is None or isinstance(value, bool):
             return False
         try:
             resolved = float(value)
