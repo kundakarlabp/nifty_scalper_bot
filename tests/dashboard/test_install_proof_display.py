@@ -9,10 +9,11 @@ def test_install_proof_display_reports_all_installed() -> None:
         "websocket_hardened": True,
         "datahub_synthetic_guard_installed": True,
         "polling_failover_native_owner": True,
-        "core_app_import_hook_installed": True,
+        "core_app_native_bootstrap_loaded": True,
+        "core_app_import_hook_installed": False,
         "datahub_import_hook_installed": False,
         "all_required_installed": True,
-        "import_hook_counts": {"core_app": 1, "datahub": 0},
+        "import_hook_counts": {"core_app": 0, "datahub": 0},
     }
 
     display = install_proof_display(proof)
@@ -21,7 +22,7 @@ def test_install_proof_display_reports_all_installed() -> None:
     assert display["css"] == "ok"
     assert display["all_installed"] is True
     assert display["missing"] == []
-    assert display["hook_counts"] == {"core_app": 1, "datahub": 0}
+    assert display["hook_counts"] == {"core_app": 0, "datahub": 0}
 
 
 def test_install_proof_display_lists_missing_items() -> None:
@@ -30,7 +31,8 @@ def test_install_proof_display_lists_missing_items() -> None:
         "websocket_hardened": False,
         "datahub_synthetic_guard_installed": True,
         "polling_failover_native_owner": False,
-        "core_app_import_hook_installed": True,
+        "core_app_native_bootstrap_loaded": True,
+        "core_app_import_hook_installed": False,
         "datahub_import_hook_installed": False,
         "all_required_installed": False,
         "import_hook_counts": {"core_app": 1, "datahub": 2},

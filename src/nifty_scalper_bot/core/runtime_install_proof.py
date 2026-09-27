@@ -120,6 +120,10 @@ def build_runtime_install_proof(ctx: Any | None = None) -> dict[str, Any]:
         and getattr(polling_supervisor, "__module__", None)
         == "nifty_scalper_bot.core.app"
     )
+    core_app_native_bootstrap_loaded = bool(
+        app_module is not None
+        and getattr(app_module, "_native_runtime_hardening_bootstrap", False)
+    )
 
     return {
         "market_data_manager_hardened": market_data_manager_hardened,
@@ -130,7 +134,9 @@ def build_runtime_install_proof(ctx: Any | None = None) -> dict[str, Any]:
         "datahub_hardening_satisfied": datahub_hardening_satisfied,
         "datahub_hardening_mode": datahub_hardening_mode,
         "polling_failover_native_owner": polling_failover_native_owner,
-        "core_app_import_hook_installed": core_hook_count == 1,
+        "core_app_native_bootstrap_loaded": core_app_native_bootstrap_loaded,
+        "core_app_import_hook_required": False,
+        "core_app_import_hook_installed": core_hook_count > 0,
         "datahub_import_hook_installed": False,
         "import_hook_counts": {
             "core_app": core_hook_count,
@@ -141,7 +147,8 @@ def build_runtime_install_proof(ctx: Any | None = None) -> dict[str, Any]:
             and websocket_hardened
             and datahub_hardening_satisfied
             and polling_failover_native_owner
-            and core_hook_count == 1
+            and core_app_native_bootstrap_loaded
+            and core_hook_count == 0
         ),
     }
 
