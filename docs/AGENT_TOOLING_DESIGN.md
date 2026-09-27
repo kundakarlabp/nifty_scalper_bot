@@ -104,6 +104,7 @@ These tools turn recurring reasoning into deterministic repository feedback.
 - The normal non-slow pytest surface is partitioned by `scripts/ci_test_shard.py` into deterministic file-level shards.
 - Every discovered pytest-style file belongs to exactly one normal shard.
 - Shard coordinates come from GitHub's matrix strategy context, not a second routing table.
+- Each job uses one dependency resolver/install pass with pip caching; no virtualenv artifact/cache layer is added.
 - A stable aggregate `tests` job succeeds only when every normal shard succeeds, preserving one branch-protection status.
 - Marker exclusions remain identical to the previous monolithic normal-suite command, so E2E/slow tests are not duplicated.
 
