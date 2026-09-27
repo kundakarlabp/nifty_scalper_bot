@@ -12,7 +12,6 @@ from __future__ import annotations
 
 from nifty_scalper_bot.config.regime_ontology import MarketRegime
 
-
 REGIME_STRATEGY_WEIGHTS: dict[str, dict[str, float]] = {
     MarketRegime.TREND.value: {
         "SMC": 1.2,
@@ -55,7 +54,7 @@ REGIME_STRATEGY_WEIGHTS: dict[str, dict[str, float]] = {
 
 def regime_strategy_weight(regime: MarketRegime | str | None, strategy: str) -> float:
     """Return the configured regime multiplier, defaulting to neutral weight 1.0."""
-    key = regime.value if isinstance(regime, MarketRegime) else str(regime or "").strip().upper()
+    key = (\n        regime.value\n        if isinstance(regime, MarketRegime)\n        else str(regime or "").strip().upper()\n    )
     return float(REGIME_STRATEGY_WEIGHTS.get(key, {}).get(str(strategy), 1.0))
 
 
