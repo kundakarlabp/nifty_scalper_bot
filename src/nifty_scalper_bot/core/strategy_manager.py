@@ -6011,9 +6011,12 @@ class StrategyManager(_BaseStrategyManager):
         regime_win_values: dict[str, float] = {}
         regime_sharpe_values: dict[str, float] = {}
         regime_drawdown_values: dict[str, float] = {}
-        active_regime_snapshots: dict[str, dict[str, float]] = {}
+        active_regime_snapshots: dict[str, dict[str, t.Any]] = {}
+        aggregate_evidence: dict[str, bool] = {}
+        regime_evidence: dict[str, bool] = {}
         performances: dict[str, StrategyPerformance] = {}
         regime_key = (self._regime_state.regime or "").strip().lower()
+        evidence_floor = max(1, self._dynamic_trade_threshold)
         for strategy in self._strategies:
             name = strategy.name
             perf = self._performance.setdefault(name, StrategyPerformance())
@@ -6036,11 +6039,12 @@ class StrategyManager(_BaseStrategyManager):
             )
             rolling_values[name] = rolling_pnl_value
             ratio_values[name] = perf.win_loss_ratio()
+            aggregate_evidence[name] = perf.trades >= evidence_floor
             bucket = None
             try:
                 if regime_key:
                     bucket = perf.regime_buckets.get(regime_key)
-                if bucket is None:
+                else:
                     bucket = perf.regime_buckets.get("unknown")
             except Exception as exc:  # noqa: BLE001
                 log.error(
@@ -6052,7 +6056,7 @@ class StrategyManager(_BaseStrategyManager):
             regime_stats_raw: dict[str, float] = {}
             if bucket is not None:
                 regime_stats_raw = bucket.snapshot()
-            active_snapshot = {
+            active_snapshot: dict[str, t.Any] = {
                 "pnl": float(regime_stats_raw.get("pnl", 0.0)),
                 "win_rate": float(regime_stats_raw.get("win_rate", 0.0)),
                 "hit_rate": float(regime_stats_raw.get("win_rate", 0.0)),
@@ -6060,20 +6064,73 @@ class StrategyManager(_BaseStrategyManager):
                 "drawdown": float(regime_stats_raw.get("drawdown", 0.0)),
                 "trades": float(regime_stats_raw.get("trades", 0.0)),
             }
+            regime_evidence[name] = bool(
+                regime_key and active_snapshot["trades"] >= evidence_floor
+            )
+            active_snapshot["evidence_sufficient"] = regime_evidence[name]
+            active_snapshot["evidence_floor"] = evidence_floor
             active_regime_snapshots[name] = active_snapshot
             regime_pnl_values[name] = active_snapshot["pnl"]
             regime_win_values[name] = active_snapshot["win_rate"]
             regime_sharpe_values[name] = active_snapshot["sharpe"]
             regime_drawdown_values[name] = -active_snapshot["drawdown"]
 
-        pnl_norm = self._normalise_metric(pnl_values)
-        sharpe_norm = self._normalise_metric(sharpe_values)
-        win_norm = self._normalise_metric(win_values)
-        drawdown_norm = self._normalise_metric(drawdown_values)
-        regime_pnl_norm = self._normalise_metric(regime_pnl_values)
-        regime_sharpe_norm = self._normalise_metric(regime_sharpe_values)
-        regime_win_norm = self._normalise_metric(regime_win_values)
-        regime_drawdown_norm = self._normalise_metric(regime_drawdown_values)
+        pnl_norm = self._normalise_metric(
+            {
+                name: value
+                for name, value in pnl_values.items()
+                if aggregate_evidence[name]
+            }
+        )
+        sharpe_norm = self._normalise_metric(
+            {
+                name: value
+                for name, value in sharpe_values.items()
+                if aggregate_evidence[name]
+            }
+        )
+        win_norm = self._normalise_metric(
+            {
+                name: value
+                for name, value in win_values.items()
+                if aggregate_evidence[name]
+            }
+        )
+        drawdown_norm = self._normalise_metric(
+            {
+                name: value
+                for name, value in drawdown_values.items()
+                if aggregate_evidence[name]
+            }
+        )
+        regime_pnl_norm = self._normalise_metric(
+            {
+                name: value
+                for name, value in regime_pnl_values.items()
+                if regime_evidence[name]
+            }
+        )
+        regime_sharpe_norm = self._normalise_metric(
+            {
+                name: value
+                for name, value in regime_sharpe_values.items()
+                if regime_evidence[name]
+            }
+        )
+        regime_win_norm = self._normalise_metric(
+            {
+                name: value
+                for name, value in regime_win_values.items()
+                if regime_evidence[name]
+            }
+        )
+        regime_drawdown_norm = self._normalise_metric(
+            {
+                name: value
+                for name, value in regime_drawdown_values.items()
+                if regime_evidence[name]
+            }
+        )
 
         regime_bias = self._regime_bias_map.get(regime_key, {})
         regime_changed = regime_key != self._regime_last_key
@@ -6097,7 +6154,7 @@ class StrategyManager(_BaseStrategyManager):
                 + regime_drawdown_norm.get(name, 0.5) * self._score_weights.drawdown
             )
             blend_weight = 0.0
-            if regime_key:
+            if regime_key and regime_evidence.get(name, False):
                 blend_weight = min(0.6, 0.25 + confidence * 0.35)
             composite_score = (
                 base_score * (1.0 - blend_weight) + regime_score * blend_weight
