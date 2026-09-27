@@ -5100,6 +5100,21 @@ class StrategyManager(_BaseStrategyManager):
         metadata["final_trade_threshold_reference"] = round(threshold, 3)
         metadata["manager_final_score_reference_only"] = True
         metadata["manager_final_score_reference_pass"] = final_score >= threshold
+        # Canonical score lineage is diagnostic only. It names each transformation
+        # explicitly so research can attribute setup, regime and context effects
+        # without treating correlated representations as independent evidence.
+        metadata["score_contract_version"] = 1
+        metadata["score_lineage"] = {
+            "raw_setup_score": round(raw_trigger_score, 3),
+            "regime_weight": round(_regime_weight(best_vote), 3),
+            "regime_adjusted_setup_score": round(weighted_trigger_score, 3),
+            "context_confirmation_bonus": round(context_bonus, 3),
+            "context_veto_penalty": round(context_penalty, 3),
+            "manager_reference_score": round(final_score, 3),
+            "manager_reference_threshold": round(threshold, 3),
+            "manager_reference_pass": final_score >= threshold,
+            "final_numeric_gate_owner": "runner_final_execution_score",
+        }
         if vetoed:
             blocked_reason = "hard_context_veto"
             log_throttled_live(
@@ -5302,7 +5317,22 @@ class StrategyManager(_BaseStrategyManager):
         metadata["trade_side"] = best_vote.side
         metadata["contract_side"] = best_vote.side
         metadata["side"] = best_vote.side
-        metadata["confirming_votes"] = [best_vote.strategy] + [v.strategy for v in same_side_context]
+        same_side_trigger_strategies = list(
+            dict.fromkeys(
+                vote.strategy
+                for _, vote in trigger_votes
+                if vote.side == best_vote.side
+            )
+        )
+        context_confirmation_strategies = list(
+            dict.fromkeys(vote.strategy for vote in same_side_context)
+        )
+        # Keep the legacy field for downstream compatibility, but make its
+        # semantics explicit: trigger consensus and context confirmation are
+        # separate evidence classes.
+        metadata["confirming_votes"] = same_side_trigger_strategies
+        metadata["confirming_trigger_strategies"] = same_side_trigger_strategies
+        metadata["context_confirmation_strategies"] = context_confirmation_strategies
         existing_direction_bias = str(metadata.get("direction_bias") or "").upper()
         if existing_direction_bias not in {"CE", "PE"}:
             metadata.pop("direction_bias", None)
