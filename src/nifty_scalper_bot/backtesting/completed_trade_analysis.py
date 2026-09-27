@@ -26,6 +26,7 @@ class CanonicalCompletedTrade:
     gross_pnl: float
     estimated_costs: float
     net_pnl: float
+    exit_reason: str
     outcome: Mapping[str, Any]
 
 
@@ -73,6 +74,18 @@ class AttributionReadiness:
     coverage: Mapping[str, ComponentCoverage]
     blockers: tuple[str, ...]
 
+
+@dataclass(frozen=True, slots=True)
+class ExecutionDataQuality:
+    """Known execution-evidence caveats in the realized historical sample."""
+
+    total_trades: int
+    known_stale_quote_exit_trades: int
+    known_stale_quote_exit_fraction: float
+    blockers: tuple[str, ...]
+
+
+_STALE_QUOTE_EXIT_MARKER = "src=ltp_stale_quote"
 
 _STRATEGY_ALIASES = {
     "ORB": "ORBPro",
@@ -207,6 +220,7 @@ def canonicalize_completed_trades(
                 gross_pnl=gross_pnl,
                 estimated_costs=estimated_costs,
                 net_pnl=net_pnl,
+                exit_reason=str(row.get("exit_reason") or "").strip(),
                 outcome=_outcome(row),
             )
         )
@@ -317,13 +331,37 @@ def attribution_readiness(
     )
 
 
+def execution_data_quality(
+    trades: Sequence[CanonicalCompletedTrade],
+) -> ExecutionDataQuality:
+    """Flag explicit stale-quote exits without silently excluding realized trades."""
+
+    total = len(trades)
+    stale = sum(
+        _STALE_QUOTE_EXIT_MARKER in trade.exit_reason.lower() for trade in trades
+    )
+    blockers = (
+        (f"known_stale_quote_exit_trades:{stale}",)
+        if stale
+        else ()
+    )
+    return ExecutionDataQuality(
+        total_trades=total,
+        known_stale_quote_exit_trades=stale,
+        known_stale_quote_exit_fraction=round(stale / total, 4) if total else 0.0,
+        blockers=blockers,
+    )
+
+
 __all__ = [
     "AttributionReadiness",
     "CanonicalCompletedTrade",
     "ChronologicalBlock",
     "CompletedTradeSummary",
     "ComponentCoverage",
+    "ExecutionDataQuality",
     "attribution_readiness",
+    "execution_data_quality",
     "canonicalize_completed_trades",
     "chronological_post_cost_blocks",
     "summarize_completed_trades",
