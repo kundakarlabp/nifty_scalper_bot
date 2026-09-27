@@ -286,7 +286,6 @@ def ensure_trade_ledger_schema(conn: sqlite3.Connection) -> None:
     )
 
 
-
 def load_completed_strategy_history(
     db_path: str | Path,
     *,
@@ -298,7 +297,11 @@ def load_completed_strategy_history(
     limit = int(per_strategy_limit)
     if limit <= 0:
         raise ValueError("per_strategy_limit must be positive")
-    names = [name for name in dict.fromkeys(str(item).strip() for item in strategy_names) if name]
+    names = [
+        name
+        for name in dict.fromkeys(str(item).strip() for item in strategy_names)
+        if name
+    ]
     resolved = Path(db_path).expanduser().resolve()
     if not names or not resolved.exists():
         return []
@@ -344,11 +347,14 @@ def load_completed_strategy_history(
                             "regime": regime,
                         }
                     )
-    except sqlite3.OperationalError:
-        return []
+    except sqlite3.OperationalError as exc:
+        if "no such table: trade_ledger" in str(exc).lower():
+            return []
+        raise
 
     history.sort(key=lambda item: (float(item["closed_at"]), str(item["trade_id"])))
     return history
+
 
 def materialize_trade_events(
     conn: sqlite3.Connection,
