@@ -9,8 +9,8 @@ counterfactual walk-forward evidence an explicit prerequisite for tuning.
 from __future__ import annotations
 
 import argparse
-from collections import defaultdict
-from collections.abc import Mapping, Sequence
+import collections
+import collections.abc
 import json
 import math
 from pathlib import Path
@@ -35,7 +35,7 @@ def _finite_number(value: Any) -> float | None:
 
 
 def _json_object(raw: Any) -> dict[str, Any]:
-    if isinstance(raw, Mapping):
+    if isinstance(raw, collections.abc.Mapping):
         return dict(raw)
     if raw in (None, ""):
         return {}
@@ -43,7 +43,7 @@ def _json_object(raw: Any) -> dict[str, Any]:
         parsed = json.loads(str(raw))
     except (TypeError, ValueError, json.JSONDecodeError):
         return {}
-    return dict(parsed) if isinstance(parsed, Mapping) else {}
+    return dict(parsed) if isinstance(parsed, collections.abc.Mapping) else {}
 
 
 def load_canonical_completed_trades(db_path: str | Path) -> list[dict[str, Any]]:
@@ -98,7 +98,7 @@ def load_canonical_completed_trades(db_path: str | Path) -> list[dict[str, Any]]
 
 
 def validate_canonical_completed_trades(
-    trades: Sequence[Mapping[str, Any]],
+    trades: collections.abc.Sequence[collections.abc.Mapping[str, Any]],
 ) -> None:
     """Fail closed when canonical economics or chronological identity are invalid."""
 
@@ -135,7 +135,7 @@ def validate_canonical_completed_trades(
 
 
 def performance_summary(
-    trades: Sequence[Mapping[str, Any]],
+    trades: collections.abc.Sequence[collections.abc.Mapping[str, Any]],
 ) -> dict[str, Any]:
     gross = [_finite_number(trade.get("gross_pnl")) or 0.0 for trade in trades]
     costs = [_finite_number(trade.get("estimated_costs")) or 0.0 for trade in trades]
@@ -171,7 +171,7 @@ def performance_summary(
 
 
 def chronological_blocks(
-    trades: Sequence[Mapping[str, Any]],
+    trades: collections.abc.Sequence[collections.abc.Mapping[str, Any]],
     *,
     block_size: int,
 ) -> list[dict[str, Any]]:
@@ -197,14 +197,14 @@ def chronological_blocks(
 
 
 def grouped_performance(
-    trades: Sequence[Mapping[str, Any]],
+    trades: collections.abc.Sequence[collections.abc.Mapping[str, Any]],
     *,
-    fields: Sequence[str],
+    fields: collections.abc.Sequence[str],
 ) -> list[dict[str, Any]]:
-    grouped: dict[tuple[str, ...], list[Mapping[str, Any]]] = defaultdict(list)
+    grouped: dict[tuple[str, ...], list[collections.abc.Mapping[str, Any]]] = collections.defaultdict(list)
     for trade in trades:
         outcome = trade.get("outcome")
-        outcome_map = outcome if isinstance(outcome, Mapping) else {}
+        outcome_map = outcome if isinstance(outcome, collections.abc.Mapping) else {}
         values = []
         for field in fields:
             if field == "strategy_profile_version":
@@ -223,17 +223,17 @@ def grouped_performance(
 
 
 def component_score_summary(
-    trades: Sequence[Mapping[str, Any]],
+    trades: collections.abc.Sequence[collections.abc.Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
     """Describe outcome by recorded decision-time score; never claim causality."""
 
-    grouped: dict[tuple[str, str, int], list[Mapping[str, Any]]] = defaultdict(list)
+    grouped: dict[tuple[str, str, int], list[collections.abc.Mapping[str, Any]]] = collections.defaultdict(list)
     for trade in trades:
         outcome = trade.get("outcome")
-        if not isinstance(outcome, Mapping):
+        if not isinstance(outcome, collections.abc.Mapping):
             continue
         quality = outcome.get("signal_quality")
-        if not isinstance(quality, Mapping):
+        if not isinstance(quality, collections.abc.Mapping):
             continue
         strategy = str(trade.get("strategy") or "UNKNOWN")
         for component in _QUALITY_COMPONENTS:
@@ -256,7 +256,7 @@ def component_score_summary(
 
 
 def evidence_coverage(
-    trades: Sequence[Mapping[str, Any]],
+    trades: collections.abc.Sequence[collections.abc.Mapping[str, Any]],
 ) -> dict[str, Any]:
     with_quality = 0
     with_final_score = 0
@@ -272,10 +272,10 @@ def evidence_coverage(
             missing_entry_filled_at += 1
 
         outcome = trade.get("outcome")
-        if not isinstance(outcome, Mapping):
+        if not isinstance(outcome, collections.abc.Mapping):
             continue
         quality = outcome.get("signal_quality")
-        if isinstance(quality, Mapping) and any(
+        if isinstance(quality, collections.abc.Mapping) and any(
             _finite_number(quality.get(component)) is not None
             for component in _QUALITY_COMPONENTS
         ):
@@ -305,7 +305,7 @@ def evidence_coverage(
 
 
 def execution_data_quality(
-    trades: Sequence[Mapping[str, Any]],
+    trades: collections.abc.Sequence[collections.abc.Mapping[str, Any]],
 ) -> dict[str, Any]:
     """Report known degraded exit-price evidence without silently excluding it."""
 
@@ -331,7 +331,7 @@ def execution_data_quality(
 
 
 def build_evidence_report(
-    trades: Sequence[Mapping[str, Any]],
+    trades: collections.abc.Sequence[collections.abc.Mapping[str, Any]],
     *,
     block_size: int = 20,
 ) -> dict[str, Any]:
@@ -398,7 +398,7 @@ def build_evidence_report(
     }
 
 
-def write_report(path: str | Path, report: Mapping[str, Any]) -> Path:
+def write_report(path: str | Path, report: collections.abc.Mapping[str, Any]) -> Path:
     resolved = Path(path).expanduser().resolve()
     resolved.parent.mkdir(parents=True, exist_ok=True)
     resolved.write_text(
@@ -408,7 +408,7 @@ def write_report(path: str | Path, report: Mapping[str, Any]) -> Path:
     return resolved
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def main(argv: collections.abc.Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--trades-db", type=Path, required=True)
     parser.add_argument("--block-size", type=int, default=20)
