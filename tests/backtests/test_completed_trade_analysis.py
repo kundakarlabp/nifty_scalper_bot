@@ -6,6 +6,7 @@ from nifty_scalper_bot.backtesting.completed_trade_analysis import (
     attribution_readiness,
     canonicalize_completed_trades,
     chronological_post_cost_blocks,
+    chronological_walk_forward,
     execution_data_quality,
     post_cost_attribution_groups,
     summarize_completed_trades,
@@ -122,6 +123,55 @@ def test_chronological_post_cost_blocks_are_contiguous_and_non_overlapping() -> 
         ("t5", "t6"),
     ]
     assert [block.summary.trade_count for block in blocks] == [2, 2, 2]
+
+
+def test_walk_forward_uses_expanding_train_and_strictly_later_test_windows() -> None:
+    trades = canonicalize_completed_trades(
+        [
+            _trade(
+                f"t{index}",
+                float(index),
+                gross_pnl=float(index + 20),
+                net_pnl=float(index),
+            )
+            for index in range(1, 9)
+        ]
+    )
+
+    folds = chronological_walk_forward(
+        trades,
+        min_train_trades=4,
+        test_trades=2,
+    )
+
+    assert [
+        (
+            fold.train_start_trade_id,
+            fold.train_end_trade_id,
+            fold.test_start_trade_id,
+            fold.test_end_trade_id,
+        )
+        for fold in folds
+    ] == [
+        ("t1", "t4", "t5", "t6"),
+        ("t1", "t6", "t7", "t8"),
+    ]
+    assert [fold.test_summary.net_pnl for fold in folds] == [11.0, 15.0]
+
+
+def test_walk_forward_fails_closed_when_sample_is_too_small() -> None:
+    trades = canonicalize_completed_trades([_trade("t1", 1.0), _trade("t2", 2.0)])
+
+    assert (
+        chronological_walk_forward(trades, min_train_trades=2, test_trades=1) == ()
+    )
+
+
+def test_walk_forward_rejects_non_positive_window_sizes() -> None:
+    with pytest.raises(ValueError, match="min_train_trades"):
+        chronological_walk_forward((), min_train_trades=0, test_trades=1)
+    with pytest.raises(ValueError, match="test_trades"):
+        chronological_walk_forward((), min_train_trades=1, test_trades=0)
 
 
 def test_summary_uses_post_cost_net_pnl() -> None:
