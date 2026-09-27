@@ -5,8 +5,8 @@ from threading import RLock
 from types import SimpleNamespace
 
 from nifty_scalper_bot.execution import bracket_core as bracket_owner
-from nifty_scalper_bot.execution import position_identity_extension as position_owner
 from nifty_scalper_bot.execution import position_manager as position_module
+from nifty_scalper_bot.execution import position_reconciliation_identity as position_owner
 from nifty_scalper_bot.strategies.orchestrator import StrategyAllocation, StrategyOrchestrator
 
 
