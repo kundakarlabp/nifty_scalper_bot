@@ -6481,6 +6481,21 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         regime_bias_map=regime_bias_map,
         market_regime_manager=market_regime_manager,
     )
+    try:
+        strategy_manager.hydrate_trade_results(
+            trade_journal.load_completed_strategy_outcomes()
+        )
+    except Exception as exc:  # noqa: BLE001 - startup remains fail-safe
+        LOGGER.warning(
+            "STRATEGY_PERFORMANCE_HYDRATION_FAILED error=%s",
+            exc,
+            extra={
+                "event": "STRATEGY_PERFORMANCE_HYDRATION_FAILED",
+                "error": str(exc),
+            },
+            exc_info=exc,
+        )
+
     strategy_profile = build_production_strategy_profile(
         settings=settings,
         strategies=elite_strategies,
