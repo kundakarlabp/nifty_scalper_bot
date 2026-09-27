@@ -194,9 +194,6 @@ def test_attribution_readiness_accepts_complete_component_evidence() -> None:
     assert readiness.blockers == ()
 
 
-
-
-
 def test_attribution_readiness_fails_closed_when_score_lineage_is_missing() -> None:
     quality = {"alpha_score": 8.0, "strategy_score": 7.5}
     rows = [_trade("vwap", 1.0, strategy="VWAPPro", signal_quality=quality)]
