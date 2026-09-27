@@ -349,10 +349,7 @@ class WalkForwardOptimizer:
         if not self.allow_parameter_updates or candidate_evaluator is None:
             return current
         selection_statistic = float(stats.trade_pnl_t_stat)
-        if (
-            stats.trade_pnl_t_stat == 0.0
-            and stats.rolling_sharpe is not None
-        ):
+        if stats.trade_pnl_t_stat == 0.0 and stats.rolling_sharpe is not None:
             # Compatibility for callers constructing legacy TradeStats directly.
             selection_statistic = float(stats.rolling_sharpe)
         if selection_statistic < 0:
