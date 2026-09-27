@@ -67,5 +67,6 @@ def test_ci_normal_test_shards_preserve_one_stable_aggregate_gate() -> None:
     assert "name: normal-tests-${{ matrix.shard }}" in text
     assert "name: tests" in text
     assert "test \"$NORMAL_SHARDS_RESULT\" = \"success\"" in text
-    assert "--shard-count 4" in text
+    assert "${{ strategy.job-index }}" in text
+    assert "${{ strategy.job-total }}" in text
 
