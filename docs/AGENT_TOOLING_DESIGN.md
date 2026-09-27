@@ -90,7 +90,7 @@ The connected GitHub application already supports authorized repository reads an
 - `scripts/agent_task.py` is the public façade; other agent scripts are focused internal components.
 - `docs/architecture/agent_manifest.json` is the SSOT for ownership, risk markers, validation routing, and architecture rules.
 
-- `scripts/agent_check.py` classifies change risk and selects the smallest safe validation ring.
+- `scripts/agent_check.py` classifies change risk and selects exact importing/co-located tests first, with SSOT area-suite fallback when no direct test is found.
 - `scripts/architecture_lint.py` enforces mechanically provable ownership boundaries.
 - `scripts/agent_task.py merge-check` rejects stale validated base/head combinations before merge.
 - `scripts/agent_failure_learn.py` classifies repeated CI failures without mutating repository memory.
@@ -135,8 +135,7 @@ The document should shrink when automation makes a prose warning unnecessary. It
 
 When architecture changes:
 
-1. Update `docs/REPO_MAP.md` and `AGENTS.md` in the same PR.
-2. Extend the area-to-test mapping in `scripts/agent_check.py`.
-3. Add a tooling regression test if ranking, classification, or quality-preflight behavior changes.
-4. Record a durable failure pattern only when it meets the institutional-memory criteria above.
-5. Keep the global repository contract compact; detailed procedures belong in skill files and these tooling documents.
+1. Update `docs/architecture/agent_manifest.json` once; human docs should reference it rather than restating ownership/routing tables.
+2. Add a tooling regression test if ranking, impact selection, classification, or quality-preflight behavior changes.
+3. Record a durable failure pattern only when it meets the institutional-memory criteria above.
+4. Keep the global repository contract compact; detailed procedures belong in skill files and these tooling documents.

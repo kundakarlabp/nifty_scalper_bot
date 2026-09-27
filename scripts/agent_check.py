@@ -26,6 +26,11 @@ try:
 except ModuleNotFoundError:
     from agent_architecture import high_risk_markers, load_manifest, validation_rules
 
+try:
+    from scripts.agent_test_impact import impacted_tests
+except ModuleNotFoundError:
+    from agent_test_impact import impacted_tests
+
 E2E_COMMAND = (
     "python -m pytest -q tests/e2e/live_sim "
     '-m "simulation_component or live_runtime_e2e or e2e_live_sim"'
@@ -130,14 +135,24 @@ def build(
     rules = validation_rules(payload)
     lowered = [item.lower() for item in normalized]
     areas: list[str] = []
-    tests: list[str] = []
+    area_candidates: list[str] = []
     for area, markers, candidates in rules:
         if any(any(marker in path for marker in markers) for path in lowered):
             areas.append(area)
-            tests.extend(
+            area_candidates.extend(
                 candidate for candidate in candidates if (root / candidate).exists()
             )
-    if any(path.startswith("src/") for path in normalized):
+
+    tests = list(impacted_tests(root, normalized))
+    has_source_change = any(path.startswith("src/") for path in normalized)
+    if not tests:
+        tests.extend(area_candidates)
+    else:
+        tests.extend(
+            candidate for candidate in area_candidates if (root / candidate).is_file()
+        )
+
+    if has_source_change:
         tests.extend(
             candidate
             for candidate in (

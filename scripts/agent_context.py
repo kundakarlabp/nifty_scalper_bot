@@ -17,6 +17,17 @@ import subprocess
 import sys
 from typing import Iterable, Sequence
 
+try:
+    from scripts.agent_architecture import (
+        high_risk_markers,
+        load_manifest,
+        validation_rules,
+    )
+    from scripts.agent_test_impact import impacted_tests
+except ModuleNotFoundError:
+    from agent_architecture import high_risk_markers, load_manifest, validation_rules
+    from agent_test_impact import impacted_tests
+
 ALLOWED = {".py", ".md", ".toml", ".yaml", ".yml", ".json", ".sh"}
 SKIP_DIRS = {
     ".git",
@@ -76,33 +87,6 @@ STOP = {
     "where",
     "which",
     "with",
-}
-CANONICAL = {
-    "src/nifty_scalper_bot/core/app.py",
-    "src/nifty_scalper_bot/data/market_data_manager.py",
-    "src/nifty_scalper_bot/data/data_hub.py",
-    "src/nifty_scalper_bot/strategies/runner.py",
-    "src/nifty_scalper_bot/execution/order_manager.py",
-    "src/nifty_scalper_bot/execution/bracket_manager.py",
-    "src/nifty_scalper_bot/notifications/telegram_controller.py",
-}
-AREA_TESTS = {
-    "streaming": ("tests/streaming", "tests/data"),
-    "data": ("tests/data", "tests/core"),
-    "execution": (
-        "tests/execution",
-        "tests/integration",
-        "tests/test_execution_path_contract.py",
-    ),
-    "risk": ("tests/risk",),
-    "strategies": ("tests/strategies",),
-    "notifications": ("tests/notifications",),
-    "dashboard": ("tests/dashboard",),
-    "deploy": (
-        "tests/test_deployment_release_guard.py",
-        "tests/core/test_release_guard.py",
-    ),
-    "core": ("tests/core", "tests/architecture"),
 }
 
 
@@ -218,29 +202,11 @@ def recent_files(root: Path) -> Counter[str]:
     )
 
 
-def risk(path: str) -> str:
-    lowered = f"/{path.lower()}"
-    if any(
-        part in lowered
-        for part in (
-            "/execution/",
-            "/risk/",
-            "/streaming/",
-            "/core/app.py",
-            "/data/rest/",
-        )
-    ):
+def risk(path: str, *, risk_markers: Sequence[str]) -> str:
+    lowered = path.lower()
+    if any(marker.lower() in lowered for marker in risk_markers):
         return "HIGH"
-    if any(
-        part in lowered
-        for part in (
-            "/strategies/",
-            "/data/",
-            "/config/",
-            "/notifications/",
-            "/deploy/",
-        )
-    ):
+    if lowered.startswith(("src/", "dashboard/", "deploy/", "ops/")):
         return "MEDIUM"
     return "LOW"
 
@@ -253,6 +219,10 @@ def build(
 ) -> dict[str, object]:
     terms = terms_from(query)
     recent = recent_files(root)
+    payload = load_manifest(root)
+    canonical = set(str(path) for path in payload["runtime_path"])
+    risk_markers = high_risk_markers(payload)
+    rules = validation_rules(payload)
     records: list[dict[str, object]] = []
     for path in iter_files(root):
         rel = path.relative_to(root).as_posix()
@@ -263,8 +233,8 @@ def build(
         symbols = python_symbols(rel, text, terms) if path.suffix == ".py" else []
         lowered_path, lowered_text = rel.lower(), text.lower()
         reasons: list[str] = []
-        score = 10 if rel in CANONICAL else 0
-        if rel in CANONICAL:
+        score = 10 if rel in canonical else 0
+        if rel in canonical:
             reasons.append("canonical-runtime")
         for term in terms:
             if term in lowered_path:
@@ -288,7 +258,7 @@ def build(
             {
                 "path": rel,
                 "score": score,
-                "risk": risk(rel),
+                "risk": risk(rel, risk_markers=risk_markers),
                 "reasons": sorted(set(reasons)),
                 "symbols": symbols,
             }
@@ -311,29 +281,28 @@ def build(
             int(item["line"]),
         ),
     )[:max_symbols]
-    source_stems = {
-        Path(str(item["path"])).stem.lower()
-        for item in ranked
-        if not str(item["path"]).startswith("tests/")
-    }
-    tests = []
+    ranked_paths = [str(item["path"]) for item in ranked]
+    tests = list(impacted_tests(root, ranked_paths))
     for item in records:
         path = str(item["path"])
-        if not path.startswith("tests/") or not path.endswith(".py"):
-            continue
-        stem = Path(path).stem.lower()
-        if stem.startswith("test_"):
-            stem = stem[5:]
-        if stem in source_stems or int(item["score"]) > 0:
+        if (
+            path.startswith("tests/")
+            and path.endswith(".py")
+            and int(item["score"]) > 0
+        ):
             tests.append(path)
     tests = list(dict.fromkeys(tests))[:12]
 
     commands = ["python -m compileall -q src dashboard"]
     if tests:
         commands.append("python -m pytest -q " + " ".join(tests[:8]))
-    joined = " ".join(str(item["path"]).lower() for item in ranked)
-    for area, candidates in AREA_TESTS.items():
-        if area in joined:
+    else:
+        lowered_ranked = [path.lower() for path in ranked_paths]
+        for _area, markers, candidates in rules:
+            if not any(
+                any(marker in path for marker in markers) for path in lowered_ranked
+            ):
+                continue
             existing = [
                 candidate for candidate in candidates if (root / candidate).exists()
             ]
@@ -343,11 +312,9 @@ def build(
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "terms": terms,
+        "runtime_path": list(payload["runtime_path"]),
         "ranked_files": [
-            {
-                key: item[key]
-                for key in ("path", "score", "risk", "reasons")
-            }
+            {key: item[key] for key in ("path", "score", "risk", "reasons")}
             for item in ranked
         ],
         "symbols": symbols,
@@ -367,7 +334,12 @@ def markdown(data: dict[str, object]) -> str:
         "## Repository contract",
         "",
         "- NIFTY options are the only tradable instruments; spot and futures are context only.",
-        "- Preserve `core/app.py → market_data_manager.py → data_hub.py → strategies/runner.py → order_manager.py → bracket_manager.py → telegram_controller.py`.",
+        (
+            "- Preserve the runtime path declared by "
+            "`docs/architecture/agent_manifest.json`: "
+            + " → ".join(str(path) for path in data["runtime_path"])
+            + "."
+        ),
         "- Never bypass readiness, quote-quality, risk, capital, cooldown, position, max-loss, or execution-mode gates.",
         "- Environment files, runtime data, logs, databases, key material, and implementation bodies are excluded.",
         "",

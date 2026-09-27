@@ -117,7 +117,8 @@ def test_agent_check_builds_focused_plan(tmp_path: Path) -> None:
     )
     payload = json.loads(result.stdout)
     assert "streaming" in payload["areas"]
-    assert "tests/streaming" in payload["focused_tests"]
+    assert "tests/streaming/test_websocket_manager.py" in payload["focused_tests"]
+    assert "tests/streaming" not in payload["focused_tests"]
     assert payload["full_suite_required"] is True
     assert payload["base_ref"] == "origin/main"
     assert payload["risk_level"] == "high"
@@ -281,3 +282,22 @@ def test_agent_check_routes_validation_assets_to_focused_tests(tmp_path: Path) -
     assert "tests/properties" in plan.focused_tests
     assert "tests/backtests/test_golden_replay_path.py" in plan.focused_tests
     assert "tests/tools/test_agent_benchmark.py" in plan.focused_tests
+
+
+def test_agent_check_falls_back_to_area_suite_when_no_direct_test_exists(
+    tmp_path: Path,
+) -> None:
+    root = _sample_repo(tmp_path)
+    (root / "tests" / "data").mkdir()
+    source = root / "src" / "nifty_scalper_bot" / "streaming" / "new_feed.py"
+    source.write_text("def decode(): return None\n", encoding="utf-8")
+    module = _load_check_module()
+
+    plan = module.build(
+        root,
+        ["src/nifty_scalper_bot/streaming/new_feed.py"],
+    )
+
+    assert "streaming" in plan.areas
+    assert "tests/streaming" in plan.focused_tests
+    assert "tests/data" in plan.focused_tests
