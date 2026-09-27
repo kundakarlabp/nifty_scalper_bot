@@ -1,19 +1,17 @@
-"""Runtime safety patches for immutable exit identity and canonical positions.
+"""Compatibility helper for legacy protective-exit identity tests.
 
-This module is deliberately narrow: it patches only the live execution identity
-surface that caused the production incident where a protective SELL could lose
-EXIT identity and a bare option symbol could diverge from its NFO-qualified
-canonical key.
+Position identity is owned natively by PositionManager. The bracket helper is
+retained only for explicit compatibility tests while BracketManager exit
+identity is migrated separately; importing this module does not mutate runtime
+PositionManager behavior.
 """
 
 from __future__ import annotations
 
-from contextlib import suppress
 import time
 from typing import Any, Mapping
 
 from nifty_scalper_bot.execution import bracket_core as _bracket_core
-from nifty_scalper_bot.execution import position_manager as _position_manager
 from nifty_scalper_bot.utils.symbols import normalize_symbol
 
 _PATCH_APPLIED = False
@@ -52,50 +50,6 @@ def _exit_product(bracket: Any | None) -> str:
 
 def _canonical_key(symbol: object) -> str:
     return normalize_symbol(str(symbol or ""))
-
-
-def _canonicalize_position_store(manager: Any) -> None:
-    positions = getattr(manager, "_positions", None)
-    if not isinstance(positions, dict):
-        return
-    canonical: dict[str, Any] = {}
-    collisions: list[str] = []
-    for raw_key, position in list(positions.items()):
-        symbol = getattr(position, "symbol", raw_key)
-        key = _canonical_key(symbol or raw_key)
-        if not key:
-            key = str(raw_key).strip().upper()
-        with suppress(Exception):
-            position.symbol = key
-        existing = canonical.get(key)
-        if existing is not None and existing is not position:
-            collisions.append(key)
-            # Do not add quantities. Keep the larger absolute broker/local exposure
-            # as the safer single authoritative in-memory representation.
-            try:
-                existing_qty = abs(int(getattr(existing, "quantity", 0) or 0))
-                incoming_qty = abs(int(getattr(position, "quantity", 0) or 0))
-            except Exception:
-                existing_qty = incoming_qty = 0
-            if incoming_qty > existing_qty:
-                canonical[key] = position
-            continue
-        canonical[key] = position
-    if canonical != positions:
-        positions.clear()
-        positions.update(canonical)
-    if collisions:
-        logger = getattr(manager, "_logger", None)
-        log = getattr(logger, "critical", None)
-        if callable(log):
-            log(
-                "POSITION_SYMBOL_CANONICALIZATION_COLLISION symbols=%s",
-                sorted(set(collisions)),
-                extra={
-                    "event": "POSITION_SYMBOL_CANONICALIZATION_COLLISION",
-                    "symbols": sorted(set(collisions)),
-                },
-            )
 
 
 def _patch_bracket_manager() -> None:
@@ -382,109 +336,10 @@ def _patch_bracket_manager() -> None:
     cls._immutable_exit_identity_patch = True
 
 
-def _patch_position_manager() -> None:
-    cls = getattr(_position_manager, "PositionManager", None)
-    if cls is None:
-        return
-    if getattr(cls, "_canonical_position_key_patch", False):
-        return
-
-    _ORIGINALS["PositionManager.__init__"] = cls.__init__
-    _ORIGINALS["PositionManager.save_state"] = cls.save_state
-    _ORIGINALS["PositionManager.open_position"] = cls.open_position
-    _ORIGINALS["PositionManager.close_position"] = cls.close_position
-    _ORIGINALS["PositionManager.update_position_price"] = cls.update_position_price
-    _ORIGINALS["PositionManager.get_position"] = cls.get_position
-    _ORIGINALS["PositionManager.has_position"] = cls.has_position
-    _ORIGINALS["PositionManager.is_flat"] = cls.is_flat
-    _ORIGINALS["PositionManager.clear_active_contract_by_symbol"] = cls.clear_active_contract_by_symbol
-    if hasattr(cls, "current_entry_protection_blocker"):
-        _ORIGINALS[
-            "PositionManager.current_entry_protection_blocker"
-        ] = cls.current_entry_protection_blocker
-
-    def __init__(self: Any, *args: Any, **kwargs: Any) -> None:
-        _ORIGINALS["PositionManager.__init__"](self, *args, **kwargs)
-        with getattr(self, "_lock", suppress()):
-            _canonicalize_position_store(self)
-
-    def save_state(self: Any, *args: Any, **kwargs: Any) -> Any:
-        lock = getattr(self, "_lock", None)
-        if lock is None:
-            _canonicalize_position_store(self)
-        else:
-            with lock:
-                _canonicalize_position_store(self)
-        return _ORIGINALS["PositionManager.save_state"](self, *args, **kwargs)
-
-    def open_position(self: Any, symbol: str, *args: Any, **kwargs: Any) -> Any:
-        return _ORIGINALS["PositionManager.open_position"](
-            self,
-            _canonical_key(symbol),
-            *args,
-            **kwargs,
-        )
-
-    def close_position(self: Any, symbol: str, *args: Any, **kwargs: Any) -> Any:
-        return _ORIGINALS["PositionManager.close_position"](
-            self,
-            _canonical_key(symbol),
-            *args,
-            **kwargs,
-        )
-
-    def update_position_price(self: Any, symbol: str, *args: Any, **kwargs: Any) -> Any:
-        return _ORIGINALS["PositionManager.update_position_price"](
-            self,
-            _canonical_key(symbol),
-            *args,
-            **kwargs,
-        )
-
-    def get_position(self: Any, symbol: str) -> Any:
-        return _ORIGINALS["PositionManager.get_position"](self, _canonical_key(symbol))
-
-    def has_position(self: Any, symbol: str) -> bool:
-        return bool(_ORIGINALS["PositionManager.has_position"](self, _canonical_key(symbol)))
-
-    def is_flat(self: Any, symbol: str) -> bool:
-        return bool(_ORIGINALS["PositionManager.is_flat"](self, _canonical_key(symbol)))
-
-    def clear_active_contract_by_symbol(self: Any, symbol: str) -> Any:
-        return _ORIGINALS["PositionManager.clear_active_contract_by_symbol"](
-            self,
-            _canonical_key(symbol),
-        )
-
-    def current_entry_protection_blocker(
-        self: Any, symbol: str | None = None
-    ) -> str | None:
-        original = _ORIGINALS.get("PositionManager.current_entry_protection_blocker")
-        if original is None:
-            return None
-        return original(self, _canonical_key(symbol) if symbol else None)
-
-    cls.__init__ = __init__
-    cls.save_state = save_state
-    cls.open_position = open_position
-    cls.close_position = close_position
-    cls.update_position_price = update_position_price
-    cls.get_position = get_position
-    cls.has_position = has_position
-    cls.has_open_position = has_position
-    cls.is_flat = is_flat
-    cls.clear_active_contract_by_symbol = clear_active_contract_by_symbol
-    if "PositionManager.current_entry_protection_blocker" in _ORIGINALS:
-        cls.current_entry_protection_blocker = current_entry_protection_blocker
-    cls._position_key = staticmethod(_canonical_key)
-    cls._canonical_position_key_patch = True
-
-
 def apply_patches() -> None:
+    """Compatibility no-op; PositionManager identity is native."""
+
     global _PATCH_APPLIED
-    if _PATCH_APPLIED:
-        return
-    _patch_position_manager()
     _PATCH_APPLIED = True
 
 
