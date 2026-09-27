@@ -36,6 +36,12 @@ import uuid
 
 import httpx
 
+from nifty_scalper_bot.utils.broker_pnl import (
+    _extract_account_m2m,
+    _strategy_day_marked_pnl,
+    _strategy_tradebook_realized_pnl,
+)
+
 try:
     from kiteconnect import KiteTicker
 except ImportError:  # pragma: no cover - compatibility for stubs/older versions
@@ -59,11 +65,6 @@ from nifty_scalper_bot.utils.errors import (
     ConfigurationError,
     OrderPlacementError,
     WebSocketError,
-)
-from nifty_scalper_bot.utils.broker_pnl import (
-    _extract_account_m2m,
-    _strategy_day_marked_pnl,
-    _strategy_tradebook_realized_pnl,
 )
 from nifty_scalper_bot.utils.logging import get_logger, log_throttled
 from nifty_scalper_bot.utils.rate_limiter import RateLimiter, RateLimitError
