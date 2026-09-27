@@ -1488,11 +1488,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 
 from nifty_scalper_bot.config.base import AppConfig
 from nifty_scalper_bot.config.paths import get_data_dir
-from nifty_scalper_bot.config.settings import (
-    ADAPTIVE_WINDOW_TRADES,
-    Settings,
-    get_settings,
-)
+from nifty_scalper_bot.config.settings import Settings, get_settings
 from nifty_scalper_bot.core.market_regime_manager import MarketRegimeManager
 from nifty_scalper_bot.core.message_bus import Message, MessageBus, MessageType
 from nifty_scalper_bot.core.option_universe import OptionUniverseManager
@@ -6493,7 +6489,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
                 str(getattr(strategy, "name", "") or "")
                 for strategy in strategy_instances
             ],
-            per_strategy_limit=ADAPTIVE_WINDOW_TRADES,
+            per_strategy_limit=strategy_manager.performance_history_limit,
         )
         strategy_manager.restore_performance_history(strategy_history)
     except Exception as exc:  # noqa: BLE001 - history restore must not block startup
