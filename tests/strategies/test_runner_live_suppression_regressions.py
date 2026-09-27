@@ -233,6 +233,7 @@ def test_bracket_completion_records_strategy_net_outcome_before_release() -> Non
         "regime": "TREND",
         "gross_pnl": 650.0,
         "net_pnl": 575.0,
+        "ledger_complete": True,
         "exit_reason": "HARD_TP_BREACH",
     }
     runner._bracket_manager = type(
@@ -252,11 +253,83 @@ def test_bracket_completion_records_strategy_net_outcome_before_release() -> Non
                 "regime": "TREND",
                 "gross_pnl": 650.0,
                 "net_pnl": 575.0,
+                "ledger_complete": True,
                 "exit_reason": "HARD_TP_BREACH",
             },
         )
     ]
     assert releases == [(symbol, True, "bracket_exit_complete")]
+
+
+def test_incomplete_or_nonfinite_outcome_never_feeds_strategy_or_risk() -> None:
+    symbol = "NFO:NIFTY2670724100PE"
+    recorded = []
+    risk_updates = []
+    releases = []
+    runner = object.__new__(StrategyRunner)
+    runner._logger = type(
+        "Log",
+        (),
+        {
+            "info": lambda *a, **k: None,
+            "error": lambda *a, **k: None,
+            "warning": lambda *a, **k: None,
+            "exception": lambda *a, **k: None,
+        },
+    )()
+    runner._strategy_manager = type(
+        "SM",
+        (),
+        {
+            "record_trade_result": (
+                lambda self, strategy, pnl, *, metadata: recorded.append(
+                    (strategy, pnl, metadata)
+                )
+            )
+        },
+    )()
+    runner._risk_manager = type(
+        "Risk",
+        (),
+        {
+            "record_completed_trade": (
+                lambda self, pnl, costs=0.0: risk_updates.append((pnl, costs))
+            )
+        },
+    )()
+    runner._normalize_symbol = lambda value: value
+    runner._notify_orchestrator_exit = lambda _symbol: None
+    runner._clear_order_in_flight = lambda _symbol: None
+    runner._release_entry_guards = (
+        lambda released_symbol, *, start_cooldown, reason: releases.append(
+            (released_symbol, start_cooldown, reason)
+        )
+    )
+    runner._position_manager = None
+
+    runner._on_bracket_exit_complete(
+        symbol,
+        {
+            "strategy_name": "VWAPPro",
+            "net_pnl": 575.0,
+            "ledger_complete": False,
+        },
+    )
+    runner._on_bracket_exit_complete(
+        symbol,
+        {
+            "strategy_name": "VWAPPro",
+            "net_pnl": float("nan"),
+            "ledger_complete": True,
+        },
+    )
+
+    assert recorded == []
+    assert risk_updates == []
+    assert releases == [
+        (symbol, True, "bracket_exit_complete"),
+        (symbol, True, "bracket_exit_complete"),
+    ]
 
 
 def test_strategy_feedback_failure_never_blocks_bracket_guard_release() -> None:
@@ -276,10 +349,8 @@ def test_strategy_feedback_failure_never_blocks_bracket_guard_release() -> None:
         "SM",
         (),
         {
-            "record_trade_result": (
-                lambda *_a, **_k: (_ for _ in ()).throw(
-                    RuntimeError("analytics down")
-                )
+            "record_trade_result": lambda *_a, **_k: (_ for _ in ()).throw(
+                RuntimeError("analytics down")
             )
         },
     )()
@@ -348,4 +419,8 @@ def test_runner_risk_halt_stays_fail_closed_when_recheck_fails() -> None:
 def test_order_failure_cooldown_rejection_uses_dedup_rollback_path() -> None:
     source = Path("src/nifty_scalper_bot/strategies/runner.py").read_text()
     assert 'reason="order_failure_cooldown_active")' in source
-    assert 'return self._reject_signal_execution(symbol=base_symbol, trace_id=trace_id, reason="order_failure_cooldown_active")' not in source
+    assert (
+        "return self._reject_signal_execution("
+        "symbol=base_symbol, trace_id=trace_id, "
+        'reason="order_failure_cooldown_active")' not in source
+    )

@@ -40,6 +40,7 @@ import hashlib
 import inspect
 import json
 import logging
+import math
 import os
 import re
 import threading
@@ -1441,21 +1442,31 @@ class StrategyRunner:
                         )
                 strategy_name = str(outcome.get("strategy_name") or "").strip()
                 net_pnl = outcome.get("net_pnl")
+                completed_net_pnl = None
+                if outcome.get("ledger_complete") is True and net_pnl is not None:
+                    try:
+                        candidate_net_pnl = float(net_pnl)
+                    except (TypeError, ValueError):
+                        candidate_net_pnl = float("nan")
+                    if math.isfinite(candidate_net_pnl):
+                        completed_net_pnl = candidate_net_pnl
                 circuit = getattr(
                     getattr(self, "_risk_manager", None),
                     "record_completed_trade",
                     None,
                 )
-                if callable(circuit) and net_pnl is not None:
+                if callable(circuit) and completed_net_pnl is not None:
                     estimated = outcome.get("estimated_costs")
                     cost_total = 0.0
                     if isinstance(estimated, Mapping):
                         try:
-                            cost_total = float(estimated.get("total") or 0.0)
+                            candidate_cost_total = float(estimated.get("total") or 0.0)
                         except (TypeError, ValueError):
-                            cost_total = 0.0
+                            candidate_cost_total = 0.0
+                        if math.isfinite(candidate_cost_total):
+                            cost_total = candidate_cost_total
                     try:
-                        circuit(float(net_pnl), cost_total)
+                        circuit(completed_net_pnl, cost_total)
                     except Exception as exc:  # noqa: BLE001 - release must continue
                         logger.error(
                             "RISK_TRADE_CIRCUIT_FEED_FAILED symbol=%s error=%s",
@@ -1468,11 +1479,15 @@ class StrategyRunner:
                     "record_trade_result",
                     None,
                 )
-                if strategy_name and callable(recorder) and net_pnl is not None:
+                if (
+                    strategy_name
+                    and callable(recorder)
+                    and completed_net_pnl is not None
+                ):
                     try:
                         recorder(
                             strategy_name,
-                            float(net_pnl),
+                            completed_net_pnl,
                             metadata={
                                 key: value
                                 for key, value in outcome.items()
