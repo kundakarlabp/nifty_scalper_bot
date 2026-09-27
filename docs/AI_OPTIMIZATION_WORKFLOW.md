@@ -152,7 +152,7 @@ Invalid input must become a safe rejection, readiness blocker, risk blocker, ope
 Generate the validation plan for changed files:
 
 ```bash
-python scripts/agent_check.py --files path/to/changed.py
+python scripts/agent_task.py plan --files path/to/changed.py
 ```
 
 Fast iteration ring:
