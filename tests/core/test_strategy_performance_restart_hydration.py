@@ -43,7 +43,7 @@ def _insert_trade(
     )
 
 
-def test_completed_strategy_history_is_bounded_and_chronological(tmp_path) -> None:
+def test_completed_strategy_history_is_complete_and_chronological(tmp_path) -> None:
     db_path = tmp_path / "trades.db"
     with sqlite3.connect(db_path) as connection:
         ensure_trade_ledger_schema(connection)
@@ -96,19 +96,25 @@ def test_completed_strategy_history_is_bounded_and_chronological(tmp_path) -> No
     history = load_completed_strategy_history(
         db_path,
         strategy_names=["VWAPPro", "SMC"],
-        per_strategy_limit=2,
     )
 
     assert [(row["strategy"], row["net_pnl"]) for row in history] == [
+        ("VWAPPro", 10.0),
         ("SMC", 7.0),
         ("VWAPPro", -5.0),
         ("VWAPPro", 20.0),
     ]
-    assert [row["regime"] for row in history] == ["TREND", "RANGE", "TREND"]
+    assert [row["regime"] for row in history] == [
+        "TREND",
+        "TREND",
+        "RANGE",
+        "TREND",
+    ]
 
 
 def test_strategy_manager_restores_history_once_without_live_side_effects() -> None:
     manager = StrategyManager([], None, None)
+    manager._adaptive_store.window_trades = 2
     history = [
         {"strategy": "VWAPPro", "net_pnl": 100.0, "regime": "TREND"},
         {"strategy": "VWAPPro", "net_pnl": 0.0, "regime": "TREND"},
@@ -123,7 +129,7 @@ def test_strategy_manager_restores_history_once_without_live_side_effects() -> N
     assert performance.wins == 1
     assert performance.losses == 1
     assert performance.win_rate() == pytest.approx(1 / 3)
-    assert manager._adaptive_store.get_stats("VWAPPro").win_rate == pytest.approx(1 / 3)
+    assert manager._adaptive_store.get_stats("VWAPPro").win_rate == 0.0
 
     with pytest.raises(RuntimeError, match="performance history already initialised"):
         manager.restore_performance_history(history)
