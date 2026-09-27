@@ -97,14 +97,19 @@ def _strategy_runtime_role(
         return None
 
     if field_name in _EXPIRY_ONLY:
-        return (\n            "trigger"\n            if strategy_mode == "expiry_gamma" and allow_expiry_gamma\n            else None\n        )
+        return (
+            "trigger"
+            if strategy_mode == "expiry_gamma" and allow_expiry_gamma
+            else None
+        )
 
     if strategy_mode == "directional_scalp":
         role = canonical_strategy_role(field_name, default="inactive")
         return role if role in {"trigger", "context"} else None
 
     if strategy_mode == "expiry_gamma":
-        role = canonical_strategy_role(field_name, default="inactive")\n        return "context" if role == "context" else None
+        role = canonical_strategy_role(field_name, default="inactive")
+        return "context" if role == "context" else None
 
     # Unsupported/retired modes (including legacy theta) fail closed.
     return None
