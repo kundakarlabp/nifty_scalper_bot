@@ -135,10 +135,13 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     context = subparsers.add_parser("context")
     context.add_argument("--query", required=True)
+    context.add_argument("--output", type=Path)
 
     plan = subparsers.add_parser("plan")
     plan.add_argument("--base-ref", default="origin/main")
     plan.add_argument("--files", nargs="*", default=[])
+    plan.add_argument("--output", type=Path)
+    plan.add_argument("--format", choices=("markdown", "json"), default="markdown")
 
     for name in ("check", "full"):
         command = subparsers.add_parser(name)
@@ -156,22 +159,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     root = args.root.resolve()
 
     if args.command == "context":
-        return _python(
-            root,
-            "agent_context.py",
-            "--query",
-            args.query,
-        ).returncode
+        context_args = ["--query", args.query]
+        if args.output:
+            context_args.extend(["--output", str(args.output)])
+        return _python(root, "agent_context.py", *context_args).returncode
 
     if args.command == "plan":
-        result = _python(
-            root,
-            "agent_check.py",
+        plan_args = [
             "--base-ref",
             args.base_ref,
             *_file_args(args.files),
-        )
-        return result.returncode
+            "--format",
+            args.format,
+        ]
+        if args.output:
+            plan_args.extend(["--output", str(args.output)])
+        return _python(root, "agent_check.py", *plan_args).returncode
 
     if args.command in {"check", "full"}:
         return _validate(
