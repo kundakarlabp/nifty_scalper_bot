@@ -177,7 +177,7 @@ Focused test → adjacent suite → full suite. Compare the failure signature ac
 
 **Earliest detector**
 
-Run `scripts/agent_merge_guard.py --validated-base <sha> --validated-head <sha>` immediately before merge. It fails closed when the target base or validated head moved.
+Run `scripts/agent_task.py merge-check --validated-base <sha> --validated-head <sha>` immediately before merge. It fails closed when the target base or validated head moved.
 
 ## Recurring bot-engineering patterns
 
@@ -218,13 +218,13 @@ Typical fingerprint: logs say only "failed", "not ready", or "no signal" without
 The normal agent path is:
 
 ```bash
-python scripts/agent_check.py --files <changed files> --run focused
+python scripts/agent_task.py check --files <changed files>
 ```
 
 For the repository itself, focused agent validation should run changed-file Ruff/Black/mypy checks first, then compile and focused tests. Full validation remains:
 
 ```bash
-python scripts/agent_check.py --files <changed files> --run full
+python scripts/agent_task.py full --files <changed files>
 ```
 
 GitHub final-head CI remains authoritative before merge.

@@ -41,6 +41,10 @@ def validate_manifest(root: Path, payload: dict[str, Any]) -> list[str]:
             if not str(case.get(field) or "").strip():
                 errors.append(f"{case_id or prefix} requires {field}")
 
+        areas = case.get("areas")
+        if not isinstance(areas, list) or not areas:
+            errors.append(f"{case_id or prefix} requires areas")
+
         targets = case.get("pytest_targets")
         if not isinstance(targets, list) or not targets:
             errors.append(f"{case_id or prefix} requires pytest_targets")
@@ -67,6 +71,19 @@ def selected_targets(
     return list(dict.fromkeys(targets))
 
 
+def case_ids_for_areas(
+    payload: dict[str, Any],
+    areas: set[str],
+) -> list[str]:
+    if not areas:
+        return []
+    return [
+        str(case["id"])
+        for case in payload["cases"]
+        if areas.intersection(str(item) for item in case.get("areas", []))
+    ]
+
+
 def run_benchmark(root: Path, targets: list[str]) -> int:
     if not targets:
         print("No benchmark targets selected.")
@@ -81,6 +98,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--root", type=Path, default=Path.cwd())
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     parser.add_argument("--case", action="append", default=[])
+    parser.add_argument("--area", action="append", default=[])
     parser.add_argument("--validate", action="store_true")
     parser.add_argument("--list", action="store_true")
     parser.add_argument("--run", action="store_true")
@@ -91,6 +109,7 @@ def main(argv: list[str] | None = None) -> int:
     payload = load_manifest(root, args.manifest)
     errors = validate_manifest(root, payload)
     case_ids = set(args.case)
+    case_ids.update(case_ids_for_areas(payload, set(args.area)))
     known_ids: set[str] = set()
     for case in payload.get("cases", []):
         if isinstance(case, dict):
@@ -98,12 +117,14 @@ def main(argv: list[str] | None = None) -> int:
     unknown = sorted(case_ids - known_ids)
     errors.extend(f"unknown case id: {item}" for item in unknown)
 
-    targets = selected_targets(payload, case_ids or None) if not errors else []
+    selectors_used = bool(args.case or args.area)
+    selected = case_ids if selectors_used else None
+    targets = selected_targets(payload, selected) if not errors else []
     summary = {
         "valid": not errors,
         "errors": errors,
         "case_count": len(payload.get("cases", [])),
-        "selected_cases": sorted(case_ids) if case_ids else "all",
+        "selected_cases": sorted(case_ids) if selectors_used else "all",
         "pytest_targets": targets,
     }
 

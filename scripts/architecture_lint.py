@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check a small set of mechanically provable architecture ownership rules."""
+"""Check mechanically provable ownership rules from the architecture manifest."""
 
 from __future__ import annotations
 
@@ -8,29 +8,12 @@ import ast
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable, Sequence
 
-BROKER_HISTORY_ALLOWLIST = {
-    "src/nifty_scalper_bot/data/market_data_manager.py",
-    "src/nifty_scalper_bot/data/rest/zerodha_client.py",
-}
-HYDRATION_FORBIDDEN_PREFIXES = (
-    "src/nifty_scalper_bot/execution/",
-    "src/nifty_scalper_bot/notifications/",
-)
-HYDRATION_OWNER_CALLS = {
-    "hydrate_symbol_history",
-    "ensure_history",
-    "reseed_history_from_bars",
-    "ingest_historical_bar",
-    "replace_history",
-}
-STRATEGY_FORBIDDEN_CALLS = {
-    "historical_data",
-    "get_historical_data",
-    "fetch_history",
-    "instruments",
-}
+try:
+    from scripts.agent_architecture import architecture_rules, load_manifest
+except ModuleNotFoundError:
+    from agent_architecture import architecture_rules, load_manifest
 
 
 @dataclass(frozen=True)
@@ -50,7 +33,34 @@ def _call_name(node: ast.Call) -> str | None:
     return None
 
 
-def inspect_file(root: Path, path: Path) -> list[Violation]:
+def _violates_rule(
+    *,
+    rel: str,
+    call_name: str,
+    rule: dict[str, Any],
+) -> bool:
+    calls = {str(item) for item in rule.get("calls", [])}
+    if call_name not in calls:
+        return False
+
+    kind = rule.get("kind")
+    if kind == "call_allowlist":
+        allowlist = {str(item) for item in rule.get("allowlist", [])}
+        return rel not in allowlist
+
+    if kind == "forbidden_calls_under":
+        prefixes = tuple(str(item) for item in rule.get("path_prefixes", []))
+        return any(rel.startswith(prefix) for prefix in prefixes)
+
+    raise ValueError(f"unsupported architecture rule kind: {kind!r}")
+
+
+def inspect_file(
+    root: Path,
+    path: Path,
+    *,
+    rules: Sequence[dict[str, Any]] | None = None,
+) -> list[Violation]:
     rel = path.relative_to(root).as_posix()
     try:
         tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -64,67 +74,43 @@ def inspect_file(root: Path, path: Path) -> list[Violation]:
             )
         ]
 
+    active_rules = (
+        tuple(rules) if rules is not None else architecture_rules(load_manifest(root))
+    )
     violations: list[Violation] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
-        name = _call_name(node)
-        if name is None:
+        call_name = _call_name(node)
+        if call_name is None:
             continue
-
-        if (
-            name in {"historical_data", "get_historical_data"}
-            and rel not in BROKER_HISTORY_ALLOWLIST
-        ):
+        for rule in active_rules:
+            if not _violates_rule(rel=rel, call_name=call_name, rule=rule):
+                continue
             violations.append(
                 Violation(
-                    "broker-history-owner",
+                    str(rule["id"]),
                     rel,
                     node.lineno,
-                    f"unexpected call to {name}",
+                    f"forbidden owner call {call_name}",
                 )
             )
-
-        if rel.startswith("src/nifty_scalper_bot/strategies/") and (
-            name in STRATEGY_FORBIDDEN_CALLS
-        ):
-            violations.append(
-                Violation(
-                    "strategy-boundary",
-                    rel,
-                    node.lineno,
-                    f"strategy calls forbidden owner API {name}",
-                )
-            )
-
-        if any(rel.startswith(prefix) for prefix in HYDRATION_FORBIDDEN_PREFIXES) and (
-            name in HYDRATION_OWNER_CALLS
-        ):
-            violations.append(
-                Violation(
-                    "history-hydration-owner",
-                    rel,
-                    node.lineno,
-                    f"non-owner calls {name}",
-                )
-            )
-
     return violations
 
 
 def inspect_repository(root: Path) -> list[Violation]:
     src = root / "src" / "nifty_scalper_bot"
+    rules = architecture_rules(load_manifest(root))
     violations: list[Violation] = []
     for path in sorted(src.rglob("*.py")):
-        violations.extend(inspect_file(root, path))
+        violations.extend(inspect_file(root, path, rules=rules))
     return violations
 
 
 def _format_text(violations: Iterable[Violation]) -> str:
-    rows = [
+    return "\n".join(
         f"{item.rule}: {item.path}:{item.line}: {item.detail}" for item in violations
-    ]
-    return "\n".join(rows)
+    )
 
 
 def main() -> int:

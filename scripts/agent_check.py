@@ -17,93 +17,18 @@ import sys
 import tempfile
 from typing import Sequence
 
-HIGH_RISK_MARKERS = (
-    "src/nifty_scalper_bot/core/app.py",
-    "src/nifty_scalper_bot/core/instrument_manager.py",
-    "src/nifty_scalper_bot/data/market_data_manager.py",
-    "src/nifty_scalper_bot/streaming/websocket_manager.py",
-    "src/nifty_scalper_bot/strategies/runner.py",
-    "src/nifty_scalper_bot/risk/",
-    "src/nifty_scalper_bot/execution/",
-    "deploy/",
-    "ops/",
-    "railway.toml",
-)
+try:
+    from scripts.agent_architecture import (
+        high_risk_markers,
+        load_manifest,
+        validation_rules,
+    )
+except ModuleNotFoundError:
+    from agent_architecture import high_risk_markers, load_manifest, validation_rules
 
 E2E_COMMAND = (
     "python -m pytest -q tests/e2e/live_sim "
     '-m "simulation_component or live_runtime_e2e or e2e_live_sim"'
-)
-
-RULES = (
-    ("streaming", ("/streaming/", "websocket"), ("tests/streaming", "tests/data")),
-    (
-        "market-data",
-        ("/data/", "/instruments/", "instrument_manager.py"),
-        ("tests/data", "tests/core", "tests/instruments"),
-    ),
-    (
-        "execution",
-        ("/execution/",),
-        (
-            "tests/execution",
-            "tests/integration/test_canonical_bo_end_to_end.py",
-            "tests/test_execution_path_contract.py",
-        ),
-    ),
-    ("risk", ("/risk/",), ("tests/risk",)),
-    ("strategy", ("/strategies/", "strategy_manager.py"), ("tests/strategies",)),
-    ("notifications", ("/notifications/", "telegram"), ("tests/notifications",)),
-    ("core", ("/core/",), ("tests/core", "tests/architecture")),
-    ("dashboard", ("dashboard/",), ("tests/dashboard",)),
-    (
-        "deployment",
-        ("deploy/", "ops/", "dockerfile", "railway.toml"),
-        (
-            "tests/core/test_release_guard.py",
-            "tests/test_deployment_release_guard.py",
-        ),
-    ),
-    (
-        "validation-assets",
-        (
-            "docs/contracts/",
-            "tests/fixtures/contracts/",
-            "tests/fixtures/replay/",
-            "benchmarks/agent/",
-            "scripts/agent_benchmark.py",
-            "tests/contracts/",
-            "tests/properties/",
-            "test_golden_replay_path.py",
-        ),
-        (
-            "tests/contracts",
-            "tests/properties",
-            "tests/backtests/test_golden_replay_path.py",
-            "tests/tools/test_agent_benchmark.py",
-        ),
-    ),
-    (
-        "agent-tooling",
-        (
-            "agents.md",
-            ".agents/",
-            "copilot-instructions.md",
-            "repo_map.md",
-            "agent_start_here.md",
-            "agent_tooling_design.md",
-            "ai_optimization_workflow.md",
-            "chatgpt_code_workflow.md",
-            "engineering_failure_patterns.md",
-            "pull_request_template.md",
-            "architecture_lint.py",
-            "scripts/agent_",
-        ),
-        (
-            "tests/tools",
-            "tests/architecture/test_agent_skills_catalog.py",
-        ),
-    ),
 )
 
 
@@ -159,13 +84,13 @@ def normalize_files(root: Path, files: Sequence[str]) -> tuple[str, ...]:
 def classify_risk(
     files: Sequence[str],
     areas: Sequence[str],
+    *,
+    risk_markers: Sequence[str],
 ) -> tuple[str, tuple[str, ...]]:
     """Classify change risk for fast local validation; final CI remains mandatory."""
     lowered = tuple(path.lower() for path in files)
     reasons = tuple(
-        marker
-        for marker in HIGH_RISK_MARKERS
-        if any(marker in path for path in lowered)
+        marker for marker in risk_markers if any(marker in path for path in lowered)
     )
     if reasons:
         return "high", reasons
@@ -201,10 +126,12 @@ def build(
     base_ref: str = "origin/main",
 ) -> Plan:
     normalized = normalize_files(root, files)
+    payload = load_manifest(root)
+    rules = validation_rules(payload)
     lowered = [item.lower() for item in normalized]
     areas: list[str] = []
     tests: list[str] = []
-    for area, markers, candidates in RULES:
+    for area, markers, candidates in rules:
         if any(any(marker in path for marker in markers) for path in lowered):
             areas.append(area)
             tests.extend(
@@ -221,7 +148,11 @@ def build(
         )
     tests = list(dict.fromkeys(tests))
     area_tuple = tuple(areas or ["unclassified"])
-    risk_level, risk_reasons = classify_risk(normalized, area_tuple)
+    risk_level, risk_reasons = classify_risk(
+        normalized,
+        area_tuple,
+        risk_markers=high_risk_markers(payload),
+    )
 
     commands: list[str] = []
     if _has_python_changes(normalized):

@@ -152,19 +152,19 @@ Invalid input must become a safe rejection, readiness blocker, risk blocker, ope
 Generate the validation plan for changed files:
 
 ```bash
-python scripts/agent_check.py --files path/to/changed.py
+python scripts/agent_task.py plan --files path/to/changed.py
 ```
 
 Fast iteration ring:
 
 ```bash
-python scripts/agent_check.py --files path/to/changed.py --run focused
+python scripts/agent_task.py check --files path/to/changed.py
 ```
 
 Pre-merge ring:
 
 ```bash
-python scripts/agent_check.py --files path/to/changed.py --run full
+python scripts/agent_task.py full --files path/to/changed.py
 ```
 
 `focused` is risk-aware: changed-file quality always runs for changed Python, production changes also run architecture ownership checks, and high-risk paths add deterministic E2E. `full` also runs the complete repository suite. Final-head CI remains authoritative before merge.

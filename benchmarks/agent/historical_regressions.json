@@ -10,6 +10,10 @@
       "skill": "market-data-path-audit",
       "pytest_targets": [
         "tests/execution/test_order_manager_freshest_cached_quote.py"
+      ],
+      "areas": [
+        "market-data",
+        "streaming"
       ]
     },
     {
@@ -20,6 +24,10 @@
       "skill": "diagnosing-trading-bugs",
       "pytest_targets": [
         "tests/execution/test_order_manager_trade_plan.py"
+      ],
+      "areas": [
+        "market-data",
+        "execution"
       ]
     },
     {
@@ -30,6 +38,9 @@
       "skill": "diagnosing-trading-bugs",
       "pytest_targets": [
         "tests/execution/test_order_manager_trade_plan.py"
+      ],
+      "areas": [
+        "execution"
       ]
     },
     {
@@ -40,6 +51,9 @@
       "skill": "runtime-contract-validation",
       "pytest_targets": [
         "tests/execution/test_execution_safety_audit_fixes.py"
+      ],
+      "areas": [
+        "execution"
       ]
     },
     {
@@ -50,6 +64,10 @@
       "skill": "architecture-cleanup",
       "pytest_targets": [
         "tests/architecture/test_canonical_bo_ownership.py"
+      ],
+      "areas": [
+        "strategy",
+        "execution"
       ]
     },
     {
@@ -60,6 +78,10 @@
       "skill": "strategy-research-validation",
       "pytest_targets": [
         "tests/backtests/test_replay_parity.py"
+      ],
+      "areas": [
+        "strategy",
+        "validation-assets"
       ]
     },
     {
@@ -70,6 +92,10 @@
       "skill": "strategy-research-validation",
       "pytest_targets": [
         "tests/risk/test_risk_rejection_codes.py"
+      ],
+      "areas": [
+        "risk",
+        "execution"
       ]
     },
     {
@@ -80,6 +106,9 @@
       "skill": "runtime-contract-validation",
       "pytest_targets": [
         "tests/execution/test_trade_plan_identity_guard.py"
+      ],
+      "areas": [
+        "execution"
       ]
     }
   ]

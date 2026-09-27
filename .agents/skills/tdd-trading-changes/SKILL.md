@@ -107,7 +107,7 @@ Never refactor while red. After all relevant tests pass:
 Run the repository quality preflight before broad tests:
 
 ```bash
-python scripts/agent_check.py --files <changed files> --run focused
+python scripts/agent_task.py check --files <changed files>
 ```
 
 This runs the existing delta-aware Ruff, Black, and mypy checkers first, then compilation and focused tests. It is specifically intended to catch recurring quality mistakes before PR publication.
@@ -115,7 +115,7 @@ This runs the existing delta-aware Ruff, Black, and mypy checkers first, then co
 Then run the validation required by `AGENTS.md`, including the complete suite through:
 
 ```bash
-python scripts/agent_check.py --files <changed files> --run full
+python scripts/agent_task.py full --files <changed files>
 ```
 
 When the complete suite cannot run, report exactly what ran, what failed, why it failed, and whether the failure is related to the change.
