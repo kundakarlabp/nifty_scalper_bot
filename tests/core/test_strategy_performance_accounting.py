@@ -4,7 +4,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from nifty_scalper_bot.core.strategy_manager import StrategyManager, StrategyScoreWeights
+from nifty_scalper_bot.core.strategy_manager import (
+    StrategyManager,
+    StrategyScoreWeights,
+)
 
 
 def test_breakeven_trade_is_neither_win_nor_loss_but_stays_in_denominator() -> None:
@@ -43,7 +46,6 @@ def test_nonfinite_trade_feedback_is_rejected_before_any_state_mutates(
 
     assert "VWAPPro" not in manager._performance
     assert manager._adaptive_store.get_stats("VWAPPro").win_rate == 0.0
-
 
 
 def _score_test_manager() -> StrategyManager:
