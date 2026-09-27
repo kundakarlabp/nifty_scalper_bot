@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import copy
+import inspect
 import json
 import math
 import re
@@ -31,6 +32,8 @@ from zoneinfo import ZoneInfo
 
 from nifty_scalper_bot.infra.metrics import METRICS
 from nifty_scalper_bot.execution.position_reconciliation_identity import (
+    _canonical_key,
+    _canonicalize_payload_symbol,
     _canonicalize_position_store,
     _prepare_broker_positions,
     _prepared_row_symbol,
@@ -78,6 +81,12 @@ _EXIT_RECONCILIATION_GRACE_MAX_S = 5.0
 _BROKER_POSITION_SNAPSHOT_MAX_AGE_DEFAULT_S = 20.0
 _BROKER_POSITION_SNAPSHOT_MAX_AGE_MIN_S = 1.0
 _BROKER_POSITION_SNAPSHOT_MAX_AGE_MAX_S = 300.0
+_QUARANTINE_INTENTS = {
+    "",
+    "UNKNOWN",
+    "BROKER_IMPORTED_ORDER",
+    "MANUAL_ORDER_QUARANTINED",
+}
 
 _STOP_REASON_RE = re.compile(r"(?<![A-Z0-9])SL(?![A-Z0-9])|STOP[_ ]?LOSS")
 _STOP_REARM_ANCHOR_KEYS = (
@@ -241,6 +250,73 @@ def _pnl_baseline_seed_from_snapshot(payload: Any) -> tuple[bool, float, str]:
     if seen:
         return True, total, "validated_broker_positions"
     return False, 0.0, ""
+
+
+def _broker_position_quantity(
+    manager: Any,
+    symbol: str,
+) -> tuple[str, int, str | None]:
+    """Return broker truth for one symbol as flat/open/unverified."""
+
+    resolver = getattr(manager, "_resolve_broker_position_fetcher", None)
+    fetcher = None
+    if callable(resolver):
+        with suppress(Exception):
+            fetcher = resolver()
+    if not callable(fetcher):
+        broker = (
+            getattr(manager, "_broker_client", None)
+            or getattr(manager, "broker_client", None)
+            or getattr(manager, "broker", None)
+        )
+        if broker is not None:
+            for name in (
+                "get_positions",
+                "list_positions",
+                "positions",
+                "fetch_positions",
+            ):
+                candidate = getattr(broker, name, None)
+                if callable(candidate):
+                    fetcher = candidate
+                    break
+    if not callable(fetcher):
+        return "unverified", 0, "broker_position_fetcher_missing"
+    try:
+        payload = fetcher()
+        if inspect.isawaitable(payload):
+            with suppress(Exception):
+                close = getattr(payload, "close", None)
+                if callable(close):
+                    close()
+            return "unverified", 0, "async_broker_position_fetcher_unsupported"
+        snapshot = decode_position_snapshot(payload)
+        qty = int(snapshot.quantity_for(_canonical_key(symbol)))
+    except PositionSnapshotError as exc:
+        return "unverified", 0, f"position_snapshot_invalid:{exc}"
+    except Exception as exc:  # noqa: BLE001 - broker boundary fails closed
+        return (
+            "unverified",
+            0,
+            f"broker_position_fetch_failed:{type(exc).__name__}:{exc}",
+        )
+    return ("flat", 0, None) if qty == 0 else ("open", qty, None)
+
+
+def _clear_symbol_quarantine(manager: Any, symbol: str) -> None:
+    """Clear stale quarantine only after broker-flat proof."""
+
+    key = _canonical_key(symbol)
+    lock = getattr(manager, "_lock", None)
+    if lock is None:
+        return
+    with lock:
+        exposures = getattr(manager, "_quarantined_broker_exposures", None)
+        if isinstance(exposures, dict):
+            exposures.pop(key, None)
+        unresolved = getattr(manager, "_cost_basis_unresolved_symbols", None)
+        if isinstance(unresolved, set):
+            unresolved.discard(key)
 
 
 def _signal_stop_setup_metadata(signal: object) -> tuple[str | None, float | None]:
@@ -532,6 +608,12 @@ class Position:
     order_id: str | None = None
     realized_pnl: float = 0.0
     state: str | None = None  # intent: track lifecycle overrides like force-closed SL
+
+    @property
+    def strategy_name(self) -> str:
+        """Expose durable bot ownership to capital/orphan diagnostics."""
+
+        return "BotManaged" if str(self.order_id or "").strip() else ""
 
     @property
     def unrealized_pnl(self) -> float:
@@ -1085,6 +1167,9 @@ class ActiveContract:
 
 
 class PositionManager:
+    _canonical_position_identity_native = True
+    _position_key = staticmethod(_canonical_key)
+
     """Track open positions and pending orders with persistence support."""
 
     FINAL_STATUSES: tuple[OrderStatus, ...] = (
