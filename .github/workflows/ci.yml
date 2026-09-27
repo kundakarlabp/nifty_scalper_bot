@@ -35,10 +35,7 @@ jobs:
           python-version: "3.12"
           cache: pip
       - name: Install development dependencies
-        run: |
-          python -m pip install --upgrade pip -q
-          python -m pip install -e '.[dev]' -q
-          python -m pip install -r dashboard/requirements.txt -q
+        run: python -m pip install -e '.[dev]' -r dashboard/requirements.txt -q
       - name: Compile production, dashboard and tooling
         run: python -m compileall -q src dashboard scripts
       - name: Enforce architecture ownership
@@ -98,10 +95,7 @@ jobs:
           python-version: "3.12"
           cache: pip
       - name: Install project and test dependencies
-        run: |
-          python -m pip install --upgrade pip -q
-          python -m pip install -e '.[dev]' -q
-          python -m pip install -r dashboard/requirements.txt -q
+        run: python -m pip install -e '.[dev]' -r dashboard/requirements.txt -q
       - name: Select deterministic normal-suite shard
         run: >-
           python scripts/ci_test_shard.py
@@ -148,9 +142,7 @@ jobs:
           python-version: "3.12"
           cache: pip
       - name: Install project and test dependencies
-        run: |
-          python -m pip install --upgrade pip -q
-          python -m pip install -e '.[dev]' -q
+        run: python -m pip install -e '.[dev]' -q
       - name: Run deterministic broker-free E2E suites once
         run: >-
           python -m pytest -q tests/e2e/live_sim
