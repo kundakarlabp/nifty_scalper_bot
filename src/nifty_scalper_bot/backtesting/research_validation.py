@@ -89,8 +89,7 @@ def bootstrap_mean_interval(
     rng = random.Random(int(seed))
     width = len(resolved)
     estimates = sorted(
-        mean(resolved[rng.randrange(width)] for _ in range(width))
-        for _ in range(count)
+        mean(resolved[rng.randrange(width)] for _ in range(width)) for _ in range(count)
     )
     tail = (1.0 - level) / 2.0
 
@@ -101,10 +100,7 @@ def bootstrap_mean_interval(
         if lower_index == upper_index:
             return estimates[lower_index]
         weight = position - lower_index
-        return (
-            estimates[lower_index] * (1.0 - weight)
-            + estimates[upper_index] * weight
-        )
+        return estimates[lower_index] * (1.0 - weight) + estimates[upper_index] * weight
 
     return BootstrapInterval(
         estimate=round(mean(resolved), 8),
@@ -154,13 +150,11 @@ def probabilistic_sharpe_ratio(
     if not math.isfinite(benchmark):
         raise ValueError("benchmark_sharpe must be finite")
     skewness, kurtosis = _distribution_moments(resolved)
-    denominator = 1.0 - skewness * observed + ((kurtosis - 1.0) / 4.0) * (
-        observed**2
-    )
+    denominator = 1.0 - skewness * observed + ((kurtosis - 1.0) / 4.0) * (observed**2)
     if denominator <= 0:
         raise ValueError("probabilistic Sharpe denominator is non-positive")
-    z_score = (observed - benchmark) * math.sqrt(len(resolved) - 1) / math.sqrt(
-        denominator
+    z_score = (
+        (observed - benchmark) * math.sqrt(len(resolved) - 1) / math.sqrt(denominator)
     )
     return NormalDist().cdf(z_score)
 
@@ -293,9 +287,7 @@ def combinatorial_purged_pbo(
     candidates = tuple(sorted(resolved))
     all_indices = set(range(observation_count))
     for chosen in combinations(range(groups), test_groups):
-        test_indices = {
-            index for group in chosen for index in group_indices[group]
-        }
+        test_indices = {index for group in chosen for index in group_indices[group]}
         forbidden = set(test_indices)
         for group in chosen:
             block = group_indices[group]
