@@ -810,10 +810,21 @@ def trading_status():
         if ctx is not None
         else {"install_proof": build_runtime_install_proof(None)}
     )
+    configured_for_live = enable_live and exec_mode.upper() == "LIVE"
+    runtime_state = structured.get("state", {}) if isinstance(structured, dict) else {}
+    can_place_live_order_now = bool(
+        configured_for_live
+        and isinstance(runtime_state, dict)
+        and runtime_state.get("live_orders_armed")
+    )
     return {
         "enable_live": enable_live,
         "execution_mode": exec_mode,
-        "will_trade": enable_live and exec_mode.upper() == "LIVE",
+        "configured_for_live": configured_for_live,
+        "can_place_live_order_now": can_place_live_order_now,
+        # Compatibility key: now reflects current executable readiness rather
+        # than configuration intent.
+        "will_trade": can_place_live_order_now,
         "engine_http_responsive": True,
         "bot_loaded": app.state.bot is not None,
         "event_loop_lag_ms": round(float(_EVENT_LOOP_LAG_MS), 3),
