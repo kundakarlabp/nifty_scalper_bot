@@ -785,6 +785,10 @@ def test_entry_plan_preserves_context_confirmation_provenance(monkeypatch) -> No
     signal.metadata.update(
         {
             "approval_path": "single_trigger_context_confirmed",
+            "strategy_key": "vwap_pro",
+            "strategy_role": "trigger",
+            "signal_family": "directional_trigger",
+            "setup_name": "continuation_pullback",
             "score_contract_version": 1,
             "score_lineage": {
                 "raw_setup_score": 7.8,
@@ -824,6 +828,10 @@ def test_entry_plan_preserves_context_confirmation_provenance(monkeypatch) -> No
     assert result.accepted is True
     provenance = runner._order_manager.plans[0].trade_provenance
     assert provenance["approval_path"] == "single_trigger_context_confirmed"
+    assert provenance["strategy_key"] == "vwap_pro"
+    assert provenance["strategy_role"] == "trigger"
+    assert provenance["signal_family"] == "directional_trigger"
+    assert provenance["setup_name"] == "continuation_pullback"
     assert provenance["score_contract_version"] == 1
     assert provenance["score_lineage"]["raw_setup_score"] == 7.8
     assert (
