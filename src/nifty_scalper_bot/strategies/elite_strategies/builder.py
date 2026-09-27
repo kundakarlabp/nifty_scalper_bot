@@ -122,8 +122,12 @@ def _production_strategy_roles(
 ) -> tuple[list[str], list[str]]:
     """Return the effective trigger and context strategy sets."""
     del strategy_mode
-    context_names = [name for name in active_names if canonical_strategy_role(name) == "context"]
-    trigger_names = [name for name in active_names if canonical_strategy_role(name) != "context"]
+    context_names = [
+        name for name in active_names if canonical_strategy_role(name) == "context"
+    ]
+    trigger_names = [
+        name for name in active_names if canonical_strategy_role(name) != "context"
+    ]
     return trigger_names, context_names
 
 
