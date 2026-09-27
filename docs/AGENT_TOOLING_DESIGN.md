@@ -87,9 +87,12 @@ The connected GitHub application already supports authorized repository reads an
 
 ## Executable guardrails
 
+- `scripts/agent_task.py` is the public façade; other agent scripts are focused internal components.
+- `docs/architecture/agent_manifest.json` is the SSOT for ownership, risk markers, validation routing, and architecture rules.
+
 - `scripts/agent_check.py` classifies change risk and selects the smallest safe validation ring.
 - `scripts/architecture_lint.py` enforces mechanically provable ownership boundaries.
-- `scripts/agent_merge_guard.py` rejects stale validated base/head combinations before merge.
+- `scripts/agent_task.py merge-check` rejects stale validated base/head combinations before merge.
 - `scripts/agent_failure_learn.py` classifies repeated CI failures without mutating repository memory.
 - `.github/workflows/failure-memory-candidates.yml` surfaces learning candidates after failed CI.
 
