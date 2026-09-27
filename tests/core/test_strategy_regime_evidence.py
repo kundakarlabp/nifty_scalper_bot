@@ -6,6 +6,7 @@ from nifty_scalper_bot.core.strategy_manager import RegimeState, StrategyManager
 class _Strategy:
     def __init__(self, name: str) -> None:
         self.name = name
+        self.config: dict[str, object] = {}
 
     def get_required_indicators(self) -> set[str]:
         return set()
