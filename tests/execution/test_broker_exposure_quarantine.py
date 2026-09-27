@@ -123,12 +123,11 @@ def test_cost_basis_sync_removes_only_stale_cost_basis_rows(tmp_path):
     assert exposures[other]["reason"] == "broker_state_unverified"
 
 
-def test_registry_state_owner_serializes_after_runtime_patches() -> None:
-    owner = "nifty_scalper_bot.execution.position_registry_state"
+def test_registry_state_is_owned_natively_by_position_manager() -> None:
+    owner = "nifty_scalper_bot.execution.position_manager"
     assert PositionManager.save_state.__module__ == owner
     assert PositionManager.load_state.__module__ == owner
-    assert PositionManager.synchronize_with_broker.__module__ == owner
-    assert PositionManager._canonical_registry_state_owner is True
+    assert PositionManager._canonical_registry_state_native is True
 
 
 def test_canonical_writer_persists_and_restores_risk_runtime_atomically(tmp_path):

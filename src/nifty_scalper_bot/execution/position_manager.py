@@ -34,7 +34,9 @@ from nifty_scalper_bot.infra.metrics import METRICS
 from nifty_scalper_bot.execution.position_reconciliation_identity import (
     _canonical_key,
     _canonicalize_payload_symbol,
+    _build_cost_basis_exposures,
     _canonicalize_position_store,
+    _merge_cost_basis_exposures,
     _prepare_broker_positions,
     _prepared_row_symbol,
     _restore_owned_position_lifecycle,
@@ -86,6 +88,11 @@ _QUARANTINE_INTENTS = {
     "UNKNOWN",
     "BROKER_IMPORTED_ORDER",
     "MANUAL_ORDER_QUARANTINED",
+}
+_ACTIVE_LEDGER_CLASSIFICATIONS = {
+    "active_external_order",
+    "broker_position_quarantined",
+    "broker_state_unverified",
 }
 
 _STOP_REASON_RE = re.compile(r"(?<![A-Z0-9])SL(?![A-Z0-9])|STOP[_ ]?LOSS")
@@ -317,6 +324,95 @@ def _clear_symbol_quarantine(manager: Any, symbol: str) -> None:
         unresolved = getattr(manager, "_cost_basis_unresolved_symbols", None)
         if isinstance(unresolved, set):
             unresolved.discard(key)
+
+
+def _hydrate_registry_state(owner: Any, payload: Mapping[str, Any]) -> None:
+    """Hydrate broker-order/quarantine registries from the canonical state file."""
+
+    ledger_raw = payload.get("broker_order_ledger", {})
+    ledger = (
+        {
+            str(order_id): dict(row)
+            for order_id, row in ledger_raw.items()
+            if isinstance(row, Mapping)
+        }
+        if isinstance(ledger_raw, Mapping)
+        else {}
+    )
+    exposures_raw = payload.get("quarantined_broker_exposures", {})
+    exposures: dict[str, dict[str, Any]] = {}
+    if isinstance(exposures_raw, Mapping):
+        for raw_key, row in exposures_raw.items():
+            if not isinstance(row, Mapping):
+                continue
+            key = _canonical_key(raw_key) or _canonical_key(
+                row.get("symbol") or row.get("tradingsymbol")
+            )
+            if key:
+                exposures[key] = dict(row)
+    persisted_unresolved_raw = payload.get("cost_basis_unresolved_symbols", [])
+    persisted_unresolved = (
+        {
+            _canonical_key(symbol)
+            for symbol in persisted_unresolved_raw
+            if _canonical_key(symbol)
+        }
+        if isinstance(persisted_unresolved_raw, (list, tuple, set))
+        else set()
+    )
+    exposure_unresolved = {
+        symbol
+        for symbol, row in exposures.items()
+        if str(row.get("reason") or "") == "cost_basis_unresolved"
+    }
+    with owner._lock:
+        owner._broker_order_ledger = ledger
+        owner._quarantined_broker_exposures = exposures
+        owner._cost_basis_unresolved_symbols = (
+            persisted_unresolved | exposure_unresolved
+        )
+
+
+def _registry_snapshot_locked(
+    owner: Any,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    ledger = {
+        str(order_id): dict(row)
+        for order_id, row in owner._broker_order_ledger.items()
+        if isinstance(row, Mapping)
+    }
+    exposures = {
+        str(symbol): dict(row)
+        for symbol, row in owner._quarantined_broker_exposures.items()
+        if isinstance(row, Mapping)
+    }
+    return ledger, exposures
+
+
+def _ledger_blocker_for_symbol(owner: Any, symbol: str | None) -> str | None:
+    wanted = _canonical_key(symbol) if symbol else None
+    with owner._lock:
+        rows = list(owner._broker_order_ledger.values())
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        classification = str(row.get("classification") or "")
+        if classification not in _ACTIVE_LEDGER_CLASSIFICATIONS:
+            continue
+        row_symbol = _canonical_key(row.get("symbol") or row.get("tradingsymbol"))
+        if wanted is not None and row_symbol != wanted:
+            continue
+        if classification == "active_external_order":
+            return "active_external_order"
+        if classification == "broker_state_unverified":
+            return "broker_state_unverified"
+        if classification == "broker_position_quarantined":
+            return "broker_exposure_quarantined"
+    return None
+
+
+def _ledger_blocks_symbol(owner: Any, symbol: str) -> bool:
+    return _ledger_blocker_for_symbol(owner, symbol) is not None
 
 
 def _signal_stop_setup_metadata(signal: object) -> tuple[str | None, float | None]:
@@ -1168,6 +1264,7 @@ class ActiveContract:
 
 class PositionManager:
     _canonical_position_identity_native = True
+    _canonical_registry_state_native = True
     _position_key = staticmethod(_canonical_key)
 
     """Track open positions and pending orders with persistence support."""
@@ -1232,6 +1329,9 @@ class PositionManager:
         self._single_reconcile_generation = 0
         self._single_reconcile_coalesced = 0
         self._cost_basis_unresolved_symbols: set[str] = set()
+        self._broker_order_ledger: dict[str, dict[str, Any]] = {}
+        self._quarantined_broker_exposures: dict[str, dict[str, Any]] = {}
+        self._registry_state_write_generation: int = 0
         self._reconcile_interval_s: float = 60.0
         self._reconcile_retry_interval_s: float = 10.0
         self._reconcile_listeners: list[Callable[[str, Mapping[str, object]], None]] = (
@@ -2437,9 +2537,32 @@ class PositionManager:
             self._require_pnl_baseline_for_entries = bool(required)
 
     def current_entry_protection_blocker(self, symbol: str | None = None) -> str | None:
-        """Return current entry blocker when a filled entry lacks SL protection."""
+        """Return the strongest broker/exposure/protection blocker for entry."""
 
         symbol_key = _canonical_key(symbol) or symbol.strip().upper() if symbol else None
+        ledger_blocker = _ledger_blocker_for_symbol(self, symbol_key)
+        if ledger_blocker is not None:
+            return ledger_blocker
+        with self._lock:
+            exposures = dict(self._quarantined_broker_exposures)
+            unresolved = set(self._cost_basis_unresolved_symbols)
+        if symbol_key is not None:
+            exposure = exposures.get(symbol_key)
+            if exposure is not None:
+                if str(exposure.get("reason") or "") == "broker_state_unverified":
+                    return "broker_state_unverified"
+                return "broker_exposure_quarantined"
+        elif exposures:
+            if any(
+                str(row.get("reason") or "") == "broker_state_unverified"
+                for row in exposures.values()
+                if isinstance(row, Mapping)
+            ):
+                return "broker_state_unverified"
+            return "broker_exposure_quarantined"
+        if unresolved and (symbol_key is None or symbol_key in unresolved):
+            return "cost_basis_unresolved"
+
         with self._lock:
             for order in self._orders.values():
                 if symbol_key is not None and order.symbol != symbol_key:
@@ -2464,6 +2587,38 @@ class PositionManager:
                 ):
                     return "entry_protection_incomplete"
         return None
+
+    def get_quarantined_broker_exposures(
+        self, symbol: str | None = None
+    ) -> dict[str, dict[str, Any]] | list[dict[str, Any]]:
+        """Return detached quarantine records, optionally for one symbol."""
+
+        wanted = _canonical_key(symbol) if symbol else None
+        with self._lock:
+            exposures = {
+                key: dict(value)
+                for key, value in self._quarantined_broker_exposures.items()
+                if isinstance(value, Mapping)
+            }
+        if wanted is None:
+            return exposures
+        exposure = exposures.get(wanted)
+        return [dict(exposure)] if exposure is not None else []
+
+    def clear_quarantined_broker_exposure(self, symbol: str) -> bool:
+        """Clear a quarantine only when no active broker-order ledger row owns it."""
+
+        wanted = _canonical_key(symbol)
+        if not wanted or _ledger_blocks_symbol(self, wanted):
+            return False
+        with self._lock:
+            removed = self._quarantined_broker_exposures.pop(wanted, None)
+            if removed is None:
+                return False
+            if str(removed.get("reason") or "") == "cost_basis_unresolved":
+                self._cost_basis_unresolved_symbols.discard(wanted)
+        self.save_state()
+        return True
 
     def add_pending_order(
         self,
@@ -2881,8 +3036,9 @@ class PositionManager:
         self.save_state()
 
     def save_state(self) -> None:
-        """Persist one coherent positions/orders snapshot to disk."""
+        """Persist one coherent positions/orders/registry snapshot to disk."""
         with self._lock:
+            ledger, exposures = _registry_snapshot_locked(self)
             state = {
                 "positions": [
                     position.to_dict() for position in self._positions.values()
@@ -2900,6 +3056,11 @@ class PositionManager:
                     order_id: lifecycle.to_dict()
                     for order_id, lifecycle in self._exit_lifecycles.items()
                 },
+                "broker_order_ledger": ledger,
+                "quarantined_broker_exposures": exposures,
+                "cost_basis_unresolved_symbols": sorted(
+                    set(self._cost_basis_unresolved_symbols)
+                ),
                 "_risk_runtime": _risk_state_snapshot(self),
                 "daily_realized_pnl": self._daily_realized_pnl,
                 "local_realized_pnl": self._local_realized_pnl,
@@ -2939,6 +3100,7 @@ class PositionManager:
         self._persist_positions_snapshot()
         with self._lock:
             self._last_reconciled_state = reconciled_snapshot
+            self._registry_state_write_generation += 1
         self._maybe_flush_persistent_state()
 
     def load_state(self) -> None:
@@ -3124,6 +3286,7 @@ class PositionManager:
             payload.get("require_pnl_baseline_for_entries", False)
         )
         _restore_risk_state(self, payload.get("_risk_runtime"))
+        _hydrate_registry_state(self, payload)
         with self._lock:
             self._refresh_realized_pnl_locked()
         try:
@@ -3274,7 +3437,20 @@ class PositionManager:
         )
         lifecycle_snapshot = _snapshot_owned_position_lifecycle(self)
         prepared, unresolved = _prepare_broker_positions(self, broker_positions)
-        self._cost_basis_unresolved_symbols = set(unresolved)
+        fresh_cost_basis = _build_cost_basis_exposures(prepared, set(unresolved))
+        with self._lock:
+            previous_unresolved = set(self._cost_basis_unresolved_symbols)
+            merged_exposures = _merge_cost_basis_exposures(
+                self._quarantined_broker_exposures,
+                fresh_cost_basis,
+            )
+            quarantine_changed = (
+                merged_exposures != self._quarantined_broker_exposures
+            )
+            unresolved_changed = previous_unresolved != set(unresolved)
+            self._quarantined_broker_exposures = merged_exposures
+            self._cost_basis_unresolved_symbols = set(unresolved)
+            before_registry_write = self._registry_state_write_generation
         if unresolved and isinstance(prepared, list):
             prepared = [
                 row
@@ -3289,6 +3465,11 @@ class PositionManager:
         restored = _restore_owned_position_lifecycle(self, lifecycle_snapshot)
         if restored:
             self.save_state()
+        if quarantine_changed or unresolved_changed:
+            with self._lock:
+                registry_write = self._registry_state_write_generation
+            if registry_write == before_registry_write:
+                self.save_state()
 
     def _maybe_seed_pnl_session_baseline(self, payload: Any) -> bool:
         """Initialize today's baseline only from authoritative broker evidence."""
