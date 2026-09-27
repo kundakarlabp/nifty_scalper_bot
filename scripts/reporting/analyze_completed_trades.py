@@ -214,7 +214,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--allow-estimated-costs",
         action="store_true",
-        help="Explicit legacy-audit override; canonical research requires broker costs.",
+        help=(
+            "Explicit legacy-audit override; canonical research requires broker costs."
+        ),
     )
     parser.add_argument(
         "--selection-trials",
