@@ -34,9 +34,7 @@ def _co_located(path: Path, source_stems: set[str]) -> bool:
     if stem.startswith("test_"):
         stem = stem[5:]
     return any(
-        stem == source
-        or stem.startswith(f"{source}_")
-        or source.startswith(f"{stem}_")
+        stem == source or stem.startswith(f"{source}_") or source.startswith(f"{stem}_")
         for source in source_stems
     )
 
@@ -53,9 +51,7 @@ def impacted_tests(
         if path.startswith("tests/") and path.endswith(".py") and (root / path).exists()
     ]
     modules = tuple(
-        module
-        for path in files
-        if (module := module_name(path)) is not None
+        module for path in files if (module := module_name(path)) is not None
     )
     source_stems = {
         Path(path).stem.lower()
@@ -65,11 +61,7 @@ def impacted_tests(
     if not modules and not changed_tests:
         return ()
 
-    needles = tuple(
-        needle
-        for module in modules
-        for needle in _import_needles(module)
-    )
+    needles = tuple(needle for module in modules for needle in _import_needles(module))
     matches: list[str] = list(changed_tests)
 
     tests_root = root / "tests"
