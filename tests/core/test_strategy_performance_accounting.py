@@ -43,8 +43,7 @@ def test_nonfinite_trade_feedback_is_rejected_before_any_state_mutates(
     assert manager._adaptive_store.get_stats("VWAPPro").win_rate == 0.0
 
 
-def test_hydrate_trade_results_rebuilds_performance_without_current_regime_leak(
-) -> None:
+def test_hydrate_trade_results_does_not_use_current_regime() -> None:
     manager = StrategyManager([], None, None)
     manager._regime_state.regime = "volatile"
 
