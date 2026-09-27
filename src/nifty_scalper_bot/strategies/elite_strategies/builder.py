@@ -8,6 +8,7 @@ import os
 from dataclasses import asdict
 from typing import Any, Dict, List, Mapping, Sequence, Type
 
+from nifty_scalper_bot.config.strategy_taxonomy import canonical_strategy_role
 from nifty_scalper_bot.strategies.elite_strategies.base_elite import EliteStrategy
 from nifty_scalper_bot.strategies.elite_strategies.bb_squeeze import BBSqueezeStrategy
 from nifty_scalper_bot.strategies.elite_strategies.config_models import (
@@ -52,15 +53,6 @@ STRATEGY_CATALOG: dict[str, tuple[str, Type[EliteStrategy], str]] = {
     "orb": ("orb_pro", ORBProStrategy, "Opening Range Breakout"),
 }
 
-_PRIMARY_DIRECTIONAL = {"smc", "vwap", "orb"}
-_CONTEXT_ONLY = {"oi_max_pain", "order_flow", "bb_squeeze", "cpr", "rsi_div"}
-_CONTEXT_CLASS_NAMES = {
-    OIMaxPainStrategy.__name__.replace("Strategy", ""),
-    OrderFlowStrategy.__name__.replace("Strategy", ""),
-    BBSqueezeStrategy.__name__.replace("Strategy", ""),
-    CPRBreakoutStrategy.__name__.replace("Strategy", ""),
-    RSIDivergenceStrategy.__name__.replace("Strategy", ""),
-}
 _EXPERIMENTAL_CONTEXT_FLAGS = {
     "bb_squeeze": "ENABLE_BB_SQUEEZE_CONTEXT",
     "cpr": "ENABLE_CPR_EXPERIMENTAL",
@@ -108,14 +100,11 @@ def _strategy_runtime_role(
         return "trigger" if strategy_mode == "expiry_gamma" and allow_expiry_gamma else None
 
     if strategy_mode == "directional_scalp":
-        if field_name in _PRIMARY_DIRECTIONAL:
-            return "trigger"
-        if field_name in _CONTEXT_ONLY:
-            return "context"
-        return None
+        role = canonical_strategy_role(field_name, default="inactive")
+        return role if role in {"trigger", "context"} else None
 
     if strategy_mode == "expiry_gamma":
-        return "context" if field_name in _CONTEXT_ONLY else None
+        return "context" if canonical_strategy_role(field_name, default="inactive") == "context" else None
 
     # Unsupported/retired modes (including legacy theta) fail closed.
     return None
@@ -128,8 +117,8 @@ def _production_strategy_roles(
 ) -> tuple[list[str], list[str]]:
     """Return the effective trigger and context strategy sets."""
     del strategy_mode
-    context_names = [name for name in active_names if name in _CONTEXT_CLASS_NAMES]
-    trigger_names = [name for name in active_names if name not in _CONTEXT_CLASS_NAMES]
+    context_names = [name for name in active_names if canonical_strategy_role(name) == "context"]
+    trigger_names = [name for name in active_names if canonical_strategy_role(name) != "context"]
     return trigger_names, context_names
 
 
