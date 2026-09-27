@@ -10,13 +10,10 @@ change and must pass chronological out-of-sample / walk-forward validation.
 
 from __future__ import annotations
 
-from types import MappingProxyType
-from typing import Mapping
-
 from nifty_scalper_bot.config.regime_ontology import MarketRegime
 
 
-_REGIME_STRATEGY_WEIGHTS: dict[str, dict[str, float]] = {
+REGIME_STRATEGY_WEIGHTS: dict[str, dict[str, float]] = {
     MarketRegime.TREND.value: {
         "SMC": 1.2,
         "VWAPPro": 1.2,
@@ -55,11 +52,6 @@ _REGIME_STRATEGY_WEIGHTS: dict[str, dict[str, float]] = {
         "SMC": 0.7,
     },
 }
-
-REGIME_STRATEGY_WEIGHTS: Mapping[str, Mapping[str, float]] = MappingProxyType(
-    {regime: MappingProxyType(dict(weights)) for regime, weights in _REGIME_STRATEGY_WEIGHTS.items()}
-)
-
 
 def regime_strategy_weight(regime: MarketRegime | str | None, strategy: str) -> float:
     """Return the configured regime multiplier, defaulting to neutral weight 1.0."""
