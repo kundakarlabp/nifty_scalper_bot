@@ -9,9 +9,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
+from nifty_scalper_bot.config.strategy_taxonomy import is_context_only_strategy
+
 _SCORE_KEYS = ("raw_setup_score", "setup_score", "strategy_score")
 _MIN_KEYS = ("setup_min", "setup_min_score", "trigger_min_score", "min_score")
-_CONTEXT_ONLY_STRATEGIES = frozenset({"orderflow"})
 _CLOSE_ACTIONS = frozenset({"CLOSE_LONG", "CLOSE_SHORT"})
 
 
@@ -37,8 +38,7 @@ def _float_from(metadata: Mapping[str, Any], keys: tuple[str, ...]) -> float | N
 
 def is_permanent_context_only(vote: Any) -> bool:
     """Return whether a strategy is structurally context-only."""
-    strategy = str(getattr(vote, "strategy", "") or "").strip().lower()
-    return strategy in _CONTEXT_ONLY_STRATEGIES
+    return is_context_only_strategy(getattr(vote, "strategy", None))
 
 
 def vote_role(vote: Any) -> str:
