@@ -105,8 +105,8 @@ jobs:
       - name: Select deterministic normal-suite shard
         run: >-
           python scripts/ci_test_shard.py
-          --shard-index "${{ matrix.shard }}"
-          --shard-count 4
+          --shard-index "${{ strategy.job-index }}"
+          --shard-count "${{ strategy.job-total }}"
           > /tmp/normal-test-shard.txt
       - name: Run normal suite shard excluding separately validated E2E markers
         shell: bash
@@ -116,7 +116,8 @@ jobs:
             echo "ERROR: normal test shard is empty" >&2
             exit 2
           fi
-          printf 'Normal test shard %s: %s files\n' "${{ matrix.shard }}" "${#files[@]}"
+          printf 'Normal test shard %s/%s: %s files\n' \
+            "${{ strategy.job-index }}" "${{ strategy.job-total }}" "${#files[@]}"
           python -m pytest -q "${files[@]}" \
             -m "not slow and not simulation_component and not live_runtime_e2e and not e2e_live_sim"
 
