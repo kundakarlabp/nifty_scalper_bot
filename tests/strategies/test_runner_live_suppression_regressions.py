@@ -422,6 +422,8 @@ def test_order_failure_cooldown_rejection_uses_dedup_rollback_path() -> None:
     source = Path("src/nifty_scalper_bot/strategies/runner.py").read_text()
     assert 'reason="order_failure_cooldown_active")' in source
     assert (
-        'return self._reject_signal_execution(symbol=base_symbol, trace_id=trace_id, reason="order_failure_cooldown_active")'
+        "return self._reject_signal_execution("
+        "symbol=base_symbol, trace_id=trace_id, "
+        'reason="order_failure_cooldown_active")'
         not in source
     )
