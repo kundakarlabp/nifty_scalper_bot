@@ -38,7 +38,7 @@ def _trade(
     }
 
 
-def test_canonicalize_completed_trades_filters_and_orders_complete_closed_rows() -> None:
+def test_canonicalize_filters_and_orders_complete_closed_rows() -> None:
     rows = [
         _trade("later", 30.0),
         _trade("open", 20.0, state="OPEN"),
@@ -76,7 +76,12 @@ def test_canonicalize_completed_trades_rejects_invalid_post_cost_identity() -> N
 def test_chronological_post_cost_blocks_are_contiguous_and_non_overlapping() -> None:
     trades = canonicalize_completed_trades(
         [
-            _trade(f"t{index}", float(index), net_pnl=float(index), gross_pnl=float(index + 20))
+            _trade(
+                f"t{index}",
+                float(index),
+                net_pnl=float(index),
+                gross_pnl=float(index + 20),
+            )
             for index in range(1, 7)
         ]
     )
@@ -94,8 +99,20 @@ def test_chronological_post_cost_blocks_are_contiguous_and_non_overlapping() -> 
 def test_summary_uses_post_cost_net_pnl() -> None:
     trades = canonicalize_completed_trades(
         [
-            _trade("winner", 1.0, gross_pnl=120.0, estimated_costs=20.0, net_pnl=100.0),
-            _trade("loser", 2.0, gross_pnl=-30.0, estimated_costs=20.0, net_pnl=-50.0),
+            _trade(
+                "winner",
+                1.0,
+                gross_pnl=120.0,
+                estimated_costs=20.0,
+                net_pnl=100.0,
+            ),
+            _trade(
+                "loser",
+                2.0,
+                gross_pnl=-30.0,
+                estimated_costs=20.0,
+                net_pnl=-50.0,
+            ),
         ]
     )
 
