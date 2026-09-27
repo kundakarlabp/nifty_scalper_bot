@@ -61,12 +61,12 @@ def test_failure_memory_workflow_is_read_only() -> None:
     assert "issues: write" not in text
     assert "agent_failure_learn.py" in text
 
+
 def test_ci_normal_test_shards_preserve_one_stable_aggregate_gate() -> None:
     text = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
 
     assert "name: normal-tests-${{ matrix.shard }}" in text
     assert "name: tests" in text
-    assert "test \"$NORMAL_SHARDS_RESULT\" = \"success\"" in text
+    assert 'test "$NORMAL_SHARDS_RESULT" = "success"' in text
     assert "${{ strategy.job-index }}" in text
     assert "${{ strategy.job-total }}" in text
-
