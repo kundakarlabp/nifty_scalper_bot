@@ -1984,7 +1984,7 @@ class PositionManager:
             pass
         self._notify_reconcile_event("position_reconcile_ok", event_payload)
 
-    def reconcile_now(self) -> bool:
+    def _reconcile_positions_now(self) -> bool:
         """Fetch and apply one authoritative broker-position snapshot, single-flight."""
         lock = getattr(self, "_single_reconcile_lock", None)
         if lock is None:
@@ -2002,6 +2002,34 @@ class PositionManager:
             return bool(self._reconcile_positions_from_broker())
         finally:
             lock.release()
+
+
+    def reconcile_now(self) -> bool:
+        """Reconcile authoritative broker positions, then broker-order evidence."""
+
+        result = bool(self._reconcile_positions_now())
+        try:
+            counts = self.reconcile_broker_orders()
+            if counts.get("seen", 0):
+                self._logger.info(
+                    "BROKER_ORDER_RECONCILE_OK seen=%s managed=%s external=%s resolved=%s",
+                    counts["seen"],
+                    counts["managed"],
+                    counts["external"],
+                    counts["resolved"],
+                    extra={"event": "BROKER_ORDER_RECONCILE_OK", **counts},
+                )
+        except Exception as exc:  # noqa: BLE001 - additive orderbook evidence
+            self._logger.warning(
+                "BROKER_ORDER_RECONCILE_FAILED error=%s",
+                exc,
+                extra={
+                    "event": "BROKER_ORDER_RECONCILE_FAILED",
+                    "error": str(exc),
+                },
+                exc_info=exc,
+            )
+        return result
 
     def _reconcile_positions_from_broker(self) -> bool:
         """Fetch and atomically apply one authoritative broker snapshot."""
