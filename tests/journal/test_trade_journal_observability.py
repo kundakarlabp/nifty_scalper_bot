@@ -806,7 +806,9 @@ def test_historical_backfill_skips_malformed_event_json(tmp_path) -> None:
         )
 
 
-def test_completed_trade_feedback_loader_uses_only_complete_finite_rows(tmp_path) -> None:
+def test_completed_trade_feedback_loader_uses_only_complete_finite_rows(
+    tmp_path,
+) -> None:
     db_path = tmp_path / "journal.db"
     journal = TradeJournal(str(db_path))
 
