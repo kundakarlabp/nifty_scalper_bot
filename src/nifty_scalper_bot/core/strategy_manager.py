@@ -31,6 +31,10 @@ from statistics import mean, pstdev
 
 from nifty_scalper_bot.config import settings as app_settings
 from nifty_scalper_bot.config.regime_ontology import MarketRegime, normalize_regime
+from nifty_scalper_bot.config.regime_strategy_policy import (
+    REGIME_STRATEGY_WEIGHTS,
+    regime_strategy_weight,
+)
 from nifty_scalper_bot.core.adaptive_calibration import (
     AdaptiveParameterStore,
     WalkForwardOptimizer,
@@ -79,18 +83,6 @@ def classify_symbol_role(symbol: str) -> str:
     if u.startswith("NFO:NIFTY") and (u.endswith("CE") or u.endswith("PE")):
         return "tradable_option"
     return "unknown"
-
-# Keyed by canonical MarketRegime names only. Regime carries no direction:
-# a trending market boosts the structure strategies regardless of whether the
-# trend is up or down, and the CE/PE choice stays with the underlying
-# direction bias. Regimes absent from a row score at the neutral weight 1.0.
-REGIME_STRATEGY_WEIGHTS: dict[str, dict[str, float]] = {
-    MarketRegime.TREND.value: {"SMC": 1.2, "VWAPPro": 1.2, "ORBPro": 1.15, "BBSqueeze": 1.1, "OrderFlow": 1.15, "RSIDivergence": 0.8},
-    MarketRegime.RANGE.value: {"RSIDivergence": 1.15, "OIMaxPain": 1.05, "ORBPro": 0.7, "VWAPPro": 0.8, "SMC": 0.85},
-    MarketRegime.VOLATILE.value: {"SMC": 0.7, "VWAPPro": 0.7, "ORBPro": 0.7, "BBSqueeze": 0.75, "OrderFlow": 0.75, "RSIDivergence": 0.7},
-    MarketRegime.EVENT.value: {"SMC": 0.6, "VWAPPro": 0.6, "ORBPro": 0.6, "BBSqueeze": 0.6, "OrderFlow": 0.6, "RSIDivergence": 0.6},
-    MarketRegime.LOW_ACTIVITY.value: {"BBSqueeze": 0.6, "VWAPPro": 0.7, "ORBPro": 0.6, "SMC": 0.7},
-}
 
 
 def _safe_float_value(value: t.Any) -> float | None:
@@ -5785,8 +5777,7 @@ class StrategyManager(_BaseStrategyManager):
         """Args: vote + regime_name. Returns: weighted StrategyVote. Raises: none."""
         try:
             regime_key = normalize_regime(regime_name).value
-            weight_map = REGIME_STRATEGY_WEIGHTS.get(regime_key, {})
-            weight = float(weight_map.get(vote.strategy, 1.0))
+            weight = regime_strategy_weight(regime_key, vote.strategy)
             weighted_score = max(0.0, min(10.0, vote.score * weight))
             log.debug(
                 "STRATEGY_REGIME_WEIGHT strategy=%s regime=%s weight=%.3f",
