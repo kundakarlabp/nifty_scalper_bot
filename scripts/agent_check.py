@@ -149,9 +149,7 @@ def build(
         tests.extend(area_candidates)
     else:
         tests.extend(
-            candidate
-            for candidate in area_candidates
-            if (root / candidate).is_file()
+            candidate for candidate in area_candidates if (root / candidate).is_file()
         )
 
     if has_source_change:
