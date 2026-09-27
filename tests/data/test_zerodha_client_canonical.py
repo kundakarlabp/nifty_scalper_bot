@@ -80,3 +80,52 @@ def test_get_order_status_returns_latest_history_state(
     assert status["status"] == "COMPLETE"
     assert status["average_price"] == 113.45
     client.close()
+
+
+def test_get_order_charges_posts_virtual_contract_note_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = ZerodhaKiteClient(api_key="k", access_token="t")
+    monkeypatch.setattr(client, "_acquire_bucket", lambda _bucket: None)
+    captured: dict[str, object] = {}
+
+    def fake_request(method, endpoint, **kwargs):
+        captured.update(method=method, endpoint=endpoint, **kwargs)
+        return {
+            "data": [
+                {
+                    "charges": {
+                        "transaction_tax": 1.5,
+                        "exchange_turnover_charge": 0.4,
+                        "sebi_turnover_charge": 0.01,
+                        "brokerage": 20.0,
+                        "stamp_duty": 0.1,
+                        "gst": {"total": 3.67},
+                        "total": 25.68,
+                    }
+                }
+            ]
+        }
+
+    monkeypatch.setattr(client, "_make_request", fake_request)
+    orders = [
+        {
+            "order_id": "123",
+            "exchange": "NFO",
+            "tradingsymbol": "NIFTY26SEP23150CE",
+            "transaction_type": "BUY",
+            "variety": "regular",
+            "product": "MIS",
+            "order_type": "MARKET",
+            "quantity": 65,
+            "average_price": 100.0,
+        }
+    ]
+
+    charges = client.get_order_charges(orders)
+
+    assert captured["method"] == "POST"
+    assert captured["endpoint"] == "/charges/orders"
+    assert captured["json_payload"] == orders
+    assert charges[0]["charges"]["total"] == 25.68
+    client.close()
