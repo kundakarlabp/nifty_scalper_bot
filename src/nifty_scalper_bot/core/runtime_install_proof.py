@@ -11,7 +11,6 @@ from types import ModuleType
 from typing import Any
 
 _CORE_APP_HOOK_ATTR = "_nifty_scalper_core_app_patch_hook"
-_DATAHUB_HOOK_ATTR = "_nifty_scalper_datahub_synthetic_guard_hook"
 
 
 def _hook_count(attr: str) -> int:
@@ -52,7 +51,6 @@ def build_runtime_install_proof(ctx: Any | None = None) -> dict[str, Any]:
     datahub_cls = type(datahub) if datahub is not None else None
     ws_cls = type(ws_manager) if ws_manager is not None else None
     core_hook_count = _hook_count(_CORE_APP_HOOK_ATTR)
-    datahub_hook_count = _hook_count(_DATAHUB_HOOK_ATTR)
 
     if ctx is not None:
         market_data_manager_hardened = bool(
@@ -96,19 +94,18 @@ def build_runtime_install_proof(ctx: Any | None = None) -> dict[str, Any]:
     datahub_native_guard_loaded = bool(
         datahub_loaded and datahub_guarded and native_methods_owned
     )
-    datahub_import_hook_required = not datahub_loaded
+    datahub_import_hook_required = False
     if datahub_native_guard_loaded:
         datahub_hardening_satisfied = True
         datahub_hardening_mode = "native"
-    elif datahub_import_hook_required and datahub_hook_count == 1:
-        datahub_hardening_satisfied = True
-        datahub_hardening_mode = "import_hook"
-    elif datahub_hook_count > 1:
-        datahub_hardening_satisfied = False
-        datahub_hardening_mode = "duplicate_hook"
     elif datahub_loaded and not native_methods_owned:
         datahub_hardening_satisfied = False
         datahub_hardening_mode = "invalid_native_ownership"
+    elif not datahub_loaded:
+        # DataHub is intentionally lazy outside active trading. No import-time
+        # patch is required; ownership is verified once the class is loaded.
+        datahub_hardening_satisfied = True
+        datahub_hardening_mode = "native_not_loaded"
     else:
         datahub_hardening_satisfied = False
         datahub_hardening_mode = "missing"
@@ -134,10 +131,10 @@ def build_runtime_install_proof(ctx: Any | None = None) -> dict[str, Any]:
         "datahub_hardening_mode": datahub_hardening_mode,
         "polling_failover_native_owner": polling_failover_native_owner,
         "core_app_import_hook_installed": core_hook_count == 1,
-        "datahub_import_hook_installed": datahub_hook_count == 1,
+        "datahub_import_hook_installed": False,
         "import_hook_counts": {
             "core_app": core_hook_count,
-            "datahub": datahub_hook_count,
+            "datahub": 0,
         },
         "all_required_installed": bool(
             market_data_manager_hardened
