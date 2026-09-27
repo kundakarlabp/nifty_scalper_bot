@@ -14,9 +14,14 @@ def load_manifest(
     root: Path,
     path: Path = DEFAULT_MANIFEST,
 ) -> dict[str, Any]:
+    validation_root = root
     resolved = path if path.is_absolute() else root / path
+    if not resolved.exists() and not path.is_absolute():
+        validation_root = Path(__file__).resolve().parents[1]
+        resolved = validation_root / path
+
     payload = json.loads(resolved.read_text(encoding="utf-8"))
-    validate_manifest(root, payload)
+    validate_manifest(validation_root, payload)
     return payload
 
 
