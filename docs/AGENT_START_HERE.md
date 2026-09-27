@@ -8,14 +8,14 @@ Use the smallest amount of repository context that can safely answer the task.
 2. Rank relevant files and tests before broad browsing:
 
    ```bash
-   python scripts/agent_context.py --query "exact error, symbol, class, function, or behavior"
+   python scripts/agent_task.py context --query "exact error, symbol, class, function, or behavior"
    ```
 
 3. Load **one primary skill** for the task. Add a secondary skill only when the task actually crosses that concern.
 4. For Python/tooling edits, scan the matching entries in `docs/ENGINEERING_FAILURE_PATTERNS.md`; do not load unrelated patterns.
 5. Read full `AGENTS.md` before editing a high-risk runtime path.
-6. Validate the changed surface first. `agent_check.py` classifies risk, runs delta-aware Ruff/Black/mypy, and adds architecture/E2E checks when warranted.
-7. Require full validation and final-head CI before merge, then run `agent_merge_guard.py` against the exact validated base/head.
+6. Validate the changed surface first through `agent_task.py check`. It prefers exact importing/co-located tests, falls back to the SSOT area suite when no direct test is found, and adds architecture/E2E checks when warranted.
+7. Require full validation and final-head CI before merge, then run `agent_task.py merge-check` against the exact validated base/head.
 
 ## Minimal skill routing
 
