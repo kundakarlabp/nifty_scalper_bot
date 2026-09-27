@@ -161,7 +161,7 @@ def build_production_strategy_profile(
             confidence_thresholds[str(strategy.name)] = float(raw_threshold)
 
     from nifty_scalper_bot.config import settings as app_settings
-    from nifty_scalper_bot.core.strategy_manager import REGIME_STRATEGY_WEIGHTS
+    from nifty_scalper_bot.config.regime_strategy_policy import REGIME_STRATEGY_WEIGHTS
 
     profile: dict[str, Any] = {
         "schema_version": 1,
