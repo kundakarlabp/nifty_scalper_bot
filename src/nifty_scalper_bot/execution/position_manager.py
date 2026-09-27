@@ -2978,6 +2978,25 @@ class PositionManager:
                 expected_exit_quantity=order.quantity,
             )
         self._persist_order_state(order)
+        with self._lock:
+            self._broker_order_ledger[order.order_id] = _broker_ledger_row(
+                existing=self._broker_order_ledger.get(order.order_id),
+                broker_payload={
+                    "order_id": order.order_id,
+                    "symbol": order.symbol,
+                    "side": order.side,
+                    "quantity": order.quantity,
+                    "filled_quantity": order.filled_quantity,
+                    "average_price": order.fill_price or order.price,
+                    "product": "MIS",
+                    "status": order.status,
+                },
+                classification="managed_order",
+                broker_position_state=None,
+                broker_position_qty=None,
+                reason=None,
+                managed=True,
+            )
         self.save_state()
 
 
