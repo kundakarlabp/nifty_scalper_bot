@@ -785,6 +785,19 @@ def test_entry_plan_preserves_context_confirmation_provenance(monkeypatch) -> No
     signal.metadata.update(
         {
             "approval_path": "single_trigger_context_confirmed",
+            "score_contract_version": 1,
+            "score_lineage": {
+                "raw_setup_score": 7.8,
+                "regime_weight": 1.2,
+                "regime_adjusted_setup_score": 9.36,
+                "context_confirmation_bonus": 0.4,
+                "context_veto_penalty": 0.0,
+                "manager_reference_score": 9.76,
+                "manager_reference_threshold": 7.5,
+                "manager_reference_pass": True,
+                "final_numeric_gate_owner": "runner_final_execution_score",
+            },
+            "confirming_trigger_strategies": ["VWAPPro"],
             "context_confirmation_strategies": ["OrderFlow"],
             "context_confirmation_evidence": [
                 {
@@ -811,6 +824,13 @@ def test_entry_plan_preserves_context_confirmation_provenance(monkeypatch) -> No
     assert result.accepted is True
     provenance = runner._order_manager.plans[0].trade_provenance
     assert provenance["approval_path"] == "single_trigger_context_confirmed"
+    assert provenance["score_contract_version"] == 1
+    assert provenance["score_lineage"]["raw_setup_score"] == 7.8
+    assert (
+        provenance["score_lineage"]["final_numeric_gate_owner"]
+        == "runner_final_execution_score"
+    )
+    assert provenance["confirming_trigger_strategies"] == ["VWAPPro"]
     assert provenance["context_confirmation_strategies"] == ["OrderFlow"]
     assert provenance["context_confirmation_evidence"] == [
         {

@@ -64,6 +64,7 @@ class ComponentCoverage:
 
     completed_trades: int
     with_signal_quality: int
+    with_attribution_provenance: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,6 +167,40 @@ def _has_signal_quality(outcome: Mapping[str, Any]) -> bool:
             return False
         if not math.isfinite(resolved):
             return False
+    return True
+
+
+def _has_attribution_provenance(outcome: Mapping[str, Any]) -> bool:
+    """Return whether a trade can support regime/setup/score attribution."""
+
+    if str(outcome.get("regime") or "").strip().upper() in {"", "UNKNOWN"}:
+        return False
+    if not str(outcome.get("setup_name") or "").strip():
+        return False
+    if not str(outcome.get("approval_path") or "").strip():
+        return False
+    if outcome.get("score_contract_version") != 1:
+        return False
+    lineage = outcome.get("score_lineage")
+    if not isinstance(lineage, Mapping):
+        return False
+    required_lineage = {
+        "raw_setup_score",
+        "regime_weight",
+        "regime_adjusted_setup_score",
+        "context_confirmation_bonus",
+        "context_veto_penalty",
+        "manager_reference_score",
+        "manager_reference_threshold",
+        "manager_reference_pass",
+        "final_numeric_gate_owner",
+    }
+    if not required_lineage.issubset(lineage):
+        return False
+    if not isinstance(outcome.get("confirming_trigger_strategies"), list):
+        return False
+    if not isinstance(outcome.get("context_confirmation_strategies"), list):
+        return False
     return True
 
 
@@ -315,14 +350,21 @@ def attribution_readiness(
         with_quality = sum(
             _has_signal_quality(trade.outcome) for trade in component_trades
         )
+        with_attribution = sum(
+            _has_attribution_provenance(trade.outcome) for trade in component_trades
+        )
         coverage[component] = ComponentCoverage(
             completed_trades=len(component_trades),
             with_signal_quality=with_quality,
+            with_attribution_provenance=with_attribution,
         )
         if not component_trades:
             blockers.append(f"missing_completed_trades:{component}")
-        elif with_quality != len(component_trades):
-            blockers.append(f"missing_signal_quality:{component}")
+        else:
+            if with_quality != len(component_trades):
+                blockers.append(f"missing_signal_quality:{component}")
+            if with_attribution != len(component_trades):
+                blockers.append(f"missing_attribution_provenance:{component}")
 
     return AttributionReadiness(
         ready=not blockers,

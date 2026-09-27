@@ -27,6 +27,27 @@ def _trade(
     outcome: dict[str, object] = {}
     if signal_quality is not None:
         outcome["signal_quality"] = signal_quality
+        outcome.update(
+            {
+                "setup_name": "continuation_pullback",
+                "regime": "TREND",
+                "approval_path": "multi_trigger",
+                "score_contract_version": 1,
+                "score_lineage": {
+                    "raw_setup_score": 7.5,
+                    "regime_weight": 1.0,
+                    "regime_adjusted_setup_score": 7.5,
+                    "context_confirmation_bonus": 0.0,
+                    "context_veto_penalty": 0.0,
+                    "manager_reference_score": 7.5,
+                    "manager_reference_threshold": 7.0,
+                    "manager_reference_pass": True,
+                    "final_numeric_gate_owner": "runner_final_execution_score",
+                },
+                "confirming_trigger_strategies": [strategy],
+                "context_confirmation_strategies": [],
+            }
+        )
     return {
         "trade_id": trade_id,
         "closed_at": closed_at,
@@ -171,6 +192,22 @@ def test_attribution_readiness_accepts_complete_component_evidence() -> None:
 
     assert readiness.ready is True
     assert readiness.blockers == ()
+
+
+def test_attribution_readiness_fails_closed_when_score_lineage_is_missing() -> None:
+    quality = {"alpha_score": 8.0, "strategy_score": 7.5}
+    rows = [_trade("vwap", 1.0, strategy="VWAPPro", signal_quality=quality)]
+    rows[0]["outcome"].pop("score_lineage")
+
+    readiness = attribution_readiness(
+        canonicalize_completed_trades(rows),
+        required_components=("VWAPPro",),
+    )
+
+    assert readiness.ready is False
+    assert readiness.coverage["VWAPPro"].with_signal_quality == 1
+    assert readiness.coverage["VWAPPro"].with_attribution_provenance == 0
+    assert "missing_attribution_provenance:VWAPPro" in readiness.blockers
 
 
 def test_execution_data_quality_flags_explicit_stale_quote_exits() -> None:

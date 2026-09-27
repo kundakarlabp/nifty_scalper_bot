@@ -21380,6 +21380,15 @@ class StrategyRunner:
                         else {}
                     ),
                     "approval_path": metadata.get("approval_path"),
+                    "score_contract_version": metadata.get("score_contract_version"),
+                    "score_lineage": (
+                        dict(metadata.get("score_lineage") or {})
+                        if isinstance(metadata.get("score_lineage"), Mapping)
+                        else {}
+                    ),
+                    "confirming_trigger_strategies": list(
+                        metadata.get("confirming_trigger_strategies") or []
+                    ),
                     "context_confirmation_strategies": metadata.get(
                         "context_confirmation_strategies"
                     ),
