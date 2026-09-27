@@ -89,7 +89,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0]
+        shard: [0, 1, 2, 3]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -102,7 +102,7 @@ jobs:
         run: >-
           python scripts/ci_test_shard.py
           --shard-index "${{ strategy.job-index }}"
-          --shard-count "${{ strategy.job-total }}"
+          --shard-count "4"
           > /tmp/normal-test-shard.txt
       - name: Run normal suite shard excluding separately validated E2E markers
         shell: bash
