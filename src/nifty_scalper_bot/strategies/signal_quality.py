@@ -153,7 +153,6 @@ def missing_score_components(metadata: dict[str, object] | None) -> list[str]:
     return [key for key in REQUIRED_SCORE_COMPONENTS if payload.get(key) is None]
 
 
-
 def _parse_score_threshold(raw: object) -> float | None:
     """Normalize configured threshold values to the internal 0..10 scale."""
     try:
