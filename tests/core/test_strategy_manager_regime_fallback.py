@@ -48,6 +48,43 @@ def test_confidence_cannot_inflate_a_weak_setup_score() -> None:
     assert vote.metadata["raw_confidence"] == 0.95
 
 
+def test_vote_boundary_stamps_canonical_strategy_identity() -> None:
+    from nifty_scalper_bot.core.strategy_manager import signal_to_vote
+
+    vote = signal_to_vote(
+        _signal(
+            "NFO:NIFTY24500CE",
+            confidence=0.8,
+            metadata={
+                "raw_setup_score": 8.0,
+                "strategy_key": "wrong",
+                "strategy_role": "wrong",
+                "signal_family": "wrong",
+            },
+        ),
+        "VWAPPro",
+    )
+
+    assert vote.strategy == "VWAPPro"
+    assert vote.metadata["strategy"] == "VWAPPro"
+    assert vote.metadata["strategy_key"] == "vwap_pro"
+    assert vote.metadata["strategy_role"] == "trigger"
+    assert vote.metadata["signal_family"] == "directional_trigger"
+
+
+def test_vote_boundary_uses_taxonomy_for_context_aliases() -> None:
+    from nifty_scalper_bot.core.strategy_manager import signal_to_vote
+
+    vote = signal_to_vote(
+        _signal("NFO:NIFTY24500CE", confidence=0.7, metadata={"raw_setup_score": 5.0}),
+        "OrderFlow",
+    )
+
+    assert vote.metadata["strategy_key"] == "order_flow"
+    assert vote.metadata["strategy_role"] == "context"
+    assert vote.metadata["signal_family"] == "directional_context"
+
+
 def test_strong_setup_with_adequate_confidence_is_unchanged() -> None:
     from nifty_scalper_bot.core.strategy_manager import signal_to_vote
 

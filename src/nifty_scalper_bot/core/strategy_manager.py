@@ -32,6 +32,11 @@ from statistics import mean, pstdev
 from nifty_scalper_bot.config import settings as app_settings
 from nifty_scalper_bot.config.regime_ontology import MarketRegime, normalize_regime
 from nifty_scalper_bot.config.regime_strategy_policy import regime_strategy_weight
+from nifty_scalper_bot.config.strategy_taxonomy import (
+    canonical_signal_family,
+    canonical_strategy_role,
+    normalize_strategy_name,
+)
 from nifty_scalper_bot.core.adaptive_calibration import (
     AdaptiveParameterStore,
     WalkForwardOptimizer,
@@ -649,7 +654,11 @@ def signal_to_vote(signal: Signal, strategy_name: str) -> StrategyVote:
     reason_list = list(metadata.get("score_reasons") or [])
     if reason and reason not in reason_list:
         reason_list.append(reason)
-    metadata.setdefault("strategy", strategy_name)
+    strategy_key = normalize_strategy_name(strategy_name)
+    metadata["strategy"] = strategy_name
+    metadata["strategy_key"] = strategy_key
+    metadata["strategy_role"] = canonical_strategy_role(strategy_key)
+    metadata["signal_family"] = canonical_signal_family(strategy_key)
     metadata.setdefault("required_data_present", True)
     metadata.setdefault("setup_quality", raw_setup_score)
     metadata["vote_score_raw_strategy"] = raw_setup_score
