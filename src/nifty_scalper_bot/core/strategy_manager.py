@@ -1447,12 +1447,6 @@ class StrategyManager(_BaseStrategyManager):
             generic_min_conf,
         )
 
-    @property
-    def performance_history_limit(self) -> int:
-        """Return the configured bounded history size used for adaptive statistics."""
-
-        return max(1, int(self._adaptive_store.window_trades))
-
     def record_trade_result(
         self,
         strategy_name: str,
