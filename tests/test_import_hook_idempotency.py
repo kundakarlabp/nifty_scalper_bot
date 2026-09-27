@@ -27,34 +27,31 @@ def _reset_data_modules() -> None:
             sys.modules.pop(name, None)
 
 
-def test_core_app_import_hook_is_not_duplicated_by_repeated_imports() -> None:
+def test_core_package_reloads_never_install_core_app_import_hook() -> None:
     _reset_core_modules()
-    before = _hook_count(CORE_HOOK_ATTR)
+    assert _hook_count(CORE_HOOK_ATTR) == 0
 
     core = importlib.import_module("nifty_scalper_bot.core")
-    first = _hook_count(CORE_HOOK_ATTR)
-
-    assert first == max(before, 1)
-    assert first <= 1
+    assert _hook_count(CORE_HOOK_ATTR) == 0
 
     for _ in range(3):
         core = importlib.reload(core)
-        assert _hook_count(CORE_HOOK_ATTR) == first
+        assert _hook_count(CORE_HOOK_ATTR) == 0
 
     for _ in range(3):
         _reset_core_modules()
         importlib.import_module("nifty_scalper_bot.core")
-        assert _hook_count(CORE_HOOK_ATTR) == first
+        assert _hook_count(CORE_HOOK_ATTR) == 0
 
 
-def test_core_app_direct_import_reuses_single_hook_and_still_patches_app() -> None:
+def test_core_app_direct_import_bootstraps_hardening_without_import_hook() -> None:
     _reset_core_modules()
     importlib.import_module("nifty_scalper_bot.core")
-    hook_count = _hook_count(CORE_HOOK_ATTR)
 
     app_module = importlib.import_module("nifty_scalper_bot.core.app")
 
-    assert _hook_count(CORE_HOOK_ATTR) == hook_count == 1
+    assert _hook_count(CORE_HOOK_ATTR) == 0
+    assert getattr(app_module, "_native_runtime_hardening_bootstrap", False) is True
     supervisor = getattr(app_module, "_polling_failover_supervisor_iteration", None)
     assert callable(supervisor)
     assert getattr(supervisor, "__module__", None) == "nifty_scalper_bot.core.app"
