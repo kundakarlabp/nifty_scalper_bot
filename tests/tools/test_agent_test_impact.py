@@ -31,7 +31,9 @@ def test_module_name_maps_source_path_to_import_path() -> None:
     assert module.module_name("tests/test_example.py") is None
 
 
-def test_impacted_tests_selects_direct_import_and_colocated_test(tmp_path: Path) -> None:
+def test_impacted_tests_selects_direct_import_and_colocated_test(
+    tmp_path: Path,
+) -> None:
     module = _load_module()
     root = tmp_path
     direct = root / "tests" / "data" / "test_quote_contract.py"
