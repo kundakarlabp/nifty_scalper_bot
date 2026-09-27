@@ -13,12 +13,18 @@ from nifty_scalper_bot.utils import logging as nsb_logging
 
 @pytest.fixture(autouse=True)
 def _reset_throttle_state():
-    """Args: none. Returns: None. Raises: none."""
+    """Isolate indicator logging from process-global throttle/filter state."""
+    logger = logging.getLogger("nifty_scalper_bot.strategies.indicators")
+    original_filters = list(logger.filters)
+    logger.filters.clear()
     with nsb_logging._THROTTLE_LOCK:
         nsb_logging._THROTTLE_STATE.clear()
-    yield
-    with nsb_logging._THROTTLE_LOCK:
-        nsb_logging._THROTTLE_STATE.clear()
+    try:
+        yield
+    finally:
+        with nsb_logging._THROTTLE_LOCK:
+            nsb_logging._THROTTLE_STATE.clear()
+        logger.filters[:] = original_filters
 
 
 def test_indicator_history_missing_market_open_emits_info(monkeypatch, caplog):
