@@ -283,6 +283,7 @@ def test_agent_check_routes_validation_assets_to_focused_tests(tmp_path: Path) -
     assert "tests/backtests/test_golden_replay_path.py" in plan.focused_tests
     assert "tests/tools/test_agent_benchmark.py" in plan.focused_tests
 
+
 def test_agent_check_falls_back_to_area_suite_when_no_direct_test_exists(
     tmp_path: Path,
 ) -> None:
@@ -300,4 +301,3 @@ def test_agent_check_falls_back_to_area_suite_when_no_direct_test_exists(
     assert "streaming" in plan.areas
     assert "tests/streaming" in plan.focused_tests
     assert "tests/data" in plan.focused_tests
-
