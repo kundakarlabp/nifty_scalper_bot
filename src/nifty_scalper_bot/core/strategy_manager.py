@@ -916,6 +916,7 @@ class StrategyPerformance:
     total_pnl: float = 0.0
     wins: int = 0
     losses: int = 0
+    trades: int = 0
     trade_returns: deque[float] = field(default_factory=lambda: deque(maxlen=200))
     last_updated: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     regime_buckets: dict[str, "RegimePerformanceBucket"] = field(default_factory=dict)
@@ -936,9 +937,10 @@ class StrategyPerformance:
 
         try:
             self.total_pnl += pnl
-            if pnl >= 0:
+            self.trades += 1
+            if pnl > 0:
                 self.wins += 1
-            else:
+            elif pnl < 0:
                 self.losses += 1
             self.trade_returns.append(pnl)
             bucket_key = "unknown"
@@ -994,7 +996,7 @@ class StrategyPerformance:
         """
 
         try:
-            trade_count = float(self.wins + self.losses)
+            trade_count = float(self.trades)
             rolling_value = float(self.rolling_pnl())
             win_rate_value = float(self.win_rate())
             sharpe_value = float(self.sharpe_ratio())
@@ -1041,10 +1043,9 @@ class StrategyPerformance:
             None.
         """
 
-        total = self.wins + self.losses
-        if total == 0:
+        if self.trades == 0:
             return 0.0
-        return self.wins / total
+        return self.wins / self.trades
 
     def win_loss_ratio(self) -> float:
         """Return win-to-loss ratio for recorded trades.
@@ -1176,9 +1177,9 @@ class RegimePerformanceBucket:
         try:
             self.total_pnl += pnl
             self.trades += 1
-            if pnl >= 0:
+            if pnl > 0:
                 self.wins += 1
-            else:
+            elif pnl < 0:
                 self.losses += 1
             self.trade_returns.append(pnl)
         except Exception as exc:  # noqa: BLE001
@@ -6045,7 +6046,7 @@ class StrategyManager(_BaseStrategyManager):
             bias = float(regime_bias.get(name, 1.0) or 1.0)
             dynamic_bias = 1.0 + (bias - 1.0) * confidence
             performance = performances[name]
-            trade_count = performance.wins + performance.losses
+            trade_count = performance.trades
             rolling_pnl_value = rolling_values.get(name, 0.0)
             stability_factor = 1.0
             apply_penalties = manual is None and trade_count >= max(
