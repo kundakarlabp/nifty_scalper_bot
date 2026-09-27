@@ -1614,7 +1614,7 @@ class StrategyManager:
 
         return None
 
-     def _validate_option_physics(self, symbol: str, action: str) -> bool:
+    def _validate_option_physics(self, symbol: str, action: str) -> bool:
         """Rejects 'Garbage Options' based on Greeks, Spread, and Liquidity."""
         quote = self._indicator_engine.get_indicators(symbol, ["bid", "ask"])
         if quote:
