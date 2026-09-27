@@ -75,9 +75,7 @@ def inspect_file(
         ]
 
     active_rules = (
-        tuple(rules)
-        if rules is not None
-        else architecture_rules(load_manifest(root))
+        tuple(rules) if rules is not None else architecture_rules(load_manifest(root))
     )
     violations: list[Violation] = []
     for node in ast.walk(tree):
@@ -111,8 +109,7 @@ def inspect_repository(root: Path) -> list[Violation]:
 
 def _format_text(violations: Iterable[Violation]) -> str:
     return "\n".join(
-        f"{item.rule}: {item.path}:{item.line}: {item.detail}"
-        for item in violations
+        f"{item.rule}: {item.path}:{item.line}: {item.detail}" for item in violations
     )
 
 
