@@ -259,7 +259,9 @@ def test_production_profile_changes_when_material_strategy_environment_changes(
         liquidity=LiquiditySettings(max_spread_pct=30.0),
         risk=RiskSettings(per_trade_risk_pct=5.0),
     )
-    strategies = build_elite_strategies(EliteStrategiesSettings(), indicator_engine=None)
+    strategies = build_elite_strategies(
+        EliteStrategiesSettings(), indicator_engine=None
+    )
     mode_profile = {"mode": "LIVE"}
 
     monkeypatch.setenv("ORB_TARGET_RR", "1.8")
@@ -293,7 +295,9 @@ def test_production_profile_does_not_capture_unrelated_or_secret_environment(
         liquidity=LiquiditySettings(max_spread_pct=30.0),
         risk=RiskSettings(per_trade_risk_pct=5.0),
     )
-    strategies = build_elite_strategies(EliteStrategiesSettings(), indicator_engine=None)
+    strategies = build_elite_strategies(
+        EliteStrategiesSettings(), indicator_engine=None
+    )
 
     profile = build_production_strategy_profile(
         settings=runtime,
