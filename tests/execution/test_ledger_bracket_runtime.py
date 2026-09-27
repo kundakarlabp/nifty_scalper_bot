@@ -530,3 +530,83 @@ def test_completed_trade_costs_count_distinct_broker_orders_not_fill_rows(
     )
     assert outcome["estimated_costs"]["brokerage"] == expected.brokerage
     assert outcome["estimated_costs"]["total"] == expected.total
+
+
+def test_completed_trade_prefers_broker_calculated_costs(
+    monkeypatch, tmp_path
+) -> None:
+    manager, _order_manager, broker = _manager(monkeypatch, tmp_path)
+    captured: list[dict[str, Any]] = []
+
+    def get_order_charges(orders):
+        captured.extend(dict(order) for order in orders)
+        totals = [11.0, 17.0]
+        return [
+            {
+                "charges": {
+                    "transaction_tax": 1.0,
+                    "exchange_turnover_charge": 0.5,
+                    "sebi_turnover_charge": 0.01,
+                    "brokerage": 5.0,
+                    "stamp_duty": 0.1,
+                    "gst": {"total": total - 6.61},
+                    "total": total,
+                }
+            }
+            for total in totals
+        ]
+
+    monkeypatch.setattr(broker, "get_order_charges", get_order_charges, raising=False)
+    manager.confirm_entry_fill("entry-1", 100.0)
+    bracket = _mark_filled_exit(
+        manager,
+        broker,
+        order_id="broker-cost-exit",
+        reason="HARD_TP_BREACH",
+        price=110.0,
+        residual=0,
+    )
+
+    manager._close_bracket(bracket, close_source="broker_fill", exit_price=110.0)
+
+    outcome = manager.get_completed_trade_outcome(SYMBOL)
+    assert outcome is not None
+    assert len(captured) == 2
+    assert {order["order_id"] for order in captured} == {"entry-1", "broker-cost-exit"}
+    assert outcome["cost_source"] == "broker_virtual_contract_note"
+    assert outcome["broker_costs"]["total"] == 28.0
+    assert outcome["effective_costs"]["total"] == 28.0
+    assert outcome["estimated_costs"]["total"] != 28.0
+    assert outcome["net_pnl"] == 1272.0
+    assert outcome["cost_reconciliation"]["broker_total"] == 28.0
+
+
+def test_completed_trade_uses_estimator_when_broker_costs_unavailable(
+    monkeypatch, tmp_path
+) -> None:
+    manager, _order_manager, broker = _manager(monkeypatch, tmp_path)
+
+    def fail_charges(_orders):
+        raise RuntimeError("charges endpoint unavailable")
+
+    monkeypatch.setattr(broker, "get_order_charges", fail_charges, raising=False)
+    manager.confirm_entry_fill("entry-1", 100.0)
+    bracket = _mark_filled_exit(
+        manager,
+        broker,
+        order_id="estimated-cost-exit",
+        reason="HARD_TP_BREACH",
+        price=110.0,
+        residual=0,
+    )
+
+    manager._close_bracket(bracket, close_source="broker_fill", exit_price=110.0)
+
+    outcome = manager.get_completed_trade_outcome(SYMBOL)
+    assert outcome is not None
+    assert outcome["cost_source"] == "estimated_model"
+    assert outcome["broker_costs"] is None
+    assert outcome["effective_costs"] == outcome["estimated_costs"]
+    assert outcome["net_pnl"] == round(
+        outcome["gross_pnl"] - outcome["estimated_costs"]["total"], 2
+    )
