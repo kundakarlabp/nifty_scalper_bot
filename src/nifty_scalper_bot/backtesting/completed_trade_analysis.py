@@ -262,7 +262,8 @@ def chronological_post_cost_blocks(
 
     ordered = list(trades)
     if any(
-        (current.closed_at, current.trade_id) >= (following.closed_at, following.trade_id)
+        (current.closed_at, current.trade_id)
+        >= (following.closed_at, following.trade_id)
         for current, following in zip(ordered, ordered[1:])
     ):
         raise ValueError("trades must be in strict chronological order")
