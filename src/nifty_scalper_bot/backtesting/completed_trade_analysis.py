@@ -320,8 +320,11 @@ def calibrate_signal_scores(
         quality = trade.outcome.get("signal_quality")
         if not isinstance(quality, Mapping):
             continue
+        raw_score = quality.get(score_key)
+        if raw_score is None:
+            continue
         try:
-            score = float(quality.get(score_key))
+            score = float(raw_score)
         except (TypeError, ValueError):
             invalid_scores += 1
             continue
