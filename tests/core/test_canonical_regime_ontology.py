@@ -106,7 +106,7 @@ def test_trend_regime_now_receives_its_configured_weight() -> None:
         MarketRegime,
         normalize_regime,
     )
-    from nifty_scalper_bot.core.strategy_manager import REGIME_STRATEGY_WEIGHTS
+    from nifty_scalper_bot.config.regime_strategy_policy import REGIME_STRATEGY_WEIGHTS
 
     trend_row = REGIME_STRATEGY_WEIGHTS[MarketRegime.TREND.value]
     assert trend_row["SMC"] > 1.0
@@ -118,7 +118,7 @@ def test_trend_regime_now_receives_its_configured_weight() -> None:
 
 def test_defensive_regimes_damp_directional_triggers() -> None:
     from nifty_scalper_bot.config.regime_ontology import MarketRegime
-    from nifty_scalper_bot.core.strategy_manager import REGIME_STRATEGY_WEIGHTS
+    from nifty_scalper_bot.config.regime_strategy_policy import REGIME_STRATEGY_WEIGHTS
 
     for regime in (
         MarketRegime.VOLATILE,
