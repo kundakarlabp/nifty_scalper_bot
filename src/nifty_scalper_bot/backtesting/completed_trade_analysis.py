@@ -516,7 +516,7 @@ def canonicalize_completed_trades(
 def summarize_completed_trades(
     trades: Sequence[CanonicalCompletedTrade],
 ) -> CompletedTradeSummary:
-    """Summarize realized economics using net P&L after estimated costs."""
+    """Summarize realized economics using the effective post-cost net P&L."""
 
     values = [float(trade.net_pnl) for trade in trades]
     wins = [value for value in values if value > 0]
@@ -765,7 +765,10 @@ __all__ = [
     "WalkForwardFold",
     "WalkForwardStability",
     "ExecutionDataQuality",
+    "ScoreCalibrationBin",
+    "ScoreCalibrationReport",
     "attribution_readiness",
+    "calibrate_signal_scores",
     "execution_data_quality",
     "canonicalize_completed_trades",
     "chronological_post_cost_blocks",
