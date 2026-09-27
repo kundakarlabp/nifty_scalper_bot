@@ -19,9 +19,7 @@ def test_machine_readable_contracts_do_not_drift_from_bound_dataclasses() -> Non
     manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
 
     bound = [
-        contract
-        for contract in manifest["contracts"]
-        if contract.get("python_symbol")
+        contract for contract in manifest["contracts"] if contract.get("python_symbol")
     ]
     assert bound
 
@@ -30,9 +28,7 @@ def test_machine_readable_contracts_do_not_drift_from_bound_dataclasses() -> Non
         assert is_dataclass(runtime_type), contract["id"]
 
         runtime_fields = {item.name for item in fields(runtime_type)}
-        schema = json.loads(
-            (ROOT / contract["schema"]).read_text(encoding="utf-8")
-        )
+        schema = json.loads((ROOT / contract["schema"]).read_text(encoding="utf-8"))
         schema_fields = set(schema["properties"])
         required_fields = set(schema["required"])
 
