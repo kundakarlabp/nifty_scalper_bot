@@ -125,6 +125,14 @@ def test_aligned_independent_trigger_can_clear_unchanged_live_quality_floor(
     )
     assert result.metadata["trade_quality_score"] >= 7.0
     assert result.metadata["approval_path"] == "aligned_two_trigger_consensus"
+    assert result.metadata["score_contract_version"] == 1
+    assert result.metadata["confirming_trigger_strategies"] == ["VWAPPro", "ORBPro"]
+    assert result.metadata["context_confirmation_strategies"] == ["OrderFlow"]
+    assert result.metadata["confirming_votes"] == ["VWAPPro", "ORBPro"]
+    lineage = result.metadata["score_lineage"]
+    assert lineage["raw_setup_score"] == 8.5
+    assert lineage["regime_adjusted_setup_score"] == 6.8
+    assert lineage["final_numeric_gate_owner"] == "runner_final_execution_score"
 
 
 def test_opposite_trigger_does_not_receive_quality_confirmation(monkeypatch) -> None:
