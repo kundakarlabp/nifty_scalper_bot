@@ -1201,7 +1201,7 @@ class StrategyManager:
         skip_count = 0
 
         bar_count = int(float(indicators.get("bar_count", 0)))
-         vwap = float(
+        vwap = float(
             indicators.get("futures_vwap")
             or indicators.get("nifty_fut_vwap")
             or indicators.get("vwap")
