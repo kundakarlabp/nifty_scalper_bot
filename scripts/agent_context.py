@@ -300,8 +300,7 @@ def build(
         lowered_ranked = [path.lower() for path in ranked_paths]
         for _area, markers, candidates in rules:
             if not any(
-                any(marker in path for marker in markers)
-                for path in lowered_ranked
+                any(marker in path for marker in markers) for path in lowered_ranked
             ):
                 continue
             existing = [
@@ -315,10 +314,7 @@ def build(
         "terms": terms,
         "runtime_path": list(payload["runtime_path"]),
         "ranked_files": [
-            {
-                key: item[key]
-                for key in ("path", "score", "risk", "reasons")
-            }
+            {key: item[key] for key in ("path", "score", "risk", "reasons")}
             for item in ranked
         ],
         "symbols": symbols,
