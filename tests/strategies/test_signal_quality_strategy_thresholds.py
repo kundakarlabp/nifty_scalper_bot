@@ -60,3 +60,54 @@ def test_strategy_threshold_aliases_live(monkeypatch):
     )
     assert orb.components["threshold"] == 7.4
     assert orb.allowed
+
+
+def test_new_global_score_setting_uses_exact_zero_to_ten_units(monkeypatch):
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("GLOBAL_MIN_SIGNAL_SCORE", "8.6")
+    monkeypatch.setenv("GLOBAL_MIN_SIGNAL_CONFIDENCE", "0.1")
+
+    score = score_signal_quality(
+        direction_score=9,
+        strategy_score=9,
+        option_score=9,
+        data_score=9,
+        rr_score=9,
+        strategy_name="VWAPPro",
+    )
+
+    assert score.components["threshold"] == 8.6
+
+
+def test_legacy_global_confidence_preserves_fraction_compatibility(monkeypatch):
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.delenv("GLOBAL_MIN_SIGNAL_SCORE", raising=False)
+    monkeypatch.setenv("GLOBAL_MIN_SIGNAL_CONFIDENCE", "0.82")
+
+    score = score_signal_quality(
+        direction_score=9,
+        strategy_score=9,
+        option_score=9,
+        data_score=9,
+        rr_score=9,
+        strategy_name="VWAPPro",
+    )
+
+    assert score.components["threshold"] == 8.2
+
+
+def test_canonical_trigger_setting_does_not_reinterpret_fraction(monkeypatch):
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("TRIGGER_VWAP_PRO_LIVE_MIN_SCORE", "0.75")
+    monkeypatch.setenv("TRIGGER_VWAP_PRO_LIVE_MIN", "9.5")
+
+    score = score_signal_quality(
+        direction_score=9,
+        strategy_score=9,
+        option_score=9,
+        data_score=9,
+        rr_score=9,
+        strategy_name="VWAPPro",
+    )
+
+    assert score.components["threshold"] == 0.75
