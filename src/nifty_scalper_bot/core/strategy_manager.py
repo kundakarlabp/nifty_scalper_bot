@@ -1554,6 +1554,7 @@ class StrategyManager(_BaseStrategyManager):
                     "metadata": dict(metadata),
                 },
             )
+
     def notify_entry_accepted(
         self,
         strategy_name: str,
