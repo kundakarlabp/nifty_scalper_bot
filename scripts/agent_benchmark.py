@@ -117,12 +117,14 @@ def main(argv: list[str] | None = None) -> int:
     unknown = sorted(case_ids - known_ids)
     errors.extend(f"unknown case id: {item}" for item in unknown)
 
-    targets = selected_targets(payload, case_ids or None) if not errors else []
+    selectors_used = bool(args.case or args.area)
+    selected = case_ids if selectors_used else None
+    targets = selected_targets(payload, selected) if not errors else []
     summary = {
         "valid": not errors,
         "errors": errors,
         "case_count": len(payload.get("cases", [])),
-        "selected_cases": sorted(case_ids) if case_ids else "all",
+        "selected_cases": sorted(case_ids) if selectors_used else "all",
         "pytest_targets": targets,
     }
 
