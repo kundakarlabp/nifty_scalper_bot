@@ -94,6 +94,25 @@ _ACTIVE_LEDGER_CLASSIFICATIONS = {
     "broker_position_quarantined",
     "broker_state_unverified",
 }
+_TERMINAL_LEDGER_CLASSIFICATIONS = {
+    "resolved_external_flat",
+    "resolved_external_terminal",
+}
+_BROKER_ORDER_STATUS_MAP = {
+    "COMPLETE": "FILLED",
+    "COMPLETED": "FILLED",
+    "FILLED": "FILLED",
+    "OPEN": "OPEN",
+    "TRIGGER PENDING": "OPEN",
+    "PENDING": "PENDING",
+    "SUBMITTED": "PENDING",
+    "PARTIALLY FILLED": "PARTIALLY_FILLED",
+    "PARTIALLY_FILLED": "PARTIALLY_FILLED",
+    "CANCELLED": "CANCELLED",
+    "CANCELED": "CANCELLED",
+    "REJECTED": "REJECTED",
+    "EXPIRED": "EXPIRED",
+}
 
 _STOP_REASON_RE = re.compile(r"(?<![A-Z0-9])SL(?![A-Z0-9])|STOP[_ ]?LOSS")
 _STOP_REARM_ANCHOR_KEYS = (
@@ -506,6 +525,157 @@ def _manual_order_exposure(order: Any, intent: str) -> dict[str, Any] | None:
         "created_at": time.time(),
         "source": "broker_order_update",
     }
+
+
+def _broker_order_get(row: Any, *names: str) -> Any:
+    if isinstance(row, Mapping):
+        return next((row.get(name) for name in names if name in row), None)
+    return next((getattr(row, name) for name in names if hasattr(row, name)), None)
+
+
+def _broker_order_int(value: Any, default: int = 0) -> int:
+    with suppress(Exception):
+        return int(float(value or 0))
+    return default
+
+
+def _broker_order_float(value: Any, default: float = 0.0) -> float:
+    with suppress(Exception):
+        return float(value or 0.0)
+    return default
+
+
+def _broker_order_status(row: Any) -> str:
+    raw = str(_broker_order_get(row, "status", "order_status", "state") or "UNKNOWN").strip().upper()
+    normalized = normalize_broker_order_status(raw)
+    token = str(normalized or raw or "UNKNOWN").strip().upper()
+    return _BROKER_ORDER_STATUS_MAP.get(token, token)
+
+
+def _broker_order_id(row: Any) -> str:
+    return str(_broker_order_get(row, "order_id", "broker_order_id", "exchange_order_id", "id") or "").strip()
+
+
+def _broker_order_symbol(row: Any) -> str:
+    return _canonical_key(_broker_order_get(row, "symbol", "tradingsymbol", "trading_symbol", "instrument"))
+
+
+def _broker_order_side(row: Any) -> str:
+    raw = str(_broker_order_get(row, "side", "transaction_type", "order_side") or "").strip().upper()
+    return "BUY" if raw in {"BUY", "B"} else "SELL" if raw in {"SELL", "S"} else raw
+
+
+def _broker_order_quantity(row: Any) -> int:
+    return abs(_broker_order_int(_broker_order_get(row, "quantity", "qty", "order_quantity", "filled_quantity", "filled")))
+
+
+def _broker_order_filled_quantity(row: Any) -> int:
+    return abs(_broker_order_int(_broker_order_get(row, "filled_quantity", "filled", "filled_qty", "filledQuantity")))
+
+
+def _normalise_broker_order_rows(payload: Any) -> list[Any]:
+    if payload is None:
+        return []
+    if isinstance(payload, Mapping):
+        for key in ("orders", "data", "net", "items"):
+            if isinstance(payload.get(key), list):
+                return list(payload[key])
+        return [payload] if _broker_order_id(payload) else []
+    try:
+        return list(payload)
+    except TypeError:
+        return []
+
+
+def _broker_order_payload(row: Any) -> dict[str, Any]:
+    payload = dict(row) if isinstance(row, Mapping) else {
+        name: getattr(row, name) for name in dir(row)
+        if not name.startswith("_") and not callable(getattr(row, name, None))
+    }
+    filled_raw = _broker_order_get(payload, "filled_quantity", "filled", "filled_qty", "filledQuantity")
+    symbol = _broker_order_symbol(payload)
+    if symbol:
+        payload["symbol"] = symbol
+        payload["tradingsymbol"] = symbol
+    payload.update({
+        "order_id": _broker_order_id(payload),
+        "status": _broker_order_status(payload),
+        "side": _broker_order_side(payload),
+        "quantity": _broker_order_quantity(payload),
+        "filled_quantity": _broker_order_filled_quantity(payload) if filled_raw is not None else _broker_order_quantity(payload),
+        "average_price": _broker_order_float(_broker_order_get(payload, "average_price", "avg_price", "fill_price", "price")),
+        "product": str(_broker_order_get(payload, "product", "product_type") or "MIS").strip().upper(),
+    })
+    return payload
+
+
+def _broker_order_timestamp_key(row: Any) -> tuple[str, str]:
+    timestamp = str(_broker_order_get(row, "exchange_timestamp", "order_timestamp", "timestamp", "created_at", "updated_at") or "")
+    return timestamp, _broker_order_id(row)
+
+
+def _broker_ledger_row(*, existing: Mapping[str, Any] | None, broker_payload: Mapping[str, Any], classification: str, broker_position_state: str | None, broker_position_qty: int | None, reason: str | None, managed: bool) -> dict[str, Any]:
+    previous = dict(existing or {})
+    order_id = str(broker_payload.get("order_id") or "").strip()
+    symbol = _canonical_key(broker_payload.get("symbol") or broker_payload.get("tradingsymbol"))
+    now = datetime.now(timezone.utc).isoformat()
+    return {
+        **previous, "order_id": order_id, "broker_order_id": order_id, "symbol": symbol, "tradingsymbol": symbol,
+        "side": str(broker_payload.get("side") or "").strip().upper(),
+        "quantity": _broker_order_int(broker_payload.get("quantity")),
+        "filled_quantity": _broker_order_int(broker_payload.get("filled_quantity")),
+        "average_price": _broker_order_float(broker_payload.get("average_price")),
+        "product": str(broker_payload.get("product") or "MIS").strip().upper(),
+        "broker_status": str(broker_payload.get("status") or "UNKNOWN").strip().upper(),
+        "classification": classification, "broker_position_state": broker_position_state,
+        "broker_position_qty": broker_position_qty, "managed_by_bot": bool(managed), "reason": reason,
+        "first_seen_at": str(previous.get("first_seen_at") or now), "last_seen_at": now, "updated_at": now,
+    }
+
+
+def _broker_ledger_classification_changed(previous: Mapping[str, Any] | None, current: Mapping[str, Any]) -> bool:
+    if not previous:
+        return True
+    return any(previous.get(key) != current.get(key) for key in ("broker_status", "classification", "broker_position_state", "broker_position_qty", "reason"))
+
+
+def _broker_ledger_blocker(row: Mapping[str, Any]) -> str | None:
+    return {
+        "active_external_order": "active_external_order",
+        "broker_state_unverified": "broker_state_unverified",
+        "broker_position_quarantined": "broker_exposure_quarantined",
+    }.get(str(row.get("classification") or ""))
+
+
+def _broker_ledger_exposure(row: Mapping[str, Any], reason: str) -> dict[str, Any]:
+    status = "BROKER_EXTERNAL_ORDER_ACTIVE" if reason == "active_external_order" else "BROKER_STATE_UNVERIFIED" if reason == "broker_state_unverified" else "BROKER_POSITION_QUARANTINED"
+    return {
+        "symbol": row["symbol"], "tradingsymbol": row["symbol"],
+        "quantity": abs(_broker_order_int(row.get("filled_quantity")) or _broker_order_int(row.get("quantity"))),
+        "side": str(row.get("side") or "").strip().upper(), "product": str(row.get("product") or "MIS").strip().upper(),
+        "average_price": _broker_order_float(row.get("average_price")), "status": status, "reason": reason,
+        "intent": "BROKER_IMPORTED_ORDER", "order_id": str(row.get("order_id") or ""), "managed_position": False,
+        "entry_accounting_allowed": False, "realized_pnl_accounting_allowed": False,
+        "requires_history_recovery": reason == "broker_position_quarantined",
+        "created_at": datetime.now(timezone.utc).isoformat(), "source": "broker_order_ledger",
+    }
+
+
+def _classify_unknown_broker_order(manager: Any, payload: Mapping[str, Any]) -> tuple[str, str | None, int | None, str | None]:
+    status = str(payload.get("status") or "UNKNOWN").upper()
+    filled_qty = _broker_order_int(payload.get("filled_quantity"))
+    if status in {"CANCELLED", "REJECTED", "EXPIRED"} and filled_qty <= 0:
+        return "resolved_external_terminal", "flat", 0, None
+    if status in {"PENDING", "OPEN", "PARTIALLY_FILLED"}:
+        return "active_external_order", None, None, "active_external_order"
+    if status == "FILLED" or filled_qty > 0:
+        state, qty, _error = _broker_position_quantity(manager, str(payload.get("symbol") or ""))
+        if state == "flat":
+            return "resolved_external_flat", state, qty, None
+        if state == "open":
+            return "broker_position_quarantined", state, qty, "broker_position_unowned_or_cost_basis_unresolved"
+        return "broker_state_unverified", state, qty, "broker_state_unverified"
+    return "active_external_order", None, None, "active_external_order"
 
 
 def _signal_stop_setup_metadata(signal: object) -> tuple[str | None, float | None]:
@@ -1359,6 +1529,7 @@ class PositionManager:
     _canonical_position_identity_native = True
     _canonical_registry_state_native = True
     _manual_quarantine_native = True
+    _broker_order_ledger_native = True
     _position_key = staticmethod(_canonical_key)
 
     """Track open positions and pending orders with persistence support."""
@@ -1813,7 +1984,7 @@ class PositionManager:
             pass
         self._notify_reconcile_event("position_reconcile_ok", event_payload)
 
-    def reconcile_now(self) -> bool:
+    def _reconcile_positions_now(self) -> bool:
         """Fetch and apply one authoritative broker-position snapshot, single-flight."""
         lock = getattr(self, "_single_reconcile_lock", None)
         if lock is None:
@@ -1831,6 +2002,34 @@ class PositionManager:
             return bool(self._reconcile_positions_from_broker())
         finally:
             lock.release()
+
+
+    def reconcile_now(self) -> bool:
+        """Reconcile authoritative broker positions, then broker-order evidence."""
+
+        result = bool(self._reconcile_positions_now())
+        try:
+            counts = self.reconcile_broker_orders()
+            if counts.get("seen", 0):
+                self._logger.info(
+                    "BROKER_ORDER_RECONCILE_OK seen=%s managed=%s external=%s resolved=%s",
+                    counts["seen"],
+                    counts["managed"],
+                    counts["external"],
+                    counts["resolved"],
+                    extra={"event": "BROKER_ORDER_RECONCILE_OK", **counts},
+                )
+        except Exception as exc:  # noqa: BLE001 - additive orderbook evidence
+            self._logger.warning(
+                "BROKER_ORDER_RECONCILE_FAILED error=%s",
+                exc,
+                extra={
+                    "event": "BROKER_ORDER_RECONCILE_FAILED",
+                    "error": str(exc),
+                },
+                exc_info=exc,
+            )
+        return result
 
     def _reconcile_positions_from_broker(self) -> bool:
         """Fetch and atomically apply one authoritative broker snapshot."""
@@ -2807,6 +3006,25 @@ class PositionManager:
                 expected_exit_quantity=order.quantity,
             )
         self._persist_order_state(order)
+        with self._lock:
+            self._broker_order_ledger[order.order_id] = _broker_ledger_row(
+                existing=self._broker_order_ledger.get(order.order_id),
+                broker_payload={
+                    "order_id": order.order_id,
+                    "symbol": order.symbol,
+                    "side": order.side,
+                    "quantity": order.quantity,
+                    "filled_quantity": order.filled_quantity,
+                    "average_price": order.fill_price or order.price,
+                    "product": "MIS",
+                    "status": order.status,
+                },
+                classification="managed_order",
+                broker_position_state=None,
+                broker_position_qty=None,
+                reason=None,
+                managed=True,
+            )
         self.save_state()
 
 
@@ -3015,10 +3233,10 @@ class PositionManager:
 
         self.save_state()
 
-    def apply_broker_order_update(
+    def _apply_managed_broker_order_update(
         self, order_id: str, broker_payload: Mapping[str, Any]
     ) -> None:
-        """Canonical position-side broker update ingress."""
+        """Apply one broker update to an already-managed local order."""
 
         broker_payload = _canonicalize_payload_symbol(dict(broker_payload))
         order_key = str(order_id)
@@ -3048,6 +3266,200 @@ class PositionManager:
                     with suppress(Exception):
                         fill_price = float(fill_price_raw)
                 self.update_order_status(order_key, str(status or ""), fill_price)
+
+
+    def apply_broker_order_update(
+        self, order_id: str, broker_payload: Mapping[str, Any]
+    ) -> None:
+        """Classify broker order truth before applying managed lifecycle updates."""
+
+        payload = _broker_order_payload(
+            dict(broker_payload or {}, order_id=str(order_id).strip())
+        )
+        oid = str(payload.get("order_id") or order_id or "").strip()
+        if not oid:
+            return
+        payload["order_id"] = oid
+        managed = oid in self._orders
+        tag = str(payload.get("tag") or "").strip()
+        if not managed and tag and tag in self._orders:
+            final_oid = oid
+            if final_oid and final_oid != tag:
+                with suppress(Exception):
+                    self.bind_pending_order_id(tag, final_oid)
+            if final_oid in self._orders:
+                oid = final_oid
+            else:
+                oid = tag
+                payload["order_id"] = oid
+            managed = True
+        client_order_id = str(
+            payload.get("client_order_id")
+            or payload.get("clientOrderId")
+            or ""
+        ).strip()
+        if not managed and client_order_id and client_order_id in self._orders:
+            oid = client_order_id
+            payload["order_id"] = oid
+            managed = True
+
+        with self._lock:
+            previous = self._broker_order_ledger.get(oid)
+
+        if managed:
+            with self._lock:
+                self._broker_order_ledger[oid] = _broker_ledger_row(
+                    existing=previous,
+                    broker_payload=payload,
+                    classification="managed_order",
+                    broker_position_state=None,
+                    broker_position_qty=None,
+                    reason=None,
+                    managed=True,
+                )
+            self._apply_managed_broker_order_update(oid, payload)
+            self.save_state()
+            return
+
+        classification, broker_state, broker_qty, reason = (
+            _classify_unknown_broker_order(self, payload)
+        )
+        row = _broker_ledger_row(
+            existing=previous,
+            broker_payload=payload,
+            classification=classification,
+            broker_position_state=broker_state,
+            broker_position_qty=broker_qty,
+            reason=reason,
+            managed=False,
+        )
+        changed = _broker_ledger_classification_changed(previous, row)
+        symbol = str(row.get("symbol") or "")
+        with self._lock:
+            self._broker_order_ledger[oid] = row
+            if classification in _TERMINAL_LEDGER_CLASSIFICATIONS:
+                self._quarantined_broker_exposures.pop(
+                    _canonical_key(symbol), None
+                )
+            else:
+                blocker = _broker_ledger_blocker(row) or str(
+                    reason or classification
+                )
+                exposure = _broker_ledger_exposure(row, blocker)
+                self._quarantined_broker_exposures[
+                    str(exposure["symbol"])
+                ] = exposure
+
+        if classification in _TERMINAL_LEDGER_CLASSIFICATIONS:
+            if changed:
+                self._logger.info(
+                    "BROKER_UNKNOWN_ORDER_RESOLVED order_id=%s symbol=%s classification=%s",
+                    oid,
+                    symbol,
+                    classification,
+                    extra={
+                        "event": "BROKER_UNKNOWN_ORDER_RESOLVED",
+                        "order_id": oid,
+                        "symbol": symbol,
+                        "classification": classification,
+                        "broker_status": row.get("broker_status"),
+                    },
+                )
+        elif changed:
+            blocker = _broker_ledger_blocker(row) or str(
+                reason or classification
+            )
+            self._logger.warning(
+                "BROKER_EXTERNAL_ORDER_QUARANTINED order_id=%s symbol=%s classification=%s reason=%s",
+                oid,
+                symbol,
+                classification,
+                blocker,
+                extra={
+                    "event": "BROKER_EXTERNAL_ORDER_QUARANTINED",
+                    "order_id": oid,
+                    "symbol": symbol,
+                    "classification": classification,
+                    "reason": blocker,
+                    "broker_status": row.get("broker_status"),
+                    "broker_position_state": broker_state,
+                    "broker_position_qty": broker_qty,
+                },
+            )
+        self.save_state()
+
+    def _resolve_broker_order_fetcher(self) -> Callable[[], Any] | None:
+        broker = self._broker_client
+        if broker is None:
+            return None
+        for name in ("get_orders", "list_orders", "orders", "fetch_orders"):
+            fetcher = getattr(broker, name, None)
+            if callable(fetcher):
+                return cast(Callable[[], Any], fetcher)
+        return None
+
+    def reconcile_broker_orders(
+        self, broker_orders: Any | None = None
+    ) -> dict[str, int]:
+        """Classify broker orderbook truth into the durable broker ledger."""
+
+        if broker_orders is None:
+            fetcher = self._resolve_broker_order_fetcher()
+            if fetcher is None:
+                return {
+                    "seen": 0,
+                    "managed": 0,
+                    "external": 0,
+                    "resolved": 0,
+                }
+            broker_orders = fetcher()
+        rows = sorted(
+            _normalise_broker_order_rows(broker_orders),
+            key=_broker_order_timestamp_key,
+        )
+        counts = {
+            "seen": 0,
+            "managed": 0,
+            "external": 0,
+            "resolved": 0,
+        }
+        for raw in rows:
+            payload = _broker_order_payload(raw)
+            oid = str(payload.get("order_id") or "").strip()
+            if not oid:
+                continue
+            counts["seen"] += 1
+            self.apply_broker_order_update(oid, payload)
+            with self._lock:
+                ledger_row = dict(self._broker_order_ledger.get(oid, {}))
+            classification = str(ledger_row.get("classification") or "")
+            if classification == "managed_order":
+                counts["managed"] += 1
+            elif classification in _TERMINAL_LEDGER_CLASSIFICATIONS:
+                counts["resolved"] += 1
+            elif classification:
+                counts["external"] += 1
+        return counts
+
+    def get_broker_order_ledger(
+        self, symbol: str | None = None
+    ) -> dict[str, dict[str, Any]]:
+        """Return a detached broker-order ledger, optionally by symbol."""
+
+        wanted = _canonical_key(symbol) if symbol else None
+        with self._lock:
+            ledger = dict(self._broker_order_ledger)
+        out: dict[str, dict[str, Any]] = {}
+        for ledger_order_id, row in ledger.items():
+            if not isinstance(row, Mapping):
+                continue
+            row_symbol = _canonical_key(
+                row.get("symbol") or row.get("tradingsymbol")
+            )
+            if wanted is not None and row_symbol != wanted:
+                continue
+            out[str(ledger_order_id)] = dict(row)
+        return out
 
     def get_pending_orders(self, symbol: str | None = None) -> list[Order]:
         """Return tracked orders, optionally filtered by ``symbol``."""

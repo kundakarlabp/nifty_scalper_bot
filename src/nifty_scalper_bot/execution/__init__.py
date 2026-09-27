@@ -19,9 +19,7 @@ from nifty_scalper_bot.execution.bracket_manager import BoundBracketManager, Bra
 from nifty_scalper_bot.execution.order_manager import OrderManager, RuntimeOrderManager
 from nifty_scalper_bot.execution.broker_pnl_authority_patch import apply_patches as _apply_broker_pnl_authority_patches
 from nifty_scalper_bot.execution.pnl_session_rollover_patch import apply_patches as _apply_pnl_session_rollover_patches
-import nifty_scalper_bot.execution.broker_order_ledger_patch as _broker_order_ledger_patch
 
-_broker_order_ledger_patch.apply_patches()
 _apply_broker_pnl_authority_patches()
 _apply_pnl_session_rollover_patches()
 
