@@ -76,7 +76,7 @@ def test_release_health_accepts_only_loaded_or_explicit_quiet_runtime() -> None:
     unloaded = health.index('"bot_loaded"', quiet)
     assert engine < loaded < quiet < unloaded
     assert "return 0" in health[loaded:quiet]
-    assert "return 1" in health[quiet:]
+    assert "broker_auth_dependency_degraded" in health[quiet:]
 
 
 def test_lightsail_release_migrates_existing_systemd_entrypoint_safely() -> None:
