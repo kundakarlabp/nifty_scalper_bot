@@ -1447,6 +1447,56 @@ class StrategyManager(_BaseStrategyManager):
             generic_min_conf,
         )
 
+    def _apply_trade_result(
+        self,
+        strategy_name: str,
+        pnl: float,
+        *,
+        regime: str | None,
+    ) -> None:
+        perf = self._performance.setdefault(strategy_name, StrategyPerformance())
+        perf.record(pnl, regime=regime)
+        self._adaptive_store.record_trade(strategy_name, pnl)
+        self._score_cache.pop(strategy_name, None)
+
+    def hydrate_trade_results(
+        self,
+        outcomes: t.Iterable[t.Mapping[str, t.Any]],
+    ) -> int:
+        """Rebuild strategy performance from durable completed-trade outcomes."""
+
+        hydrated = 0
+        for outcome in outcomes:
+            strategy_name = str(outcome.get("strategy_name") or "").strip()
+            if not strategy_name:
+                continue
+            try:
+                resolved_pnl = float(outcome.get("net_pnl"))
+            except (TypeError, ValueError):
+                continue
+            if not isfinite(resolved_pnl):
+                continue
+            regime_value = outcome.get("regime")
+            regime_label = regime_value if isinstance(regime_value, str) else None
+            self._apply_trade_result(
+                strategy_name,
+                resolved_pnl,
+                regime=regime_label,
+            )
+            hydrated += 1
+        if hydrated:
+            log.info(
+                "STRATEGY_PERFORMANCE_HYDRATED trades=%d strategies=%d",
+                hydrated,
+                len(self._performance),
+                extra={
+                    "event": "STRATEGY_PERFORMANCE_HYDRATED",
+                    "trades": hydrated,
+                    "strategies": len(self._performance),
+                },
+            )
+        return hydrated
+
     def record_trade_result(
         self,
         strategy_name: str,
@@ -1475,7 +1525,6 @@ class StrategyManager(_BaseStrategyManager):
         resolved_pnl = float(pnl)
         if not isfinite(resolved_pnl):
             raise ValueError("pnl must be finite")
-        perf = self._performance.setdefault(strategy_name, StrategyPerformance())
         regime_label: str | None = None
         if metadata is not None:
             try:
@@ -1490,8 +1539,11 @@ class StrategyManager(_BaseStrategyManager):
                 )
         if regime_label is None:
             regime_label = self._regime_state.regime
-        perf.record(resolved_pnl, regime=regime_label)
-        self._adaptive_store.record_trade(strategy_name, resolved_pnl)
+        self._apply_trade_result(
+            strategy_name,
+            resolved_pnl,
+            regime=regime_label,
+        )
         if metadata:
             log.info(
                 "Condition met: strategy_trade_recorded",
@@ -1502,8 +1554,6 @@ class StrategyManager(_BaseStrategyManager):
                     "metadata": dict(metadata),
                 },
             )
-        self._score_cache.pop(strategy_name, None)
-
     def notify_entry_accepted(
         self,
         strategy_name: str,
