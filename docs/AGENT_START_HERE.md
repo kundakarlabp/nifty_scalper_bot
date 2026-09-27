@@ -57,7 +57,7 @@ Add rollback, interface, state-transition, or deployment details only when the c
 Generate a focused validation plan:
 
 ```bash
-python scripts/agent_check.py --files path/to/changed.py
+python scripts/agent_task.py plan --files path/to/changed.py
 ```
 
 Execute the risk-aware fast validation ring:
@@ -66,11 +66,7 @@ Execute the risk-aware fast validation ring:
 python scripts/agent_task.py check --files path/to/changed.py
 ```
 
-For changes related to a known historical regression, select the smallest relevant benchmark case:
-
-```bash
-python scripts/agent_task.py check --files <changed files>
-```
+The `check` and `full` commands automatically select historical-regression cases whose declared areas overlap the change. Do not select benchmark cases manually unless diagnosing the benchmark itself.
 
 Execute focused checks plus the complete suite before merge when the environment supports it:
 
