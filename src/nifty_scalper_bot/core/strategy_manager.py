@@ -5982,7 +5982,7 @@ class StrategyManager(_BaseStrategyManager):
             try:
                 if regime_key:
                     bucket = perf.regime_buckets.get(regime_key)
-                if bucket is None:
+                else:
                     bucket = perf.regime_buckets.get("unknown")
             except Exception as exc:  # noqa: BLE001
                 log.error(
@@ -5994,13 +5994,21 @@ class StrategyManager(_BaseStrategyManager):
             regime_stats_raw: dict[str, float] = {}
             if bucket is not None:
                 regime_stats_raw = bucket.snapshot()
+            regime_trades = float(regime_stats_raw.get("trades", 0.0))
+            evidence_target = max(1, self._dynamic_trade_threshold)
+            evidence_fraction = (
+                min(1.0, regime_trades / float(evidence_target))
+                if regime_key
+                else 0.0
+            )
             active_snapshot = {
                 "pnl": float(regime_stats_raw.get("pnl", 0.0)),
                 "win_rate": float(regime_stats_raw.get("win_rate", 0.0)),
                 "hit_rate": float(regime_stats_raw.get("win_rate", 0.0)),
                 "sharpe": float(regime_stats_raw.get("sharpe", 0.0)),
                 "drawdown": float(regime_stats_raw.get("drawdown", 0.0)),
-                "trades": float(regime_stats_raw.get("trades", 0.0)),
+                "trades": regime_trades,
+                "evidence_fraction": evidence_fraction,
             }
             active_regime_snapshots[name] = active_snapshot
             regime_pnl_values[name] = active_snapshot["pnl"]
@@ -6040,7 +6048,12 @@ class StrategyManager(_BaseStrategyManager):
             )
             blend_weight = 0.0
             if regime_key:
-                blend_weight = min(0.6, 0.25 + confidence * 0.35)
+                evidence_fraction = float(
+                    active_regime_snapshots[name].get("evidence_fraction", 0.0)
+                )
+                blend_weight = (
+                    min(0.6, 0.25 + confidence * 0.35) * evidence_fraction
+                )
             composite_score = (
                 base_score * (1.0 - blend_weight) + regime_score * blend_weight
             )
