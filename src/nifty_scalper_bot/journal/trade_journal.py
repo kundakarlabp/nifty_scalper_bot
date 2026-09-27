@@ -5,6 +5,7 @@ from __future__ import annotations
 import atexit
 import json
 import logging
+import math
 import queue
 import sqlite3
 import threading
@@ -175,6 +176,65 @@ class TradeJournal:
     def db_path(self) -> Path:
         """Return the canonical SQLite journal path for read-only consumers."""
         return self._db_path
+
+    def load_completed_strategy_outcomes(
+        self,
+        *,
+        build_sha: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return chronological ledger-complete net outcomes for one build."""
+
+        resolved_build = str(build_sha or resolve_build_sha()).strip()
+        conn = self._ensure_connection(None)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                """
+                SELECT trade_id, strategy, net_pnl, outcome_json, closed_at
+                FROM trade_ledger
+                WHERE state = 'CLOSED'
+                  AND ledger_complete = 1
+                  AND strategy IS NOT NULL
+                  AND strategy != ''
+                  AND net_pnl IS NOT NULL
+                  AND build_sha = ?
+                ORDER BY COALESCE(closed_at, updated_at), trade_id
+                """,
+                (resolved_build,),
+            ).fetchall()
+        finally:
+            conn.close()
+
+        outcomes: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                net_pnl = float(row["net_pnl"])
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(net_pnl):
+                continue
+            outcome: Mapping[str, Any] = {}
+            try:
+                decoded = json.loads(str(row["outcome_json"] or "{}"))
+                if isinstance(decoded, Mapping):
+                    outcome = decoded
+            except (TypeError, ValueError, json.JSONDecodeError):
+                outcome = {}
+            regime = outcome.get("regime")
+            outcomes.append(
+                {
+                    "trade_id": str(row["trade_id"]),
+                    "strategy_name": str(row["strategy"]),
+                    "net_pnl": net_pnl,
+                    "regime": regime if isinstance(regime, str) else None,
+                    "closed_at": (
+                        float(row["closed_at"])
+                        if row["closed_at"] is not None
+                        else None
+                    ),
+                }
+            )
+        return outcomes
 
     # -------------------------------------------------------
     # Internal
