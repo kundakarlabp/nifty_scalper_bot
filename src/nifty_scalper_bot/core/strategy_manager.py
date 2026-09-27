@@ -31,10 +31,7 @@ from statistics import mean, pstdev
 
 from nifty_scalper_bot.config import settings as app_settings
 from nifty_scalper_bot.config.regime_ontology import MarketRegime, normalize_regime
-from nifty_scalper_bot.config.regime_strategy_policy import (
-    REGIME_STRATEGY_WEIGHTS,
-    regime_strategy_weight,
-)
+from nifty_scalper_bot.config.regime_strategy_policy import regime_strategy_weight
 from nifty_scalper_bot.core.adaptive_calibration import (
     AdaptiveParameterStore,
     WalkForwardOptimizer,
