@@ -25,36 +25,15 @@ For owner-created issues titled `[Agent Context] ...`, GitHub Actions automatica
 | `benchmarks/agent/` | Historical regression benchmark manifest for coding-agent changes |
 | `tests/fixtures/replay/` | Sanitized deterministic golden replay inputs |
 
-## Authoritative runtime path
+## Architecture SSOT
+
+Canonical ownership, runtime path, high-risk markers, validation routing, and architecture-lint rules live in:
 
 ```text
-core/app.py
-→ data/market_data_manager.py
-→ data/data_hub.py
-→ strategies/runner.py
-→ execution/order_manager.py
-→ execution/bracket_manager.py
-→ notifications/telegram_controller.py
+docs/architecture/agent_manifest.json
 ```
 
-Do not bypass this flow. Options are the only tradable instruments. Spot is direction/context only; futures is optional context only.
-
-## Core ownership
-
-| File | Owns | Does not own |
-|---|---|---|
-| `core/app.py` | Wiring, startup sequence, readiness/arming source of truth | Contract selection, history storage, order placement |
-| `core/instrument_manager.py` | Contract selection and token resolution | Tick/history storage, strategy decisions |
-| `data/market_data_manager.py` | Tick cache, subscriptions, quotes/depth/OI, OHLC history and hydration | Contract selection, strategy logic |
-| `data/data_hub.py` | Read facade over active market data | Independent history or contract selection |
-| `data/candle_engine.py` | Tick-to-OHLC bars and bar readiness | Broker instruments |
-| `strategies/runner.py` | Evaluation loop, gates, signal-to-order handoff | Contract selection, broker history fetch, order placement |
-| `execution/order_manager.py` | Canonical live placement, retries, idempotency, order lifecycle | Signal generation and contract selection |
-| `execution/position_manager.py` | Position and pending-order state | Strategy scoring |
-| `execution/bracket_manager.py` | Virtual SL/TP, trailing, targets, partial exits and recovery | Entry decisions and separate placement path |
-| `notifications/telegram_controller.py` | Operator commands, authentication, diagnostics and alerts | Trading decisions and direct order ownership |
-
-`execution/order_executor.py` is non-live and is not the canonical live order path.
+This repository map is navigational only. Do not copy ownership/routing tables back into this file; update the manifest and its tests instead.
 
 ## Support modules
 
@@ -120,24 +99,6 @@ Do not bypass this flow. Options are the only tradable instruments. Spot is dire
 | Dashboard truth/export/rendering | dashboard modules | `tests/dashboard/` |
 | Lightsail release/startup | deploy scripts, release guard | deployment and release-guard tests |
 
-## High-risk paths
-
-```text
-src/nifty_scalper_bot/core/app.py
-src/nifty_scalper_bot/core/instrument_manager.py
-src/nifty_scalper_bot/data/market_data_manager.py
-src/nifty_scalper_bot/data/data_hub.py
-src/nifty_scalper_bot/streaming/websocket_manager.py
-src/nifty_scalper_bot/strategies/runner.py
-src/nifty_scalper_bot/risk/risk_manager.py
-src/nifty_scalper_bot/execution/order_manager.py
-src/nifty_scalper_bot/execution/position_manager.py
-src/nifty_scalper_bot/execution/bracket_manager.py
-src/nifty_scalper_bot/notifications/telegram_controller.py
-```
-
-Inspect direct call sites, state ownership, restart/reconnect behavior, and regression tests before editing these files.
-
 ## Source-of-truth invariants
 
 - Contract selection lives in InstrumentManager.
@@ -152,31 +113,16 @@ Inspect direct call sites, state ownership, restart/reconnect behavior, and regr
 
 ## Agent tooling
 
-Generate ranked repository context:
+Use the single public façade:
 
 ```bash
-python scripts/agent_context.py --query "exact error or symbol" --output /tmp/agent-context.md
+python scripts/agent_task.py context --query "exact error or symbol"
+python scripts/agent_task.py plan --files path/to/changed.py
+python scripts/agent_task.py check --files path/to/changed.py
+python scripts/agent_task.py full --files path/to/changed.py
 ```
 
-Generate a focused validation plan:
-
-```bash
-python scripts/agent_check.py --files path/to/changed.py --output /tmp/agent-check.md
-```
-
-Validate or run historical regression cases:
-
-```bash
-python scripts/agent_benchmark.py --validate
-python scripts/agent_benchmark.py --case <case-id> --run
-```
-
-Final validation remains:
-
-```bash
-python -m compileall -q src dashboard
-python -m pytest -q
-```
+The façade delegates to the existing focused tools, automatically selects relevant historical regression cases, and never starts the live trading runtime.
 
 ## Runtime pressure ownership map
 
