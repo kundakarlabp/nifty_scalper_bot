@@ -1275,21 +1275,6 @@ class StrategyManager:
                     skip_count += 1
                     continue
 
-                # Gating: Low VIX filter for Momentum strategies
-                if vix < 12.0 and (
-                    "Breakout" in strategy.name or "ORB" in strategy.name
-                ):
-                    logger.debug(
-                        "strategy_skip_vix",
-                        extra={
-                            "event": "strategy_skip_vix",
-                            "strategy": strategy.name,
-                            "vix": vix,
-                        },
-                    )
-                    skip_count += 1
-                    continue
-
                 eval_count += 1
                 logger.debug(
                     "strategy_call",
