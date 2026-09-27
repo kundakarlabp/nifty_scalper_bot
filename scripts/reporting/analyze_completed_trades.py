@@ -32,8 +32,7 @@ def load_trade_ledger_rows(db_path: Path) -> list[dict[str, Any]]:
     uri = f"{resolved.as_uri()}?mode=ro"
     with sqlite3.connect(uri, uri=True) as connection:
         connection.row_factory = sqlite3.Row
-        rows = connection.execute(
-            """
+        rows = connection.execute("""
             SELECT
                 trade_id,
                 state,
@@ -48,8 +47,7 @@ def load_trade_ledger_rows(db_path: Path) -> list[dict[str, Any]]:
             WHERE state = 'CLOSED'
               AND ledger_complete = 1
             ORDER BY closed_at, trade_id
-            """
-        ).fetchall()
+            """).fetchall()
     return [dict(row) for row in rows]
 
 
@@ -86,8 +84,7 @@ def build_analysis(
         "attribution": {
             "ready": readiness.ready,
             "coverage": {
-                name: asdict(coverage)
-                for name, coverage in readiness.coverage.items()
+                name: asdict(coverage) for name, coverage in readiness.coverage.items()
             },
             "blockers": list(readiness.blockers),
         },
