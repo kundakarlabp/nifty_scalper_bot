@@ -33,7 +33,12 @@ def _co_located(path: Path, source_stems: set[str]) -> bool:
     stem = path.stem.lower()
     if stem.startswith("test_"):
         stem = stem[5:]
-    return any(source in stem or stem in source for source in source_stems)
+    return any(
+        stem == source
+        or stem.startswith(f"{source}_")
+        or source.startswith(f"{stem}_")
+        for source in source_stems
+    )
 
 
 def impacted_tests(
