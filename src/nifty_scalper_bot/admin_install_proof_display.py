@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
+# DataHub hardening is native; only mechanisms needing install proof are listed.
 _REQUIRED_FLAGS = (
     ("market_data_manager_hardened", "MDM"),
     ("websocket_hardened", "WebSocket"),
