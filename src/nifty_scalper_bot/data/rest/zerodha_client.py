@@ -1326,6 +1326,35 @@ class ZerodhaKiteClient(BaseBrokerClient):
                 return order
         return {}
 
+    def get_order_charges(
+        self,
+        orders: Sequence[Mapping[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Return Zerodha's order-wise virtual contract-note charges.
+
+        The endpoint is used only after confirmed fills for accounting/research;
+        order execution never depends on this call.
+        """
+
+        payload = [dict(order) for order in orders if isinstance(order, Mapping)]
+        if not payload:
+            return []
+        self._acquire_bucket(self._GENERAL_BUCKET)
+        response = self._ensure_json(
+            self._make_request(
+                "POST",
+                "/charges/orders",
+                json_payload=payload,
+                operation_label="charges.orders",
+            )
+        )
+        data = response.get("data")
+        if not isinstance(data, list) or any(
+            not isinstance(item, Mapping) for item in data
+        ):
+            raise BrokerError("Malformed Zerodha order-charges response")
+        return [dict(cast(Mapping[str, Any], item)) for item in data]
+
     def cancel_order(self, order_id: str, variety: str = "regular") -> dict:
         """Cancel order."""
 
@@ -2780,6 +2809,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
         params: dict | None = None,
         data: dict | None = None,
         *,
+        json_payload: Any | None = None,
         raw_response: bool = False,
         expect_order_response: bool = False,
         operation_label: str | None = None,
@@ -2792,6 +2822,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
             endpoint: Relative endpoint to invoke on the REST client.
             params: Optional query parameters for the request.
             data: Optional form payload for the request.
+            json_payload: Optional JSON body for endpoints that require JSON POST.
             raw_response: Whether to return the raw :class:`httpx.Response`.
             expect_order_response: Flag to tailor error mapping for order APIs.
             operation_label: Structured label used for retry diagnostics.
@@ -2812,7 +2843,10 @@ class ZerodhaKiteClient(BaseBrokerClient):
         def _operation() -> dict | httpx.Response:
             self._breaker_sleep(url)
             try:
-                response = self._client.request(method, url, params=params, data=data)
+                request_kwargs: dict[str, Any] = {"params": params, "data": data}
+                if json_payload is not None:
+                    request_kwargs["json"] = json_payload
+                response = self._client.request(method, url, **request_kwargs)
             except httpx.RequestError as exc:
                 raise RetryableError(
                     f"Request error for {url}",
