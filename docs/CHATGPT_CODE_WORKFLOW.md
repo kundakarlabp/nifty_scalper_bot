@@ -77,7 +77,7 @@ For recurring specialist work, prefer these repository procedures instead of res
 Generate a compact context report:
 
 ```bash
-python scripts/agent_context.py \
+python scripts/agent_task.py context \
   --query "websocket pong timeout reconnect alerts" \
   --output /tmp/agent-context.md
 ```
@@ -92,8 +92,8 @@ python scripts/agent_task.py plan --files src/nifty_scalper_bot/streaming/websoc
 Execute the focused ring before publishing Python changes:
 
 ```bash
-python scripts/agent_task.py plan --files src/nifty_scalper_bot/streaming/websocket_manager.py \
-  --run focused
+python scripts/agent_task.py check \
+  --files src/nifty_scalper_bot/streaming/websocket_manager.py
 ```
 
 The public façade delegates to the risk-aware focused ring: it runs delta-aware Ruff, Black, and mypy checks first, adds architecture ownership validation for production code, and adds deterministic broker-free E2E for high-risk paths. These tools never place orders or start the trading runtime.
