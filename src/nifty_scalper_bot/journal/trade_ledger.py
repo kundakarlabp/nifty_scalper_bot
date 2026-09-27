@@ -296,9 +296,7 @@ def materialize_trade_events(
         conn.executemany(_UPSERT_SQL, materialized)
 
 
-def load_completed_trade_feedback(
-    conn: sqlite3.Connection,
-) -> list[dict[str, Any]]:
+def load_completed_trade_feedback(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     """Return canonical completed-trade feedback in chronological order."""
     rows = conn.execute(
         """
