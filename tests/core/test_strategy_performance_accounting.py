@@ -41,3 +41,57 @@ def test_nonfinite_trade_feedback_is_rejected_before_any_state_mutates(
 
     assert "VWAPPro" not in manager._performance
     assert manager._adaptive_store.get_stats("VWAPPro").win_rate == 0.0
+
+
+def test_restore_trade_results_is_idempotent_and_rebuilds_regime_stats() -> None:
+    manager = StrategyManager([], None, None)
+    records = [
+        {
+            "trade_id": "trade-1",
+            "strategy": "VWAPPro",
+            "net_pnl": 100.0,
+            "regime": "TREND",
+        },
+        {
+            "trade_id": "trade-2",
+            "strategy": "VWAPPro",
+            "net_pnl": -40.0,
+            "regime": "RANGE",
+        },
+        {
+            "trade_id": "trade-3",
+            "strategy": "SMC",
+            "net_pnl": 25.0,
+            "regime": None,
+        },
+    ]
+
+    assert manager.restore_trade_results(records) == 3
+    assert manager.restore_trade_results(records) == 3
+
+    vwap = manager._performance["VWAPPro"]
+    assert vwap.trades == 2
+    assert vwap.total_pnl == 60.0
+    assert vwap.regime_buckets["trend"].trades == 1
+    assert vwap.regime_buckets["range"].trades == 1
+    assert manager._adaptive_store.get_stats("VWAPPro").win_rate == 0.5
+
+    smc = manager._performance["SMC"]
+    assert smc.trades == 1
+    assert smc.regime_buckets["unknown"].trades == 1
+
+
+def test_restore_trade_results_fails_atomically_on_invalid_record() -> None:
+    manager = StrategyManager([], None, None)
+    manager.record_trade_result("VWAPPro", 10.0, metadata={"regime": "trend"})
+
+    with pytest.raises(ValueError, match="strategy and finite net_pnl are required"):
+        manager.restore_trade_results(
+            [
+                {"strategy": "SMC", "net_pnl": 20.0, "regime": "range"},
+                {"strategy": "", "net_pnl": 5.0, "regime": "trend"},
+            ]
+        )
+
+    assert set(manager._performance) == {"VWAPPro"}
+    assert manager._performance["VWAPPro"].trades == 1
