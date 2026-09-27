@@ -338,8 +338,12 @@ def markdown(data: dict[str, object]) -> str:
         "## Repository contract",
         "",
         "- NIFTY options are the only tradable instruments; spot and futures are context only.",
-        "- Preserve the runtime path declared by `docs/architecture/agent_manifest.json`: "
-        + " → ".join(str(path) for path in data["runtime_path"]) + ".",
+        (
+            "- Preserve the runtime path declared by "
+            "`docs/architecture/agent_manifest.json`: "
+            + " → ".join(str(path) for path in data["runtime_path"])
+            + "."
+        ),
         "- Never bypass readiness, quote-quality, risk, capital, cooldown, position, max-loss, or execution-mode gates.",
         "- Environment files, runtime data, logs, databases, key material, and implementation bodies are excluded.",
         "",
