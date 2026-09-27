@@ -16,15 +16,14 @@ def test_native_position_manager_owns_reconciliation_identity_contract() -> None
     manager_source = Path(
         "src/nifty_scalper_bot/execution/position_manager.py"
     ).read_text(encoding="utf-8")
-    overlay_source = Path(
+    overlay_path = Path(
         "src/nifty_scalper_bot/execution/position_identity_extension.py"
-    ).read_text(encoding="utf-8")
+    )
 
     assert "def _reconcile_positions_from_broker" in manager_source
     assert "self._single_reconcile_lock" in manager_source
     assert "_prepare_broker_positions(self, broker_positions)" in manager_source
-    assert "cls.reconcile_now = reconcile_now" not in overlay_source
-    assert "cls.synchronize_with_broker = synchronize_with_broker" not in overlay_source
+    assert not overlay_path.exists()
 
 
 def test_native_sync_preserves_bot_owned_fill_basis_and_lifecycle(tmp_path) -> None:
