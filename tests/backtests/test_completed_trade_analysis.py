@@ -453,7 +453,8 @@ def test_score_calibration_reports_post_cost_expectancy_and_r_uncertainty() -> N
     assert report.blockers == ()
 
 
-def test_score_calibration_marks_underpowered_bins_without_selecting_threshold() -> None:
+def test_score_calibration_marks_underpowered_bins_without_selecting_threshold(
+) -> None:
     row = _trade(
         "s1",
         1.0,
