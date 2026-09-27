@@ -340,11 +340,7 @@ def execution_data_quality(
     stale = sum(
         _STALE_QUOTE_EXIT_MARKER in trade.exit_reason.lower() for trade in trades
     )
-    blockers = (
-        (f"known_stale_quote_exit_trades:{stale}",)
-        if stale
-        else ()
-    )
+    blockers = (f"known_stale_quote_exit_trades:{stale}",) if stale else ()
     return ExecutionDataQuality(
         total_trades=total,
         known_stale_quote_exit_trades=stale,
