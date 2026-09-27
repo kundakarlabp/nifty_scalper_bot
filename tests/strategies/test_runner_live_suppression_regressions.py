@@ -261,7 +261,6 @@ def test_bracket_completion_records_strategy_net_outcome_before_release() -> Non
     assert releases == [(symbol, True, "bracket_exit_complete")]
 
 
-
 def test_incomplete_or_nonfinite_outcome_never_feeds_strategy_or_risk() -> None:
     symbol = "NFO:NIFTY2670724100PE"
     recorded = []
@@ -422,4 +421,7 @@ def test_runner_risk_halt_stays_fail_closed_when_recheck_fails() -> None:
 def test_order_failure_cooldown_rejection_uses_dedup_rollback_path() -> None:
     source = Path("src/nifty_scalper_bot/strategies/runner.py").read_text()
     assert 'reason="order_failure_cooldown_active")' in source
-    assert 'return self._reject_signal_execution(symbol=base_symbol, trace_id=trace_id, reason="order_failure_cooldown_active")' not in source
+    assert (
+        'return self._reject_signal_execution(symbol=base_symbol, trace_id=trace_id, reason="order_failure_cooldown_active")'
+        not in source
+    )
