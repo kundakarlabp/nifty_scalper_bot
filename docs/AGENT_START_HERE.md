@@ -63,19 +63,19 @@ python scripts/agent_check.py --files path/to/changed.py
 Execute the risk-aware fast validation ring:
 
 ```bash
-python scripts/agent_check.py --files path/to/changed.py --run focused
+python scripts/agent_task.py check --files path/to/changed.py
 ```
 
 For changes related to a known historical regression, select the smallest relevant benchmark case:
 
 ```bash
-python scripts/agent_benchmark.py --case <case-id> --run
+python scripts/agent_task.py check --files <changed files>
 ```
 
 Execute focused checks plus the complete suite before merge when the environment supports it:
 
 ```bash
-python scripts/agent_check.py --files path/to/changed.py --run full
+python scripts/agent_task.py full --files path/to/changed.py
 ```
 
 Preserve the canonical runtime path. Never weaken risk, execution, instrument, or readiness safeguards merely to make a test or trade pass.
