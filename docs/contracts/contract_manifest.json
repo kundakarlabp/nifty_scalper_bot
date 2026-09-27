@@ -11,19 +11,22 @@
       "id": "trade_plan",
       "schema": "docs/contracts/trade_plan.schema.json",
       "sample": "tests/fixtures/contracts/trade_plan.json",
-      "owner": "src/nifty_scalper_bot/execution/order_manager_core.py"
+      "owner": "src/nifty_scalper_bot/execution/order_manager_core.py",
+      "python_symbol": "nifty_scalper_bot.execution.order_manager_core:TradePlan"
     },
     {
       "id": "position_snapshot",
       "schema": "docs/contracts/position_snapshot.schema.json",
       "sample": "tests/fixtures/contracts/position_snapshot.json",
-      "owner": "src/nifty_scalper_bot/execution/position_snapshot.py"
+      "owner": "src/nifty_scalper_bot/execution/position_snapshot.py",
+      "python_symbol": "nifty_scalper_bot.execution.position_snapshot:PositionSnapshot"
     },
     {
       "id": "risk_snapshot",
       "schema": "docs/contracts/risk_snapshot.schema.json",
       "sample": "tests/fixtures/contracts/risk_snapshot.json",
-      "owner": "src/nifty_scalper_bot/risk/risk_manager.py"
+      "owner": "src/nifty_scalper_bot/risk/risk_manager.py",
+      "python_symbol": "nifty_scalper_bot.risk.risk_manager:RiskSnapshot"
     }
   ]
 }
