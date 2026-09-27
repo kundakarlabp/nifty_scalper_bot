@@ -21,6 +21,7 @@ from typing import Any
 _ECONOMIC_TOLERANCE_RUPEES = 0.02
 _QUALITY_COMPONENTS = ("alpha_score", "direction_score", "strategy_score")
 _TARGET_STRATEGIES = ("ORBPro", "SMC", "VWAPPro")
+_STALE_EXIT_MARKER = "src=ltp_stale_quote"
 
 
 def _finite_number(value: Any) -> float | None:
@@ -65,6 +66,7 @@ def load_canonical_completed_trades(db_path: str | Path) -> list[dict[str, Any]]
                 net_pnl,
                 entry_filled_at,
                 closed_at,
+                exit_reason,
                 build_sha,
                 outcome_json
             FROM trade_ledger
@@ -85,8 +87,9 @@ def load_canonical_completed_trades(db_path: str | Path) -> list[dict[str, Any]]
             "net_pnl": row[6],
             "entry_filled_at": row[7],
             "closed_at": row[8],
-            "build_sha": row[9],
-            "outcome": _json_object(row[10]),
+            "exit_reason": row[9],
+            "build_sha": row[10],
+            "outcome": _json_object(row[11]),
         }
         for row in rows
     ]
@@ -301,6 +304,32 @@ def evidence_coverage(
     }
 
 
+def execution_data_quality(
+    trades: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Report known degraded exit-price evidence without silently excluding it."""
+
+    flagged = [
+        trade
+        for trade in trades
+        if _STALE_EXIT_MARKER in str(trade.get("exit_reason") or "")
+    ]
+    not_flagged = [trade for trade in trades if trade not in flagged]
+    count = len(trades)
+    return {
+        "known_stale_quote_exit_trades": len(flagged),
+        "known_stale_quote_exit_fraction": (
+            round(len(flagged) / count, 4) if count else 0.0
+        ),
+        "known_stale_quote_exit_performance": performance_summary(flagged),
+        "not_explicitly_stale_exit_performance": performance_summary(not_flagged),
+        "interpretation": (
+            "not_explicitly_stale does not prove clean execution; the flag only "
+            "identifies trades whose recorded exit reason names ltp_stale_quote"
+        ),
+    }
+
+
 def build_evidence_report(
     trades: Sequence[Mapping[str, Any]],
     *,
@@ -309,6 +338,7 @@ def build_evidence_report(
     ordered = list(trades)
     validate_canonical_completed_trades(ordered)
     coverage = evidence_coverage(ordered)
+    execution_quality = execution_data_quality(ordered)
     target_counts = coverage["target_strategy_counts"]
     missing_target_strategy = [
         strategy for strategy in _TARGET_STRATEGIES if target_counts[strategy] == 0
@@ -329,6 +359,11 @@ def build_evidence_report(
         parameter_reasons.append(
             "ORB/SMC/VWAP decision-time component coverage is incomplete"
         )
+    if execution_quality["known_stale_quote_exit_trades"]:
+        parameter_reasons.append(
+            "historical outcomes include exits explicitly sourced from "
+            "ltp_stale_quote"
+        )
 
     return {
         "dataset": {
@@ -336,6 +371,7 @@ def build_evidence_report(
             "canonical_trade_count": len(ordered),
             "economic_identity_tolerance_rupees": _ECONOMIC_TOLERANCE_RUPEES,
             "coverage": coverage,
+            "execution_data_quality": execution_quality,
         },
         "post_cost_baseline": performance_summary(ordered),
         "chronological_blocks": blocks,
