@@ -26,7 +26,7 @@ from abc import ABC, abstractmethod
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from math import sqrt
+from math import isfinite, sqrt
 from statistics import mean, pstdev
 
 from nifty_scalper_bot.config import settings as app_settings
@@ -1473,7 +1473,7 @@ class StrategyManager(_BaseStrategyManager):
             extra={"event": "strategy_record_trade", "strategy": strategy_name},
         )
         resolved_pnl = float(pnl)
-        if not math.isfinite(resolved_pnl):
+        if not isfinite(resolved_pnl):
             raise ValueError("pnl must be finite")
         perf = self._performance.setdefault(strategy_name, StrategyPerformance())
         regime_label: str | None = None
