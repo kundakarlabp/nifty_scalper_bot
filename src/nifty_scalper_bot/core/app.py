@@ -16881,6 +16881,20 @@ async def _run_atr_feed_task(ctx: BotContext) -> None:
             await asyncio.sleep(5)
 
 
+def _bootstrap_native_runtime_hardening() -> None:
+    """Install the declared runtime hardening after app owners are fully defined."""
+
+    import sys
+
+    from nifty_scalper_bot.core import _apply_app_runtime_patches
+
+    _apply_app_runtime_patches(sys.modules[__name__])
+    globals()["_native_runtime_hardening_bootstrap"] = True
+
+
+_bootstrap_native_runtime_hardening()
+
+
 __all__ = [
     "NiftyScalperApp",
     "initialize_components",
