@@ -162,9 +162,7 @@ def test_walk_forward_uses_expanding_train_and_strictly_later_test_windows() -> 
 def test_walk_forward_fails_closed_when_sample_is_too_small() -> None:
     trades = canonicalize_completed_trades([_trade("t1", 1.0), _trade("t2", 2.0)])
 
-    assert (
-        chronological_walk_forward(trades, min_train_trades=2, test_trades=1) == ()
-    )
+    assert chronological_walk_forward(trades, min_train_trades=2, test_trades=1) == ()
 
 
 def test_walk_forward_rejects_non_positive_window_sizes() -> None:
