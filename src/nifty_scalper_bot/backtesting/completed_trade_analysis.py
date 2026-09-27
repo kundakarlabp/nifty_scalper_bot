@@ -25,6 +25,8 @@ class CanonicalCompletedTrade:
     strategy: str
     gross_pnl: float
     estimated_costs: float
+    effective_costs: float
+    cost_source: str
     net_pnl: float
     exit_reason: str
     outcome: Mapping[str, Any]
@@ -37,6 +39,8 @@ class CompletedTradeSummary:
     trade_count: int
     gross_pnl: float
     estimated_costs: float
+    effective_costs: float
+    broker_cost_trade_count: int
     net_pnl: float
     expectancy: float
     win_rate: float
@@ -287,6 +291,7 @@ def canonicalize_completed_trades(
     rows: Sequence[Mapping[str, Any]],
     *,
     net_identity_tolerance: float = 0.02,
+    allow_estimated_costs: bool = False,
 ) -> tuple[CanonicalCompletedTrade, ...]:
     """Return one validated row per CLOSED, ledger-complete economic trade.
 
@@ -318,11 +323,32 @@ def canonicalize_completed_trades(
             row.get("estimated_costs"),
             field="estimated_costs",
         )
+        outcome = _outcome(row)
+        cost_source = str(outcome.get("cost_source") or "estimated_model").strip()
+        effective_payload = outcome.get("effective_costs")
+        if cost_source == "broker_virtual_contract_note":
+            if not isinstance(effective_payload, Mapping):
+                raise ValueError(
+                    f"broker-calculated costs missing from completed trade: {trade_id}"
+                )
+            effective_costs = _finite_number(
+                effective_payload.get("total"),
+                field="effective_costs.total",
+            )
+        elif allow_estimated_costs:
+            effective_costs = estimated_costs
+            cost_source = "estimated_model"
+        else:
+            raise ValueError(
+                "broker-calculated costs required for canonical research dataset: "
+                f"{trade_id}"
+            )
+
         net_pnl = _finite_number(row.get("net_pnl"), field="net_pnl")
-        expected_net = gross_pnl - estimated_costs
+        expected_net = gross_pnl - effective_costs
         if abs(expected_net - net_pnl) > tolerance:
             raise ValueError(
-                "completed trade violates gross_pnl - estimated_costs = net_pnl "
+                "completed trade violates gross_pnl - effective_costs = net_pnl "
                 f"within tolerance: {trade_id}"
             )
 
@@ -333,9 +359,11 @@ def canonicalize_completed_trades(
                 strategy=_canonical_strategy(row.get("strategy")),
                 gross_pnl=gross_pnl,
                 estimated_costs=estimated_costs,
+                effective_costs=effective_costs,
+                cost_source=cost_source,
                 net_pnl=net_pnl,
                 exit_reason=str(row.get("exit_reason") or "").strip(),
-                outcome=_outcome(row),
+                outcome=outcome,
             )
         )
 
@@ -367,6 +395,10 @@ def summarize_completed_trades(
         trade_count=count,
         gross_pnl=round(sum(trade.gross_pnl for trade in trades), 2),
         estimated_costs=round(sum(trade.estimated_costs for trade in trades), 2),
+        effective_costs=round(sum(trade.effective_costs for trade in trades), 2),
+        broker_cost_trade_count=sum(
+            trade.cost_source == "broker_virtual_contract_note" for trade in trades
+        ),
         net_pnl=round(sum(values), 2),
         expectancy=round(sum(values) / count, 4) if count else 0.0,
         win_rate=round(len(wins) / count, 4) if count else 0.0,
@@ -480,6 +512,12 @@ def walk_forward_stability(
         gross_pnl=round(sum(fold.test_summary.gross_pnl for fold in folds), 2),
         estimated_costs=round(
             sum(fold.test_summary.estimated_costs for fold in folds), 2
+        ),
+        effective_costs=round(
+            sum(fold.test_summary.effective_costs for fold in folds), 2
+        ),
+        broker_cost_trade_count=sum(
+            fold.test_summary.broker_cost_trade_count for fold in folds
         ),
         net_pnl=round(sum(fold.test_summary.net_pnl for fold in folds), 2),
         expectancy=(
