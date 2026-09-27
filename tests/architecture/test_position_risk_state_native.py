@@ -24,9 +24,9 @@ def test_position_risk_state_is_native_not_package_patch() -> None:
 
 
 def test_position_manager_broker_sync_owns_risk_pnl_reconciliation() -> None:
-    source = Path(
-        "src/nifty_scalper_bot/execution/position_manager.py"
-    ).read_text(encoding="utf-8")
+    source = Path("src/nifty_scalper_bot/execution/position_manager.py").read_text(
+        encoding="utf-8"
+    )
 
     sync_start = source.index("    def synchronize_with_broker(")
     sync_end = source.index(
