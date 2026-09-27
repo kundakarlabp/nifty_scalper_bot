@@ -10,7 +10,7 @@ from __future__ import annotations
 from contextlib import suppress
 import csv
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 import io
 import json
@@ -59,6 +59,11 @@ from nifty_scalper_bot.utils.errors import (
     ConfigurationError,
     OrderPlacementError,
     WebSocketError,
+)
+from nifty_scalper_bot.utils.broker_pnl import (
+    _extract_account_m2m,
+    _strategy_day_marked_pnl,
+    _strategy_tradebook_realized_pnl,
 )
 from nifty_scalper_bot.utils.logging import get_logger, log_throttled
 from nifty_scalper_bot.utils.rate_limiter import RateLimiter, RateLimitError
@@ -1325,6 +1330,82 @@ class ZerodhaKiteClient(BaseBrokerClient):
             if str(order.get("order_id")) == str(order_id):
                 return order
         return {}
+
+    def get_pnl_snapshot(self) -> dict[str, Any]:
+        """Return dedicated broker P&L evidence without changing exposure truth."""
+
+        realized: float | None = None
+        unrealized: float | None = None
+        margins_error: str | None = None
+        try:
+            margins = self.get_account_margins(segment="equity")
+            realized, unrealized = _extract_account_m2m(margins)
+        except Exception as exc:  # diagnostic enrichment must not affect execution
+            margins_error = f"{type(exc).__name__}: {exc}"
+
+        day_marked: float | None = None
+        day_closed: float | None = None
+        day_rows = 0
+        positions_error: str | None = None
+        try:
+            self._acquire_bucket(self._GENERAL_BUCKET)
+            response = self._ensure_json(
+                self._make_request(
+                    "GET",
+                    "/portfolio/positions",
+                    operation_label="pnl.positions",
+                )
+            )
+            data = response.get("data") if isinstance(response, Mapping) else None
+            day = data.get("day") if isinstance(data, Mapping) else None
+            day_marked, day_closed, day_rows = _strategy_day_marked_pnl(day)
+        except Exception as exc:  # diagnostic enrichment must not affect execution
+            positions_error = f"{type(exc).__name__}: {exc}"
+
+        tradebook_realized: float | None = None
+        tradebook_fill_count = 0
+        tradebook_error: str | None = None
+        try:
+            self._acquire_bucket(self._GENERAL_BUCKET)
+            response = self._ensure_json(
+                self._make_request(
+                    "GET",
+                    "/trades",
+                    operation_label="pnl.trades",
+                )
+            )
+            trades = response.get("data") if isinstance(response, Mapping) else None
+            tradebook_realized, tradebook_fill_count = (
+                _strategy_tradebook_realized_pnl(trades)
+            )
+        except Exception as exc:  # diagnostic enrichment must not affect execution
+            tradebook_error = f"{type(exc).__name__}: {exc}"
+
+        margin_realized = None if realized is None else float(realized)
+        margin_unrealized = None if unrealized is None else float(unrealized)
+        return {
+            "account_realized": margin_realized,
+            "account_unrealized": margin_unrealized,
+            "account_total": (
+                None
+                if margin_realized is None
+                else margin_realized + float(margin_unrealized or 0.0)
+            ),
+            "margin_m2m_realized": margin_realized,
+            "margin_m2m_unrealized": margin_unrealized,
+            "margins_error": margins_error,
+            "strategy_tradebook_realized_gross": tradebook_realized,
+            "strategy_tradebook_fill_count": int(tradebook_fill_count),
+            "tradebook_source": "zerodha_trades",
+            "tradebook_error": tradebook_error,
+            "strategy_day_marked_gross": day_marked,
+            "strategy_day_closed_gross": day_closed,
+            "strategy_day_rows": int(day_rows),
+            "source": "zerodha_margins_m2m",
+            "positions_source": "zerodha_positions_day",
+            "positions_error": positions_error,
+            "observed_at": datetime.now(timezone.utc).isoformat(),
+        }
 
     def get_order_charges(
         self,
