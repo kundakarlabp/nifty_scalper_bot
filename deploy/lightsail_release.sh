@@ -137,23 +137,43 @@ validate_environment() {
   fi
 }
 
+broker_auth_dependency_degraded() {
+  local ready_json
+  ready_json="$(curl -sS --max-time 3 "http://127.0.0.1:${PORT}/readyz" 2>/dev/null || true)"
+  grep -Eq '"primary_blocker"[[:space:]]*:[[:space:]]*"startup_failed"' <<<"$ready_json" || return 1
+  grep -Eqi '"error"[[:space:]]*:[[:space:]]*"[^"]*(zerodha authentication invalid|incorrect[^"]*api_key[^"]*access_token|invalid access_token|session expired|token expired|authentication failed)' <<<"$ready_json"
+}
+
 service_healthy() {
-  local live_json
+  local expected_sha="${1:-}" live_json release_json expected_short
   live_json="$(curl -fsS --max-time 3 "http://127.0.0.1:${PORT}/livez" 2>/dev/null || true)"
   grep -Eq '"engine_http_responsive"[[:space:]]*:[[:space:]]*true' <<<"$live_json" || return 1
+
+  if [ -n "$expected_sha" ]; then
+    expected_short="${expected_sha:0:12}"
+    release_json="$(curl -fsS --max-time 3 "http://127.0.0.1:${PORT}/releasez" 2>/dev/null || true)"
+    grep -Eq "\"effective_sha\"[[:space:]]*:[[:space:]]*\"${expected_short}\"" <<<"$release_json" || return 1
+  fi
+
   if grep -Eq '"bot_loaded"[[:space:]]*:[[:space:]]*true' <<<"$live_json"; then
     return 0
   fi
   # deployment_main intentionally unloads the trading stack outside the AUTO
   # window. That explicit quiet control plane is healthy even though
-  # bot_loaded=false; accepting no other unloaded shape keeps fail-closed
-  # semantics for accidental partial startups.
-  grep -Eq '"quiet"[[:space:]]*:[[:space:]]*true' <<<"$live_json" || return 1
-  grep -Eq '"bot_loaded"[[:space:]]*:[[:space:]]*false' <<<"$live_json" || return 1
+  # bot_loaded=false.
+  if grep -Eq '"quiet"[[:space:]]*:[[:space:]]*true' <<<"$live_json" \
+    && grep -Eq '"bot_loaded"[[:space:]]*:[[:space:]]*false' <<<"$live_json"; then
+    return 0
+  fi
+  # A broker-token/session failure is an external dependency failure, not proof
+  # that the candidate code release is unhealthy. Accept only this explicit
+  # fail-closed startup shape; unknown startup failures still trigger rollback.
+  broker_auth_dependency_degraded
 }
 
 wait_for_service() {
-  for _ in $(seq 1 150); do service_healthy && return 0; sleep 2; done
+  local expected_sha="${1:-}"
+  for _ in $(seq 1 150); do service_healthy "$expected_sha" && return 0; sleep 2; done
   return 1
 }
 
@@ -288,7 +308,7 @@ AFTER="$(git rev-parse origin/main)"
 current_runtime_sha="$(first_nonempty_env GIT_COMMIT_SHA 2>/dev/null || true)"
 
 if [ "$BEFORE" = "$AFTER" ] && [ "$FORCE_RESTART" = false ]; then
-  if service_healthy; then
+  if service_healthy "$BEFORE"; then
     if [ "$current_runtime_sha" = "$BEFORE" ]; then
       write_status current "running ${BEFORE:0:7}"
       exit 0
@@ -389,8 +409,11 @@ if ! set_runtime_build_sha "$AFTER"; then
   exit 1
 fi
 sudo systemctl restart "$SERVICE"
-if wait_for_service; then
-  if restart_streamlit; then
+if wait_for_service "$AFTER"; then
+  if broker_auth_dependency_degraded; then
+    write_status deployed_dependency_degraded "deployed ${AFTER:0:7}; engine healthy, broker authentication unavailable; trading blocked"
+    logger -t niftybot-deploy "candidate deployed; broker authentication unavailable, trading remains blocked"
+  elif restart_streamlit; then
     write_status deployed "deployed ${AFTER:0:7}; bot and console healthy"
   else
     write_status deployed_console_degraded "deployed ${AFTER:0:7}; bot healthy, console restart failed"
