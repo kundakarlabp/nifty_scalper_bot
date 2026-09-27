@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from nifty_scalper_bot.execution.broker_exposure_quarantine_extension import _is_manual_reduction_order
+from nifty_scalper_bot.execution.position_manager import _is_manual_reduction_order
 
 
 class _BadQuantity:

@@ -415,6 +415,99 @@ def _ledger_blocks_symbol(owner: Any, symbol: str) -> bool:
     return _ledger_blocker_for_symbol(owner, symbol) is not None
 
 
+def _order_symbol(order: Any) -> str:
+    return _canonical_key(
+        getattr(order, "symbol", "") or getattr(order, "tradingsymbol", "")
+    )
+
+
+def _order_side(order: Any) -> str:
+    return str(
+        getattr(order, "side", "") or getattr(order, "transaction_type", "")
+    ).strip().upper()
+
+
+def _order_quantity(order: Any) -> int:
+    for name in ("filled_quantity", "quantity", "qty"):
+        raw = getattr(order, name, None)
+        if raw is None:
+            continue
+        with suppress(Exception):
+            return abs(int(float(raw or 0)))
+    return 0
+
+
+def _position_for_symbol(manager: Any, symbol: str) -> Any | None:
+    positions = getattr(manager, "_positions", None)
+    if isinstance(positions, dict):
+        return positions.get(symbol) or positions.get(_canonical_key(symbol))
+    getter = getattr(manager, "get_open_positions", None)
+    if callable(getter):
+        with suppress(Exception):
+            for position in getter() or []:
+                if _canonical_key(getattr(position, "symbol", "")) == symbol:
+                    return position
+    return None
+
+
+def _is_manual_reduction_order(manager: Any, order: Any) -> bool:
+    """Return whether an unknown/manual fill only reduces owned exposure."""
+
+    symbol = _order_symbol(order)
+    qty = _order_quantity(order)
+    side = _order_side(order)
+    if not symbol or qty <= 0 or side not in {"BUY", "SELL"}:
+        return False
+    existing = _position_for_symbol(manager, symbol)
+    if existing is None:
+        return False
+    existing_side = str(getattr(existing, "side", "") or "").strip().upper()
+    with suppress(Exception):
+        existing_qty = abs(int(float(getattr(existing, "quantity", 0) or 0)))
+        if existing_qty <= 0 or qty > existing_qty:
+            return False
+        if existing_side == "LONG" and side == "SELL":
+            return True
+        if existing_side == "SHORT" and side == "BUY":
+            return True
+    return False
+
+
+def _manual_order_exposure(order: Any, intent: str) -> dict[str, Any] | None:
+    symbol = _order_symbol(order)
+    if not symbol:
+        return None
+    qty = _order_quantity(order)
+    try:
+        price = float(
+            getattr(order, "average_price", 0.0)
+            or getattr(order, "fill_price", 0.0)
+            or getattr(order, "price", 0.0)
+            or 0.0
+        )
+    except Exception:
+        price = 0.0
+    return {
+        "symbol": symbol,
+        "tradingsymbol": symbol,
+        "quantity": abs(qty),
+        "signed_quantity": qty,
+        "side": _order_side(order),
+        "product": str(getattr(order, "product", "MIS") or "MIS").upper(),
+        "average_price": price,
+        "status": "BROKER_POSITION_QUARANTINED",
+        "reason": "broker_position_unowned_or_cost_basis_unresolved",
+        "intent": intent,
+        "order_id": str(getattr(order, "order_id", "") or ""),
+        "managed_position": False,
+        "entry_accounting_allowed": False,
+        "realized_pnl_accounting_allowed": False,
+        "requires_history_recovery": True,
+        "created_at": time.time(),
+        "source": "broker_order_update",
+    }
+
+
 def _signal_stop_setup_metadata(signal: object) -> tuple[str | None, float | None]:
     """Return stable setup identity plus its structural timestamp when available."""
     payloads: list[Mapping[str, object]] = []
@@ -1265,6 +1358,7 @@ class ActiveContract:
 class PositionManager:
     _canonical_position_identity_native = True
     _canonical_registry_state_native = True
+    _manual_quarantine_native = True
     _position_key = staticmethod(_canonical_key)
 
     """Track open positions and pending orders with persistence support."""
@@ -4232,7 +4326,7 @@ class PositionManager:
 
     # Internal helpers -------------------------------------------------
 
-    def _handle_filled_order(self, order: Order) -> FillApplicationResult:
+    def _handle_filled_order_core(self, order: Order) -> FillApplicationResult:
         intent = str(getattr(order, "intent", "UNKNOWN") or "UNKNOWN").strip().upper()
         if intent in _QUARANTINE_INTENTS:
             symbol = _canonical_key(getattr(order, "symbol", None))
@@ -4710,6 +4804,56 @@ class PositionManager:
                 delta_fill_price=fill_price,
                 reason="scale_fill_unprotected",
             )
+    def _handle_filled_order(self, order: Order) -> FillApplicationResult:
+        """Apply a fill while quarantining unknown broker exposure fail-closed."""
+
+        intent = str(getattr(order, "intent", "UNKNOWN") or "UNKNOWN").strip().upper()
+        if intent in _QUARANTINE_INTENTS and _is_manual_reduction_order(self, order):
+            order.intent = "REDUCE"
+            result = self._handle_filled_order_core(order)
+            symbol = _order_symbol(order)
+            with self._lock:
+                self._quarantined_broker_exposures.pop(symbol, None)
+                self._cost_basis_unresolved_symbols.discard(symbol)
+            self._logger.warning(
+                "MANUAL_EXIT_RECOGNISED order_id=%s symbol=%s side=%s qty=%s",
+                order.order_id,
+                symbol,
+                _order_side(order),
+                _order_quantity(order),
+                extra={
+                    "event": "MANUAL_EXIT_RECOGNISED",
+                    "order_id": order.order_id,
+                    "symbol": symbol,
+                    "side": _order_side(order),
+                    "quantity": _order_quantity(order),
+                    "intent": "REDUCE",
+                },
+            )
+            return result
+
+        result = self._handle_filled_order_core(order)
+        if intent not in _QUARANTINE_INTENTS:
+            return result
+
+        symbol = _order_symbol(order)
+        result_reason = str(getattr(result, "reason", "") or "")
+        with self._lock:
+            if result_reason == "broker_flat_confirmed_unknown_order":
+                self._quarantined_broker_exposures.pop(symbol, None)
+                self._cost_basis_unresolved_symbols.discard(symbol)
+                return result
+            exposure = _manual_order_exposure(order, intent)
+            if exposure is not None:
+                if result_reason == "broker_state_unverified":
+                    exposure["status"] = "BROKER_STATE_UNVERIFIED"
+                    exposure["reason"] = "broker_state_unverified"
+                    exposure["requires_history_recovery"] = False
+                elif result_reason:
+                    exposure["reason"] = result_reason
+                self._quarantined_broker_exposures[exposure["symbol"]] = exposure
+        return result
+
 
     def _scale_position(self, position: Position, qty: int, fill_price: float) -> None:
         new_qty = position.quantity + qty
