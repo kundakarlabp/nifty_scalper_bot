@@ -6488,7 +6488,6 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
                 str(getattr(strategy, "name", "") or "")
                 for strategy in strategy_instances
             ],
-            per_strategy_limit=strategy_manager.performance_history_limit,
         )
         strategy_manager.restore_performance_history(strategy_history)
     except Exception as exc:  # noqa: BLE001 - history restore must not block startup
