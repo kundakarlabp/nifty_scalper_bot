@@ -1,0 +1,274 @@
+{
+  "version": 1,
+  "runtime_path": [
+    "src/nifty_scalper_bot/core/instrument_manager.py",
+    "src/nifty_scalper_bot/core/app.py",
+    "src/nifty_scalper_bot/data/market_data_manager.py",
+    "src/nifty_scalper_bot/data/candle_engine.py",
+    "src/nifty_scalper_bot/data/data_hub.py",
+    "src/nifty_scalper_bot/core/strategy_manager.py",
+    "src/nifty_scalper_bot/strategies/runner.py",
+    "src/nifty_scalper_bot/risk/risk_manager.py",
+    "src/nifty_scalper_bot/execution/order_manager.py",
+    "src/nifty_scalper_bot/execution/position_manager.py",
+    "src/nifty_scalper_bot/execution/bracket_manager.py"
+  ],
+  "owners": [
+    {
+      "id": "instruments",
+      "concern": "Contract discovery, expiry/strike selection, symbol/token mapping",
+      "owner": "src/nifty_scalper_bot/core/instrument_manager.py",
+      "high_risk": true
+    },
+    {
+      "id": "runtime-wiring",
+      "concern": "Runtime basket commit and subsystem wiring",
+      "owner": "src/nifty_scalper_bot/core/app.py",
+      "high_risk": true
+    },
+    {
+      "id": "market-data",
+      "concern": "Subscriptions, quote/depth/OI, freshness, history and hydration",
+      "owner": "src/nifty_scalper_bot/data/market_data_manager.py",
+      "read_facade": "src/nifty_scalper_bot/data/data_hub.py",
+      "high_risk": true
+    },
+    {
+      "id": "candles",
+      "concern": "Tick-to-OHLC construction",
+      "owner": "src/nifty_scalper_bot/data/candle_engine.py",
+      "high_risk": false
+    },
+    {
+      "id": "strategy-orchestration",
+      "concern": "Strategy evaluation and signal orchestration",
+      "owner": "src/nifty_scalper_bot/core/strategy_manager.py",
+      "collaborators": [
+        "src/nifty_scalper_bot/strategies/runner.py"
+      ],
+      "high_risk": true
+    },
+    {
+      "id": "risk",
+      "concern": "Risk limits, sizing and risk telemetry",
+      "owner": "src/nifty_scalper_bot/risk/risk_manager.py",
+      "high_risk": true
+    },
+    {
+      "id": "orders",
+      "concern": "Live placement and broker order lifecycle",
+      "owner": "src/nifty_scalper_bot/execution/order_manager.py",
+      "high_risk": true
+    },
+    {
+      "id": "positions",
+      "concern": "Position and pending-order state",
+      "owner": "src/nifty_scalper_bot/execution/position_manager.py",
+      "high_risk": true
+    },
+    {
+      "id": "brackets",
+      "concern": "Protective exits, trailing and recovery",
+      "owner": "src/nifty_scalper_bot/execution/bracket_manager.py",
+      "high_risk": true
+    },
+    {
+      "id": "operator",
+      "concern": "Operator commands and diagnostics",
+      "owner": "src/nifty_scalper_bot/notifications/telegram_controller.py",
+      "high_risk": false
+    }
+  ],
+  "high_risk_markers": [
+    "src/nifty_scalper_bot/core/app.py",
+    "src/nifty_scalper_bot/core/instrument_manager.py",
+    "src/nifty_scalper_bot/data/market_data_manager.py",
+    "src/nifty_scalper_bot/data/data_hub.py",
+    "src/nifty_scalper_bot/streaming/websocket_manager.py",
+    "src/nifty_scalper_bot/strategies/runner.py",
+    "src/nifty_scalper_bot/risk/",
+    "src/nifty_scalper_bot/execution/",
+    "deploy/",
+    "ops/",
+    "railway.toml"
+  ],
+  "validation_areas": [
+    {
+      "name": "streaming",
+      "markers": [
+        "/streaming/",
+        "websocket"
+      ],
+      "tests": [
+        "tests/streaming",
+        "tests/data"
+      ]
+    },
+    {
+      "name": "market-data",
+      "markers": [
+        "/data/",
+        "/instruments/",
+        "instrument_manager.py"
+      ],
+      "tests": [
+        "tests/data",
+        "tests/core",
+        "tests/instruments"
+      ]
+    },
+    {
+      "name": "execution",
+      "markers": [
+        "/execution/"
+      ],
+      "tests": [
+        "tests/execution",
+        "tests/integration/test_canonical_bo_end_to_end.py",
+        "tests/test_execution_path_contract.py"
+      ]
+    },
+    {
+      "name": "risk",
+      "markers": [
+        "/risk/"
+      ],
+      "tests": [
+        "tests/risk"
+      ]
+    },
+    {
+      "name": "strategy",
+      "markers": [
+        "/strategies/",
+        "strategy_manager.py"
+      ],
+      "tests": [
+        "tests/strategies"
+      ]
+    },
+    {
+      "name": "notifications",
+      "markers": [
+        "/notifications/",
+        "telegram"
+      ],
+      "tests": [
+        "tests/notifications"
+      ]
+    },
+    {
+      "name": "core",
+      "markers": [
+        "/core/"
+      ],
+      "tests": [
+        "tests/core",
+        "tests/architecture"
+      ]
+    },
+    {
+      "name": "dashboard",
+      "markers": [
+        "dashboard/"
+      ],
+      "tests": [
+        "tests/dashboard"
+      ]
+    },
+    {
+      "name": "deployment",
+      "markers": [
+        "deploy/",
+        "ops/",
+        "dockerfile",
+        "railway.toml"
+      ],
+      "tests": [
+        "tests/core/test_release_guard.py",
+        "tests/test_deployment_release_guard.py"
+      ]
+    },
+    {
+      "name": "validation-assets",
+      "markers": [
+        "docs/contracts/",
+        "tests/fixtures/contracts/",
+        "tests/fixtures/replay/",
+        "benchmarks/agent/",
+        "scripts/agent_benchmark.py",
+        "tests/contracts/",
+        "tests/properties/",
+        "test_golden_replay_path.py"
+      ],
+      "tests": [
+        "tests/contracts",
+        "tests/properties",
+        "tests/backtests/test_golden_replay_path.py",
+        "tests/tools/test_agent_benchmark.py"
+      ]
+    },
+    {
+      "name": "agent-tooling",
+      "markers": [
+        "agents.md",
+        ".agents/",
+        "repo_map.md",
+        "agent_start_here.md",
+        "agent_tooling_design.md",
+        "ai_optimization_workflow.md",
+        "chatgpt_code_workflow.md",
+        "engineering_failure_patterns.md",
+        "pull_request_template.md",
+        "architecture_lint.py",
+        "scripts/agent_"
+      ],
+      "tests": [
+        "tests/tools",
+        "tests/architecture"
+      ]
+    }
+  ],
+  "architecture_rules": [
+    {
+      "id": "broker-history-owner",
+      "kind": "call_allowlist",
+      "calls": [
+        "historical_data",
+        "get_historical_data"
+      ],
+      "allowlist": [
+        "src/nifty_scalper_bot/data/market_data_manager.py",
+        "src/nifty_scalper_bot/data/rest/zerodha_client.py"
+      ]
+    },
+    {
+      "id": "strategy-boundary",
+      "kind": "forbidden_calls_under",
+      "path_prefixes": [
+        "src/nifty_scalper_bot/strategies/"
+      ],
+      "calls": [
+        "historical_data",
+        "get_historical_data",
+        "fetch_history",
+        "instruments"
+      ]
+    },
+    {
+      "id": "history-hydration-owner",
+      "kind": "forbidden_calls_under",
+      "path_prefixes": [
+        "src/nifty_scalper_bot/execution/",
+        "src/nifty_scalper_bot/notifications/"
+      ],
+      "calls": [
+        "hydrate_symbol_history",
+        "ensure_history",
+        "reseed_history_from_bars",
+        "ingest_historical_bar",
+        "replace_history"
+      ]
+    }
+  ]
+}
