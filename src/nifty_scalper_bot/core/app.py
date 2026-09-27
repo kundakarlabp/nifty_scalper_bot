@@ -6092,6 +6092,16 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     # 9. Initialize Execution
     # [FIX] We inject indicator_engine here to enable Volatility-Adaptive Trailing
     trade_journal = TradeJournal(db_path=str(get_data_dir() / "trades.db"))
+    strategy_feedback_history: list[dict[str, Any]] = []
+    try:
+        strategy_feedback_history = trade_journal.load_completed_trade_feedback()
+    except Exception as exc:  # noqa: BLE001 - neutral cold state is safe fallback
+        LOGGER.warning(
+            "Strategy performance history load failed; using neutral state: %s",
+            exc,
+            extra={"event": "strategy_performance_history_load_failed"},
+            exc_info=exc,
+        )
     trade_journal.start()
     order_manager = OrderManager(
         broker_client=broker_client,
@@ -6483,7 +6493,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     )
     try:
         restored_trade_count = strategy_manager.restore_trade_results(
-            trade_journal.load_completed_trade_feedback()
+            strategy_feedback_history
         )
         LOGGER.info(
             "STRATEGY_PERFORMANCE_RESTORED trades=%d",
