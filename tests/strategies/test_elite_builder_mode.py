@@ -223,13 +223,14 @@ def test_production_profile_is_stable_and_changes_with_material_settings(
     )
 
     assert first == repeated
-    assert first["version"].startswith("production-v1-")
+    assert first["version"].startswith("production-v2-")
     assert first["execution_mode"] == "LIVE"
     assert "OrderFlow" in first["strategies"]["context_only"]
     assert {"SMC", "VWAPPro", "ORBPro"}.issubset(
         first["strategies"]["trigger_capable"]
     )
     assert first["score_thresholds"]["global_min_confidence"] == 0.35
+    assert first["strategy_configs"]["ORBPro"]["orb_minutes"] == 15
 
     changed_runtime = SimpleNamespace(
         **{
@@ -246,3 +247,60 @@ def test_production_profile_is_stable_and_changes_with_material_settings(
 
     assert changed["risk"]["per_trade_risk_pct"] == 4.0
     assert changed["version"] != first["version"]
+
+
+def test_production_profile_changes_when_material_strategy_environment_changes(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("STRATEGY_MODE", "directional_scalp")
+    runtime = SimpleNamespace(
+        execution_mode="LIVE",
+        orders=OrderSettings(lifecycle=OrderLifecycleSettings()),
+        liquidity=LiquiditySettings(max_spread_pct=30.0),
+        risk=RiskSettings(per_trade_risk_pct=5.0),
+    )
+    strategies = build_elite_strategies(EliteStrategiesSettings(), indicator_engine=None)
+    mode_profile = {"mode": "LIVE"}
+
+    monkeypatch.setenv("ORB_TARGET_RR", "1.8")
+    first = build_production_strategy_profile(
+        settings=runtime,
+        strategies=strategies,
+        mode_profile=mode_profile,
+        global_min_confidence=0.35,
+    )
+    monkeypatch.setenv("ORB_TARGET_RR", "2.0")
+    changed = build_production_strategy_profile(
+        settings=runtime,
+        strategies=strategies,
+        mode_profile=mode_profile,
+        global_min_confidence=0.35,
+    )
+
+    assert first["decision_environment"]["ORB_TARGET_RR"] == "1.8"
+    assert changed["decision_environment"]["ORB_TARGET_RR"] == "2.0"
+    assert first["version"] != changed["version"]
+
+
+def test_production_profile_does_not_capture_unrelated_or_secret_environment(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("BROKER_ACCESS_TOKEN", "must-not-enter-profile")
+    monkeypatch.setenv("UNRELATED_RUNTIME_SETTING", "ignored")
+    runtime = SimpleNamespace(
+        execution_mode="LIVE",
+        orders=OrderSettings(lifecycle=OrderLifecycleSettings()),
+        liquidity=LiquiditySettings(max_spread_pct=30.0),
+        risk=RiskSettings(per_trade_risk_pct=5.0),
+    )
+    strategies = build_elite_strategies(EliteStrategiesSettings(), indicator_engine=None)
+
+    profile = build_production_strategy_profile(
+        settings=runtime,
+        strategies=strategies,
+        mode_profile={"mode": "LIVE"},
+        global_min_confidence=0.35,
+    )
+
+    assert "BROKER_ACCESS_TOKEN" not in profile["decision_environment"]
+    assert "UNRELATED_RUNTIME_SETTING" not in profile["decision_environment"]
