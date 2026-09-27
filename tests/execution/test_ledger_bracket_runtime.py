@@ -532,9 +532,7 @@ def test_completed_trade_costs_count_distinct_broker_orders_not_fill_rows(
     assert outcome["estimated_costs"]["total"] == expected.total
 
 
-def test_completed_trade_prefers_broker_calculated_costs(
-    monkeypatch, tmp_path
-) -> None:
+def test_completed_trade_prefers_broker_calculated_costs(monkeypatch, tmp_path) -> None:
     manager, _order_manager, broker = _manager(monkeypatch, tmp_path)
     captured: list[dict[str, Any]] = []
 
