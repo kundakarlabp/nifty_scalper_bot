@@ -349,6 +349,7 @@ def load_completed_strategy_history(
         )
     return history
 
+
 def materialize_trade_events(
     conn: sqlite3.Connection,
     events: Sequence[Mapping[str, Any]],
