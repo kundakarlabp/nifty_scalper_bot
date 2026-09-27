@@ -140,6 +140,109 @@ def _option_stop_thesis(symbol: object) -> tuple[str, str] | None:
     return underlying, option_side
 
 
+def _risk_state_snapshot(owner: Any) -> dict[str, Any]:
+    """Return restart-safe entry-risk state owned by PositionManager."""
+
+    stopped = getattr(owner, "_recent_stop_thesis", None)
+    circuit = getattr(owner, "_risk_circuit_state", None)
+    return {
+        "trades_today_date": getattr(owner, "_trades_today_date", None),
+        "trades_today_count": int(getattr(owner, "_trades_today_count", 0) or 0),
+        "recent_stop_thesis": dict(stopped) if isinstance(stopped, dict) else None,
+        "risk_circuit": dict(circuit) if isinstance(circuit, dict) else None,
+    }
+
+
+def _restore_risk_state(owner: Any, state: Any) -> None:
+    """Restore same-day entry-risk state from the canonical position snapshot."""
+
+    if not isinstance(state, Mapping):
+        return
+    today = owner._trading_date_ist()
+    if state.get("trades_today_date") == today:
+        with suppress(TypeError, ValueError):
+            owner._trades_today_date = today
+            owner._trades_today_count = max(
+                0, int(state.get("trades_today_count", 0) or 0)
+            )
+    circuit = state.get("risk_circuit")
+    if isinstance(circuit, Mapping) and str(circuit.get("trading_date") or "") == today:
+        owner._risk_circuit_state = dict(circuit)
+    stopped = state.get("recent_stop_thesis")
+    if isinstance(stopped, Mapping):
+        stored_date = str(stopped.get("trading_date") or "")
+        if not stored_date or stored_date == today:
+            owner._recent_stop_thesis = dict(stopped)
+
+
+def _materialize_broker_positions(payload: Any) -> Any:
+    """Materialize one-shot broker iterables before multi-pass reconciliation."""
+
+    if isinstance(payload, Mapping):
+        return payload
+    if isinstance(payload, Sequence) and not isinstance(payload, (str, bytes)):
+        return payload
+    try:
+        return list(payload)
+    except TypeError:
+        return payload
+
+
+def _snapshot_has_authoritative_realized(payload: Any) -> bool:
+    """Return whether managed MIS rows explicitly contain broker realised P&L."""
+
+    try:
+        snapshot = decode_position_snapshot(payload)
+    except Exception:
+        return False
+    for row in snapshot.rows:
+        record = row.raw
+        if not is_strategy_instrument(row.symbol):
+            continue
+        if str(record.get("product") or "").strip().upper() != "MIS":
+            continue
+        if "realised" in record or "realized" in record:
+            return True
+    return False
+
+
+def _pnl_baseline_seed_from_snapshot(payload: Any) -> tuple[bool, float, str]:
+    """Resolve a safe opening realised-P&L baseline from broker position truth."""
+
+    try:
+        snapshot = decode_position_snapshot(payload)
+    except Exception:
+        return False, 0.0, ""
+    if not snapshot.rows:
+        return True, 0.0, "validated_broker_empty_snapshot"
+
+    total = 0.0
+    seen = False
+    for row in snapshot.rows:
+        record = row.raw
+        if not is_strategy_instrument(row.symbol):
+            continue
+        if str(record.get("product") or "").strip().upper() != "MIS":
+            continue
+        key = (
+            "realised"
+            if "realised" in record
+            else "realized"
+            if "realized" in record
+            else None
+        )
+        if key is None:
+            continue
+        try:
+            total += float(record.get(key) or 0.0)
+        except (TypeError, ValueError):
+            return False, 0.0, ""
+        seen = True
+    if seen:
+        return True, total, "validated_broker_positions"
+    return False, 0.0, ""
+
+
 def _signal_stop_setup_metadata(signal: object) -> tuple[str | None, float | None]:
     """Return stable setup identity plus its structural timestamp when available."""
     payloads: list[Mapping[str, object]] = []
@@ -1012,6 +1115,7 @@ class PositionManager:
         self._trades_today_date: str | None = None
         self._trades_today_count: int = 0
         self._recent_stop_thesis: dict[str, object] | None = None
+        self._risk_circuit_state: dict[str, object] = {}
         self._order_locks: dict[str, threading.RLock] = {}
         self._symbol_lifecycle_locks: dict[str, threading.RLock] = {}
         self._orders: Dict[str, Order] = {}
@@ -2097,6 +2201,22 @@ class PositionManager:
                 return 0
             return int(self._trades_today_count)
 
+    def get_risk_circuit_state(self) -> dict[str, object]:
+        """Return persisted same-day risk-circuit runtime state."""
+
+        with self._lock:
+            return dict(self._risk_circuit_state)
+
+    def persist_risk_circuit_state(self, **values: object) -> None:
+        """Merge and durably persist risk-circuit state for the current IST day."""
+
+        with self._lock:
+            state = dict(self._risk_circuit_state)
+            state.update(values)
+            state["trading_date"] = self._trading_date_ist()
+            self._risk_circuit_state = state
+        self.save_state()
+
     @staticmethod
     def _trading_date_ist(now: datetime | None = None) -> str:
         """Return the exchange trading date in IST for P&L baselines."""
@@ -2693,6 +2813,7 @@ class PositionManager:
                     order_id: lifecycle.to_dict()
                     for order_id, lifecycle in self._exit_lifecycles.items()
                 },
+                "_risk_runtime": _risk_state_snapshot(self),
                 "daily_realized_pnl": self._daily_realized_pnl,
                 "local_realized_pnl": self._local_realized_pnl,
                 "broker_realized_pnl": self._broker_realized_pnl,
@@ -2915,6 +3036,7 @@ class PositionManager:
         self._require_pnl_baseline_for_entries = bool(
             payload.get("require_pnl_baseline_for_entries", False)
         )
+        _restore_risk_state(self, payload.get("_risk_runtime"))
         with self._lock:
             self._refresh_realized_pnl_locked()
         try:
@@ -3057,7 +3179,12 @@ class PositionManager:
         raise ValueError("broker position quantity is null or invalid")
 
     def synchronize_with_broker(self, broker_positions: Any) -> None:
-        """Canonicalize broker truth and preserve bot-owned lifecycle identity."""
+        """Canonicalize broker truth and reconcile restart-safe session P&L state."""
+
+        broker_positions = _materialize_broker_positions(broker_positions)
+        broker_realized_authoritative = _snapshot_has_authoritative_realized(
+            broker_positions
+        )
         lifecycle_snapshot = _snapshot_owned_position_lifecycle(self)
         prepared, unresolved = _prepare_broker_positions(self, broker_positions)
         self._cost_basis_unresolved_symbols = set(unresolved)
@@ -3068,10 +3195,100 @@ class PositionManager:
                 if _prepared_row_symbol(row) not in unresolved
             ]
         self._synchronize_managed_positions_from_broker(prepared)
+        self._maybe_seed_pnl_session_baseline(broker_positions)
+        if broker_realized_authoritative:
+            self._reconcile_local_pnl_to_broker_snapshot()
         _canonicalize_position_store(self)
         restored = _restore_owned_position_lifecycle(self, lifecycle_snapshot)
         if restored:
             self.save_state()
+
+    def _maybe_seed_pnl_session_baseline(self, payload: Any) -> bool:
+        """Initialize today's baseline only from authoritative broker evidence."""
+
+        available, seed_value, source = _pnl_baseline_seed_from_snapshot(payload)
+        if not available:
+            return False
+        today = self._trading_date_ist()
+        with self._lock:
+            baseline = self._session_opening_realized_baseline
+            session_date = self._pnl_trading_date
+            local_realized = float(self._local_realized_pnl)
+        if baseline is not None and str(session_date or "") == today:
+            return False
+        stale_dated_state = bool(session_date) and str(session_date) != today
+        if abs(local_realized) > 1e-6 and not stale_dated_state:
+            self._logger.warning(
+                "PNL_BASELINE_SEED_BLOCKED local_realized=%.2f session_date=%s source=%s",
+                local_realized,
+                session_date,
+                source,
+                extra={
+                    "event": "PNL_BASELINE_SEED_BLOCKED",
+                    "reason": "unverified_nonzero_local_pnl",
+                    "local_realized": local_realized,
+                    "session_date": session_date,
+                    "source": source,
+                },
+            )
+            return False
+        established = bool(
+            self.establish_pnl_session_baseline(
+                seed_value,
+                trading_date=today,
+                source=source,
+            )
+        )
+        self._logger.info(
+            "PNL_SESSION_BASELINE_READY trading_date=%s baseline=%.2f source=%s established=%s",
+            today,
+            seed_value,
+            source,
+            established,
+            extra={
+                "event": "PNL_SESSION_BASELINE_READY",
+                "trading_date": today,
+                "baseline": seed_value,
+                "source": source,
+                "established": established,
+            },
+        )
+        return True
+
+    def _reconcile_local_pnl_to_broker_snapshot(self) -> None:
+        """Use explicit managed-position realised P&L as broker authority."""
+
+        with self._lock:
+            if (
+                self._broker_realized_pnl is None
+                or self._session_opening_realized_baseline is None
+            ):
+                return
+            broker_session = float(self._broker_realized_pnl) - float(
+                self._session_opening_realized_baseline
+            )
+            local_before = float(self._local_realized_pnl)
+            mismatch = abs(local_before - broker_session) > 1.0
+            self._local_realized_pnl = broker_session
+            self._refresh_realized_pnl_locked()
+            self._pnl_authority = "validated_broker_positions"
+            self._pnl_reconciliation_status = (
+                "broker_authoritative_reconciled" if mismatch else "matched"
+            )
+        if mismatch:
+            self._logger.warning(
+                "PNL_BROKER_AUTHORITY_RECONCILED local_before=%.2f broker_session=%.2f adjustment=%.2f",
+                local_before,
+                broker_session,
+                broker_session - local_before,
+                extra={
+                    "event": "PNL_BROKER_AUTHORITY_RECONCILED",
+                    "local_before": local_before,
+                    "broker_session": broker_session,
+                    "adjustment": broker_session - local_before,
+                },
+            )
+        self.save_state()
 
     def _synchronize_managed_positions_from_broker(
         self, broker_positions: Any

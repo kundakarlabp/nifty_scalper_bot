@@ -1,8 +1,8 @@
 """Canonical persistence owner for broker-order and quarantine registries.
 
-PositionManager remains the lifecycle/accounting implementation.  This module is
-installed explicitly after the legacy position/risk wrappers and before broker-order
-classification overlays.  It owns the durable broker-order ledger and
+PositionManager remains the lifecycle/accounting implementation and now owns its
+risk runtime state natively. This registry adapter is installed before broker-order
+classification overlays and owns the durable broker-order ledger and
 quarantine registry as part of the same atomic positions.json snapshot, avoiding
 the prior read/merge/second-write persistence race.
 """
@@ -19,10 +19,6 @@ from nifty_scalper_bot.execution.position_reconciliation_identity import (
     _build_cost_basis_exposures,
     _merge_cost_basis_exposures,
     _prepare_broker_positions,
-)
-from nifty_scalper_bot.execution.position_risk_state_patch import (
-    _restore_risk_state,
-    _risk_state_snapshot,
 )
 from nifty_scalper_bot.utils.symbols import normalize_symbol
 
@@ -191,7 +187,7 @@ def apply_patches() -> None:
                 "cost_basis_unresolved_symbols": sorted(
                     set(self._cost_basis_unresolved_symbols)
                 ),
-                "_risk_runtime": _risk_state_snapshot(self),
+                "_risk_runtime": _position_manager._risk_state_snapshot(self),
                 "daily_realized_pnl": self._daily_realized_pnl,
                 "local_realized_pnl": self._local_realized_pnl,
                 "broker_realized_pnl": self._broker_realized_pnl,
@@ -243,7 +239,7 @@ def apply_patches() -> None:
         _ORIGINALS["PositionManager.load_state"](self)
         payload = _read_state(self)
         _hydrate_registry_state(self, payload)
-        _restore_risk_state(self, payload.get("_risk_runtime"))
+        _position_manager._restore_risk_state(self, payload.get("_risk_runtime"))
 
     def synchronize_with_broker(self: Any, broker_positions: Any) -> Any:
         prepared, unresolved = _prepare_broker_positions(self, broker_positions)
