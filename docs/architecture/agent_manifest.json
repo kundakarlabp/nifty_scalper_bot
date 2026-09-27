@@ -213,6 +213,7 @@
       "markers": [
         "agents.md",
         ".agents/",
+        "copilot-instructions.md",
         "repo_map.md",
         "agent_start_here.md",
         "agent_tooling_design.md",
