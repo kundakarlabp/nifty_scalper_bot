@@ -17,22 +17,18 @@ import sys
 import tempfile
 from typing import Sequence
 
+try:
+    from scripts.agent_architecture import (
+        high_risk_markers,
+        load_manifest,
+        validation_rules,
+    )
+except ModuleNotFoundError:
+    from agent_architecture import high_risk_markers, load_manifest, validation_rules
+
 E2E_COMMAND = (
     "python -m pytest -q tests/e2e/live_sim "
     '-m "simulation_component or live_runtime_e2e or e2e_live_sim"'
-)
-
-
-ns.md",
-            "pull_request_template.md",
-            "architecture_lint.py",
-            "scripts/agent_",
-        ),
-        (
-            "tests/tools",
-            "tests/architecture/test_agent_skills_catalog.py",
-        ),
-    ),
 )
 
 
