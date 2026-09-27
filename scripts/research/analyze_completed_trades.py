@@ -14,7 +14,6 @@ import math
 import sqlite3
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
@@ -22,23 +21,6 @@ from typing import Any
 _ECONOMIC_TOLERANCE_RUPEES = 0.02
 _QUALITY_COMPONENTS = ("alpha_score", "direction_score", "strategy_score")
 _TARGET_STRATEGIES = ("ORBPro", "SMC", "VWAPPro")
-
-
-@dataclass(frozen=True, slots=True)
-class PerformanceSummary:
-    trade_count: int
-    gross_pnl: float
-    estimated_costs: float
-    net_pnl: float
-    expectancy: float
-    win_rate: float
-    average_win: float | None
-    average_loss: float | None
-    profit_factor: float | None
-    max_drawdown: float
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
 
 
 def _finite_number(value: Any) -> float | None:
@@ -143,13 +125,15 @@ def validate_canonical_completed_trades(
 
         current_key = (closed_at, trade_id)
         if previous_key is not None and current_key <= previous_key:
-            raise ValueError("canonical trades must be strictly chronologically ordered")
+            raise ValueError(
+                "canonical trades must be strictly chronologically ordered"
+            )
         previous_key = current_key
 
 
 def performance_summary(
     trades: Sequence[Mapping[str, Any]],
-) -> PerformanceSummary:
+) -> dict[str, Any]:
     gross = [_finite_number(trade.get("gross_pnl")) or 0.0 for trade in trades]
     costs = [_finite_number(trade.get("estimated_costs")) or 0.0 for trade in trades]
     net = [_finite_number(trade.get("net_pnl")) or 0.0 for trade in trades]
@@ -167,18 +151,20 @@ def performance_summary(
     gross_profit = sum(wins)
     gross_loss = abs(sum(losses))
     trade_count = len(net)
-    return PerformanceSummary(
-        trade_count=trade_count,
-        gross_pnl=round(sum(gross), 2),
-        estimated_costs=round(sum(costs), 2),
-        net_pnl=round(sum(net), 2),
-        expectancy=round(sum(net) / trade_count, 4) if trade_count else 0.0,
-        win_rate=round(len(wins) / trade_count, 4) if trade_count else 0.0,
-        average_win=round(sum(wins) / len(wins), 4) if wins else None,
-        average_loss=round(sum(losses) / len(losses), 4) if losses else None,
-        profit_factor=round(gross_profit / gross_loss, 4) if gross_loss > 0 else None,
-        max_drawdown=round(max_drawdown, 2),
-    )
+    return {
+        "trade_count": trade_count,
+        "gross_pnl": round(sum(gross), 2),
+        "estimated_costs": round(sum(costs), 2),
+        "net_pnl": round(sum(net), 2),
+        "expectancy": round(sum(net) / trade_count, 4) if trade_count else 0.0,
+        "win_rate": round(len(wins) / trade_count, 4) if trade_count else 0.0,
+        "average_win": round(sum(wins) / len(wins), 4) if wins else None,
+        "average_loss": round(sum(losses) / len(losses), 4) if losses else None,
+        "profit_factor": (
+            round(gross_profit / gross_loss, 4) if gross_loss > 0 else None
+        ),
+        "max_drawdown": round(max_drawdown, 2),
+    }
 
 
 def chronological_blocks(
@@ -201,7 +187,7 @@ def chronological_blocks(
                 "complete_block": len(block) == block_size,
                 "first_closed_at": block[0]["closed_at"],
                 "last_closed_at": block[-1]["closed_at"],
-                **performance_summary(block).to_dict(),
+                **performance_summary(block),
             }
         )
     return rows
@@ -228,7 +214,7 @@ def grouped_performance(
     rows: list[dict[str, Any]] = []
     for key, group in sorted(grouped.items()):
         row = {field: value for field, value in zip(fields, key)}
-        row.update(performance_summary(group).to_dict())
+        row.update(performance_summary(group))
         rows.append(row)
     return rows
 
@@ -260,7 +246,7 @@ def component_score_summary(
                 "strategy": strategy,
                 "component": component,
                 "score_bucket": f"{lower}.0-<{lower + 1}.0",
-                **performance_summary(group).to_dict(),
+                **performance_summary(group),
             }
         )
     return rows
@@ -351,7 +337,7 @@ def build_evidence_report(
             "economic_identity_tolerance_rupees": _ECONOMIC_TOLERANCE_RUPEES,
             "coverage": coverage,
         },
-        "post_cost_baseline": performance_summary(ordered).to_dict(),
+        "post_cost_baseline": performance_summary(ordered),
         "chronological_blocks": blocks,
         "strategy_attribution": grouped_performance(ordered, fields=("strategy",)),
         "strategy_profile_attribution": grouped_performance(
