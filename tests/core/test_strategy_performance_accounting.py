@@ -41,3 +41,32 @@ def test_nonfinite_trade_feedback_is_rejected_before_any_state_mutates(
 
     assert "VWAPPro" not in manager._performance
     assert manager._adaptive_store.get_stats("VWAPPro").win_rate == 0.0
+
+
+def test_hydrate_trade_results_rebuilds_performance_without_current_regime_leak() -> None:
+    manager = StrategyManager([], None, None)
+    manager._regime_state.regime = "volatile"
+
+    hydrated = manager.hydrate_trade_results(
+        [
+            {
+                "strategy_name": "VWAPPro",
+                "net_pnl": 100.0,
+                "regime": "TREND",
+            },
+            {
+                "strategy_name": "VWAPPro",
+                "net_pnl": -25.0,
+                "regime": None,
+            },
+        ]
+    )
+
+    performance = manager._performance["VWAPPro"]
+    assert hydrated == 2
+    assert performance.trades == 2
+    assert performance.total_pnl == 75.0
+    assert performance.regime_buckets["trend"].trades == 1
+    assert performance.regime_buckets["unknown"].trades == 1
+    assert "volatile" not in performance.regime_buckets
+    assert manager._adaptive_store.get_stats("VWAPPro").win_rate == 0.5
