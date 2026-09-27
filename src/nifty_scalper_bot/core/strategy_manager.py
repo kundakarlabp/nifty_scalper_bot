@@ -6076,7 +6076,11 @@ class StrategyManager(_BaseStrategyManager):
             regime_drawdown_values[name] = -active_snapshot["drawdown"]
 
         pnl_norm = self._normalise_metric(
-            {name: value for name, value in pnl_values.items() if aggregate_evidence[name]}
+            {
+                name: value
+                for name, value in pnl_values.items()
+                if aggregate_evidence[name]
+            }
         )
         sharpe_norm = self._normalise_metric(
             {
@@ -6086,7 +6090,11 @@ class StrategyManager(_BaseStrategyManager):
             }
         )
         win_norm = self._normalise_metric(
-            {name: value for name, value in win_values.items() if aggregate_evidence[name]}
+            {
+                name: value
+                for name, value in win_values.items()
+                if aggregate_evidence[name]
+            }
         )
         drawdown_norm = self._normalise_metric(
             {
