@@ -90,9 +90,7 @@ def classify_risk(
     """Classify change risk for fast local validation; final CI remains mandatory."""
     lowered = tuple(path.lower() for path in files)
     reasons = tuple(
-        marker
-        for marker in risk_markers
-        if any(marker in path for path in lowered)
+        marker for marker in risk_markers if any(marker in path for path in lowered)
     )
     if reasons:
         return "high", reasons
