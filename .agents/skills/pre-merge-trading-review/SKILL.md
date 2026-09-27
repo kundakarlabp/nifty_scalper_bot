@@ -109,7 +109,7 @@ Before reviewing broad test results, confirm the change did not repeat a known p
 For Python changes, require the repository preflight:
 
 ```bash
-python scripts/agent_check.py --files <changed files> --run focused
+python scripts/agent_task.py check --files <changed files>
 ```
 
 This must pass the existing delta-aware Ruff/Black/mypy checks, compilation, and focused tests. Then require the complete suite/final-head CI. When external dependencies prevent execution, the PR must state what ran, what failed, why, and whether the failure is related.
