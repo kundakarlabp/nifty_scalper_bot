@@ -77,7 +77,6 @@ class AttributionReadiness:
 
 
 @dataclass(frozen=True, slots=True)
-@dataclass(frozen=True, slots=True)
 class AttributionGroup:
     """Post-cost outcome summary for one canonical decision cohort."""
 
@@ -87,6 +86,7 @@ class AttributionGroup:
     summary: CompletedTradeSummary
 
 
+@dataclass(frozen=True, slots=True)
 class ExecutionDataQuality:
     """Known execution-evidence caveats in the realized historical sample."""
 
