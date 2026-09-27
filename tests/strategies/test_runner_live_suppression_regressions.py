@@ -349,10 +349,8 @@ def test_strategy_feedback_failure_never_blocks_bracket_guard_release() -> None:
         "SM",
         (),
         {
-            "record_trade_result": (
-                lambda *_a, **_k: (_ for _ in ()).throw(
-                    RuntimeError("analytics down")
-                )
+            "record_trade_result": lambda *_a, **_k: (_ for _ in ()).throw(
+                RuntimeError("analytics down")
             )
         },
     )()
@@ -424,6 +422,5 @@ def test_order_failure_cooldown_rejection_uses_dedup_rollback_path() -> None:
     assert (
         "return self._reject_signal_execution("
         "symbol=base_symbol, trace_id=trace_id, "
-        'reason="order_failure_cooldown_active")'
-        not in source
+        'reason="order_failure_cooldown_active")' not in source
     )
