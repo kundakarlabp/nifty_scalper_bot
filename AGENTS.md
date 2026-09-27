@@ -14,38 +14,17 @@ Capital protection, data correctness, and broker-state truth take priority over 
 - Never weaken readiness, risk, broker, or execution safeguards to increase trade count.
 - Strategy profitability claims require reproducible costs, slippage, chronological out-of-sample evidence, paper/shadow evidence, and live observation where appropriate.
 
-## Canonical ownership
+## Architecture SSOT
 
-| Concern | Owner |
-|---|---|
-| Contract discovery, expiry/strike selection, symbol/token mapping | `core/instrument_manager.py` |
-| Runtime basket commit and subsystem wiring | `core/app.py` |
-| Subscriptions, quote/depth/OI, freshness and OHLC hydration | `data/market_data_manager.py` |
-| Tick-to-OHLC construction | `data/candle_engine.py` |
-| Strategy-facing market-data reads | `data/data_hub.py` |
-| Strategy orchestration/evaluation | `core/strategy_manager.py`, `strategies/*` |
-| Risk limits and sizing | `risk/*` |
-| Live placement and broker lifecycle | `execution/order_manager.py` |
-| Position/pending-order state | `execution/position_manager.py` |
-| Protective exits/trailing/recovery | `execution/bracket_manager.py` |
-| Operator commands/diagnostics | `notifications/*` |
+`docs/architecture/agent_manifest.json` is the canonical machine-readable source for:
 
-Do not create competing selectors, instrument caches, history owners, readiness owners, position owners, or execution paths.
+- runtime ownership;
+- authoritative runtime path;
+- high-risk paths;
+- validation-area routing;
+- mechanically enforceable architecture rules.
 
-## Runtime path
-
-```text
-InstrumentManager
-→ App commits active basket
-→ MarketDataManager subscribes/hydrates
-→ CandleEngine builds bars
-→ DataHub exposes prepared context
-→ StrategyManager / StrategyRunner evaluate
-→ Risk validates/sizes
-→ OrderManager submits/reconciles
-→ PositionManager owns position state
-→ BracketManager manages exits
-```
+Human docs and agent tools must consume or reference that manifest rather than restating their own ownership/routing tables. Runtime behavioral invariants remain in this file.
 
 ## Hard invariants
 
@@ -110,19 +89,19 @@ Prefer existing owners/public interfaces. Do not add helpers, wrappers, compatib
 
 ## Validation
 
-Use the repository tooling rather than hand-building validation commands:
+Use the single public agent façade rather than hand-building validation commands:
 
 ```bash
-python scripts/agent_check.py --files <changed files> --run focused
-python scripts/agent_check.py --files <changed files> --run full
+python scripts/agent_task.py check --files <changed files>
+python scripts/agent_task.py full --files <changed files>
 ```
 
-The focused ring is risk-aware and runs changed-file quality checks before affected tests. Final-head GitHub CI remains authoritative before merge.
+The façade performs debt-safe style preflight, SSOT-driven focused validation, and relevant historical-regression benchmarks. Final-head GitHub CI remains authoritative before merge.
 
-Before merge, use the merge guard with the exact validated base/head SHAs:
+Before merge, verify the exact validated base/head through the same façade:
 
 ```bash
-python scripts/agent_merge_guard.py \
+python scripts/agent_task.py merge-check \
   --validated-base <base-sha> \
   --validated-head <head-sha>
 ```
