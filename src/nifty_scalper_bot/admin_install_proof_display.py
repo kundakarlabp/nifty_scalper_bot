@@ -10,7 +10,7 @@ _REQUIRED_FLAGS = (
     ("websocket_hardened", "WebSocket"),
     ("datahub_synthetic_guard_installed", "DataHub synthetic guard"),
     ("polling_failover_native_owner", "Polling failover"),
-    ("core_app_import_hook_installed", "core.app hook"),
+    ("core_app_native_bootstrap_loaded", "core.app native bootstrap"),
 )
 
 
