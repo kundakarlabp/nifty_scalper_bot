@@ -25,12 +25,8 @@ def test_deflated_sharpe_penalizes_multiple_trials() -> None:
     report = deflated_sharpe_ratio(returns, trials=25)
 
     assert report.expected_maximum_sharpe > 0.0
-    assert (
-        0.0
-        <= report.deflated_sharpe_ratio
-        <= report.probabilistic_sharpe_ratio
-        <= 1.0
-    )
+    assert 0.0 <= report.deflated_sharpe_ratio <= 1.0
+    assert report.deflated_sharpe_ratio <= report.probabilistic_sharpe_ratio
     assert report.observations == len(returns)
     assert report.trials == 25
 
