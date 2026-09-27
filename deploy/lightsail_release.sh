@@ -411,6 +411,7 @@ fi
 sudo systemctl restart "$SERVICE"
 if wait_for_service "$AFTER"; then
   if broker_auth_dependency_degraded; then
+    restart_streamlit || log "WARNING: dashboard restart failed while broker auth is degraded"
     write_status deployed_dependency_degraded "deployed ${AFTER:0:7}; engine healthy, broker authentication unavailable; trading blocked"
     logger -t niftybot-deploy "candidate deployed; broker authentication unavailable, trading remains blocked"
   elif restart_streamlit; then
