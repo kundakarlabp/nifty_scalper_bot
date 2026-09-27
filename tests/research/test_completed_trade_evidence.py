@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sqlite3
+import sys
 from pathlib import Path
 from types import ModuleType
 
@@ -20,6 +21,7 @@ def _load_module() -> ModuleType:
     assert spec is not None
     assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
@@ -33,6 +35,7 @@ def _trade(
     estimated_costs: float = 10.0,
     net_pnl: float = 90.0,
     with_quality: bool = False,
+    exit_reason: str = "HARD_SL_BREACH src=ltp sl=99.0",
 ) -> dict[str, object]:
     outcome: dict[str, object] = {
         "strategy_profile_version": "production-v1-test",
@@ -55,6 +58,7 @@ def _trade(
         "net_pnl": net_pnl,
         "entry_filled_at": closed_at - 10.0,
         "closed_at": closed_at,
+        "exit_reason": exit_reason,
         "build_sha": "abc123",
         "outcome": outcome,
     }
@@ -133,6 +137,30 @@ def test_chronological_blocks_use_post_cost_net_pnl() -> None:
     assert blocks[1]["complete_block"] is False
 
 
+def test_known_stale_quote_exit_is_flagged_not_silently_excluded() -> None:
+    module = _load_module()
+    trades = [
+        _trade(
+            "TRD_1",
+            closed_at=1.0,
+            exit_reason="HARD_SL_BREACH src=ltp_stale_quote sl=95.0",
+        ),
+        _trade("TRD_2", closed_at=2.0),
+    ]
+
+    report = module.build_evidence_report(trades, block_size=2)
+    quality = report["dataset"]["execution_data_quality"]
+
+    assert quality["known_stale_quote_exit_trades"] == 1
+    assert quality["known_stale_quote_exit_fraction"] == 0.5
+    assert quality["known_stale_quote_exit_performance"]["trade_count"] == 1
+    assert quality["not_explicitly_stale_exit_performance"]["trade_count"] == 1
+    assert any(
+        "ltp_stale_quote" in reason
+        for reason in report["gates"]["parameter_change_reasons"]
+    )
+
+
 @pytest.mark.parametrize(
     ("trades", "message"),
     [
@@ -190,6 +218,7 @@ def test_loader_selects_only_closed_ledger_complete_rows(tmp_path: Path) -> None
                 net_pnl REAL,
                 entry_filled_at REAL,
                 closed_at REAL,
+                exit_reason TEXT,
                 build_sha TEXT,
                 outcome_json TEXT,
                 state TEXT,
@@ -208,6 +237,7 @@ def test_loader_selects_only_closed_ledger_complete_rows(tmp_path: Path) -> None
                 40.0,
                 19.0,
                 20.0,
+                "HARD_SL_BREACH src=ltp sl=90.0",
                 "sha2",
                 json.dumps({"strategy_profile_version": "v2"}),
                 "CLOSED",
@@ -223,6 +253,7 @@ def test_loader_selects_only_closed_ledger_complete_rows(tmp_path: Path) -> None
                 90.0,
                 9.0,
                 10.0,
+                "HARD_SL_BREACH src=ltp sl=90.0",
                 "sha1",
                 json.dumps({"strategy_profile_version": "v1"}),
                 "CLOSED",
@@ -238,6 +269,7 @@ def test_loader_selects_only_closed_ledger_complete_rows(tmp_path: Path) -> None
                 90.0,
                 29.0,
                 30.0,
+                "OPEN",
                 "sha3",
                 "{}",
                 "OPEN",
@@ -246,7 +278,8 @@ def test_loader_selects_only_closed_ledger_complete_rows(tmp_path: Path) -> None
         ]
         connection.executemany(
             """
-            INSERT INTO trade_ledger VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO trade_ledger
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             rows,
         )
