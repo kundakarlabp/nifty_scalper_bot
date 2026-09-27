@@ -6012,6 +6012,7 @@ class StrategyManager(_BaseStrategyManager):
         regime_sharpe_values: dict[str, float] = {}
         regime_drawdown_values: dict[str, float] = {}
         active_regime_snapshots: dict[str, dict[str, float]] = {}
+        regime_evidence_ready: dict[str, bool] = {}
         performances: dict[str, StrategyPerformance] = {}
         regime_key = (self._regime_state.regime or "").strip().lower()
         for strategy in self._strategies:
@@ -6040,7 +6041,7 @@ class StrategyManager(_BaseStrategyManager):
             try:
                 if regime_key:
                     bucket = perf.regime_buckets.get(regime_key)
-                if bucket is None:
+                else:
                     bucket = perf.regime_buckets.get("unknown")
             except Exception as exc:  # noqa: BLE001
                 log.error(
@@ -6061,10 +6062,17 @@ class StrategyManager(_BaseStrategyManager):
                 "trades": float(regime_stats_raw.get("trades", 0.0)),
             }
             active_regime_snapshots[name] = active_snapshot
-            regime_pnl_values[name] = active_snapshot["pnl"]
-            regime_win_values[name] = active_snapshot["win_rate"]
-            regime_sharpe_values[name] = active_snapshot["sharpe"]
-            regime_drawdown_values[name] = -active_snapshot["drawdown"]
+            same_regime_ready = bool(
+                regime_key
+                and active_snapshot["trades"]
+                >= max(1, self._dynamic_trade_threshold)
+            )
+            regime_evidence_ready[name] = same_regime_ready
+            if same_regime_ready:
+                regime_pnl_values[name] = active_snapshot["pnl"]
+                regime_win_values[name] = active_snapshot["win_rate"]
+                regime_sharpe_values[name] = active_snapshot["sharpe"]
+                regime_drawdown_values[name] = -active_snapshot["drawdown"]
 
         pnl_norm = self._normalise_metric(pnl_values)
         sharpe_norm = self._normalise_metric(sharpe_values)
@@ -6097,7 +6105,7 @@ class StrategyManager(_BaseStrategyManager):
                 + regime_drawdown_norm.get(name, 0.5) * self._score_weights.drawdown
             )
             blend_weight = 0.0
-            if regime_key:
+            if regime_key and regime_evidence_ready.get(name, False):
                 blend_weight = min(0.6, 0.25 + confidence * 0.35)
             composite_score = (
                 base_score * (1.0 - blend_weight) + regime_score * blend_weight
