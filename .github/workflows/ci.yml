@@ -40,6 +40,8 @@ jobs:
         run: python -m compileall -q src dashboard scripts
       - name: Enforce architecture ownership
         run: python scripts/architecture_lint.py
+      - name: Collect complete pytest tree
+        run: python -m pytest tests --collect-only -q -o addopts="" --import-mode=importlib
       - name: Resolve changed Python files
         id: changed
         shell: bash
