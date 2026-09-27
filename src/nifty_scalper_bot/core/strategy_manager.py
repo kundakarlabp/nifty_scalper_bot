@@ -659,6 +659,14 @@ def signal_to_vote(signal: Signal, strategy_name: str) -> StrategyVote:
     metadata["strategy_key"] = strategy_key
     metadata["strategy_role"] = canonical_strategy_role(strategy_key)
     metadata["signal_family"] = canonical_signal_family(strategy_key)
+    setup_name = str(
+        metadata.get("setup_name")
+        or metadata.get("setup_type")
+        or metadata.get("feature")
+        or signal.reason
+        or strategy_key
+    ).strip()
+    metadata["setup_name"] = setup_name or strategy_key
     metadata.setdefault("required_data_present", True)
     metadata.setdefault("setup_quality", raw_setup_score)
     metadata["vote_score_raw_strategy"] = raw_setup_score
