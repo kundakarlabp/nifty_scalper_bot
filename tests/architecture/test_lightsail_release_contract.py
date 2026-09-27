@@ -205,7 +205,7 @@ def test_release_health_separates_candidate_integrity_from_broker_auth() -> None
     health = release.split("service_healthy", 1)[1].split("wait_for_service", 1)[0]
 
     assert 'local expected_sha="${1:-}"' in health
-    assert '"effective_sha"' in health
+    assert "effective_sha" in health
     assert "broker_auth_dependency_degraded" in health
     assert "unknown startup failures still trigger rollback" in health
     assert 'wait_for_service "$AFTER"' in release
