@@ -10,7 +10,6 @@ _REQUIRED_FLAGS = (
     ("datahub_synthetic_guard_installed", "DataHub synthetic guard"),
     ("polling_failover_native_owner", "Polling failover"),
     ("core_app_import_hook_installed", "core.app hook"),
-    ("datahub_import_hook_installed", "DataHub hook"),
 )
 
 
