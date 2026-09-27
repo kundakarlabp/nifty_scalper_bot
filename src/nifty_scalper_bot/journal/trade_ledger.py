@@ -12,6 +12,7 @@ import math
 import sqlite3
 import time
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import Any
 
 _TRADE_STATES = {
@@ -285,6 +286,70 @@ def ensure_trade_ledger_schema(conn: sqlite3.Connection) -> None:
     )
 
 
+
+def load_completed_strategy_history(
+    db_path: str | Path,
+    *,
+    strategy_names: Sequence[str],
+    per_strategy_limit: int,
+) -> list[dict[str, Any]]:
+    """Load bounded ledger-complete net outcomes for strategy-state restoration."""
+
+    limit = int(per_strategy_limit)
+    if limit <= 0:
+        raise ValueError("per_strategy_limit must be positive")
+    names = [name for name in dict.fromkeys(str(item).strip() for item in strategy_names) if name]
+    resolved = Path(db_path).expanduser().resolve()
+    if not names or not resolved.exists():
+        return []
+
+    history: list[dict[str, Any]] = []
+    uri = f"{resolved.as_uri()}?mode=ro"
+    try:
+        with sqlite3.connect(uri, uri=True) as connection:
+            for strategy in names:
+                rows = connection.execute(
+                    """
+                    SELECT trade_id, strategy, net_pnl, closed_at, outcome_json
+                    FROM trade_ledger
+                    WHERE state = 'CLOSED'
+                      AND ledger_complete = 1
+                      AND strategy = ?
+                      AND net_pnl IS NOT NULL
+                      AND closed_at IS NOT NULL
+                    ORDER BY closed_at DESC, trade_id DESC
+                    LIMIT ?
+                    """,
+                    (strategy, limit),
+                ).fetchall()
+                for trade_id, row_strategy, net_pnl, closed_at, outcome_json in rows:
+                    resolved_pnl = _number(net_pnl)
+                    resolved_closed_at = _number(closed_at)
+                    if resolved_pnl is None or resolved_closed_at is None:
+                        continue
+                    regime = None
+                    if outcome_json:
+                        try:
+                            outcome = json.loads(str(outcome_json))
+                        except (TypeError, ValueError, json.JSONDecodeError):
+                            outcome = {}
+                        if isinstance(outcome, Mapping):
+                            regime = _text(outcome.get("regime"))
+                    history.append(
+                        {
+                            "trade_id": str(trade_id),
+                            "strategy": str(row_strategy),
+                            "net_pnl": resolved_pnl,
+                            "closed_at": resolved_closed_at,
+                            "regime": regime,
+                        }
+                    )
+    except sqlite3.OperationalError:
+        return []
+
+    history.sort(key=lambda item: (float(item["closed_at"]), str(item["trade_id"])))
+    return history
+
 def materialize_trade_events(
     conn: sqlite3.Connection,
     events: Sequence[Mapping[str, Any]],
@@ -469,4 +534,8 @@ def _first_number(*values: Any) -> float | None:
     return None
 
 
-__all__ = ["ensure_trade_ledger_schema", "materialize_trade_events"]
+__all__ = [
+    "ensure_trade_ledger_schema",
+    "load_completed_strategy_history",
+    "materialize_trade_events",
+]
