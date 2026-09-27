@@ -6,6 +6,7 @@ from nifty_scalper_bot.backtesting.completed_trade_analysis import (
     attribution_readiness,
     canonicalize_completed_trades,
     chronological_post_cost_blocks,
+    execution_data_quality,
     summarize_completed_trades,
 )
 
@@ -21,6 +22,7 @@ def _trade(
     ledger_complete: bool = True,
     state: str = "CLOSED",
     signal_quality: dict[str, float] | None = None,
+    exit_reason: str = "HARD_SL_BREACH src=ltp sl=90.0",
 ) -> dict[str, object]:
     outcome: dict[str, object] = {}
     if signal_quality is not None:
@@ -34,6 +36,7 @@ def _trade(
         "net_pnl": net_pnl,
         "ledger_complete": ledger_complete,
         "state": state,
+        "exit_reason": exit_reason,
         "outcome": outcome,
     }
 
@@ -168,3 +171,23 @@ def test_attribution_readiness_accepts_complete_component_evidence() -> None:
 
     assert readiness.ready is True
     assert readiness.blockers == ()
+
+
+def test_execution_data_quality_flags_explicit_stale_quote_exits() -> None:
+    trades = canonicalize_completed_trades(
+        [
+            _trade(
+                "stale",
+                1.0,
+                exit_reason="HARD_SL_BREACH src=ltp_stale_quote sl=90.0",
+            ),
+            _trade("live", 2.0),
+        ]
+    )
+
+    quality = execution_data_quality(trades)
+
+    assert quality.total_trades == 2
+    assert quality.known_stale_quote_exit_trades == 1
+    assert quality.known_stale_quote_exit_fraction == 0.5
+    assert quality.blockers == ("known_stale_quote_exit_trades:1",)

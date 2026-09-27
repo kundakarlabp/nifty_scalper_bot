@@ -19,6 +19,7 @@ from nifty_scalper_bot.backtesting.completed_trade_analysis import (  # noqa: E4
     attribution_readiness,
     canonicalize_completed_trades,
     chronological_post_cost_blocks,
+    execution_data_quality,
     summarize_completed_trades,
 )
 
@@ -41,6 +42,7 @@ def load_trade_ledger_rows(db_path: Path) -> list[dict[str, Any]]:
                 gross_pnl,
                 estimated_costs,
                 net_pnl,
+                exit_reason,
                 ledger_complete,
                 outcome_json
             FROM trade_ledger
@@ -63,6 +65,7 @@ def build_analysis(
     overall = summarize_completed_trades(trades)
     blocks = chronological_post_cost_blocks(trades, block_size=block_size)
     readiness = attribution_readiness(trades, required_components=components)
+    execution_quality = execution_data_quality(trades)
     return {
         "dataset": {
             "canonical_completed_trades": len(trades),
@@ -81,6 +84,7 @@ def build_analysis(
             }
             for block in blocks
         ],
+        "execution_data_quality": asdict(execution_quality),
         "attribution": {
             "ready": readiness.ready,
             "coverage": {
