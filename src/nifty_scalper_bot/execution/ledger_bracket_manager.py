@@ -512,9 +512,16 @@ class LedgerBracketManager(CanonicalBracketManager):
         executed_orders = 2
         if self._fill_ledger is not None:
             with suppress(Exception):
+                fills = self._fill_ledger.load_fills(str(bracket.bracket_id))
                 executed_orders = max(
                     2,
-                    len(self._fill_ledger.load_fills(str(bracket.bracket_id))),
+                    len(
+                        {
+                            str(fill.order_id)
+                            for fill in fills
+                            if str(getattr(fill, "order_id", "") or "").strip()
+                        }
+                    ),
                 )
         costs = None
         net_pnl = gross_pnl
