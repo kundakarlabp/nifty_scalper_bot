@@ -92,6 +92,22 @@ def _run_benchmarks(
     return _python(root, "agent_benchmark.py", *args, "--run").returncode
 
 
+def _syntax_preflight(root: Path) -> int:
+    """Fail before style mutation when repository Python cannot compile."""
+    return _run(
+        [
+            sys.executable,
+            "-m",
+            "compileall",
+            "-q",
+            "src",
+            "dashboard",
+            "scripts",
+        ],
+        cwd=root,
+    ).returncode
+
+
 def _validate(
     root: Path,
     *,
@@ -100,6 +116,10 @@ def _validate(
     scope: str,
     style_fix: bool,
 ) -> int:
+    syntax = _syntax_preflight(root)
+    if syntax != 0:
+        return syntax
+
     if style_fix:
         style = _python(
             root,
