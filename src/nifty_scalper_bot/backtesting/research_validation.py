@@ -6,11 +6,11 @@ sampling uncertainty around already post-cost candidate return series.
 
 from __future__ import annotations
 
+import math
+import random
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from itertools import combinations
-import math
-import random
 from statistics import NormalDist, mean, stdev
 
 
@@ -284,7 +284,9 @@ def combinatorial_purged_pbo(
     if test_groups <= 0 or test_groups >= groups:
         raise ValueError("n_test_groups must be between 1 and n_groups - 1")
     if purge < 0 or embargo < 0:
-        raise ValueError("purge_observations and embargo_observations must be non-negative")
+        raise ValueError(
+            "purge_observations and embargo_observations must be non-negative"
+        )
 
     group_indices = _contiguous_groups(observation_count, groups)
     folds: list[PBOFold] = []
