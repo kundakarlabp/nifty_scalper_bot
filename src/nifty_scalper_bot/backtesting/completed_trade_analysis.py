@@ -59,6 +59,19 @@ class ChronologicalBlock:
 
 
 @dataclass(frozen=True, slots=True)
+class WalkForwardFold:
+    """One expanding-history, strictly later out-of-sample evaluation fold."""
+
+    index: int
+    train_start_trade_id: str
+    train_end_trade_id: str
+    test_start_trade_id: str
+    test_end_trade_id: str
+    train_summary: CompletedTradeSummary
+    test_summary: CompletedTradeSummary
+
+
+@dataclass(frozen=True, slots=True)
 class ComponentCoverage:
     """Observed completed-trade coverage for one trigger strategy."""
 
@@ -389,6 +402,51 @@ def chronological_post_cost_blocks(
     return tuple(blocks)
 
 
+def chronological_walk_forward(
+    trades: Sequence[CanonicalCompletedTrade],
+    *,
+    min_train_trades: int,
+    test_trades: int,
+) -> tuple[WalkForwardFold, ...]:
+    """Evaluate expanding history against strictly later post-cost test windows."""
+
+    min_train = int(min_train_trades)
+    test_size = int(test_trades)
+    if min_train <= 0:
+        raise ValueError("min_train_trades must be positive")
+    if test_size <= 0:
+        raise ValueError("test_trades must be positive")
+
+    ordered = list(trades)
+    if any(
+        (current.closed_at, current.trade_id)
+        >= (following.closed_at, following.trade_id)
+        for current, following in zip(ordered, ordered[1:])
+    ):
+        raise ValueError("trades must be in strict chronological order")
+    if len(ordered) < min_train + test_size:
+        return ()
+
+    folds: list[WalkForwardFold] = []
+    train_end = min_train
+    while train_end + test_size <= len(ordered):
+        train = ordered[:train_end]
+        test = ordered[train_end : train_end + test_size]
+        folds.append(
+            WalkForwardFold(
+                index=len(folds) + 1,
+                train_start_trade_id=train[0].trade_id,
+                train_end_trade_id=train[-1].trade_id,
+                test_start_trade_id=test[0].trade_id,
+                test_end_trade_id=test[-1].trade_id,
+                train_summary=summarize_completed_trades(train),
+                test_summary=summarize_completed_trades(test),
+            )
+        )
+        train_end += test_size
+    return tuple(folds)
+
+
 def attribution_readiness(
     trades: Sequence[CanonicalCompletedTrade],
     *,
@@ -451,10 +509,12 @@ __all__ = [
     "ChronologicalBlock",
     "CompletedTradeSummary",
     "ComponentCoverage",
+    "WalkForwardFold",
     "ExecutionDataQuality",
     "attribution_readiness",
     "execution_data_quality",
     "canonicalize_completed_trades",
     "chronological_post_cost_blocks",
+    "chronological_walk_forward",
     "summarize_completed_trades",
 ]
