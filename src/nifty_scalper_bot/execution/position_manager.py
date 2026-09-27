@@ -3181,10 +3181,12 @@ class PositionManager:
     def synchronize_with_broker(self, broker_positions: Any) -> None:
         """Canonicalize broker truth and reconcile restart-safe session P&L state."""
 
-        payload = _materialize_broker_positions(broker_positions)
-        broker_realized_authoritative = _snapshot_has_authoritative_realized(payload)
+        broker_positions = _materialize_broker_positions(broker_positions)
+        broker_realized_authoritative = _snapshot_has_authoritative_realized(
+            broker_positions
+        )
         lifecycle_snapshot = _snapshot_owned_position_lifecycle(self)
-        prepared, unresolved = _prepare_broker_positions(self, payload)
+        prepared, unresolved = _prepare_broker_positions(self, broker_positions)
         self._cost_basis_unresolved_symbols = set(unresolved)
         if unresolved and isinstance(prepared, list):
             prepared = [
@@ -3193,7 +3195,7 @@ class PositionManager:
                 if _prepared_row_symbol(row) not in unresolved
             ]
         self._synchronize_managed_positions_from_broker(prepared)
-        self._maybe_seed_pnl_session_baseline(payload)
+        self._maybe_seed_pnl_session_baseline(broker_positions)
         if broker_realized_authoritative:
             self._reconcile_local_pnl_to_broker_snapshot()
         _canonicalize_position_store(self)
