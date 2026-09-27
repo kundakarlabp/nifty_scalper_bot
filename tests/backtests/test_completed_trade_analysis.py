@@ -7,6 +7,7 @@ from nifty_scalper_bot.backtesting.completed_trade_analysis import (
     canonicalize_completed_trades,
     chronological_post_cost_blocks,
     execution_data_quality,
+    post_cost_attribution_groups,
     summarize_completed_trades,
 )
 
@@ -29,6 +30,9 @@ def _trade(
         outcome["signal_quality"] = signal_quality
         outcome.update(
             {
+                "strategy_key": str(strategy).lower(),
+                "strategy_role": "trigger",
+                "signal_family": "directional_trigger",
                 "setup_name": "continuation_pullback",
                 "regime": "TREND",
                 "approval_path": "multi_trigger",
@@ -208,6 +212,46 @@ def test_attribution_readiness_fails_closed_when_score_lineage_is_missing() -> N
     assert readiness.coverage["VWAPPro"].with_signal_quality == 1
     assert readiness.coverage["VWAPPro"].with_attribution_provenance == 0
     assert "missing_attribution_provenance:VWAPPro" in readiness.blockers
+
+
+def test_attribution_readiness_requires_canonical_strategy_identity() -> None:
+    quality = {"alpha_score": 8.0, "strategy_score": 7.5}
+    rows = [_trade("vwap", 1.0, strategy="VWAPPro", signal_quality=quality)]
+    rows[0]["outcome"].pop("strategy_key")
+
+    readiness = attribution_readiness(
+        canonicalize_completed_trades(rows),
+        required_components=("VWAPPro",),
+    )
+
+    assert readiness.ready is False
+    assert readiness.coverage["VWAPPro"].with_attribution_provenance == 0
+    assert "missing_attribution_provenance:VWAPPro" in readiness.blockers
+
+
+def test_post_cost_attribution_groups_regime_setup_and_confirmation() -> None:
+    quality = {"alpha_score": 8.0, "strategy_score": 7.5}
+    rows = [
+        _trade("context", 1.0, signal_quality=quality, net_pnl=80.0),
+        _trade(
+            "multi",
+            2.0,
+            signal_quality=quality,
+            gross_pnl=-20.0,
+            estimated_costs=20.0,
+            net_pnl=-40.0,
+        ),
+    ]
+    rows[0]["outcome"]["context_confirmation_strategies"] = ["OrderFlow"]
+    rows[1]["outcome"]["confirming_trigger_strategies"] = ["VWAPPro", "ORBPro"]
+
+    groups = post_cost_attribution_groups(canonicalize_completed_trades(rows))
+
+    assert [group.confirmation_type for group in groups] == [
+        "multi_trigger",
+        "single_trigger_context_confirmed",
+    ]
+    assert [group.summary.net_pnl for group in groups] == [-40.0, 80.0]
 
 
 def test_execution_data_quality_flags_explicit_stale_quote_exits() -> None:

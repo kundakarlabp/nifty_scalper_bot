@@ -77,6 +77,16 @@ class AttributionReadiness:
 
 
 @dataclass(frozen=True, slots=True)
+class AttributionGroup:
+    """Post-cost outcome summary for one canonical decision cohort."""
+
+    regime: str
+    setup_name: str
+    confirmation_type: str
+    summary: CompletedTradeSummary
+
+
+@dataclass(frozen=True, slots=True)
 class ExecutionDataQuality:
     """Known execution-evidence caveats in the realized historical sample."""
 
@@ -173,6 +183,9 @@ def _has_signal_quality(outcome: Mapping[str, Any]) -> bool:
 def _has_attribution_provenance(outcome: Mapping[str, Any]) -> bool:
     """Return whether a trade can support regime/setup/score attribution."""
 
+    for field in ("strategy_key", "strategy_role", "signal_family"):
+        if not str(outcome.get(field) or "").strip():
+            return False
     if str(outcome.get("regime") or "").strip().upper() in {"", "UNKNOWN"}:
         return False
     if not str(outcome.get("setup_name") or "").strip():
@@ -202,6 +215,47 @@ def _has_attribution_provenance(outcome: Mapping[str, Any]) -> bool:
     if not isinstance(outcome.get("context_confirmation_strategies"), list):
         return False
     return True
+
+
+def _confirmation_type(outcome: Mapping[str, Any]) -> str:
+    triggers = outcome.get("confirming_trigger_strategies")
+    contexts = outcome.get("context_confirmation_strategies")
+    trigger_count = len(triggers) if isinstance(triggers, list) else 0
+    context_count = len(contexts) if isinstance(contexts, list) else 0
+    if trigger_count >= 2:
+        return "multi_trigger"
+    if trigger_count == 1 and context_count > 0:
+        return "single_trigger_context_confirmed"
+    if trigger_count == 1:
+        return "single_trigger_unconfirmed"
+    return "unknown"
+
+
+def post_cost_attribution_groups(
+    trades: Sequence[CanonicalCompletedTrade],
+) -> tuple[AttributionGroup, ...]:
+    """Summarize canonical trades by regime, setup and confirmation type."""
+
+    grouped: dict[tuple[str, str, str], list[CanonicalCompletedTrade]] = {}
+    for trade in trades:
+        if not _has_attribution_provenance(trade.outcome):
+            continue
+        key = (
+            str(trade.outcome["regime"]).strip().upper(),
+            str(trade.outcome["setup_name"]).strip(),
+            _confirmation_type(trade.outcome),
+        )
+        grouped.setdefault(key, []).append(trade)
+
+    return tuple(
+        AttributionGroup(
+            regime=regime,
+            setup_name=setup_name,
+            confirmation_type=confirmation_type,
+            summary=summarize_completed_trades(sample),
+        )
+        for (regime, setup_name, confirmation_type), sample in sorted(grouped.items())
+    )
 
 
 def canonicalize_completed_trades(
