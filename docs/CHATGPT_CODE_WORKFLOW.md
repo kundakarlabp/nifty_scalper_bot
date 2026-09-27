@@ -85,20 +85,18 @@ python scripts/agent_context.py \
 Generate a changed-file validation plan:
 
 ```bash
-python scripts/agent_check.py \
-  --files src/nifty_scalper_bot/streaming/websocket_manager.py \
+python scripts/agent_task.py plan --files src/nifty_scalper_bot/streaming/websocket_manager.py \
   --output /tmp/agent-check.md
 ```
 
 Execute the focused ring before publishing Python changes:
 
 ```bash
-python scripts/agent_check.py \
-  --files src/nifty_scalper_bot/streaming/websocket_manager.py \
+python scripts/agent_task.py plan --files src/nifty_scalper_bot/streaming/websocket_manager.py \
   --run focused
 ```
 
-The focused ring is risk-aware: it runs delta-aware Ruff, Black, and mypy checks first, adds architecture ownership validation for production code, and adds deterministic broker-free E2E for high-risk paths. These tools never place orders or start the trading runtime.
+The public façade delegates to the risk-aware focused ring: it runs delta-aware Ruff, Black, and mypy checks first, adds architecture ownership validation for production code, and adds deterministic broker-free E2E for high-risk paths. These tools never place orders or start the trading runtime.
 
 ## Validation and merge rule
 
@@ -111,7 +109,7 @@ Focused tests provide fast feedback but never replace the full suite. A PR may b
 - all valid review threads are resolved
 - CI passes on the final PR head
 
-When the task explicitly asks ChatGPT to merge after validation, verify the exact validated base/head with `scripts/agent_merge_guard.py` immediately before squash merge. If the base or head moved, refresh and rerun final-head CI. Otherwise, leave the PR open for review.
+When the task explicitly asks ChatGPT to merge after validation, verify the exact validated base/head with `scripts/agent_task.py merge-check` immediately before squash merge. If the base or head moved, refresh and rerun final-head CI. Otherwise, leave the PR open for review.
 
 ## Access and confidentiality
 
