@@ -1,5 +1,5 @@
 # File purpose: Canonical pull-request/main validation for the NIFTY scalper.
-# Key responsibilities: Run changed-code quality, the normal non-slow suite, and deterministic E2E validation once each.
+# Key responsibilities: Run changed-code quality, shard the complete normal non-slow suite, and run deterministic E2E validation once.
 # Operational constraints: Read-only CI; no broker/network access; do not duplicate marked E2E tests in the normal suite.
 
 name: CI
@@ -83,9 +83,14 @@ jobs:
           --base "$(cat /tmp/quality-base.txt)"
           --files-from /tmp/changed-python.txt
 
-  tests:
+  normal-test-shard:
+    name: normal-tests-${{ matrix.shard }}
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -97,10 +102,37 @@ jobs:
           python -m pip install --upgrade pip -q
           python -m pip install -e '.[dev]' -q
           python -m pip install -r dashboard/requirements.txt -q
-      - name: Run normal suite excluding separately validated E2E markers
+      - name: Select deterministic normal-suite shard
         run: >-
-          python -m pytest -q
-          -m "not slow and not simulation_component and not live_runtime_e2e and not e2e_live_sim"
+          python scripts/ci_test_shard.py
+          --shard-index "${{ matrix.shard }}"
+          --shard-count 4
+          > /tmp/normal-test-shard.txt
+      - name: Run normal suite shard excluding separately validated E2E markers
+        shell: bash
+        run: |
+          mapfile -t files < /tmp/normal-test-shard.txt
+          if ((${#files[@]} == 0)); then
+            echo "ERROR: normal test shard is empty" >&2
+            exit 2
+          fi
+          printf 'Normal test shard %s: %s files\n' "${{ matrix.shard }}" "${#files[@]}"
+          python -m pytest -q "${files[@]}" \
+            -m "not slow and not simulation_component and not live_runtime_e2e and not e2e_live_sim"
+
+  tests:
+    name: tests
+    if: always()
+    needs: normal-test-shard
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require all normal test shards
+        env:
+          NORMAL_SHARDS_RESULT: ${{ needs.normal-test-shard.result }}
+        run: |
+          echo "Normal shard result: $NORMAL_SHARDS_RESULT"
+          test "$NORMAL_SHARDS_RESULT" = "success"
 
   e2e-simulation:
     runs-on: ubuntu-latest
