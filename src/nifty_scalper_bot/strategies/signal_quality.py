@@ -8,6 +8,10 @@ from typing import Any, Mapping, cast
 
 from nifty_scalper_bot.config.entry_policy import resolve_entry_policy
 from nifty_scalper_bot.config.regime_ontology import MarketRegime, normalize_regime
+from nifty_scalper_bot.config.strategy_taxonomy import (
+    is_context_only_strategy,
+    normalize_strategy_name,
+)
 
 TRADABLE_REGIMES: frozenset[MarketRegime] = frozenset(
     {MarketRegime.TREND, MarketRegime.RANGE, MarketRegime.VOLATILE}
@@ -19,16 +23,6 @@ REQUIRED_SCORE_COMPONENTS: tuple[str, ...] = (
     "option_score",
     "data_score",
     "rr_score",
-)
-
-CONTEXT_ONLY_STRATEGIES: frozenset[str] = frozenset(
-    {
-        "oi_max_pain",
-        "order_flow",
-        "bb_squeeze",
-        "cpr_breakout",
-        "rsi_divergence",
-    }
 )
 
 
@@ -159,35 +153,6 @@ def missing_score_components(metadata: dict[str, object] | None) -> list[str]:
     return [key for key in REQUIRED_SCORE_COMPONENTS if payload.get(key) is None]
 
 
-def normalize_strategy_name(strategy_name: str | None) -> str:
-    """Args: strategy_name. Returns: canonical strategy key. Raises: none."""
-    raw = str(strategy_name or "").strip().lower().replace(" ", "_").replace("-", "_")
-    aliases = {
-        "smc": "smc_lite",
-        "smc_liquidity": "smc_lite",
-        "smc_lite": "smc_lite",
-        "smc_liquidity_sweep_lite": "smc_lite",
-        "premium_momentum": "premium_squeeze",
-        "premium_momentum_squeeze": "premium_squeeze",
-        "premium_squeeze": "premium_squeeze",
-        "rsidivergence": "rsi_divergence",
-        "rsi_divergence": "rsi_divergence",
-        "cprbreakout": "cpr_breakout",
-        "cpr_breakout": "cpr_breakout",
-        "bbsqueeze": "bb_squeeze",
-        "bb_squeeze": "bb_squeeze",
-        "orderflow": "order_flow",
-        "order_flow": "order_flow",
-        "oimaxpain": "oi_max_pain",
-        "oi_max_pain": "oi_max_pain",
-        "orbpro": "orb_pro",
-        "orb_pro": "orb_pro",
-        "vwappro": "vwap_pro",
-        "vwap_pro": "vwap_pro",
-    }
-    return aliases.get(raw, raw)
-
-
 def _parse_score_threshold(raw: object) -> float | None:
     """Normalize configured threshold values to the internal 0..10 scale."""
     try:
@@ -293,7 +258,7 @@ def score_signal_quality(
     alpha_score = 0.55 * direction + 0.45 * strategy
     normalized_strategy_name = normalize_strategy_name(strategy_name)
     threshold = trigger_threshold(strategy_name=normalized_strategy_name)
-    context_only = normalized_strategy_name in CONTEXT_ONLY_STRATEGIES
+    context_only = is_context_only_strategy(normalized_strategy_name)
     alpha_floor_required = normalized_strategy_name in {
         "vwap_pro",
         "orb_pro",

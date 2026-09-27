@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 
 import pytest
@@ -136,7 +137,8 @@ def test_option_universe_live_without_basket_returns_empty_not_crash(monkeypatch
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     manager = OptionUniverseManager(OptionUniverseConfig())
 
-    assert manager.get_primary_symbols() == []
+    with caplog.at_level(logging.INFO):
+        assert manager.get_primary_symbols() == []
     assert "OPTION_UNIVERSE_RUNTIME_CALL_BLOCKED" in caplog.text
 
 
