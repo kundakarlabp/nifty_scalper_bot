@@ -11,7 +11,6 @@ from contextlib import suppress
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
-from nifty_scalper_bot.execution import position_identity_extension as _position_identity
 from nifty_scalper_bot.execution import position_manager as _position_manager
 from nifty_scalper_bot.utils.symbols import normalize_symbol
 
@@ -334,7 +333,7 @@ def _classify_unknown(
     if status in {"PENDING", "OPEN", "PARTIALLY_FILLED"}:
         return "active_external_order", None, None, "active_external_order"
     if status == "FILLED" or filled_qty > 0:
-        state, qty, _error = _position_identity._broker_position_quantity(self, symbol)
+        state, qty, _error = _position_manager._broker_position_quantity(self, symbol)
         if state == "flat":
             return "resolved_external_flat", state, qty, None
         if state == "open":
