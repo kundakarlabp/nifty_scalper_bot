@@ -88,6 +88,8 @@ STOP = {
     "which",
     "with",
 }
+
+
 def terms_from(query: str) -> list[str]:
     raw = re.findall(r"[A-Za-z][A-Za-z0-9_.:-]{2,}", query.lower())
     terms: set[str] = set()
@@ -280,20 +282,14 @@ def build(
         ),
     )[:max_symbols]
     ranked_paths = [str(item["path"]) for item in ranked]
-    source_stems = {
-        Path(path).stem.lower()
-        for path in ranked_paths
-        if not path.startswith("tests/")
-    }
     tests = list(impacted_tests(root, ranked_paths))
     for item in records:
         path = str(item["path"])
-        if not path.startswith("tests/") or not path.endswith(".py"):
-            continue
-        stem = Path(path).stem.lower()
-        if stem.startswith("test_"):
-            stem = stem[5:]
-        if stem in source_stems or int(item["score"]) > 0:
+        if (
+            path.startswith("tests/")
+            and path.endswith(".py")
+            and int(item["score"]) > 0
+        ):
             tests.append(path)
     tests = list(dict.fromkeys(tests))[:12]
 
