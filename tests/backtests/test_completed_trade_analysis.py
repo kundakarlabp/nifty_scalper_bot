@@ -4,6 +4,7 @@ import pytest
 
 from nifty_scalper_bot.backtesting.completed_trade_analysis import (
     attribution_readiness,
+    calibrate_signal_scores,
     canonicalize_completed_trades,
     chronological_post_cost_blocks,
     chronological_walk_forward,
@@ -395,3 +396,75 @@ def test_execution_data_quality_flags_explicit_stale_quote_exits() -> None:
     assert quality.known_stale_quote_exit_trades == 1
     assert quality.known_stale_quote_exit_fraction == 0.5
     assert quality.blockers == ("known_stale_quote_exit_trades:1",)
+
+
+def test_score_calibration_reports_post_cost_expectancy_and_r_uncertainty() -> None:
+    rows = [
+        _trade(
+            "s1",
+            1.0,
+            gross_pnl=100.0,
+            net_pnl=80.0,
+            signal_quality={"alpha_score": 6.2, "strategy_score": 6.0},
+        ),
+        _trade(
+            "s2",
+            2.0,
+            gross_pnl=60.0,
+            net_pnl=40.0,
+            signal_quality={"alpha_score": 6.8, "strategy_score": 6.5},
+        ),
+        _trade(
+            "s3",
+            3.0,
+            gross_pnl=-20.0,
+            net_pnl=-40.0,
+            signal_quality={"alpha_score": 7.2, "strategy_score": 7.0},
+        ),
+        _trade(
+            "s4",
+            4.0,
+            gross_pnl=120.0,
+            net_pnl=100.0,
+            signal_quality={"alpha_score": 7.8, "strategy_score": 7.5},
+        ),
+    ]
+    for row, r_multiple in zip(rows, (0.8, 0.4, -0.4, 1.0)):
+        row["outcome"]["r_multiple"] = r_multiple
+
+    report = calibrate_signal_scores(
+        canonicalize_completed_trades(rows),
+        score_key="alpha_score",
+        bin_width=1.0,
+        minimum_trades_per_bin=2,
+        bootstrap_samples=300,
+        seed=9,
+    )
+
+    assert report.scored_trades == 4
+    assert report.r_scored_trades == 4
+    assert len(report.bins) == 2
+    assert report.bins[0].lower == 6.0
+    assert report.bins[0].net_expectancy == 60.0
+    assert report.bins[0].mean_r == 0.6
+    assert report.bins[0].evidence_ready is True
+    assert report.bins[0].net_expectancy_ci_lower <= 60.0
+    assert report.bins[0].net_expectancy_ci_upper >= 60.0
+    assert report.blockers == ()
+
+
+def test_score_calibration_marks_underpowered_bins_without_selecting_threshold() -> None:
+    row = _trade(
+        "s1",
+        1.0,
+        signal_quality={"alpha_score": 8.1, "strategy_score": 8.0},
+    )
+
+    report = calibrate_signal_scores(
+        canonicalize_completed_trades([row]),
+        minimum_trades_per_bin=10,
+        bootstrap_samples=20,
+    )
+
+    assert report.bins[0].evidence_ready is False
+    assert report.blockers == ("underpowered_bins:1",)
