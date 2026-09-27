@@ -804,3 +804,62 @@ def test_historical_backfill_skips_malformed_event_json(tmp_path) -> None:
             ).fetchone()[0]
             == "CLOSED"
         )
+
+
+def test_load_completed_strategy_outcomes_is_build_scoped_and_ledger_complete(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("GIT_COMMIT_SHA", "build-a")
+    journal = TradeJournal(str(tmp_path / "journal.db"))
+    events = []
+    for trade_id, strategy, pnl, regime, build_sha, complete, ts in (
+        ("trade-1", "VWAPPro", 100.0, "TREND", "build-a", True, 10.0),
+        ("trade-2", "VWAPPro", -40.0, "RANGE", "build-a", True, 20.0),
+        ("trade-3", "ORBPro", 75.0, "TREND", "build-b", True, 30.0),
+        ("trade-4", "SMCLite", 50.0, "TREND", "build-a", False, 40.0),
+    ):
+        events.append(
+            journal._normalize_event(
+                {
+                    "event_type": "BRACKET_CLOSED",
+                    "timestamp": ts,
+                    "symbol": "NFO:NIFTYCE",
+                    "meta": {
+                        "trade_id": trade_id,
+                        "signal_id": trade_id,
+                        "trace_id": trade_id,
+                        "strategy": strategy,
+                        "build_sha": build_sha,
+                        "completed_trade": {
+                            "strategy_name": strategy,
+                            "net_pnl": pnl,
+                            "ledger_complete": complete,
+                            "regime": regime,
+                        },
+                    },
+                }
+            )
+        )
+
+    conn = journal._flush_batch(events, None)
+    assert conn is not None
+    conn.close()
+
+    outcomes = journal.load_completed_strategy_outcomes()
+
+    assert outcomes == [
+        {
+            "trade_id": "trade-1",
+            "strategy_name": "VWAPPro",
+            "net_pnl": 100.0,
+            "regime": "TREND",
+            "closed_at": 10.0,
+        },
+        {
+            "trade_id": "trade-2",
+            "strategy_name": "VWAPPro",
+            "net_pnl": -40.0,
+            "regime": "RANGE",
+            "closed_at": 20.0,
+        },
+    ]
