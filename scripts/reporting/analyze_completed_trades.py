@@ -18,8 +18,8 @@ if str(SRC_PATH) not in sys.path:
 from nifty_scalper_bot.backtesting.completed_trade_analysis import (  # noqa: E402
     attribution_readiness,
     canonicalize_completed_trades,
-    execution_data_quality,
     chronological_post_cost_blocks,
+    execution_data_quality,
     summarize_completed_trades,
 )
 
