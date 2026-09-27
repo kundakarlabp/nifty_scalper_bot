@@ -1305,9 +1305,10 @@ class PositionManager:
             return self._order_locks.setdefault(str(order_id), threading.RLock())
 
     def _symbol_lifecycle_lock_for(self, symbol: str) -> threading.RLock:
+        symbol_key = _canonical_key(symbol) or symbol.strip().upper()
         with self._lock:
             return self._symbol_lifecycle_locks.setdefault(
-                symbol.upper(), threading.RLock()
+                symbol_key, threading.RLock()
             )
 
     def set_broker_client(self, broker_client: Any | None) -> None:
@@ -1872,7 +1873,7 @@ class PositionManager:
             None.
         """
 
-        normalized = symbol.strip().upper()
+        normalized = _canonical_key(symbol) or symbol.strip().upper()
         self._logger.debug(
             "Entered clear_active_contract_by_symbol",
             extra={"event": "clear_active_contract_by_symbol", "symbol": normalized},
@@ -1924,7 +1925,7 @@ class PositionManager:
         Broker-authoritative callers must use ``broker_exposure_state`` instead.
         """
 
-        lookup = symbol.strip().upper()
+        lookup = _canonical_key(symbol) or symbol.strip().upper()
         self._logger.debug(
             "Entered is_flat", extra={"event": "is_flat", "symbol": lookup}
         )
@@ -1998,7 +1999,7 @@ class PositionManager:
         order_id: str | None = None,
     ) -> Position:
         """Open a position under the same lock used by broker reconciliation."""
-        symbol_key = symbol.upper()
+        symbol_key = _canonical_key(symbol) or symbol.strip().upper()
         position = Position(
             symbol=symbol_key,
             side=_normalize_side(str(side)),
@@ -2030,7 +2031,7 @@ class PositionManager:
         close_time: datetime | None = None,
     ) -> Position:
         """Close a position atomically and retain conservative realised P&L."""
-        symbol_key = symbol.upper()
+        symbol_key = _canonical_key(symbol) or symbol.strip().upper()
         with self._lock:
             position = self._positions.get(symbol_key)
             if position is None:
@@ -2170,7 +2171,7 @@ class PositionManager:
 
     def update_position_price(self, symbol: str, current_price: float) -> None:
         """Update the mark price of an open position under the state lock."""
-        symbol_key = symbol.upper()
+        symbol_key = _canonical_key(symbol) or symbol.strip().upper()
         with self._lock:
             position = self._positions.get(symbol_key)
             if position is None:
@@ -2182,7 +2183,7 @@ class PositionManager:
         """Return the :class:`Position` for ``symbol`` if it exists."""
 
         with self._lock:
-            return self._positions.get(symbol.upper())
+            return self._positions.get(_canonical_key(symbol) or symbol.strip().upper())
 
     def get_all_positions(self) -> list[Position]:
         """Return all currently open positions."""
@@ -2200,7 +2201,7 @@ class PositionManager:
         """Return ``True`` if a position exists for ``symbol``."""
 
         with self._lock:
-            return symbol.upper() in self._positions
+            return (_canonical_key(symbol) or symbol.strip().upper()) in self._positions
 
     def has_open_position(self, symbol: str) -> bool:
         """Return whether an open position exists. Args: symbol. Returns: bool. Raises: None."""
@@ -2438,7 +2439,7 @@ class PositionManager:
     def current_entry_protection_blocker(self, symbol: str | None = None) -> str | None:
         """Return current entry blocker when a filled entry lacks SL protection."""
 
-        symbol_key = symbol.upper() if symbol else None
+        symbol_key = _canonical_key(symbol) or symbol.strip().upper() if symbol else None
         with self._lock:
             for order in self._orders.values():
                 if symbol_key is not None and order.symbol != symbol_key:
@@ -2505,7 +2506,7 @@ class PositionManager:
             )
             return
 
-        symbol_key = symbol.upper()
+        symbol_key = _canonical_key(symbol) or symbol.strip().upper()
         existing_position = self._positions.get(symbol_key)
         normalized_side = _normalize_order_side(side)
         normalized_intent = _normalize_intent(intent)
@@ -2576,7 +2577,7 @@ class PositionManager:
     def is_exit_converging(self, symbol: str) -> bool:
         """Return True while a managed exit for ``symbol`` is still converging."""
 
-        symbol_key = symbol.upper()
+        symbol_key = _canonical_key(symbol) or symbol.strip().upper()
         with self._lock:
             for order in self._orders.values():
                 if order.symbol != symbol_key:
@@ -2770,6 +2771,7 @@ class PositionManager:
     ) -> None:
         """Canonical position-side broker update ingress."""
 
+        broker_payload = _canonicalize_payload_symbol(dict(broker_payload))
         order_key = str(order_id)
         order_lock = self._order_lock_for(order_key)
         with order_lock:
@@ -2801,7 +2803,7 @@ class PositionManager:
     def get_pending_orders(self, symbol: str | None = None) -> list[Order]:
         """Return tracked orders, optionally filtered by ``symbol``."""
 
-        symbol_key = symbol.upper() if symbol else None
+        symbol_key = _canonical_key(symbol) or symbol.strip().upper() if symbol else None
         orders: Iterable[Order] = self._orders.values()
         if symbol_key is not None:
             orders = (order for order in orders if order.symbol == symbol_key)
@@ -4050,7 +4052,68 @@ class PositionManager:
     # Internal helpers -------------------------------------------------
 
     def _handle_filled_order(self, order: Order) -> FillApplicationResult:
-        symbol_key = order.symbol
+        intent = str(getattr(order, "intent", "UNKNOWN") or "UNKNOWN").strip().upper()
+        if intent in _QUARANTINE_INTENTS:
+            symbol = _canonical_key(getattr(order, "symbol", None))
+            state, broker_qty, broker_error = _broker_position_quantity(self, symbol)
+            if state == "flat":
+                _clear_symbol_quarantine(self, symbol)
+                self._logger.info(
+                    "BROKER_FLAT_CONFIRMED_FOR_UNKNOWN_ORDER order_id=%s symbol=%s side=%s",
+                    order.order_id,
+                    symbol,
+                    order.side,
+                    extra={
+                        "event": "BROKER_FLAT_CONFIRMED_FOR_UNKNOWN_ORDER",
+                        "order_id": order.order_id,
+                        "symbol": symbol,
+                        "side": order.side,
+                        "intent": intent,
+                    },
+                )
+                return FillApplicationResult(
+                    accounting_finalized=True,
+                    lifecycle_resolved=True,
+                    reason="broker_flat_confirmed_unknown_order",
+                )
+            if state == "unverified":
+                self._logger.warning(
+                    "BROKER_STATE_UNVERIFIED_FOR_UNKNOWN_ORDER order_id=%s symbol=%s side=%s reason=%s",
+                    order.order_id,
+                    symbol,
+                    order.side,
+                    broker_error,
+                    extra={
+                        "event": "BROKER_STATE_UNVERIFIED_FOR_UNKNOWN_ORDER",
+                        "order_id": order.order_id,
+                        "symbol": symbol,
+                        "side": order.side,
+                        "intent": intent,
+                        "reason": broker_error,
+                    },
+                )
+                return FillApplicationResult(reason="broker_state_unverified")
+            self._logger.warning(
+                "BROKER_POSITION_QUARANTINED_FOR_UNKNOWN_ORDER order_id=%s symbol=%s side=%s broker_qty=%s",
+                order.order_id,
+                symbol,
+                order.side,
+                broker_qty,
+                extra={
+                    "event": "BROKER_POSITION_QUARANTINED_FOR_UNKNOWN_ORDER",
+                    "order_id": order.order_id,
+                    "symbol": symbol,
+                    "side": order.side,
+                    "intent": intent,
+                    "broker_qty": broker_qty,
+                },
+            )
+            return FillApplicationResult(
+                reason="broker_position_unowned_or_cost_basis_unresolved"
+            )
+
+        symbol_key = _canonical_key(order.symbol) or order.symbol.strip().upper()
+        order.symbol = symbol_key
         cumulative_qty = (
             order.quantity if order.filled_quantity == 0 else order.filled_quantity
         )
@@ -4337,6 +4400,30 @@ class PositionManager:
                 )
                 if order.pre_order_quantity == 0 and position.order_id is None:
                     position.order_id = order.order_id
+                if order.pre_order_quantity == 0 and position.order_id == order.order_id:
+                    fill_basis = float(
+                        order.last_cumulative_average_price
+                        or order.fill_price
+                        or fill_price
+                        or 0.0
+                    )
+                    if fill_basis > 0.0:
+                        broker_day_basis = float(position.entry_price or 0.0)
+                        position.entry_price = fill_basis
+                        self._logger.info(
+                            "ENTRY_LIFECYCLE_BASIS_RESTORED order_id=%s symbol=%s broker_day_basis=%.2f fill_basis=%.2f",
+                            order.order_id,
+                            symbol_key,
+                            broker_day_basis,
+                            fill_basis,
+                            extra={
+                                "event": "ENTRY_LIFECYCLE_BASIS_RESTORED",
+                                "order_id": order.order_id,
+                                "symbol": symbol_key,
+                                "broker_day_basis": broker_day_basis,
+                                "fill_basis": fill_basis,
+                            },
+                        )
                 order.protection_confirmed = False
                 order.protection_failure_reason = "entry_protection_incomplete"
                 mark_applied()
@@ -4495,7 +4582,7 @@ class PositionManager:
             self._recently_flat_exit_until_monotonic = {}
         if not hasattr(self, "_recently_flat_exit_metadata"):
             self._recently_flat_exit_metadata = {}
-        key = symbol.upper()
+        key = _canonical_key(symbol) or symbol.strip().upper()
         now = time.monotonic()
         grace = float(
             getattr(
@@ -4513,7 +4600,7 @@ class PositionManager:
         )
 
     def _clear_recent_exit_guard_locked(self, symbol: str) -> None:
-        key = symbol.upper()
+        key = _canonical_key(symbol) or symbol.strip().upper()
         if hasattr(self, "_recently_flat_exit_until_monotonic"):
             self._recently_flat_exit_until_monotonic.pop(key, None)
         if hasattr(self, "_recently_flat_exit_metadata"):
@@ -4523,13 +4610,13 @@ class PositionManager:
         self, symbol: str, quantity: int
     ) -> bool:
         """Return true for a non-zero broker row that conflicts with a recent exit."""
-        if symbol.upper() in self._positions:
+        if (_canonical_key(symbol) or symbol.strip().upper()) in self._positions:
             return False
         if not hasattr(self, "_recently_flat_exit_until_monotonic"):
             self._recently_flat_exit_until_monotonic = {}
         if not hasattr(self, "_recently_flat_exit_metadata"):
             self._recently_flat_exit_metadata = {}
-        key = symbol.upper()
+        key = _canonical_key(symbol) or symbol.strip().upper()
         until = self._recently_flat_exit_until_monotonic.get(key)
         if until is None:
             return False
