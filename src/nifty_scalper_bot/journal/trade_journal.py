@@ -16,6 +16,7 @@ from typing import Any
 from nifty_scalper_bot.config.env_utils import resolve_build_sha
 from nifty_scalper_bot.journal.trade_ledger import (
     ensure_trade_ledger_schema,
+    load_completed_trade_feedback,
     materialize_trade_events,
 )
 
@@ -175,6 +176,14 @@ class TradeJournal:
     def db_path(self) -> Path:
         """Return the canonical SQLite journal path for read-only consumers."""
         return self._db_path
+
+    def load_completed_trade_feedback(self) -> list[dict[str, Any]]:
+        """Return ledger-complete, post-cost trade feedback for state rebuild."""
+        conn = self._ensure_connection(None)
+        try:
+            return load_completed_trade_feedback(conn)
+        finally:
+            conn.close()
 
     # -------------------------------------------------------
     # Internal
