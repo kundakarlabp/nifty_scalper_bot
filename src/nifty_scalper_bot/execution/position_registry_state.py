@@ -1,8 +1,8 @@
 """Canonical persistence owner for broker-order and quarantine registries.
 
-PositionManager remains the lifecycle/accounting implementation.  This module is
-installed explicitly after the legacy position/risk wrappers and before broker-order
-classification overlays.  It owns the durable broker-order ledger and
+PositionManager remains the lifecycle/accounting implementation and now owns its
+risk runtime state natively. This registry adapter is installed before broker-order
+classification overlays and owns the durable broker-order ledger and
 quarantine registry as part of the same atomic positions.json snapshot, avoiding
 the prior read/merge/second-write persistence race.
 """
