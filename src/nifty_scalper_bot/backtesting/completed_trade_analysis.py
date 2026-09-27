@@ -72,6 +72,18 @@ class WalkForwardFold:
 
 
 @dataclass(frozen=True, slots=True)
+class WalkForwardStability:
+    """Descriptive OOS stability evidence; never a parameter-selection verdict."""
+
+    ready: bool
+    fold_count: int
+    positive_oos_folds: int
+    positive_oos_fraction: float
+    aggregate_oos: CompletedTradeSummary
+    blockers: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class ComponentCoverage:
     """Observed completed-trade coverage for one trigger strategy."""
 
@@ -447,6 +459,67 @@ def chronological_walk_forward(
     return tuple(folds)
 
 
+def walk_forward_stability(
+    folds: Sequence[WalkForwardFold],
+    *,
+    minimum_folds: int = 2,
+) -> WalkForwardStability:
+    """Summarize OOS fold consistency and fail closed on inadequate coverage."""
+
+    required = int(minimum_folds)
+    if required <= 0:
+        raise ValueError("minimum_folds must be positive")
+
+    blockers: list[str] = []
+    if len(folds) < required:
+        blockers.append(f"insufficient_oos_folds:{len(folds)}<{required}")
+
+    oos_trade_count = sum(fold.test_summary.trade_count for fold in folds)
+    aggregate = CompletedTradeSummary(
+        trade_count=oos_trade_count,
+        gross_pnl=round(sum(fold.test_summary.gross_pnl for fold in folds), 2),
+        estimated_costs=round(
+            sum(fold.test_summary.estimated_costs for fold in folds), 2
+        ),
+        net_pnl=round(sum(fold.test_summary.net_pnl for fold in folds), 2),
+        expectancy=(
+            round(
+                sum(fold.test_summary.net_pnl for fold in folds) / oos_trade_count,
+                4,
+            )
+            if oos_trade_count
+            else 0.0
+        ),
+        win_rate=(
+            round(
+                sum(
+                    fold.test_summary.win_rate * fold.test_summary.trade_count
+                    for fold in folds
+                )
+                / oos_trade_count,
+                4,
+            )
+            if oos_trade_count
+            else 0.0
+        ),
+        average_win=0.0,
+        average_loss=0.0,
+        profit_factor=None,
+        max_drawdown=max(
+            (fold.test_summary.max_drawdown for fold in folds), default=0.0
+        ),
+    )
+    positive = sum(fold.test_summary.net_pnl > 0 for fold in folds)
+    return WalkForwardStability(
+        ready=not blockers,
+        fold_count=len(folds),
+        positive_oos_folds=positive,
+        positive_oos_fraction=round(positive / len(folds), 4) if folds else 0.0,
+        aggregate_oos=aggregate,
+        blockers=tuple(blockers),
+    )
+
+
 def attribution_readiness(
     trades: Sequence[CanonicalCompletedTrade],
     *,
@@ -510,11 +583,13 @@ __all__ = [
     "CompletedTradeSummary",
     "ComponentCoverage",
     "WalkForwardFold",
+    "WalkForwardStability",
     "ExecutionDataQuality",
     "attribution_readiness",
     "execution_data_quality",
     "canonicalize_completed_trades",
     "chronological_post_cost_blocks",
     "chronological_walk_forward",
+    "walk_forward_stability",
     "summarize_completed_trades",
 ]
