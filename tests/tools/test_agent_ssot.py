@@ -30,12 +30,15 @@ def test_agent_architecture_manifest_is_valid_and_paths_exist() -> None:
 
 def test_agent_tools_do_not_reintroduce_parallel_architecture_tables() -> None:
     agent_check = (ROOT / "scripts" / "agent_check.py").read_text(encoding="utf-8")
+    agent_context = (ROOT / "scripts" / "agent_context.py").read_text(encoding="utf-8")
     architecture_lint = (ROOT / "scripts" / "architecture_lint.py").read_text(
         encoding="utf-8"
     )
 
     assert "HIGH_RISK_MARKERS =" not in agent_check
     assert "\nRULES = (" not in agent_check
+    assert "\nCANONICAL = {" not in agent_context
+    assert "\nAREA_TESTS = {" not in agent_context
     assert "BROKER_HISTORY_ALLOWLIST =" not in architecture_lint
     assert "HYDRATION_FORBIDDEN_PREFIXES =" not in architecture_lint
     assert "STRATEGY_FORBIDDEN_CALLS =" not in architecture_lint
