@@ -27,7 +27,10 @@ def _trade(
     signal_quality: dict[str, float] | None = None,
     exit_reason: str = "HARD_SL_BREACH src=ltp sl=90.0",
 ) -> dict[str, object]:
-    outcome: dict[str, object] = {}
+    outcome: dict[str, object] = {
+        "cost_source": "broker_virtual_contract_note",
+        "effective_costs": {"total": estimated_costs},
+    }
     if signal_quality is not None:
         outcome["signal_quality"] = signal_quality
         outcome.update(
@@ -99,8 +102,26 @@ def test_canonicalize_completed_trades_rejects_invalid_post_cost_identity() -> N
         )
     ]
 
-    with pytest.raises(ValueError, match="gross_pnl - estimated_costs"):
+    with pytest.raises(ValueError, match="gross_pnl - effective_costs"):
         canonicalize_completed_trades(rows)
+
+
+def test_canonicalize_rejects_estimated_only_costs_by_default() -> None:
+    row = _trade("estimated", 1.0)
+    row["outcome"] = {"cost_source": "estimated_model"}
+
+    with pytest.raises(ValueError, match="broker-calculated costs required"):
+        canonicalize_completed_trades([row])
+
+
+def test_canonicalize_can_explicitly_include_estimated_costs_for_legacy_audit() -> None:
+    row = _trade("estimated", 1.0)
+    row["outcome"] = {"cost_source": "estimated_model"}
+
+    result = canonicalize_completed_trades([row], allow_estimated_costs=True)
+
+    assert result[0].cost_source == "estimated_model"
+    assert result[0].effective_costs == 20.0
 
 
 def test_chronological_post_cost_blocks_are_contiguous_and_non_overlapping() -> None:
@@ -248,6 +269,8 @@ def test_summary_uses_post_cost_net_pnl() -> None:
 
     assert summary.gross_pnl == 90.0
     assert summary.estimated_costs == 40.0
+    assert summary.effective_costs == 40.0
+    assert summary.broker_cost_trade_count == 2
     assert summary.net_pnl == 50.0
     assert summary.expectancy == 25.0
     assert summary.win_rate == 0.5
