@@ -549,3 +549,80 @@ def test_walk_forward_rejects_invalid_expectancy_margin(bad_margin: float) -> No
             min_validation_trades=1,
             min_validation_expectancy_improvement=bad_margin,
         )
+
+
+def test_trade_store_does_not_mislabel_trade_t_stat_as_sharpe_or_frequency() -> None:
+    store = AdaptiveParameterStore(window_trades=4)
+    store.record_trade("s1", 1.0)
+    stats = store.record_trade("s1", 3.0)
+
+    assert stats.trade_count == 2
+    assert stats.window_fill_ratio == 0.5
+    assert stats.trade_pnl_t_stat > 0.0
+    assert stats.rolling_sharpe is None
+    assert stats.signal_frequency is None
+
+
+def test_optimizer_keeps_regime_parameter_histories_independent() -> None:
+    store = AdaptiveParameterStore(window_trades=10)
+    stats = store.record_trade("s1", 10.0)
+    current = {
+        "momentum_z_threshold": 1.0,
+        "microvol_percentile": 60.0,
+        "spread_threshold_pct": 0.2,
+    }
+    opt = WalkForwardOptimizer(alpha=0.5, allow_parameter_updates=True)
+
+    trend = opt.optimize(
+        "s1",
+        "trend",
+        stats,
+        current,
+        candidate_evaluator=lambda params: -abs(params["momentum_z_threshold"] - 0.9),
+    )
+    range_params = opt.optimize(
+        "s1",
+        "range",
+        stats,
+        current,
+        candidate_evaluator=lambda params: -abs(params["momentum_z_threshold"] - 1.1),
+    )
+
+    assert trend["momentum_z_threshold"] == pytest.approx(0.95)
+    assert range_params["momentum_z_threshold"] == pytest.approx(1.05)
+    assert opt.on_regime_change("s1", "trend", range_params) == trend
+    assert opt.on_regime_change("s1", "range", trend) == range_params
+
+
+def test_optimizer_unfreezes_after_fresh_nonnegative_evidence() -> None:
+    current = {
+        "momentum_z_threshold": 1.0,
+        "microvol_percentile": 60.0,
+        "spread_threshold_pct": 0.2,
+    }
+    opt = WalkForwardOptimizer(alpha=1.0, allow_parameter_updates=True)
+    losing = TradeStats(trade_pnl_t_stat=-1.0)
+    recovered = TradeStats(trade_pnl_t_stat=1.0)
+
+    assert (
+        opt.optimize(
+            "s1",
+            "trend",
+            losing,
+            current,
+            candidate_evaluator=lambda _params: 1.0,
+        )
+        == current
+    )
+    assert "s1" in opt._frozen_strategies
+
+    tuned = opt.optimize(
+        "s1",
+        "trend",
+        recovered,
+        current,
+        candidate_evaluator=lambda params: -abs(params["momentum_z_threshold"] - 0.9),
+    )
+
+    assert "s1" not in opt._frozen_strategies
+    assert tuned["momentum_z_threshold"] == pytest.approx(0.9)
