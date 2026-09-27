@@ -2,12 +2,8 @@
 
 from __future__ import annotations
 
-import importlib.abc
-import importlib.machinery
+import importlib
 import os
-import sys
-from collections.abc import Sequence
-from types import ModuleType
 from typing import Any
 
 from nifty_scalper_bot.utils.logging import get_logger
@@ -17,7 +13,6 @@ from nifty_scalper_bot.utils.pricing import canonical_price_source  # compat
 
 _CORE_TRUTHY = {"1", "true", "yes", "y", "on", "live"}
 _APP_MODULE_NAME = "nifty_scalper_bot.core.app"
-_APP_IMPORT_HOOK_ATTR = "_nifty_scalper_core_app_patch_hook"
 _RUNTIME_HARDENING_REQUIRED = (
     "market_data_hardening",
     "dynamic_universe",
@@ -332,60 +327,6 @@ def install_runtime_hardening() -> dict[str, bool]:
     return _apply_app_runtime_patches(_app_module)
 
 
-class _CoreAppPatchLoader(importlib.abc.Loader):
-    def __init__(self, wrapped: importlib.abc.Loader) -> None:
-        self._wrapped = wrapped
-
-    def create_module(self, spec: importlib.machinery.ModuleSpec) -> ModuleType | None:
-        create = getattr(self._wrapped, "create_module", None)
-        if callable(create):
-            return create(spec)
-        return None
-
-    def exec_module(self, module: ModuleType) -> None:
-        exec_module = getattr(self._wrapped, "exec_module", None)
-        if callable(exec_module):
-            exec_module(module)
-        else:
-            load_module = getattr(self._wrapped, "load_module", None)
-            if callable(load_module):
-                loaded = load_module(module.__name__)  # pragma: no cover
-                if loaded is not module:
-                    module.__dict__.update(getattr(loaded, "__dict__", {}))
-        _apply_app_runtime_patches(module)
-
-
-class _CoreAppPatchFinder(importlib.abc.MetaPathFinder):
-    def find_spec(
-        self,
-        fullname: str,
-        path: Sequence[str] | None,
-        target: ModuleType | None = None,
-    ) -> importlib.machinery.ModuleSpec | None:
-        if fullname != _APP_MODULE_NAME:
-            return None
-        spec = importlib.machinery.PathFinder.find_spec(fullname, path)
-        if (
-            spec is None
-            or spec.loader is None
-            or isinstance(spec.loader, _CoreAppPatchLoader)
-        ):
-            return spec
-        spec.loader = _CoreAppPatchLoader(spec.loader)
-        return spec
-
-
-def _install_core_app_patch_import_hook() -> None:
-    if any(getattr(finder, _APP_IMPORT_HOOK_ATTR, False) for finder in sys.meta_path):
-        return
-    finder = _CoreAppPatchFinder()
-    setattr(finder, _APP_IMPORT_HOOK_ATTR, True)
-    sys.meta_path.insert(0, finder)
-
-
-_install_core_app_patch_import_hook()
-
-
 def __getattr__(name: str) -> Any:
     """Return lazily imported core entry points."""
     _LOGGER.debug(
@@ -396,7 +337,6 @@ def __getattr__(name: str) -> Any:
         try:
             _app_module = importlib.import_module(_APP_MODULE_NAME)
 
-            _apply_app_runtime_patches(_app_module)
             if name == "app":
                 return _app_module
             _App = _app_module.NiftyScalperApp
