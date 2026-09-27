@@ -240,14 +240,21 @@ class ChronologicalWalkForward:
 
 @dataclass(slots=True)
 class TradeStats:
-    """Rolling trade metrics. Args: None. Returns: None. Raises: None."""
+    """Rolling trade metrics without implying a time-series Sharpe ratio."""
 
     win_rate: float = 0.0
     avg_win: float = 0.0
     avg_loss: float = 0.0
-    rolling_sharpe: float = 0.0
+    trade_pnl_t_stat: float = 0.0
     max_drawdown: float = 0.0
-    signal_frequency: float = 0.0
+    trade_count: int = 0
+    window_fill_ratio: float = 0.0
+    # Legacy input compatibility only. AdaptiveParameterStore no longer
+    # populates this misleading field because trade P&L is not a return series.
+    rolling_sharpe: float | None = None
+    # Frequency requires elapsed sessions/time. It cannot be inferred from a
+    # fixed-length trade deque, so the store deliberately leaves it unavailable.
+    signal_frequency: float | None = None
 
 
 @dataclass(slots=True)
@@ -274,11 +281,14 @@ class AdaptiveParameterStore:
         win_rate = len(wins) / max(len(values), 1)
         avg_win = mean(wins) if wins else 0.0
         avg_loss = mean(losses) if losses else 0.0
-        sharpe = 0.0
+        trade_pnl_t_stat = 0.0
         if len(values) >= 2:
             std = pstdev(values)
             if std > 0:
-                sharpe = (mean(values) / std) * sqrt(len(values))
+                # This is a trade-level signal-to-noise/t-statistic proxy, not
+                # an annualised Sharpe ratio. A Sharpe requires a time-indexed
+                # return series and a defined sampling frequency.
+                trade_pnl_t_stat = (mean(values) / std) * sqrt(len(values))
         eq = 0.0
         peak = 0.0
         dd = 0.0
@@ -290,9 +300,10 @@ class AdaptiveParameterStore:
             win_rate=win_rate,
             avg_win=avg_win,
             avg_loss=avg_loss,
-            rolling_sharpe=sharpe,
+            trade_pnl_t_stat=trade_pnl_t_stat,
             max_drawdown=dd,
-            signal_frequency=len(values) / max(float(self.window_trades), 1.0),
+            trade_count=len(values),
+            window_fill_ratio=len(values) / max(float(self.window_trades), 1.0),
         )
         self._stats[strategy] = stats
         return stats
@@ -337,9 +348,14 @@ class WalkForwardOptimizer:
 
         if not self.allow_parameter_updates or candidate_evaluator is None:
             return current
-        if strategy in self._frozen_strategies or stats.rolling_sharpe < 0:
+        selection_statistic = float(stats.trade_pnl_t_stat)
+        if stats.trade_pnl_t_stat == 0.0 and stats.rolling_sharpe is not None:
+            # Compatibility for callers constructing legacy TradeStats directly.
+            selection_statistic = float(stats.rolling_sharpe)
+        if selection_statistic < 0:
             self._frozen_strategies.add(strategy)
             return current
+        self._frozen_strategies.discard(strategy)
         mz = current.get("momentum_z_threshold", 0.5)
         mv = current.get("microvol_percentile", 60.0)
         sp = current.get("spread_threshold_pct", 0.3)
@@ -386,7 +402,7 @@ class WalkForwardOptimizer:
         if self.drawdown_threshold > 0 and stats.max_drawdown > self.drawdown_threshold:
             self.risk_scale = min(self.risk_scale, 0.5)
 
-        prev = self._params.get(strategy, current)
+        prev = self._regime_params.get(strategy, {}).get(regime, current)
         blended = {
             key: (1.0 - self.alpha) * float(prev.get(key, value))
             + self.alpha * float(value)
@@ -406,8 +422,7 @@ class WalkForwardOptimizer:
         target = self._regime_params.get(strategy, {}).get(regime)
         if not target:
             return current
-        return {
-            key: (1.0 - self.alpha) * float(current.get(key, value))
-            + self.alpha * float(value)
-            for key, value in target.items()
-        }
+        # The regime-specific value was already smoothed when selected. Loading
+        # it must not apply a second smoothing pass or contaminate it with the
+        # parameters of the regime being left.
+        return dict(target)

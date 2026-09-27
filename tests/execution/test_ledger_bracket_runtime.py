@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import time
+from types import SimpleNamespace
 from typing import Any
 
 from nifty_scalper_bot.execution.bracket_manager import BracketExitLifecycle
 from nifty_scalper_bot.execution.ledger_bracket_manager import LedgerBracketManager
+from nifty_scalper_bot.risk.cost_model import estimate_round_trip_cost
 
 SYMBOL = "NFO:NIFTY2662324050PE"
 
@@ -493,3 +495,38 @@ def test_concurrent_final_close_accounts_once(monkeypatch, tmp_path) -> None:
     assert bracket.exit_executed is True
     assert bracket.remaining_quantity == 0
     assert manager.has_unresolved_exit() is False
+
+
+def test_completed_trade_costs_count_distinct_broker_orders_not_fill_rows(
+    monkeypatch, tmp_path
+) -> None:
+    manager, _order_manager, _broker = _manager(monkeypatch, tmp_path)
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+
+    class _FillRows:
+        def load_fills(self, _bracket_id: str):
+            return [
+                SimpleNamespace(order_id="entry-1"),
+                SimpleNamespace(order_id="exit-1"),
+                SimpleNamespace(order_id="exit-1"),
+            ]
+
+    manager._fill_ledger = _FillRows()  # type: ignore[assignment]
+    ledger_pnl = SimpleNamespace(entry_vwap=100.0, exit_vwap=110.0, entry_quantity=130)
+    outcome = manager._completed_trade_outcome(
+        bracket,
+        ledger_pnl=ledger_pnl,
+        gross_pnl=1300.0,
+        exit_price=110.0,
+        ledger_complete=True,
+    )
+
+    expected = estimate_round_trip_cost(
+        entry_price=100.0,
+        exit_price=110.0,
+        quantity=130,
+        executed_orders=2,
+    )
+    assert outcome["estimated_costs"]["brokerage"] == expected.brokerage
+    assert outcome["estimated_costs"]["total"] == expected.total

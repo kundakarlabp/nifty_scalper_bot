@@ -68,6 +68,57 @@ _EXPERIMENTAL_CONTEXT_FLAGS = {
 }
 _EXPIRY_ONLY = {"gamma_scalping", "tuesday_gamma_buyer"}
 _TRUE_VALUES = {"1", "true", "yes", "on"}
+_POLICY_ENV_PREFIXES = (
+    "ORB_",
+    "VWAP_",
+    "SMC_",
+    "TRIGGER_",
+    "SIGNAL_MIN_SCORE_",
+    "ORDERFLOW_",
+    "ENABLE_OI_",
+    "ENABLE_BB_",
+    "ENABLE_CPR_",
+    "ENABLE_RSI_",
+)
+_POLICY_ENV_KEYS = frozenset(
+    {
+        "ALLOW_EXPIRY_GAMMA_STRATEGIES",
+        "GLOBAL_MIN_SIGNAL_CONFIDENCE",
+        "LIVE_MAX_SPREAD_PCT",
+        "ORDER_MAX_SPREAD_PCT",
+        "SPREAD_MAX_PCT",
+        "STRATEGY_MODE",
+    }
+)
+
+
+def _material_policy_environment() -> dict[str, str]:
+    """Return only non-secret environment values that can change decisions."""
+
+    return {
+        key: value
+        for key, value in sorted(os.environ.items())
+        if key in _POLICY_ENV_KEYS
+        or any(key.startswith(prefix) for prefix in _POLICY_ENV_PREFIXES)
+    }
+
+
+def _strategy_config_snapshots(
+    strategies: Sequence[EliteStrategy],
+) -> dict[str, dict[str, Any]]:
+    """Return immutable material strategy config snapshots for provenance."""
+
+    snapshots: dict[str, dict[str, Any]] = {}
+    for strategy in strategies:
+        config = getattr(strategy, "config", None)
+        if config is None:
+            continue
+        try:
+            payload = asdict(config)
+        except TypeError:
+            continue
+        snapshots[str(strategy.name)] = payload
+    return snapshots
 
 
 def _env_true(name: str, default: str = "false") -> bool:
@@ -164,7 +215,7 @@ def build_production_strategy_profile(
     from nifty_scalper_bot.core.strategy_manager import REGIME_STRATEGY_WEIGHTS
 
     profile: dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "execution_mode": str(mode_profile.get("mode") or settings.execution_mode),
         "strategies": {
             "mode": strategy_mode,
@@ -177,6 +228,8 @@ def build_production_strategy_profile(
             "per_strategy_min_confidence": confidence_thresholds,
             "mode_gate": dict(mode_profile),
         },
+        "strategy_configs": _strategy_config_snapshots(strategies),
+        "decision_environment": _material_policy_environment(),
         "quote_policy": {
             "order_max_age_ms": int(settings.orders.max_quote_age_ms),
             "liquidity_max_spread_pct": float(settings.liquidity.max_spread_pct),
@@ -215,7 +268,7 @@ def build_production_strategy_profile(
     }
     canonical = json.dumps(profile, sort_keys=True, separators=(",", ":"))
     digest = hashlib.sha256(canonical.encode()).hexdigest()[:12]
-    profile["version"] = f"production-v1-{digest}"
+    profile["version"] = f"production-v2-{digest}"
     return profile
 
 

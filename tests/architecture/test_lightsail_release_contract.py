@@ -57,6 +57,8 @@ def test_release_runner_validates_and_rolls_back() -> None:
     assert '"quiet"[[:space:]]*:[[:space:]]*true' in release
     assert '"bot_loaded"[[:space:]]*:[[:space:]]*false' in release
     assert "http://127.0.0.1:${PORT}/livez" in release
+    assert "http://127.0.0.1:${PORT}/releasez" in release
+    assert "broker_auth_dependency_degraded" in release
     health_block = release.split("service_healthy", 1)[1].split("wait_for_service", 1)[
         0
     ]
@@ -74,7 +76,7 @@ def test_release_health_accepts_only_loaded_or_explicit_quiet_runtime() -> None:
     unloaded = health.index('"bot_loaded"', quiet)
     assert engine < loaded < quiet < unloaded
     assert "return 0" in health[loaded:quiet]
-    assert "return 1" in health[quiet:]
+    assert "broker_auth_dependency_degraded" in health[quiet:]
 
 
 def test_lightsail_release_migrates_existing_systemd_entrypoint_safely() -> None:
@@ -196,3 +198,16 @@ def test_release_provisions_nonsecret_trade_replication_settings() -> None:
         'if [ "$RUNTIME_ENV_CHANGED" = true ]; then FORCE_RESTART=true; fi' in release
     )
     assert "tests/infra/test_supabase_trade_replication.py" in release
+
+
+def test_release_health_separates_candidate_integrity_from_broker_auth() -> None:
+    release = _text("deploy/lightsail_release.sh")
+    health = release.split("service_healthy", 1)[1].split("wait_for_service", 1)[0]
+
+    assert 'local expected_sha="${1:-}"' in health
+    assert "effective_sha" in health
+    assert "broker_auth_dependency_degraded" in health
+    assert "unknown startup failures still trigger rollback" in health
+    assert 'wait_for_service "$AFTER"' in release
+    assert 'service_healthy "$BEFORE"' in release
+    assert "deployed_dependency_degraded" in release

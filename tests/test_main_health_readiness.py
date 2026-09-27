@@ -539,3 +539,30 @@ async def test_lifespan_keeps_replication_alive_when_bot_startup_fails(
         assert replication_cancelled.is_set() is False
 
     assert replication_cancelled.is_set() is True
+
+
+def test_trading_status_distinguishes_live_configuration_from_current_arming(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    ctx = _ctx(
+        broker_balance_valid=True,
+        position_reconciliation_completed=True,
+        live_orders_armed=False,
+    )
+    main.app.state.bot = SimpleNamespace(_ctx=ctx)
+
+    blocked = main.trading_status()
+
+    assert blocked["configured_for_live"] is True
+    assert blocked["can_place_live_order_now"] is False
+    assert blocked["will_trade"] is False
+
+    ctx.live_orders_armed = True
+    ctx.readiness_decision.live_orders_armed = True
+    armed = main.trading_status()
+
+    assert armed["configured_for_live"] is True
+    assert armed["can_place_live_order_now"] is True
+    assert armed["will_trade"] is True
