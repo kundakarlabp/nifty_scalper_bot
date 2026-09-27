@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import pytest
 
-from nifty_scalper_bot.execution import position_identity_extension as identity_ext
 from nifty_scalper_bot.execution.position_manager import Order, PositionManager
+from nifty_scalper_bot.execution.position_reconciliation_identity import (
+    _prepare_broker_positions,
+)
 
 
 SYMBOL = "NFO:NIFTY2670724250PE"
@@ -175,7 +177,7 @@ def test_unresolved_broker_cost_basis_blocks_entries_without_sync_exception(tmp_
     exposures = manager.get_quarantined_broker_exposures()
     assert exposures[SYMBOL]["reason"] == "cost_basis_unresolved"
     assert exposures[SYMBOL]["status"] == "BROKER_POSITION_QUARANTINED"
-    prepared, unresolved = identity_ext._prepare_broker_positions(
+    prepared, unresolved = _prepare_broker_positions(
         manager,
         [
             {
