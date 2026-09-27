@@ -123,7 +123,9 @@ def test_strategy_manager_restores_history_once_without_live_side_effects() -> N
     assert performance.wins == 1
     assert performance.losses == 1
     assert performance.win_rate() == pytest.approx(1 / 3)
-    assert manager._adaptive_store.get_stats("VWAPPro").win_rate == pytest.approx(1 / 3)
+    assert manager._adaptive_store.get_stats("VWAPPro").win_rate == pytest.approx(
+        1 / 3
+    )
 
     with pytest.raises(RuntimeError, match="performance history already initialised"):
         manager.restore_performance_history(history)
