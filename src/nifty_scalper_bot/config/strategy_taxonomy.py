@@ -53,9 +53,13 @@ _TAXONOMY: dict[str, StrategyTaxon] = {
     "smc_lite": StrategyTaxon("smc_lite", "trigger", "directional_trigger"),
     "vwap_pro": StrategyTaxon("vwap_pro", "trigger", "directional_trigger"),
     "orb_pro": StrategyTaxon("orb_pro", "trigger", "directional_trigger"),
-    "premium_squeeze": StrategyTaxon(\n        "premium_squeeze", "trigger", "directional_trigger"\n    ),
+    "premium_squeeze": StrategyTaxon(
+        "premium_squeeze", "trigger", "directional_trigger"
+    ),
     "gamma_scalping": StrategyTaxon("gamma_scalping", "trigger", "expiry_trigger"),
-    "tuesday_gamma_buyer": StrategyTaxon(\n        "tuesday_gamma_buyer", "trigger", "expiry_trigger"\n    ),
+    "tuesday_gamma_buyer": StrategyTaxon(
+        "tuesday_gamma_buyer", "trigger", "expiry_trigger"
+    ),
     "order_flow": StrategyTaxon("order_flow", "context", "directional_context"),
     "oi_max_pain": StrategyTaxon("oi_max_pain", "context", "directional_context"),
     "bb_squeeze": StrategyTaxon("bb_squeeze", "context", "directional_context"),
@@ -78,7 +82,9 @@ def canonical_strategy_role(name: str | None, *, default: str = "trigger") -> st
     return taxon.role if taxon is not None else default
 
 
-def canonical_signal_family(\n    name: str | None, *, default: str = "directional_trigger"\n) -> str:
+def canonical_signal_family(
+    name: str | None, *, default: str = "directional_trigger"
+) -> str:
     taxon = strategy_taxon(name)
     return taxon.signal_family if taxon is not None else default
 
