@@ -1486,7 +1486,6 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from nifty_scalper_bot.config.base import AppConfig
-from nifty_scalper_bot.config.paths import get_data_dir
 from nifty_scalper_bot.config.settings import Settings, get_settings
 from nifty_scalper_bot.core.market_regime_manager import MarketRegimeManager
 from nifty_scalper_bot.core.message_bus import Message, MessageBus, MessageType
