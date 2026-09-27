@@ -70,3 +70,13 @@ def test_ci_normal_test_shards_preserve_one_stable_aggregate_gate() -> None:
     assert 'test "$NORMAL_SHARDS_RESULT" = "success"' in text
     assert "${{ strategy.job-index }}" in text
     assert "${{ strategy.job-total }}" in text
+
+
+def test_full_collection_uses_path_safe_import_mode() -> None:
+    ci = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
+    slow = (WORKFLOWS / "slow-suite-weekly.yml").read_text(encoding="utf-8")
+
+    assert "pytest tests --collect-only" in ci
+    assert "--import-mode=importlib" in ci
+    assert "pytest tests -m slow" in slow
+    assert "--import-mode=importlib" in slow
