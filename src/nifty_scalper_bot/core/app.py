@@ -6481,6 +6481,26 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         regime_bias_map=regime_bias_map,
         market_regime_manager=market_regime_manager,
     )
+    try:
+        restored_trade_count = strategy_manager.restore_trade_results(
+            trade_journal.load_completed_trade_feedback()
+        )
+        LOGGER.info(
+            "STRATEGY_PERFORMANCE_RESTORED trades=%d",
+            restored_trade_count,
+            extra={
+                "event": "STRATEGY_PERFORMANCE_RESTORED",
+                "restored_trade_count": restored_trade_count,
+            },
+        )
+    except Exception as exc:  # noqa: BLE001 - cold neutral state is safe fallback
+        LOGGER.warning(
+            "Strategy performance restore failed; continuing with neutral state: %s",
+            exc,
+            extra={"event": "strategy_performance_restore_failed"},
+            exc_info=exc,
+        )
+
     strategy_profile = build_production_strategy_profile(
         settings=settings,
         strategies=elite_strategies,
