@@ -1504,6 +1504,46 @@ class StrategyManager(_BaseStrategyManager):
             )
         self._score_cache.pop(strategy_name, None)
 
+    def restore_trade_results(
+        self,
+        records: t.Sequence[t.Mapping[str, t.Any]],
+    ) -> int:
+        """Atomically rebuild performance state from canonical completed trades."""
+        restored_performance: dict[str, StrategyPerformance] = {}
+        restored_adaptive = AdaptiveParameterStore(
+            window_trades=self._adaptive_store.window_trades
+        )
+
+        for record in records:
+            strategy_name = str(record.get("strategy") or "").strip()
+            try:
+                resolved_pnl = float(record.get("net_pnl"))
+            except (TypeError, ValueError):
+                resolved_pnl = float("nan")
+            if not strategy_name or not isfinite(resolved_pnl):
+                raise ValueError("strategy and finite net_pnl are required")
+
+            regime_value = record.get("regime")
+            regime_label = (
+                str(regime_value).strip()
+                if isinstance(regime_value, str) and regime_value.strip()
+                else None
+            )
+            performance = restored_performance.setdefault(
+                strategy_name,
+                StrategyPerformance(),
+            )
+            performance.record(resolved_pnl, regime=regime_label)
+            restored_adaptive.record_trade(strategy_name, resolved_pnl)
+
+        self._performance = restored_performance
+        self._adaptive_store = restored_adaptive
+        self._score_cache.clear()
+        self._dynamic_disabled.clear()
+        self._allocation_state.clear()
+        self._regime_last_key = None
+        return len(records)
+
     def notify_entry_accepted(
         self,
         strategy_name: str,
