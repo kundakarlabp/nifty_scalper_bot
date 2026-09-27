@@ -1504,7 +1504,6 @@ class StrategyManager(_BaseStrategyManager):
                     "metadata": dict(metadata),
                 },
             )
-        self._score_cache.pop(strategy_name, None)
 
     def _record_performance_observation(
         self,
