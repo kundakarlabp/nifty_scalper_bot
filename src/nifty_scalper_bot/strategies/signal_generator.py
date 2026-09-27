@@ -162,10 +162,9 @@ class Strategy(ABC):
     ) -> Signal | None:
         """Generate trading signal."""
 
-        # ✅ FIX: Block futures at strategy entry, not execution
-        # This saves CPU cycles and prevents misleading signals
-        if "FUT" in symbol.upper():
-            return None
+        # Symbol-domain eligibility is owned by StrategyManager/orchestration.
+        # Concrete strategies override this method, so guards placed in this
+        # abstract body are not an executable safety boundary.
 
     @abstractmethod
     def get_required_indicators(self) -> list[str]:
@@ -1202,8 +1201,6 @@ class StrategyManager:
         skip_count = 0
 
         bar_count = int(float(indicators.get("bar_count", 0)))
-        vix = float(indicators.get("vix") or 15.0)
-        regime_factor = self._get_regime_modifier(vix)
         vwap = float(
             indicators.get("futures_vwap")
             or indicators.get("nifty_fut_vwap")
@@ -1278,21 +1275,6 @@ class StrategyManager:
                     skip_count += 1
                     continue
 
-                # Gating: Low VIX filter for Momentum strategies
-                if vix < 12.0 and (
-                    "Breakout" in strategy.name or "ORB" in strategy.name
-                ):
-                    logger.debug(
-                        "strategy_skip_vix",
-                        extra={
-                            "event": "strategy_skip_vix",
-                            "strategy": strategy.name,
-                            "vix": vix,
-                        },
-                    )
-                    skip_count += 1
-                    continue
-
                 eval_count += 1
                 logger.debug(
                     "strategy_call",
@@ -1340,13 +1322,6 @@ class StrategyManager:
                         new_conf = signal.confidence / 100.0
                         new_conf = min(new_conf, 0.99)  # Cap at 0.99
                         signal = dataclasses.replace(signal, confidence=new_conf)
-
-                    # Apply regime factor (Low VIX penalty)
-                    if regime_factor < 1.0:
-                        signal = dataclasses.replace(
-                            signal,
-                            confidence=signal.confidence * regime_factor,
-                        )
 
                     # Tag metadata and collect
                     all_signals.append(
@@ -1623,13 +1598,6 @@ class StrategyManager:
             return None
 
         return None
-
-    def _get_regime_modifier(self, vix: float) -> float:
-        if vix > 24.0:
-            return 0.8
-        if vix < 11.0:
-            return 0.9
-        return 1.0
 
     def _validate_option_physics(self, symbol: str, action: str) -> bool:
         """Rejects 'Garbage Options' based on Greeks, Spread, and Liquidity."""
