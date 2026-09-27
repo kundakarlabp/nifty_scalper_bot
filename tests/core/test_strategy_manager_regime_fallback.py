@@ -70,6 +70,26 @@ def test_vote_boundary_stamps_canonical_strategy_identity() -> None:
     assert vote.metadata["strategy_key"] == "vwap_pro"
     assert vote.metadata["strategy_role"] == "trigger"
     assert vote.metadata["signal_family"] == "directional_trigger"
+    assert vote.metadata["setup_name"] == "test"
+
+
+def test_vote_boundary_prefers_explicit_setup_name_over_legacy_setup_type() -> None:
+    from nifty_scalper_bot.core.strategy_manager import signal_to_vote
+
+    vote = signal_to_vote(
+        _signal(
+            "NFO:NIFTY24500CE",
+            confidence=0.8,
+            metadata={
+                "raw_setup_score": 8.0,
+                "setup_name": "canonical_setup",
+                "setup_type": "legacy_setup",
+            },
+        ),
+        "VWAPPro",
+    )
+
+    assert vote.metadata["setup_name"] == "canonical_setup"
 
 
 def test_vote_boundary_uses_taxonomy_for_context_aliases() -> None:

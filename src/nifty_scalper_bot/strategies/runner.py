@@ -21361,8 +21361,12 @@ class StrategyRunner:
                 resolved_lot_size=_resolved_lot_size,
                 trade_provenance={
                     "strategy_name": strategy_name,
+                    "strategy_key": metadata.get("strategy_key"),
+                    "strategy_role": metadata.get("strategy_role"),
+                    "signal_family": metadata.get("signal_family"),
                     "setup_name": str(
-                        metadata.get("setup_type")
+                        metadata.get("setup_name")
+                        or metadata.get("setup_type")
                         or metadata.get("feature")
                         or signal.reason
                         or strategy_name
