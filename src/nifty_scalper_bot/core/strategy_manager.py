@@ -3384,11 +3384,17 @@ class StrategyManager(_BaseStrategyManager):
                 int(spot_ctx.get("context_snapshot_version") or 0),
                 int(fut_ctx.get("context_snapshot_version") or 0),
             )
+            spot_snapshot_version = int(spot_ctx.get("context_snapshot_version") or 0)
+            futures_snapshot_version = int(fut_ctx.get("context_snapshot_version") or 0)
             indicators["context_snapshot_pair"] = (
-                int(spot_ctx.get("context_snapshot_version") or 0),
-                int(fut_ctx.get("context_snapshot_version") or 0),
+                spot_snapshot_version,
+                futures_snapshot_version,
+            )
+            indicators["context_snapshot_version_skew"] = abs(
+                spot_snapshot_version - futures_snapshot_version
             )
             context_resolved = False
+            context_available = False
             direction_context_source: str | None = None
             if resolution.conflict:
                 # Fresh contradictory evidence is a transition, not stale/missing
@@ -3407,19 +3413,24 @@ class StrategyManager(_BaseStrategyManager):
                 indicators["direction_resolution_reason"] = resolution.reason
                 indicators["direction_context_source"] = "spot_futures_transition"
                 direction_context_source = "spot_futures_transition"
+                context_available = True
                 log_throttled(
                     log,
-                    f"direction_context_conflict:{symbol}",
-                    "DIRECTION_CONTEXT_CONFLICT_FAIL_CLOSED symbol=%s spot_bias=%s futures_bias=%s spot_age_s=%s futures_age_s=%s",
+                    f"direction_context_transition:{symbol}",
+                    "DIRECTION_CONTEXT_TRANSITION symbol=%s spot_bias=%s futures_bias=%s spot_age_s=%s futures_age_s=%s spot_snapshot_version=%s futures_snapshot_version=%s snapshot_version_skew=%s reason=%s",
                     symbol,
                     spot_observation.bias if spot_observation else None,
                     futures_observation.bias if futures_observation else None,
                     spot_observation.age_seconds if spot_observation else None,
                     futures_observation.age_seconds if futures_observation else None,
+                    spot_snapshot_version,
+                    futures_snapshot_version,
+                    indicators["context_snapshot_version_skew"],
+                    resolution.reason,
                     interval_sec=30.0,
                     level=logging.WARNING,
                     extra={
-                        "event": "DIRECTION_CONTEXT_CONFLICT_FAIL_CLOSED",
+                        "event": "DIRECTION_CONTEXT_TRANSITION",
                         "symbol": symbol,
                         "spot_bias": spot_observation.bias if spot_observation else None,
                         "futures_bias": futures_observation.bias if futures_observation else None,
@@ -3440,16 +3451,21 @@ class StrategyManager(_BaseStrategyManager):
                     indicators["direction_context_confirming_source"] = resolution.confirming_source
                 direction_context_source = observation.source
                 context_resolved = True
+                context_available = True
                 log_throttled(
                     log,
                     f"direction_context_resolved:{symbol}",
-                    "DIRECTION_CONTEXT_RESOLVED source=%s bias=%s confidence=%.2f age_s=%.2f symbol=%s confirming_source=%s",
+                    "DIRECTION_CONTEXT_RESOLVED source=%s bias=%s confidence=%.2f age_s=%.2f symbol=%s confirming_source=%s spot_snapshot_version=%s futures_snapshot_version=%s snapshot_version_skew=%s reason=%s",
                     observation.source,
                     observation.bias,
                     observation.confidence,
                     observation.age_seconds,
                     symbol,
                     resolution.confirming_source,
+                    spot_snapshot_version,
+                    futures_snapshot_version,
+                    indicators["context_snapshot_version_skew"],
+                    resolution.reason,
                     interval_sec=30.0,
                     level=logging.INFO,
                 )
@@ -3461,7 +3477,7 @@ class StrategyManager(_BaseStrategyManager):
                 indicators["direction_context_source"] = "unresolved"
                 direction_context_source = "unresolved"
 
-            if not context_resolved:
+            if not context_available:
                 log_throttled(
                     log,
                     f"option_underlying_context_missing:{symbol}",
