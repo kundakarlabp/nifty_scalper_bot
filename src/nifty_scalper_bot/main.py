@@ -31,6 +31,7 @@ from nifty_scalper_bot.infra.scheduled_tasks import (
     start_daily_log_archive_task,
     start_trade_replication_task,
 )
+from nifty_scalper_bot.journal.trade_ledger import load_trade_ledger_rows
 from nifty_scalper_bot.utils.async_helpers import safe_task
 from nifty_scalper_bot.utils.metrics import ensure_multiproc_dir
 
@@ -302,8 +303,6 @@ async def lifespan(app: FastAPI):
 # -------------------------------------------------------
 # FASTAPI APP
 # -------------------------------------------------------
-
-from nifty_scalper_bot.journal.trade_ledger import load_trade_ledger_rows
 
 app = FastAPI(lifespan=lifespan)
 app.state.bot = None
