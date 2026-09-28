@@ -149,5 +149,9 @@ def arbitrate_underlying_direction(
     return UnderlyingDirectionResolution(
         observation=observation,
         state=_state_for_bias(observation.bias if observation else None),
-        reason="single_fresh_underlying_source" if observation else "no_fresh_underlying_source",
+        reason=(
+            "single_fresh_underlying_source"
+            if observation
+            else "no_fresh_underlying_source"
+        ),
     )
