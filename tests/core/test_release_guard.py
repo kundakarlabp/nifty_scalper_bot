@@ -25,6 +25,7 @@ def _clear_release_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "APP_BUILD_SHA_FILE",
         "RAILWAY_GIT_COMMIT_SHA",
         "EXPECTED_GIT_COMMIT_SHA",
+        "GIT_COMMIT_SHA",
         "GIT_SHA",
         "RELEASE_ID",
         "RAILWAY_PROJECT_ID",
@@ -67,6 +68,23 @@ def test_strict_release_guard_rejects_mismatched_image(
 
     with pytest.raises(RuntimeError, match="DEPLOYMENT_RELEASE_MISMATCH"):
         enforce_release_freshness(embedded_path=marker)
+
+
+def test_lightsail_runtime_prefers_published_git_commit_sha(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _clear_release_env(monkeypatch)
+    marker = tmp_path / ".build_commit_sha"
+    marker.write_text(SHA_A, encoding="utf-8")
+    monkeypatch.setenv("GIT_COMMIT_SHA", SHA_B)
+
+    snapshot = build_release_snapshot(embedded_path=marker)
+
+    assert snapshot.strict is False
+    assert snapshot.build_sha == SHA_A
+    assert snapshot.runtime_sha == SHA_B
+    assert snapshot.effective_sha == SHA_B
 
 
 def test_local_runtime_without_release_metadata_is_non_strict(
