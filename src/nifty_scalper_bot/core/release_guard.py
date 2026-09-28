@@ -125,6 +125,7 @@ def build_release_snapshot(*, embedded_path: Path | None = None) -> ReleaseSnaps
     runtime_sha = _first_sha(
         os.getenv("RAILWAY_GIT_COMMIT_SHA"),
         os.getenv("EXPECTED_GIT_COMMIT_SHA"),
+        os.getenv("GIT_COMMIT_SHA"),
         os.getenv("GIT_SHA"),
         os.getenv("RELEASE_ID"),
     )
