@@ -128,13 +128,13 @@ def test_unchanged_release_confirms_health_failure_before_restart() -> None:
         "wait_for_service()", 1
     )[0]
 
-    assert 'BOT_DEPLOY_HEALTH_PROBE_ATTEMPTS:-3' in helper
-    assert 'BOT_DEPLOY_HEALTH_PROBE_INTERVAL_SEC:-2' in helper
+    assert "BOT_DEPLOY_HEALTH_PROBE_ATTEMPTS:-3" in helper
+    assert "BOT_DEPLOY_HEALTH_PROBE_INTERVAL_SEC:-2" in helper
     assert 'service_healthy "$expected_sha"' in helper
     assert "for attempt in" in helper
 
     unchanged = release.split('if [ "$BEFORE" = "$AFTER" ]', 1)[1].split(
-        'CANDIDATE=', 1
+        "CANDIDATE=", 1
     )[0]
     assert 'service_healthy_confirmed "$BEFORE"' in unchanged
     assert 'service_healthy "$BEFORE"' not in unchanged
