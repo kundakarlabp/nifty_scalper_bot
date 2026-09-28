@@ -69,7 +69,7 @@ def test_vote_boundary_stamps_canonical_strategy_identity() -> None:
     assert vote.metadata["strategy"] == "VWAPPro"
     assert vote.metadata["strategy_key"] == "vwap_pro"
     assert vote.metadata["strategy_role"] == "trigger"
-    assert vote.metadata["signal_family"] == "directional_trigger"
+    assert vote.metadata["signal_family"] == "reclaim_structure"
     assert vote.metadata["setup_name"] == "test"
 
 
