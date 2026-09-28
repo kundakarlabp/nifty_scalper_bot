@@ -13607,7 +13607,8 @@ class OrderManager:
                 ledger_counts = ledger_reconciler(broker_orders)
                 if ledger_counts.get("seen", 0):
                     self._logger.info(
-                        "BROKER_ORDER_RECONCILE_OK seen=%s managed=%s external=%s resolved=%s",
+                        "BROKER_ORDER_RECONCILE_OK seen=%s managed=%s "
+                        "external=%s resolved=%s",
                         ledger_counts.get("seen", 0),
                         ledger_counts.get("managed", 0),
                         ledger_counts.get("external", 0),
