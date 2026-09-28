@@ -9,7 +9,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
-from nifty_scalper_bot.config.strategy_taxonomy import (\n    canonical_signal_family,\n    is_context_only_strategy,\n)
+from nifty_scalper_bot.config.strategy_taxonomy import (
+    canonical_signal_family,
+    is_context_only_strategy,
+)
 
 _SCORE_KEYS = ("raw_setup_score", "setup_score", "strategy_score")
 _MIN_KEYS = ("setup_min", "setup_min_score", "trigger_min_score", "min_score")
