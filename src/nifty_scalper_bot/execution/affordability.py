@@ -97,7 +97,16 @@ def _risk_budget_snapshot(
     lot_size: int,
     *,
     available_balance: float | None = None,
-) -> tuple[float | None, float | None, float | None, float | None, float | None, float | None, float | None, str | None]:
+) -> tuple[
+    float | None,
+    float | None,
+    float | None,
+    float | None,
+    float | None,
+    float | None,
+    float | None,
+    str | None,
+]:
     """Return risk-budget telemetry without making a readiness decision.
 
     MarginEngine and RiskManager own final position sizing and stop-risk
