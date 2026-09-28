@@ -45,7 +45,7 @@ class MarketRegimeManager:
     block_thresholds: MutableMapping[str, float] = field(
         default_factory=lambda: {"event": 0.8, "volatile": 0.95}
     )
-    fail_closed: bool = False
+    fail_closed: bool = True
     datahub: Any | None = None
     indicators: Any | None = None
     regime_settings: Mapping[str, Any] | None = None
