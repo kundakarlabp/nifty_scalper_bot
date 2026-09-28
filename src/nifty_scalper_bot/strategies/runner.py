@@ -10024,7 +10024,7 @@ class StrategyRunner:
             return MarketRegime.UNKNOWN
 
     def detect_market_regime(self, symbol: str) -> str:
-        """Args: symbol. Returns: coarse regime label. Raises: None."""
+        """Return coarse ATR activity state for the separate low-volatility safety guard."""
         try:
             atr_raw = (
                 self._indicator_engine.get_atr(symbol)
@@ -10046,7 +10046,7 @@ class StrategyRunner:
             return "unknown"
 
     def _strategy_allowed_for_regime(self, strategy: str, regime: MarketRegime) -> bool:
-        """Validate regime gate for strategy. Args: strategy, regime; Returns: bool; Raises: none."""
+        """Validate strategy admission against the central accepted regime."""
 
         if not _env_bool("RUNNER_ENABLE_REGIME_GATE", True):
             self._logger.debug(
