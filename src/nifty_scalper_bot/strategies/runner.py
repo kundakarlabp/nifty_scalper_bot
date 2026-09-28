@@ -19000,15 +19000,25 @@ class StrategyRunner:
                 option_side=initial_option_side,
                 reason_key=reason_key,
             )
-            reject_cooldown_key = f"{base_symbol}:{reason_key}:score_below_threshold"
+            setup_id = str((getattr(signal, "metadata", {}) or {}).get("setup_id") or "").strip()
+            reject_scope = setup_id or f"{base_symbol}:{reason_key}"
+            reject_cooldown_key = f"{reject_scope}:score_below_threshold"
+            # A hard quality rejection belongs to the structural setup. Merely
+            # waiting 15 seconds must not let the identical setup repeatedly
+            # sample noisy context until one snapshot passes. A genuinely new
+            # setup_id escapes this veto immediately.
+            required_reject_seconds = float(
+                os.getenv(
+                    "SETUP_REJECT_COOLDOWN_SECONDS" if setup_id else "SIGNAL_REJECT_COOLDOWN_SECONDS",
+                    "900" if setup_id else "15",
+                ) or ("900" if setup_id else "15")
+            )
             reject_last_ts = self._signal_reject_cooldown_ts.get(reject_cooldown_key)
             if reject_last_ts is not None and (
                 now_epoch - float(reject_last_ts)
-            ) < float(os.getenv("SIGNAL_REJECT_COOLDOWN_SECONDS", "15") or "15"):
+            ) < required_reject_seconds:
                 reject_age = now_epoch - float(reject_last_ts)
-                required_seconds = float(
-                    os.getenv("SIGNAL_REJECT_COOLDOWN_SECONDS", "15") or "15"
-                )
+                required_seconds = required_reject_seconds
                 self._logger.info(
                     "SIGNAL_REJECT_COOLDOWN_ACTIVE symbol=%s reason=%s trace_id=%s",
                     base_symbol,
