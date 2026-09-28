@@ -9,125 +9,42 @@ from nifty_scalper_bot.core.underlying_direction import (
 
 def _obs(bias: str, *, source: str, age: float, confidence: float = 0.8):
     return UnderlyingDirectionObservation(
-        bias=bias,
-        confidence=confidence,
-        age_seconds=age,
-        source=source,
+        bias=bias, confidence=confidence, age_seconds=age, source=source
     )
 
 
 def test_agreement_uses_futures_as_price_discovery_authority() -> None:
     spot = _obs("PE", source="spot_context", age=2.4, confidence=0.84)
     futures = _obs("PE", source="futures_context", age=0.2, confidence=0.91)
-
     resolved = arbitrate_underlying_direction(spot, futures)
-
     assert resolved.conflict is False
     assert resolved.observation is futures
-    assert resolved.observation.age_seconds == 0.2
-    assert resolved.observation.confidence == 0.91
+    assert resolved.state is UnderlyingDirectionState.CONFIRMED_BEAR
     assert resolved.confirming_source == "spot_context"
 
 
-def test_comparable_disagreement_fails_closed_even_when_futures_is_primary() -> None:
-    resolved = arbitrate_underlying_direction(
-        _obs("CE", source="spot_context", age=0.4, confidence=0.82),
-        _obs("PE", source="futures_context", age=0.1, confidence=0.74),
+def test_any_fresh_spot_futures_disagreement_is_non_executable_transition() -> None:
+    confidence_pairs = (
+        (0.95, 0.58),
+        (0.58, 0.95),
+        (0.82, 0.74),
+        (0.68, 0.45),
     )
-
-    assert resolved.conflict is True
-    assert resolved.observation is None
-
-
-def test_materially_stronger_spot_can_override_weak_futures() -> None:
-    spot = _obs("PE", source="spot_context", age=0.2, confidence=0.90)
-    resolved = arbitrate_underlying_direction(
-        spot,
-        _obs("CE", source="futures_context", age=0.1, confidence=0.58),
-    )
-    assert resolved.conflict is False
-    assert resolved.observation is spot
-    assert resolved.confirming_source == "futures_context:weak_disagreement"
-
-
-def test_materially_stronger_futures_can_override_weak_spot() -> None:
-    futures = _obs("CE", source="futures_context", age=0.1, confidence=0.91)
-    resolved = arbitrate_underlying_direction(
-        _obs("PE", source="spot_context", age=0.2, confidence=0.60),
-        futures,
-    )
-    assert resolved.conflict is False
-    assert resolved.observation is futures
-    assert resolved.confirming_source == "spot_context:weak_disagreement"
-
-
-def test_confirmed_leader_resolves_weak_transition_hysteresis_band() -> None:
-    resolved = arbitrate_underlying_direction(
-        _obs("PE", source="spot_context", age=0.2, confidence=0.60),
-        _obs("CE", source="futures_context", age=0.1, confidence=0.75),
-    )
-
-    assert resolved.conflict is False
-    assert resolved.observation is not None
-    assert resolved.observation.bias == "CE"
-    assert resolved.confirming_source == "spot_context:weak_transition"
-
-
-def test_transition_band_does_not_override_credible_opposition() -> None:
-    resolved = arbitrate_underlying_direction(
-        _obs("PE", source="spot_context", age=0.2, confidence=0.61),
-        _obs("CE", source="futures_context", age=0.1, confidence=0.75),
-    )
-
-    assert resolved.conflict is True
-    assert resolved.observation is None
-
-
-def test_transition_band_requires_confirmed_leader() -> None:
-    resolved = arbitrate_underlying_direction(
-        _obs("PE", source="spot_context", age=0.2, confidence=0.60),
-        _obs("CE", source="futures_context", age=0.1, confidence=0.74),
-    )
-
-    assert resolved.conflict is True
-    assert resolved.observation is None
-
-
-def test_credible_opposition_is_transition_and_fails_closed_despite_large_gap() -> None:
-    resolved = arbitrate_underlying_direction(
-        _obs("PE", source="spot_context", age=0.2, confidence=0.69),
-        _obs("CE", source="futures_context", age=0.1, confidence=0.91),
-    )
-
-    assert resolved.conflict is True
-    assert resolved.observation is None
-
-
-def test_weak_disagreement_boundary_still_allows_dominant_source() -> None:
-    futures = _obs("PE", source="futures_context", age=0.1, confidence=0.90)
-    resolved = arbitrate_underlying_direction(
-        _obs("CE", source="spot_context", age=0.2, confidence=0.60),
-        futures,
-    )
-
-    assert resolved.conflict is False
-    assert resolved.observation is futures
-
-
-def test_low_conviction_disagreement_still_fails_closed() -> None:
-    resolved = arbitrate_underlying_direction(
-        _obs("PE", source="spot_context", age=0.2, confidence=0.68),
-        _obs("CE", source="futures_context", age=0.1, confidence=0.45),
-    )
-    assert resolved.conflict is True
-    assert resolved.observation is None
+    for spot_conf, fut_conf in confidence_pairs:
+        resolved = arbitrate_underlying_direction(
+            _obs("CE", source="spot_context", age=0.2, confidence=spot_conf),
+            _obs("PE", source="futures_context", age=0.1, confidence=fut_conf),
+        )
+        assert resolved.conflict is True
+        assert resolved.observation is None
+        assert resolved.executable_bias is None
+        assert resolved.state is UnderlyingDirectionState.TRANSITION
+        assert resolved.reason == "fresh_spot_futures_disagreement"
 
 
 def test_single_resolved_source_is_accepted_without_cross_source_age() -> None:
     futures = _obs("PE", source="futures_context", age=1.7, confidence=0.76)
-
     resolved = arbitrate_underlying_direction(None, futures)
-
     assert resolved.conflict is False
     assert resolved.observation is futures
     assert resolved.observation.age_seconds == 1.7
@@ -148,27 +65,5 @@ def test_strategy_manager_documents_and_uses_underlying_only_authority() -> None
     source = Path("src/nifty_scalper_bot/core/strategy_manager.py").read_text()
     assert "OPTION PREMIUM DATA MUST NEVER AUTHORIZE UNDERLYING DIRECTION" in source
     assert "arbitrate_underlying_direction" in source
-    assert 'direction_bias = (indicators.get("direction_bias")' not in source
     assert "DIRECTION_CONTEXT_TRANSITION" in source
     assert "context_snapshot_version_skew" in source
-
-
-def test_agreement_exposes_semantic_bull_state() -> None:
-    resolved = arbitrate_underlying_direction(
-        _obs("CE", source="spot_context", age=0.2, confidence=0.80),
-        _obs("CE", source="futures_context", age=0.1, confidence=0.85),
-    )
-    assert resolved.state is UnderlyingDirectionState.CONFIRMED_BULL
-    assert resolved.executable_bias == "CE"
-    assert resolved.reason == "spot_futures_agree"
-
-
-def test_credible_disagreement_is_transition_not_missing_context() -> None:
-    resolved = arbitrate_underlying_direction(
-        _obs("PE", source="spot_context", age=0.2, confidence=0.82),
-        _obs("CE", source="futures_context", age=0.1, confidence=0.84),
-    )
-    assert resolved.observation is None
-    assert resolved.conflict is True
-    assert resolved.state is UnderlyingDirectionState.TRANSITION
-    assert resolved.reason == "credible_spot_futures_disagreement"

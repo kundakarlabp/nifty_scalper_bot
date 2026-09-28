@@ -9,7 +9,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
-from nifty_scalper_bot.config.strategy_taxonomy import is_context_only_strategy
+from nifty_scalper_bot.config.strategy_taxonomy import (
+    canonical_signal_family,
+    is_context_only_strategy,
+)
 
 _SCORE_KEYS = ("raw_setup_score", "setup_score", "strategy_score")
 _MIN_KEYS = ("setup_min", "setup_min_score", "trigger_min_score", "min_score")
@@ -134,7 +137,11 @@ def independent_same_side_confirmation(
     best_strategy = str(getattr(best, "strategy", "") or "").strip().lower()
     if best_side not in {"CE", "PE"} or not best_strategy:
         return False, []
+    best_family = canonical_signal_family(best_strategy)
 
+    # Consensus is evidence diversification, not object-count diversification.
+    # Two strategies derived from the same canonical evidence family may agree
+    # because of one price move and therefore cannot confirm each other.
     confirming = sorted(
         {
             str(getattr(vote, "strategy", "") or "").strip()
@@ -142,6 +149,7 @@ def independent_same_side_confirmation(
             if str(getattr(vote, "side", "") or "").upper() == best_side
             and str(getattr(vote, "strategy", "") or "").strip().lower()
             not in {"", best_strategy}
+            and canonical_signal_family(getattr(vote, "strategy", None)) != best_family
         }
     )
     return bool(confirming), confirming

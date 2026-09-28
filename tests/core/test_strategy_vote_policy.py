@@ -89,3 +89,19 @@ def test_close_vote_cannot_count_as_independent_entry_confirmation():
         (_signal("CLOSE_LONG"), _vote(strategy="VWAPPro", side="CE", score=9.0, role="trigger")),
     ]
     assert independent_same_side_confirmation(signals) == (False, [])
+
+
+def test_smc_and_vwap_same_reclaim_family_do_not_manufacture_consensus():
+    signals = [
+        (_signal(), _vote(strategy="SMC", side="CE", score=8.0, role="trigger")),
+        (_signal(), _vote(strategy="VWAPPro", side="CE", score=7.5, role="trigger")),
+    ]
+    assert independent_same_side_confirmation(signals) == (False, [])
+
+
+def test_reclaim_and_orb_breakout_are_independent_evidence_families():
+    signals = [
+        (_signal(), _vote(strategy="SMC", side="CE", score=8.0, role="trigger")),
+        (_signal(), _vote(strategy="ORBPro", side="CE", score=7.5, role="trigger")),
+    ]
+    assert independent_same_side_confirmation(signals) == (True, ["ORBPro"])

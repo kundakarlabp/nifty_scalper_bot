@@ -102,49 +102,14 @@ def arbitrate_underlying_direction(
                 reason="spot_futures_agree",
             )
 
-        confidence_gap = abs(spot.confidence - futures.confidence)
-        stronger = spot if spot.confidence > futures.confidence else futures
-        weaker = futures if stronger is spot else spot
-        if (
-            confidence_gap < _DOMINANCE_GAP
-            and stronger.confidence >= _MIN_TRANSITION_LEADER_CONFIDENCE
-            and weaker.confidence <= _MAX_WEAK_DISAGREEMENT_CONFIDENCE
-            and confidence_gap >= _MIN_TRANSITION_GAP
-        ):
-            return UnderlyingDirectionResolution(
-                observation=stronger,
-                confirming_source=f"{weaker.source}:weak_transition",
-                state=_state_for_bias(stronger.bias),
-                reason="dominant_source_weak_transition",
-            )
-        if confidence_gap < _DOMINANCE_GAP:
-            return UnderlyingDirectionResolution(
-                observation=None,
-                conflict=True,
-                state=UnderlyingDirectionState.TRANSITION,
-                reason="credible_spot_futures_disagreement",
-            )
-
-        if stronger.confidence < _MIN_DOMINANT_CONFIDENCE:
-            return UnderlyingDirectionResolution(
-                observation=None,
-                conflict=True,
-                state=UnderlyingDirectionState.TRANSITION,
-                reason="credible_spot_futures_disagreement",
-            )
-        if weaker.confidence > _MAX_WEAK_DISAGREEMENT_CONFIDENCE:
-            return UnderlyingDirectionResolution(
-                observation=None,
-                conflict=True,
-                state=UnderlyingDirectionState.TRANSITION,
-                reason="credible_spot_futures_disagreement",
-            )
-
+        # Canonical execution invariant: two fresh underlying authorities that
+        # disagree are a transition. Confidence dominance is diagnostic only;
+        # it must never manufacture an executable CE/PE bias from conflict.
         return UnderlyingDirectionResolution(
-            observation=stronger,
-            confirming_source=f"{weaker.source}:weak_disagreement",
-            state=_state_for_bias(stronger.bias),
-            reason="dominant_source_weak_disagreement",
+            observation=None,
+            conflict=True,
+            state=UnderlyingDirectionState.TRANSITION,
+            reason="fresh_spot_futures_disagreement",
         )
 
     observation = futures if futures is not None else spot

@@ -16,7 +16,10 @@ def test_aliases_share_one_structural_identity() -> None:
 def test_directional_runtime_roles_are_canonical() -> None:
     for name in ("SMC", "VWAPPro", "ORBPro"):
         assert canonical_strategy_role(name) == "trigger"
-        assert canonical_signal_family(name) == "directional_trigger"
+
+    assert canonical_signal_family("SMC") == "reclaim_structure"
+    assert canonical_signal_family("VWAPPro") == "reclaim_structure"
+    assert canonical_signal_family("ORBPro") == "opening_breakout"
 
     for name in ("OrderFlow", "OIMaxPain", "BBSqueeze", "CPRBreakout", "RSIDivergence"):
         assert is_context_only_strategy(name)
