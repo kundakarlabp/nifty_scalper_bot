@@ -149,7 +149,8 @@ def test_strategy_manager_documents_and_uses_underlying_only_authority() -> None
     assert "OPTION PREMIUM DATA MUST NEVER AUTHORIZE UNDERLYING DIRECTION" in source
     assert "arbitrate_underlying_direction" in source
     assert 'direction_bias = (indicators.get("direction_bias")' not in source
-    assert "DIRECTION_CONTEXT_CONFLICT_FAIL_CLOSED" in source
+    assert "DIRECTION_CONTEXT_TRANSITION" in source
+    assert "context_snapshot_version_skew" in source
 
 
 def test_agreement_exposes_semantic_bull_state() -> None:
