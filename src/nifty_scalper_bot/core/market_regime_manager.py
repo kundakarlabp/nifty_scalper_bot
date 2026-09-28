@@ -39,8 +39,8 @@ class MarketRegimeManager:
 
     detector: MarketRegimeDetector
     history_limit: int = 64
-    min_confidence: float = 0.45
-    stale_after_seconds: float = 180.0
+    min_confidence: float = 0.40
+    stale_after_seconds: float = 300.0
     transition_confirmations: int = 2
     block_thresholds: MutableMapping[str, float] = field(
         default_factory=lambda: {"event": 0.8, "volatile": 0.95}
