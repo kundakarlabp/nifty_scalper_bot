@@ -4,6 +4,7 @@ from nifty_scalper_bot.strategies.indicators import IndicatorEngine
 from nifty_scalper_bot.strategies.runtime_context_contract import (
     live_direction_context_has_proof,
     normalise_live_direction_context,
+    resolve_context_age_optional,
     resolve_context_age_seconds,
 )
 
@@ -214,3 +215,20 @@ def test_runtime_context_current_age_replaces_cached_false_atomically() -> None:
     assert indicators["fut_fresh"] is True
     assert indicators["futures_fresh"] is True
     assert indicators["live_direction_context_proof"] is True
+
+
+def test_optional_context_age_does_not_encode_missing_as_999() -> None:
+    assert resolve_context_age_optional({}) is None
+    assert resolve_context_age_seconds({}) == 999.0  # compatibility adapter only
+
+
+def test_normalised_context_labels_missing_freshness_explicitly() -> None:
+    preserved = normalise_live_direction_context({"direction_bias": "CE"})
+    assert preserved["context_freshness_state"] == "MISSING"
+
+
+def test_normalised_context_labels_fresh_age_explicitly() -> None:
+    preserved = normalise_live_direction_context(
+        {"direction_bias": "PE", "context_age_seconds": 0.25}
+    )
+    assert preserved["context_freshness_state"] == "FRESH"

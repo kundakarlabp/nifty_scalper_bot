@@ -50,6 +50,7 @@ from nifty_scalper_bot.core.strategy_vote_policy import (
 )
 from nifty_scalper_bot.core.underlying_direction import (
     UnderlyingDirectionObservation,
+    UnderlyingDirectionState,
     arbitrate_underlying_direction,
 )
 from nifty_scalper_bot.infra.metrics import METRICS
@@ -2409,8 +2410,11 @@ class StrategyManager(_BaseStrategyManager):
         derived_direction = stabilised["direction"]
         derived_confidence = stabilised["confidence"]
         derived_reasons = stabilised["reasons"]
+        self._context_snapshot_version = int(getattr(self, "_context_snapshot_version", 0) or 0) + 1
+        snapshot_version = self._context_snapshot_version
         snapshot = {
             "symbol": symbol, "role": role, "context_kind": context_kind, "timestamp": time.time(),
+            "context_snapshot_version": snapshot_version,
             "ltp": _num("ltp", "close", "price"), "close": _num("close", "ltp", "price"),
             "vwap": _num("exchange_vwap", "session_vwap", "vwap"),
             "ema_fast": ema_fast,
@@ -3354,6 +3358,9 @@ class StrategyManager(_BaseStrategyManager):
             indicators.pop("context_age_seconds", None)
             indicators.pop("context_fresh", None)
             indicators.pop("direction_context_source", None)
+            indicators.pop("underlying_direction_state", None)
+            indicators.pop("direction_transition", None)
+            indicators.pop("direction_resolution_reason", None)
 
             spot_observation = _resolve_underlying_observation(
                 spot_ctx,
@@ -3373,12 +3380,33 @@ class StrategyManager(_BaseStrategyManager):
                 spot_observation,
                 futures_observation,
             )
+            indicators["context_snapshot_version"] = max(
+                int(spot_ctx.get("context_snapshot_version") or 0),
+                int(fut_ctx.get("context_snapshot_version") or 0),
+            )
+            indicators["context_snapshot_pair"] = (
+                int(spot_ctx.get("context_snapshot_version") or 0),
+                int(fut_ctx.get("context_snapshot_version") or 0),
+            )
             context_resolved = False
             direction_context_source: str | None = None
             if resolution.conflict:
-                indicators["context_fresh"] = False
-                indicators["direction_context_source"] = "spot_futures_conflict"
-                direction_context_source = "spot_futures_conflict"
+                # Fresh contradictory evidence is a transition, not stale/missing
+                # context. Keep execution fail-closed (no CE/PE bias) while
+                # preserving freshness/provenance for strategy diagnostics.
+                conflict_ages = [
+                    obs.age_seconds
+                    for obs in (spot_observation, futures_observation)
+                    if obs is not None
+                ]
+                indicators["context_fresh"] = bool(conflict_ages)
+                if conflict_ages:
+                    indicators["context_age_seconds"] = max(conflict_ages)
+                indicators["underlying_direction_state"] = resolution.state.value
+                indicators["direction_transition"] = True
+                indicators["direction_resolution_reason"] = resolution.reason
+                indicators["direction_context_source"] = "spot_futures_transition"
+                direction_context_source = "spot_futures_transition"
                 log_throttled(
                     log,
                     f"direction_context_conflict:{symbol}",
@@ -3405,6 +3433,9 @@ class StrategyManager(_BaseStrategyManager):
                 indicators["context_age_seconds"] = observation.age_seconds
                 indicators["context_fresh"] = True
                 indicators["direction_context_source"] = observation.source
+                indicators["underlying_direction_state"] = resolution.state.value
+                indicators["direction_transition"] = False
+                indicators["direction_resolution_reason"] = resolution.reason
                 if resolution.confirming_source:
                     indicators["direction_context_confirming_source"] = resolution.confirming_source
                 direction_context_source = observation.source
@@ -3424,6 +3455,9 @@ class StrategyManager(_BaseStrategyManager):
                 )
             else:
                 indicators["context_fresh"] = False
+                indicators["underlying_direction_state"] = UnderlyingDirectionState.UNAVAILABLE.value
+                indicators["direction_transition"] = False
+                indicators["direction_resolution_reason"] = resolution.reason
                 indicators["direction_context_source"] = "unresolved"
                 direction_context_source = "unresolved"
 

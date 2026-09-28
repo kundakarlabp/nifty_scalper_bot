@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from nifty_scalper_bot.core.underlying_direction import (
     UnderlyingDirectionObservation,
+    UnderlyingDirectionState,
     arbitrate_underlying_direction,
 )
 
@@ -149,3 +150,24 @@ def test_strategy_manager_documents_and_uses_underlying_only_authority() -> None
     assert "arbitrate_underlying_direction" in source
     assert 'direction_bias = (indicators.get("direction_bias")' not in source
     assert "DIRECTION_CONTEXT_CONFLICT_FAIL_CLOSED" in source
+
+
+def test_agreement_exposes_semantic_bull_state() -> None:
+    resolved = arbitrate_underlying_direction(
+        _obs("CE", source="spot_context", age=0.2, confidence=0.80),
+        _obs("CE", source="futures_context", age=0.1, confidence=0.85),
+    )
+    assert resolved.state is UnderlyingDirectionState.CONFIRMED_BULL
+    assert resolved.executable_bias == "CE"
+    assert resolved.reason == "spot_futures_agree"
+
+
+def test_credible_disagreement_is_transition_not_missing_context() -> None:
+    resolved = arbitrate_underlying_direction(
+        _obs("PE", source="spot_context", age=0.2, confidence=0.82),
+        _obs("CE", source="futures_context", age=0.1, confidence=0.84),
+    )
+    assert resolved.observation is None
+    assert resolved.conflict is True
+    assert resolved.state is UnderlyingDirectionState.TRANSITION
+    assert resolved.reason == "credible_spot_futures_disagreement"
