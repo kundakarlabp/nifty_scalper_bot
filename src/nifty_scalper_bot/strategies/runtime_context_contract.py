@@ -19,6 +19,8 @@ _LIVE_DIRECTION_CONTEXT_KEYS = frozenset(
         "underlying_direction_state",
         "direction_transition",
         "direction_resolution_reason",
+        "context_snapshot_version",
+        "context_snapshot_pair",
         "context_timestamp",
         "direction_context_timestamp",
         "direction_updated_at",
