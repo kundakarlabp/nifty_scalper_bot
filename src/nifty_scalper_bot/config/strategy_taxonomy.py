@@ -50,11 +50,11 @@ _ALIASES: dict[str, str] = {
 }
 
 _TAXONOMY: dict[str, StrategyTaxon] = {
-    "smc_lite": StrategyTaxon("smc_lite", "trigger", "directional_trigger"),
-    "vwap_pro": StrategyTaxon("vwap_pro", "trigger", "directional_trigger"),
-    "orb_pro": StrategyTaxon("orb_pro", "trigger", "directional_trigger"),
+    "smc_lite": StrategyTaxon("smc_lite", "trigger", "reclaim_structure"),
+    "vwap_pro": StrategyTaxon("vwap_pro", "trigger", "reclaim_structure"),
+    "orb_pro": StrategyTaxon("orb_pro", "trigger", "opening_breakout"),
     "premium_squeeze": StrategyTaxon(
-        "premium_squeeze", "trigger", "directional_trigger"
+        "premium_squeeze", "trigger", "volatility_momentum"
     ),
     "gamma_scalping": StrategyTaxon("gamma_scalping", "trigger", "expiry_trigger"),
     "tuesday_gamma_buyer": StrategyTaxon(
