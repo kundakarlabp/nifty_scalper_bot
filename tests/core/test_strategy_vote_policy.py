@@ -105,3 +105,14 @@ def test_reclaim_and_orb_breakout_are_independent_evidence_families():
         (_signal(), _vote(strategy="ORBPro", side="CE", score=7.5, role="trigger")),
     ]
     assert independent_same_side_confirmation(signals) == (True, ["ORBPro"])
+
+
+def test_20260928_losing_ce_replay_cannot_gain_false_two_trigger_consensus():
+    """Replay the decisive SMC+VWAP evidence shape from the 2026-09-28 CE loss."""
+    signals = [
+        (_signal(), _vote(strategy="SMC", side="CE", score=8.0, role="trigger")),
+        (_signal(), _vote(strategy="VWAPPro", side="CE", score=7.5, role="trigger")),
+    ]
+    confirmed, confirming = independent_same_side_confirmation(signals)
+    assert confirmed is False
+    assert confirming == []
