@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect
 
 from nifty_scalper_bot.strategies import signal_generator
+from nifty_scalper_bot.strategies.runner import StrategyRunner
 
 
 def test_base_strategy_manager_has_no_parallel_adx_regime_classifier() -> None:
@@ -28,3 +29,10 @@ def test_legacy_regime_adaptive_strategy_is_not_a_production_owner() -> None:
     source = inspect.getsource(signal_generator)
     assert "RegimeAdaptiveStrategy" not in source
     assert "MarketRegimeDetector" not in source
+
+
+def test_runner_consumes_central_regime_state_instead_of_reclassifying() -> None:
+    source = inspect.getsource(StrategyRunner._compute_regime_snapshot)
+    assert "classify_runner_regime" not in source
+    assert "_indicator_engine.get_indicators" not in source
+    assert "get_latest_snapshot" in source
