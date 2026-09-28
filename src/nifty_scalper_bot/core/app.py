@@ -16328,7 +16328,7 @@ def _health_check(ctx: BotContext) -> None:
             inactive_reason = "runner_loop_exception"
         log_throttled(
             LOGGER,
-            key="strategy_runner_inactive_health",
+            key=f"strategy_runner_inactive_health:{inactive_reason}",
             msg=f"Strategy runner is not active ({inactive_reason})",
             level=logging.WARNING if expected_active else logging.INFO,
             interval_sec=60.0,

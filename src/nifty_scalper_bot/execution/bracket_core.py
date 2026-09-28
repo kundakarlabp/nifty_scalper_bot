@@ -5469,6 +5469,26 @@ class BracketManager:
         symbol = normalize_symbol(symbol)
         if self._reconcile_lock.locked():
             return ""
+
+        # Orphan adoption is a recovery path, never a second bracket authority.
+        # If a non-terminal bracket already owns this symbol, return that
+        # canonical identity without calculating or logging alternate SL/TP.
+        with self._lock:
+            owner = _existing_owner(self, symbol)
+        if owner is not None:
+            owner_id = str(getattr(owner, "entry_order_id", "") or "")
+            LOGGER.info(
+                "ORPHAN_ADOPTION_SKIPPED_MANAGED symbol=%s existing=%s",
+                symbol,
+                owner_id,
+                extra={
+                    "event": "ORPHAN_ADOPTION_SKIPPED_MANAGED",
+                    "symbol": symbol,
+                    "existing_entry_order_id": owner_id,
+                },
+            )
+            return owner_id
+
         # ── FIX: use symbol-stable ID so repeated adoption attempts hit the
         # dedup path in register_virtual_bracket (which updates triggers on an
         # existing bracket) instead of creating a fresh bracket every second.

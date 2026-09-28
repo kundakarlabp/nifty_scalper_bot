@@ -67,3 +67,15 @@ def test_strategy_manager_documents_and_uses_underlying_only_authority() -> None
     assert "arbitrate_underlying_direction" in source
     assert "DIRECTION_CONTEXT_TRANSITION" in source
     assert "context_snapshot_version_skew" in source
+
+
+def test_20260928_losing_ce_replay_fails_closed_on_spot_futures_conflict() -> None:
+    """Replay spot CE 0.95 versus futures PE disagreement seen before the live loss."""
+    resolved = arbitrate_underlying_direction(
+        _obs("CE", source="spot_context", age=0.2, confidence=0.95),
+        _obs("PE", source="futures_context", age=0.1, confidence=0.59),
+    )
+    assert resolved.conflict is True
+    assert resolved.executable_bias is None
+    assert resolved.state is UnderlyingDirectionState.TRANSITION
+    assert resolved.reason == "fresh_spot_futures_disagreement"
