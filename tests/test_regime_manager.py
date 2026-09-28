@@ -94,7 +94,6 @@ def test_can_trade_respects_bypass_toggle() -> None:
     assert manager.can_trade(record_decision=False) is True
 
 
-
 @pytest.mark.asyncio
 async def test_indicator_refresh_does_not_double_ingest_transition(monkeypatch) -> None:
     detector = MarketRegimeDetector()
