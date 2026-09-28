@@ -134,4 +134,4 @@ def test_hard_score_rejection_is_scoped_to_structural_setup_identity() -> None:
     )
     assert 'metadata", {}) or {}).get("setup_id")' in source
     assert "SETUP_REJECT_COOLDOWN_SECONDS" in source
-    assert '"900" if setup_id else "15"' in source
+    assert 'SETUP_REJECT_COOLDOWN_SECONDS", "900"' in source
