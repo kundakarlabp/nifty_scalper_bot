@@ -38,7 +38,7 @@ def _runner_regime_adx(value: object) -> float | None:
 def classify_runner_regime(
     indicators: Mapping[str, float | int | None],
 ) -> MarketRegime:
-    """Preserve the established StrategyRunner regime gate classification.
+    """Legacy diagnostic classifier retained for replay/tests, not live regime authority.
 
     This is the canonical owner of the lightweight runner gate that previously
     lived in the strategies market-regime helper. Thresholds are intentionally
