@@ -350,7 +350,6 @@ def load_completed_strategy_history(
     return history
 
 
-
 def load_trade_ledger_rows(
     db_path: str | Path,
     *,
@@ -406,6 +405,7 @@ def load_trade_ledger_rows(
         item["ledger_complete"] = bool(item["ledger_complete"])
         result.append(item)
     return result
+
 
 def materialize_trade_events(
     conn: sqlite3.Connection,
