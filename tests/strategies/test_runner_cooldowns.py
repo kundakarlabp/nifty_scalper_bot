@@ -129,7 +129,9 @@ def test_net_rr_broker_attempt_does_not_latch_cooldown() -> None:
 
 
 def test_hard_score_rejection_is_scoped_to_structural_setup_identity() -> None:
-    source = Path("src/nifty_scalper_bot/strategies/runner.py").read_text(\n        encoding="utf-8"\n    )
+    source = Path("src/nifty_scalper_bot/strategies/runner.py").read_text(
+        encoding="utf-8"
+    )
     assert 'metadata", {}) or {}).get("setup_id")' in source
     assert "SETUP_REJECT_COOLDOWN_SECONDS" in source
     assert '"900" if setup_id else "15"' in source
