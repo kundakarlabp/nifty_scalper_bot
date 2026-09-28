@@ -49,16 +49,25 @@ def test_runner_no_longer_declares_a_private_regime_vocabulary() -> None:
     assert "REGIME_GATE_DECISION" in source
 
 
-def test_default_gate_preserves_pre_ontology_effective_admission(monkeypatch) -> None:
+def test_default_gate_only_hard_filters_explicit_strategy_policies(monkeypatch) -> None:
     monkeypatch.setenv("RUNNER_ENABLE_REGIME_GATE", "true")
     for name in ("RUNNER_VWAP_ALLOWED_REGIMES", "RUNNER_ORB_ALLOWED_REGIMES"):
         monkeypatch.delenv(name, raising=False)
     runner = StrategyRunner.__new__(StrategyRunner)
     runner._logger = __import__("logging").getLogger("test")
 
-    assert StrategyRunner._strategy_allowed_for_regime(runner, "SMC", MarketRegime.TREND)
-    assert StrategyRunner._strategy_allowed_for_regime(runner, "SMC", MarketRegime.VOLATILE)
-    assert not StrategyRunner._strategy_allowed_for_regime(runner, "SMC", MarketRegime.RANGE)
-    assert StrategyRunner._strategy_allowed_for_regime(runner, "vwap_pro", MarketRegime.TREND)
-    assert not StrategyRunner._strategy_allowed_for_regime(runner, "vwap_pro", MarketRegime.RANGE)
-    assert not StrategyRunner._strategy_allowed_for_regime(runner, "vwap_pro", MarketRegime.VOLATILE)
+    assert StrategyRunner._strategy_allowed_for_regime(
+        runner, "SMC", MarketRegime.RANGE
+    )
+    assert StrategyRunner._strategy_allowed_for_regime(
+        runner, "RSI Mean Reversion", MarketRegime.RANGE
+    )
+    assert StrategyRunner._strategy_allowed_for_regime(
+        runner, "vwap_pro", MarketRegime.TREND
+    )
+    assert not StrategyRunner._strategy_allowed_for_regime(
+        runner, "vwap_pro", MarketRegime.RANGE
+    )
+    assert not StrategyRunner._strategy_allowed_for_regime(
+        runner, "vwap_pro", MarketRegime.VOLATILE
+    )
