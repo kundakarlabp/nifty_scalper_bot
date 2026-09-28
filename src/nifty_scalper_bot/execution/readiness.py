@@ -366,8 +366,11 @@ def normalize_readiness_blockers(
         blocker_list=ordered_visible,
         secondary_blockers=ordered_secondary,
         live_orders_armed=armed,
-        evaluation_ready=bool(evaluation_ready and not primary),
-        execution_ready=bool(execution_ready and not primary),
+        # Capability readiness is independent of session/risk/broker blockers.
+        # A blocker disarms live orders; it must not rewrite whether the data/
+        # strategy or execution prerequisites themselves are ready.
+        evaluation_ready=bool(evaluation_ready),
+        execution_ready=bool(execution_ready),
         human_reason=human,
     )
     _emit_live_validation_checklist(
