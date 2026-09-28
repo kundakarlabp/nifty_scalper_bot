@@ -20,7 +20,12 @@ class _Switches:
         return self._day_loss
 
 
-def _order_manager(*, max_day_loss: float = 319.09, day_loss: float = 0.0):
+def _order_manager(
+    *,
+    max_day_loss: float = 319.09,
+    day_loss: float = 0.0,
+    completed_trade_costs: float = 0.0,
+):
     manager = OrderManager.__new__(OrderManager)
     manager._risk_manager = SimpleNamespace(
         account_balance=15_954.60,
@@ -32,6 +37,7 @@ def _order_manager(*, max_day_loss: float = 319.09, day_loss: float = 0.0):
             atr_stop_multiple=1.0,
         ),
         _switches=_Switches(max_day_loss, day_loss),
+        _completed_trade_costs_today=completed_trade_costs,
     )
     manager._margin_engine = MarginEngine(
         broker=object(), data_hub=None, lot_size_resolver=None, clock=lambda: 0.0
@@ -144,6 +150,30 @@ def test_affordability_reports_risk_without_changing_cash_readiness() -> None:
     assert decision.per_trade_risk_budget == pytest.approx(797.73)
     assert decision.effective_one_lot_risk_budget == pytest.approx(319.09)
     assert decision.max_stop_distance_one_lot == pytest.approx(319.09 / 65.0)
+    assert decision.max_daily_loss == pytest.approx(319.09)
+    assert decision.current_day_loss == pytest.approx(0.0)
+    assert decision.completed_trade_costs_today == pytest.approx(0.0)
+    assert decision.day_loss_source == "risk_switches"
+
+
+def test_affordability_exposes_cost_adjusted_daily_loss_accounting() -> None:
+    manager = _order_manager(
+        max_day_loss=741.465,
+        day_loss=367.403554,
+        completed_trade_costs=136.653554,
+    )
+
+    decision = evaluate_minimum_lot_affordability(
+        symbol="NFO:NIFTY2690124050PE",
+        quote={"ask": 65.30},
+        order_manager=manager,
+        fallback_balance=15_954.60,
+    )
+
+    assert decision.max_daily_loss == pytest.approx(741.465)
+    assert decision.current_day_loss == pytest.approx(367.403554)
+    assert decision.completed_trade_costs_today == pytest.approx(136.653554)
+    assert decision.remaining_daily_risk_budget == pytest.approx(374.061446)
 
 
 @pytest.mark.parametrize(
