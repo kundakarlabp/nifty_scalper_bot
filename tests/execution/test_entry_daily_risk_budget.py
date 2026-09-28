@@ -20,7 +20,12 @@ class _Switches:
         return self._day_loss
 
 
-def _order_manager(*, max_day_loss: float = 319.09, day_loss: float = 0.0, completed_trade_costs: float = 0.0):
+def _order_manager(
+    *,
+    max_day_loss: float = 319.09,
+    day_loss: float = 0.0,
+    completed_trade_costs: float = 0.0,
+):
     manager = OrderManager.__new__(OrderManager)
     manager._risk_manager = SimpleNamespace(
         account_balance=15_954.60,
