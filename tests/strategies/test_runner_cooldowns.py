@@ -128,7 +128,7 @@ def test_net_rr_broker_attempt_does_not_latch_cooldown() -> None:
     assert runner._execution_reject_cooldown_ts == {}
 
 
-def test_hard_score_rejection_is_scoped_to_structural_setup_identity() -> None:
+def test_hard_score_rejection_is_scoped_to_structural_setup_identity(\n) -> None:
     source = Path("src/nifty_scalper_bot/strategies/runner.py").read_text(
         encoding="utf-8"
     )
