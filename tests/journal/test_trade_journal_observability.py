@@ -807,7 +807,9 @@ def test_historical_backfill_skips_malformed_event_json(tmp_path) -> None:
         )
 
 
-def test_canonical_ledger_reader_returns_bounded_decoded_completed_rows(\n    tmp_path,\n) -> None:
+def test_canonical_ledger_reader_returns_bounded_decoded_completed_rows(
+    tmp_path,
+) -> None:
     db_path = tmp_path / "journal.db"
     journal = TradeJournal(str(db_path))
     for index in range(2):
