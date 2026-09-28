@@ -4,6 +4,7 @@ import logging
 from types import SimpleNamespace
 
 from nifty_scalper_bot.core import app as app_module
+from nifty_scalper_bot.utils.logging import _THROTTLE_STATE
 
 
 class _Runner:
@@ -23,6 +24,7 @@ def test_health_check_paper_mode_not_live_disabled(monkeypatch, caplog) -> None:
         readiness_mode='PAPER',
         started_mono=0.0,
     )
+    _THROTTLE_STATE.clear()
     caplog.set_level(logging.INFO)
     app_module._health_check(ctx)
     reasons = [r.reason for r in caplog.records]
