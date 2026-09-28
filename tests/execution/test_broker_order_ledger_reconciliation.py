@@ -4,7 +4,9 @@ import json
 
 import pytest
 
+from nifty_scalper_bot.execution.order_manager import OrderManager
 from nifty_scalper_bot.execution.position_manager import PositionManager
+from nifty_scalper_bot.utils.rate_limiter import RateLimiter
 
 
 SYMBOL = "NFO:NIFTY2671423950CE"
@@ -211,3 +213,34 @@ def test_reconcile_broker_orders_is_deterministic_and_canonicalizes_symbols(tmp_
     assert ledger["earlier"]["symbol"] == SYMBOL
     assert ledger["earlier"]["classification"] == "resolved_external_flat"
     assert ledger["later"]["classification"] == "active_external_order"
+
+
+def test_order_manager_reconciliation_classifies_external_order_without_local_pending(
+    tmp_path, monkeypatch
+):
+    """Periodic order reconciliation must not miss broker-only orders while flat."""
+
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    broker = Broker(
+        positions={"net": []},
+        orders=[_open_order("external-open")],
+    )
+    position_manager = PositionManager(state_file=str(tmp_path / "positions.json"))
+    manager = OrderManager(
+        broker_client=broker,
+        position_manager=position_manager,
+        rate_limiter=RateLimiter(),
+    )
+
+    assert position_manager.get_pending_orders() == []
+
+    manager.reconcile_open_orders_with_broker()
+
+    assert broker.order_calls == 1
+    ledger = position_manager.get_broker_order_ledger()
+    assert ledger["external-open"]["classification"] == "active_external_order"
+    assert (
+        position_manager.current_entry_protection_blocker(SYMBOL)
+        == "active_external_order"
+    )
