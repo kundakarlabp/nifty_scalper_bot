@@ -193,3 +193,13 @@ def test_duplicate_snapshot_does_not_count_as_second_confirmation() -> None:
     diagnostics = manager.build_diagnostics()
     assert diagnostics["transition"]["pending_regime"] == "RANGE"
     assert diagnostics["transition"]["pending_count"] == 1
+
+
+
+def test_regime_manager_defaults_match_production_safety_contract() -> None:
+    manager = MarketRegimeManager(MarketRegimeDetector())
+
+    assert manager.min_confidence == 0.40
+    assert manager.stale_after_seconds == 300.0
+    assert manager.fail_closed is True
+    assert manager.transition_confirmations == 2
