@@ -10066,6 +10066,15 @@ class StrategyRunner:
             "orbpro": "RUNNER_ORB_ALLOWED_REGIMES",
         }
         env_name = strategy_env_map.get(normalized)
+        if env_name is None:
+            self._logger.debug(
+                "REGIME_GATE_DECISION strategy=%s regime=%s allowed=True "
+                "reason=no_explicit_strategy_regime_policy",
+                strategy or "unknown",
+                regime.value,
+                extra={"event": "REGIME_GATE_DECISION"},
+            )
+            return True
         # Canonical vocabulary with the pre-ontology *effective* defaults
         # preserved. RANGE was not emitted as NORMAL by the runtime engine, so
         # adding RANGE here would silently broaden live admission. Enable RANGE
