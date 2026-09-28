@@ -9,12 +9,13 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Deque, Mapping, MutableMapping
 
+from nifty_scalper_bot.config.regime_ontology import MarketRegime, normalize_regime
 from nifty_scalper_bot.core.market_regime import (
     MarketRegimeDetector,
     RegimeSnapshot,
 )
 from nifty_scalper_bot.infra.metrics import METRICS
-from nifty_scalper_bot.utils.env import coalesce_bool, coalesce_float
+from nifty_scalper_bot.utils.env import coalesce_bool, coalesce_float, coalesce_int
 from nifty_scalper_bot.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -38,12 +39,13 @@ class MarketRegimeManager:
 
     detector: MarketRegimeDetector
     history_limit: int = 64
-    min_confidence: float = 0.45
-    stale_after_seconds: float = 180.0
+    min_confidence: float = 0.40
+    stale_after_seconds: float = 300.0
+    transition_confirmations: int = 2
     block_thresholds: MutableMapping[str, float] = field(
         default_factory=lambda: {"event": 0.8, "volatile": 0.95}
     )
-    fail_closed: bool = False
+    fail_closed: bool = True
     datahub: Any | None = None
     indicators: Any | None = None
     regime_settings: Mapping[str, Any] | None = None
@@ -51,6 +53,9 @@ class MarketRegimeManager:
     _history: Deque[RegimeSnapshot] = field(init=False, repr=False)
     _decisions: Deque[RegimeDecision] = field(init=False, repr=False)
     _current: RegimeSnapshot | None = field(init=False, default=None, repr=False)
+    _raw_current: RegimeSnapshot | None = field(init=False, default=None, repr=False)
+    _pending_regime: str | None = field(init=False, default=None, repr=False)
+    _pending_count: int = field(init=False, default=0, repr=False)
     _last_filter_reasons: tuple[str, ...] = field(
         init=False, default_factory=tuple, repr=False
     )
@@ -106,6 +111,17 @@ class MarketRegimeManager:
                     extra={"event": "regime_manager_history_override_error"},
                 )
 
+        transition_override = settings.get("transition_confirmations")
+        if transition_override is not None:
+            try:
+                self.transition_confirmations = max(1, int(transition_override))
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "Failure in MarketRegimeManager transition override: %s",
+                    exc,
+                    extra={"event": "regime_manager_transition_override_error"},
+                )
+
         self._lock = threading.RLock()
 
         # ✅ FIXED: Ensure this is initialized
@@ -114,6 +130,9 @@ class MarketRegimeManager:
         self._history: Deque[RegimeSnapshot] = deque(maxlen=max(5, self.history_limit))
         self._decisions: Deque[RegimeDecision] = deque(maxlen=200)
         self._current: RegimeSnapshot | None = None
+        self._raw_current: RegimeSnapshot | None = None
+        self._pending_regime = None
+        self._pending_count = 0
         self._last_filter_reasons: tuple[str, ...] = tuple()
         self._bypass = False
         self._listener_registered = False
@@ -177,6 +196,10 @@ class MarketRegimeManager:
         )
         try:
             snapshot = self.get_latest_snapshot()
+            raw_snapshot = self.get_raw_snapshot()
+            with self._lock:
+                pending_regime = self._pending_regime
+                pending_count = self._pending_count
             history = self.get_history(limit=10)
             decisions = self.get_decision_history(limit=20)
             history_payload = [
@@ -205,6 +228,17 @@ class MarketRegimeManager:
                     "confidence": getattr(snapshot, "confidence", None),
                     "updated_at": getattr(snapshot, "updated_at", None),
                     "reason": getattr(snapshot, "reason", None),
+                },
+                "raw": {
+                    "regime": getattr(raw_snapshot, "regime", None),
+                    "confidence": getattr(raw_snapshot, "confidence", None),
+                    "updated_at": getattr(raw_snapshot, "updated_at", None),
+                    "reason": getattr(raw_snapshot, "reason", None),
+                },
+                "transition": {
+                    "pending_regime": pending_regime,
+                    "pending_count": pending_count,
+                    "required_confirmations": self.transition_confirmations,
                 },
                 "bypass": self.get_regime_filter_bypass(),
                 "stats": self.get_regime_filter_stats(),
@@ -293,6 +327,15 @@ class MarketRegimeManager:
             self.fail_closed = bool(
                 coalesce_bool("REGIME_FAIL_CLOSED", default=self.fail_closed)
             )
+            self.transition_confirmations = max(
+                1,
+                int(
+                    coalesce_int(
+                        "REGIME_TRANSITION_CONFIRMATIONS",
+                        default=self.transition_confirmations,
+                    )
+                ),
+            )
         except Exception as exc:  # noqa: BLE001 - defensive
             logger.error(
                 "Failure in MarketRegimeManager._apply_env_overrides: %s",
@@ -302,7 +345,7 @@ class MarketRegimeManager:
             )
 
     def ingest_snapshot(self, snapshot: RegimeSnapshot) -> None:
-        """Record incoming *snapshot* from the detector."""
+        """Record a raw detector snapshot and update the accepted stable state."""
         logger.debug(
             "Entered MarketRegimeManager.ingest_snapshot",
             extra={
@@ -313,6 +356,7 @@ class MarketRegimeManager:
         )
         try:
             previous = self._store_snapshot(snapshot)
+            current = self.get_latest_snapshot()
         except Exception as exc:  # noqa: BLE001
             logger.error(
                 "Failure in MarketRegimeManager.ingest_snapshot: %s",
@@ -320,21 +364,44 @@ class MarketRegimeManager:
                 extra={"event": "regime_manager_ingest_error"},
             )
             return
-        if previous is None or previous.regime != snapshot.regime:
+
+        previous_key = normalize_regime(getattr(previous, "regime", None))
+        current_key = normalize_regime(getattr(current, "regime", None))
+        incoming_key = normalize_regime(snapshot.regime)
+        if current is not None and previous_key is not current_key:
             logger.info(
                 "Condition met: regime_manager_transition",
                 extra={
                     "event": "regime_manager_transition",
-                    "symbol": snapshot.symbol,
+                    "symbol": current.symbol,
                     "from": getattr(previous, "regime", None),
-                    "to": snapshot.regime,
-                    "confidence": snapshot.confidence,
+                    "to": current.regime,
+                    "confidence": current.confidence,
+                },
+            )
+        elif current is not None and incoming_key is not current_key:
+            logger.debug(
+                "REGIME_TRANSITION_PENDING symbol=%s stable=%s raw=%s "
+                "count=%s required=%s",
+                snapshot.symbol,
+                current.regime,
+                snapshot.regime,
+                self._pending_count,
+                self.transition_confirmations,
+                extra={
+                    "event": "REGIME_TRANSITION_PENDING",
+                    "symbol": snapshot.symbol,
+                    "stable_regime": current.regime,
+                    "raw_regime": snapshot.regime,
+                    "pending_count": self._pending_count,
+                    "required_confirmations": self.transition_confirmations,
                 },
             )
         try:
+            metric_snapshot = current or snapshot
             METRICS.update_regime_confidence(
-                regime=snapshot.regime,
-                confidence=snapshot.confidence,
+                regime=metric_snapshot.regime,
+                confidence=metric_snapshot.confidence,
             )
         except Exception as exc:  # noqa: BLE001
             logger.error(
@@ -343,17 +410,86 @@ class MarketRegimeManager:
                 extra={"event": "regime_manager_metric_error"},
             )
 
+    def _block_threshold_for(self, regime: object) -> float:
+        """Return a block threshold for any canonical or legacy regime label."""
+        canonical = normalize_regime(regime)
+        candidates = (
+            str(regime or ""),
+            str(regime or "").lower(),
+            str(regime or "").upper(),
+            canonical.value,
+            canonical.value.lower(),
+        )
+        for key in candidates:
+            if key in self.block_thresholds:
+                return float(self.block_thresholds[key])
+        return 0.0
+
     def _store_snapshot(self, snapshot: RegimeSnapshot) -> RegimeSnapshot | None:
-        """Persist *snapshot* into caches and return previous entry."""
+        """Persist raw state and advance stable state only on confirmed transitions."""
         with self._lock:
             previous = self._current
-            self._current = snapshot
+            prior_raw = self._raw_current
+            if (
+                prior_raw is not None
+                and prior_raw.symbol == snapshot.symbol
+                and prior_raw.regime == snapshot.regime
+                and prior_raw.confidence == snapshot.confidence
+                and prior_raw.reason == snapshot.reason
+                and prior_raw.updated_at == snapshot.updated_at
+            ):
+                return previous
+
+            self._raw_current = snapshot
             self._history.append(snapshot)
+
+            incoming = normalize_regime(snapshot.regime)
+            current = normalize_regime(getattr(previous, "regime", None))
+
+            if previous is None:
+                self._current = snapshot
+                self._pending_regime = None
+                self._pending_count = 0
+                return previous
+
+            if incoming is MarketRegime.UNKNOWN:
+                self._pending_regime = incoming.value
+                self._pending_count = 0
+                return previous
+
+            if incoming is current:
+                self._current = snapshot
+                self._pending_regime = None
+                self._pending_count = 0
+                return previous
+
+            safety_threshold = self._block_threshold_for(snapshot.regime)
+            if safety_threshold and snapshot.confidence >= safety_threshold:
+                self._current = snapshot
+                self._pending_regime = None
+                self._pending_count = 0
+                return previous
+
+            if snapshot.confidence < self.min_confidence:
+                self._pending_regime = incoming.value
+                self._pending_count = 0
+                return previous
+
+            if self._pending_regime == incoming.value:
+                self._pending_count += 1
+            else:
+                self._pending_regime = incoming.value
+                self._pending_count = 1
+
+            if self._pending_count >= self.transition_confirmations:
+                self._current = snapshot
+                self._pending_regime = None
+                self._pending_count = 0
         return previous
 
     # ------------------------------------------------------------------
     def get_current_regime(self) -> str | None:
-        """Return the latest regime label when available."""
+        """Return the accepted stable regime label when available."""
         logger.debug(
             "Entered MarketRegimeManager.get_current_regime",
             extra={"event": "regime_manager_current_regime"},
@@ -393,7 +529,7 @@ class MarketRegimeManager:
             return 0.0
 
     def get_latest_snapshot(self) -> RegimeSnapshot | None:
-        """Return the most recent snapshot without modifying state."""
+        """Return the accepted stable snapshot without modifying state."""
         logger.debug(
             "Entered MarketRegimeManager.get_latest_snapshot",
             extra={"event": "regime_manager_latest_snapshot"},
@@ -406,6 +542,19 @@ class MarketRegimeManager:
                 "Failure in MarketRegimeManager.get_latest_snapshot: %s",
                 exc,
                 extra={"event": "regime_manager_latest_snapshot_error"},
+            )
+            return None
+
+    def get_raw_snapshot(self) -> RegimeSnapshot | None:
+        """Return the freshest detector observation, including pending transitions."""
+        try:
+            with self._lock:
+                return self._raw_current
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "Failure in MarketRegimeManager.get_raw_snapshot: %s",
+                exc,
+                extra={"event": "regime_manager_raw_snapshot_error"},
             )
             return None
 
@@ -501,8 +650,10 @@ class MarketRegimeManager:
                 },
             )
 
-            # 5. Update state
-            self.ingest_snapshot(snapshot)
+            # Detector.evaluate() records and broadcasts the snapshot to this
+            # manager's registered listener. Calling ingest_snapshot() again here
+            # double-counted every indicator refresh and defeated transition
+            # confirmation semantics.
             self._last_indicator_refresh = time.time()
 
         except Exception as exc:
@@ -548,9 +699,11 @@ class MarketRegimeManager:
 
         try:
             snapshot: RegimeSnapshot | None
+            raw_snapshot: RegimeSnapshot | None
             bypass: bool
             with self._lock:
                 snapshot = self._current
+                raw_snapshot = self._raw_current
                 bypass = self._bypass
             if bypass:
                 bypass_reasons = ("bypass_enabled",)
@@ -573,8 +726,8 @@ class MarketRegimeManager:
             reasons: list[str] = []
             allowed = True
             now = time.time()
-            if snapshot is None:
-                # ✅ FIX: Check for auto-bypass when regime data is unavailable
+            if raw_snapshot is None:
+                # Check for auto-bypass when regime data is unavailable
                 # This provides graceful degradation during API outages
                 auto_bypass = coalesce_bool(
                     "REGIME_BYPASS_ON_UNAVAILABLE", default=False
@@ -616,7 +769,7 @@ class MarketRegimeManager:
                     allowed = False
                     reasons.append("regime_unavailable")
             else:
-                age = max(0.0, now - float(snapshot.updated_at))
+                age = max(0.0, now - float(raw_snapshot.updated_at))
                 if age > self.stale_after_seconds:
                     # ✅ FIX: Check for stale bypass
                     stale_bypass = coalesce_bool(
@@ -638,11 +791,20 @@ class MarketRegimeManager:
                     else:
                         allowed = False
                         reasons.append("regime_stale")
-                if snapshot.confidence < self.min_confidence:
+                if raw_snapshot.confidence < self.min_confidence:
                     allowed = False
                     reasons.append("confidence_below_floor")
-                threshold = self.block_thresholds.get(snapshot.regime, 0.0)
-                if threshold and snapshot.confidence >= threshold:
+                if normalize_regime(raw_snapshot.regime) is MarketRegime.UNKNOWN:
+                    allowed = False
+                    reasons.append("regime_unknown")
+                threshold = self._block_threshold_for(
+                    getattr(snapshot, "regime", raw_snapshot.regime)
+                )
+                if (
+                    snapshot is not None
+                    and threshold
+                    and snapshot.confidence >= threshold
+                ):
                     allowed = False
                     reasons.append(f"regime_block_{snapshot.regime}")
             if context:

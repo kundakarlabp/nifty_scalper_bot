@@ -92,3 +92,44 @@ def test_can_trade_respects_bypass_toggle() -> None:
     assert manager.can_trade(record_decision=False) is False
     assert manager.toggle_bypass() is True
     assert manager.can_trade(record_decision=False) is True
+
+
+@pytest.mark.asyncio
+async def test_indicator_refresh_does_not_double_ingest_transition(monkeypatch) -> None:
+    detector = MarketRegimeDetector()
+    manager = MarketRegimeManager(
+        detector,
+        indicators=DummyIndicators(),
+        transition_confirmations=2,
+    )
+    manager.ingest_snapshot(
+        RegimeSnapshot(
+            symbol="NIFTY",
+            regime="trend",
+            confidence=0.80,
+            reason="baseline",
+            updated_at=time.time(),
+            adjustments={},
+        )
+    )
+    candidate = RegimeSnapshot(
+        symbol="NIFTY",
+        regime="range",
+        confidence=0.70,
+        reason="single-observation",
+        updated_at=time.time(),
+        adjustments={},
+    )
+
+    def _evaluate(*args, **kwargs):
+        del args, kwargs
+        detector._record_snapshot(candidate)
+        return candidate
+
+    monkeypatch.setattr(detector, "evaluate", _evaluate)
+    await manager.refresh_from_indicators()
+
+    assert manager.get_current_regime() == "trend"
+    diagnostics = manager.build_diagnostics()
+    assert diagnostics["transition"]["pending_regime"] == "RANGE"
+    assert diagnostics["transition"]["pending_count"] == 1

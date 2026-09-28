@@ -43,3 +43,21 @@ ctx.market_regime_manager.ingest_snapshot(snap)
 5. Re-enable strategies if needed: `/strategy_enable <name>`.
 6. Check `/tail 200` – confirm no repeated `regime_blocklist_veto` or errors.
 7. If still blocked, adjust strategy thresholds before loosening regime guards.
+
+
+## Stable regime state
+
+The detector publishes raw observations; `MarketRegimeManager` owns the accepted
+stable regime used by strategy scoring and gating. Ordinary regime changes require
+consecutive confirmations (default `REGIME_TRANSITION_CONFIRMATIONS=2`).
+High-confidence regimes that already meet a configured safety block threshold are
+accepted immediately so hysteresis can never delay a protective block.
+
+Freshness, confidence-floor, and unknown-regime safety checks use the freshest raw
+observation. Diagnostics expose both `current` (stable) and `raw` state plus any
+pending transition.
+
+`StrategyRunner` consumes this accepted stable state for its existing strategy-regime
+admission rules; it no longer recomputes a second ADX/ATR/VWAP-slope regime. The
+runner's coarse ATR low-volatility check remains a separate execution-safety guard,
+not a regime classifier or direction authority.
