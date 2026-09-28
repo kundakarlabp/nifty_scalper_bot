@@ -23,8 +23,14 @@ def test_agreement_uses_futures_as_price_discovery_authority() -> None:
     assert resolved.confirming_source == "spot_context"
 
 
-def test_any_fresh_spot_futures_disagreement_is_non_executable_transition(\n) -> None:
-    for spot_conf, fut_conf in ((0.95, 0.58), (0.58, 0.95), (0.82, 0.74), (0.68, 0.45)):
+def test_any_fresh_spot_futures_disagreement_is_non_executable_transition() -> None:
+    confidence_pairs = (
+        (0.95, 0.58),
+        (0.58, 0.95),
+        (0.82, 0.74),
+        (0.68, 0.45),
+    )
+    for spot_conf, fut_conf in confidence_pairs:
         resolved = arbitrate_underlying_direction(
             _obs("CE", source="spot_context", age=0.2, confidence=spot_conf),
             _obs("PE", source="futures_context", age=0.1, confidence=fut_conf),
