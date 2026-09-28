@@ -41,7 +41,7 @@ def load_trade_ledger_rows(db_path: Path) -> list[dict[str, Any]]:
         raise FileNotFoundError(f"Trade journal not found: {resolved}")
     return load_canonical_trade_ledger_rows(
         resolved,
-        limit=1000,
+        limit=None,
         closed_only=True,
     )
 
