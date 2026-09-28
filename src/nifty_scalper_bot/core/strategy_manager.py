@@ -31,7 +31,7 @@ from statistics import mean, pstdev
 
 from nifty_scalper_bot.config import settings as app_settings
 from nifty_scalper_bot.config.regime_ontology import MarketRegime, normalize_regime
-from nifty_scalper_bot.config.regime_strategy_policy import regime_strategy_weight
+from nifty_scalper_bot.config.regime_strategy_policy import (regime_strategy_compatibility, regime_strategy_weight)
 from nifty_scalper_bot.config.strategy_taxonomy import (
     canonical_signal_family,
     canonical_strategy_role,
@@ -5895,6 +5895,8 @@ class StrategyManager(_BaseStrategyManager):
             metadata["regime_weight"] = weight
             metadata["regime_weighted_vote_score"] = weighted_score
             metadata["regime_name"] = regime_key or "UNKNOWN"
+            metadata["regime_compatibility"] = regime_strategy_compatibility(regime_key, vote.strategy)
+            metadata["regime_routing_mode"] = "observe_only"
             return StrategyVote(
                 strategy=vote.strategy,
                 side=vote.side,
