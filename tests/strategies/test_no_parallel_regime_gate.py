@@ -22,3 +22,9 @@ def test_abstract_strategy_does_not_claim_symbol_domain_ownership() -> None:
     assert (
         "Symbol-domain eligibility is owned by StrategyManager/orchestration" in source
     )
+
+
+def test_legacy_regime_adaptive_strategy_is_not_a_production_owner() -> None:
+    source = inspect.getsource(signal_generator)
+    assert "RegimeAdaptiveStrategy" not in source
+    assert "MarketRegimeDetector" not in source
