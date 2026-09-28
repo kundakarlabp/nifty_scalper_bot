@@ -195,7 +195,6 @@ def test_duplicate_snapshot_does_not_count_as_second_confirmation() -> None:
     assert diagnostics["transition"]["pending_count"] == 1
 
 
-
 def test_regime_manager_defaults_match_production_safety_contract() -> None:
     manager = MarketRegimeManager(MarketRegimeDetector())
 
