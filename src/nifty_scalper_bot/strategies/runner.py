@@ -83,6 +83,7 @@ from nifty_scalper_bot.config.entry_policy import resolve_entry_policy
 from nifty_scalper_bot.config.env_utils import parse_float_env, parse_int_env
 from nifty_scalper_bot.config.env_utils import resolve_build_sha as _resolve_build_sha
 from nifty_scalper_bot.config.regime_ontology import MarketRegime, normalize_regime
+from nifty_scalper_bot.config.regime_strategy_policy import runner_regime_policy
 from nifty_scalper_bot.config.settings import get_settings
 from nifty_scalper_bot.core.active_basket import (
     ActiveContractSelection,
@@ -10056,17 +10057,8 @@ class StrategyRunner:
                 extra={"event": "REGIME_GATE_BYPASSED"},
             )
             return True
-        normalized = (strategy or "").strip().lower()
-        strategy_env_map = {
-            "vwap_pro": "RUNNER_VWAP_ALLOWED_REGIMES",
-            "vwappro": "RUNNER_VWAP_ALLOWED_REGIMES",
-            "premium_momentum": "RUNNER_PREMIUM_SQUEEZE_ALLOWED_REGIMES",
-            "premium_momentum_squeeze": "RUNNER_PREMIUM_SQUEEZE_ALLOWED_REGIMES",
-            "orb_pro": "RUNNER_ORB_ALLOWED_REGIMES",
-            "orbpro": "RUNNER_ORB_ALLOWED_REGIMES",
-        }
-        env_name = strategy_env_map.get(normalized)
-        if env_name is None:
+        policy = runner_regime_policy(strategy)
+        if policy is None:
             self._logger.debug(
                 "REGIME_GATE_DECISION strategy=%s regime=%s allowed=True "
                 "reason=no_explicit_strategy_regime_policy",
@@ -10075,16 +10067,10 @@ class StrategyRunner:
                 extra={"event": "REGIME_GATE_DECISION"},
             )
             return True
-        # Canonical vocabulary with the pre-ontology *effective* defaults
-        # preserved. RANGE was not emitted as NORMAL by the runtime engine, so
-        # adding RANGE here would silently broaden live admission. Enable RANGE
-        # only through an explicit strategy env after expectancy validation.
-        default_allowed = "TREND,VOLATILE"
-        if env_name == "RUNNER_VWAP_ALLOWED_REGIMES":
-            default_allowed = "TREND"
-        allowed_csv = (
-            os.getenv(env_name or "", default_allowed) if env_name else default_allowed
-        )
+
+        env_name, default_regimes = policy
+        default_allowed = ",".join(default_regimes)
+        allowed_csv = os.getenv(env_name, default_allowed)
         allowed = {
             normalize_regime(item).value
             for item in allowed_csv.split(",")
