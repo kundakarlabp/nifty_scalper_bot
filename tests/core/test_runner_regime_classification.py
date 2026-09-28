@@ -81,12 +81,8 @@ def test_runner_uses_central_stable_regime_manager() -> None:
         MarketRegimeDetector(),
         transition_confirmations=2,
     )
-    manager.ingest_snapshot(
-        RegimeSnapshot("NIFTY", "trend", 0.80, "baseline", 1.0, {})
-    )
-    manager.ingest_snapshot(
-        RegimeSnapshot("NIFTY", "range", 0.70, "pending", 2.0, {})
-    )
+    manager.ingest_snapshot(RegimeSnapshot("NIFTY", "trend", 0.80, "baseline", 1.0, {}))
+    manager.ingest_snapshot(RegimeSnapshot("NIFTY", "range", 0.70, "pending", 2.0, {}))
 
     runner = StrategyRunner.__new__(StrategyRunner)
     runner._strategy_manager = SimpleNamespace(_regime_manager=manager)
