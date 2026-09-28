@@ -31,6 +31,7 @@ from nifty_scalper_bot.infra.scheduled_tasks import (
     start_daily_log_archive_task,
     start_trade_replication_task,
 )
+from nifty_scalper_bot.journal.trade_ledger import load_trade_ledger_rows
 from nifty_scalper_bot.utils.async_helpers import safe_task
 from nifty_scalper_bot.utils.metrics import ensure_multiproc_dir
 
@@ -336,6 +337,19 @@ def root():
 @app.get("/health")
 def health():
     return readyz()
+
+
+@app.get("/diagnostics/completed-trades")
+def completed_trades(limit: int = 100):
+    """Return bounded read-only rows from the canonical completed-trade ledger."""
+    rows = load_trade_ledger_rows(get_data_dir() / "trades.db", limit=limit)
+    return {
+        "source": "trade_ledger",
+        "count": len(rows),
+        "limit": max(1, min(1000, int(limit))),
+        "trades": rows,
+        "build_sha": STARTUP_BUILD_SHA,
+    }
 
 
 @app.get("/livez")

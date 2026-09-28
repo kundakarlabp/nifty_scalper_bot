@@ -6,6 +6,7 @@ import sqlite3
 import pytest
 
 from nifty_scalper_bot.journal.trade_journal import TradeJournal
+from nifty_scalper_bot.journal.trade_ledger import load_trade_ledger_rows
 
 
 def test_normalize_event_adds_canonical_correlation_fields(tmp_path) -> None:
@@ -804,3 +805,46 @@ def test_historical_backfill_skips_malformed_event_json(tmp_path) -> None:
             ).fetchone()[0]
             == "CLOSED"
         )
+
+
+def test_canonical_ledger_reader_returns_bounded_decoded_completed_rows(
+    tmp_path,
+) -> None:
+    db_path = tmp_path / "journal.db"
+    journal = TradeJournal(str(db_path))
+    for index in range(2):
+        event = journal._normalize_event(
+            {
+                "event_type": "BRACKET_CLOSED",
+                "timestamp": 20.0 + index,
+                "symbol": "NFO:NIFTYCE",
+                "side": "BUY",
+                "meta": {
+                    "trade_id": f"trade-{index}",
+                    "strategy": "VWAPPro",
+                    "completed_trade": {
+                        "quantity": 65,
+                        "entry_price": 100.0,
+                        "exit_price": 99.0 + index,
+                        "gross_pnl": -65.0 + (65.0 * index),
+                        "estimated_costs": {"total": 75.0 + index},
+                        "net_pnl": -140.0 + (64.0 * index),
+                        "ledger_complete": True,
+                        "execution_quality": {"fill_source": "broker"},
+                        "regime": "RANGE",
+                    },
+                },
+            }
+        )
+        conn = journal._flush_batch([event], None)
+        assert conn is not None
+        conn.close()
+
+    rows = load_trade_ledger_rows(db_path, limit=1)
+
+    assert len(rows) == 1
+    assert rows[0]["trade_id"] == "trade-1"
+    assert rows[0]["ledger_complete"] is True
+    assert rows[0]["costs"]["total"] == 76.0
+    assert rows[0]["execution_quality"]["fill_source"] == "broker"
+    assert rows[0]["outcome"]["regime"] == "RANGE"
