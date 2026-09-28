@@ -89,6 +89,28 @@ def regime_strategy_compatibility(
     return "compatible"
 
 
+
+# Explicit Runner admission policies that pre-date observe-only compatibility.
+# Keeping identity/default ownership here prevents runner.py from defining a
+# second regime-policy vocabulary. Strategies absent from this table are not
+# hard-filtered by the Runner regime gate.
+RUNNER_REGIME_POLICIES: dict[str, tuple[str, tuple[str, ...]]] = {
+    "vwap_pro": ("RUNNER_VWAP_ALLOWED_REGIMES", (MarketRegime.TREND.value,)),
+    "orb_pro": (
+        "RUNNER_ORB_ALLOWED_REGIMES",
+        (MarketRegime.TREND.value, MarketRegime.VOLATILE.value),
+    ),
+    "premium_squeeze": (
+        "RUNNER_PREMIUM_SQUEEZE_ALLOWED_REGIMES",
+        (MarketRegime.TREND.value, MarketRegime.VOLATILE.value),
+    ),
+}
+
+
+def runner_regime_policy(strategy: str) -> tuple[str, tuple[str, ...]] | None:
+    """Return the explicit Runner regime policy for a canonical strategy."""
+    return RUNNER_REGIME_POLICIES.get(normalize_strategy_name(strategy))
+
 def regime_strategy_weight(regime: MarketRegime | str | None, strategy: str) -> float:
     """Return the configured regime multiplier, defaulting to neutral weight 1.0."""
     key = (
@@ -101,6 +123,8 @@ def regime_strategy_weight(regime: MarketRegime | str | None, strategy: str) -> 
 
 __all__ = [
     "REGIME_STRATEGY_WEIGHTS",
+    "RUNNER_REGIME_POLICIES",
     "regime_strategy_compatibility",
     "regime_strategy_weight",
+    "runner_regime_policy",
 ]
