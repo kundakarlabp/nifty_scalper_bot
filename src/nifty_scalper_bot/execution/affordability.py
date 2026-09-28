@@ -42,6 +42,10 @@ class MinimumLotAffordability:
     plan_cost_inclusive_risk: float | None = None
     plan_risk_affordable: bool | None = None
     capacity_blocker: str | None = None
+    max_daily_loss: float | None = None
+    current_day_loss: float | None = None
+    completed_trade_costs_today: float | None = None
+    day_loss_source: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -93,7 +97,7 @@ def _risk_budget_snapshot(
     lot_size: int,
     *,
     available_balance: float | None = None,
-) -> tuple[float | None, float | None, float | None, float | None]:
+) -> tuple[float | None, float | None, float | None, float | None, float | None, float | None, float | None, str | None]:
     """Return risk-budget telemetry without making a readiness decision.
 
     MarginEngine and RiskManager own final position sizing and stop-risk
@@ -103,7 +107,7 @@ def _risk_budget_snapshot(
     """
     manager = getattr(order_manager, "_risk_manager", None)
     if manager is None or lot_size <= 0:
-        return None, None, None, None
+        return None, None, None, None, None, None, None, None
 
     balance = _finite_float(available_balance, minimum=0.0)
     if balance is None or balance <= 0.0:
@@ -117,6 +121,12 @@ def _risk_budget_snapshot(
     )
 
     remaining = None
+    max_day_loss = None
+    current_day_loss = None
+    completed_trade_costs = _finite_float(
+        getattr(manager, "_completed_trade_costs_today", None), minimum=0.0
+    )
+    day_loss_source = "risk_switches"
     switches = getattr(manager, "_switches", None)
     if switches is not None:
         max_day_loss = _finite_float(
@@ -127,6 +137,7 @@ def _risk_budget_snapshot(
             if callable(reader):
                 try:
                     current = max(float(reader() or 0.0), 0.0)
+                    current_day_loss = current
                     remaining = max(max_day_loss - current, 0.0)
                 except Exception:
                     remaining = 0.0
@@ -138,7 +149,7 @@ def _risk_budget_snapshot(
     max_stop_distance = (
         effective / float(lot_size) if effective is not None and lot_size > 0 else None
     )
-    return per_trade, remaining, effective, max_stop_distance
+    return (per_trade, remaining, effective, max_stop_distance, max_day_loss, current_day_loss, completed_trade_costs, day_loss_source)
 
 
 def evaluate_minimum_lot_affordability(
@@ -238,6 +249,10 @@ def evaluate_minimum_lot_affordability(
         remaining_daily_risk_budget,
         effective_one_lot_risk_budget,
         max_stop_distance_one_lot,
+        max_daily_loss,
+        current_day_loss,
+        completed_trade_costs_today,
+        day_loss_source,
     ) = _risk_budget_snapshot(
         order_manager,
         lot_size,
@@ -345,6 +360,10 @@ def evaluate_minimum_lot_affordability(
         plan_cost_inclusive_risk=plan_cost_inclusive_risk,
         plan_risk_affordable=plan_risk_affordable,
         capacity_blocker=capacity_blocker,
+        max_daily_loss=max_daily_loss,
+        current_day_loss=current_day_loss,
+        completed_trade_costs_today=completed_trade_costs_today,
+        day_loss_source=day_loss_source,
     )
 
 
