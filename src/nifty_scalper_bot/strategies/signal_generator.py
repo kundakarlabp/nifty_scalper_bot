@@ -18,7 +18,6 @@ from dataclasses import dataclass, field
 from datetime import datetime, time
 from typing import Any, Deque, Iterable, Literal, Mapping, MutableMapping, Protocol
 
-from nifty_scalper_bot.core.signal_arbitrator import SignalArbitrator
 from nifty_scalper_bot.core.strategy_context_builder import (
     build_strategy_history_context,
 )
@@ -1014,8 +1013,6 @@ class StrategyManager:
         self._last_index_vwap: float | None = None
         self._last_index_update_ts: float | None = None
         self._index_cache_log_ts: float | None = None
-        self._signal_arbitrator = SignalArbitrator()
-
         raw_config = config if config else (strategies[0].config if strategies else {})
         self._config = raw_config
         # ✅ FIX: Log which strategies are loaded
