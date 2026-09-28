@@ -110,6 +110,7 @@ def runner_regime_policy(strategy: str) -> tuple[str, tuple[str, ...]] | None:
     """Return the explicit Runner regime policy for a canonical strategy."""
     return RUNNER_REGIME_POLICIES.get(normalize_strategy_name(strategy))
 
+
 def regime_strategy_weight(regime: MarketRegime | str | None, strategy: str) -> float:
     """Return the configured regime multiplier, defaulting to neutral weight 1.0."""
     key = (
