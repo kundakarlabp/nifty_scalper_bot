@@ -427,6 +427,17 @@ class MarketRegimeManager:
         """Persist raw state and advance stable state only on confirmed transitions."""
         with self._lock:
             previous = self._current
+            prior_raw = self._raw_current
+            if (
+                prior_raw is not None
+                and prior_raw.symbol == snapshot.symbol
+                and prior_raw.regime == snapshot.regime
+                and prior_raw.confidence == snapshot.confidence
+                and prior_raw.reason == snapshot.reason
+                and prior_raw.updated_at == snapshot.updated_at
+            ):
+                return previous
+
             self._raw_current = snapshot
             self._history.append(snapshot)
 
@@ -476,7 +487,7 @@ class MarketRegimeManager:
 
     # ------------------------------------------------------------------
     def get_current_regime(self) -> str | None:
-        """Return the latest regime label when available."""
+        """Return the accepted stable regime label when available."""
         logger.debug(
             "Entered MarketRegimeManager.get_current_regime",
             extra={"event": "regime_manager_current_regime"},
