@@ -2410,8 +2410,11 @@ class StrategyManager(_BaseStrategyManager):
         derived_direction = stabilised["direction"]
         derived_confidence = stabilised["confidence"]
         derived_reasons = stabilised["reasons"]
+        self._context_snapshot_version = int(getattr(self, "_context_snapshot_version", 0) or 0) + 1
+        snapshot_version = self._context_snapshot_version
         snapshot = {
             "symbol": symbol, "role": role, "context_kind": context_kind, "timestamp": time.time(),
+            "context_snapshot_version": snapshot_version,
             "ltp": _num("ltp", "close", "price"), "close": _num("close", "ltp", "price"),
             "vwap": _num("exchange_vwap", "session_vwap", "vwap"),
             "ema_fast": ema_fast,
@@ -3376,6 +3379,14 @@ class StrategyManager(_BaseStrategyManager):
             resolution = arbitrate_underlying_direction(
                 spot_observation,
                 futures_observation,
+            )
+            indicators["context_snapshot_version"] = max(
+                int(spot_ctx.get("context_snapshot_version") or 0),
+                int(fut_ctx.get("context_snapshot_version") or 0),
+            )
+            indicators["context_snapshot_pair"] = (
+                int(spot_ctx.get("context_snapshot_version") or 0),
+                int(fut_ctx.get("context_snapshot_version") or 0),
             )
             context_resolved = False
             direction_context_source: str | None = None
