@@ -26,9 +26,7 @@ def test_orphan_adoption_returns_existing_canonical_owner_without_repricing() ->
     )
     manager._brackets = {"entry-1": owner}
 
-    adopted = manager.attach_orphan_position(
-        "NFO:NIFTY26SEP22850CE", "BUY", 65, 108.55
-    )
+    adopted = manager.attach_orphan_position("NFO:NIFTY26SEP22850CE", "BUY", 65, 108.55)
 
     assert adopted == "entry-1"
     assert list(manager._brackets) == ["entry-1"]
