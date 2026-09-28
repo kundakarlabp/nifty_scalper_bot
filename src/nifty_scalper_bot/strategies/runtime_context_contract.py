@@ -15,6 +15,10 @@ _LIVE_DIRECTION_CONTEXT_KEYS = frozenset(
         "direction_source",
         "context_source",
         "context_age_seconds",
+        "context_freshness_state",
+        "underlying_direction_state",
+        "direction_transition",
+        "direction_resolution_reason",
         "context_timestamp",
         "direction_context_timestamp",
         "direction_updated_at",
@@ -119,17 +123,24 @@ def _source_context_age_seconds(context: Mapping[str, Any]) -> float | None:
     return max(source_ages)
 
 
+def resolve_context_age_optional(context: Mapping[str, Any]) -> float | None:
+    """Return real context age or None when age evidence is unavailable."""
+    if not isinstance(context, Mapping):
+        return None
+    explicit_age = _coerce_age_seconds(context.get("context_age_seconds"))
+    if explicit_age is not None:
+        return explicit_age
+    return _source_context_age_seconds(context)
+
+
 def resolve_context_age_seconds(
     context: Mapping[str, Any], default: float = 999.0
 ) -> float:
     """Return normalized context age, failing closed only without age evidence."""
     if not isinstance(context, Mapping):
         return float(default)
-    explicit_age = _coerce_age_seconds(context.get("context_age_seconds"))
-    if explicit_age is not None:
-        return explicit_age
-    source_age = _source_context_age_seconds(context)
-    return source_age if source_age is not None else float(default)
+    age = resolve_context_age_optional(context)
+    return age if age is not None else float(default)
 
 
 def _coerce_timestamp(value: Any) -> datetime | None:
@@ -268,5 +279,12 @@ def normalise_live_direction_context(context: Mapping[str, Any]) -> dict[str, An
     preserved["live_direction_context_proof"] = live_direction_context_has_proof(
         preserved, max_age_seconds=max_age
     )
+    resolved_age = resolve_context_age_optional(preserved)
+    if resolved_age is None:
+        preserved["context_freshness_state"] = "MISSING"
+    elif resolved_age <= max_age:
+        preserved["context_freshness_state"] = "FRESH"
+    else:
+        preserved["context_freshness_state"] = "STALE"
 
     return preserved
