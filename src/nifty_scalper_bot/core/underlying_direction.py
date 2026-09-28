@@ -31,6 +31,8 @@ def _state_for_bias(bias: str | None) -> UnderlyingDirectionState:
     if bias == "PE":
         return UnderlyingDirectionState.CONFIRMED_BEAR
     return UnderlyingDirectionState.UNAVAILABLE
+
+
 _DOMINANCE_GAP = 0.20
 _MIN_DOMINANT_CONFIDENCE = 0.70
 _MAX_WEAK_DISAGREEMENT_CONFIDENCE = 0.60
