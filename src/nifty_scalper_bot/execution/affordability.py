@@ -149,7 +149,16 @@ def _risk_budget_snapshot(
     max_stop_distance = (
         effective / float(lot_size) if effective is not None and lot_size > 0 else None
     )
-    return (per_trade, remaining, effective, max_stop_distance, max_day_loss, current_day_loss, completed_trade_costs, day_loss_source)
+    return (
+        per_trade,
+        remaining,
+        effective,
+        max_stop_distance,
+        max_day_loss,
+        current_day_loss,
+        completed_trade_costs,
+        day_loss_source,
+    )
 
 
 def evaluate_minimum_lot_affordability(
