@@ -49,3 +49,33 @@ def test_broker_auth_invalid_has_priority_over_market_closed() -> None:
     )
 
     assert decision.primary_blocker == "broker_auth_invalid"
+
+
+def test_market_closed_disarms_without_erasing_capability_readiness() -> None:
+    decision = normalize_readiness_blockers(
+        [],
+        "closed",
+        live_mode=True,
+        evaluation_ready=True,
+        execution_ready=True,
+    )
+
+    assert decision.primary_blocker == "market_closed"
+    assert decision.live_orders_armed is False
+    assert decision.evaluation_ready is True
+    assert decision.execution_ready is True
+
+
+def test_hard_blocker_disarms_without_reclassifying_capability_state() -> None:
+    decision = normalize_readiness_blockers(
+        ["broker_auth_invalid"],
+        "open",
+        live_mode=True,
+        evaluation_ready=True,
+        execution_ready=True,
+    )
+
+    assert decision.primary_blocker == "broker_auth_invalid"
+    assert decision.live_orders_armed is False
+    assert decision.evaluation_ready is True
+    assert decision.execution_ready is True
