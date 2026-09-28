@@ -122,6 +122,24 @@ def test_lightsail_migration_forces_restart_before_healthy_no_change_exit() -> N
     assert '[ "$FORCE_RESTART" = false ]' in no_change_block
 
 
+def test_unchanged_release_confirms_health_failure_before_restart() -> None:
+    release = _text("deploy/lightsail_release.sh")
+    helper = release.split("service_healthy_confirmed()", 1)[1].split(
+        "wait_for_service()", 1
+    )[0]
+
+    assert 'BOT_DEPLOY_HEALTH_PROBE_ATTEMPTS:-3' in helper
+    assert 'BOT_DEPLOY_HEALTH_PROBE_INTERVAL_SEC:-2' in helper
+    assert 'service_healthy "$expected_sha"' in helper
+    assert "for attempt in" in helper
+
+    unchanged = release.split('if [ "$BEFORE" = "$AFTER" ]', 1)[1].split(
+        'CANDIDATE=', 1
+    )[0]
+    assert 'service_healthy_confirmed "$BEFORE"' in unchanged
+    assert 'service_healthy "$BEFORE"' not in unchanged
+
+
 def test_deploy_helpers_do_not_embed_credentials() -> None:
     paths = (
         "deploy/lightsail_setup.sh",
@@ -209,5 +227,5 @@ def test_release_health_separates_candidate_integrity_from_broker_auth() -> None
     assert "broker_auth_dependency_degraded" in health
     assert "unknown startup failures still trigger rollback" in health
     assert 'wait_for_service "$AFTER"' in release
-    assert 'service_healthy "$BEFORE"' in release
+    assert 'service_healthy_confirmed "$BEFORE"' in release
     assert "deployed_dependency_degraded" in release
