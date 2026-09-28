@@ -2536,7 +2536,7 @@ class StrategyManager(_BaseStrategyManager):
         )
         confirm_seconds = max(
             0.0,
-            self._env_float("STRATEGY_CONTEXT_REVERSAL_CONFIRM_SECONDS", 5.0),
+            self._env_float("STRATEGY_CONTEXT_REVERSAL_CONFIRM_SECONDS", 15.0),
         )
         try:
             min_observations = max(
