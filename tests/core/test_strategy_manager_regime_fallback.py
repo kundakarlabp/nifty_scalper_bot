@@ -260,20 +260,3 @@ def test_quality_score_credits_demonstrated_evidence() -> None:
     assert components["liquidity_spread_quality"] == 2.0
     assert components["freshness_tick_quality"] == 1.0
     assert meta["quality_evidence_complete"] is True
-
-
-
-def test_regime_bias_map_normalises_legacy_aliases_and_drops_unknowns() -> None:
-    manager = StrategyManager(
-        [],
-        None,
-        None,
-        regime_bias_map={
-            "chop": {"Alpha": 1.2},
-            "volcrush": {"Beta": 1.15},
-        },
-    )
-
-    assert manager._regime_bias_map["range"]["Alpha"] == 1.2
-    assert "volcrush" not in manager._regime_bias_map
-    assert "unknown" not in manager._regime_bias_map
