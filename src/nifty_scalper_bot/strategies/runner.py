@@ -94,7 +94,6 @@ from nifty_scalper_bot.core.history_roles import (
     history_role_priority,
     resolve_symbol_history_role,
 )
-from nifty_scalper_bot.core.market_regime import classify_runner_regime
 from nifty_scalper_bot.core.message_bus import Message, MessageBus
 from nifty_scalper_bot.core.strategy_manager import StrategyManager
 from nifty_scalper_bot.core.trade_manager import TradeManager
@@ -9985,49 +9984,44 @@ class StrategyRunner:
         return snapshot is not None
 
     def _compute_regime_snapshot(self, symbol: str) -> MarketRegime:
-        """Compute market regime for symbol. Args: symbol; Returns: MarketRegime; Raises: none."""
-        try:
-            indicators = self._indicator_engine.get_indicators(symbol)
-            history = self._indicator_engine.get_history(symbol)
-            atr_avg = 0.0
-            if history:
-                tail = history[-20:]
-                mean_price = sum(float(v) for v in tail) / max(len(tail), 1)
-                atr_avg = mean_price * 0.002
-            latest = self._indicator_engine.get_latest(symbol)
-            volume = float((latest or {}).get("volume") or 0.0)
-            avg_volume = float((latest or {}).get("avg_volume") or 0.0)
-            volume_expansion = (volume / avg_volume) if avg_volume > 0 else 1.0
-            current_vwap = float(indicators.get("vwap") or 0.0)
-            history_tail = history[-3:] if history else []
-            reference = sum(float(v) for v in history_tail) / max(len(history_tail), 1)
-            vwap_slope = (current_vwap - reference) if reference > 0 else 0.0
-            regime = classify_runner_regime(
-                {
-                    "adx": indicators.get("adx"),
-                    "atr": indicators.get("atr"),
-                    "atr_average": atr_avg,
-                    "vwap_slope": vwap_slope,
-                    "volume_expansion": volume_expansion,
-                }
-            )
+        """Resolve the accepted regime from the central regime manager SSOT."""
+        regime_manager = getattr(self._strategy_manager, "_regime_manager", None)
+        if regime_manager is None:
             self._last_regime_inputs_by_symbol[symbol] = {
-                "adx": indicators.get("adx"),
-                "atr": indicators.get("atr"),
-                "atr_average": atr_avg,
-                "vwap_slope": vwap_slope,
-                "volume": volume,
-                "avg_volume": avg_volume,
-                "volume_expansion": volume_expansion,
-                "vwap": current_vwap,
+                "source": "market_regime_manager",
+                "reason": "manager_unavailable",
+            }
+            self._last_regime_by_symbol[symbol] = MarketRegime.UNKNOWN
+            return MarketRegime.UNKNOWN
+
+        try:
+            stable_getter = getattr(regime_manager, "get_latest_snapshot", None)
+            raw_getter = getattr(regime_manager, "get_raw_snapshot", None)
+            stable = stable_getter() if callable(stable_getter) else None
+            raw = raw_getter() if callable(raw_getter) else stable
+            regime = normalize_regime(getattr(stable, "regime", None))
+            self._last_regime_inputs_by_symbol[symbol] = {
+                "source": "market_regime_manager",
+                "stable_regime": getattr(stable, "regime", None),
+                "stable_confidence": getattr(stable, "confidence", None),
+                "stable_updated_at": getattr(stable, "updated_at", None),
+                "raw_regime": getattr(raw, "regime", None),
+                "raw_confidence": getattr(raw, "confidence", None),
+                "raw_updated_at": getattr(raw, "updated_at", None),
             }
             self._last_regime_by_symbol[symbol] = regime
             return regime
         except Exception as exc:
             self._logger.error(
-                "Failure in StrategyRunner._compute_regime_snapshot: %s", exc
+                "Failure resolving canonical runner regime: %s",
+                exc,
+                extra={
+                    "event": "RUNNER_CANONICAL_REGIME_RESOLUTION_ERROR",
+                    "symbol": symbol,
+                },
             )
-            return self._last_regime_by_symbol.get(symbol, MarketRegime.UNKNOWN)
+            self._last_regime_by_symbol[symbol] = MarketRegime.UNKNOWN
+            return MarketRegime.UNKNOWN
 
     def detect_market_regime(self, symbol: str) -> str:
         """Args: symbol. Returns: coarse regime label. Raises: None."""
