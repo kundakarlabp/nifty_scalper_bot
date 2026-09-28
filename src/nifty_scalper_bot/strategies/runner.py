@@ -19007,11 +19007,14 @@ class StrategyRunner:
             # waiting 15 seconds must not let the identical setup repeatedly
             # sample noisy context until one snapshot passes. A genuinely new
             # setup_id escapes this veto immediately.
-            required_reject_seconds = float(
-                os.getenv(
-                    "SETUP_REJECT_COOLDOWN_SECONDS" if setup_id else "SIGNAL_REJECT_COOLDOWN_SECONDS",
-                    "900" if setup_id else "15",
-                ) or ("900" if setup_id else "15")
+            signal_reject_seconds = float(
+                os.getenv("SIGNAL_REJECT_COOLDOWN_SECONDS", "15") or "15"
+            )
+            setup_reject_seconds = float(
+                os.getenv("SETUP_REJECT_COOLDOWN_SECONDS", "900") or "900"
+            )
+            required_reject_seconds = (
+                setup_reject_seconds if setup_id else signal_reject_seconds
             )
             reject_last_ts = self._signal_reject_cooldown_ts.get(reject_cooldown_key)
             if reject_last_ts is not None and (
