@@ -8,7 +8,9 @@ from nifty_scalper_bot.core.underlying_direction import (
 
 
 def _obs(bias: str, *, source: str, age: float, confidence: float = 0.8):
-    return UnderlyingDirectionObservation(\n        bias=bias, confidence=confidence, age_seconds=age, source=source\n    )
+    return UnderlyingDirectionObservation(
+        bias=bias, confidence=confidence, age_seconds=age, source=source
+    )
 
 
 def test_agreement_uses_futures_as_price_discovery_authority() -> None:
