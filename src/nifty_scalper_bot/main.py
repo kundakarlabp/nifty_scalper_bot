@@ -352,7 +352,6 @@ def completed_trades(limit: int = 100):
     }
 
 
-
 @app.get("/livez")
 def livez():
     return {
