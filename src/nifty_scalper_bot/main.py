@@ -338,6 +338,7 @@ def root():
 def health():
     return readyz()
 
+
 @app.get("/diagnostics/completed-trades")
 def completed_trades(limit: int = 100):
     """Return bounded read-only rows from the canonical completed-trade ledger."""
