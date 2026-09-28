@@ -1386,10 +1386,14 @@ class StrategyManager(_BaseStrategyManager):
             else StrategyScoreWeights().normalised()
         )
         self._regime_signal_getter = regime_signal_getter
-        self._regime_bias_map = {
-            regime.lower(): {k: float(v) for k, v in mapping.items()}
-            for regime, mapping in (regime_bias_map or {}).items()
-        }
+        self._regime_bias_map: dict[str, dict[str, float]] = {}
+        for regime, mapping in (regime_bias_map or {}).items():
+            canonical_regime = normalize_regime(regime)
+            if canonical_regime is MarketRegime.UNKNOWN:
+                continue
+            key = canonical_regime.value.lower()
+            target = self._regime_bias_map.setdefault(key, {})
+            target.update({k: float(v) for k, v in mapping.items()})
         self._regime_manager = market_regime_manager
         self._performance: dict[str, StrategyPerformance] = {}
         self._manual_allocations: dict[str, float] = {}
@@ -2105,15 +2109,16 @@ class StrategyManager(_BaseStrategyManager):
         if hasattr(regime_raw, "value"):
             regime_raw = regime_raw.value
 
-        # Final Cleaning
-        regime = str(regime_raw or "").strip().lower()
+        # Final cleaning through the canonical regime ontology.
+        canonical_regime = normalize_regime(regime_raw)
+        regime = canonical_regime.value.lower()
         try:
             confidence = float(confidence_raw or 0.0)
         except (ValueError, TypeError):
             confidence = 0.0
 
         self._regime_state = RegimeState(
-            regime=regime or None,
+            regime=regime,
             confidence=max(0.0, min(confidence, 1.0)),
             updated_at=datetime.now(timezone.utc),
         )
