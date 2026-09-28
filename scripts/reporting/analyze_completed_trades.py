@@ -25,11 +25,12 @@ from nifty_scalper_bot.backtesting.completed_trade_analysis import (  # noqa: E4
     summarize_completed_trades,
     walk_forward_stability,
 )
-from nifty_scalper_bot.journal.trade_ledger import load_trade_ledger_rows as load_canonical_trade_ledger_rows  # noqa: E402
-
 from nifty_scalper_bot.backtesting.research_validation import (  # noqa: E402
     combinatorial_purged_pbo,
     deflated_sharpe_ratio,
+)
+from nifty_scalper_bot.journal.trade_ledger import (  # noqa: E402
+    load_trade_ledger_rows as load_canonical_trade_ledger_rows,
 )
 
 
