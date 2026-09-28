@@ -5817,7 +5817,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         ("REGIME_STALE_AFTER_SEC", "300"),
         ("REGIME_BLOCK_EVENT", "0.80"),
         ("REGIME_BLOCK_VOLATILE", "0.95"),
-        ("REGIME_FAIL_CLOSED", "0"),
+        ("REGIME_FAIL_CLOSED", "1"),
         ("STRATEGY_ENFORCE_BLOCKLIST", "0"),
     ):
         os.environ.setdefault(env_key, env_default)
