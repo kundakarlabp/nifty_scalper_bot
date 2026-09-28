@@ -55,6 +55,7 @@ def test_direction_observation_rejects_non_directional_values() -> None:
 
 def test_strategy_manager_documents_and_uses_underlying_only_authority() -> None:
     from pathlib import Path
+
     source = Path("src/nifty_scalper_bot/core/strategy_manager.py").read_text()
     assert "OPTION PREMIUM DATA MUST NEVER AUTHORIZE UNDERLYING DIRECTION" in source
     assert "arbitrate_underlying_direction" in source
