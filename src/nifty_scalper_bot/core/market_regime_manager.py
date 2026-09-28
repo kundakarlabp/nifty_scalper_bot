@@ -378,9 +378,13 @@ class MarketRegimeManager:
                     "confidence": current.confidence,
                 },
             )
-        elif current is not None and normalize_regime(snapshot.regime) is not current_key:
+        elif (
+            current is not None
+            and normalize_regime(snapshot.regime) is not current_key
+        ):
             logger.debug(
-                "REGIME_TRANSITION_PENDING symbol=%s stable=%s raw=%s count=%s required=%s",
+                "REGIME_TRANSITION_PENDING symbol=%s stable=%s raw=%s "
+                "count=%s required=%s",
                 snapshot.symbol,
                 current.regime,
                 snapshot.regime,
