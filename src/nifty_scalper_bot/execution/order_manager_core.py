@@ -13564,10 +13564,6 @@ class OrderManager:
                 if order.status not in self.FINAL_STATUSES
             }
 
-        # Optimization: Don't spam API if we have nothing to track
-        if not pending_ids:
-            return
-
         try:
             # 2. RESOLVE FETCHER (Fixes the 'no attribute orders' crash)
             # Dynamically find the correct method (get_orders, list_orders, etc.)
@@ -13598,6 +13594,34 @@ class OrderManager:
                 response, (str, bytes)
             ):
                 broker_orders = list(response)
+
+            # Feed the exact broker orderbook snapshot into the canonical
+            # PositionManager ledger even when there are no locally pending orders.
+            # This is the only durable owner for external/unknown broker-order
+            # classification and its entry blocker. Reusing this response avoids
+            # a second broker API call in the periodic reconciliation path.
+            ledger_reconciler = getattr(
+                self._positions, "reconcile_broker_orders", None
+            )
+            if callable(ledger_reconciler):
+                ledger_counts = ledger_reconciler(broker_orders)
+                if ledger_counts.get("seen", 0):
+                    self._logger.info(
+                        "BROKER_ORDER_RECONCILE_OK seen=%s managed=%s external=%s resolved=%s",
+                        ledger_counts.get("seen", 0),
+                        ledger_counts.get("managed", 0),
+                        ledger_counts.get("external", 0),
+                        ledger_counts.get("resolved", 0),
+                        extra={
+                            "event": "BROKER_ORDER_RECONCILE_OK",
+                            **ledger_counts,
+                        },
+                    )
+
+            # There is no managed-order lifecycle work left after the canonical
+            # ledger has classified broker-only orders.
+            if not pending_ids:
+                return
 
             # Map broker order_id -> payload for O(1) lookup
             broker_map = {}
