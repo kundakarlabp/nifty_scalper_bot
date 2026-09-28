@@ -367,6 +367,7 @@ class MarketRegimeManager:
 
         previous_key = normalize_regime(getattr(previous, "regime", None))
         current_key = normalize_regime(getattr(current, "regime", None))
+        incoming_key = normalize_regime(snapshot.regime)
         if current is not None and previous_key is not current_key:
             logger.info(
                 "Condition met: regime_manager_transition",
@@ -378,10 +379,7 @@ class MarketRegimeManager:
                     "confidence": current.confidence,
                 },
             )
-        elif (
-            current is not None
-            and normalize_regime(snapshot.regime) is not current_key
-        ):
+        elif current is not None and incoming_key is not current_key:
             logger.debug(
                 "REGIME_TRANSITION_PENDING symbol=%s stable=%s raw=%s "
                 "count=%s required=%s",
