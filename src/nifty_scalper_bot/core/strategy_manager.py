@@ -2536,7 +2536,7 @@ class StrategyManager(_BaseStrategyManager):
         )
         confirm_seconds = max(
             0.0,
-            self._env_float("STRATEGY_CONTEXT_REVERSAL_CONFIRM_SECONDS", 5.0),
+            self._env_float("STRATEGY_CONTEXT_REVERSAL_CONFIRM_SECONDS", 15.0),
         )
         try:
             min_observations = max(
@@ -5360,8 +5360,11 @@ class StrategyManager(_BaseStrategyManager):
             hard_veto_reasons.append("negative_premium_flow")
         if no_vote_counts.get("smc_structure_required_live"):
             hard_veto_reasons.append("smc_structure_required_live")
+        if bool(indicator_map.get("direction_transition")):
+            hard_veto_reasons.append("underlying_direction_transition")
         two_trigger_aligned = bool(
-            len(trigger_votes) >= 2
+            confirmation
+            and len(trigger_votes) >= 2
             and best_vote.side in {"CE", "PE"}
             and direction_bias == str(best_vote.side).upper()
             and context_age_seconds <= max_context_age
