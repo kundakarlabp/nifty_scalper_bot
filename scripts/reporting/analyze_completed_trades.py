@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import json
 import math
-import sqlite3
 import sys
 from dataclasses import asdict
 from pathlib import Path
@@ -26,6 +25,8 @@ from nifty_scalper_bot.backtesting.completed_trade_analysis import (  # noqa: E4
     summarize_completed_trades,
     walk_forward_stability,
 )
+from nifty_scalper_bot.journal.trade_ledger import load_trade_ledger_rows as load_canonical_trade_ledger_rows  # noqa: E402
+
 from nifty_scalper_bot.backtesting.research_validation import (  # noqa: E402
     combinatorial_purged_pbo,
     deflated_sharpe_ratio,
@@ -33,32 +34,16 @@ from nifty_scalper_bot.backtesting.research_validation import (  # noqa: E402
 
 
 def load_trade_ledger_rows(db_path: Path) -> list[dict[str, Any]]:
-    """Read canonical completed-trade fields from the local SQLite ledger."""
+    """Read completed trades through the shared canonical ledger read path."""
 
     resolved = db_path.expanduser().resolve()
     if not resolved.exists():
         raise FileNotFoundError(f"Trade journal not found: {resolved}")
-    uri = f"{resolved.as_uri()}?mode=ro"
-    with sqlite3.connect(uri, uri=True) as connection:
-        connection.row_factory = sqlite3.Row
-        rows = connection.execute("""
-            SELECT
-                trade_id,
-                state,
-                strategy,
-                closed_at,
-                gross_pnl,
-                estimated_costs,
-                net_pnl,
-                exit_reason,
-                ledger_complete,
-                outcome_json
-            FROM trade_ledger
-            WHERE state = 'CLOSED'
-              AND ledger_complete = 1
-            ORDER BY closed_at, trade_id
-            """).fetchall()
-    return [dict(row) for row in rows]
+    return load_canonical_trade_ledger_rows(
+        resolved,
+        limit=1000,
+        closed_only=True,
+    )
 
 
 def build_analysis(
