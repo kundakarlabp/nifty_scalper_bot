@@ -171,6 +171,30 @@ service_healthy() {
   broker_auth_dependency_degraded
 }
 
+service_healthy_confirmed() {
+  local expected_sha="${1:-}"
+  local attempts="${BOT_DEPLOY_HEALTH_PROBE_ATTEMPTS:-3}"
+  local delay="${BOT_DEPLOY_HEALTH_PROBE_INTERVAL_SEC:-2}"
+  local attempt
+
+  if ! [[ "$attempts" =~ ^[1-9][0-9]*$ ]]; then attempts=3; fi
+  if ! [[ "$delay" =~ ^[0-9]+([.][0-9]+)?$ ]]; then delay=2; fi
+
+  for attempt in $(seq 1 "$attempts"); do
+    if service_healthy "$expected_sha"; then
+      if [ "$attempt" -gt 1 ]; then
+        log "health probe recovered on attempt $attempt/$attempts; restart suppressed"
+      fi
+      return 0
+    fi
+    if [ "$attempt" -lt "$attempts" ]; then
+      sleep "$delay"
+    fi
+  done
+  log "health probe failed $attempts consecutive attempts"
+  return 1
+}
+
 wait_for_service() {
   local expected_sha="${1:-}"
   for _ in $(seq 1 150); do service_healthy "$expected_sha" && return 0; sleep 2; done
@@ -308,7 +332,7 @@ AFTER="$(git rev-parse origin/main)"
 current_runtime_sha="$(first_nonempty_env GIT_COMMIT_SHA 2>/dev/null || true)"
 
 if [ "$BEFORE" = "$AFTER" ] && [ "$FORCE_RESTART" = false ]; then
-  if service_healthy "$BEFORE"; then
+  if service_healthy_confirmed "$BEFORE"; then
     if [ "$current_runtime_sha" = "$BEFORE" ]; then
       write_status current "running ${BEFORE:0:7}"
       exit 0
