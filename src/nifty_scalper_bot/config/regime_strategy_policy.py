@@ -89,7 +89,6 @@ def regime_strategy_compatibility(
     return "compatible"
 
 
-
 # Explicit Runner admission policies that pre-date observe-only compatibility.
 # Keeping identity/default ownership here prevents runner.py from defining a
 # second regime-policy vocabulary. Strategies absent from this table are not
