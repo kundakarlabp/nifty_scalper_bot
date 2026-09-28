@@ -179,3 +179,19 @@ def test_unknown_raw_regime_fails_closed_without_overwriting_stable_state() -> N
     assert manager.get_current_regime() == "trend"
     assert manager.can_trade() is False
     assert "regime_unknown" in manager.get_filter_reasons()
+
+
+
+def test_duplicate_snapshot_does_not_count_as_second_confirmation() -> None:
+    detector = MarketRegimeDetector()
+    manager = MarketRegimeManager(detector, transition_confirmations=2)
+    manager.ingest_snapshot(_make_snapshot("trend", 0.80))
+    candidate = _make_snapshot("range", 0.70)
+
+    manager.ingest_snapshot(candidate)
+    manager.ingest_snapshot(candidate)
+
+    assert manager.get_current_regime() == "trend"
+    diagnostics = manager.build_diagnostics()
+    assert diagnostics["transition"]["pending_regime"] == "RANGE"
+    assert diagnostics["transition"]["pending_count"] == 1
