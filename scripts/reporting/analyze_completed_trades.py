@@ -21,8 +21,10 @@ from nifty_scalper_bot.backtesting.completed_trade_analysis import (  # noqa: E4
     calibrate_signal_scores,
     canonicalize_completed_trades,
     chronological_post_cost_blocks,
+    chronological_walk_forward,
     execution_data_quality,
     summarize_completed_trades,
+    walk_forward_stability,
 )
 from nifty_scalper_bot.backtesting.research_validation import (  # noqa: E402
     combinatorial_purged_pbo,
@@ -66,6 +68,9 @@ def build_analysis(
     components: tuple[str, ...],
     allow_estimated_costs: bool = False,
     selection_trials: int | None = None,
+    walk_forward_min_train: int = 20,
+    walk_forward_test_trades: int = 10,
+    walk_forward_min_folds: int = 2,
 ) -> dict[str, Any]:
     """Build a machine-readable evidence report from canonical ledger rows."""
 
@@ -77,6 +82,15 @@ def build_analysis(
     blocks = chronological_post_cost_blocks(trades, block_size=block_size)
     readiness = attribution_readiness(trades, required_components=components)
     execution_quality = execution_data_quality(trades)
+    walk_forward_folds = chronological_walk_forward(
+        trades,
+        min_train_trades=walk_forward_min_train,
+        test_trades=walk_forward_test_trades,
+    )
+    walk_forward = walk_forward_stability(
+        walk_forward_folds,
+        minimum_folds=walk_forward_min_folds,
+    )
     score_calibration = {
         key: asdict(
             calibrate_signal_scores(
@@ -136,6 +150,26 @@ def build_analysis(
             }
             for block in blocks
         ],
+        "walk_forward": {
+            "configuration": {
+                "min_train_trades": walk_forward_min_train,
+                "test_trades": walk_forward_test_trades,
+                "minimum_folds": walk_forward_min_folds,
+            },
+            "folds": [
+                {
+                    "index": fold.index,
+                    "train_start_trade_id": fold.train_start_trade_id,
+                    "train_end_trade_id": fold.train_end_trade_id,
+                    "test_start_trade_id": fold.test_start_trade_id,
+                    "test_end_trade_id": fold.test_end_trade_id,
+                    "train_summary": asdict(fold.train_summary),
+                    "test_summary": asdict(fold.test_summary),
+                }
+                for fold in walk_forward_folds
+            ],
+            "stability": asdict(walk_forward),
+        },
         "execution_data_quality": asdict(execution_quality),
         "cost_evidence": {
             "broker_cost_trades": overall.broker_cost_trade_count,
@@ -211,6 +245,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--trades-db", type=Path, required=True)
     parser.add_argument("--block-size", type=int, default=20)
+    parser.add_argument("--walk-forward-min-train", type=int, default=20)
+    parser.add_argument("--walk-forward-test-trades", type=int, default=10)
+    parser.add_argument("--walk-forward-min-folds", type=int, default=2)
     parser.add_argument(
         "--allow-estimated-costs",
         action="store_true",
@@ -248,6 +285,9 @@ def main(argv: list[str] | None = None) -> int:
             components=components,
             allow_estimated_costs=args.allow_estimated_costs,
             selection_trials=args.selection_trials,
+            walk_forward_min_train=args.walk_forward_min_train,
+            walk_forward_test_trades=args.walk_forward_test_trades,
+            walk_forward_min_folds=args.walk_forward_min_folds,
         )
         report["candidate_validation"] = (
             build_candidate_validation(
