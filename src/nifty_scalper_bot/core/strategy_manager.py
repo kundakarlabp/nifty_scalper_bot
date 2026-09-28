@@ -1386,14 +1386,10 @@ class StrategyManager(_BaseStrategyManager):
             else StrategyScoreWeights().normalised()
         )
         self._regime_signal_getter = regime_signal_getter
-        self._regime_bias_map: dict[str, dict[str, float]] = {}
-        for regime, mapping in (regime_bias_map or {}).items():
-            canonical_regime = normalize_regime(regime)
-            if canonical_regime is MarketRegime.UNKNOWN:
-                continue
-            key = canonical_regime.value.lower()
-            target = self._regime_bias_map.setdefault(key, {})
-            target.update({k: float(v) for k, v in mapping.items()})
+        self._regime_bias_map = {
+            regime.lower(): {k: float(v) for k, v in mapping.items()}
+            for regime, mapping in (regime_bias_map or {}).items()
+        }
         self._regime_manager = market_regime_manager
         self._performance: dict[str, StrategyPerformance] = {}
         self._manual_allocations: dict[str, float] = {}
