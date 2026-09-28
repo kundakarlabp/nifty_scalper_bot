@@ -109,3 +109,73 @@ def test_market_regime_manager_fail_closed_blocks_on_error() -> None:
     assert allowed is False
     reasons = manager.get_filter_reasons()
     assert "regime_fail_closed_error" in reasons
+
+
+
+def test_regime_transition_requires_consecutive_confirmations() -> None:
+    detector = MarketRegimeDetector()
+    manager = MarketRegimeManager(detector, transition_confirmations=2)
+    manager.ingest_snapshot(_make_snapshot("trend", 0.75))
+
+    manager.ingest_snapshot(_make_snapshot("range", 0.70))
+    assert manager.get_current_regime() == "trend"
+    assert manager.get_raw_snapshot() is not None
+    assert manager.get_raw_snapshot().regime == "range"
+    diagnostics = manager.build_diagnostics()
+    assert diagnostics["transition"]["pending_regime"] == "RANGE"
+    assert diagnostics["transition"]["pending_count"] == 1
+
+    manager.ingest_snapshot(_make_snapshot("range", 0.72))
+    assert manager.get_current_regime() == "range"
+    diagnostics = manager.build_diagnostics()
+    assert diagnostics["transition"]["pending_regime"] is None
+    assert diagnostics["transition"]["pending_count"] == 0
+
+
+def test_transient_regime_flip_does_not_replace_stable_state() -> None:
+    detector = MarketRegimeDetector()
+    manager = MarketRegimeManager(detector, transition_confirmations=2)
+    manager.ingest_snapshot(_make_snapshot("trend", 0.80))
+
+    manager.ingest_snapshot(_make_snapshot("range", 0.70))
+    manager.ingest_snapshot(_make_snapshot("trend", 0.78))
+
+    assert manager.get_current_regime() == "trend"
+    diagnostics = manager.build_diagnostics()
+    assert diagnostics["transition"]["pending_regime"] is None
+
+
+def test_high_risk_regime_escalates_immediately() -> None:
+    detector = MarketRegimeDetector()
+    manager = MarketRegimeManager(detector, transition_confirmations=3)
+    manager.ingest_snapshot(_make_snapshot("trend", 0.80))
+
+    manager.ingest_snapshot(_make_snapshot("event", 0.82))
+
+    assert manager.get_current_regime() == "event"
+    assert manager.can_trade() is False
+    assert "regime_block_event" in manager.get_filter_reasons()
+
+
+def test_low_confidence_raw_observation_blocks_without_flipping_stable_state() -> None:
+    detector = MarketRegimeDetector()
+    manager = MarketRegimeManager(detector, transition_confirmations=2)
+    manager.ingest_snapshot(_make_snapshot("trend", 0.80))
+
+    manager.ingest_snapshot(_make_snapshot("range", 0.20))
+
+    assert manager.get_current_regime() == "trend"
+    assert manager.can_trade() is False
+    assert "confidence_below_floor" in manager.get_filter_reasons()
+
+
+def test_unknown_raw_regime_fails_closed_without_overwriting_stable_state() -> None:
+    detector = MarketRegimeDetector()
+    manager = MarketRegimeManager(detector, transition_confirmations=2)
+    manager.ingest_snapshot(_make_snapshot("trend", 0.80))
+
+    manager.ingest_snapshot(_make_snapshot("unmapped_state", 0.90))
+
+    assert manager.get_current_regime() == "trend"
+    assert manager.can_trade() is False
+    assert "regime_unknown" in manager.get_filter_reasons()
