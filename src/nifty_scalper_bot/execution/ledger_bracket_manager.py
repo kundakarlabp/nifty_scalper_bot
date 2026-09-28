@@ -674,6 +674,15 @@ class LedgerBracketManager(CanonicalBracketManager):
             getattr(bracket, "lowest_ltp", entry_price) or entry_price or 0.0
         )
         entry = float(entry_price or 0.0)
+
+        # Excursion telemetry must include the confirmed executable exit fill.
+        # Protection can fire on bid/ask while LTP remains inside the entry,
+        # otherwise a real losing trade can be reported with MAE=0.
+        if resolved_exit is not None:
+            exit_value = float(resolved_exit)
+            high = max(high, exit_value)
+            low = min(low, exit_value)
+
         if side == "SELL":
             mfe_points = max(0.0, entry - low)
             mae_points = max(0.0, high - entry)
