@@ -350,6 +350,63 @@ def load_completed_strategy_history(
     return history
 
 
+
+def load_trade_ledger_rows(
+    db_path: str | Path,
+    *,
+    limit: int = 100,
+    closed_only: bool = True,
+) -> list[dict[str, Any]]:
+    """Read bounded canonical trade-ledger rows for diagnostics and research."""
+
+    resolved = Path(db_path).expanduser().resolve()
+    if not resolved.exists():
+        return []
+    bounded_limit = max(1, min(1000, int(limit)))
+    where = "WHERE state = 'CLOSED' AND ledger_complete = 1" if closed_only else ""
+    uri = f"{resolved.as_uri()}?mode=ro"
+    try:
+        with sqlite3.connect(uri, uri=True) as connection:
+            connection.row_factory = sqlite3.Row
+            rows = connection.execute(
+                f"""
+                SELECT
+                    trade_id, signal_id, trace_id, strategy, symbol, side,
+                    state, entry_order_id, exit_order_id, quantity,
+                    entry_price, initial_stop_price, initial_target_price,
+                    stop_price, target_price, exit_price,
+                    gross_pnl, estimated_costs, net_pnl, r_multiple,
+                    mfe_r, mae_r, holding_seconds, exit_reason, close_source,
+                    ledger_complete, decision_at, entry_submitted_at,
+                    entry_filled_at, bracket_armed_at, exit_triggered_at,
+                    exit_submitted_at, exit_filled_at, closed_at,
+                    created_at, updated_at, last_event_name, build_sha,
+                    costs_json, execution_quality_json, outcome_json
+                FROM trade_ledger
+                {where}
+                ORDER BY COALESCE(closed_at, updated_at) DESC, trade_id DESC
+                LIMIT ?
+                """,
+                (bounded_limit,),
+            ).fetchall()
+    except sqlite3.OperationalError as exc:
+        if "no such table: trade_ledger" in str(exc).lower():
+            return []
+        raise
+
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        for key in ("costs_json", "execution_quality_json", "outcome_json"):
+            raw = item.pop(key, None)
+            try:
+                item[key.removesuffix("_json")] = json.loads(raw) if raw else {}
+            except (TypeError, ValueError, json.JSONDecodeError):
+                item[key.removesuffix("_json")] = {}
+        item["ledger_complete"] = bool(item["ledger_complete"])
+        result.append(item)
+    return result
+
 def materialize_trade_events(
     conn: sqlite3.Connection,
     events: Sequence[Mapping[str, Any]],
