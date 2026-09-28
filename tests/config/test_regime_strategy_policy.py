@@ -5,6 +5,7 @@ import json
 from nifty_scalper_bot.config.regime_ontology import MarketRegime
 from nifty_scalper_bot.config.regime_strategy_policy import (
     REGIME_STRATEGY_WEIGHTS,
+    regime_strategy_compatibility,
     regime_strategy_weight,
 )
 
@@ -24,3 +25,10 @@ def test_regime_strategy_policy_remains_profile_json_serializable() -> None:
     encoded = json.dumps({"strategy_weights": REGIME_STRATEGY_WEIGHTS}, sort_keys=True)
     assert '"TREND"' in encoded
     assert '"SMC"' in encoded
+
+
+def test_regime_strategy_compatibility_is_structural_and_non_numeric() -> None:
+    assert regime_strategy_compatibility("TREND", "VWAPPro") == "preferred"
+    assert regime_strategy_compatibility("RANGE", "VWAPPro") == "compatible"
+    assert regime_strategy_compatibility("EVENT", "VWAPPro") == "caution"
+    assert regime_strategy_compatibility("UNKNOWN", "VWAPPro") == "unknown"
