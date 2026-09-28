@@ -111,7 +111,6 @@ def test_market_regime_manager_fail_closed_blocks_on_error() -> None:
     assert "regime_fail_closed_error" in reasons
 
 
-
 def test_regime_transition_requires_consecutive_confirmations() -> None:
     detector = MarketRegimeDetector()
     manager = MarketRegimeManager(detector, transition_confirmations=2)
@@ -179,7 +178,6 @@ def test_unknown_raw_regime_fails_closed_without_overwriting_stable_state() -> N
     assert manager.get_current_regime() == "trend"
     assert manager.can_trade() is False
     assert "regime_unknown" in manager.get_filter_reasons()
-
 
 
 def test_duplicate_snapshot_does_not_count_as_second_confirmation() -> None:
