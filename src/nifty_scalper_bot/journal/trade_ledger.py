@@ -354,7 +354,7 @@ def load_completed_strategy_history(
 def load_trade_ledger_rows(
     db_path: str | Path,
     *,
-    limit: int = 100,
+    limit: int | None = 100,
     closed_only: bool = True,
 ) -> list[dict[str, Any]]:
     """Read bounded canonical trade-ledger rows for diagnostics and research."""
@@ -362,7 +362,7 @@ def load_trade_ledger_rows(
     resolved = Path(db_path).expanduser().resolve()
     if not resolved.exists():
         return []
-    bounded_limit = max(1, min(1000, int(limit)))
+    bounded_limit = None if limit is None else max(1, min(1000, int(limit)))
     where = "WHERE state = 'CLOSED' AND ledger_complete = 1" if closed_only else ""
     uri = f"{resolved.as_uri()}?mode=ro"
     try:
@@ -385,9 +385,9 @@ def load_trade_ledger_rows(
                 FROM trade_ledger
                 {where}
                 ORDER BY COALESCE(closed_at, updated_at) DESC, trade_id DESC
-                LIMIT ?
+                {"" if bounded_limit is None else "LIMIT ?"}
                 """,
-                (bounded_limit,),
+                () if bounded_limit is None else (bounded_limit,),
             ).fetchall()
     except sqlite3.OperationalError as exc:
         if "no such table: trade_ledger" in str(exc).lower():
