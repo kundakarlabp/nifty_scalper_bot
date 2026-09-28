@@ -59,9 +59,9 @@ REGIME_STRATEGY_WEIGHTS: dict[str, dict[str, float]] = {
 # Keeping this policy descriptive prevents literature-derived priors from becoming
 # unvalidated live alpha.
 _REGIME_PREFERRED_FAMILIES: dict[str, frozenset[str]] = {
-    MarketRegime.TREND.value: frozenset({"smc", "vwap_pro", "orb_pro", "bb_squeeze"}),
+    MarketRegime.TREND.value: frozenset({"smc_lite", "vwap_pro", "orb_pro", "bb_squeeze"}),
     MarketRegime.RANGE.value: frozenset({"rsi_divergence", "oi_max_pain"}),
-    MarketRegime.VOLATILE.value: frozenset({"smc", "vwap_pro", "orb_pro"}),
+    MarketRegime.VOLATILE.value: frozenset({"smc_lite", "vwap_pro", "orb_pro"}),
     MarketRegime.EVENT.value: frozenset(),
     MarketRegime.LOW_ACTIVITY.value: frozenset({"bb_squeeze"}),
 }
