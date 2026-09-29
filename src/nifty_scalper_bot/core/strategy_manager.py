@@ -3836,7 +3836,19 @@ class StrategyManager(_BaseStrategyManager):
             )
             primary_reason = "no_strategy_signal"
             category = "strategy_no_trigger"
-            if no_vote_reason_counts.get("underlying_direction_conflict"):
+            # Preserve the canonical underlying transition as the root cause.
+            # Strategies may surface this as direction_context_not_ready because
+            # executable CE/PE direction is deliberately cleared on fresh
+            # spot/futures disagreement.  Collapsing that into no_strategy_signal
+            # makes a healthy fail-closed transition look like alpha failure.
+            if (
+                bool(indicators.get("direction_transition"))
+                and str(indicators.get("direction_resolution_reason") or "")
+                == "fresh_spot_futures_disagreement"
+            ):
+                primary_reason = "underlying_direction_transition"
+                category = "context_direction_transition"
+            elif no_vote_reason_counts.get("underlying_direction_conflict"):
                 primary_reason = "underlying_direction_conflict"
                 category = "context_direction_conflict"
             elif no_vote_reason_counts.get("tick_direction_missing_or_neutral"):
