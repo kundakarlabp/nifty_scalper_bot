@@ -746,23 +746,6 @@ class ORBProStrategy(EliteStrategy):
                 and float(snapshot["volume_ratio"])
                 >= _env_float("ORB_MOMENTUM_MIN_VOLUME_RATIO", 1.20)
             )
-            if momentum_confirmed:
-                signal = self._build_signal(
-                    symbol=symbol,
-                    side=side,
-                    current_price=current_price,
-                    indicators=indicators,
-                    snapshot=snapshot,
-                    event=event,
-                    branch="momentum",
-                    retest_timestamp=None,
-                )
-                if signal is None:
-                    event["status"] = "QUALITY_REJECTED"
-                    return None
-                event["status"] = "EMITTED"
-                self._event_count_by_key[key] = self._event_count_by_key.get(key, 0) + 1
-                return signal
             setup_id = (
                 f"orbv2:{snapshot['session_date']}:{snapshot['symbol']}:{side}:"
                 f"{current_ts.isoformat()}"
@@ -775,6 +758,39 @@ class ORBProStrategy(EliteStrategy):
                 side=side,
                 reason="underlying_breakout",
             )
+            if momentum_confirmed:
+                transition_setup(
+                    SetupStage.CONFIRMING,
+                    strategy="ORBPro",
+                    setup_id=setup_id,
+                    symbol=symbol,
+                    side=side,
+                    reason="orb_momentum_confirmation",
+                )
+                signal = self._build_signal(
+                    symbol=symbol,
+                    side=side,
+                    current_price=current_price,
+                    indicators=indicators,
+                    snapshot=snapshot,
+                    event=event,
+                    branch="momentum",
+                    retest_timestamp=None,
+                )
+                if signal is None:
+                    event["status"] = "QUALITY_REJECTED"
+                    transition_setup(
+                        SetupStage.QUALITY_REJECTED,
+                        strategy="ORBPro",
+                        setup_id=setup_id,
+                        symbol=symbol,
+                        side=side,
+                        reason="orb_quality_below_minimum",
+                    )
+                    return None
+                event["status"] = "EMITTED"
+                self._event_count_by_key[key] = self._event_count_by_key.get(key, 0) + 1
+                return signal
             transition_setup(
                 SetupStage.CONFIRMING,
                 strategy="ORBPro",
@@ -850,6 +866,17 @@ class ORBProStrategy(EliteStrategy):
         )
         if signal is None:
             event["status"] = "QUALITY_REJECTED"
+            transition_setup(
+                SetupStage.QUALITY_REJECTED,
+                strategy="ORBPro",
+                setup_id=(
+                    f"orbv2:{snapshot['session_date']}:{snapshot['symbol']}:{side}:"
+                    f"{breakout_ts.isoformat()}"
+                ),
+                symbol=symbol,
+                side=side,
+                reason="orb_quality_below_minimum",
+            )
             return None
         event["status"] = "EMITTED"
         self._event_count_by_key[key] = self._event_count_by_key.get(key, 0) + 1
