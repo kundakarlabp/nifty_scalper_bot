@@ -4777,6 +4777,13 @@ class StrategyManager(_BaseStrategyManager):
                     context_metadata.get("quote_depth_valid")
                     or context_metadata.get("tradable_quote")
                 )
+                # The context producer owns quote/freshness eligibility.
+                # Do not reconstruct a weaker subset here: a fresh vote timestamp
+                # does not make stale or otherwise non-executable market
+                # microstructure valid confirmation evidence.
+                context_quality_eligible = (
+                    context_metadata.get("context_quality_eligible") is True
+                )
                 if (
                     context_vote.strategy.strip().lower()
                     in context_confirm_allowed_strategies
@@ -4786,6 +4793,7 @@ class StrategyManager(_BaseStrategyManager):
                     and float(context_vote.confidence)
                     >= context_confirm_min_confidence
                     and context_quote_ready
+                    and context_quality_eligible
                 ):
                     qualifying_context_votes.append(context_vote)
             # A weakly disagreeing underlying source is useful provenance,
