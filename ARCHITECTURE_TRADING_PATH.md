@@ -128,3 +128,22 @@ Compatibility adapters may preserve historical constructor or import shapes, but
 ## Forbidden runtime layers
 
 Retired executor, order-processor, monkey-patch installer and side-channel bracket layers must not be used in live runtime.
+
+
+## Canonical structural setup lifecycle
+
+Structural opportunity observability is keyed by the existing strategy-owned `setup_id`.
+`strategies/setup_lifecycle.py` is the single bounded lifecycle registry and is
+**observational only**: it must never admit, reject, score, size, or route a trade.
+
+Ownership remains unchanged:
+- ORB/VWAP/SMC own setup formation, confirmation, invalidation, and expiry semantics.
+- `StrategyManager` owns trigger/context arbitration and manager qualification.
+- `StrategyRunner` remains the sole final-quality owner and creates the immutable `TradePlan`.
+- `OrderManager` / `RuntimeOrderManager` remain the only execution authorities.
+
+The canonical progression is:
+`SETUP_ARMED -> CONFIRMING -> TRIGGER_QUALIFIED -> MANAGER_QUALIFIED -> RUNNER_APPROVED -> TRADE_PLAN -> BROKER_ACCEPTED`.
+Terminal outcomes include invalidation, expiry, context veto, quality rejection,
+risk rejection, and execution rejection. Raw tick evaluation counts are not
+equivalent to independent setup opportunities.
