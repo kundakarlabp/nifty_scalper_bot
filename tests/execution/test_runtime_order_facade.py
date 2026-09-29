@@ -144,6 +144,50 @@ def test_unresolved_exit_provider_is_canonical_reconciliation_owner() -> None:
     assert manager._bracket_manager is None
 
 
+def test_successful_native_order_marks_endpoint_verified(monkeypatch) -> None:
+    manager = _manager(None)
+
+    monkeypatch.setattr(
+        order_manager_core.OrderManager,
+        "place_order",
+        lambda self, *args, **kwargs: "OID-PROOF",
+    )
+
+    result = manager.place_order(
+        symbol="NFO:NIFTY26SEP22700CE",
+        side="BUY",
+        quantity=65,
+        intent="ENTRY",
+        check_risk=False,
+    )
+
+    assert result == "OID-PROOF"
+    assert manager.order_endpoint_verified is True
+    assert manager.broker_order_endpoint_verified is True
+
+
+def test_rejected_native_order_does_not_mark_endpoint_verified(monkeypatch) -> None:
+    manager = _manager(None)
+
+    monkeypatch.setattr(
+        order_manager_core.OrderManager,
+        "place_order",
+        lambda self, *args, **kwargs: None,
+    )
+
+    result = manager.place_order(
+        symbol="NFO:NIFTY26SEP22700CE",
+        side="BUY",
+        quantity=65,
+        intent="ENTRY",
+        check_risk=False,
+    )
+
+    assert result is None
+    assert getattr(manager, "order_endpoint_verified", False) is False
+    assert getattr(manager, "broker_order_endpoint_verified", False) is False
+
+
 def test_managed_order_preserves_approved_strategy_name(monkeypatch) -> None:
     manager = _manager(None)
     captured: dict[str, Any] = {}

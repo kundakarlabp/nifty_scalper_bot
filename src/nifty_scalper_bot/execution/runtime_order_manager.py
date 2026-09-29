@@ -647,7 +647,14 @@ class RuntimeOrderManager(_core.OrderManager):
         # unchanged order kwargs; the structural stop guard can recover the
         # strategy setup only while this specific signal is under risk review.
         with order_setup_context(cleaned_kwargs.get("signal_id")):
-            return super().place_order(*args, **cleaned_kwargs)
+            result = super().place_order(*args, **cleaned_kwargs)
+        # A non-empty native placement result is positive broker evidence that the
+        # order endpoint accepted a real runtime request.  This is telemetry only:
+        # it never arms trading and never substitutes for readiness/risk gates.
+        if result:
+            self.order_endpoint_verified = True
+            self.broker_order_endpoint_verified = True
+        return result
 
     def _sync_filled_exit_bracket(
         self,
