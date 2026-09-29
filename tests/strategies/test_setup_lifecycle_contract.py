@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 from nifty_scalper_bot.strategies.setup_lifecycle import (
     SetupLifecycleRegistry,
     SetupStage,
