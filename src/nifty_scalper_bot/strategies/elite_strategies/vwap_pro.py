@@ -557,7 +557,7 @@ class VWAPProStrategy(EliteStrategy):
             setup_lifecycle_id = (
                 f"vwap:{contract_side}:{thesis_anchor}:{session_scope}:{symbol_scope}"
             )
-            if is_live and not event_confirmed:
+            if is_live:
                 transition_setup(
                     SetupStage.ARMED,
                     strategy="VWAPPro",
@@ -566,6 +566,7 @@ class VWAPProStrategy(EliteStrategy):
                     side=contract_side,
                     reason="vwap_thesis_armed",
                 )
+            if is_live and not event_confirmed:
                 transition_setup(
                     SetupStage.CONFIRMING,
                     strategy="VWAPPro",
@@ -676,6 +677,15 @@ class VWAPProStrategy(EliteStrategy):
 
             threshold_source = "trend_aligned" if trend_alignment else "base"
             if score < min_score:
+                if is_live:
+                    transition_setup(
+                        SetupStage.QUALITY_REJECTED,
+                        strategy="VWAPPro",
+                        setup_id=setup_lifecycle_id,
+                        symbol=symbol,
+                        side=contract_side,
+                        reason="weak_score",
+                    )
                 self._no_vote("weak_score")
                 LOGGER.info(
                     "STRATEGY_NO_VOTE strategy=VWAPPro reason=weak_score "
