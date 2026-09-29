@@ -170,6 +170,7 @@ from nifty_scalper_bot.strategies.signal_quality import (
     score_signal_metadata,
 )
 from nifty_scalper_bot.strategies.trade_selector import TradeCandidateSelector
+from nifty_scalper_bot.strategies.setup_lifecycle import SETUP_LIFECYCLE, SetupStage, transition_setup
 from nifty_scalper_bot.utils import metrics
 from nifty_scalper_bot.utils.async_helpers import safe_task
 from nifty_scalper_bot.utils.errors import OrderPlacementError
@@ -7658,7 +7659,23 @@ class StrategyRunner:
                             "decision_reference_price": float(price),
                         },
                     )
+                    transition_setup(
+                        SetupStage.TRADE_PLAN,
+                        metadata,
+                        strategy=(metadata or {}).get("strategy"),
+                        symbol=symbol,
+                        side=(metadata or {}).get("contract_side"),
+                    )
                     submit_result = self._order_manager.submit_trade_plan_result(plan)
+                    if submit_result.accepted and submit_result.order_id:
+                        transition_setup(
+                            SetupStage.BROKER_ACCEPTED,
+                            metadata,
+                            strategy=(metadata or {}).get("strategy"),
+                            symbol=symbol,
+                            side=(metadata or {}).get("contract_side"),
+                            reason=submit_result.order_id,
+                        )
                     if not submit_result.accepted or not submit_result.order_id:
                         raise RuntimeError(
                             f"order_manager_rejected:{submit_result.reason}"
@@ -20811,6 +20828,14 @@ class StrategyRunner:
                             "reasons": rejection_reasons,
                         },
                     )
+                transition_setup(
+                    SetupStage.QUALITY_REJECTED,
+                    metadata,
+                    strategy=metadata.get("strategy"),
+                    symbol=signal.symbol,
+                    side=infer_option_side(signal.symbol, metadata),
+                    reason=quality_reject_reason,
+                )
                 self._signal_reject_cooldown_ts[reject_cooldown_key] = now_epoch
                 return _reject_after_dedup(
                     reason=quality_reject_reason,
@@ -20819,6 +20844,14 @@ class StrategyRunner:
                         "reasons": rejection_reasons,
                     },
                 )
+            transition_setup(
+                SetupStage.RUNNER_APPROVED,
+                metadata,
+                strategy=metadata.get("strategy"),
+                symbol=signal.symbol,
+                side=infer_option_side(signal.symbol, metadata),
+                reason="runner_final_quality",
+            )
             self._final_quality_approved_counter = (
                 getattr(self, "_final_quality_approved_counter", 0) + 1
             )
