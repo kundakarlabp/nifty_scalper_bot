@@ -438,3 +438,34 @@ def test_manager_final_trade_score_is_reference_only_runner_owns_numeric_quality
     assert result.metadata["manager_final_score_reference_only"] is True
     assert result.metadata["manager_final_score_reference_pass"] is False
     assert result.metadata["quality_gate_owner"] == "runner_final_execution_score"
+
+
+def test_no_signal_preserves_underlying_transition_root_cause(monkeypatch) -> None:
+    """Fresh spot/futures disagreement is context transition, not alpha failure."""
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    manager = _manager()
+    symbol = _SYMBOL
+    manager._latest_context_snapshots = {
+        "spot_context": {
+            "symbol": "NSE:NIFTY 50",
+            "direction_bias": "PE",
+            "underlying_direction_confidence": 0.8,
+            "timestamp": time.time(),
+            "tick_age_seconds": 0.01,
+            "context_snapshot_version": 10,
+        },
+        "futures_context": {
+            "symbol": "NFO:NIFTY26SEPFUT",
+            "direction_bias": "CE",
+            "underlying_direction_confidence": 0.8,
+            "timestamp": time.time(),
+            "tick_age_seconds": 0.01,
+            "context_snapshot_version": 11,
+        },
+    }
+
+    assert manager.generate_signal(symbol, 100.0) is None
+    decision = manager.get_last_no_signal_decision(symbol)
+    assert decision is not None
+    assert decision.reason == "underlying_direction_transition"
+    assert decision.category == "context_direction_transition"
