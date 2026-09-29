@@ -1,4 +1,4 @@
-from nifty_scalper_bot.strategies.setup_lifecycle import SetupStage, transition_setup\nfrom __future__ import annotations
+from __future__ import annotations
 
 import os
 from datetime import datetime, time, timedelta, timezone
@@ -13,6 +13,7 @@ from nifty_scalper_bot.strategies.elite_strategies.base_elite import (
 from nifty_scalper_bot.strategies.elite_strategies.config_models import (
     ORBProStrategyConfig,
 )
+from nifty_scalper_bot.strategies.setup_lifecycle import SetupStage, transition_setup
 from nifty_scalper_bot.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
