@@ -438,3 +438,29 @@ def test_manager_final_trade_score_is_reference_only_runner_owns_numeric_quality
     assert result.metadata["manager_final_score_reference_only"] is True
     assert result.metadata["manager_final_score_reference_pass"] is False
     assert result.metadata["quality_gate_owner"] == "runner_final_execution_score"
+
+
+def test_no_signal_preserves_underlying_transition_root_cause() -> None:
+    """Fresh spot/futures disagreement is context transition, not alpha failure."""
+    cause = StrategyManager._canonical_no_signal_root_cause(
+        {
+            "direction_transition": True,
+            "direction_resolution_reason": "fresh_spot_futures_disagreement",
+        }
+    )
+    assert cause == (
+        "context_direction_transition",
+        "underlying_direction_transition",
+    )
+
+
+def test_no_signal_root_cause_does_not_relabel_ordinary_no_trigger() -> None:
+    assert (
+        StrategyManager._canonical_no_signal_root_cause(
+            {
+                "direction_transition": False,
+                "direction_resolution_reason": "spot_futures_agree",
+            }
+        )
+        is None
+    )

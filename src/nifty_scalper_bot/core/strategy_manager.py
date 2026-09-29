@@ -3836,7 +3836,13 @@ class StrategyManager(_BaseStrategyManager):
             )
             primary_reason = "no_strategy_signal"
             category = "strategy_no_trigger"
-            if no_vote_reason_counts.get("underlying_direction_conflict"):
+            # Preserve explicit upstream context causes before strategy
+            # no-vote reasons so a healthy fail-closed transition is not
+            # misclassified as alpha failure.
+            canonical_cause = self._canonical_no_signal_root_cause(indicators)
+            if canonical_cause is not None:
+                category, primary_reason = canonical_cause
+            elif no_vote_reason_counts.get("underlying_direction_conflict"):
                 primary_reason = "underlying_direction_conflict"
                 category = "context_direction_conflict"
             elif no_vote_reason_counts.get("tick_direction_missing_or_neutral"):
@@ -5463,6 +5469,19 @@ class StrategyManager(_BaseStrategyManager):
 
     def get_last_no_signal_decision(self, symbol: str) -> StrategyNoSignalDecision | None:
         return self._last_no_signal_decision_by_symbol.get(str(symbol or "").strip().upper())
+
+    @staticmethod
+    def _canonical_no_signal_root_cause(
+        indicators: t.Mapping[str, t.Any],
+    ) -> tuple[str, str] | None:
+        """Return a canonical upstream no-trade cause when one is explicit."""
+        if (
+            bool(indicators.get("direction_transition"))
+            and str(indicators.get("direction_resolution_reason") or "")
+            == "fresh_spot_futures_disagreement"
+        ):
+            return ("context_direction_transition", "underlying_direction_transition")
+        return None
 
     def _record_no_signal_decision(
         self,
