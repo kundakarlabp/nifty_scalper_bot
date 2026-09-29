@@ -60,6 +60,7 @@ from nifty_scalper_bot.infra.metrics import METRICS
 from nifty_scalper_bot.instruments.active_contracts import canonical_nifty_future_symbol
 from nifty_scalper_bot.strategies.elite_strategies.base_elite import EliteStrategy
 from nifty_scalper_bot.strategies.signal_quality import infer_option_side
+from nifty_scalper_bot.strategies.setup_lifecycle import SetupStage, transition_setup
 from nifty_scalper_bot.core.strategy_context_builder import (
     build_strategy_history_context,
 )
@@ -5432,6 +5433,14 @@ class StrategyManager(_BaseStrategyManager):
         metadata["approval_path"] = approval_path
         metadata["is_approved"] = True
         log.info("TRADE_DECISION_TRACE approval_path=%s symbol=%s strategy=%s", approval_path, symbol_norm, best_vote.strategy)
+        transition_setup(
+            SetupStage.MANAGER_QUALIFIED,
+            metadata,
+            strategy=best_vote.strategy,
+            symbol=symbol_norm,
+            side=best_vote.side,
+            reason=approval_path,
+        )
         log.info(
             "STRATEGY_CANDIDATE_QUALIFIED symbol=%s strategy=%s side=%s approval_path=%s "
             "final_score=%.2f trade_quality_score=%.2f",
