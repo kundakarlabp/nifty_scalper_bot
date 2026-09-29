@@ -354,6 +354,21 @@ def test_health_trading_reconciliation_requires_authenticated_broker():
     assert body["reconciliation"]["completed"] is True
 
 
+def test_health_reads_order_endpoint_proof_from_runtime_manager():
+    ctx = _ctx(
+        broker_balance_valid=True,
+        position_reconciliation_started=True,
+        position_reconciliation_completed=True,
+        order_manager=SimpleNamespace(order_endpoint_verified=True),
+    )
+    main.app.state.bot = SimpleNamespace(_ctx=ctx)
+
+    body = _json(main.health_trading())
+
+    assert body["broker"]["order_endpoint_verified"] is True
+    assert body["broker"]["broker_session_state"] == "order_verified"
+
+
 def test_health_trading_reconciliation_completed_when_order_endpoint_verified():
     ctx = _ctx(
         order_endpoint_verified=True,
