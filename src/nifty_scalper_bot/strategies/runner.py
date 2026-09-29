@@ -5697,6 +5697,7 @@ class StrategyRunner:
                 "approved_candidate_count": getattr(
                     self, "_final_quality_approved_counter", 0
                 ),
+                "setup_lifecycle": SETUP_LIFECYCLE.snapshot(),
                 "tick_count": getattr(self, "_eval_counter", 0),
                 "last_tick_age_sec": (
                     round(time.monotonic() - self._last_tick_seen_ts, 1)
