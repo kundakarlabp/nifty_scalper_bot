@@ -467,9 +467,14 @@ def _broker_session_status(ctx):  # noqa: ANN001
         or feed_authentication_proven
     )
     funds_endpoint_verified = bool(getattr(ctx, "broker_balance_valid", False))
+    order_manager = getattr(ctx, "order_manager", None) or getattr(
+        ctx, "runtime_order_manager", None
+    )
     order_endpoint_verified = bool(
         getattr(ctx, "order_endpoint_verified", False)
         or getattr(ctx, "broker_order_endpoint_verified", False)
+        or getattr(order_manager, "order_endpoint_verified", False)
+        or getattr(order_manager, "broker_order_endpoint_verified", False)
     )
     auth_invalid = bool(
         getattr(ctx, "broker_auth_invalid", False)
