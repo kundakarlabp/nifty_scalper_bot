@@ -79,7 +79,10 @@ class SetupLifecycleRegistry:
 
     @staticmethod
     def key(strategy: object, setup_id: object, side: object = "") -> str:
-        return f"{str(strategy or 'unknown').strip().lower()}:{str(side or '').strip().upper()}:{str(setup_id or '').strip()}"
+        strategy_key = str(strategy or "unknown").strip().lower()
+        side_key = str(side or "").strip().upper()
+        setup_key = str(setup_id or "").strip()
+        return f"{strategy_key}:{side_key}:{setup_key}"
 
     def transition(
         self,
@@ -107,7 +110,8 @@ class SetupLifecycleRegistry:
                 next_rank = _RANK.get(resolved, previous_rank + 1)
                 if resolved not in _TERMINAL and next_rank < previous_rank:
                     return previous
-                if previous_stage == resolved and str(reason or "") == str(previous.reason or ""):
+                same_reason = str(reason or "") == str(previous.reason or "")
+                if previous_stage == resolved and same_reason:
                     previous.updated_ts = now
                     self._records.move_to_end(key)
                     return previous
@@ -134,7 +138,10 @@ class SetupLifecycleRegistry:
             while len(self._records) > self._limit:
                 self._records.popitem(last=False)
         LOGGER.info(
-            "SETUP_LIFECYCLE stage=%s strategy=%s symbol=%s side=%s setup_id=%s reason=%s",
+            (
+                "SETUP_LIFECYCLE stage=%s strategy=%s symbol=%s side=%s "
+                "setup_id=%s reason=%s"
+            ),
             resolved.value,
             record.strategy,
             record.symbol,
@@ -155,8 +162,16 @@ class SetupLifecycleRegistry:
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
-            active = [asdict(item) for item in self._records.values() if SetupStage(item.stage) not in _TERMINAL]
-            terminal = Counter(item.stage for item in self._records.values() if SetupStage(item.stage) in _TERMINAL)
+            active = [
+                asdict(item)
+                for item in self._records.values()
+                if SetupStage(item.stage) not in _TERMINAL
+            ]
+            terminal = Counter(
+                item.stage
+                for item in self._records.values()
+                if SetupStage(item.stage) in _TERMINAL
+            )
             return {
                 "active_count": len(active),
                 "active": active,
@@ -183,11 +198,24 @@ def transition_setup(
     return SETUP_LIFECYCLE.transition(
         stage,
         strategy=strategy or payload.get("strategy_name") or payload.get("strategy"),
-        setup_id=setup_id or payload.get("setup_id") or payload.get("setup_structure_id"),
+        setup_id=(
+            setup_id or payload.get("setup_id") or payload.get("setup_structure_id")
+        ),
         symbol=symbol or payload.get("candidate_symbol") or payload.get("symbol"),
-        side=side or payload.get("contract_side") or payload.get("trade_side") or payload.get("side"),
+        side=(
+            side
+            or payload.get("contract_side")
+            or payload.get("trade_side")
+            or payload.get("side")
+        ),
         reason=reason,
     )
 
 
-__all__ = ["SETUP_LIFECYCLE", "SetupLifecycleRecord", "SetupLifecycleRegistry", "SetupStage", "transition_setup"]
+__all__ = [
+    "SETUP_LIFECYCLE",
+    "SetupLifecycleRecord",
+    "SetupLifecycleRegistry",
+    "SetupStage",
+    "transition_setup",
+]
