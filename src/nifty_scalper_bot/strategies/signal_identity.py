@@ -16,6 +16,7 @@ from contextvars import ContextVar
 from datetime import datetime, timezone
 from typing import Any, Iterator, Mapping
 
+from nifty_scalper_bot.strategies.setup_lifecycle import SetupStage, transition_setup
 from nifty_scalper_bot.strategies.quote_update_identity import (
     build_evaluation_snapshot_id,
     resolve_quote_update_identity,
