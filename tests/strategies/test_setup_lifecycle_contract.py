@@ -69,3 +69,30 @@ def test_setup_lifecycle_terminal_rejection_is_counted() -> None:
     snapshot = registry.snapshot()
     assert snapshot["terminal_counts"][SetupStage.QUALITY_REJECTED.value] == 1
     assert snapshot["transition_counts"][SetupStage.QUALITY_REJECTED.value] == 1
+
+
+def test_native_strategy_sources_cover_direct_and_terminal_lifecycle_paths() -> None:
+    from pathlib import Path
+
+    root = Path("src/nifty_scalper_bot/strategies/elite_strategies")
+    orb = (root / "orb_pro.py").read_text()
+    vwap = (root / "vwap_pro.py").read_text()
+    smc = (root / "smc_liquidity.py").read_text()
+
+    # ORB momentum can trigger without a retest; it must still start at ARMED.
+    momentum = orb[orb.index("if momentum_confirmed:") - 700 : orb.index("if momentum_confirmed:") + 900]
+    assert "SetupStage.ARMED" in momentum
+    assert "SetupStage.CONFIRMING" in momentum
+    assert "SetupStage.QUALITY_REJECTED" in momentum
+
+    # A confirmed VWAP event bypasses the unconfirmed-return branch, so ARMED
+    # must be recorded before that branch and weak quality must terminate it.
+    setup_idx = vwap.index("setup_lifecycle_id =")
+    unconfirmed_idx = vwap.index("if is_live and not event_confirmed:", setup_idx)
+    assert "SetupStage.ARMED" in vwap[setup_idx:unconfirmed_idx]
+    weak_idx = vwap.index("if score < min_score:", unconfirmed_idx)
+    assert "SetupStage.QUALITY_REJECTED" in vwap[weak_idx : weak_idx + 700]
+
+    # SMC structural sweeps remain the native owner of setup formation.
+    assert "SetupStage.ARMED" in smc
+    assert "SetupStage.CONFIRMING" in smc
