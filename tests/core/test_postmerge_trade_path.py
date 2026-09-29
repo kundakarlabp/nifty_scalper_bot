@@ -61,6 +61,9 @@ def _signal_vote(
             {
                 "context_bonus_score": 2.0,
                 "vote_timestamp": time.time(),
+                # This helper models valid live OrderFlow context.  The
+                # producer-owned eligibility bit is part of that contract.
+                "context_quality_eligible": True,
                 "trigger_conditions_met": False,
                 "trigger_block_reason": "context_only_role",
             }

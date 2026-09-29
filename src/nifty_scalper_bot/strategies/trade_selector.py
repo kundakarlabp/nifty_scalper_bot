@@ -155,19 +155,11 @@ class TradeCandidateSelector:
                 continue
 
             premium = ltp
-            premium_dynamic_override = False
-            if premium < self.min_option_premium:
-                dynamic_enabled = os.getenv('MIN_OPTION_PREMIUM_DYNAMIC', 'true').lower() in {'1', 'true', 'yes', 'on'}
-                dynamic_floor = float(os.getenv('MIN_OPTION_PREMIUM_DYNAMIC_FLOOR', '25') or '25')
-                dynamic_max_spread = float(os.getenv('MIN_OPTION_PREMIUM_DYNAMIC_MAX_SPREAD_PCT', '0.75') or '0.75')
-                near_atm = atm_distance <= max(1, self.option_strike_window_each_side)
-                if has_bid_ask:
-                    dyn_mid = ((bid or 0.0) + (ask or 0.0)) / 2.0
-                    dyn_spread = (((ask or 0.0) - (bid or 0.0)) / dyn_mid * 100.0) if dyn_mid > 0 else 100.0
-                else:
-                    dyn_spread = None
-                premium_dynamic_override = bool(dynamic_enabled and premium >= dynamic_floor and has_bid_ask and dyn_spread is not None and dyn_spread <= dynamic_max_spread and near_atm)
-            if (premium < self.min_option_premium and not premium_dynamic_override) or premium > self.max_option_premium:
+            # This selector is the execution-candidate gate.  The canonical
+            # execution premium floor is binding here; dynamic widening belongs
+            # only in the evaluation universe and must never manufacture an
+            # execution-eligible contract below EntryPolicy.execution_min_premium.
+            if premium < self.min_option_premium or premium > self.max_option_premium:
                 rejects['premium_out_of_range'] += 1
                 self._log_reject('premium_out_of_range', symbol, throttle_key_parts=('premium_out_of_range', symbol, int(self.min_option_premium), int(self.max_option_premium)), premium=premium, min_option_premium=self.min_option_premium, max_option_premium=self.max_option_premium, ltp=ltp, bid=bid, ask=ask, strike=strike, atm=atm_strike, atm_distance=atm_distance)
                 continue
@@ -187,8 +179,6 @@ class TradeCandidateSelector:
             reasons = ['candidate_valid']
             if real_ticks_derived:
                 reasons.append('real_tick_count_derived_from_fresh_ms_quote')
-            if premium_dynamic_override:
-                reasons.append('premium_filter_dynamic_override')
             spread_pct: float | None = None
             if has_bid_ask:
                 mid = ((bid or 0.0) + (ask or 0.0)) / 2.0
