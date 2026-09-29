@@ -4,6 +4,7 @@ Strategies own setup semantics; StrategyManager owns arbitration; Runner owns fi
 quality; execution owners remain unchanged.  This module owns only the shared,
 bounded lifecycle record keyed by structural setup identity.
 """
+
 from __future__ import annotations
 
 import threading
