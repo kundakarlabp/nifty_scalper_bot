@@ -282,6 +282,7 @@ def _context_vote(
             "vote_timestamp": time.time() - age_s,
             "quote_depth_valid": True,
             "tradable_quote": True,
+            "context_quality_eligible": True,
             "trigger_conditions_met": False,
             "trigger_block_reason": "context_only_role",
         },
@@ -743,3 +744,34 @@ async def test_smc_required_orderflow_cannot_be_bypassed_by_single_vote_override
                 "NFO:NIFTY2670724050CE"
             ]
             assert decision.reason == "single_trigger_context_confirmation_invalid"
+
+
+async def test_orderflow_confirmation_requires_canonical_context_quality(monkeypatch) -> None:
+    """Fresh timestamps/depth cannot rescue producer-rejected context evidence."""
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    manager = _manager_probe()
+    trigger = _signal_vote(strategy="SMC", raw_score=8.0, weighted_score=8.0)
+    trigger[0].metadata.update(
+        {
+            "strategy": "SMC",
+            "is_selected_option": True,
+            "preliminary_only": True,
+            "requires_orderflow_confirmation": True,
+            "requires_runner_final_score": True,
+            "setup_pass": True,
+            "setup_min": 7.0,
+        }
+    )
+    context_signal, context_vote = _context_vote(score=10.0, confidence=0.85)
+    context_vote.metadata["context_quality_eligible"] = False
+
+    result = manager._combine_strategy_votes(
+        symbol="NFO:NIFTY2670724050CE",
+        signals=[trigger, (context_signal, context_vote)],
+        indicators=_valid_entry_context(),
+    )
+
+    assert result is None
+    decision = manager._last_no_signal_decision_by_symbol["NFO:NIFTY2670724050CE"]
+    assert decision.reason == "single_trigger_context_confirmation_invalid"
