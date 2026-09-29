@@ -1,4 +1,4 @@
-from __future__ import annotations
+from nifty_scalper_bot.strategies.setup_lifecycle import SetupStage, transition_setup\nfrom __future__ import annotations
 
 import os
 from datetime import datetime, time, timedelta, timezone
@@ -6,7 +6,6 @@ from typing import Any, Mapping
 from zoneinfo import ZoneInfo
 
 from nifty_scalper_bot.config.regime_ontology import MarketRegime, normalize_regime
-from nifty_scalper_bot.strategies.setup_lifecycle import SetupStage, transition_setup
 from nifty_scalper_bot.strategies.elite_strategies.base_elite import (
     EliteSignal,
     EliteStrategy,
