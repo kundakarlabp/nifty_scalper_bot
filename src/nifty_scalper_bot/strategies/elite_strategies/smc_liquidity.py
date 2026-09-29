@@ -13,6 +13,7 @@ from nifty_scalper_bot.strategies.elite_strategies.base_elite import (
 from nifty_scalper_bot.strategies.elite_strategies.config_models import (
     SMCStrategyConfig,
 )
+from nifty_scalper_bot.strategies.setup_lifecycle import SetupStage, transition_setup
 from nifty_scalper_bot.strategies.runtime_context_contract import (
     resolve_context_age_seconds,
 )
@@ -1076,6 +1077,23 @@ class SMCStrategy(EliteStrategy):
                 desired,
             )
             event = self._events[event_key]
+            setup_id = self._setup_id(underlying_symbol, side, event["sweep_ts"])
+            transition_setup(
+                SetupStage.ARMED,
+                strategy="SMC",
+                setup_id=setup_id,
+                symbol=symbol,
+                side=side,
+                reason="underlying_liquidity_sweep",
+            )
+            transition_setup(
+                SetupStage.CONFIRMING,
+                strategy="SMC",
+                setup_id=setup_id,
+                symbol=symbol,
+                side=side,
+                reason="smc_awaiting_confirmation",
+            )
             self._no_vote("smc_awaiting_confirmation")
             LOGGER.info(
                 "SMC_SWEEP_ARMED symbol=%s option_side=%s "
