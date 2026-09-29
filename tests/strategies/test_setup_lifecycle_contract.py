@@ -1,3 +1,4 @@
+# Canonical lifecycle is observability-only; native owners retain all trading decisions.
 from __future__ import annotations
 
 from nifty_scalper_bot.strategies.setup_lifecycle import (
