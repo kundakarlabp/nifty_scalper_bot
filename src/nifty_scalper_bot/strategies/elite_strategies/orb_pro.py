@@ -6,6 +6,7 @@ from typing import Any, Mapping
 from zoneinfo import ZoneInfo
 
 from nifty_scalper_bot.config.regime_ontology import MarketRegime, normalize_regime
+from nifty_scalper_bot.strategies.setup_lifecycle import SetupStage, transition_setup
 from nifty_scalper_bot.strategies.elite_strategies.base_elite import (
     EliteSignal,
     EliteStrategy,
@@ -762,6 +763,18 @@ class ORBProStrategy(EliteStrategy):
                 event["status"] = "EMITTED"
                 self._event_count_by_key[key] = self._event_count_by_key.get(key, 0) + 1
                 return signal
+            setup_id = (
+                f"orbv2:{snapshot['session_date']}:{snapshot['symbol']}:{side}:"
+                f"{current_ts.isoformat()}"
+            )
+            transition_setup(
+                SetupStage.ARMED, strategy="ORBPro", setup_id=setup_id,
+                symbol=symbol, side=side, reason="underlying_breakout",
+            )
+            transition_setup(
+                SetupStage.CONFIRMING, strategy="ORBPro", setup_id=setup_id,
+                symbol=symbol, side=side, reason="awaiting_orb_retest",
+            )
             self._no_vote("awaiting_orb_retest")
             return None
 
@@ -769,6 +782,11 @@ class ORBProStrategy(EliteStrategy):
         breakout_age = max(0.0, (current_ts - breakout_ts).total_seconds())
         if breakout_age > max(60.0, _env_float("ORB_BREAKOUT_MAX_AGE_SECONDS", 600.0)):
             event["status"] = "EXPIRED"
+            transition_setup(
+                SetupStage.EXPIRED, strategy="ORBPro",
+                setup_id=f"orbv2:{snapshot['session_date']}:{snapshot['symbol']}:{side}:{breakout_ts.isoformat()}",
+                symbol=symbol, side=side, reason="orb_breakout_expired",
+            )
             self._no_vote("orb_breakout_expired")
             return None
 
@@ -789,6 +807,11 @@ class ORBProStrategy(EliteStrategy):
             )
         if invalidated:
             event["status"] = "INVALIDATED"
+            transition_setup(
+                SetupStage.INVALIDATED, strategy="ORBPro",
+                setup_id=f"orbv2:{snapshot['session_date']}:{snapshot['symbol']}:{side}:{breakout_ts.isoformat()}",
+                symbol=symbol, side=side, reason="orb_breakout_invalidated",
+            )
             self._no_vote("orb_breakout_invalidated")
             return None
         if not retest:
