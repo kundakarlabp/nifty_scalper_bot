@@ -60,3 +60,16 @@ def test_data_quality_respects_effective_candidate_limits():
     quality = selector.evaluate_data_quality(base(tick_age_ms=900), max_age=1.0, min_ticks=3, max_spread=5.0)
     assert quality.allowed is True
     assert quality.score == 10.0
+
+
+def test_execution_premium_floor_cannot_be_bypassed_by_dynamic_filter(monkeypatch):
+    monkeypatch.setenv("EXECUTION_MIN_OPTION_PREMIUM", "40")
+    monkeypatch.setenv("MIN_OPTION_PREMIUM_DYNAMIC", "true")
+    monkeypatch.setenv("MIN_OPTION_PREMIUM_DYNAMIC_FLOOR", "25")
+    snapshot = base(ltp=30.0, bid=29.9, ask=30.1)
+    ranked = TradeCandidateSelector().select_ranked_candidates(
+        direction_bias="CE",
+        atm_strike=22000,
+        snapshots=[snapshot],
+    )
+    assert ranked == []
