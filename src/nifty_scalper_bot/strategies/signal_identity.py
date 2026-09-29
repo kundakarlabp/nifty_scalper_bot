@@ -244,6 +244,14 @@ def finalize_signal_observability(
     vote_event = (
         "STRATEGY_CONTEXT_VOTE" if role == "context" else "STRATEGY_TRIGGER_VOTE"
     )
+    if role != "context":
+        transition_setup(
+            SetupStage.TRIGGER_QUALIFIED,
+            metadata,
+            strategy=strategy,
+            symbol=getattr(signal, "symbol", symbol),
+            side=side,
+        )
     LOGGER.log(
         logging.DEBUG if role == "context" else logging.INFO,
         (
