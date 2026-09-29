@@ -80,7 +80,8 @@ def test_native_strategy_sources_cover_direct_and_terminal_lifecycle_paths() -> 
     smc = (root / "smc_liquidity.py").read_text()
 
     # ORB momentum can trigger without a retest; it must still start at ARMED.
-    momentum = orb[orb.index("if momentum_confirmed:") - 700 : orb.index("if momentum_confirmed:") + 900]
+    momentum_idx = orb.index("if momentum_confirmed:")
+    momentum = orb[momentum_idx - 700 : momentum_idx + 900]
     assert "SetupStage.ARMED" in momentum
     assert "SetupStage.CONFIRMING" in momentum
     assert "SetupStage.QUALITY_REJECTED" in momentum
