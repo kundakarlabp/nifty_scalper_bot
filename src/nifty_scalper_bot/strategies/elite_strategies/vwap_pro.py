@@ -9,6 +9,7 @@ from typing import Any, Mapping
 
 from nifty_scalper_bot.strategies.elite_strategies.base_elite import EliteSignal, EliteStrategy
 from nifty_scalper_bot.strategies.elite_strategies.config_models import VWAPProStrategyConfig
+from nifty_scalper_bot.strategies.setup_lifecycle import SetupStage, transition_setup
 from nifty_scalper_bot.strategies.signal_quality import (
     canonical_max_spread_pct,
     resolve_signal_domain,
@@ -553,7 +554,26 @@ class VWAPProStrategy(EliteStrategy):
             event_confirmed = bool(
                 continuation_confirmed or pullback_flag or penetration_confirmed
             )
+            setup_lifecycle_id = (
+                f"vwap:{contract_side}:{thesis_anchor}:{session_scope}:{symbol_scope}"
+            )
             if is_live and not event_confirmed:
+                transition_setup(
+                    SetupStage.ARMED,
+                    strategy="VWAPPro",
+                    setup_id=setup_lifecycle_id,
+                    symbol=symbol,
+                    side=contract_side,
+                    reason="vwap_thesis_armed",
+                )
+                transition_setup(
+                    SetupStage.CONFIRMING,
+                    strategy="VWAPPro",
+                    setup_id=setup_lifecycle_id,
+                    symbol=symbol,
+                    side=contract_side,
+                    reason="vwap_event_unconfirmed",
+                )
                 self._no_vote("vwap_event_unconfirmed")
                 LOGGER.info(
                     "STRATEGY_NO_VOTE strategy=VWAPPro symbol=%s reason=vwap_event_unconfirmed close=%.2f vwap=%.2f penetration_atr=%.3f",
@@ -732,7 +752,7 @@ class VWAPProStrategy(EliteStrategy):
                 "trade_side": contract_side,
                 "side": contract_side,
                 "contract_side": contract_side,
-                "setup_id": f"vwap:{contract_side}:{thesis_anchor}:{session_scope}:{symbol_scope}",
+                "setup_id": setup_lifecycle_id,
                 # Stop rearm is structural, not merely a later evaluation bar.
                 # Keep the exact VWAP reclaim/reset anchor so the same thesis
                 # cannot re-enter after a stop just because one minute elapsed.
