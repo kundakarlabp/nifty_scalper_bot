@@ -28,7 +28,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import re
 import threading
 import time
 from collections import defaultdict, deque
@@ -269,25 +268,6 @@ _ORDER_STATE_MACHINE: dict[str, set[str]] = {
     "rejected": set(),
     "expired": set(),
 }
-
-_MONTH_MAP = {
-    "JAN": 1,
-    "FEB": 2,
-    "MAR": 3,
-    "APR": 4,
-    "MAY": 5,
-    "JUN": 6,
-    "JUL": 7,
-    "AUG": 8,
-    "SEP": 9,
-    "OCT": 10,
-    "NOV": 11,
-    "DEC": 12,
-}
-
-_OPTION_RE = re.compile(
-    r"^(?:NFO:)?(?P<base>[A-Z]+)(?P<year>\d{2})(?P<month>[A-Z]{3})(?P<strike>\d+)(?P<side>CE|PE)$"
-)
 
 
 class DataHub:
