@@ -1,14 +1,8 @@
-"""Runner regime gate must resolve legacy aliases through the canonical ontology.
-
-This previously asserted on literal alias strings in ``runner.py`` source text,
-which passed while the gate compared against a vocabulary the regime engine
-never emitted. It now exercises the gate itself.
-"""
+"""Canonical regime aliases remain stable after retiring Runner admission gates."""
 
 from pathlib import Path
 
 from nifty_scalper_bot.config.regime_ontology import MarketRegime, normalize_regime
-from nifty_scalper_bot.strategies.runner import StrategyRunner
 
 
 def test_legacy_regime_aliases_resolve_to_canonical_states() -> None:
@@ -18,56 +12,10 @@ def test_legacy_regime_aliases_resolve_to_canonical_states() -> None:
     assert normalize_regime("RANGING") is MarketRegime.RANGE
 
 
-def test_runner_gate_accepts_legacy_alias_configuration(monkeypatch) -> None:
-    """Operators with legacy env values must keep working after canonicalisation."""
-    monkeypatch.setenv("RUNNER_ENABLE_REGIME_GATE", "true")
-    monkeypatch.setenv("RUNNER_VWAP_ALLOWED_REGIMES", "TREND,HIGH_VOLATILITY")
-    runner = StrategyRunner.__new__(StrategyRunner)
-    runner._logger = __import__("logging").getLogger("test")
-
-    assert StrategyRunner._strategy_allowed_for_regime(
-        runner, "vwap_pro", MarketRegime.VOLATILE
-    )
-    assert not StrategyRunner._strategy_allowed_for_regime(
-        runner, "vwap_pro", MarketRegime.RANGE
-    )
-
-
-def test_runner_gate_blocks_unresolved_and_inactive_regimes(monkeypatch) -> None:
-    monkeypatch.setenv("RUNNER_ENABLE_REGIME_GATE", "true")
-    monkeypatch.delenv("RUNNER_ORB_ALLOWED_REGIMES", raising=False)
-    runner = StrategyRunner.__new__(StrategyRunner)
-    runner._logger = __import__("logging").getLogger("test")
-
-    for regime in (MarketRegime.UNKNOWN, MarketRegime.LOW_ACTIVITY):
-        assert not StrategyRunner._strategy_allowed_for_regime(runner, "orb_pro", regime)
-
-
 def test_runner_no_longer_declares_a_private_regime_vocabulary() -> None:
-    source = Path("src/nifty_scalper_bot/strategies/runner.py").read_text(encoding="utf-8")
+    source = Path("src/nifty_scalper_bot/strategies/runner.py").read_text(
+        encoding="utf-8"
+    )
     assert '"VOLATILE": "HIGH_VOLATILITY"' not in source
-    assert "REGIME_GATE_DECISION" in source
-
-
-def test_default_gate_only_hard_filters_explicit_strategy_policies(monkeypatch) -> None:
-    monkeypatch.setenv("RUNNER_ENABLE_REGIME_GATE", "true")
-    for name in ("RUNNER_VWAP_ALLOWED_REGIMES", "RUNNER_ORB_ALLOWED_REGIMES"):
-        monkeypatch.delenv(name, raising=False)
-    runner = StrategyRunner.__new__(StrategyRunner)
-    runner._logger = __import__("logging").getLogger("test")
-
-    assert StrategyRunner._strategy_allowed_for_regime(
-        runner, "SMC", MarketRegime.RANGE
-    )
-    assert StrategyRunner._strategy_allowed_for_regime(
-        runner, "RSI Mean Reversion", MarketRegime.RANGE
-    )
-    assert StrategyRunner._strategy_allowed_for_regime(
-        runner, "vwap_pro", MarketRegime.TREND
-    )
-    assert not StrategyRunner._strategy_allowed_for_regime(
-        runner, "vwap_pro", MarketRegime.RANGE
-    )
-    assert not StrategyRunner._strategy_allowed_for_regime(
-        runner, "vwap_pro", MarketRegime.VOLATILE
-    )
+    assert "RUNNER_VWAP_ALLOWED_REGIMES" not in source
+    assert "RUNNER_ORB_ALLOWED_REGIMES" not in source

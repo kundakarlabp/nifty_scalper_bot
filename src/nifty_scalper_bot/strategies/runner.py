@@ -83,7 +83,6 @@ from nifty_scalper_bot.config.entry_policy import resolve_entry_policy
 from nifty_scalper_bot.config.env_utils import parse_float_env, parse_int_env
 from nifty_scalper_bot.config.env_utils import resolve_build_sha as _resolve_build_sha
 from nifty_scalper_bot.config.regime_ontology import MarketRegime, normalize_regime
-from nifty_scalper_bot.config.regime_strategy_policy import runner_regime_policy
 from nifty_scalper_bot.config.settings import get_settings
 from nifty_scalper_bot.core.active_basket import (
     ActiveContractSelection,
@@ -10135,100 +10134,6 @@ class StrategyRunner:
                 "Failure in StrategyRunner.detect_market_regime: %s", exc
             )
             return "unknown"
-
-    def _strategy_allowed_for_regime(self, strategy: str, regime: MarketRegime) -> bool:
-        """Validate strategy admission against the central accepted regime."""
-
-        if not _env_bool("RUNNER_ENABLE_REGIME_GATE", True):
-            self._logger.debug(
-                "REGIME_GATE_BYPASSED strategy=%s regime=%s reason=disabled",
-                strategy or "unknown",
-                regime.value,
-                extra={"event": "REGIME_GATE_BYPASSED"},
-            )
-            return True
-        policy = runner_regime_policy(strategy)
-        if policy is None:
-            self._logger.debug(
-                "REGIME_GATE_DECISION strategy=%s regime=%s allowed=True "
-                "reason=no_explicit_strategy_regime_policy",
-                strategy or "unknown",
-                regime.value,
-                extra={"event": "REGIME_GATE_DECISION"},
-            )
-            return True
-
-        env_name, default_regimes = policy
-        default_allowed = ",".join(default_regimes)
-        allowed_csv = os.getenv(env_name, default_allowed)
-        allowed = {
-            normalize_regime(item).value
-            for item in allowed_csv.split(",")
-            if item.strip()
-        }
-        regime_name = normalize_regime(regime).value
-        allowed_for_regime = regime_name in allowed
-        self._logger.debug(
-            "REGIME_GATE_DECISION strategy=%s regime=%s allowed=%s allowed_regimes=%s env=%s",
-            strategy or "unknown",
-            regime.value,
-            allowed_for_regime,
-            sorted(allowed),
-            env_name or "default",
-            extra={"event": "REGIME_GATE_DECISION"},
-        )
-        return allowed_for_regime
-
-    def _strategy_regime_decision(
-        self,
-        *,
-        strategy: str,
-        regime: MarketRegime,
-        symbol: str,
-        metadata: Mapping[str, Any] | None = None,
-    ) -> tuple[bool, str]:
-        """Return strategy-regime compatibility decision. Args: strategy/regime/symbol/metadata; Returns: tuple[bool,str]; Raises: none."""
-        del symbol
-        normalized = (strategy or "").strip().lower()
-        canonical = normalize_regime(regime)
-        meta = dict(metadata or {})
-        selected = bool(
-            meta.get("candidate_selected")
-            or meta.get("is_selected_option")
-            or meta.get("selected_ok")
-        )
-        try:
-            spread_pct = float(
-                meta.get("candidate_spread_pct")
-                if meta.get("candidate_spread_pct") is not None
-                else (
-                    meta.get("spread_pct")
-                    if meta.get("spread_pct") is not None
-                    else 999.0
-                )
-            )
-        except (TypeError, ValueError):
-            spread_pct = 999.0
-        try:
-            rr = float(
-                meta.get("candidate_rr")
-                if meta.get("candidate_rr") is not None
-                else meta.get("rr") if meta.get("rr") is not None else 0.0
-            )
-        except (TypeError, ValueError):
-            rr = 0.0
-        if self._strategy_allowed_for_regime(strategy, regime):
-            return True, "regime_in_allowed_list"
-        if normalized in {"vwap_pro", "vwappro"} and canonical is MarketRegime.VOLATILE:
-            max_spread = float(
-                os.getenv("VWAP_HIGH_VOL_MAX_SPREAD_PCT", "0.75") or "0.75"
-            )
-            min_rr = float(os.getenv("VWAP_HIGH_VOL_MIN_RR", "1.6") or "1.6")
-            rr_allowed = rr >= min_rr - 1e-9
-            if selected and spread_pct <= max_spread and rr_allowed:
-                return True, "vwap_high_vol_execution_quality_soft_allow"
-            return False, "vwap_high_vol_execution_quality_failed"
-        return False, "regime_not_allowed"
 
     def _strategy_slots_available(self) -> bool:
         """Return True when active strategy slots are available for new entries."""
@@ -20659,74 +20564,11 @@ class StrategyRunner:
             metadata["runtime_regime_inputs"] = self._last_regime_inputs_by_symbol.get(
                 base_symbol, {}
             )
-            regime_allowed, regime_reason = self._strategy_regime_decision(
-                strategy=signal_strategy,
-                regime=current_regime,
-                symbol=base_symbol,
-                metadata=metadata,
-            )
-            metadata["regime_decision"] = "allow" if regime_allowed else "block"
-            metadata["regime_reason"] = regime_reason
-            if not regime_allowed:
-                self._logger.info(
-                    "REGIME_GATE_REJECTED symbol=%s strategy=%s regime=%s side=%s reason=%s selected=%s spread_pct=%s candidate_rr=%s trace_id=%s",
-                    base_symbol,
-                    signal_strategy or "unknown",
-                    current_regime.value,
-                    infer_option_side(signal.symbol, metadata),
-                    regime_reason,
-                    bool(
-                        metadata.get("candidate_selected")
-                        or metadata.get("is_selected_option")
-                    ),
-                    metadata.get("candidate_spread_pct") or metadata.get("spread_pct"),
-                    metadata.get("candidate_rr"),
-                    trace_id,
-                    extra={
-                        "event": "REGIME_GATE_REJECTED",
-                        "symbol": base_symbol,
-                        "strategy": signal_strategy or "unknown",
-                        "regime": current_regime.value,
-                        "side": infer_option_side(signal.symbol, metadata),
-                        "regime_reason": regime_reason,
-                        "selected": bool(
-                            metadata.get("candidate_selected")
-                            or metadata.get("is_selected_option")
-                        ),
-                        "spread_pct": metadata.get("candidate_spread_pct")
-                        or metadata.get("spread_pct"),
-                        "candidate_rr": metadata.get("candidate_rr"),
-                        "trace_id": trace_id,
-                        "regime_inputs": self._last_regime_inputs_by_symbol.get(
-                            base_symbol, {}
-                        ),
-                    },
-                )
-                self._logger.info(
-                    "TRADE_DECISION_TRACE symbol=%s strategy=%s side=%s allowed=%s blocked_at=%s blocked_reason=%s regime=%s regime_reason=%s",
-                    base_symbol,
-                    signal_strategy or "unknown",
-                    infer_option_side(signal.symbol, metadata),
-                    False,
-                    "runner_regime_gate",
-                    "regime_not_allowed",
-                    current_regime.value,
-                    regime_reason,
-                    extra={
-                        "event": "TRADE_DECISION_TRACE",
-                        "symbol": base_symbol,
-                        "strategy": signal_strategy or "unknown",
-                        "side": infer_option_side(signal.symbol, metadata),
-                        "allowed": False,
-                        "blocked_at": "runner_regime_gate",
-                        "blocked_reason": "regime_not_allowed",
-                        "regime": current_regime.value,
-                        "regime_reason": regime_reason,
-                        "trace_id": trace_id,
-                    },
-                )
-                _trace("regime_not_allowed")
-                return _reject_after_dedup(reason="regime_not_allowed")
+            # Regime influence is already applied once by StrategyManager through
+            # canonical regime weighting. Runner records the runtime regime for
+            # diagnostics, then owns final signal quality and execution readiness.
+            metadata["regime_decision"] = "observe_only"
+            metadata["regime_reason"] = "manager_weighted_observe_only"
             missing_components = missing_score_components(metadata)
             if requires_final_score:
                 has_components = not missing_components
