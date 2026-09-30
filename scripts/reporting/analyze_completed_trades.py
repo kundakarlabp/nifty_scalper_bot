@@ -22,8 +22,9 @@ from nifty_scalper_bot.backtesting.completed_trade_analysis import (  # noqa: E4
     chronological_post_cost_blocks,
     chronological_walk_forward,
     execution_data_quality,
-    summarize_completed_trades,
+    post_cost_attribution_groups,
     summarize_candidate_decisions,
+    summarize_completed_trades,
     walk_forward_stability,
 )
 from nifty_scalper_bot.backtesting.research_validation import (  # noqa: E402
@@ -70,6 +71,7 @@ def build_analysis(
     blocks = chronological_post_cost_blocks(trades, block_size=block_size)
     readiness = attribution_readiness(trades, required_components=components)
     execution_quality = execution_data_quality(trades)
+    attribution_groups = post_cost_attribution_groups(trades)
     walk_forward_folds = chronological_walk_forward(
         trades,
         min_train_trades=walk_forward_min_train,
@@ -170,6 +172,15 @@ def build_analysis(
         "deflated_sharpe": dsr,
         "attribution": {
             "ready": readiness.ready,
+            "groups": [
+                {
+                    "regime": group.regime,
+                    "setup_name": group.setup_name,
+                    "confirmation_type": group.confirmation_type,
+                    "summary": asdict(group.summary),
+                }
+                for group in attribution_groups
+            ],
             "coverage": {
                 name: asdict(coverage) for name, coverage in readiness.coverage.items()
             },
