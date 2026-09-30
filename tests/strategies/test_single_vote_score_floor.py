@@ -775,3 +775,28 @@ async def test_orderflow_confirmation_requires_canonical_context_quality(monkeyp
     assert result is None
     decision = manager._last_no_signal_decision_by_symbol["NFO:NIFTY2670724050CE"]
     assert decision.reason == "single_trigger_context_confirmation_invalid"
+
+
+async def test_duplicate_same_family_context_cannot_double_count_confirmation(
+    monkeypatch,
+) -> None:
+    """Repeated evidence from one context family must contribute only once."""
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    monkeypatch.delenv("STRATEGY_ALLOW_SINGLE_VOTE_SCALP", raising=False)
+    monkeypatch.delenv("STRATEGY_ALLOW_SELECTED_OPTION_SINGLE_VOTE", raising=False)
+    manager = _manager_probe()
+    trigger = _signal_vote(strategy="SMC", raw_score=8.0, weighted_score=8.0)
+    trigger[0].metadata.update({"strategy": "SMC", "is_selected_option": True})
+    first = _context_vote(score=8.0, confidence=0.80)
+    duplicate = _context_vote(score=8.0, confidence=0.80)
+
+    result = manager._combine_strategy_votes(
+        symbol="NFO:NIFTY2670724050CE",
+        signals=[trigger, first, duplicate],
+        indicators=_valid_entry_context(),
+    )
+
+    assert result is not None
+    assert result.metadata["context_bonus"] == 0.9
+    assert result.metadata["final_trade_score"] == 8.9
