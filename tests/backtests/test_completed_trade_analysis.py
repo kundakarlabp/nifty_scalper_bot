@@ -10,6 +10,7 @@ from nifty_scalper_bot.backtesting.completed_trade_analysis import (
     chronological_walk_forward,
     execution_data_quality,
     post_cost_attribution_groups,
+    summarize_candidate_decisions,
     summarize_completed_trades,
     walk_forward_stability,
 )
@@ -468,3 +469,40 @@ def test_score_calibration_marks_underpowered_bins() -> None:
 
     assert report.bins[0].evidence_ready is False
     assert report.blockers == ("underpowered_bins:1",)
+
+
+def test_candidate_decision_funnel_preserves_reasons_and_quality() -> None:
+    rows = [
+        {
+            "event_name": "candidate.blocked",
+            "reason_code": "alpha_below_threshold",
+            "meta": {
+                "research_context": {
+                    "signal_quality": {"alpha_score": 6.8, "final_score": 7.6}
+                }
+            },
+        },
+        {
+            "event_name": "candidate.blocked",
+            "reason_code": "risk_capacity_unavailable",
+            "meta": {},
+        },
+        {
+            "event_name": "candidate.approved",
+            "reason_code": "order_submitted",
+            "meta": {},
+        },
+    ]
+
+    summary = summarize_candidate_decisions(rows)
+
+    assert summary.total_decisions == 3
+    assert summary.approved == 1
+    assert summary.blocked == 2
+    assert summary.approval_fraction == 0.3333
+    assert summary.with_research_context == 1
+    assert summary.with_signal_quality == 1
+    assert summary.blocked_by_reason == {
+        "alpha_below_threshold": 1,
+        "risk_capacity_unavailable": 1,
+    }

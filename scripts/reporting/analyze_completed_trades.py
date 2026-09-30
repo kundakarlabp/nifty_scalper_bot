@@ -15,7 +15,7 @@ SRC_PATH = PROJECT_ROOT / "src"
 if str(SRC_PATH) not in sys.path:
     sys.path.insert(0, str(SRC_PATH))
 
-from nifty_scalper_bot.backtesting.completed_trade_analysis import (  # noqa: E402
+from nifty_scalper_bot.backtesting.completed_trade_analysis import (  # noqa: E402, I001
     attribution_readiness,
     calibrate_signal_scores,
     canonicalize_completed_trades,
@@ -23,6 +23,7 @@ from nifty_scalper_bot.backtesting.completed_trade_analysis import (  # noqa: E4
     chronological_walk_forward,
     execution_data_quality,
     summarize_completed_trades,
+    summarize_candidate_decisions,
     walk_forward_stability,
 )
 from nifty_scalper_bot.backtesting.research_validation import (  # noqa: E402
@@ -30,6 +31,7 @@ from nifty_scalper_bot.backtesting.research_validation import (  # noqa: E402
     deflated_sharpe_ratio,
 )
 from nifty_scalper_bot.journal.trade_ledger import (  # noqa: E402
+    load_candidate_decision_rows,
     load_trade_ledger_rows as load_canonical_trade_ledger_rows,
 )
 
@@ -274,6 +276,10 @@ def main(argv: list[str] | None = None) -> int:
             walk_forward_min_train=args.walk_forward_min_train,
             walk_forward_test_trades=args.walk_forward_test_trades,
             walk_forward_min_folds=args.walk_forward_min_folds,
+        )
+        candidate_decisions = load_candidate_decision_rows(args.trades_db)
+        report["candidate_decision_funnel"] = asdict(
+            summarize_candidate_decisions(candidate_decisions)
         )
         report["candidate_validation"] = (
             build_candidate_validation(
