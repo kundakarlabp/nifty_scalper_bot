@@ -5216,6 +5216,7 @@ class StrategyRunner:
         trace_id: str | None = None,
         signal_id: str | None = None,
         signal_score: float | None = None,
+        research_context: Mapping[str, Any] | None = None,
     ) -> None:
         """Update diagnostics and persist the decision in the existing journal."""
         try:
@@ -5237,6 +5238,8 @@ class StrategyRunner:
             recorder = getattr(self._order_manager, "record_trade_decision", None)
             if callable(recorder):
                 payload = dataclasses.asdict(snapshot)
+                if research_context:
+                    payload["research_context"] = dict(research_context)
                 if order_submitted and signal_id:
                     payload["signal_id"] = signal_id
                     payload["trade_id"] = f"TRD_{signal_id}"
@@ -20838,6 +20841,25 @@ class StrategyRunner:
                     reason=quality_reject_reason,
                 )
                 self._signal_reject_cooldown_ts[reject_cooldown_key] = now_epoch
+                self._record_trade_decision_snapshot(
+                    symbol=signal.symbol,
+                    direction=infer_option_side(signal.symbol, metadata),
+                    final_reason=quality_reject_reason,
+                    selected_candidate=signal.symbol,
+                    strategy_allowed=False,
+                    risk_allowed=None,
+                    order_submitted=False,
+                    trace_id=trace_id,
+                    signal_score=quality.final_score,
+                    research_context={
+                        "strategy": str(quality.components.get("strategy_name", "")),
+                        "regime": str(metadata.get("regime") or ""),
+                        "approval_path": str(metadata.get("approval_path") or ""),
+                        "signal_quality": dict(quality.components),
+                        "rejection_stage": "runner_final_score",
+                        "rejection_reasons": rejection_reasons,
+                    },
+                )
                 return _reject_after_dedup(
                     reason=quality_reject_reason,
                     details={
