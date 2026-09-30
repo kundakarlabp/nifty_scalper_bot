@@ -26,6 +26,25 @@ def _unexpired_option_symbol(strike: int = 25000, side: str = "CE") -> str:
     return f"NFO:NIFTY{expiry:%y%b}{strike}{side}".upper()
 
 
+class _OptionMetadataResolver:
+    def __init__(self, rows: dict[str, dict[str, Any]]) -> None:
+        self._rows = rows
+
+    def lookup(self, symbol: str) -> dict[str, Any] | None:
+        row = self._rows.get(symbol)
+        return dict(row) if row is not None else None
+
+
+def _option_row(symbol: str, expiry: str, strike: float, side: str) -> dict[str, Any]:
+    return {
+        "tradingsymbol": symbol.split(":", 1)[-1],
+        "name": "NIFTY",
+        "expiry": expiry,
+        "strike": strike,
+        "instrument_type": side,
+    }
+
+
 def test_sync_callback_none_no_error() -> None:
     mdm = MarketDataManager(DummyBroker(), websocket=None)
     seen: list[dict[str, Any]] = []
@@ -86,8 +105,12 @@ def test_datahub_ingest_tick_sync_returns_none() -> None:
 
 
 def test_tick_ingestion_defers_missing_option_analytics(monkeypatch) -> None:
-    hub = DataHub(MarketDataManager(DummyBroker(), websocket=None))
     symbol = _unexpired_option_symbol()
+    expiry = datetime.now(timezone.utc) + timedelta(days=45)
+    resolver = _OptionMetadataResolver(
+        {symbol: _option_row(symbol, expiry.date().isoformat(), 25_000.0, "CE")}
+    )
+    hub = DataHub(MarketDataManager(DummyBroker(), websocket=None), resolver)
     calls: list[float] = []
     monkeypatch.setattr(hub, "get_latest_price", lambda _symbol: 25_000.0)
     monkeypatch.setattr(
@@ -320,3 +343,31 @@ def test_same_timestamp_ws_full_depth_change_reaches_subscribers() -> None:
     assert seen[-1]["ask"] == 100.05
     assert seen[-1]["depth"]["buy"][0]["quantity"] == 130
     assert seen[-1]["depth"]["sell"][0]["quantity"] == 195
+
+
+def test_option_parser_uses_broker_expiry_for_weekly_and_monthly_symbols() -> None:
+    weekly = "NFO:NIFTY26O0622700CE"
+    monthly = "NFO:NIFTY26OCT22700PE"
+    resolver = _OptionMetadataResolver(
+        {
+            weekly: _option_row(weekly, "2026-10-06", 22_700.0, "CE"),
+            monthly: _option_row(monthly, "2026-10-27", 22_700.0, "PE"),
+        }
+    )
+    hub = DataHub(MarketDataManager(DummyBroker(), websocket=None), resolver)
+
+    weekly_parsed = hub._parse_option_symbol(weekly)
+    monthly_parsed = hub._parse_option_symbol(monthly)
+
+    assert weekly_parsed is not None
+    assert weekly_parsed[1].isoformat() == "2026-10-06T15:30:00+05:30"
+    assert weekly_parsed[2:] == (22_700.0, True)
+    assert monthly_parsed is not None
+    assert monthly_parsed[1].isoformat() == "2026-10-27T15:30:00+05:30"
+    assert monthly_parsed[2:] == (22_700.0, False)
+
+
+def test_option_parser_does_not_invent_expiry_without_metadata() -> None:
+    hub = DataHub(MarketDataManager(DummyBroker(), websocket=None))
+    assert hub._parse_option_symbol("NFO:NIFTY26OCT22700CE") is None
+    assert hub._parse_option_symbol("NFO:NIFTY26O0622700CE") is None
