@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime, time as dtime
-import logging
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -77,15 +76,16 @@ def test_ws_legacy_callback_still_runs_without_mdm_batch_ingress() -> None:
     assert callback_ticks == [tick]
 
 
-def test_ticker_close_error_is_suppressed() -> None:
-    class DummyManager:
-        _logger = logging.getLogger("test.websocket_hardening")
+def test_native_ticker_builder_makes_close_best_effort() -> None:
+    install_websocket_market_data_hardening(WebSocketManager)
+    manager = WebSocketManager(
+        "api_key",
+        "access_token",
+        ticker_factory=_BadCloseTicker,
+        trading_window_enabled=False,
+    )
 
-        def _build_ticker(self) -> _BadCloseTicker:
-            return _BadCloseTicker()
-
-    install_websocket_market_data_hardening(DummyManager)
-    ticker = DummyManager()._build_ticker()
+    ticker = manager._build_ticker()
 
     assert ticker.close() is None
 
