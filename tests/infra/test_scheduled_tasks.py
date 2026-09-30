@@ -8,6 +8,7 @@ import pytest
 
 from nifty_scalper_bot.infra.scheduled_tasks import (
     run_archive_rotation,
+    _run_trade_replication,
     run_periodic_task,
     start_background_tasks,
     start_trade_replication_task,
@@ -179,3 +180,51 @@ async def test_run_periodic_task_logs_task_name_and_error(
     assert messages[-1][0] == "Periodic task failed name=%s error=%s"
     assert messages[-1][1][0] == "replicate_trade"
     assert str(messages[-1][1][1]) == "remote unavailable"
+
+
+@pytest.mark.asyncio
+async def test_trade_replication_runs_immediately_before_periodic_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    class _Replicator:
+        def replicate_once(self) -> dict[str, int]:
+            calls.append("replicate")
+            return {"events": 2, "ledger": 1, "checkpoint": 2}
+
+    async def fake_periodic(*_args: Any, **_kwargs: Any) -> None:
+        calls.append("periodic")
+
+    monkeypatch.setattr(
+        "nifty_scalper_bot.infra.scheduled_tasks.run_periodic_task",
+        fake_periodic,
+    )
+
+    await _run_trade_replication(_Replicator(), interval_sec=30.0)
+
+    assert calls == ["replicate", "periodic"]
+
+
+@pytest.mark.asyncio
+async def test_trade_replication_initial_failure_does_not_stop_periodic_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    class _Replicator:
+        def replicate_once(self) -> dict[str, int]:
+            calls.append("replicate")
+            raise RuntimeError("remote unavailable")
+
+    async def fake_periodic(*_args: Any, **_kwargs: Any) -> None:
+        calls.append("periodic")
+
+    monkeypatch.setattr(
+        "nifty_scalper_bot.infra.scheduled_tasks.run_periodic_task",
+        fake_periodic,
+    )
+
+    await _run_trade_replication(_Replicator(), interval_sec=30.0)
+
+    assert calls == ["replicate", "periodic"]
