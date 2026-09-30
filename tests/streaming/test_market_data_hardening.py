@@ -135,11 +135,7 @@ async def test_reconnect_cleanup_continues_after_existing_ticker_close_error(mon
 def test_trading_window_uses_configured_timezone_object(monkeypatch) -> None:
     install_websocket_market_data_hardening(WebSocketManager)
     monkeypatch.setattr(
-        "nifty_scalper_bot.streaming.market_data_hardening.datetime",
-        _TradingDayDateTime,
-    )
-    monkeypatch.setattr(
-        "nifty_scalper_bot.utils.runtime_session_guards.datetime",
+        "nifty_scalper_bot.streaming.websocket_manager.datetime",
         _TradingDayDateTime,
     )
     manager = WebSocketManager(
@@ -158,11 +154,7 @@ def test_trading_window_uses_configured_timezone_object(monkeypatch) -> None:
 def test_market_data_hardening_preserves_nse_holiday_guard(monkeypatch) -> None:
     install_websocket_market_data_hardening(WebSocketManager)
     monkeypatch.setattr(
-        "nifty_scalper_bot.streaming.market_data_hardening.datetime",
-        _GaneshChaturthiDateTime,
-    )
-    monkeypatch.setattr(
-        "nifty_scalper_bot.utils.runtime_session_guards.datetime",
+        "nifty_scalper_bot.streaming.websocket_manager.datetime",
         _GaneshChaturthiDateTime,
     )
     manager = WebSocketManager(
@@ -175,3 +167,12 @@ def test_market_data_hardening_preserves_nse_holiday_guard(monkeypatch) -> None:
     )
 
     assert manager._is_within_trading_window() is False
+
+
+def test_websocket_hardening_installer_is_verification_only() -> None:
+    before = WebSocketManager._on_ticks
+
+    install_websocket_market_data_hardening(WebSocketManager)
+
+    assert WebSocketManager._on_ticks is before
+    assert WebSocketManager._market_data_hardening_installed is True
