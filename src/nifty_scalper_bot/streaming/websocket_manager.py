@@ -757,11 +757,15 @@ class WebSocketManager:
                 self._logger.error("Failure in _replace_ticker.close_old: %s", e)
 
     def _build_ticker(self) -> KiteTicker:
-        """Args: none; Returns: KiteTicker; Raises: Exception."""
-
+        """Build a close-safe ticker from the configured transport factory."""
         if self._ticker_factory is not None:
-            return self._ticker_factory()
-        return KiteTicker(self._api_key, self._access_token, reconnect=False)
+            ticker = self._ticker_factory()
+        else:
+            if KiteTicker is None:
+                raise RuntimeError("kiteconnect is not installed")
+            ticker = KiteTicker(self._api_key, self._access_token, reconnect=False)
+        self._make_ticker_close_safe(ticker)
+        return ticker
 
     def _bind_handlers(self, ticker: KiteTicker) -> None:
         """Args: ticker; Returns: none; Raises: none."""
@@ -945,7 +949,22 @@ class WebSocketManager:
             self._state = ConnectionState.DISCONNECTED
             self._last_disconnect_at = time.time()
             self._stream_health = "degraded"
-            # 1006 is stream degradation, not fatal startup failure.
+            if code == 1006 and not self._is_within_trading_window():
+                self._stream_health = "idle"
+                if self._on_disconnect_callback is not None:
+                    self._on_disconnect_callback()
+                self._logger.info(
+                    "WEBSOCKET_IDLE_CLOSED code=1006 reason=%s action=no_reconnect",
+                    reason or "closing_handshake_timeout",
+                    extra={
+                        "event": "WEBSOCKET_IDLE_CLOSED",
+                        "code": 1006,
+                        "reason": reason or "closing_handshake_timeout",
+                        "action": "no_reconnect",
+                    },
+                )
+                return
+            # 1006 during the live session is degradation, not fatal startup failure.
             if code == 1006:
                 self._logger.warning(
                     "WEBSOCKET_DEGRADED code=1006 reason=closing_handshake_timeout"
