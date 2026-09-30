@@ -83,7 +83,6 @@ from nifty_scalper_bot.config.entry_policy import resolve_entry_policy
 from nifty_scalper_bot.config.env_utils import parse_float_env, parse_int_env
 from nifty_scalper_bot.config.env_utils import resolve_build_sha as _resolve_build_sha
 from nifty_scalper_bot.config.regime_ontology import MarketRegime, normalize_regime
-from nifty_scalper_bot.config.regime_strategy_policy import runner_regime_policy
 from nifty_scalper_bot.config.settings import get_settings
 from nifty_scalper_bot.core.active_basket import (
     ActiveContractSelection,
@@ -10137,47 +10136,19 @@ class StrategyRunner:
             return "unknown"
 
     def _strategy_allowed_for_regime(self, strategy: str, regime: MarketRegime) -> bool:
-        """Validate strategy admission against the central accepted regime."""
+        """Observe regime compatibility without duplicating Manager admission.
 
-        if not _env_bool("RUNNER_ENABLE_REGIME_GATE", True):
-            self._logger.debug(
-                "REGIME_GATE_BYPASSED strategy=%s regime=%s reason=disabled",
-                strategy or "unknown",
-                regime.value,
-                extra={"event": "REGIME_GATE_BYPASSED"},
-            )
-            return True
-        policy = runner_regime_policy(strategy)
-        if policy is None:
-            self._logger.debug(
-                "REGIME_GATE_DECISION strategy=%s regime=%s allowed=True "
-                "reason=no_explicit_strategy_regime_policy",
-                strategy or "unknown",
-                regime.value,
-                extra={"event": "REGIME_GATE_DECISION"},
-            )
-            return True
-
-        env_name, default_regimes = policy
-        default_allowed = ",".join(default_regimes)
-        allowed_csv = os.getenv(env_name, default_allowed)
-        allowed = {
-            normalize_regime(item).value
-            for item in allowed_csv.split(",")
-            if item.strip()
-        }
-        regime_name = normalize_regime(regime).value
-        allowed_for_regime = regime_name in allowed
+        StrategyManager is the single owner of regime-to-strategy influence via
+        canonical regime weighting. Runner owns final quality and execution
+        readiness; it must not re-apply a strategy-specific regime allow-list.
+        """
         self._logger.debug(
-            "REGIME_GATE_DECISION strategy=%s regime=%s allowed=%s allowed_regimes=%s env=%s",
+            "REGIME_GATE_DECISION strategy=%s regime=%s allowed=True reason=manager_weighted_observe_only",
             strategy or "unknown",
-            regime.value,
-            allowed_for_regime,
-            sorted(allowed),
-            env_name or "default",
+            normalize_regime(regime).value,
             extra={"event": "REGIME_GATE_DECISION"},
         )
-        return allowed_for_regime
+        return True
 
     def _strategy_regime_decision(
         self,
@@ -10187,48 +10158,10 @@ class StrategyRunner:
         symbol: str,
         metadata: Mapping[str, Any] | None = None,
     ) -> tuple[bool, str]:
-        """Return strategy-regime compatibility decision. Args: strategy/regime/symbol/metadata; Returns: tuple[bool,str]; Raises: none."""
-        del symbol
-        normalized = (strategy or "").strip().lower()
-        canonical = normalize_regime(regime)
-        meta = dict(metadata or {})
-        selected = bool(
-            meta.get("candidate_selected")
-            or meta.get("is_selected_option")
-            or meta.get("selected_ok")
-        )
-        try:
-            spread_pct = float(
-                meta.get("candidate_spread_pct")
-                if meta.get("candidate_spread_pct") is not None
-                else (
-                    meta.get("spread_pct")
-                    if meta.get("spread_pct") is not None
-                    else 999.0
-                )
-            )
-        except (TypeError, ValueError):
-            spread_pct = 999.0
-        try:
-            rr = float(
-                meta.get("candidate_rr")
-                if meta.get("candidate_rr") is not None
-                else meta.get("rr") if meta.get("rr") is not None else 0.0
-            )
-        except (TypeError, ValueError):
-            rr = 0.0
-        if self._strategy_allowed_for_regime(strategy, regime):
-            return True, "regime_in_allowed_list"
-        if normalized in {"vwap_pro", "vwappro"} and canonical is MarketRegime.VOLATILE:
-            max_spread = float(
-                os.getenv("VWAP_HIGH_VOL_MAX_SPREAD_PCT", "0.75") or "0.75"
-            )
-            min_rr = float(os.getenv("VWAP_HIGH_VOL_MIN_RR", "1.6") or "1.6")
-            rr_allowed = rr >= min_rr - 1e-9
-            if selected and spread_pct <= max_spread and rr_allowed:
-                return True, "vwap_high_vol_execution_quality_soft_allow"
-            return False, "vwap_high_vol_execution_quality_failed"
-        return False, "regime_not_allowed"
+        """Preserve regime telemetry while leaving admission to canonical owners."""
+        del symbol, metadata
+        self._strategy_allowed_for_regime(strategy, regime)
+        return True, "manager_weighted_observe_only"
 
     def _strategy_slots_available(self) -> bool:
         """Return True when active strategy slots are available for new entries."""
