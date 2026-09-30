@@ -124,7 +124,6 @@ def test_approved_decision_uses_executed_signal_identity_and_score() -> None:
     assert captured[0]["signal_score"] == 7.8
 
 
-
 def test_decision_snapshot_persists_research_context() -> None:
     captured: list[dict[str, object]] = []
     runner = SimpleNamespace(
@@ -161,6 +160,7 @@ def test_decision_snapshot_persists_research_context() -> None:
         "signal_quality": {"final_score": 7.2, "alpha_score": 6.4},
         "rejection_stage": "runner_final_score",
     }
+
 
 def test_margin_needed_rejection_is_deterministic_risk_capacity() -> None:
     assert (
