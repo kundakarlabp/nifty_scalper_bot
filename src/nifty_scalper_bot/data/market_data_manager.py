@@ -351,6 +351,8 @@ class MarketDataManager:
 
     _native_candle_flush_lifecycle_owner = True
 
+    _tick_accounting_hardening_installed = True
+
     def __init__(
         self,
         broker: Any = None,
