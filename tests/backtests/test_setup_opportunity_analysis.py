@@ -65,7 +65,7 @@ def test_opportunity_canonicalization_never_invents_missing_setup_identity() -> 
     assert canonicalize_setup_opportunities([row]) == ()
 
 
-def test_opportunity_canonicalization_preserves_contract_rotation_with_same_setup() -> None:
+def test_opportunity_canonicalization_preserves_contract_rotation() -> None:
     rows = [
         _decision("2026-09-30T04:00:00Z", symbol="NFO:NIFTY22700CE"),
         _decision("2026-09-30T04:00:05Z", symbol="NFO:NIFTY22750CE"),
