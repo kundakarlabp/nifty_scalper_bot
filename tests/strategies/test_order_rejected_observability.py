@@ -235,3 +235,48 @@ def test_reject_signal_execution_forwards_existing_research_context() -> None:
 
     assert captured[0]["signal_score"] == 7.3
     assert captured[0]["research_context"] == details["research_context"]
+
+
+def test_decision_research_context_preserves_existing_setup_provenance_only() -> None:
+    metadata = {
+        "strategy": "VWAPPro",
+        "regime": "TREND",
+        "setup_id": "vwap:CE:anchor:2026-09-30:NFO:NIFTYCE",
+        "setup_name": "premium_vwap_reclaim",
+        "strategy_key": "vwap_pro",
+        "strategy_role": "trigger",
+        "signal_family": "vwap",
+        "contract_side": "CE",
+        "raw_setup_score": 6.5,
+        "score_contract_version": 1,
+        "score_lineage": {"raw_setup_score": 6.5},
+        "underlying_direction_bias": "CE",
+        "underlying_direction_confidence": 0.91,
+        "context_age_seconds": 0.8,
+        "spread_pct": 0.32,
+        "iv_rank": 48.0,
+        "unrelated_runtime_object": object(),
+    }
+
+    context = StrategyRunner._decision_research_context(
+        metadata=metadata,
+        quality=None,
+        stage="runner_final_score",
+    )
+
+    assert context["setup_id"] == metadata["setup_id"]
+    assert context["raw_setup_score"] == 6.5
+    assert context["underlying_direction_bias"] == "CE"
+    assert context["spread_pct"] == 0.32
+    assert "unrelated_runtime_object" not in context
+
+
+def test_decision_research_context_does_not_invent_setup_identity() -> None:
+    context = StrategyRunner._decision_research_context(
+        metadata={"strategy": "ORBPro", "regime": "TREND"},
+        quality=None,
+        stage="manager",
+    )
+
+    assert "setup_id" not in context
+    assert "setup_structure_id" not in context
