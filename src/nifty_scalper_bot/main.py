@@ -28,6 +28,7 @@ from nifty_scalper_bot.config.env_utils import normalise_live_env_defaults
 from nifty_scalper_bot.config.paths import get_data_dir
 from nifty_scalper_bot.core.runtime_install_proof import build_runtime_install_proof
 from nifty_scalper_bot.infra.scheduled_tasks import (
+    get_trade_replication_status,
     start_daily_log_archive_task,
     start_trade_replication_task,
 )
@@ -720,6 +721,7 @@ def health_trading():
             "live_orders_armed": live_orders_armed and not blockers,
             "primary_blocker": primary,
             "blockers": [b for b in blockers if b],
+            "trade_replication": get_trade_replication_status(),
             **structured_status,
             "broker": {
                 "ready": bool(getattr(ctx, "broker_ready", False)),
