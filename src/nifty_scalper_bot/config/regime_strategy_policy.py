@@ -118,8 +118,11 @@ def regime_strategy_weight(regime: MarketRegime | str | None, strategy: str) -> 
         if isinstance(regime, MarketRegime)
         else str(regime or "").strip().upper()
     )
-    return float(\n        REGIME_STRATEGY_WEIGHTS.get(key, {}).get(normalize_strategy_name(strategy), 1.0)\n    )
-
+    return float(
+        REGIME_STRATEGY_WEIGHTS.get(key, {}).get(
+            normalize_strategy_name(strategy), 1.0
+        )
+    )
 
 __all__ = [
     "REGIME_STRATEGY_WEIGHTS",
