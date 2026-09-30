@@ -5097,12 +5097,6 @@ class StrategyManager(_BaseStrategyManager):
                         blocked_reason = "single_trigger_context_confirmation_invalid"
                     elif same_side_context and not qualifying_context_votes:
                         blocked_reason = "single_trigger_context_confirmation_invalid"
-                    elif (
-                        qualifying_context_votes
-                        and not manager_context_score_reference_pass
-                        and not canonical_smc_setup_pass
-                    ):
-                        blocked_reason = "single_trigger_context_score_below_min"
                     elif not allow_scalp_single:
                         blocked_reason = "single_vote_scalp_disabled"
                     else:
