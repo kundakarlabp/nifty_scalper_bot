@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 
 from nifty_scalper_bot.infra.scheduled_tasks import (
+    get_trade_replication_status,
     run_archive_rotation,
     run_periodic_task,
     start_background_tasks,
@@ -179,3 +180,36 @@ async def test_run_periodic_task_logs_task_name_and_error(
     assert messages[-1][0] == "Periodic task failed name=%s error=%s"
     assert messages[-1][1][0] == "replicate_trade"
     assert str(messages[-1][1][1]) == "remote unavailable"
+
+
+@pytest.mark.asyncio
+async def test_periodic_task_can_run_immediately_before_sleep() -> None:
+    calls = 0
+
+    def task_fn() -> None:
+        nonlocal calls
+        calls += 1
+
+    task = asyncio.create_task(
+        run_periodic_task(task_fn, 60.0, "immediate", run_immediately=True)
+    )
+    await asyncio.sleep(0.01)
+    assert calls == 1
+    task.cancel()
+    await task
+
+
+def test_trade_replication_disabled_status_is_explicit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> None:
+    monkeypatch.setattr(
+        "nifty_scalper_bot.infra.scheduled_tasks.build_supabase_trade_replicator",
+        lambda _path: None,
+    )
+
+    assert start_trade_replication_task(tmp_path / "trades.db") is None
+    status = get_trade_replication_status()
+    assert status["enabled"] is False
+    assert status["task_state"] == "disabled"
+    assert status["last_error"] is None
