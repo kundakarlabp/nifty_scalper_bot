@@ -230,7 +230,10 @@ def label_forward_option_buy_path(
     for row in observations:
         try:
             ts = _timestamp(row.get("timestamp"), field="observation timestamp")
-            price = float(row.get(price_field))
+            raw_price = row.get(price_field)
+            if raw_price is None:
+                continue
+            price = float(raw_price)
         except (TypeError, ValueError):
             continue
         if not math.isfinite(price) or price <= 0 or ts < start or ts > start + horizon:
