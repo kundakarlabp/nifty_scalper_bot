@@ -407,7 +407,6 @@ def load_trade_ledger_rows(
     return result
 
 
-
 def load_candidate_decision_rows(
     db_path: str | Path,
     *,
@@ -451,6 +450,7 @@ def load_candidate_decision_rows(
         item["meta"] = meta if isinstance(meta, dict) else {}
         decisions.append(item)
     return decisions
+
 
 def materialize_trade_events(
     conn: sqlite3.Connection,
