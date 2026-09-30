@@ -21,7 +21,11 @@ def install_websocket_market_data_hardening(manager_cls: type[Any]) -> None:
         "_on_ticks",
         "_on_close",
     )
-    missing = [\n        name\n        for name in required\n        if not callable(getattr(manager_cls, name, None))\n    ]
+    missing = [
+        name
+        for name in required
+        if not callable(getattr(manager_cls, name, None))
+    ]
     if missing or not bool(getattr(manager_cls, _INSTALLED_ATTR, False)):
         raise RuntimeError(
             "websocket_native_hardening_missing "
