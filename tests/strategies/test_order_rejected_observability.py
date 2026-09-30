@@ -124,6 +124,44 @@ def test_approved_decision_uses_executed_signal_identity_and_score() -> None:
     assert captured[0]["signal_score"] == 7.8
 
 
+
+def test_trade_decision_snapshot_persists_research_context_without_affecting_execution() -> None:
+    captured: list[dict[str, object]] = []
+    runner = SimpleNamespace(
+        _runtime_live_orders_armed=True,
+        _last_trade_decision=None,
+        _order_manager=SimpleNamespace(
+            record_trade_decision=lambda snapshot, trace_id=None: captured.append(
+                snapshot
+            )
+        ),
+        _logger=SimpleNamespace(debug=lambda *_args, **_kwargs: None),
+    )
+
+    StrategyRunner._record_trade_decision_snapshot(
+        runner,
+        symbol="NFO:NIFTYCE",
+        direction="CE",
+        final_reason="alpha_below_threshold",
+        order_submitted=False,
+        trace_id="blocked-trace",
+        signal_score=7.2,
+        research_context={
+            "strategy": "vwap_pro",
+            "regime": "TREND",
+            "signal_quality": {"final_score": 7.2, "alpha_score": 6.4},
+            "rejection_stage": "runner_final_score",
+        },
+    )
+
+    assert captured[0]["order_submitted"] is False
+    assert captured[0]["research_context"] == {
+        "strategy": "vwap_pro",
+        "regime": "TREND",
+        "signal_quality": {"final_score": 7.2, "alpha_score": 6.4},
+        "rejection_stage": "runner_final_score",
+    }
+
 def test_margin_needed_rejection_is_deterministic_risk_capacity() -> None:
     assert (
         StrategyRunner._deterministic_execution_reject_reason("MARGIN needed=11225.50")
