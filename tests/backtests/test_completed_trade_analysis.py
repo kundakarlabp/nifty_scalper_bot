@@ -10,8 +10,8 @@ from nifty_scalper_bot.backtesting.completed_trade_analysis import (
     chronological_walk_forward,
     execution_data_quality,
     post_cost_attribution_groups,
-    summarize_completed_trades,
     summarize_candidate_decisions,
+    summarize_completed_trades,
     walk_forward_stability,
 )
 
@@ -471,7 +471,7 @@ def test_score_calibration_marks_underpowered_bins() -> None:
     assert report.blockers == ("underpowered_bins:1",)
 
 
-def test_candidate_decision_funnel_preserves_block_reasons_and_quality_coverage() -> None:
+def test_candidate_decision_funnel_preserves_block_reasons_and_quality_coverage(\n) -> None:
     rows = [
         {
             "event_name": "candidate.blocked",
