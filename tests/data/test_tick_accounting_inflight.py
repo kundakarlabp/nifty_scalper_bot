@@ -77,9 +77,7 @@ class _FakeMarketDataManager:
                 "inflight_ticks": inflight,
                 "unexplained_loss": unexplained,
                 "accounting_total": accounting_total,
-                "accounting_balanced": (
-                    accounting_total == self._tick_submitted_total
-                ),
+                "accounting_balanced": (accounting_total == self._tick_submitted_total),
                 "active_drains": self._tick_active_drains,
                 "drain_scheduled": self._tick_drain_scheduled,
             }
