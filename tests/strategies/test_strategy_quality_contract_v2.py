@@ -217,6 +217,7 @@ def test_vwap_native_consumes_proximity_config(monkeypatch) -> None:
     assert signal.metadata["vwap_configured_proximity_pass"] is True
     assert signal.metadata["vwap_distance_atr"] == 0.05
     assert signal.metadata["setup_score"] == signal.metadata["strategy_score"]
+    assert signal.confidence == min(0.85, signal.metadata["strategy_score"] / 10.0)
 
 
 

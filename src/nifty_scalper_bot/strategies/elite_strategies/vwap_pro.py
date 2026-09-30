@@ -752,7 +752,7 @@ class VWAPProStrategy(EliteStrategy):
                 return None
 
             strategy_score = max(0.0, min(10.0, score))
-            confidence = max(0.45, min(0.85, strategy_score / 10.0))
+            confidence = max(0.10, min(0.85, strategy_score / 10.0))
             metadata = {
                 "strategy": "VWAPPro",
                 "strategy_name": "VWAPPro",
