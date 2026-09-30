@@ -10135,34 +10135,6 @@ class StrategyRunner:
             )
             return "unknown"
 
-    def _strategy_allowed_for_regime(self, strategy: str, regime: MarketRegime) -> bool:
-        """Observe regime compatibility without duplicating Manager admission.
-
-        StrategyManager is the single owner of regime-to-strategy influence via
-        canonical regime weighting. Runner owns final quality and execution
-        readiness; it must not re-apply a strategy-specific regime allow-list.
-        """
-        self._logger.debug(
-            "REGIME_GATE_DECISION strategy=%s regime=%s allowed=True reason=manager_weighted_observe_only",
-            strategy or "unknown",
-            normalize_regime(regime).value,
-            extra={"event": "REGIME_GATE_DECISION"},
-        )
-        return True
-
-    def _strategy_regime_decision(
-        self,
-        *,
-        strategy: str,
-        regime: MarketRegime,
-        symbol: str,
-        metadata: Mapping[str, Any] | None = None,
-    ) -> tuple[bool, str]:
-        """Preserve regime telemetry while leaving admission to canonical owners."""
-        del symbol, metadata
-        self._strategy_allowed_for_regime(strategy, regime)
-        return True, "manager_weighted_observe_only"
-
     def _strategy_slots_available(self) -> bool:
         """Return True when active strategy slots are available for new entries."""
         try:
@@ -20592,74 +20564,11 @@ class StrategyRunner:
             metadata["runtime_regime_inputs"] = self._last_regime_inputs_by_symbol.get(
                 base_symbol, {}
             )
-            regime_allowed, regime_reason = self._strategy_regime_decision(
-                strategy=signal_strategy,
-                regime=current_regime,
-                symbol=base_symbol,
-                metadata=metadata,
-            )
-            metadata["regime_decision"] = "allow" if regime_allowed else "block"
-            metadata["regime_reason"] = regime_reason
-            if not regime_allowed:
-                self._logger.info(
-                    "REGIME_GATE_REJECTED symbol=%s strategy=%s regime=%s side=%s reason=%s selected=%s spread_pct=%s candidate_rr=%s trace_id=%s",
-                    base_symbol,
-                    signal_strategy or "unknown",
-                    current_regime.value,
-                    infer_option_side(signal.symbol, metadata),
-                    regime_reason,
-                    bool(
-                        metadata.get("candidate_selected")
-                        or metadata.get("is_selected_option")
-                    ),
-                    metadata.get("candidate_spread_pct") or metadata.get("spread_pct"),
-                    metadata.get("candidate_rr"),
-                    trace_id,
-                    extra={
-                        "event": "REGIME_GATE_REJECTED",
-                        "symbol": base_symbol,
-                        "strategy": signal_strategy or "unknown",
-                        "regime": current_regime.value,
-                        "side": infer_option_side(signal.symbol, metadata),
-                        "regime_reason": regime_reason,
-                        "selected": bool(
-                            metadata.get("candidate_selected")
-                            or metadata.get("is_selected_option")
-                        ),
-                        "spread_pct": metadata.get("candidate_spread_pct")
-                        or metadata.get("spread_pct"),
-                        "candidate_rr": metadata.get("candidate_rr"),
-                        "trace_id": trace_id,
-                        "regime_inputs": self._last_regime_inputs_by_symbol.get(
-                            base_symbol, {}
-                        ),
-                    },
-                )
-                self._logger.info(
-                    "TRADE_DECISION_TRACE symbol=%s strategy=%s side=%s allowed=%s blocked_at=%s blocked_reason=%s regime=%s regime_reason=%s",
-                    base_symbol,
-                    signal_strategy or "unknown",
-                    infer_option_side(signal.symbol, metadata),
-                    False,
-                    "runner_regime_gate",
-                    "regime_not_allowed",
-                    current_regime.value,
-                    regime_reason,
-                    extra={
-                        "event": "TRADE_DECISION_TRACE",
-                        "symbol": base_symbol,
-                        "strategy": signal_strategy or "unknown",
-                        "side": infer_option_side(signal.symbol, metadata),
-                        "allowed": False,
-                        "blocked_at": "runner_regime_gate",
-                        "blocked_reason": "regime_not_allowed",
-                        "regime": current_regime.value,
-                        "regime_reason": regime_reason,
-                        "trace_id": trace_id,
-                    },
-                )
-                _trace("regime_not_allowed")
-                return _reject_after_dedup(reason="regime_not_allowed")
+            # Regime influence is already applied once by StrategyManager through
+            # canonical regime weighting. Runner records the runtime regime for
+            # diagnostics, then owns final signal quality and execution readiness.
+            metadata["regime_decision"] = "observe_only"
+            metadata["regime_reason"] = "manager_weighted_observe_only"
             missing_components = missing_score_components(metadata)
             if requires_final_score:
                 has_components = not missing_components
