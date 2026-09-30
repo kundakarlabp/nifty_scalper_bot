@@ -371,3 +371,17 @@ def test_option_parser_does_not_invent_expiry_without_metadata() -> None:
     hub = DataHub(MarketDataManager(DummyBroker(), websocket=None))
     assert hub._parse_option_symbol("NFO:NIFTY26OCT22700CE") is None
     assert hub._parse_option_symbol("NFO:NIFTY26O0622700CE") is None
+
+
+def test_option_parser_accepts_canonical_resolver_wrapper() -> None:
+    symbol = "NFO:NIFTY26O0622700CE"
+    manager = _OptionMetadataResolver(
+        {symbol: _option_row(symbol, "2026-10-06", 22_700.0, "CE")}
+    )
+    wrapper = type("_ResolverWrapper", (), {"_instrument_manager": manager})()
+    hub = DataHub(MarketDataManager(DummyBroker(), websocket=None), wrapper)
+
+    parsed = hub._parse_option_symbol(symbol)
+
+    assert parsed is not None
+    assert parsed[1].isoformat() == "2026-10-06T15:30:00+05:30"
