@@ -20,11 +20,13 @@ class _FakeMarketDataManager:
         self._tick_dropped_total = 0
         self._tick_active_drains = 0
         self._tick_drain_scheduled = True
+        self._tick_accounting_inflight_batch_size = 0
 
     def _pop_pending_tick_batch(self) -> list[dict[str, int]]:
         with self._pending_tick_lock:
             batch = list(self._pending)
             self._pending.clear()
+            self._tick_accounting_inflight_batch_size = len(batch)
             return batch
 
     async def _drain_latest_ticks(self) -> None:
@@ -38,17 +40,33 @@ class _FakeMarketDataManager:
         finally:
             with self._pending_tick_lock:
                 self._tick_active_drains -= 1
+                self._tick_accounting_inflight_batch_size = 0
                 self._tick_drain_scheduled = False
 
     def get_tick_pressure_stats(self) -> dict[str, int | bool]:
         with self._pending_tick_lock:
             pending = len(self._pending)
-            unexplained = (
+            residual = max(
                 self._tick_submitted_total
                 - self._tick_processed_total
                 - self._tick_coalesced_total
                 - self._tick_dropped_total
-                - pending
+                - pending,
+                0,
+            )
+            inflight = (
+                min(residual, self._tick_accounting_inflight_batch_size)
+                if self._tick_active_drains > 0
+                else 0
+            )
+            unexplained = max(residual - inflight, 0)
+            accounting_total = (
+                self._tick_processed_total
+                + self._tick_coalesced_total
+                + self._tick_dropped_total
+                + pending
+                + inflight
+                + unexplained
             )
             return {
                 "submitted_total": self._tick_submitted_total,
@@ -56,23 +74,19 @@ class _FakeMarketDataManager:
                 "coalesced_total": self._tick_coalesced_total,
                 "dropped_total": self._tick_dropped_total,
                 "pending_ticks": pending,
+                "inflight_ticks": inflight,
                 "unexplained_loss": unexplained,
+                "accounting_total": accounting_total,
+                "accounting_balanced": (
+                    accounting_total == self._tick_submitted_total
+                ),
                 "active_drains": self._tick_active_drains,
                 "drain_scheduled": self._tick_drain_scheduled,
             }
 
 
 def _patched_manager() -> _FakeMarketDataManager:
-    class Manager(_FakeMarketDataManager):
-        _tick_accounting_hardening_installed = True
-
-        _pop_pending_tick_batch = MarketDataManager._pop_pending_tick_batch
-        _drain_latest_ticks = MarketDataManager._drain_latest_ticks
-        get_tick_pressure_stats = MarketDataManager.get_tick_pressure_stats
-
-    manager = Manager()
-    manager._tick_accounting_inflight_batch_size = 0
-    return manager
+    return _FakeMarketDataManager()
 
 
 def test_popped_batch_is_reported_as_inflight_not_unexplained() -> None:
