@@ -15,7 +15,7 @@ SRC_PATH = PROJECT_ROOT / "src"
 if str(SRC_PATH) not in sys.path:
     sys.path.insert(0, str(SRC_PATH))
 
-from nifty_scalper_bot.backtesting.completed_trade_analysis import (  # noqa: E402
+from nifty_scalper_bot.backtesting.completed_trade_analysis import (  # noqa: E402, I001
     attribution_readiness,
     calibrate_signal_scores,
     canonicalize_completed_trades,
