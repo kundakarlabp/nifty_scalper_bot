@@ -65,13 +65,20 @@ def test_opportunity_canonicalization_never_invents_missing_setup_identity() -> 
     assert canonicalize_setup_opportunities([row]) == ()
 
 
-def test_opportunity_canonicalization_fails_closed_on_conflicting_symbol() -> None:
+def test_opportunity_canonicalization_preserves_contract_rotation_with_same_setup() -> None:
     rows = [
-        _decision("2026-09-30T04:00:00Z"),
-        _decision("2026-09-30T04:00:05Z", symbol="NFO:NIFTYOTHERCE"),
+        _decision("2026-09-30T04:00:00Z", symbol="NFO:NIFTY22700CE"),
+        _decision("2026-09-30T04:00:05Z", symbol="NFO:NIFTY22750CE"),
     ]
 
-    assert canonicalize_setup_opportunities(rows) == ()
+    opportunities = canonicalize_setup_opportunities(rows)
+
+    assert len(opportunities) == 1
+    assert opportunities[0].symbol == "NFO:NIFTY22750CE"
+    assert opportunities[0].observed_symbols == (
+        "NFO:NIFTY22700CE",
+        "NFO:NIFTY22750CE",
+    )
 
 
 def test_forward_path_uses_executable_bid_and_reports_mfe_mae_in_r() -> None:
