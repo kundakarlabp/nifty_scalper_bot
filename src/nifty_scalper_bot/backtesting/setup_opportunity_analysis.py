@@ -154,35 +154,29 @@ def canonicalize_setup_opportunities(
                 or item[2].get("trade_side")
                 or item[1].get("direction")
                 or ""
-            ).strip().upper()
+            )
+            .strip()
+            .upper()
             for item in sample
         }
         symbols = {
             str(
-                item[1].get("selected_candidate")
-                or item[1].get("symbol")
-                or ""
+                item[1].get("selected_candidate") or item[1].get("symbol") or ""
             ).strip()
             for item in sample
             if str(
-                item[1].get("selected_candidate")
-                or item[1].get("symbol")
-                or ""
+                item[1].get("selected_candidate") or item[1].get("symbol") or ""
             ).strip()
         }
         if len(strategies) != 1 or len(sides) != 1:
             continue
         last_ts, last_row, last_context = sample[-1]
         setup_id = str(
-            last_context.get("setup_id")
-            or last_context.get("setup_structure_id")
-            or ""
+            last_context.get("setup_id") or last_context.get("setup_structure_id") or ""
         ).strip()
         event = str(last_row.get("event_name") or "").strip()
         final_reason = str(
-            last_row.get("reason_code")
-            or last_row.get("final_reason")
-            or "unknown"
+            last_row.get("reason_code") or last_row.get("final_reason") or "unknown"
         ).strip()
         symbol = str(
             last_row.get("selected_candidate") or last_row.get("symbol") or ""
@@ -304,7 +298,7 @@ def compare_score_policy(
         policy="regime_weighted" if use_regime_weight else "neutral_weight",
         eligible=eligible,
         selected=len(selected_r),
-        mean_r=round(sum(selected_r) / len(selected_r), 6) if selected_r else None,
+        mean_r=(round(sum(selected_r) / len(selected_r), 6) if selected_r else None),
         positive_fraction=(
             round(sum(value > 0 for value in selected_r) / len(selected_r), 6)
             if selected_r
