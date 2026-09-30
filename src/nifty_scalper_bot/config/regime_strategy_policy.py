@@ -15,41 +15,41 @@ from nifty_scalper_bot.config.strategy_taxonomy import normalize_strategy_name
 
 REGIME_STRATEGY_WEIGHTS: dict[str, dict[str, float]] = {
     MarketRegime.TREND.value: {
-        "SMC": 1.2,
-        "VWAPPro": 1.2,
-        "ORBPro": 1.15,
-        "BBSqueeze": 1.1,
-        "OrderFlow": 1.15,
-        "RSIDivergence": 0.8,
+        "smc_lite": 1.2,
+        "vwap_pro": 1.2,
+        "orb_pro": 1.15,
+        "bb_squeeze": 1.1,
+        "order_flow": 1.15,
+        "rsi_divergence": 0.8,
     },
     MarketRegime.RANGE.value: {
-        "RSIDivergence": 1.15,
-        "OIMaxPain": 1.05,
-        "ORBPro": 0.7,
-        "VWAPPro": 0.8,
-        "SMC": 0.85,
+        "rsi_divergence": 1.15,
+        "oi_max_pain": 1.05,
+        "orb_pro": 0.7,
+        "vwap_pro": 0.8,
+        "smc_lite": 0.85,
     },
     MarketRegime.VOLATILE.value: {
-        "SMC": 0.7,
-        "VWAPPro": 0.7,
-        "ORBPro": 0.7,
-        "BBSqueeze": 0.75,
-        "OrderFlow": 0.75,
-        "RSIDivergence": 0.7,
+        "smc_lite": 0.7,
+        "vwap_pro": 0.7,
+        "orb_pro": 0.7,
+        "bb_squeeze": 0.75,
+        "order_flow": 0.75,
+        "rsi_divergence": 0.7,
     },
     MarketRegime.EVENT.value: {
-        "SMC": 0.6,
-        "VWAPPro": 0.6,
-        "ORBPro": 0.6,
-        "BBSqueeze": 0.6,
-        "OrderFlow": 0.6,
-        "RSIDivergence": 0.6,
+        "smc_lite": 0.6,
+        "vwap_pro": 0.6,
+        "orb_pro": 0.6,
+        "bb_squeeze": 0.6,
+        "order_flow": 0.6,
+        "rsi_divergence": 0.6,
     },
     MarketRegime.LOW_ACTIVITY.value: {
-        "BBSqueeze": 0.6,
-        "VWAPPro": 0.7,
-        "ORBPro": 0.6,
-        "SMC": 0.7,
+        "bb_squeeze": 0.6,
+        "vwap_pro": 0.7,
+        "orb_pro": 0.6,
+        "smc_lite": 0.7,
     },
 }
 
@@ -118,7 +118,7 @@ def regime_strategy_weight(regime: MarketRegime | str | None, strategy: str) -> 
         if isinstance(regime, MarketRegime)
         else str(regime or "").strip().upper()
     )
-    return float(REGIME_STRATEGY_WEIGHTS.get(key, {}).get(str(strategy), 1.0))
+    return float(\n        REGIME_STRATEGY_WEIGHTS.get(key, {}).get(normalize_strategy_name(strategy), 1.0)\n    )
 
 
 __all__ = [
