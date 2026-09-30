@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 
 from nifty_scalper_bot.config.regime_ontology import MarketRegime
+from nifty_scalper_bot.config.regime_strategy_policy import REGIME_STRATEGY_WEIGHTS
 from nifty_scalper_bot.config.regime_strategy_policy import (
-    REGIME_STRATEGY_WEIGHTS,
     regime_strategy_compatibility,
     regime_strategy_weight,
 )
