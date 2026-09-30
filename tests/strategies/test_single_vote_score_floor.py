@@ -338,11 +338,11 @@ async def test_selected_smc_trigger_uses_fresh_same_side_orderflow_confirmation(
     assert result.metadata["final_trade_score"] >= 9.0
 
 
-async def test_range_vwap_trigger_cannot_use_orderflow_as_only_confirmation(
+async def test_range_vwap_trigger_can_reach_runner_with_strong_orderflow_confirmation(
     monkeypatch,
     caplog,
 ) -> None:
-    """A RANGE continuation trigger needs another true trigger, not context alone."""
+    """Strong RANGE VWAP + independent OrderFlow reaches Runner; Runner owns final alpha."""
     caplog.set_level(logging.INFO)
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     monkeypatch.setenv("ENABLE_LIVE", "true")
@@ -365,19 +365,19 @@ async def test_range_vwap_trigger_cannot_use_orderflow_as_only_confirmation(
         indicators=_valid_entry_context(),
     )
 
-    assert result is None
-    decision = manager._last_no_signal_decision_by_symbol["NFO:NIFTY2670724050CE"]
-    assert decision.reason == "single_trigger_context_confirmation_invalid"
-    assert any(
+    assert result is not None
+    assert result.metadata["approval_path"] == "single_trigger_context_confirmed"
+    assert result.metadata["quality_gate_owner"] == "runner_final_execution_score"
+    assert not any(
         "VWAP_CONTEXT_PROMOTION_BLOCKED" in record.getMessage()
         for record in caplog.records
     )
 
 
-async def test_strong_range_vwap_trigger_still_requires_independent_trigger(
+async def test_strong_range_vwap_trigger_can_use_independent_orderflow_context(
     monkeypatch,
 ) -> None:
-    """RANGE VWAP continuation cannot be rescued by context-only OrderFlow."""
+    """Strong RANGE VWAP may be manager-qualified; OrderFlow never becomes a trigger."""
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     monkeypatch.setenv("ENABLE_LIVE", "true")
     monkeypatch.delenv("STRATEGY_ALLOW_SINGLE_VOTE_SCALP", raising=False)
@@ -397,9 +397,9 @@ async def test_strong_range_vwap_trigger_still_requires_independent_trigger(
         indicators=_valid_entry_context(),
     )
 
-    assert result is None
-    decision = manager._last_no_signal_decision_by_symbol["NFO:NIFTY2670724050CE"]
-    assert decision.reason == "single_trigger_context_confirmation_invalid"
+    assert result is not None
+    assert result.metadata["approval_path"] == "single_trigger_context_confirmed"
+    assert result.metadata["context_confirmation_strategies"] == ["OrderFlow"]
 
 
 async def test_trend_vwap_trigger_can_use_fresh_orderflow_confirmation(

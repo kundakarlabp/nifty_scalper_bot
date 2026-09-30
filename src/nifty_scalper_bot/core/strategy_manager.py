@@ -30,7 +30,7 @@ from math import isfinite, sqrt
 from statistics import mean, pstdev
 
 from nifty_scalper_bot.config import settings as app_settings
-from nifty_scalper_bot.config.regime_ontology import MarketRegime, normalize_regime
+from nifty_scalper_bot.config.regime_ontology import normalize_regime
 from nifty_scalper_bot.config.regime_strategy_policy import (
     regime_strategy_compatibility,
     regime_strategy_weight,
@@ -4827,49 +4827,12 @@ class StrategyManager(_BaseStrategyManager):
             if ambiguous_underlying:
                 qualifying_context_votes = []
 
-            # VWAPPro is a continuation/pullback trigger. Context-only OrderFlow
-            # may confirm it only in a TREND regime. In RANGE/VOLATILE/UNKNOWN,
-            # same-side microstructure is correlated context, not an independent
-            # alpha leg; an independent trigger such as SMC/ORB is required.
-            best_vote_metadata = dict(best_vote.metadata or {})
-            trigger_regime_name = str(
-                best_vote_metadata.get("regime_name")
-                or metadata.get("regime_name")
-                or "UNKNOWN"
-            ).upper()
-            vwap_continuation_trigger = bool(
-                str(best_vote.strategy or "").strip().lower()
-                in {"vwappro", "vwap_pro"}
-                or str(
-                    best_vote_metadata.get("strategy_family")
-                    or metadata.get("strategy_family")
-                    or ""
-                )
-                .strip()
-                .lower()
-                == "vwap_continuation_pullback"
-            )
-            if (
-                vwap_continuation_trigger
-                and trigger_regime_name != MarketRegime.TREND.value
-            ):
-                qualifying_context_votes = []
-                log_throttled(
-                    log,
-                    f"vwap_context_promotion_blocked:{symbol_norm}:{trigger_regime_name}",
-                    "VWAP_CONTEXT_PROMOTION_BLOCKED symbol=%s regime=%s "
-                    "reason=non_trend_regime_requires_independent_trigger",
-                    symbol_norm,
-                    trigger_regime_name,
-                    interval_sec=30.0,
-                    level=logging.INFO,
-                    extra={
-                        "event": "VWAP_CONTEXT_PROMOTION_BLOCKED",
-                        "symbol": symbol_norm,
-                        "regime": trigger_regime_name,
-                        "reason": "non_trend_regime_requires_independent_trigger",
-                    },
-                )
+            # StrategyManager owns structural/context qualification only. A fresh,
+            # strong, same-side OrderFlow vote may confirm a threshold-passing VWAP
+            # trigger in any regime; Runner remains the sole final numeric alpha/
+            # execution-quality owner. Regime fit is already represented exactly once
+            # in weighted_trigger_score, so a second regime hard block here would
+            # duplicate the same evidence and can strand otherwise valid candidates.
             confirmed_raw_context_score = _independent_context_total(
                 qualifying_context_votes, self._extract_raw_context_score
             )

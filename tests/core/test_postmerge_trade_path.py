@@ -173,13 +173,14 @@ def _trend_vwap_context_candidate(
     *,
     direction_score: float,
     independent_setup_score: float,
+    regime_name: str = "TREND",
 ) -> Signal:
     vwap = _signal_vote(
         "VWAPPro",
         raw_score=8.0,
         weighted_score=6.4,
         confidence=0.80,
-        regime_name="TREND",
+        regime_name=regime_name,
     )
     vwap[0].metadata.update(
         {
@@ -230,6 +231,31 @@ def test_context_confirmed_trend_vwap_still_fails_closed_on_weak_independent_alp
     )
 
     assert quality.final_score >= quality.components["threshold"]
+    assert quality.components["alpha_score"] < quality.components["threshold"]
+    assert quality.allowed is False
+    assert "alpha_below_threshold" in quality.reasons
+
+
+def test_range_vwap_context_reaches_runner_but_weak_alpha_still_fails_closed(
+    monkeypatch,
+) -> None:
+    """RANGE context confirmation restores routing, not permission to bypass Runner."""
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    manager = StrategyManager.__new__(StrategyManager)
+    manager._last_no_signal_decision_by_symbol = {}
+    manager._compute_trade_quality_score = lambda *args, **kwargs: (10.0, {})
+
+    candidate = _trend_vwap_context_candidate(
+        manager,
+        direction_score=8.0,
+        independent_setup_score=6.0,
+        regime_name="RANGE",
+    )
+    quality = score_signal_metadata(candidate.metadata, strategy_name="VWAPPro")
+
+    assert candidate.metadata["regime_weight"] == 0.8
+    assert candidate.metadata["quality_gate_owner"] == "runner_final_execution_score"
     assert quality.components["alpha_score"] < quality.components["threshold"]
     assert quality.allowed is False
     assert "alpha_below_threshold" in quality.reasons
