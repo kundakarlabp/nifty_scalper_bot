@@ -22,8 +22,8 @@ from nifty_scalper_bot.backtesting.completed_trade_analysis import (  # noqa: E4
     chronological_post_cost_blocks,
     chronological_walk_forward,
     execution_data_quality,
-    summarize_completed_trades,
     summarize_candidate_decisions,
+    summarize_completed_trades,
     walk_forward_stability,
 )
 from nifty_scalper_bot.backtesting.research_validation import (  # noqa: E402
