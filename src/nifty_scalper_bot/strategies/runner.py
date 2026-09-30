@@ -5252,10 +5252,10 @@ class StrategyRunner:
             "expiry",
             "dte",
         )
-        for field in provenance_fields:
-            value = metadata.get(field)
+        for provenance_field in provenance_fields:
+            value = metadata.get(provenance_field)
             if value not in (None, ""):
-                context[field] = value
+                context[provenance_field] = value
         if rejection_reasons:
             context["rejection_reasons"] = list(rejection_reasons)
         return context
