@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 from pathlib import Path
+from time import time
 from typing import Any, Awaitable, Callable
 
 from nifty_scalper_bot.infra.daily_log_archive import (
@@ -21,11 +22,36 @@ from nifty_scalper_bot.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
 
+_TRADE_REPLICATION_STATUS: dict[str, Any] = {
+    "enabled": False,
+    "task_state": "not_started",
+    "last_attempt_at": None,
+    "last_success_at": None,
+    "last_error": None,
+    "events": 0,
+    "ledger": 0,
+    "checkpoint": 0,
+}
+
+
+def get_trade_replication_status() -> dict[str, Any]:
+    """Return a read-only snapshot of process-owned replication health."""
+    return dict(_TRADE_REPLICATION_STATUS)
+
+
+def _set_trade_replication_status(**updates: Any) -> None:
+    _TRADE_REPLICATION_STATUS.update(updates)
+
 
 async def run_periodic_task(
     task_fn: Callable[[], Any] | Callable[[], Awaitable[Any]],
     interval_sec: float,
     task_name: str,
+    *,
+    run_immediately: bool = False,
+    on_attempt: Callable[[], None] | None = None,
+    on_success: Callable[[Any], None] | None = None,
+    on_error: Callable[[Exception], None] | None = None,
 ) -> None:
     """Run *task_fn* periodically with defensive error handling.
 
@@ -45,16 +71,23 @@ async def run_periodic_task(
         "Entered run_periodic_task",
         extra={"event": f"task.{task_name}.enter", "interval_sec": interval_sec},
     )
+    first_run = True
     while True:
         try:
-            await asyncio.sleep(interval_sec)
+            if not (first_run and run_immediately):
+                await asyncio.sleep(interval_sec)
+            first_run = False
+            if on_attempt is not None:
+                on_attempt()
             LOGGER.debug(
                 "Executing periodic task",
                 extra={"event": f"task.{task_name}.start"},
             )
             result = task_fn()
             if inspect.isawaitable(result):
-                await result
+                result = await result
+            if on_success is not None:
+                on_success(result)
             LOGGER.debug(
                 "Periodic task completed",
                 extra={"event": f"task.{task_name}.success"},
@@ -66,6 +99,8 @@ async def run_periodic_task(
             )
             break
         except Exception as exc:  # noqa: BLE001
+            if on_error is not None:
+                on_error(exc)
             LOGGER.error(
                 "Periodic task failed name=%s error=%s",
                 task_name,
@@ -95,14 +130,75 @@ def start_trade_replication_task(
     """Start optional trade replication independently of broker startup."""
     replicator = build_supabase_trade_replicator(db_path)
     if replicator is None:
+        _set_trade_replication_status(
+            enabled=False,
+            task_state="disabled",
+            last_attempt_at=None,
+            last_success_at=None,
+            last_error=None,
+            events=0,
+            ledger=0,
+            checkpoint=0,
+        )
         return None
-    return safe_task(
+
+    def on_attempt() -> None:
+        _set_trade_replication_status(
+            enabled=True,
+            task_state="running",
+            last_attempt_at=time(),
+            last_error=None,
+        )
+
+    def on_success(result: Any) -> None:
+        payload = result if isinstance(result, dict) else {}
+        _set_trade_replication_status(
+            enabled=True,
+            task_state="running",
+            last_success_at=time(),
+            last_error=None,
+            events=int(payload.get("events", 0) or 0),
+            ledger=int(payload.get("ledger", 0) or 0),
+            checkpoint=int(payload.get("checkpoint", 0) or 0),
+        )
+
+    def on_error(exc: Exception) -> None:
+        _set_trade_replication_status(
+            enabled=True,
+            task_state="error",
+            last_error=str(exc),
+        )
+
+    _set_trade_replication_status(
+        enabled=True,
+        task_state="scheduled",
+        last_error=None,
+    )
+    task = safe_task(
         run_periodic_task(
             task_fn=lambda: asyncio.to_thread(replicator.replicate_once),
             interval_sec=replication_interval_seconds(),
             task_name="replicate_trade_observability",
+            run_immediately=True,
+            on_attempt=on_attempt,
+            on_success=on_success,
+            on_error=on_error,
         )
     )
+
+    def task_done(done: asyncio.Task[Any]) -> None:
+        if done.cancelled():
+            _set_trade_replication_status(task_state="cancelled")
+        elif done.exception() is not None:
+            _set_trade_replication_status(
+                task_state="dead",
+                last_error=str(done.exception()),
+            )
+        else:
+            _set_trade_replication_status(task_state="stopped")
+
+    task.add_done_callback(task_done)
+    return task
 
 
 async def run_archive_rotation(order_manager: Any, max_age_days: int = 90) -> None:
