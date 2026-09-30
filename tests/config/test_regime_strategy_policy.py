@@ -17,9 +17,7 @@ def test_regime_strategy_policy_preserves_current_weights() -> None:
 
 def test_regime_strategy_policy_defaults_to_neutral_for_unknown_pair() -> None:
     assert (
-        regime_policy.regime_strategy_weight(
-            MarketRegime.TREND, "UnknownStrategy"
-        )
+        regime_policy.regime_strategy_weight(MarketRegime.TREND, "UnknownStrategy")
         == 1.0
     )
     assert regime_policy.regime_strategy_weight(None, "SMC") == 1.0
@@ -36,18 +34,12 @@ def test_regime_strategy_policy_remains_profile_json_serializable() -> None:
 
 def test_regime_strategy_compatibility_is_structural_and_non_numeric() -> None:
     assert (
-        regime_policy.regime_strategy_compatibility("TREND", "VWAPPro")
-        == "preferred"
+        regime_policy.regime_strategy_compatibility("TREND", "VWAPPro") == "preferred"
     )
     assert (
-        regime_policy.regime_strategy_compatibility("RANGE", "VWAPPro")
-        == "compatible"
+        regime_policy.regime_strategy_compatibility("RANGE", "VWAPPro") == "compatible"
     )
+    assert regime_policy.regime_strategy_compatibility("EVENT", "VWAPPro") == "caution"
     assert (
-        regime_policy.regime_strategy_compatibility("EVENT", "VWAPPro")
-        == "caution"
-    )
-    assert (
-        regime_policy.regime_strategy_compatibility("UNKNOWN", "VWAPPro")
-        == "unknown"
+        regime_policy.regime_strategy_compatibility("UNKNOWN", "VWAPPro") == "unknown"
     )
