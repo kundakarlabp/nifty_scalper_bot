@@ -547,7 +547,7 @@ async def test_opposite_side_context_remains_a_veto_not_confirmation(
     assert decision.reason == "hard_context_veto"
 
 
-async def test_regime_downweighted_context_cannot_unlock_single_trigger(
+async def test_regime_downweighted_context_reaches_runner_quality_owner(
     monkeypatch,
 ) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
@@ -572,9 +572,10 @@ async def test_regime_downweighted_context_cannot_unlock_single_trigger(
         indicators=_valid_entry_context(),
     )
 
-    assert result is None
-    decision = manager._last_no_signal_decision_by_symbol["NFO:NIFTY2670724050CE"]
-    assert decision.reason == "single_trigger_context_score_below_min"
+    assert result is not None
+    assert result.metadata["approval_path"] == "single_trigger_context_confirmed"
+    assert result.metadata["quality_gate_owner"] == "runner_final_execution_score"
+    assert result.metadata["context_confirmed_final_score"] < 7.0
 
 
 async def test_context_confirmation_applies_regime_weight_exactly_once(
