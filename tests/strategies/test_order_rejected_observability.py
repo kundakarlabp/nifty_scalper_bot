@@ -174,3 +174,64 @@ def test_margin_no_qty_rejection_is_deterministic_risk_capacity() -> None:
         StrategyRunner._deterministic_execution_reject_reason("margin_no_qty")
         == "risk_capacity_unavailable"
     )
+
+
+def test_decision_research_context_does_not_fabricate_quality() -> None:
+    context = StrategyRunner._decision_research_context(
+        metadata={"strategy": "VWAPPro", "regime": "RANGE"},
+        quality=None,
+        stage="pre_score",
+    )
+
+    assert context["strategy"] == "VWAPPro"
+    assert context["regime"] == "RANGE"
+    assert context["decision_stage"] == "pre_score"
+    assert "signal_quality" not in context
+
+
+def test_decision_research_context_carries_known_quality() -> None:
+    quality = SimpleNamespace(
+        components={
+            "strategy_name": "VWAPPro",
+            "final_score": 7.4,
+            "alpha_score": 6.9,
+        }
+    )
+    context = StrategyRunner._decision_research_context(
+        metadata={"strategy": "VWAPPro", "regime": "TREND", "approval_path": "x"},
+        quality=quality,
+        stage="execution",
+    )
+
+    assert context["signal_quality"]["final_score"] == 7.4
+    assert context["decision_stage"] == "execution"
+    assert context["approval_path"] == "x"
+
+
+def test_reject_signal_execution_forwards_existing_research_context() -> None:
+    captured: list[dict[str, object]] = []
+    runner = SimpleNamespace(
+        _emit_signal_execution_result=lambda **_kwargs: None,
+        _record_trade_decision_snapshot=lambda **kwargs: captured.append(kwargs),
+        _logger=SimpleNamespace(info=lambda *_args, **_kwargs: None),
+    )
+    details = {
+        "direction": "PE",
+        "signal_score": 7.3,
+        "research_context": {
+            "strategy": "VWAPPro",
+            "decision_stage": "execution",
+            "signal_quality": {"final_score": 7.3},
+        },
+    }
+
+    StrategyRunner._reject_signal_execution(
+        runner,
+        symbol="NFO:NIFTYPE",
+        trace_id="trace-provenance",
+        reason="no_affordable_execution_candidate",
+        details=details,
+    )
+
+    assert captured[0]["signal_score"] == 7.3
+    assert captured[0]["research_context"] == details["research_context"]
