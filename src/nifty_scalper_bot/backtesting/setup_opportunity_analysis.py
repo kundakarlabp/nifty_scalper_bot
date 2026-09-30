@@ -22,6 +22,7 @@ class CanonicalSetupOpportunity:
     setup_id: str
     strategy: str
     symbol: str
+    observed_symbols: tuple[str, ...]
     side: str
     first_seen_ts: float
     last_seen_ts: float
@@ -165,7 +166,7 @@ def canonicalize_setup_opportunities(
                 or ""
             ).strip()
         }
-        if len(strategies) != 1 or len(sides) != 1 or len(symbols) > 1:
+        if len(strategies) != 1 or len(sides) != 1:
             continue
         last_ts, last_row, last_context = sample[-1]
         setup_id = str(
@@ -179,13 +180,16 @@ def canonicalize_setup_opportunities(
             or last_row.get("final_reason")
             or "unknown"
         ).strip()
-        symbol = next(iter(symbols), "")
+        symbol = str(
+            last_row.get("selected_candidate") or last_row.get("symbol") or ""
+        ).strip()
         opportunities.append(
             CanonicalSetupOpportunity(
                 opportunity_id=key,
                 setup_id=setup_id,
                 strategy=next(iter(strategies)),
                 symbol=symbol,
+                observed_symbols=tuple(sorted(symbols)),
                 side=next(iter(sides)),
                 first_seen_ts=sample[0][0],
                 last_seen_ts=last_ts,
