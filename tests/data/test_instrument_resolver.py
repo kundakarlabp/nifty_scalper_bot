@@ -31,6 +31,10 @@ def resolver() -> InstrumentResolver:
             "exchange": "NFO",
             "instrument_token": 12345,
             "lot_size": 75,
+            "expiry": "2025-10-28",
+            "strike": 25900.0,
+            "instrument_type": "CE",
+            "name": "NIFTY",
         }
     ]
     broker = _StubBroker(rows)
@@ -71,3 +75,14 @@ def test_canonicalize_index(resolver: InstrumentResolver) -> None:
     assert symbol == "NIFTY"
     assert exchange in {"NSE", None}
     assert segment in {"INDEX", "UNKNOWN"}
+
+
+def test_lookup_returns_authoritative_broker_metadata_copy(
+    resolver: InstrumentResolver,
+) -> None:
+    row = resolver.lookup("NFO:NIFTY25OCT25900CE")
+    assert row is not None
+    assert row["expiry"] == "2025-10-28"
+    assert row["strike"] == 25900.0
+    row["expiry"] = "2099-01-01"
+    assert resolver.lookup("NIFTY25OCT25900CE")["expiry"] == "2025-10-28"
