@@ -125,7 +125,7 @@ def test_forward_path_ignores_out_of_horizon_and_invalid_prices() -> None:
     assert label.terminal_r == 0.5
 
 
-def test_score_policy_can_compare_regime_weight_with_neutral_without_selecting_winner() -> None:
+def test_score_policy_compares_regime_weight_with_neutral() -> None:
     samples = [
         {"raw_setup_score": 6.0, "regime_weight": 1.2, "outcome_r": 1.0},
         {"raw_setup_score": 6.5, "regime_weight": 0.8, "outcome_r": -0.5},
