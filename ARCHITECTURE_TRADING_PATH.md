@@ -147,3 +147,15 @@ The canonical progression is:
 Terminal outcomes include invalidation, expiry, context veto, quality rejection,
 risk rejection, and execution rejection. Raw tick evaluation counts are not
 equivalent to independent setup opportunities.
+
+
+## Research evidence boundary
+
+Research attribution is downstream of the live path and cannot become a runtime authority.
+
+- `strategies/setup_lifecycle.py` owns bounded live observability for the strategy-owned structural `setup_id`.
+- Runner decision persistence may copy an allow-listed set of facts already present on the signal into `research_context`; it must not calculate new features or infer missing setup identity.
+- `backtesting/setup_opportunity_analysis.py` is research-only. It collapses repeated candidate evaluations to one independent setup opportunity and may derive forward executable-side MFE/MAE labels from persisted observations.
+- Rows without authoritative `setup_id`, or rows with conflicting strategy/side/symbol identity, fail closed for attribution.
+- Counterfactual score/regime/exit experiments are descriptive and chronological. They cannot mutate live weights, thresholds, strategies, risk settings, order routing, or bracket state.
+- Every parameter experiment must retain a unique experiment ID, hypothesis, parameter set, cost-model identity, and strictly later out-of-sample window.

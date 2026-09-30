@@ -5223,6 +5223,39 @@ class StrategyRunner:
         }
         if isinstance(components, Mapping):
             context["signal_quality"] = dict(components)
+
+        # Preserve decision-time facts that already exist on the strategy signal.
+        # This is an observability allow-list only: it must never calculate a
+        # feature, infer direction, or create a second strategy/runtime owner.
+        provenance_fields = (
+            "setup_id",
+            "setup_structure_id",
+            "setup_name",
+            "strategy_key",
+            "strategy_role",
+            "signal_family",
+            "contract_side",
+            "trade_side",
+            "raw_setup_score",
+            "setup_score",
+            "score_contract_version",
+            "score_lineage",
+            "confirming_trigger_strategies",
+            "context_confirmation_strategies",
+            "underlying_direction_bias",
+            "underlying_direction_confidence",
+            "context_age_seconds",
+            "futures_vwap_slope",
+            "futures_volume_ratio",
+            "spread_pct",
+            "iv_rank",
+            "expiry",
+            "dte",
+        )
+        for provenance_field in provenance_fields:
+            value = metadata.get(provenance_field)
+            if value not in (None, ""):
+                context[provenance_field] = value
         if rejection_reasons:
             context["rejection_reasons"] = list(rejection_reasons)
         return context
