@@ -4616,8 +4616,18 @@ class StrategyManager(_BaseStrategyManager):
         vetoed = False
         same_side_context = [v for _, v in context_votes if v.side == best_vote.side]
         opposite_context = [v for _, v in context_votes if v.side in {"CE", "PE"} and v.side != best_vote.side]
-        positive_context = sum(self._extract_context_score(v) for v in same_side_context)
-        negative_context = sum(self._extract_context_veto_score(v) for v in opposite_context)
+        # Correlated context is one evidence family, not multiple independent votes.
+        # Keep the strongest observation per canonical family so repeated/overlapping
+        # context cannot manufacture conviction while distinct families still add.
+        def _independent_context_total(votes: t.Sequence[StrategyVote], extractor: t.Callable[[StrategyVote], float]) -> float:
+            strongest: dict[str, float] = {}
+            for vote in votes:
+                family = canonical_signal_family(vote.strategy)
+                strongest[family] = max(strongest.get(family, 0.0), extractor(vote))
+            return sum(strongest.values())
+
+        positive_context = _independent_context_total(same_side_context, self._extract_context_score)
+        negative_context = _independent_context_total(opposite_context, self._extract_context_veto_score)
         context_bonus = min(1.5, 0.45 * positive_context)
         context_penalty = min(1.5, 0.60 * negative_context)
         final_score = weighted_trigger_score + context_bonus - context_penalty
