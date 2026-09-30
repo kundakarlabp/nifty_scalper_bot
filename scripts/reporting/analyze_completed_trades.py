@@ -27,6 +27,9 @@ from nifty_scalper_bot.backtesting.completed_trade_analysis import (  # noqa: E4
     summarize_completed_trades,
     walk_forward_stability,
 )
+from nifty_scalper_bot.backtesting.setup_opportunity_analysis import (  # noqa: E402
+    canonicalize_setup_opportunities,
+)
 from nifty_scalper_bot.backtesting.research_validation import (  # noqa: E402
     combinatorial_purged_pbo,
     deflated_sharpe_ratio,
@@ -289,9 +292,28 @@ def main(argv: list[str] | None = None) -> int:
             walk_forward_min_folds=args.walk_forward_min_folds,
         )
         candidate_decisions = load_candidate_decision_rows(args.trades_db)
-        report["candidate_decision_funnel"] = asdict(
-            summarize_candidate_decisions(candidate_decisions)
-        )
+        decision_funnel = summarize_candidate_decisions(candidate_decisions)
+        report["candidate_decision_funnel"] = asdict(decision_funnel)
+        setup_opportunities = canonicalize_setup_opportunities(candidate_decisions)
+        report["setup_opportunities"] = {
+            "independent_opportunities": len(setup_opportunities),
+            "approved": sum(item.approved for item in setup_opportunities),
+            "blocked": sum(not item.approved for item in setup_opportunities),
+            "decision_rows_with_setup_identity": sum(
+                item.decision_count for item in setup_opportunities
+            ),
+            "decision_rows_total": decision_funnel.total_decisions,
+            "identity_coverage_fraction": (
+                round(
+                    sum(item.decision_count for item in setup_opportunities)
+                    / decision_funnel.total_decisions,
+                    4,
+                )
+                if decision_funnel.total_decisions
+                else 0.0
+            ),
+            "ready_for_forward_labelling": bool(setup_opportunities),
+        }
         report["candidate_validation"] = (
             build_candidate_validation(
                 load_candidate_returns(args.candidate_returns_json),
