@@ -4870,13 +4870,11 @@ class StrategyManager(_BaseStrategyManager):
                         "reason": "non_trend_regime_requires_independent_trigger",
                     },
                 )
-            confirmed_raw_context_score = sum(
-                self._extract_raw_context_score(vote)
-                for vote in qualifying_context_votes
+            confirmed_raw_context_score = _independent_context_total(
+                qualifying_context_votes, self._extract_raw_context_score
             )
-            confirmed_positive_context = sum(
-                self._extract_context_score(vote)
-                for vote in qualifying_context_votes
+            confirmed_positive_context = _independent_context_total(
+                qualifying_context_votes, self._extract_context_score
             )
             confirmed_context_bonus = min(
                 1.5, 0.45 * confirmed_positive_context
