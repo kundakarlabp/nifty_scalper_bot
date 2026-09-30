@@ -4851,6 +4851,10 @@ class StrategyManager(_BaseStrategyManager):
                     - context_penalty,
                 ),
             )
+            # This score is telemetry only. StrategyManager owns structural/context
+            # qualification; Runner is the sole final numeric quality owner.
+            # Re-applying a final score floor here strands confirmed candidates
+            # before Runner can evaluate the canonical independent-alpha contract.
             manager_context_score_reference_pass = bool(
                 context_confirmed_final_score >= context_confirmed_final_min
             )
@@ -4861,10 +4865,6 @@ class StrategyManager(_BaseStrategyManager):
                 and selected_option
                 and not vetoed
                 and qualifying_context_votes
-                and (
-                    manager_context_score_reference_pass
-                    or canonical_smc_setup_pass
-                )
             )
             if qualifying_context_votes:
                 log.info(
@@ -4941,12 +4941,6 @@ class StrategyManager(_BaseStrategyManager):
                     blocked_reason = "single_trigger_context_confirmation_invalid"
                 elif same_side_context and not qualifying_context_votes:
                     blocked_reason = "single_trigger_context_confirmation_invalid"
-                elif (
-                    qualifying_context_votes
-                    and not manager_context_score_reference_pass
-                    and not canonical_smc_setup_pass
-                ):
-                    blocked_reason = "single_trigger_context_score_below_min"
                 elif threshold_passed and not allow_scalp_single:
                     blocked_reason = "single_vote_scalp_disabled"
                 else:
@@ -5103,12 +5097,6 @@ class StrategyManager(_BaseStrategyManager):
                         blocked_reason = "single_trigger_context_confirmation_invalid"
                     elif same_side_context and not qualifying_context_votes:
                         blocked_reason = "single_trigger_context_confirmation_invalid"
-                    elif (
-                        qualifying_context_votes
-                        and not manager_context_score_reference_pass
-                        and not canonical_smc_setup_pass
-                    ):
-                        blocked_reason = "single_trigger_context_score_below_min"
                     elif not allow_scalp_single:
                         blocked_reason = "single_vote_scalp_disabled"
                     else:
