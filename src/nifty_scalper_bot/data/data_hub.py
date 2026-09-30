@@ -1278,7 +1278,11 @@ class DataHub:
         and monthly contracts both use the resolver's broker-dump row, keeping
         contract dates aligned with the InstrumentManager/contract SSOT.
         """
-        lookup = getattr(self._resolver, "lookup", None)
+        metadata_owner = self._resolver
+        lookup = getattr(metadata_owner, "lookup", None)
+        if not callable(lookup):
+            metadata_owner = getattr(self._resolver, "_instrument_manager", None)
+            lookup = getattr(metadata_owner, "lookup", None)
         if not callable(lookup):
             return None
         try:
