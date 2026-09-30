@@ -4,7 +4,7 @@ import importlib.util
 from pathlib import Path
 
 
-SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "reporting" / "analyze_completed_trades.py"
+SCRIPT = (\n    Path(__file__).resolve().parents[2]\n    / "scripts"\n    / "reporting"\n    / "analyze_completed_trades.py"\n)
 spec = importlib.util.spec_from_file_location("analyze_completed_trades", SCRIPT)
 assert spec is not None and spec.loader is not None
 module = importlib.util.module_from_spec(spec)
