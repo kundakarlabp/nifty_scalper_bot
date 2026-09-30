@@ -4,6 +4,7 @@ import asyncio
 from collections import deque
 import threading
 
+from nifty_scalper_bot.data.market_data_manager import MarketDataManager
 from nifty_scalper_bot.data.tick_accounting_hardening import (
     install_tick_accounting_hardening,
 )
@@ -63,10 +64,15 @@ class _FakeMarketDataManager:
 
 def _patched_manager() -> _FakeMarketDataManager:
     class Manager(_FakeMarketDataManager):
-        pass
+        _tick_accounting_hardening_installed = True
 
-    install_tick_accounting_hardening(Manager)
-    return Manager()
+        _pop_pending_tick_batch = MarketDataManager._pop_pending_tick_batch
+        _drain_latest_ticks = MarketDataManager._drain_latest_ticks
+        get_tick_pressure_stats = MarketDataManager.get_tick_pressure_stats
+
+    manager = Manager()
+    manager._tick_accounting_inflight_batch_size = 0
+    return manager
 
 
 def test_popped_batch_is_reported_as_inflight_not_unexplained() -> None:
@@ -142,3 +148,15 @@ def test_existing_coalesced_and_dropped_terminals_remain_unchanged() -> None:
     assert stats["inflight_ticks"] == 0
     assert stats["unexplained_loss"] == 0
     assert stats["accounting_balanced"] is True
+
+
+def test_tick_accounting_installer_does_not_replace_native_methods() -> None:
+    before_pop = MarketDataManager._pop_pending_tick_batch
+    before_drain = MarketDataManager._drain_latest_ticks
+    before_stats = MarketDataManager.get_tick_pressure_stats
+
+    install_tick_accounting_hardening(MarketDataManager)
+
+    assert MarketDataManager._pop_pending_tick_batch is before_pop
+    assert MarketDataManager._drain_latest_ticks is before_drain
+    assert MarketDataManager.get_tick_pressure_stats is before_stats
