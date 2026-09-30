@@ -220,9 +220,13 @@ def label_forward_option_buy_path(
     risk = float(risk_points)
     horizon = float(horizon_seconds)
     if not all(math.isfinite(value) for value in (start, entry, risk, horizon)):
-        raise ValueError("decision_ts, entry_price, risk_points and horizon must be finite")
+        raise ValueError(
+            "decision_ts, entry_price, risk_points and horizon must be finite"
+        )
     if entry <= 0 or risk <= 0 or horizon <= 0:
-        raise ValueError("entry_price, risk_points and horizon_seconds must be positive")
+        raise ValueError(
+            "entry_price, risk_points and horizon_seconds must be positive"
+        )
 
     path: list[tuple[float, float]] = []
     for row in observations:
