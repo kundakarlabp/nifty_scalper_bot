@@ -198,6 +198,38 @@ class WebSocketManager:
         self._fallback_start_callback = on_start
         self._fallback_stop_callback = on_stop
 
+    def _make_ticker_close_safe(self, ticker: Any | None = None) -> None:
+        """Make ticker.close best-effort at the transport boundary."""
+        target = ticker if ticker is not None else self._ticker
+        if target is None or bool(
+            getattr(target, "_nifty_safe_close_installed", False)
+        ):
+            return
+        close = getattr(target, "close", None)
+        if not callable(close):
+            return
+
+        def _safe_close(*args: Any, **kwargs: Any) -> Any:
+            try:
+                return close(*args, **kwargs)
+            except Exception as exc:
+                self._logger.warning(
+                    "WS_TICKER_CLOSE_SUPPRESSED error=%r",
+                    exc,
+                    exc_info=True,
+                    extra={
+                        "event": "WS_TICKER_CLOSE_SUPPRESSED",
+                        "error": repr(exc),
+                    },
+                )
+                return None
+
+        try:
+            setattr(target, "close", _safe_close)
+            setattr(target, "_nifty_safe_close_installed", True)
+        except Exception as exc:
+            self._logger.debug("WS safe-close wrapper skipped: %s", exc)
+
     @property
     def ticker(self) -> KiteTicker:
         """Args: none; Returns: active ticker; Raises: RuntimeError."""
@@ -806,7 +838,7 @@ class WebSocketManager:
         now = time.monotonic()
         self._last_tick_mono = now
         self._last_pong_mono = now
-        restored = not self._connected.is_set() or self._state != ConnectionState.CONNECTED
+        restored = (\n            not self._connected.is_set()\n            or self._state != ConnectionState.CONNECTED\n        )
         self._connected.set()
         self._state = ConnectionState.CONNECTED
         self._stream_health = "healthy"
