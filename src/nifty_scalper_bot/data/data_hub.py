@@ -1292,20 +1292,48 @@ class DataHub:
     def _parse_option_symbol(
         self, symbol: str
     ) -> tuple[str, datetime, float, bool] | None:
-        match = _OPTION_RE.match(symbol)
-        if not match:
+        """Resolve option identity from broker instrument metadata.
+
+        Expiry is deliberately not reconstructed from the trading symbol. Weekly
+        and monthly contracts both use the resolver's broker-dump row, keeping
+        contract dates aligned with the InstrumentManager/contract SSOT.
+        """
+        lookup = getattr(self._resolver, "lookup", None)
+        if not callable(lookup):
             return None
-        year = 2000 + int(match.group("year"))
-        month = _MONTH_MAP.get(match.group("month"))
-        if month is None:
+        try:
+            row = lookup(symbol)
+        except Exception:  # noqa: BLE001 - optional analytics must stay non-gating
             return None
-        expiry = datetime(year, month, 28, 15, 30, tzinfo=timezone.utc).replace(tzinfo=None)
-        return (
-            match.group("base"),
-            expiry,
-            float(match.group("strike")),
-            match.group("side") == "CE",
+        if not isinstance(row, Mapping):
+            return None
+
+        raw_expiry = row.get("expiry")
+        try:
+            if isinstance(raw_expiry, datetime):
+                expiry_date = raw_expiry.date()
+            else:
+                expiry_date = datetime.strptime(str(raw_expiry)[:10], "%Y-%m-%d").date()
+            strike = float(row.get("strike"))
+        except (TypeError, ValueError):
+            return None
+
+        side = str(row.get("instrument_type") or "").strip().upper()
+        if side not in {"CE", "PE"}:
+            return None
+        base = str(row.get("name") or "NIFTY").strip().upper()
+        if not base:
+            return None
+
+        expiry = datetime(
+            expiry_date.year,
+            expiry_date.month,
+            expiry_date.day,
+            15,
+            30,
+            tzinfo=timezone(timedelta(hours=5, minutes=30)),
         )
+        return base, expiry, strike, side == "CE"
 
     def _ingest_tick_impl(self, tick: Tick) -> None:
         canonical_tick = (
