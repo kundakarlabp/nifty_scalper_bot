@@ -1,53 +1,13 @@
-from nifty_scalper_bot.config.regime_ontology import MarketRegime
-from nifty_scalper_bot.strategies.runner import StrategyRunner
+from pathlib import Path
 
 
-def test_vwap_high_vol_soft_allow_uses_candidate_metadata() -> None:
-    runner = StrategyRunner.__new__(StrategyRunner)
-    runner._strategy_allowed_for_regime = lambda *_args, **_kwargs: False
-    allowed, reason = runner._strategy_regime_decision(
-        strategy="VWAPPro",
-        regime=MarketRegime.VOLATILE,
-        symbol="NIFTY",
-        metadata={
-            "candidate_selected": True,
-            "candidate_spread_pct": 0.4,
-            "candidate_rr": 1.8,
-        },
-    )
-    assert allowed is True
-    assert reason == "vwap_high_vol_execution_quality_soft_allow"
+def test_runner_has_no_strategy_specific_regime_admission_or_execution_soft_allow() -> None:
+    """Manager weighting and candidate economics are the canonical owners."""
+    source = Path("src/nifty_scalper_bot/strategies/runner.py").read_text(encoding="utf-8")
 
-
-def test_vwap_high_vol_soft_allow_tolerates_rr_boundary_float_noise() -> None:
-    runner = StrategyRunner.__new__(StrategyRunner)
-    runner._strategy_allowed_for_regime = lambda *_args, **_kwargs: False
-    allowed, reason = runner._strategy_regime_decision(
-        strategy="VWAPPro",
-        regime=MarketRegime.VOLATILE,
-        symbol="NIFTY",
-        metadata={
-            "candidate_selected": True,
-            "candidate_spread_pct": 0.4,
-            "candidate_rr": 1.5999999999999996,
-        },
-    )
-    assert allowed is True
-    assert reason == "vwap_high_vol_execution_quality_soft_allow"
-
-
-def test_vwap_high_vol_soft_allow_rejects_materially_low_rr() -> None:
-    runner = StrategyRunner.__new__(StrategyRunner)
-    runner._strategy_allowed_for_regime = lambda *_args, **_kwargs: False
-    allowed, reason = runner._strategy_regime_decision(
-        strategy="VWAPPro",
-        regime=MarketRegime.VOLATILE,
-        symbol="NIFTY",
-        metadata={
-            "candidate_selected": True,
-            "candidate_spread_pct": 0.4,
-            "candidate_rr": 1.599,
-        },
-    )
-    assert allowed is False
-    assert reason == "vwap_high_vol_execution_quality_failed"
+    assert "def _strategy_allowed_for_regime" not in source
+    assert "def _strategy_regime_decision" not in source
+    assert "REGIME_GATE_REJECTED" not in source
+    assert "VWAP_HIGH_VOL_MAX_SPREAD_PCT" not in source
+    assert "VWAP_HIGH_VOL_MIN_RR" not in source
+    assert "runner_regime_policy" not in source
