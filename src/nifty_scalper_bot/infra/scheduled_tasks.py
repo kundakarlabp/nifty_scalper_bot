@@ -89,19 +89,64 @@ def start_daily_log_archive_task() -> asyncio.Task[Any] | None:
     )
 
 
+async def _run_trade_replication(
+    replicator: Any,
+    *,
+    interval_sec: float,
+) -> None:
+    """Run one immediate replication attempt, then continue periodically."""
+    try:
+        result = await asyncio.to_thread(replicator.replicate_once)
+        LOGGER.info(
+            "Trade replication initial sync completed result=%s",
+            result,
+            extra={"event": "task.replicate_trade_observability.initial_success"},
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - off-hot-path observability guard
+        LOGGER.error(
+            "Trade replication initial sync failed error=%s",
+            exc,
+            extra={
+                "event": "task.replicate_trade_observability.initial_error",
+                "error": str(exc),
+            },
+            exc_info=exc,
+        )
+    await run_periodic_task(
+        task_fn=lambda: asyncio.to_thread(replicator.replicate_once),
+        interval_sec=interval_sec,
+        task_name="replicate_trade_observability",
+    )
+
+
 def start_trade_replication_task(
     db_path: str | Path,
 ) -> asyncio.Task[Any] | None:
     """Start optional trade replication independently of broker startup."""
-    replicator = build_supabase_trade_replicator(db_path)
+    resolved_path = Path(db_path)
+    replicator = build_supabase_trade_replicator(resolved_path)
     if replicator is None:
-        return None
-    return safe_task(
-        run_periodic_task(
-            task_fn=lambda: asyncio.to_thread(replicator.replicate_once),
-            interval_sec=replication_interval_seconds(),
-            task_name="replicate_trade_observability",
+        LOGGER.info(
+            "Trade replication disabled db_path=%s",
+            resolved_path,
+            extra={"event": "task.replicate_trade_observability.disabled"},
         )
+        return None
+    interval_sec = replication_interval_seconds()
+    LOGGER.info(
+        "Trade replication enabled db_path=%s interval_sec=%.1f",
+        resolved_path,
+        interval_sec,
+        extra={
+            "event": "task.replicate_trade_observability.enabled",
+            "db_path": str(resolved_path),
+            "interval_sec": interval_sec,
+        },
+    )
+    return safe_task(
+        _run_trade_replication(replicator, interval_sec=interval_sec)
     )
 
 
