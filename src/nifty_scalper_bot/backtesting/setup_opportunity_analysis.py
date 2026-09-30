@@ -233,12 +233,7 @@ def label_forward_option_buy_path(
             price = float(row.get(price_field))
         except (TypeError, ValueError):
             continue
-        if (
-            not math.isfinite(price)
-            or price <= 0
-            or ts < start
-            or ts > start + horizon
-        ):
+        if not math.isfinite(price) or price <= 0 or ts < start or ts > start + horizon:
             continue
         path.append((ts, price))
     if not path:
