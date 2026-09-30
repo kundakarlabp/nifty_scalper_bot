@@ -28,7 +28,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import re
 import threading
 import time
 from collections import defaultdict, deque
@@ -269,25 +268,6 @@ _ORDER_STATE_MACHINE: dict[str, set[str]] = {
     "rejected": set(),
     "expired": set(),
 }
-
-_MONTH_MAP = {
-    "JAN": 1,
-    "FEB": 2,
-    "MAR": 3,
-    "APR": 4,
-    "MAY": 5,
-    "JUN": 6,
-    "JUL": 7,
-    "AUG": 8,
-    "SEP": 9,
-    "OCT": 10,
-    "NOV": 11,
-    "DEC": 12,
-}
-
-_OPTION_RE = re.compile(
-    r"^(?:NFO:)?(?P<base>[A-Z]+)(?P<year>\d{2})(?P<month>[A-Z]{3})(?P<strike>\d+)(?P<side>CE|PE)$"
-)
 
 
 class DataHub:
@@ -1292,20 +1272,52 @@ class DataHub:
     def _parse_option_symbol(
         self, symbol: str
     ) -> tuple[str, datetime, float, bool] | None:
-        match = _OPTION_RE.match(symbol)
-        if not match:
+        """Resolve option identity from broker instrument metadata.
+
+        Expiry is deliberately not reconstructed from the trading symbol. Weekly
+        and monthly contracts both use the resolver's broker-dump row, keeping
+        contract dates aligned with the InstrumentManager/contract SSOT.
+        """
+        metadata_owner = self._resolver
+        lookup = getattr(metadata_owner, "lookup", None)
+        if not callable(lookup):
+            metadata_owner = getattr(self._resolver, "_instrument_manager", None)
+            lookup = getattr(metadata_owner, "lookup", None)
+        if not callable(lookup):
             return None
-        year = 2000 + int(match.group("year"))
-        month = _MONTH_MAP.get(match.group("month"))
-        if month is None:
+        try:
+            row = lookup(symbol)
+        except Exception:  # noqa: BLE001 - optional analytics must stay non-gating
             return None
-        expiry = datetime(year, month, 28, 15, 30, tzinfo=timezone.utc).replace(tzinfo=None)
-        return (
-            match.group("base"),
-            expiry,
-            float(match.group("strike")),
-            match.group("side") == "CE",
+        if not isinstance(row, Mapping):
+            return None
+
+        raw_expiry = row.get("expiry")
+        try:
+            if isinstance(raw_expiry, datetime):
+                expiry_date = raw_expiry.date()
+            else:
+                expiry_date = datetime.strptime(str(raw_expiry)[:10], "%Y-%m-%d").date()
+            strike = float(row.get("strike"))
+        except (TypeError, ValueError):
+            return None
+
+        side = str(row.get("instrument_type") or "").strip().upper()
+        if side not in {"CE", "PE"}:
+            return None
+        base = str(row.get("name") or "NIFTY").strip().upper()
+        if not base:
+            return None
+
+        expiry = datetime(
+            expiry_date.year,
+            expiry_date.month,
+            expiry_date.day,
+            15,
+            30,
+            tzinfo=timezone(timedelta(hours=5, minutes=30)),
         )
+        return base, expiry, strike, side == "CE"
 
     def _ingest_tick_impl(self, tick: Tick) -> None:
         canonical_tick = (

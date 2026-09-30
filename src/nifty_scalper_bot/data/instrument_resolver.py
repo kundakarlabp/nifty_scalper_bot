@@ -12,6 +12,7 @@ class InstrumentResolver:
         self._broker = broker
         self._token_by_symbol: dict[str, int] = {}
         self._exchange_by_symbol: dict[str, str] = {}
+        self._metadata_by_symbol: dict[str, dict[str, Any]] = {}
 
     def warm_from_broker_dump(self, rows: list[dict[str, Any]]) -> None:
         """Warm caches from broker rows. Args: rows. Returns: none. Raises: none."""
@@ -28,12 +29,23 @@ class InstrumentResolver:
                 continue
             self._token_by_symbol[symbol] = token
             self._exchange_by_symbol[symbol] = exchange
+            self._metadata_by_symbol[symbol] = dict(row)
 
     def resolve_symbol_to_token(self, symbol: str) -> int | None:
         """Resolve instrument token. Args: symbol. Returns: token/None. Raises: none."""
 
         canon, _, _ = self.canonicalize(symbol)
         return self._token_by_symbol.get(canon)
+
+    def lookup(self, symbol: str) -> dict[str, Any] | None:
+        """Return broker instrument metadata for *symbol* when cached.
+
+        The broker dump is authoritative for contract attributes such as expiry;
+        consumers must not reconstruct those attributes from trading symbols.
+        """
+        canon, _, _ = self.canonicalize(symbol)
+        row = self._metadata_by_symbol.get(canon)
+        return dict(row) if row is not None else None
 
     def build_quote_keys(self, symbol: str) -> tuple[str, list[str]]:
         """Build quote lookup keys. Args: symbol. Returns: canonical+keys. Raises: none."""
