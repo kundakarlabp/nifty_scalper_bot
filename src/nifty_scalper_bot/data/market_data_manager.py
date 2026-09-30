@@ -351,6 +351,8 @@ class MarketDataManager:
 
     _native_candle_flush_lifecycle_owner = True
 
+    _tick_accounting_hardening_installed = True
+
     def __init__(
         self,
         broker: Any = None,
@@ -420,6 +422,7 @@ class MarketDataManager:
         self._last_tick_hash: dict[str, int] = {}
         self._tick_cache: dict[str, dict[str, Any]] = {}
         self._tick_counter = 0
+        self._tick_accounting_inflight_batch_size = 0
         self._mdm_selected_tick_count = 0
         self._last_mdm_selected_tick_at: float = 0.0
         self._last_tick_log_time = time.monotonic()
@@ -7591,6 +7594,7 @@ class MarketDataManager:
                     continue
                 break
             self._pending_heap_prune_locked()
+            self._tick_accounting_inflight_batch_size = len(batch)
         return batch
 
     def _requeue_unprocessed_ticks(self, ticks: list[dict[str, Any]]) -> None:
@@ -7770,6 +7774,7 @@ class MarketDataManager:
                 )
                 drain_duration_ms = self._last_drain_duration_ms
                 self._tick_active_drains = max(0, self._tick_active_drains - 1)
+                self._tick_accounting_inflight_batch_size = 0
                 self._update_pipeline_overload_locked()
                 has_more = self._pending_count_locked() > 0
                 self._tick_drain_scheduled = False
@@ -7903,16 +7908,28 @@ class MarketDataManager:
                 overload_duration_s = max(
                     0.0, time.monotonic() - self._overload_since_mono
                 )
+            submitted = max(int(self._tick_submitted_total), 0)
+            processed = max(int(self._tick_processed_total), 0)
+            coalesced = max(int(self._tick_coalesced_total), 0)
+            dropped = max(int(self._tick_dropped_total), 0)
+            residual = max(submitted - processed - coalesced - dropped - pending, 0)
+            tracked_batch = max(int(self._tick_accounting_inflight_batch_size or 0), 0)
+            inflight = (
+                min(residual, tracked_batch) if self._tick_active_drains > 0 else 0
+            )
+            unexplained = max(residual - inflight, 0)
+            accounting_total = (
+                processed + coalesced + dropped + pending + inflight + unexplained
+            )
             return {
-                "submitted_total": self._tick_submitted_total,
-                "processed_total": self._tick_processed_total,
-                "coalesced_total": self._tick_coalesced_total,
-                "dropped_total": self._tick_dropped_total,
-                "unexplained_loss": self._tick_submitted_total
-                - self._tick_processed_total
-                - self._tick_coalesced_total
-                - self._tick_dropped_total
-                - pending,
+                "submitted_total": submitted,
+                "processed_total": processed,
+                "coalesced_total": coalesced,
+                "dropped_total": dropped,
+                "inflight_ticks": inflight,
+                "unexplained_loss": unexplained,
+                "accounting_total": accounting_total,
+                "accounting_balanced": accounting_total == submitted,
                 "pending_ticks": pending,
                 "pending_tick_count": pending,
                 "active_queue_count": active_queue_count,
