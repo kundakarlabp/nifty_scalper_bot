@@ -125,6 +125,10 @@ def test_start_trade_replication_task_is_independent_of_execution_stack(
     class _FakeTask:
         def __init__(self, coro: Awaitable[Any]) -> None:
             self.coro = coro
+            self.callbacks: list[Any] = []
+
+        def add_done_callback(self, callback: Any) -> None:
+            self.callbacks.append(callback)
 
     class _Replicator:
         def replicate_once(self) -> dict[str, int]:
