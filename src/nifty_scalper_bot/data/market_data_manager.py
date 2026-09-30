@@ -7912,26 +7912,14 @@ class MarketDataManager:
             processed = max(int(self._tick_processed_total), 0)
             coalesced = max(int(self._tick_coalesced_total), 0)
             dropped = max(int(self._tick_dropped_total), 0)
-            residual = max(
-                submitted - processed - coalesced - dropped - pending,
-                0,
-            )
-            tracked_batch = max(
-                int(self._tick_accounting_inflight_batch_size or 0), 0
-            )
+            residual = max(submitted - processed - coalesced - dropped - pending, 0)
+            tracked_batch = max(int(self._tick_accounting_inflight_batch_size or 0), 0)
             inflight = (
-                min(residual, tracked_batch)
-                if self._tick_active_drains > 0
-                else 0
+                min(residual, tracked_batch) if self._tick_active_drains > 0 else 0
             )
             unexplained = max(residual - inflight, 0)
             accounting_total = (
-                processed
-                + coalesced
-                + dropped
-                + pending
-                + inflight
-                + unexplained
+                processed + coalesced + dropped + pending + inflight + unexplained
             )
             return {
                 "submitted_total": submitted,
