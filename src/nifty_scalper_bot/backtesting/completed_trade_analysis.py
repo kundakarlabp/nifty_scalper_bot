@@ -150,6 +150,62 @@ class ScoreCalibrationReport:
 
 
 @dataclass(frozen=True, slots=True)
+class CandidateDecisionSummary:
+    """Selection-funnel coverage from persisted runner decisions."""
+
+    total_decisions: int
+    approved: int
+    blocked: int
+    approval_fraction: float
+    with_research_context: int
+    with_signal_quality: int
+    blocked_by_reason: Mapping[str, int]
+
+
+def summarize_candidate_decisions(
+    rows: Sequence[Mapping[str, Any]],
+) -> CandidateDecisionSummary:
+    """Summarize accepted/rejected candidates without inventing outcomes."""
+
+    approved = 0
+    blocked = 0
+    with_context = 0
+    with_quality = 0
+    reasons: dict[str, int] = {}
+    for row in rows:
+        event_name = str(row.get("event_name") or "").strip()
+        if event_name == "candidate.approved":
+            approved += 1
+        elif event_name == "candidate.blocked":
+            blocked += 1
+            reason = str(row.get("reason_code") or "unknown").strip() or "unknown"
+            reasons[reason] = reasons.get(reason, 0) + 1
+        else:
+            continue
+        meta = row.get("meta")
+        if not isinstance(meta, Mapping):
+            continue
+        research = meta.get("research_context")
+        if not isinstance(research, Mapping):
+            continue
+        with_context += 1
+        quality = research.get("signal_quality")
+        if isinstance(quality, Mapping) and quality:
+            with_quality += 1
+
+    total = approved + blocked
+    return CandidateDecisionSummary(
+        total_decisions=total,
+        approved=approved,
+        blocked=blocked,
+        approval_fraction=round(approved / total, 4) if total else 0.0,
+        with_research_context=with_context,
+        with_signal_quality=with_quality,
+        blocked_by_reason=dict(sorted(reasons.items())),
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class ExecutionDataQuality:
     """Known execution-evidence caveats in the realized historical sample."""
 
@@ -762,6 +818,7 @@ def execution_data_quality(
 __all__ = [
     "AttributionReadiness",
     "CanonicalCompletedTrade",
+    "CandidateDecisionSummary",
     "ChronologicalBlock",
     "CompletedTradeSummary",
     "ComponentCoverage",
@@ -778,4 +835,5 @@ __all__ = [
     "chronological_walk_forward",
     "walk_forward_stability",
     "summarize_completed_trades",
+    "summarize_candidate_decisions",
 ]
