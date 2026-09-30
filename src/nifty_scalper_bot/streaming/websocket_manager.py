@@ -838,7 +838,10 @@ class WebSocketManager:
         now = time.monotonic()
         self._last_tick_mono = now
         self._last_pong_mono = now
-        restored = (\n            not self._connected.is_set()\n            or self._state != ConnectionState.CONNECTED\n        )
+        restored = (
+            not self._connected.is_set()
+            or self._state != ConnectionState.CONNECTED
+        )
         self._connected.set()
         self._state = ConnectionState.CONNECTED
         self._stream_health = "healthy"
