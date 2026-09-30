@@ -109,10 +109,10 @@ def test_trend_regime_now_receives_its_configured_weight() -> None:
     from nifty_scalper_bot.config.regime_strategy_policy import REGIME_STRATEGY_WEIGHTS
 
     trend_row = REGIME_STRATEGY_WEIGHTS[MarketRegime.TREND.value]
-    assert trend_row["SMC"] > 1.0
+    assert trend_row["smc_lite"] > 1.0
     assert (
-        REGIME_STRATEGY_WEIGHTS[normalize_regime("trend").value]["SMC"]
-        == trend_row["SMC"]
+        REGIME_STRATEGY_WEIGHTS[normalize_regime("trend").value]["smc_lite"]
+        == trend_row["smc_lite"]
     )
 
 
@@ -126,4 +126,4 @@ def test_defensive_regimes_damp_directional_triggers() -> None:
         MarketRegime.LOW_ACTIVITY,
     ):
         row = REGIME_STRATEGY_WEIGHTS[regime.value]
-        assert row["SMC"] < 1.0
+        assert row["smc_lite"] < 1.0
