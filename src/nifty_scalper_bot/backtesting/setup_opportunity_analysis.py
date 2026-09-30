@@ -109,8 +109,8 @@ def canonicalize_setup_opportunities(
     """Collapse repeated candidate evaluations to one structural setup identity.
 
     Rows without a strategy-owned setup identity are ignored rather than assigned
-    a synthetic identity. Conflicting strategy/side/symbol facts for the same
-    setup fail closed because such rows cannot support trustworthy attribution.
+    a synthetic identity. Conflicting strategy/side facts for the same setup
+    fail closed because such rows cannot support trustworthy attribution.
     """
 
     grouped: dict[str, list[tuple[float, Mapping[str, Any], dict[str, Any]]]] = {}
@@ -129,12 +129,16 @@ def canonicalize_setup_opportunities(
             ts_value = row.get("created_at")
         ts = _timestamp(ts_value, field="decision timestamp")
         strategy = str(context.get("strategy") or "").strip().lower()
-        side = str(
-            context.get("contract_side")
-            or context.get("trade_side")
-            or row.get("direction")
-            or ""
-        ).strip().upper()
+        side = (
+            str(
+                context.get("contract_side")
+                or context.get("trade_side")
+                or row.get("direction")
+                or ""
+            )
+            .strip()
+            .upper()
+        )
         key = f"{strategy}:{side}:{setup_id}"
         grouped.setdefault(key, []).append((ts, row, context))
 
@@ -235,7 +239,12 @@ def label_forward_option_buy_path(
             price = float(row.get(price_field))
         except (TypeError, ValueError):
             continue
-        if not math.isfinite(price) or price <= 0 or ts < start or ts > start + horizon:
+        if (
+            not math.isfinite(price)
+            or price <= 0
+            or ts < start
+            or ts > start + horizon
+        ):
             continue
         path.append((ts, price))
     if not path:
@@ -295,9 +304,7 @@ def compare_score_policy(
         policy="regime_weighted" if use_regime_weight else "neutral_weight",
         eligible=eligible,
         selected=len(selected_r),
-        mean_r=(
-            round(sum(selected_r) / len(selected_r), 6) if selected_r else None
-        ),
+        mean_r=round(sum(selected_r) / len(selected_r), 6) if selected_r else None,
         positive_fraction=(
             round(sum(value > 0 for value in selected_r) / len(selected_r), 6)
             if selected_r
