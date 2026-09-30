@@ -125,7 +125,7 @@ def test_approved_decision_uses_executed_signal_identity_and_score() -> None:
 
 
 
-def test_trade_decision_snapshot_persists_research_context_without_affecting_execution() -> None:
+def test_trade_decision_snapshot_persists_research_context_without_affecting_execution(\n) -> None:
     captured: list[dict[str, object]] = []
     runner = SimpleNamespace(
         _runtime_live_orders_armed=True,
