@@ -13,7 +13,7 @@ import random
 import time
 from collections.abc import Awaitable, Callable, Coroutine, Sequence
 from dataclasses import dataclass
-from datetime import time as dtime
+from datetime import datetime, time as dtime
 from enum import Enum
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -25,6 +25,7 @@ except Exception:  # pragma: no cover - optional dependency guard
 
 from nifty_scalper_bot.utils.async_helpers import safe_task
 from nifty_scalper_bot.utils.logging import get_logger
+from nifty_scalper_bot.utils.smart_symbol import is_nse_trading_day
 
 TickCallback = Callable[[dict[str, Any]], Awaitable[None] | None]
 
@@ -48,6 +49,8 @@ class _CircuitState:
 
 class WebSocketManager:
     """Transport-only KiteTicker session manager; business subscription intent lives upstream."""
+
+    _market_data_hardening_installed = True
 
     def __init__(
         self,
@@ -195,11 +198,37 @@ class WebSocketManager:
         self._fallback_start_callback = on_start
         self._fallback_stop_callback = on_stop
 
-    def _build_ticker(self) -> KiteTicker:
-        """Args: none; Returns: KiteTicker instance; Raises: RuntimeError."""
-        if KiteTicker is None:
-            raise RuntimeError("kiteconnect is not installed")
-        return KiteTicker(self._api_key, self._access_token, reconnect=False)
+    def _make_ticker_close_safe(self, ticker: Any | None = None) -> None:
+        """Make ticker.close best-effort at the transport boundary."""
+        target = ticker if ticker is not None else self._ticker
+        if target is None or bool(
+            getattr(target, "_nifty_safe_close_installed", False)
+        ):
+            return
+        close = getattr(target, "close", None)
+        if not callable(close):
+            return
+
+        def _safe_close(*args: Any, **kwargs: Any) -> Any:
+            try:
+                return close(*args, **kwargs)
+            except Exception as exc:
+                self._logger.warning(
+                    "WS_TICKER_CLOSE_SUPPRESSED error=%r",
+                    exc,
+                    exc_info=True,
+                    extra={
+                        "event": "WS_TICKER_CLOSE_SUPPRESSED",
+                        "error": repr(exc),
+                    },
+                )
+                return None
+
+        try:
+            setattr(target, "close", _safe_close)
+            setattr(target, "_nifty_safe_close_installed", True)
+        except Exception as exc:
+            self._logger.debug("WS safe-close wrapper skipped: %s", exc)
 
     @property
     def ticker(self) -> KiteTicker:
@@ -242,6 +271,7 @@ class WebSocketManager:
             self._reconnect_task = None
             self._watchdog_task = None
             ticker = self._ticker
+            self._make_ticker_close_safe(ticker)
             self._ticker = None
             if ticker is not None:
                 await asyncio.to_thread(ticker.close)
@@ -530,6 +560,7 @@ class WebSocketManager:
             # Close the ticker that failed to connect — prevents orphaned
             # KiteTicker threads from producing late 1006 close events.
             ticker = self._ticker
+            self._make_ticker_close_safe(ticker)
             if ticker is not None:
                 try:
                     await asyncio.to_thread(ticker.close)
@@ -585,6 +616,7 @@ class WebSocketManager:
 
                 # Ensure any old ticker is fully closed before reconnect
                 if self._ticker is not None:
+                    self._make_ticker_close_safe(self._ticker)
                     try:
                         await asyncio.to_thread(self._ticker.close)
                     except Exception as e:
@@ -722,11 +754,15 @@ class WebSocketManager:
                 self._logger.error("Failure in _replace_ticker.close_old: %s", e)
 
     def _build_ticker(self) -> KiteTicker:
-        """Args: none; Returns: KiteTicker; Raises: Exception."""
-
+        """Build a close-safe ticker from the configured transport factory."""
         if self._ticker_factory is not None:
-            return self._ticker_factory()
-        return KiteTicker(self._api_key, self._access_token, reconnect=False)
+            ticker = self._ticker_factory()
+        else:
+            if KiteTicker is None:
+                raise RuntimeError("kiteconnect is not installed")
+            ticker = KiteTicker(self._api_key, self._access_token, reconnect=False)
+        self._make_ticker_close_safe(ticker)
+        return ticker
 
     def _bind_handlers(self, ticker: KiteTicker) -> None:
         """Args: ticker; Returns: none; Raises: none."""
@@ -780,29 +816,31 @@ class WebSocketManager:
         except Exception as e:
             self._logger.error("Failure in _on_connect: %s", e)
 
-    def _on_ticks(self, ws, ticks):
-        """Args: ws, ticks; Returns: none; Raises: none."""
-
+    def _on_ticks(self, ws: Any, ticks: Any) -> None:
+        """Route each WebSocket batch through exactly one market-data ingress."""
         del ws
         if not ticks:
             return
-
-        market_data_manager = getattr(self, "_market_data_manager", None)
-        process_ticks = getattr(market_data_manager, "process_ticks", None)
-        if callable(process_ticks):
-            try:
-                process_ticks(ticks)
-            except Exception as e:
-                self._logger.error("Failure in _on_ticks.process_ticks: %s", e)
-
         if not isinstance(ticks, list):
             self._logger.error("Invalid ticks payload type: %s", type(ticks))
             return
 
+        market_data_manager = getattr(self, "_market_data_manager", None)
+        process_ticks = getattr(market_data_manager, "process_ticks", None)
+        dispatched_to_mdm = False
+        if callable(process_ticks):
+            try:
+                process_ticks(ticks)
+                dispatched_to_mdm = True
+            except Exception as exc:
+                self._logger.error("Failure in _on_ticks.process_ticks: %s", exc)
+
         now = time.monotonic()
         self._last_tick_mono = now
         self._last_pong_mono = now
-        restored = (not self._connected.is_set() or self._state != ConnectionState.CONNECTED)
+        restored = not self._connected.is_set() or (
+            self._state != ConnectionState.CONNECTED
+        )
         self._connected.set()
         self._state = ConnectionState.CONNECTED
         self._stream_health = "healthy"
@@ -813,42 +851,45 @@ class WebSocketManager:
                 "WEBSOCKET_CONNECTION_RESTORED_BY_TICK",
                 extra={"event": "WEBSOCKET_CONNECTION_RESTORED_BY_TICK"},
             )
+
         update_authoritative = getattr(
             market_data_manager, "update_authoritative_ticks", None
         )
         if callable(update_authoritative):
             try:
                 update_authoritative(ticks)
-            except Exception as e:
-                self._logger.error("Failure in _on_ticks.update_authoritative: %s", e)
+            except Exception as exc:
+                self._logger.error("Failure in _on_ticks.update_authoritative: %s", exc)
+
         if self._fallback_active and self._fallback_stop_callback is not None:
             self._fallback_active = False
             try:
                 self._fallback_stop_callback()
-            except Exception as e:
-                self._logger.error("Failure in _on_ticks.fallback_stop: %s", e)
+            except Exception as exc:
+                self._logger.error("Failure in _on_ticks.fallback_stop: %s", exc)
 
-        callback = self._on_tick_callback
-        if not callable(callback):
-            # process_ticks() already enqueued all ticks into MDM's queue —
-            # the per-tick callback slot is intentionally unset to prevent
-            # double-enqueue (see MarketDataManager.__init__ comment).
-            return
-
-        # Log first tick received — confirms pipeline is alive
-        if not self._first_tick_logged and ticks:
-            first_token = ticks[0].get("instrument_token", "?")
+        if not self._first_tick_logged:
+            first = ticks[0]
+            first_token = (
+                first.get("instrument_token", "?") if isinstance(first, dict) else "?"
+            )
             self._first_tick_logged = True
             self._logger.info(
                 "FIRST_TICK_RECEIVED instrument_token=%s — pipeline is live",
                 first_token,
             )
 
+        if dispatched_to_mdm:
+            return
+
+        callback = self._on_tick_callback
+        if not callable(callback):
+            return
         for tick in ticks:
-            if "instrument_token" not in tick:
+            if not isinstance(tick, dict) or "instrument_token" not in tick:
                 self._logger.debug(
                     "Skipping tick without instrument_token: %s",
-                    list(tick.keys())[:5],
+                    list(tick.keys())[:5] if isinstance(tick, dict) else type(tick),
                 )
                 continue
             try:
@@ -907,7 +948,22 @@ class WebSocketManager:
             self._state = ConnectionState.DISCONNECTED
             self._last_disconnect_at = time.time()
             self._stream_health = "degraded"
-            # 1006 is stream degradation, not fatal startup failure.
+            if code == 1006 and not self._is_within_trading_window():
+                self._stream_health = "idle"
+                if self._on_disconnect_callback is not None:
+                    self._on_disconnect_callback()
+                self._logger.info(
+                    "WEBSOCKET_IDLE_CLOSED code=1006 reason=%s action=no_reconnect",
+                    reason or "closing_handshake_timeout",
+                    extra={
+                        "event": "WEBSOCKET_IDLE_CLOSED",
+                        "code": 1006,
+                        "reason": reason or "closing_handshake_timeout",
+                        "action": "no_reconnect",
+                    },
+                )
+                return
+            # 1006 during the live session is degradation, not fatal startup failure.
             if code == 1006:
                 self._logger.warning(
                     "WEBSOCKET_DEGRADED code=1006 reason=closing_handshake_timeout"
@@ -1059,32 +1115,24 @@ class WebSocketManager:
         return True
 
     def _is_within_trading_window(self) -> bool:
-        """Determine whether WebSocket is allowed to connect."""
-
+        """Use the configured timezone and canonical NSE trading calendar."""
         if not self._trading_window_enabled:
             return True
 
-        from datetime import datetime
-        from zoneinfo import ZoneInfo
-
-        ist = ZoneInfo("Asia/Kolkata")
-        now = datetime.now(ist)
-
-        # Weekends blocked
-        if now.weekday() >= 5:
+        now = datetime.now(self._trading_tz)
+        if not is_nse_trading_day(now.date()):
             return False
 
         now_time = now.time().replace(tzinfo=None)
         allowed = self._trading_start <= now_time <= self._trading_end
-
         if not allowed:
             self._logger.debug(
-                "WS window blocked | now=%s | start=%s | end=%s",
+                "WS window blocked | now=%s | start=%s | end=%s | tz=%s",
                 now_time,
                 self._trading_start,
                 self._trading_end,
+                self._trading_tz,
             )
-
         return allowed
 
     async def _cancel_task(self, task: asyncio.Task[None] | None) -> None:
@@ -1097,18 +1145,3 @@ class WebSocketManager:
             await task
         except asyncio.CancelledError:
             return
-
-
-# ── Explicit hardening integration (definition site, fails loudly) ──────────
-# Previously installed from streaming/__init__.py; centralized here so the
-# transport class is never exposed without the NSE calendar guard and
-# market-data hardening, regardless of import path.
-from nifty_scalper_bot.streaming.market_data_hardening import (  # noqa: E402
-    install_websocket_market_data_hardening as _install_ws_hardening,
-)
-from nifty_scalper_bot.utils.runtime_session_guards import (  # noqa: E402
-    install_websocket_market_calendar_guard as _install_ws_calendar_guard,
-)
-
-_install_ws_calendar_guard()
-_install_ws_hardening(WebSocketManager)
