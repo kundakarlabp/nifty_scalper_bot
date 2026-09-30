@@ -575,7 +575,7 @@ async def test_regime_downweighted_context_reaches_runner_quality_owner(
     assert result is not None
     assert result.metadata["approval_path"] == "single_trigger_context_confirmed"
     assert result.metadata["quality_gate_owner"] == "runner_final_execution_score"
-    assert result.metadata["context_confirmed_final_score"] < 7.0
+    assert result.metadata["final_trade_score"] < 7.0
 
 
 async def test_context_confirmation_applies_regime_weight_exactly_once(
