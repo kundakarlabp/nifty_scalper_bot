@@ -5201,6 +5201,32 @@ class StrategyRunner:
                 continue
         return []
 
+    @staticmethod
+    def _decision_research_context(
+        *,
+        metadata: Mapping[str, Any],
+        quality: Any | None,
+        stage: str,
+        rejection_reasons: Sequence[str] | None = None,
+    ) -> dict[str, Any]:
+        """Build provenance only from facts known at the current decision stage."""
+        components = getattr(quality, "components", None)
+        context: dict[str, Any] = {
+            "strategy": str(
+                (components or {}).get("strategy_name")
+                if isinstance(components, Mapping)
+                else metadata.get("strategy_name") or metadata.get("strategy") or ""
+            ),
+            "regime": str(metadata.get("regime") or ""),
+            "approval_path": str(metadata.get("approval_path") or ""),
+            "decision_stage": str(stage),
+        }
+        if isinstance(components, Mapping):
+            context["signal_quality"] = dict(components)
+        if rejection_reasons:
+            context["rejection_reasons"] = list(rejection_reasons)
+        return context
+
     def _record_trade_decision_snapshot(
         self,
         *,
@@ -5294,6 +5320,16 @@ class StrategyRunner:
             risk_allowed=None,
             order_submitted=False,
             trace_id=trace_id,
+            signal_score=(
+                payload.get("signal_score")
+                if isinstance(payload.get("signal_score"), (int, float))
+                else None
+            ),
+            research_context=(
+                payload.get("research_context")
+                if isinstance(payload.get("research_context"), Mapping)
+                else None
+            ),
         )
         if reason == "candidate_refresh_pending" and not bool(
             payload.get("event_loop_active", False)
@@ -19361,6 +19397,7 @@ class StrategyRunner:
                 self._reset_execution_state(base_symbol)
                 return SignalExecutionResult(False, "max_order_attempts_per_minute")
             metadata = dict(signal.metadata or {})
+            decision_research_context: dict[str, Any] | None = None
             # Signal metadata is external to the runner; only this invocation may
             # stamp a replacement after every strict replacement guard passes.
             metadata.pop("_runner_approved_replacement_symbol", None)
@@ -19462,11 +19499,23 @@ class StrategyRunner:
                         reason=reason_key,
                     )
                 self._reset_execution_state(base_symbol)
+                rejection_details = dict(details or {})
+                if decision_research_context:
+                    rejection_details.setdefault(
+                        "research_context",
+                        {
+                            **decision_research_context,
+                            "decision_stage": "execution",
+                            "rejection_stage": "execution",
+                        },
+                    )
+                    if quality is not None:
+                        rejection_details.setdefault("signal_score", quality.final_score)
                 return self._reject_signal_execution(
                     symbol=base_symbol,
                     trace_id=trace_id,
                     reason=reason,
-                    details=details,
+                    details=rejection_details,
                 )
 
             _reject_after_dedup = reject_after_dedup
@@ -20747,6 +20796,11 @@ class StrategyRunner:
                 else quality.final_score
             )
             final_confidence = max(0.0, min(1.0, confidence_score / 10.0))
+            decision_research_context = self._decision_research_context(
+                metadata=metadata,
+                quality=quality,
+                stage="runner_final_score",
+            )
             self._logger.info(
                 "SIGNAL_SCORE strategy_name=%s threshold=%.2f final=%.2f alpha=%.2f direction=%.2f strategy=%.2f option=%.2f data=%.2f rr=%.2f confidence=%.2f allowed=%s reasons=%s trace_id=%s",
                 str(quality.components.get("strategy_name", "")),
@@ -20852,10 +20906,7 @@ class StrategyRunner:
                     trace_id=trace_id,
                     signal_score=quality.final_score,
                     research_context={
-                        "strategy": str(quality.components.get("strategy_name", "")),
-                        "regime": str(metadata.get("regime") or ""),
-                        "approval_path": str(metadata.get("approval_path") or ""),
-                        "signal_quality": dict(quality.components),
+                        **(decision_research_context or {}),
                         "rejection_stage": "runner_final_score",
                         "rejection_reasons": rejection_reasons,
                     },
@@ -21688,7 +21739,19 @@ class StrategyRunner:
                     order_submitted=True,
                     trace_id=trace_id,
                     signal_id=signal.deterministic_id,
-                    signal_score=metadata.get("final_score"),
+                    signal_score=(
+                        quality.final_score
+                        if quality is not None
+                        else metadata.get("final_score")
+                    ),
+                    research_context=(
+                        {
+                            **decision_research_context,
+                            "decision_stage": "order_submitted",
+                        }
+                        if decision_research_context
+                        else None
+                    ),
                 )
                 return SignalExecutionResult(
                     True,
@@ -21804,6 +21867,16 @@ class StrategyRunner:
                     risk_allowed=False,
                     order_submitted=False,
                     trace_id=trace_id,
+                    signal_score=(quality.final_score if quality is not None else None),
+                    research_context=(
+                        {
+                            **decision_research_context,
+                            "decision_stage": "order_manager",
+                            "rejection_stage": "order_manager",
+                        }
+                        if decision_research_context
+                        else None
+                    ),
                 )
                 return SignalExecutionResult(
                     False, submit_reason, details=submit_details
