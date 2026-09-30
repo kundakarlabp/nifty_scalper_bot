@@ -407,6 +407,51 @@ def load_trade_ledger_rows(
     return result
 
 
+
+def load_candidate_decision_rows(
+    db_path: str | Path,
+    *,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
+    """Read canonical runner candidate decisions from the existing journal."""
+
+    resolved = Path(db_path).expanduser().resolve()
+    if not resolved.exists():
+        return []
+    bounded_limit = None if limit is None else max(1, min(10000, int(limit)))
+    uri = f"{resolved.as_uri()}?mode=ro"
+    try:
+        with sqlite3.connect(uri, uri=True) as connection:
+            connection.row_factory = sqlite3.Row
+            rows = connection.execute(
+                f"""
+                SELECT timestamp, event_name, symbol, side, signal_id, trace_id,
+                       strategy, reason_code, build_sha, meta_json
+                FROM trade_events
+                WHERE event_type = 'TRADE_DECISION'
+                  AND event_name IN ('candidate.approved', 'candidate.blocked')
+                ORDER BY timestamp ASC, id ASC
+                {"" if bounded_limit is None else "LIMIT ?"}
+                """,
+                () if bounded_limit is None else (bounded_limit,),
+            ).fetchall()
+    except sqlite3.OperationalError as exc:
+        if "no such table: trade_events" in str(exc).lower():
+            return []
+        raise
+
+    decisions: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        raw_meta = item.pop("meta_json", None)
+        try:
+            meta = json.loads(raw_meta) if raw_meta else {}
+        except (TypeError, ValueError, json.JSONDecodeError):
+            meta = {}
+        item["meta"] = meta if isinstance(meta, dict) else {}
+        decisions.append(item)
+    return decisions
+
 def materialize_trade_events(
     conn: sqlite3.Connection,
     events: Sequence[Mapping[str, Any]],
