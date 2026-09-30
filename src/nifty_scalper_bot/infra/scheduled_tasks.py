@@ -5,9 +5,8 @@ from __future__ import annotations
 import asyncio
 import inspect
 from pathlib import Path
-from typing import Any, Awaitable, Callable
-
 from time import time
+from typing import Any, Awaitable, Callable
 
 from nifty_scalper_bot.infra.daily_log_archive import (
     archive_interval_seconds,
