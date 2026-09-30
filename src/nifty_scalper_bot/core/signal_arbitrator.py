@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 
@@ -13,6 +13,27 @@ from typing import Any
 class _SymbolState:
     direction: str
     last_ts: float
+
+
+@dataclass(slots=True, frozen=True)
+class TradeDecision:
+    """Compatibility DTO for the legacy risk-gate boundary."""
+
+    action: str
+    direction: str
+    symbol: str | None
+    underlying: str
+    score: float
+    confidence: float
+    entry_price: float | None
+    stop_loss: float | None
+    target: float | None
+    rr: float | None
+    reasons: list[str]
+    votes: list[Any] = field(default_factory=list)
+    candidate_meta: dict[str, Any] = field(default_factory=dict)
+    trace_id: str = ""
+    timestamp: float = 0.0
 
 
 class SignalArbitrator:
