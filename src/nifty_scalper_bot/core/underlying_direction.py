@@ -32,7 +32,6 @@ def _state_for_bias(bias: str | None) -> UnderlyingDirectionState:
     return UnderlyingDirectionState.UNAVAILABLE
 
 
-
 @dataclass(frozen=True, slots=True)
 class UnderlyingDirectionObservation:
     """Atomic direction evidence from one underlying market-data source."""
