@@ -136,6 +136,12 @@ class RiskSwitches:
             return 0.0
         return remaining
 
+    def rebase_day_pnl(self) -> None:
+        """Start a fresh loss-budget window without erasing streak/cooldown state."""
+
+        self._reset_if_needed()
+        self._day_pnl = 0.0
+
     def reset_day(self) -> None:
         """Reset counters for a new trading day."""
 
