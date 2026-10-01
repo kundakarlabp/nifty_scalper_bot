@@ -95,6 +95,7 @@ def _run_benchmarks(
 def _syntax_preflight(root: Path) -> int:
     """Fail before style mutation when repository Python cannot compile."""
     return _run(
+        root,
         [
             sys.executable,
             "-m",
@@ -104,7 +105,6 @@ def _syntax_preflight(root: Path) -> int:
             "dashboard",
             "scripts",
         ],
-        cwd=root,
     ).returncode
 
 

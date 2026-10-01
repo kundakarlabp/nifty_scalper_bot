@@ -4192,7 +4192,7 @@ class StrategyManager(_BaseStrategyManager):
             regime_weight = 1.0
         return max(0.0, raw_context_score * max(0.0, regime_weight))
 
-    def _context_vote_is_timestamped(self, vote: StrategyVote) -> bool:
+    def _context_vote_is_timestamped(self, vote: StrategyVote, *, max_age_s: float | None = None) -> bool:
         """Return whether a context vote proves it is current.
 
         A hard veto blocks an otherwise valid trade, so it requires an
@@ -4205,10 +4205,12 @@ class StrategyManager(_BaseStrategyManager):
             stamped = float(raw)
         except (TypeError, ValueError):
             return False
-        if stamped <= 0:
+        if not isfinite(stamped) or stamped <= 0:
             return False
         max_age = max(0.0, self._env_float("CONTEXT_VOTE_MAX_AGE_SEC", 30.0))
-        return (time.time() - stamped) <= max_age
+        if max_age_s is not None:
+            max_age = min(max_age, max(0.0, max_age_s))
+        return 0.0 <= (time.time() - stamped) <= max_age
 
     def _extract_context_veto_score(self, vote: StrategyVote) -> float:
         """Args: vote. Returns: context veto score. Raises: none."""
@@ -4635,16 +4637,12 @@ class StrategyManager(_BaseStrategyManager):
         final_score = max(0.0, min(10.0, final_score))
         context_confidence_floor = float(os.getenv("STRATEGY_CONTEXT_HARD_VETO_MIN_CONFIDENCE", "0.80") or "0.80")
         context_freshness_max_age_s = float(os.getenv("STRATEGY_CONTEXT_HARD_VETO_MAX_AGE_SECONDS", "120") or "120")
-        now_epoch = time.time()
         hard_veto_candidates = []
         for vote in opposite_context:
-            md = dict(vote.metadata or {})
-            vote_ts = float(md.get("timestamp_epoch") or md.get("ts") or now_epoch)
-            age_s = max(0.0, now_epoch - vote_ts)
             if (
                 self._extract_context_veto_score(vote) >= 8.0
                 and float(vote.confidence) >= context_confidence_floor
-                and age_s <= context_freshness_max_age_s
+                and self._context_vote_is_timestamped(vote, max_age_s=context_freshness_max_age_s)
             ):
                 hard_veto_candidates.append(vote)
         vetoed = bool(hard_veto_candidates)
