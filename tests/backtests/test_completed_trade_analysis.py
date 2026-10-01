@@ -549,17 +549,19 @@ def test_post_cost_outcome_evidence_reports_strategy_setup_and_r_excursions() ->
 
 
 def test_gate_effectiveness_requires_both_approved_and_blocked_labels() -> None:
-    incomplete = summarize_gate_effectiveness([
-        {"approved": False, "final_reason": "spread_too_wide", "post_cost_r": -0.5}
-    ])
+    incomplete = summarize_gate_effectiveness(
+        [{"approved": False, "final_reason": "spread_too_wide", "post_cost_r": -0.5}]
+    )
     assert incomplete.ready is False
     assert incomplete.blockers == ("missing_approved_counterfactual_labels",)
 
-    report = summarize_gate_effectiveness([
-        {"approved": True, "final_reason": "order_submitted", "post_cost_r": 0.4},
-        {"approved": False, "final_reason": "spread_too_wide", "post_cost_r": -0.5},
-        {"approved": False, "final_reason": "spread_too_wide", "post_cost_r": 0.1},
-    ])
+    report = summarize_gate_effectiveness(
+        [
+            {"approved": True, "final_reason": "order_submitted", "post_cost_r": 0.4},
+            {"approved": False, "final_reason": "spread_too_wide", "post_cost_r": -0.5},
+            {"approved": False, "final_reason": "spread_too_wide", "post_cost_r": 0.1},
+        ]
+    )
     assert report.ready is True
     assert report.labelled_opportunities == 3
     blocked = next(group for group in report.groups if group.decision == "blocked")
