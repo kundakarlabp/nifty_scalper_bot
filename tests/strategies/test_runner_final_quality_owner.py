@@ -85,6 +85,23 @@ def test_execution_quality_cannot_rescue_weak_directional_alpha(monkeypatch) -> 
     assert "alpha_below_threshold" in quality.reasons
 
 
+def test_strong_direction_cannot_rescue_marginal_native_setup(monkeypatch) -> None:
+    """Regression: the 2026-10-01 VWAP shape must fail the alpha gate."""
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    quality = score_signal_quality(
+        direction_score=9.5,
+        strategy_score=5.5,
+        option_score=9.97,
+        data_score=10.0,
+        rr_score=10.0,
+        strategy_name="VWAPPro",
+    )
+    assert quality.final_score > quality.components["threshold"]
+    assert quality.components["alpha_score"] < quality.components["threshold"]
+    assert quality.allowed is False
+    assert "alpha_below_threshold" in quality.reasons
+
+
 def test_strong_alpha_with_good_execution_remains_tradable(monkeypatch) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     quality = score_signal_quality(

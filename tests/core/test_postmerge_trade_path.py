@@ -273,7 +273,7 @@ def test_context_confirmed_trend_vwap_can_clear_runner_with_strong_independent_a
 
     candidate = _trend_vwap_context_candidate(
         manager,
-        direction_score=9.0,
+        direction_score=9.5,
         independent_setup_score=6.0,
     )
     quality = score_signal_metadata(
