@@ -117,8 +117,10 @@ uncertainty; the existing IID bootstrap alone does not establish independence.
 
 The vector engine still uses a generic proportional commission and configured
 price column; it is not the canonical NIFTY fee/depth execution model. Its
-annualised metrics assume 252 observations/year and must not be interpreted as
-valid intraday annualisation. It also passes the whole input frame to a strategy;
+annualised metrics now use observed daily closing equity with 252 sessions/year
+(see the subsequent [session-metrics correction](2026-10-01-backtest-session-metrics.md)).
+Short or incomplete histories still do not establish reliable annual performance.
+It also passes the whole input frame to a strategy;
 feature causality is the strategy's responsibility. Bar-start versus actual
 availability timestamps must be explicit before using candle OHLC for decisions.
 Minute-candle extrema cannot establish tick-level target/stop ordering or OFI.

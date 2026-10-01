@@ -889,20 +889,27 @@ class BacktestEngine:
         return net, return_pct
 
     def _calculate_performance(self, equity_curve: pd.DataFrame) -> Dict[str, float]:
-        returns = equity_curve["returns"]
+        # Annualize observed session returns, not each intraday bar as one day.
+        daily_equity = equity_curve["equity"].resample("1D").last().dropna()
+        returns = (
+            daily_equity / daily_equity.shift(1, fill_value=self.config.initial_cash)
+            - 1.0
+        )
         total_return = equity_curve["equity"].iloc[-1] / self.config.initial_cash - 1
-        periods = len(equity_curve)
+        periods = len(daily_equity)
         annual_factor = 252
         cagr = (1 + total_return) ** (annual_factor / max(periods, 1)) - 1
         excess_returns = returns - self.config.risk_free_rate / annual_factor
-        volatility = returns.std() * math.sqrt(annual_factor)
+        volatility = float(returns.std()) * math.sqrt(annual_factor)
+        if not math.isfinite(volatility):
+            volatility = 0.0
         sharpe = (
             (excess_returns.mean() * annual_factor) / volatility if volatility else 0.0
         )
         drawdown = self._calculate_drawdown(equity_curve["equity"])
         sortino = 0.0
         downside = returns[returns < 0].std() * math.sqrt(annual_factor)
-        if downside:
+        if math.isfinite(downside) and downside:
             sortino = (returns.mean() * annual_factor) / downside
         win_rate = self._calculate_win_rate()
         profit_factor = self._calculate_profit_factor()
