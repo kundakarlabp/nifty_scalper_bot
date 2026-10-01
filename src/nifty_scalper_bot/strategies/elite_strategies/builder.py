@@ -223,7 +223,7 @@ def build_production_strategy_profile(
 
     entry_policy = resolve_entry_policy()
     profile: dict[str, Any] = {
-        "schema_version": 2,
+        "schema_version": 3,
         "execution_mode": str(mode_profile.get("mode") or settings.execution_mode),
         "strategies": {
             "mode": strategy_mode,
