@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 import pytest
 
 
@@ -809,7 +810,7 @@ async def test_duplicate_same_family_context_cannot_double_count_confirmation(
 
 @pytest.mark.parametrize("timestamp", [None, "invalid", float("nan"), float("inf"), 1001.0, 969.0])
 def test_invalid_context_timestamp_cannot_veto_or_confirm(monkeypatch, timestamp):
-    monkeypatch.setattr("nifty_scalper_bot.core.strategy_manager.time.time", lambda: 1000.0)
+    monkeypatch.setattr(time, "time", lambda: 1000.0)
     monkeypatch.setenv("CONTEXT_VOTE_MAX_AGE_SEC", "30")
     manager = _manager_probe()
     _, vote = _context_vote(score=10.0)
@@ -821,7 +822,7 @@ def test_invalid_context_timestamp_cannot_veto_or_confirm(monkeypatch, timestamp
 
 @pytest.mark.parametrize("legacy_timestamp", ["invalid", 0.0, 1.0, float("inf")])
 async def test_hard_veto_uses_canonical_vote_timestamp(monkeypatch, legacy_timestamp):
-    monkeypatch.setattr("nifty_scalper_bot.core.strategy_manager.time.time", lambda: 1000.0)
+    monkeypatch.setattr(time, "time", lambda: 1000.0)
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     monkeypatch.setenv("STRATEGY_ALLOW_SINGLE_VOTE_SCALP", "true")
     monkeypatch.setenv("CONTEXT_VOTE_MAX_AGE_SEC", "30")
@@ -842,7 +843,7 @@ async def test_hard_veto_uses_canonical_vote_timestamp(monkeypatch, legacy_times
 
 
 async def test_fresh_canonical_timestamp_keeps_hard_veto(monkeypatch):
-    monkeypatch.setattr("nifty_scalper_bot.core.strategy_manager.time.time", lambda: 1000.0)
+    monkeypatch.setattr(time, "time", lambda: 1000.0)
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     monkeypatch.setenv("STRATEGY_ALLOW_SINGLE_VOTE_SCALP", "true")
     monkeypatch.setenv("CONTEXT_VOTE_MAX_AGE_SEC", "30")
