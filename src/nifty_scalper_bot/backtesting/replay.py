@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from bisect import bisect_right
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Mapping, Protocol, Sequence
 from zoneinfo import ZoneInfo
@@ -133,9 +133,19 @@ class ReplayHarness:
         if callable(clock_time) and callable(set_clock):
             set_clock(clock_time)
 
-    def run_dataframe(self, data: pd.DataFrame) -> ReplayResult:
-        """Replay the provided dataframe and return a :class:`ReplayResult`."""
+    def run_dataframe(
+        self, data: pd.DataFrame, *, bar_interval: timedelta | None = None
+    ) -> ReplayResult:
+        """Replay availability-stamped data or explicitly timed bar-start history.
 
+        Pass the candle interval for bar-start timestamps so completed OHLC is
+        available only at bar end. Omit it for already available observations.
+        """
+
+        if bar_interval is not None and (
+            not isinstance(bar_interval, timedelta) or bar_interval <= timedelta(0)
+        ):
+            raise ValueError("bar_interval must be positive")
         if data.empty:
             return ReplayResult(
                 0, None, None, [], [], fill_calibration=self._fill_calibration
@@ -145,6 +155,8 @@ class ReplayHarness:
             frame.index = pd.to_datetime(frame.index)
         if frame.index.hasnans:
             raise ValueError("Replay data contains missing timestamps")
+        if bar_interval is not None:
+            frame.index = frame.index + bar_interval
         frame.sort_index(kind="stable", inplace=True)
         start_ts = frame.index[0].to_pydatetime()
         end_ts = frame.index[-1].to_pydatetime()
@@ -180,17 +192,21 @@ class ReplayHarness:
             execution_costs=execution_costs,
         )
 
-    def run_file(self, path: Path) -> ReplayResult:
+    def run_file(
+        self, path: Path, *, bar_interval: timedelta | None = None
+    ) -> ReplayResult:
         """Load ``path`` as CSV/Parquet and run :meth:`run_dataframe`."""
 
         frame = _load_frame(path)
-        return self.run_dataframe(frame)
+        return self.run_dataframe(frame, bar_interval=bar_interval)
 
-    def run_day(self, directory: Path, day: str) -> ReplayResult:
+    def run_day(
+        self, directory: Path, day: str, *, bar_interval: timedelta | None = None
+    ) -> ReplayResult:
         """Run replay for ``day`` located inside ``directory``."""
 
         day_path = _resolve_day_path(directory, day)
-        return self.run_file(day_path)
+        return self.run_file(day_path, bar_interval=bar_interval)
 
     def _publish_and_dispatch(self, symbol: str, tick: Mapping[str, Any]) -> None:
         payload = {
