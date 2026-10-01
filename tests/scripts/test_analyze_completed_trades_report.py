@@ -114,4 +114,4 @@ def test_build_analysis_emits_repeatable_realized_post_cost_evidence() -> None:
         "mean_mfe_r": 1.2,
         "mean_mae_r": 0.25,
     }
-    assert report["realized_post_cost_evidence"]["by_setup"][0]["value"] == "breakout_retest"
+    assert (\n        report["realized_post_cost_evidence"]["by_setup"][0]["value"]\n        == "breakout_retest"\n    )
