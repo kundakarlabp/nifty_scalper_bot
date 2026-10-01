@@ -151,6 +151,67 @@ def test_replay_advances_clock_once_per_synchronised_timestamp() -> None:
     assert order["timestamp"] == frame.index[-1].to_pydatetime().timestamp()
 
 
+def test_dataframe_replay_matches_file_chronology_without_mutating_input(
+    tmp_path: Path,
+) -> None:
+    frame = _sample_frame().iloc[[2, 0, 1]]
+    original_index = frame.index.copy()
+    path = tmp_path / "replay.csv"
+    frame.to_csv(path)
+    runners = [_DummyRunner(), _DummyRunner()]
+    clocks = [_ReplayClock(), _ReplayClock()]
+    harnesses = [
+        ReplayHarness(
+            runner,
+            PaperFillEngine(_DummyDataHub(), _DummyResolver()),
+            option_symbol="OPT",
+            clock=clock,
+        )
+        for runner, clock in zip(runners, clocks)
+    ]
+
+    direct = harnesses[0].run_dataframe(frame)
+    loaded = harnesses[1].run_file(path)
+
+    assert clocks[0].timestamps == clocks[1].timestamps
+    assert runners[0].ticks == runners[1].ticks
+    assert direct.start == loaded.start
+    assert direct.end == loaded.end
+    assert frame.index.equals(original_index)
+
+
+def test_replay_rejects_missing_timestamp_before_dispatch_or_clock_advance() -> None:
+    runner = _DummyRunner()
+    clock = _ReplayClock()
+    harness = ReplayHarness(
+        runner,
+        PaperFillEngine(_DummyDataHub(), _DummyResolver()),
+        option_symbol="OPT",
+        clock=clock,
+    )
+    frame = _sample_frame()
+    frame.index = pd.DatetimeIndex([frame.index[0], pd.NaT, frame.index[2]])
+
+    with pytest.raises(ValueError, match="missing timestamps"):
+        harness.run_dataframe(frame)
+
+    assert runner.ticks == []
+    assert clock.timestamps == []
+
+
+def test_replay_preserves_record_order_at_equal_timestamps() -> None:
+    runner = _DummyRunner()
+    harness = ReplayHarness(
+        runner, PaperFillEngine(_DummyDataHub(), _DummyResolver()), option_symbol="OPT"
+    )
+    frame = _sample_frame()
+    frame.index = pd.DatetimeIndex([frame.index[0], frame.index[0], frame.index[2]])
+
+    harness.run_dataframe(frame)
+
+    assert [tick["close"] for _, tick in runner.ticks] == [100.5, 101.5, 102.5]
+
+
 def test_replay_market_order_consumes_historical_depth_across_ticks() -> None:
     hub = _DummyDataHub()
     paper = PaperFillEngine(hub, _DummyResolver())

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import timezone
 from pathlib import Path
 
@@ -45,6 +46,107 @@ def test_equity_curve_alignment(
         pytest.approx(result.equity_curve["equity"].iloc[0])
         == backtest_engine.config.initial_cash
     )
+
+
+@pytest.mark.parametrize(
+    ("prices", "signals", "slippage", "expected_return", "expected_drawdown"),
+    [
+        ([100.0], [1], 0.0, -0.001, -0.001),
+        ([100.0], [1], 0.01, -0.00201, -0.00201),
+        ([100.0, 100.0, 100.0], [1, 0, 0], 0.0, -0.002, -0.002),
+        ([100.0, 120.0, 120.0], [1, 0, 0], 0.0, 0.0178, -0.001),
+        ([100.0, 100.0], [0, 0], 0.0, 0.0, 0.0),
+    ],
+)
+def test_backtest_includes_first_entry_cost_in_returns_and_drawdown(
+    tmp_path: Path, prices, signals, slippage, expected_return, expected_drawdown
+) -> None:
+    data = pd.DataFrame(
+        {"close": prices},
+        index=pd.date_range(
+            "2026-09-24T09:30:00+05:30", periods=len(prices), freq="min"
+        ),
+    )
+
+    class _Strategy:
+        name = "initial_cost_regression"
+
+        def generate_signals(self, market_data: pd.DataFrame) -> pd.Series:
+            return pd.Series(signals, index=market_data.index)
+
+    result = BacktestEngine(
+        data,
+        _Strategy(),
+        be.BacktestConfig(
+            initial_cash=10_000.0,
+            fixed_quantity=10,
+            commission_pct=0.01,
+            slippage_pct=slippage,
+            risk_free_rate=0.0,
+            output_directory=tmp_path,
+            generate_visualizations=False,
+        ),
+    ).run()
+
+    assert result.performance["total_return"] == pytest.approx(expected_return)
+    assert result.performance["max_drawdown"] == pytest.approx(expected_drawdown)
+    assert (1.0 + result.equity_curve["returns"]).prod() - 1.0 == pytest.approx(
+        expected_return
+    )
+    assert len(result.equity_curve) == len(data)
+    exported = json.loads(result.json_path.read_text())
+    assert exported["pnl"]["total"] == pytest.approx(expected_return * 10_000.0)
+    assert sum(exported["pnl"]["daily"].values()) == pytest.approx(
+        exported["pnl"]["total"]
+    )
+
+
+def test_daily_pnl_includes_entry_cost_and_overnight_changes(
+    tmp_path: Path, deterministic_strategy: be.StrategyProtocol
+) -> None:
+    data = pd.DataFrame(
+        {"close": [100.0, 110.0, 120.0, 115.0]},
+        index=pd.to_datetime(
+            [
+                "2026-09-24T09:30:00+05:30",
+                "2026-09-24T10:00:00+05:30",
+                "2026-09-25T09:30:00+05:30",
+                "2026-09-28T09:30:00+05:30",
+            ]
+        ),
+    )
+    result = BacktestEngine(
+        data,
+        deterministic_strategy,
+        be.BacktestConfig(
+            initial_cash=10_000.0,
+            fixed_quantity=10,
+            commission_pct=0.01,
+            slippage_pct=0.0,
+            allow_short=False,
+            output_directory=tmp_path,
+            generate_visualizations=False,
+        ),
+    ).run()
+
+    exported = json.loads(result.json_path.read_text())
+    assert exported["pnl"]["daily"] == pytest.approx(
+        {"2026-09-24": -11.0, "2026-09-25": 100.0, "2026-09-28": -61.5}
+    )
+    assert exported["pnl"]["total"] == pytest.approx(27.5)
+    assert sum(exported["pnl"]["daily"].values()) == pytest.approx(27.5)
+
+
+def test_backtest_rejects_missing_timestamps_before_strategy_evaluation() -> None:
+    class _Strategy:
+        name = "must_not_run"
+
+        def generate_signals(self, market_data: pd.DataFrame) -> pd.Series:
+            raise AssertionError("invalid data reached strategy")
+
+    data = pd.DataFrame({"close": [100.0]}, index=pd.DatetimeIndex([pd.NaT]))
+    with pytest.raises(ValueError, match="missing timestamps"):
+        BacktestEngine(data, _Strategy())
 
 
 @pytest.mark.unit

@@ -589,7 +589,9 @@ class BacktestEngine:
         self.data = data.copy()
         if not isinstance(self.data.index, pd.DatetimeIndex):
             raise TypeError("data must be indexed by datetime")
-        self.data = self.data.sort_index()
+        if self.data.index.hasnans:
+            raise ValueError("Market data contains missing timestamps")
+        self.data = self.data.sort_index(kind="stable")
         self.strategy = strategy
         self.config = config or BacktestConfig()
         self.config.validate()
@@ -735,7 +737,10 @@ class BacktestEngine:
         equity_df = pd.DataFrame(
             equity_history, columns=["timestamp", "equity", "cash", "position"]
         ).set_index("timestamp")
-        equity_df["returns"] = equity_df["equity"].pct_change().fillna(0.0)
+        previous_equity = equity_df["equity"].shift(
+            1, fill_value=self.config.initial_cash
+        )
+        equity_df["returns"] = equity_df["equity"] / previous_equity - 1.0
         return equity_df
 
     def _target_position(
@@ -885,9 +890,7 @@ class BacktestEngine:
 
     def _calculate_performance(self, equity_curve: pd.DataFrame) -> Dict[str, float]:
         returns = equity_curve["returns"]
-        total_return = (
-            equity_curve["equity"].iloc[-1] / equity_curve["equity"].iloc[0] - 1
-        )
+        total_return = equity_curve["equity"].iloc[-1] / self.config.initial_cash - 1
         periods = len(equity_curve)
         annual_factor = 252
         cagr = (1 + total_return) ** (annual_factor / max(periods, 1)) - 1
@@ -917,7 +920,7 @@ class BacktestEngine:
         }
 
     def _calculate_drawdown(self, equity: pd.Series) -> float:
-        rolling_max = equity.cummax()
+        rolling_max = equity.cummax().clip(lower=self.config.initial_cash)
         drawdowns = (equity - rolling_max) / rolling_max
         return float(drawdowns.min()) if not drawdowns.empty else 0.0
 
@@ -1142,12 +1145,13 @@ class BacktestEngine:
             equity_series = equity_curve.get("equity", pd.Series(dtype=float))
             daily_pnl: Dict[str, float] = {}
             if not equity_series.empty:
-                daily_window = (
-                    equity_series.resample("1D").agg(["first", "last"]).dropna()
+                daily_equity = equity_series.resample("1D").last().dropna()
+                daily_changes = daily_equity - daily_equity.shift(
+                    1, fill_value=self.config.initial_cash
                 )
-                for timestamp, row in daily_window.iterrows():
-                    daily_pnl[str(timestamp.date())] = float(row["last"] - row["first"])
-                total_pnl = float(equity_series.iloc[-1] - equity_series.iloc[0])
+                for timestamp, change in daily_changes.items():
+                    daily_pnl[str(timestamp.date())] = float(change)
+                total_pnl = float(equity_series.iloc[-1] - self.config.initial_cash)
             else:
                 total_pnl = 0.0
             summary_payload = {
