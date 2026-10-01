@@ -79,3 +79,39 @@ def test_build_analysis_emits_post_cost_attribution_groups() -> None:
             },
         }
     ]
+
+
+def test_build_analysis_emits_repeatable_realized_post_cost_evidence() -> None:
+    outcome = {
+        "cost_source": "broker_virtual_contract_note",
+        "effective_costs": {"total": 20.0},
+        "setup_name": "breakout_retest",
+        "r_multiple": 0.8,
+        "mfe_r": 1.2,
+        "mae_r": 0.25,
+    }
+    row = {
+        "trade_id": "e1",
+        "closed_at": 1.0,
+        "strategy": "ORBPro",
+        "gross_pnl": 100.0,
+        "estimated_costs": 20.0,
+        "net_pnl": 80.0,
+        "ledger_complete": True,
+        "state": "CLOSED",
+        "exit_reason": "TARGET",
+        "outcome": outcome,
+    }
+
+    report = module.build_analysis([row], block_size=20, components=("ORBPro",))
+
+    assert report["realized_post_cost_evidence"]["by_strategy"][0] == {
+        "dimension": "strategy",
+        "value": "ORBPro",
+        "trade_count": 1,
+        "net_expectancy": 80.0,
+        "mean_r_multiple": 0.8,
+        "mean_mfe_r": 1.2,
+        "mean_mae_r": 0.25,
+    }
+    assert report["realized_post_cost_evidence"]["by_setup"][0]["value"] == "breakout_retest"
