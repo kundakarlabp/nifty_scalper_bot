@@ -12,8 +12,8 @@ from nifty_scalper_bot.backtesting.completed_trade_analysis import (
     post_cost_attribution_groups,
     post_cost_outcome_evidence,
     summarize_candidate_decisions,
-    summarize_gate_effectiveness,
     summarize_completed_trades,
+    summarize_gate_effectiveness,
     walk_forward_stability,
 )
 
@@ -513,8 +513,8 @@ def test_candidate_decision_funnel_preserves_reasons_and_quality() -> None:
 def test_post_cost_outcome_evidence_reports_strategy_setup_and_r_excursions() -> None:
     quality = {"alpha_score": 8.0, "strategy_score": 7.5}
     rows = [
-        _trade("a", 1.0, strategy="VWAPPro", gross_pnl=120.0, net_pnl=100.0, signal_quality=quality),
-        _trade("b", 2.0, strategy="VWAPPro", gross_pnl=-20.0, net_pnl=-40.0, signal_quality=quality),
+        _trade(\n            "a",\n            1.0,\n            strategy="VWAPPro",\n            gross_pnl=120.0,\n            net_pnl=100.0,\n            signal_quality=quality,\n        ),
+        _trade(\n            "b",\n            2.0,\n            strategy="VWAPPro",\n            gross_pnl=-20.0,\n            net_pnl=-40.0,\n            signal_quality=quality,\n        ),
     ]
     for row, r_value, mfe, mae in zip(rows, (1.0, -0.4), (1.4, 0.3), (0.2, 0.8)):
         row["outcome"]["r_multiple"] = r_value
