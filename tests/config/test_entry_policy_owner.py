@@ -155,7 +155,7 @@ def test_runner_final_spread_guard_uses_execution_policy() -> None:
 def test_strategy_manager_spread_gates_use_canonical_entry_policy() -> None:
     from pathlib import Path
 
-    source = Path("src/nifty_scalper_bot/core/strategy_manager.py").read_text(encoding="utf-8")
+    source = Path("src/nifty_scalper_bot/core/strategy_manager.py").read_text(\n        encoding="utf-8"\n    )
     assert 'self._env_float("LIVE_MAX_SPREAD_PCT", 0.75)' not in source
     assert source.count("resolve_entry_policy().execution_max_spread_pct") >= 2
 
