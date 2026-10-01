@@ -255,7 +255,15 @@ def score_signal_quality(
     # Direction + native setup quality are the alpha evidence. Option
     # microstructure, data readiness and R:R validate executability but must
     # not rescue a weak directional thesis into an entry.
-    alpha_score = 0.55 * direction + 0.45 * strategy
+    # Alpha is intentionally non-compensatory: a very strong directional
+    # context must not rescue a materially weaker native setup. The weighted
+    # harmonic mean preserves the existing 55/45 ownership while penalising
+    # imbalance between the two independent alpha families.
+    alpha_score = (
+        1.0 / ((0.55 / direction) + (0.45 / strategy))
+        if direction > 0.0 and strategy > 0.0
+        else 0.0
+    )
     normalized_strategy_name = normalize_strategy_name(strategy_name)
     threshold = trigger_threshold(strategy_name=normalized_strategy_name)
     context_only = is_context_only_strategy(normalized_strategy_name)
