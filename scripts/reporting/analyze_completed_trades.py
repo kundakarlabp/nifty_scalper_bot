@@ -77,8 +77,6 @@ def build_analysis(
     readiness = attribution_readiness(trades, required_components=components)
     execution_quality = execution_data_quality(trades)
     attribution_groups = post_cost_attribution_groups(trades)
-    strategy_evidence = post_cost_outcome_evidence(trades, dimension="strategy")
-    setup_evidence = post_cost_outcome_evidence(trades, dimension="setup")
     walk_forward_folds = chronological_walk_forward(
         trades,
         min_train_trades=walk_forward_min_train,
@@ -168,8 +166,17 @@ def build_analysis(
             "stability": asdict(walk_forward),
         },
         "realized_post_cost_evidence": {
-            "by_strategy": [asdict(item) for item in strategy_evidence],
-            "by_setup": [asdict(item) for item in setup_evidence],
+            f"by_{dimension}": [
+                asdict(item)
+                for item in post_cost_outcome_evidence(trades, dimension=dimension)
+            ]
+            for dimension in (
+                "strategy",
+                "setup",
+                "entry_hour_ist",
+                "days_to_expiry",
+                "target_adjustment",
+            )
         },
         "execution_data_quality": asdict(execution_quality),
         "cost_evidence": {

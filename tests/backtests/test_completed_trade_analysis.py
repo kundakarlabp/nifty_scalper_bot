@@ -548,6 +548,26 @@ def test_post_cost_outcome_evidence_reports_strategy_setup_and_r_excursions() ->
     assert setup[0].net_expectancy == 30.0
 
 
+def test_post_cost_cohorts_use_decision_time_and_preserve_missing_facts() -> None:
+    row = _trade("a", "2026-10-01T08:00:00Z")
+    row["outcome"].update(
+        {
+            "decision_ts": "2026-10-01T04:00:00Z",
+            "contract_expiry": "2026-10-06",
+            "premium_cost_target_adjusted": True,
+        }
+    )
+    trades = canonicalize_completed_trades([row, _trade("unknown", 1.0)])
+    for dimension, expected in (
+        ("entry_hour_ist", "09"),
+        ("days_to_expiry", "5"),
+        ("target_adjustment", "adjusted"),
+    ):
+        groups = post_cost_outcome_evidence(trades, dimension=dimension)
+        assert {group.value for group in groups} == {expected, "unknown"}
+        assert all(group.trade_count == 1 for group in groups)
+
+
 def test_gate_effectiveness_requires_both_approved_and_blocked_labels() -> None:
     incomplete = summarize_gate_effectiveness(
         [{"approved": False, "final_reason": "spread_too_wide", "post_cost_r": -0.5}]

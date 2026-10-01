@@ -125,6 +125,59 @@ def test_forward_path_ignores_out_of_horizon_and_invalid_prices() -> None:
     assert label.terminal_r == 0.5
 
 
+@pytest.mark.parametrize(
+    ("prices", "target", "first_barrier", "elapsed"),
+    [
+        ([112.0, 89.0, 125.0], 110.0, "target", 1.0),
+        ([112.0, 89.0, 125.0], 120.0, "stop", 2.0),
+        ([105.0, 108.0, 109.0], 120.0, None, None),
+    ],
+)
+def test_forward_path_reports_first_barrier_for_original_or_extended_target(
+    prices,
+    target,
+    first_barrier,
+    elapsed,
+) -> None:
+    label = label_forward_option_buy_path(
+        [{"timestamp": 100.0 + i, "bid": price} for i, price in enumerate(prices, 1)],
+        decision_ts=100.0,
+        entry_price=100.0,
+        risk_points=10.0,
+        horizon_seconds=10.0,
+        target_price=target,
+    )
+    assert label is not None
+    assert label.first_barrier == first_barrier
+    assert label.time_to_first_barrier_seconds == elapsed
+
+
+@pytest.mark.parametrize("target", [90.0, 100.0, float("nan"), float("inf")])
+def test_forward_path_rejects_invalid_target(target) -> None:
+    with pytest.raises(ValueError, match="target_price"):
+        label_forward_option_buy_path(
+            [{"timestamp": 101.0, "bid": 105.0}],
+            decision_ts=100.0,
+            entry_price=100.0,
+            risk_points=10.0,
+            horizon_seconds=10.0,
+            target_price=target,
+        )
+
+
+def test_forward_path_does_not_invent_barrier_order_for_same_timestamp() -> None:
+    label = label_forward_option_buy_path(
+        [{"timestamp": 101.0, "bid": 112.0}, {"timestamp": 101.0, "bid": 89.0}],
+        decision_ts=100.0,
+        entry_price=100.0,
+        risk_points=10.0,
+        horizon_seconds=10.0,
+        target_price=110.0,
+    )
+    assert label is not None
+    assert label.first_barrier == "ambiguous"
+
+
 def test_score_policy_compares_regime_weight_with_neutral() -> None:
     samples = [
         {"raw_setup_score": 6.0, "regime_weight": 1.2, "outcome_r": 1.0},

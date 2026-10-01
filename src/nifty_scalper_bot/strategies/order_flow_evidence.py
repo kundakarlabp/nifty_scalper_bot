@@ -5,6 +5,7 @@ from __future__ import annotations
 import threading
 from collections import deque
 from dataclasses import dataclass, field
+from math import isfinite
 from typing import Any, Mapping
 
 
@@ -16,10 +17,10 @@ class _OfiState:
     bid_qty: float
     ask_qty: float
     observed_at: float
+    truncated_at: float = 0.0
     events: deque[tuple[float, float, float]] = field(
         default_factory=lambda: deque(maxlen=256)
     )
-    snapshot: dict[str, object] = field(default_factory=dict)
 
 
 class TemporalOfiAccumulator:
@@ -42,7 +43,7 @@ class TemporalOfiAccumulator:
             number = float(value)
         except (TypeError, ValueError):
             return None
-        return number if number == number else None
+        return number if isfinite(number) else None
 
     def _best_book(
         self,
@@ -92,6 +93,8 @@ class TemporalOfiAccumulator:
             "ofi_3s_normalized": 0.0,
             "ofi_update_count_1s": 0,
             "ofi_update_count_3s": 0,
+            "ofi_1s_complete": True,
+            "ofi_3s_complete": True,
             "ofi_source": "runner_datahub_tick_updates",
             "queue_imbalance_top": (bid_qty - ask_qty) / max(bid_qty + ask_qty, 1.0),
         }
@@ -120,7 +123,8 @@ class TemporalOfiAccumulator:
     ) -> dict[str, object]:
         """Return latest OFI snapshot after one accepted canonical tick."""
         book = self._best_book(quote)
-        if book is None:
+        now = self._float(observed_at)
+        if book is None or now is None or now <= 0.0:
             with self._lock:
                 self._state.pop(symbol, None)
             return self._baseline_snapshot(0.0, 0.0)
@@ -133,22 +137,13 @@ class TemporalOfiAccumulator:
                 round(bid_qty, 2),
                 round(ask_qty, 2),
             )
-        now = float(observed_at)
-
         with self._lock:
             previous = self._state.get(symbol)
-            if (
-                previous is not None
-                and previous.version == version
-                and 0.0 <= now - previous.observed_at <= self._reset_gap_seconds
-            ):
-                return dict(previous.snapshot)
+            if previous is not None and now < previous.observed_at:
+                # A late update cannot replace the accepted best-book baseline.
+                return self._baseline_snapshot(0.0, 0.0)
 
-            if (
-                previous is None
-                or now <= previous.observed_at
-                or now - previous.observed_at > self._reset_gap_seconds
-            ):
+            if previous is None or now - previous.observed_at > self._reset_gap_seconds:
                 snapshot = self._baseline_snapshot(bid_qty, ask_qty)
                 self._state[symbol] = _OfiState(
                     version=version,
@@ -158,21 +153,29 @@ class TemporalOfiAccumulator:
                     ask_qty=ask_qty,
                     observed_at=now,
                     events=deque(maxlen=self._max_events),
-                    snapshot=snapshot,
                 )
                 return dict(snapshot)
 
-            ofi_event = (
-                (bid_qty if bid >= previous.bid else 0.0)
-                - (previous.bid_qty if bid <= previous.bid else 0.0)
-                - (ask_qty if ask <= previous.ask else 0.0)
-                + (previous.ask_qty if ask >= previous.ask else 0.0)
-            )
-            depth_scale = max((bid_qty + ask_qty) / 2.0, 1.0)
+            duplicate = previous.version == version
+            if duplicate:
+                bid, ask = previous.bid, previous.ask
+                bid_qty, ask_qty = previous.bid_qty, previous.ask_qty
             events = deque(previous.events, maxlen=self._max_events)
-            events.append((now, float(ofi_event), float(depth_scale)))
             while events and now - events[0][0] > 3.0:
                 events.popleft()
+            truncated_at = previous.truncated_at
+            ofi_event = 0.0
+            if not duplicate:
+                ofi_event = (
+                    (bid_qty if bid >= previous.bid else 0.0)
+                    - (previous.bid_qty if bid <= previous.bid else 0.0)
+                    - (ask_qty if ask <= previous.ask else 0.0)
+                    + (previous.ask_qty if ask >= previous.ask else 0.0)
+                )
+                depth_scale = max((bid_qty + ask_qty) / 2.0, 1.0)
+                if len(events) == self._max_events:
+                    truncated_at = events[0][0]
+                events.append((now, float(ofi_event), float(depth_scale)))
 
             ofi_1s, normalized_1s, count_1s = self._window(
                 events,
@@ -185,7 +188,8 @@ class TemporalOfiAccumulator:
                 seconds=3.0,
             )
             snapshot = {
-                "ofi_ready": count_1s >= 2,
+                "ofi_ready": count_1s >= 2
+                and (not truncated_at or now - truncated_at > 1.0),
                 "ofi_event": float(ofi_event),
                 "ofi_1s": ofi_1s,
                 "ofi_3s": ofi_3s,
@@ -193,6 +197,8 @@ class TemporalOfiAccumulator:
                 "ofi_3s_normalized": normalized_3s,
                 "ofi_update_count_1s": count_1s,
                 "ofi_update_count_3s": count_3s,
+                "ofi_1s_complete": not truncated_at or now - truncated_at > 1.0,
+                "ofi_3s_complete": not truncated_at or now - truncated_at > 3.0,
                 "ofi_source": "runner_datahub_tick_updates",
                 "queue_imbalance_top": (bid_qty - ask_qty)
                 / max(bid_qty + ask_qty, 1.0),
@@ -203,9 +209,9 @@ class TemporalOfiAccumulator:
                 ask=ask,
                 bid_qty=bid_qty,
                 ask_qty=ask_qty,
-                observed_at=now,
+                observed_at=previous.observed_at if duplicate else now,
+                truncated_at=truncated_at,
                 events=events,
-                snapshot=snapshot,
             )
             return dict(snapshot)
 

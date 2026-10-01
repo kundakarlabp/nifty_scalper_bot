@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import logging
 
+import pytest
+
 from nifty_scalper_bot.strategies.order_flow_evidence import TemporalOfiAccumulator
 from nifty_scalper_bot.strategies.runner import StrategyRunner
 
@@ -132,3 +134,129 @@ def test_invalid_best_book_clears_temporal_evidence() -> None:
     assert cleared["ofi_ready"] is False
     assert cleared["ofi_1s"] == 0.0
     assert restored["ofi_update_count_1s"] == 0
+
+
+def test_duplicate_version_ages_windows_without_creating_flow() -> None:
+    accumulator = TemporalOfiAccumulator()
+    for version, timestamp, buy in ((1, 10.0, 100), (2, 10.2, 140), (3, 10.4, 160)):
+        accumulator.update(
+            SYMBOL,
+            _tick(version=version, buy=buy, sell=100),
+            update_version=version,
+            observed_at=timestamp,
+        )
+    aged = accumulator.update(
+        SYMBOL,
+        _tick(version=3, buy=160, sell=100),
+        update_version=3,
+        observed_at=11.5,
+    )
+    assert aged["ofi_ready"] is False
+    assert aged["ofi_event"] == 0.0
+    assert aged["ofi_1s"] == 0.0
+    assert aged["ofi_update_count_1s"] == 0
+    assert aged["ofi_3s"] == 60.0
+    expired = accumulator.update(
+        SYMBOL,
+        _tick(version=3, buy=160, sell=100),
+        update_version=3,
+        observed_at=13.5,
+    )
+    assert expired["ofi_3s"] == 0.0
+
+
+@pytest.mark.parametrize("field", ["bid", "ask", "buy", "sell", "observed_at"])
+@pytest.mark.parametrize("invalid", [float("inf"), float("-inf"), float("nan")])
+def test_nonfinite_book_or_clock_cannot_authorize_ofi(field, invalid) -> None:
+    accumulator = TemporalOfiAccumulator()
+    for version, buy in ((1, 100), (2, 140)):
+        accumulator.update(
+            SYMBOL,
+            _tick(version=version, buy=buy, sell=100),
+            update_version=version,
+            observed_at=10.0 + version / 10.0,
+        )
+    tick = _tick(version=3, buy=160, sell=100)
+    observed_at = 10.3
+    if field in {"bid", "ask"}:
+        tick[field] = invalid
+    elif field in {"buy", "sell"}:
+        tick["depth"][field][0]["quantity"] = invalid
+    else:
+        observed_at = invalid
+    snapshot = accumulator.update(
+        SYMBOL,
+        tick,
+        update_version=3,
+        observed_at=observed_at,
+    )
+    assert snapshot["ofi_ready"] is False
+    assert snapshot["ofi_1s_normalized"] == 0.0
+    restored = accumulator.update(
+        SYMBOL,
+        _tick(version=4, buy=170, sell=100),
+        update_version=4,
+        observed_at=10.4,
+    )
+    assert restored["ofi_update_count_1s"] == 0
+
+
+def test_bounded_ofi_never_presents_truncated_window_as_ready() -> None:
+    accumulator = TemporalOfiAccumulator(max_events=8)
+    for version in range(1, 11):
+        snapshot = accumulator.update(
+            SYMBOL,
+            _tick(version=version, buy=100 + version * 10, sell=100),
+            update_version=version,
+            observed_at=10.0 + version / 100.0,
+        )
+    assert snapshot["ofi_ready"] is False
+    assert snapshot["ofi_1s_complete"] is False
+    assert snapshot["ofi_3s_complete"] is False
+    recovered = accumulator.update(
+        SYMBOL,
+        _tick(version=11, buy=220, sell=100),
+        update_version=11,
+        observed_at=11.2,
+    )
+    assert recovered["ofi_update_count_1s"] == 1
+    ready = accumulator.update(
+        SYMBOL,
+        _tick(version=12, buy=230, sell=100),
+        update_version=12,
+        observed_at=11.3,
+    )
+    assert ready["ofi_ready"] is True
+    assert ready["ofi_1s"] == 30.0
+    assert ready["ofi_3s_complete"] is False
+
+
+def test_late_update_does_not_replace_fresher_ofi_baseline() -> None:
+    accumulator = TemporalOfiAccumulator()
+    accumulator.update(
+        SYMBOL,
+        _tick(version=1, buy=100, sell=100),
+        update_version=1,
+        observed_at=10.0,
+    )
+    accumulator.update(
+        SYMBOL,
+        _tick(version=2, buy=140, sell=100),
+        update_version=2,
+        observed_at=10.2,
+    )
+    late = accumulator.update(
+        SYMBOL,
+        _tick(version=1, buy=100, sell=100),
+        update_version=1,
+        observed_at=10.1,
+    )
+    current = accumulator.update(
+        SYMBOL,
+        _tick(version=3, buy=160, sell=100),
+        update_version=3,
+        observed_at=10.3,
+    )
+    assert late["ofi_ready"] is False
+    assert current["ofi_event"] == 20.0
+    assert current["ofi_1s"] == 60.0

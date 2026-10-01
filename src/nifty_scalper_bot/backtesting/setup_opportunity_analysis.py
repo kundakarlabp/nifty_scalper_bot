@@ -51,6 +51,8 @@ class ForwardPathLabel:
     terminal_r: float
     hit_positive_1r: bool
     hit_negative_1r: bool
+    first_barrier: str | None = None
+    time_to_first_barrier_seconds: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -210,6 +212,7 @@ def label_forward_option_buy_path(
     risk_points: float,
     horizon_seconds: float,
     price_field: str = "bid",
+    target_price: float | None = None,
 ) -> ForwardPathLabel | None:
     """Label a hypothetical long-option path using executable-side observations."""
 
@@ -225,6 +228,9 @@ def label_forward_option_buy_path(
         raise ValueError(
             "entry_price, risk_points and horizon_seconds must be positive"
         )
+    target = float(target_price) if target_price is not None else None
+    if target is not None and (not math.isfinite(target) or target <= entry):
+        raise ValueError("target_price must be finite and above entry_price")
 
     path: list[tuple[float, float]] = []
     for row in observations:
@@ -248,6 +254,24 @@ def label_forward_option_buy_path(
     mae, mae_ts = max(adverse, key=lambda item: item[0])
     terminal_price = path[-1][1]
     terminal_r = (terminal_price - entry) / risk
+    first_barrier = None
+    barrier_time = None
+    if target is not None:
+        for ts, price in path:
+            if price <= entry - risk or price >= target:
+                first_barrier = "stop" if price <= entry - risk else "target"
+                if any(
+                    observed_ts == ts
+                    and (
+                        observed_price >= target
+                        if first_barrier == "stop"
+                        else observed_price <= entry - risk
+                    )
+                    for observed_ts, observed_price in path
+                ):
+                    first_barrier = "ambiguous"
+                barrier_time = round(ts - start, 6)
+                break
     return ForwardPathLabel(
         observation_count=len(path),
         horizon_seconds=horizon,
@@ -263,6 +287,8 @@ def label_forward_option_buy_path(
         terminal_r=round(terminal_r, 6),
         hit_positive_1r=any((price - entry) >= risk for _, price in path),
         hit_negative_1r=any((entry - price) >= risk for _, price in path),
+        first_barrier=first_barrier,
+        time_to_first_barrier_seconds=barrier_time,
     )
 
 
