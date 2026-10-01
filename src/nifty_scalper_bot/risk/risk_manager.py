@@ -1311,7 +1311,7 @@ class RiskManager:
             )
             return False
         effective_daily_realized = (
-            snap.daily_realized - self._operator_reset_realized_baseline
+            snap.daily_realized - getattr(self, "_operator_reset_realized_baseline", 0.0)
         )
         if snap.daily_loss_limit > 0 and effective_daily_realized <= -snap.daily_loss_limit:
             self._last_rejection = (
@@ -1630,7 +1630,7 @@ class RiskManager:
         if broker_realized is not None:
             self._last_pnl_snapshot = broker_realized
             effective_realized = (
-                broker_realized - self._operator_reset_realized_baseline
+                broker_realized - getattr(self, "_operator_reset_realized_baseline", 0.0)
             )
             if abs(effective_realized) >= 1e-6:
                 self._switches.record_pnl(effective_realized)
@@ -1688,7 +1688,7 @@ class RiskManager:
                 },
             )
             return
-        effective_realized = realized - self._operator_reset_realized_baseline
+        effective_realized = realized - getattr(self, "_operator_reset_realized_baseline", 0.0)
         if abs(effective_realized) >= 1e-6:
             self._switches.record_pnl(effective_realized)
         self._logger.warning(
@@ -1727,7 +1727,7 @@ class RiskManager:
         costs = abs(float(state.get("completed_trade_costs_today", 0.0) or 0.0))
         if costs > 0:
             self._completed_trade_costs_today = costs
-            effective_costs = max(costs - self._operator_reset_cost_baseline, 0.0)
+            effective_costs = max(costs - getattr(self, "_operator_reset_cost_baseline", 0.0), 0.0)
             if effective_costs > 0:
                 self._switches.record_pnl(-effective_costs)
         self._switches.restore_runtime(
@@ -1762,9 +1762,9 @@ class RiskManager:
                 consecutive_losses=int(self._switches.consecutive_losses()),
                 loss_cooldown_until_epoch=float(self._switches.cooldown_until_epoch()),
                 operator_reset_realized_baseline=float(
-                    self._operator_reset_realized_baseline
+                    getattr(self, "_operator_reset_realized_baseline", 0.0)
                 ),
-                operator_reset_cost_baseline=float(self._operator_reset_cost_baseline),
+                operator_reset_cost_baseline=float(getattr(self, "_operator_reset_cost_baseline", 0.0)),
             )
         except Exception:  # noqa: BLE001 - persistence must not break trading
             self._logger.warning("RISK_CIRCUIT_PERSIST_FAILED", exc_info=True)
