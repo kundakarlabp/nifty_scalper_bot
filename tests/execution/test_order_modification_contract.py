@@ -75,16 +75,18 @@ def test_broker_modification_failure_is_not_success(modification_manager):
     assert calls == []
 
 
+@pytest.mark.parametrize("filled", [0, 10])
 def test_stop_resize_uses_existing_order_without_cancel_replacement(
     modification_manager,
+    filled,
 ):
     manager, calls = modification_manager
-    state = SimpleNamespace(stop_order_id="order-1")
+    state = SimpleNamespace(stop_order_id="order-1", stop_filled=filled)
 
     manager._resize_stop_order(state, 65)
 
-    assert calls == [("order-1", {"variety": "regular", "quantity": 65})]
-    assert manager._orders["order-1"].quantity == 65
+    assert calls == [("order-1", {"variety": "regular", "quantity": 65 + filled})]
+    assert manager._orders["order-1"].quantity == 65 + filled
 
 
 @pytest.mark.parametrize("target", ["primary", "secondary"])

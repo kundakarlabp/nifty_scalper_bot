@@ -7032,8 +7032,9 @@ class OrderManager:
         stop_id = state.stop_order_id
         if not stop_id:
             return
+        updated_total = state.stop_filled + new_quantity
         try:
-            success = self.modify_order(stop_id, quantity=new_quantity)
+            success = self.modify_order(stop_id, quantity=updated_total)
         except Exception as exc:  # noqa: BLE001
             self._logger.error(
                 "Failure in _resize_stop_order modify: %s",
@@ -7044,7 +7045,7 @@ class OrderManager:
         if success:
             details = self._orders.get(stop_id)
             if details is not None:
-                details.quantity = new_quantity
+                details.quantity = updated_total
             return
         try:
             self.cancel_order(stop_id)

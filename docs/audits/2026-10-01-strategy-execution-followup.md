@@ -33,9 +33,9 @@ replay established that the timestamp defects below caused these live rejections
    keywords. Use the existing locked order store and existing public keywords.
    Omitted fields are now omitted from broker modifications instead of sent as
    zero prices/triggers/quantity. Empty modifications and unknown orders fail.
-3. Partially filled target resizing sent outstanding quantity to the broker
+3. Partially filled stop/target resizing sent outstanding quantity to the broker
    but recorded filled-plus-outstanding locally. Compute the total once and
-   use it for both primary/secondary broker modifications and local state.
+   use it for stop/primary/secondary broker modifications and local state.
 4. The required agent validation façade called `_run` with an unsupported
    `cwd` keyword. Pass its existing repository-root argument; a regression
    proves compile failures still stop validation before style mutation.
