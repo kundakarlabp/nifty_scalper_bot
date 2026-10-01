@@ -33,6 +33,7 @@ from candles. Current instrument selection is not a historical universe.
 | --- | --- | --- |
 | Total return starts at first post-entry equity, omitting initial costs | `backtesting/backtest_engine.py` | Use configured initial capital; include first observation's account return |
 | Drawdown ignores the initial capital peak | Same owner | Bound running peak below by initial capital |
+| Exported total/daily P&L omits entry costs and overnight changes | Same owner | Compute total from initial capital and daily changes from preceding observed day-end equity |
 | Direct dataframe replay runs input order while file replay sorts | `backtesting/replay.py` | Own stable chronological ordering once in `run_dataframe`; remove duplicate loader conversion/sorting |
 | Missing timestamps reach clock/strategy processing | Both input owners | Reject missing timestamps before dispatch or strategy evaluation |
 
@@ -61,6 +62,12 @@ timestamp record order, preserve caller input, and reject missing timestamps
 before any tick dispatch or clock advance. Six regressions failed before the
 implementation; the initial focused run passed 23 tests before adding the extra
 commission-plus-slippage case.
+
+Final review reproduced five export-accounting failures. The JSON total now
+agrees with account equity and its daily values telescope to that total, including
+initial costs and overnight movement. A multi-session fixture with a weekend gap
+reports daily P&L of -11, +100 and -61.5, summing to +27.5 without inventing weekend
+observations. This is research accounting, not a change to live overnight policy.
 
 ## Prioritised experiments using existing code
 

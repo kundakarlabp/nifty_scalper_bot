@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import timezone
 from pathlib import Path
 
@@ -93,6 +94,47 @@ def test_backtest_includes_first_entry_cost_in_returns_and_drawdown(
         expected_return
     )
     assert len(result.equity_curve) == len(data)
+    exported = json.loads(result.json_path.read_text())
+    assert exported["pnl"]["total"] == pytest.approx(expected_return * 10_000.0)
+    assert sum(exported["pnl"]["daily"].values()) == pytest.approx(
+        exported["pnl"]["total"]
+    )
+
+
+def test_daily_pnl_includes_entry_cost_and_overnight_changes(
+    tmp_path: Path, deterministic_strategy: be.StrategyProtocol
+) -> None:
+    data = pd.DataFrame(
+        {"close": [100.0, 110.0, 120.0, 115.0]},
+        index=pd.to_datetime(
+            [
+                "2026-09-24T09:30:00+05:30",
+                "2026-09-24T10:00:00+05:30",
+                "2026-09-25T09:30:00+05:30",
+                "2026-09-28T09:30:00+05:30",
+            ]
+        ),
+    )
+    result = BacktestEngine(
+        data,
+        deterministic_strategy,
+        be.BacktestConfig(
+            initial_cash=10_000.0,
+            fixed_quantity=10,
+            commission_pct=0.01,
+            slippage_pct=0.0,
+            allow_short=False,
+            output_directory=tmp_path,
+            generate_visualizations=False,
+        ),
+    ).run()
+
+    exported = json.loads(result.json_path.read_text())
+    assert exported["pnl"]["daily"] == pytest.approx(
+        {"2026-09-24": -11.0, "2026-09-25": 100.0, "2026-09-28": -61.5}
+    )
+    assert exported["pnl"]["total"] == pytest.approx(27.5)
+    assert sum(exported["pnl"]["daily"].values()) == pytest.approx(27.5)
 
 
 def test_backtest_rejects_missing_timestamps_before_strategy_evaluation() -> None:

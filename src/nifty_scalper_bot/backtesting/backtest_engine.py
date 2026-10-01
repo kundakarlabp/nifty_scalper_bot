@@ -1145,12 +1145,13 @@ class BacktestEngine:
             equity_series = equity_curve.get("equity", pd.Series(dtype=float))
             daily_pnl: Dict[str, float] = {}
             if not equity_series.empty:
-                daily_window = (
-                    equity_series.resample("1D").agg(["first", "last"]).dropna()
+                daily_equity = equity_series.resample("1D").last().dropna()
+                daily_changes = daily_equity - daily_equity.shift(
+                    1, fill_value=self.config.initial_cash
                 )
-                for timestamp, row in daily_window.iterrows():
-                    daily_pnl[str(timestamp.date())] = float(row["last"] - row["first"])
-                total_pnl = float(equity_series.iloc[-1] - equity_series.iloc[0])
+                for timestamp, change in daily_changes.items():
+                    daily_pnl[str(timestamp.date())] = float(change)
+                total_pnl = float(equity_series.iloc[-1] - self.config.initial_cash)
             else:
                 total_pnl = 0.0
             summary_payload = {
