@@ -9,7 +9,9 @@ import pytest
 from nifty_scalper_bot.data.rest.zerodha_client import ZerodhaKiteClient
 
 
-def _client(monkeypatch: pytest.MonkeyPatch) -> tuple[ZerodhaKiteClient, dict[str, Any]]:
+def _client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[ZerodhaKiteClient, dict[str, Any]]:
     client = ZerodhaKiteClient(api_key="k", access_token="t")
     captured: dict[str, Any] = {}
 
