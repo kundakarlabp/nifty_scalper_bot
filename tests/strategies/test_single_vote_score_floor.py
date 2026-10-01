@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import logging
 import os
+import time
+import pytest
 
 
 def _selected_option_allowed(
@@ -804,3 +806,57 @@ async def test_duplicate_same_family_context_cannot_double_count_confirmation(
     assert result is not None
     assert result.metadata["context_bonus"] == 0.9
     assert result.metadata["final_trade_score"] == 8.9
+
+
+@pytest.mark.parametrize("timestamp", [None, "invalid", float("nan"), float("inf"), 1001.0, 969.0])
+def test_invalid_context_timestamp_cannot_veto_or_confirm(monkeypatch, timestamp):
+    monkeypatch.setattr(time, "time", lambda: 1000.0)
+    monkeypatch.setenv("CONTEXT_VOTE_MAX_AGE_SEC", "30")
+    manager = _manager_probe()
+    _, vote = _context_vote(score=10.0)
+    vote.metadata["vote_timestamp"] = timestamp
+
+    assert manager._context_vote_is_timestamped(vote) is False
+    assert manager._extract_context_veto_score(vote) == 0.0
+
+
+@pytest.mark.parametrize("legacy_timestamp", ["invalid", 0.0, 1.0, float("inf")])
+async def test_hard_veto_uses_canonical_vote_timestamp(monkeypatch, legacy_timestamp):
+    monkeypatch.setattr(time, "time", lambda: 1000.0)
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("STRATEGY_ALLOW_SINGLE_VOTE_SCALP", "true")
+    monkeypatch.setenv("CONTEXT_VOTE_MAX_AGE_SEC", "30")
+    monkeypatch.setenv("STRATEGY_CONTEXT_HARD_VETO_MAX_AGE_SECONDS", "5")
+    manager = _manager_probe()
+    trigger = _signal_vote(strategy="VWAPPro", raw_score=9.0, weighted_score=9.0)
+    context = _context_vote(side="PE", score=10.0, confidence=0.85)
+    context[1].metadata.update({"timestamp_epoch": legacy_timestamp, "vote_timestamp": 990.0})
+
+    result = manager._combine_strategy_votes(
+        symbol="NFO:NIFTY2670724050CE", signals=[trigger, context],
+        indicators=_valid_entry_context(),
+    )
+
+    assert result is not None
+    # Still current enough for a soft penalty, but too old for a hard veto.
+    assert result.metadata["context_penalty"] == 1.5
+
+
+async def test_fresh_canonical_timestamp_keeps_hard_veto(monkeypatch):
+    monkeypatch.setattr(time, "time", lambda: 1000.0)
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("STRATEGY_ALLOW_SINGLE_VOTE_SCALP", "true")
+    monkeypatch.setenv("CONTEXT_VOTE_MAX_AGE_SEC", "30")
+    monkeypatch.setenv("STRATEGY_CONTEXT_HARD_VETO_MAX_AGE_SECONDS", "5")
+    manager = _manager_probe()
+    trigger = _signal_vote(strategy="VWAPPro", raw_score=9.0, weighted_score=9.0)
+    context = _context_vote(side="PE", score=10.0, confidence=0.85)
+    context[1].metadata.update({"timestamp_epoch": 1.0, "vote_timestamp": 999.0})
+
+    result = manager._combine_strategy_votes(
+        symbol="NFO:NIFTY2670724050CE", signals=[trigger, context],
+        indicators=_valid_entry_context(),
+    )
+
+    assert result is None
+    assert manager._last_no_signal_decision_by_symbol["NFO:NIFTY2670724050CE"].reason == "hard_context_veto"

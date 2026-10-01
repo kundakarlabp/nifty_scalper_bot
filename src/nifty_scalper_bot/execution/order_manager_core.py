@@ -1928,7 +1928,7 @@ class OrderManager:
             return
 
         def _modify(order_id: str, price: float) -> bool:
-            return self.modify_order(order_id, new_price=price)
+            return self.modify_order(order_id, price=price)
 
         try:
             controller = DynamicTPController(
@@ -7032,8 +7032,9 @@ class OrderManager:
         stop_id = state.stop_order_id
         if not stop_id:
             return
+        updated_total = state.stop_filled + new_quantity
         try:
-            success = self.modify_order(stop_id, new_quantity=new_quantity)
+            success = self.modify_order(stop_id, quantity=updated_total)
         except Exception as exc:  # noqa: BLE001
             self._logger.error(
                 "Failure in _resize_stop_order modify: %s",
@@ -7044,7 +7045,7 @@ class OrderManager:
         if success:
             details = self._orders.get(stop_id)
             if details is not None:
-                details.quantity = new_quantity
+                details.quantity = updated_total
             return
         try:
             self.cancel_order(stop_id)
@@ -7184,8 +7185,13 @@ class OrderManager:
                 state.tp_secondary_id = None
                 state.tp_secondary_qty = state.tp_secondary_filled
             return
+        updated_total = new_outstanding + (
+            state.tp_primary_filled
+            if target == "primary"
+            else state.tp_secondary_filled
+        )
         try:
-            success = self.modify_order(order_id, new_quantity=new_outstanding)
+            success = self.modify_order(order_id, quantity=updated_total)
         except Exception as exc:  # noqa: BLE001
             self._logger.error(
                 "Failure in _resize_target_order modify: %s",
@@ -7195,13 +7201,10 @@ class OrderManager:
             success = False
         if success:
             details = self._orders.get(order_id)
-            updated_total = new_outstanding
             if target == "primary":
-                state.tp_primary_qty = state.tp_primary_filled + new_outstanding
-                updated_total = state.tp_primary_qty
+                state.tp_primary_qty = updated_total
             else:
-                state.tp_secondary_qty = state.tp_secondary_filled + new_outstanding
-                updated_total = state.tp_secondary_qty
+                state.tp_secondary_qty = updated_total
             if details is not None:
                 details.quantity = updated_total
             return
@@ -8370,9 +8373,9 @@ class OrderManager:
     def modify_order(
         self,
         order_id: str,
-        price: float = 0.0,
-        trigger_price: float = 0.0,
-        quantity: int = 0,
+        price: float | None = None,
+        trigger_price: float | None = None,
+        quantity: int | None = None,
     ) -> bool:
         """
         Modify an existing order.
@@ -8386,7 +8389,8 @@ class OrderManager:
                 trigger_price = self._round_to_tick(trigger_price)
 
             # 1. Fetch Order Context
-            order = self.get_order(order_id)
+            with self._lock:
+                order = self._orders.get(order_id)
             if not order:
                 self._logger.error(f"Cannot modify unknown order {order_id}")
                 return False
@@ -8396,8 +8400,9 @@ class OrderManager:
             # to maintain the "Market Buffer".
             if (
                 order.order_type == OrderType.STOP_LOSS
+                and trigger_price is not None
                 and trigger_price > 0
-                and (price is None or price == 0)
+                and price is None
             ):
                 buffer = 0.05  # 5%
                 if order.side == "SELL":  # Long SL
@@ -8409,12 +8414,21 @@ class OrderManager:
                 )
 
             # 3. Execute Modification
+            changes = {
+                key: value
+                for key, value in {
+                    "price": price,
+                    "trigger_price": trigger_price,
+                    "quantity": quantity,
+                }.items()
+                if value is not None
+            }
+            if not changes:
+                return False
             self._validate_execution_adapter()
             self._broker.modify_order(
                 order_id=order_id,
-                price=price,
-                trigger_price=trigger_price,
-                quantity=quantity,
+                **changes,
                 variety="regular",  # Zerodha default
             )
             return True
@@ -11163,7 +11177,7 @@ class OrderManager:
         for price in plan.limit_prices[1:]:
             if _remaining() <= 0:
                 break
-            if not self.modify_order(order_id, new_price=price):
+            if not self.modify_order(order_id, price=price):
                 continue
             _refresh()
             wait_window = min(plan.step_timeout, _remaining())

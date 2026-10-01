@@ -25,6 +25,25 @@ class _Result:
         self.stderr = stderr
 
 
+def test_syntax_preflight_uses_repository_root_and_propagates_failure(monkeypatch):
+    module = _load_task_module()
+    calls = []
+
+    def fake_subprocess_run(argv, *, cwd, capture_output, text, check):
+        calls.append((argv, cwd))
+        return _Result(returncode=1)
+
+    monkeypatch.setattr(module.subprocess, "run", fake_subprocess_run)
+
+    assert module._syntax_preflight(ROOT) == 1
+    assert calls == [
+        (
+            [sys.executable, "-m", "compileall", "-q", "src", "dashboard", "scripts"],
+            ROOT,
+        )
+    ]
+
+
 def test_agent_task_check_runs_style_validation_and_relevant_benchmarks(
     monkeypatch,
 ) -> None:
