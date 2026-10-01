@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from datetime import timezone
 from pathlib import Path
 
@@ -46,6 +47,79 @@ def test_equity_curve_alignment(
         pytest.approx(result.equity_curve["equity"].iloc[0])
         == backtest_engine.config.initial_cash
     )
+
+
+@pytest.mark.parametrize("bars_per_session", [2, 5])
+def test_annual_metrics_do_not_change_when_flat_intraday_bars_are_added(
+    tmp_path: Path, bars_per_session: int
+) -> None:
+    class Hold:
+        name = "session_sampling_regression"
+
+        def generate_signals(self, market_data: pd.DataFrame) -> pd.Series:
+            return pd.Series(1, index=market_data.index)
+
+    results = []
+    for count in (1, bars_per_session):
+        timestamps, prices = [], []
+        for day, price in (
+            ("2026-09-24", 100),
+            ("2026-09-25", 110),
+            ("2026-09-28", 90),
+        ):
+            for minute in range(count):
+                timestamps.append(
+                    pd.Timestamp(day + "T09:30:00+05:30") + pd.Timedelta(minutes=minute)
+                )
+                prices.append(price)
+        result = BacktestEngine(
+            pd.DataFrame({"close": prices}, index=timestamps),
+            Hold(),
+            be.BacktestConfig(
+                initial_cash=10_000,
+                fixed_quantity=10,
+                commission_pct=0.01,
+                slippage_pct=0,
+                risk_free_rate=0,
+                output_directory=tmp_path / str(count),
+                generate_visualizations=False,
+            ),
+        ).run()
+        results.append(result)
+    for metric in (
+        "total_return",
+        "cagr",
+        "sharpe_ratio",
+        "sortino_ratio",
+        "volatility",
+    ):
+        assert results[1].performance[metric] == pytest.approx(
+            results[0].performance[metric]
+        )
+    assert results[1].performance["cagr"] == pytest.approx((1 - 0.011) ** (252 / 3) - 1)
+
+
+def test_single_observed_session_reports_finite_annual_metrics(tmp_path: Path) -> None:
+    class Flat:
+        name = "flat_single_session"
+
+        def generate_signals(self, market_data: pd.DataFrame) -> pd.Series:
+            return pd.Series(0, index=market_data.index)
+
+    data = pd.DataFrame(
+        {"close": [100.0]}, index=pd.to_datetime(["2026-09-24T09:30:00+05:30"])
+    )
+    result = BacktestEngine(
+        data,
+        Flat(),
+        be.BacktestConfig(
+            output_directory=tmp_path,
+            generate_visualizations=False,
+        ),
+    ).run()
+    for metric in ("cagr", "sharpe_ratio", "sortino_ratio", "volatility"):
+        assert math.isfinite(result.performance[metric])
+        assert result.performance[metric] == 0
 
 
 @pytest.mark.parametrize(
