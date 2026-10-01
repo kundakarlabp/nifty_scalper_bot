@@ -23,7 +23,9 @@ from nifty_scalper_bot.backtesting.completed_trade_analysis import (  # noqa: E4
     chronological_walk_forward,
     execution_data_quality,
     post_cost_attribution_groups,
+    post_cost_outcome_evidence,
     summarize_candidate_decisions,
+    summarize_gate_effectiveness,
     summarize_completed_trades,
     walk_forward_stability,
 )
@@ -75,6 +77,8 @@ def build_analysis(
     readiness = attribution_readiness(trades, required_components=components)
     execution_quality = execution_data_quality(trades)
     attribution_groups = post_cost_attribution_groups(trades)
+    strategy_evidence = post_cost_outcome_evidence(trades, dimension="strategy")
+    setup_evidence = post_cost_outcome_evidence(trades, dimension="setup")
     walk_forward_folds = chronological_walk_forward(
         trades,
         min_train_trades=walk_forward_min_train,
@@ -163,6 +167,10 @@ def build_analysis(
             ],
             "stability": asdict(walk_forward),
         },
+        "realized_post_cost_evidence": {
+            "by_strategy": [asdict(item) for item in strategy_evidence],
+            "by_setup": [asdict(item) for item in setup_evidence],
+        },
         "execution_data_quality": asdict(execution_quality),
         "cost_evidence": {
             "broker_cost_trades": overall.broker_cost_trade_count,
@@ -214,8 +222,22 @@ def load_candidate_returns(path: Path) -> dict[str, list[float]]:
     return candidates
 
 
-def build_candidate_validation(
-    candidates: dict[str, list[float]],
+def load_opportunity_outcomes(path: Path) -> dict[str, float]:
+    """Load independent setup opportunity -> post-cost counterfactual R labels."""
+
+    payload = json.loads(path.expanduser().read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("opportunity outcomes JSON must be an object")
+    result: dict[str, float] = {}
+    for opportunity_id, value in payload.items():
+        resolved = float(value)
+        if not math.isfinite(resolved):
+            raise ValueError(f"non-finite post-cost R for {opportunity_id!r}")
+        result[str(opportunity_id)] = resolved
+    return result
+
+
+def build_candidate_validation(    candidates: dict[str, list[float]],
     *,
     n_groups: int,
     n_test_groups: int,
@@ -261,6 +283,14 @@ def main(argv: list[str] | None = None) -> int:
         "--selection-trials",
         type=int,
         help="Actual number of parameter/strategy trials used for DSR deflation.",
+    )
+    parser.add_argument(
+        "--opportunity-outcomes-json",
+        type=Path,
+        help=(
+            "JSON object mapping canonical opportunity_id to independently "
+            "labelled post-cost counterfactual R for gate-effectiveness analysis."
+        ),
     )
     parser.add_argument(
         "--candidate-returns-json",
@@ -313,6 +343,34 @@ def main(argv: list[str] | None = None) -> int:
                 else 0.0
             ),
             "ready_for_forward_labelling": bool(setup_opportunities),
+        }
+        outcome_labels = (
+            load_opportunity_outcomes(args.opportunity_outcomes_json)
+            if args.opportunity_outcomes_json is not None
+            else {}
+        )
+        gate_rows = [
+            {
+                "approved": item.approved,
+                "final_reason": item.final_reason,
+                "post_cost_r": outcome_labels[item.opportunity_id],
+            }
+            for item in setup_opportunities
+            if item.opportunity_id in outcome_labels
+        ]
+        gate_report = summarize_gate_effectiveness(gate_rows)
+        report["gate_effectiveness"] = {
+            **asdict(gate_report),
+            "label_coverage_fraction": (
+                round(len(gate_rows) / len(setup_opportunities), 4)
+                if setup_opportunities
+                else 0.0
+            ),
+            "interpretation": (
+                "descriptive_counterfactual_post_cost_r_by_final_gate_reason"
+                if gate_report.ready
+                else "insufficient_counterfactual_labels_no_gate_effect_claim"
+            ),
         }
         report["candidate_validation"] = (
             build_candidate_validation(
