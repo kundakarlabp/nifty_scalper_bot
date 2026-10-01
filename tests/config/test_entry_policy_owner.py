@@ -150,3 +150,24 @@ def test_runner_final_spread_guard_uses_execution_policy() -> None:
     source = Path("src/nifty_scalper_bot/strategies/runner.py").read_text(encoding="utf-8")
     assert "spread_pct > resolve_entry_policy().execution_max_spread_pct" in source
     assert "spread_pct > resolve_entry_policy().evaluation_max_spread_pct" not in source
+
+
+def test_strategy_manager_spread_gates_use_canonical_entry_policy() -> None:
+    from pathlib import Path
+
+    source = Path("src/nifty_scalper_bot/core/strategy_manager.py").read_text(
+        encoding="utf-8"
+    )
+    assert 'self._env_float("LIVE_MAX_SPREAD_PCT", 0.75)' not in source
+    assert source.count("resolve_entry_policy().execution_max_spread_pct") >= 2
+
+
+def test_env_template_prefers_canonical_spread_keys() -> None:
+    from pathlib import Path
+
+    source = Path(".env.example").read_text(encoding="utf-8")
+    assert "EXECUTION_MAX_OPTION_SPREAD_PCT=0.75" in source
+    assert "MAX_OPTION_SPREAD_PCT_FOR_EVAL=1.50" in source
+    assert "LIVE_CANDIDATE_MAX_SPREAD_PCT=" not in source
+    assert "SPREAD_MAX_PCT=" not in source
+    assert "MIN_DEPTH_QTY=" not in source

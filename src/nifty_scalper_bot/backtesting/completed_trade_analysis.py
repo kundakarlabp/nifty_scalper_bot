@@ -206,6 +206,143 @@ def summarize_candidate_decisions(
 
 
 @dataclass(frozen=True, slots=True)
+class OutcomeEvidenceGroup:
+    """Post-cost realized evidence for one strategy or setup cohort."""
+
+    dimension: str
+    value: str
+    trade_count: int
+    net_expectancy: float
+    mean_r_multiple: float | None
+    mean_mfe_r: float | None
+    mean_mae_r: float | None
+
+
+@dataclass(frozen=True, slots=True)
+class GateOutcomeGroup:
+    """Counterfactual post-cost R evidence for one final decision outcome."""
+
+    decision: str
+    reason: str
+    opportunity_count: int
+    mean_post_cost_r: float
+    positive_fraction: float
+
+
+@dataclass(frozen=True, slots=True)
+class GateEffectivenessReport:
+    """Descriptive gate evidence; never a causal or parameter-change verdict."""
+
+    ready: bool
+    labelled_opportunities: int
+    approved_labelled: int
+    blocked_labelled: int
+    groups: tuple[GateOutcomeGroup, ...]
+    blockers: tuple[str, ...]
+
+
+def _optional_outcome_mean(
+    trades: Sequence[CanonicalCompletedTrade],
+    key: str,
+) -> float | None:
+    values: list[float] = []
+    for trade in trades:
+        raw_value = trade.outcome.get(key)
+        if raw_value is None:
+            continue
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(value):
+            values.append(value)
+    return round(sum(values) / len(values), 6) if values else None
+
+
+def post_cost_outcome_evidence(
+    trades: Sequence[CanonicalCompletedTrade],
+    *,
+    dimension: str,
+) -> tuple[OutcomeEvidenceGroup, ...]:
+    """Summarize realized post-cost expectancy and R excursions by cohort."""
+
+    if dimension not in {"strategy", "setup"}:
+        raise ValueError("dimension must be 'strategy' or 'setup'")
+    grouped: dict[str, list[CanonicalCompletedTrade]] = {}
+    for trade in trades:
+        if dimension == "strategy":
+            value = str(trade.strategy or "").strip() or "unknown"
+        else:
+            value = str(trade.outcome.get("setup_name") or "").strip() or "unknown"
+        grouped.setdefault(value, []).append(trade)
+    result: list[OutcomeEvidenceGroup] = []
+    for value, sample in sorted(grouped.items()):
+        summary = summarize_completed_trades(sample)
+        result.append(
+            OutcomeEvidenceGroup(
+                dimension=dimension,
+                value=value,
+                trade_count=summary.trade_count,
+                net_expectancy=summary.expectancy,
+                mean_r_multiple=_optional_outcome_mean(sample, "r_multiple"),
+                mean_mfe_r=_optional_outcome_mean(sample, "mfe_r"),
+                mean_mae_r=_optional_outcome_mean(sample, "mae_r"),
+            )
+        )
+    return tuple(result)
+
+
+def summarize_gate_effectiveness(
+    rows: Sequence[Mapping[str, Any]],
+) -> GateEffectivenessReport:
+    """Summarize independently labelled approved/blocked setup opportunities."""
+
+    grouped: dict[tuple[str, str], list[float]] = {}
+    approved_labelled = 0
+    blocked_labelled = 0
+    for row in rows:
+        try:
+            value = float(row["post_cost_r"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not math.isfinite(value):
+            continue
+        approved = bool(row.get("approved"))
+        decision = "approved" if approved else "blocked"
+        reason = str(row.get("final_reason") or "unknown").strip() or "unknown"
+        grouped.setdefault((decision, reason), []).append(value)
+        if approved:
+            approved_labelled += 1
+        else:
+            blocked_labelled += 1
+    groups = tuple(
+        GateOutcomeGroup(
+            decision=decision,
+            reason=reason,
+            opportunity_count=len(values),
+            mean_post_cost_r=round(sum(values) / len(values), 6),
+            positive_fraction=round(
+                sum(value > 0 for value in values) / len(values), 6
+            ),
+        )
+        for (decision, reason), values in sorted(grouped.items())
+    )
+    blockers: list[str] = []
+    if not approved_labelled:
+        blockers.append("missing_approved_counterfactual_labels")
+    if not blocked_labelled:
+        blockers.append("missing_blocked_counterfactual_labels")
+    return GateEffectivenessReport(
+        ready=not blockers,
+        labelled_opportunities=approved_labelled + blocked_labelled,
+        approved_labelled=approved_labelled,
+        blocked_labelled=blocked_labelled,
+        groups=groups,
+        blockers=tuple(blockers),
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class ExecutionDataQuality:
     """Known execution-evidence caveats in the realized historical sample."""
 

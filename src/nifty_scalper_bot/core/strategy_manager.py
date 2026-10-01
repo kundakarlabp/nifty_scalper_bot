@@ -30,6 +30,7 @@ from math import isfinite, sqrt
 from statistics import mean, pstdev
 
 from nifty_scalper_bot.config import settings as app_settings
+from nifty_scalper_bot.config.entry_policy import resolve_entry_policy
 from nifty_scalper_bot.config.regime_ontology import normalize_regime
 from nifty_scalper_bot.config.regime_strategy_policy import (
     regime_strategy_compatibility,
@@ -5072,7 +5073,7 @@ class StrategyManager(_BaseStrategyManager):
                     and (strike_distance_from_atm is not None)
                     and weighted_trigger_score >= switch_min_score
                     and quote_depth_valid
-                    and switch_spread_pct <= self._env_float("LIVE_MAX_SPREAD_PCT", 0.75)
+                    and switch_spread_pct <= resolve_entry_policy().execution_max_spread_pct
                     and strike_distance_from_atm <= max_candidate_switch_distance
                 )
                 if switch_allowed:
@@ -5348,7 +5349,7 @@ class StrategyManager(_BaseStrategyManager):
             and context_age_seconds <= max_context_age
             and selected_ok_combined
             and quote_depth_ok
-            and spread_pct <= self._env_float("LIVE_MAX_SPREAD_PCT", 0.75)
+            and spread_pct <= resolve_entry_policy().execution_max_spread_pct
             and not hard_veto_reasons
             and not no_vote_counts.get("negative_premium_flow")
         )

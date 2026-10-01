@@ -8,6 +8,7 @@ import os
 from dataclasses import asdict
 from typing import Any, Dict, List, Mapping, Sequence, Type
 
+from nifty_scalper_bot.config.entry_policy import resolve_entry_policy
 from nifty_scalper_bot.config.strategy_taxonomy import canonical_strategy_role
 from nifty_scalper_bot.strategies.elite_strategies.base_elite import EliteStrategy
 from nifty_scalper_bot.strategies.elite_strategies.bb_squeeze import BBSqueezeStrategy
@@ -82,7 +83,9 @@ _POLICY_ENV_KEYS = frozenset(
         "TRIGGER_PREMIUM_SQUEEZE_LIVE_MIN_SCORE",
         "TRIGGER_SMC_LIVE_MIN_SCORE",
         "TRIGGER_VWAP_PRO_LIVE_MIN_SCORE",
-        "LIVE_MAX_SPREAD_PCT",
+        "EXECUTION_MAX_OPTION_SPREAD_PCT",
+        "LIVE_CANDIDATE_MAX_SPREAD_PCT",
+        "MAX_OPTION_SPREAD_PCT_FOR_EVAL",
         "ORDER_MAX_SPREAD_PCT",
         "SPREAD_MAX_PCT",
         "STRATEGY_MODE",
@@ -218,8 +221,9 @@ def build_production_strategy_profile(
     from nifty_scalper_bot.config import settings as app_settings
     from nifty_scalper_bot.config.regime_strategy_policy import REGIME_STRATEGY_WEIGHTS
 
+    entry_policy = resolve_entry_policy()
     profile: dict[str, Any] = {
-        "schema_version": 2,
+        "schema_version": 3,
         "execution_mode": str(mode_profile.get("mode") or settings.execution_mode),
         "strategies": {
             "mode": strategy_mode,
@@ -237,16 +241,8 @@ def build_production_strategy_profile(
         "quote_policy": {
             "order_max_age_ms": int(settings.orders.max_quote_age_ms),
             "liquidity_max_spread_pct": float(settings.liquidity.max_spread_pct),
-            "live_entry_max_spread_pct": float(
-                os.getenv("LIVE_MAX_SPREAD_PCT", "0.75") or "0.75"
-            ),
-            "order_max_spread_pct": float(
-                os.getenv(
-                    "ORDER_MAX_SPREAD_PCT",
-                    os.getenv("SPREAD_MAX_PCT", "10.0"),
-                )
-                or "10.0"
-            ),
+            "evaluation_max_spread_pct": entry_policy.evaluation_max_spread_pct,
+            "execution_max_spread_pct": entry_policy.execution_max_spread_pct,
         },
         "risk": {
             "per_trade_risk_pct": float(settings.risk.per_trade_risk_pct),
