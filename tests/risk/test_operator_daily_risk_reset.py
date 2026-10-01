@@ -100,6 +100,7 @@ def test_restart_seeds_only_loss_after_operator_baseline() -> None:
 
     assert switches.day_loss() == pytest.approx(100.0)
 
+
 def test_missing_operator_baseline_keeps_legacy_seed_behavior() -> None:
     today = "2026-10-01"
     manager = SimpleNamespace(
