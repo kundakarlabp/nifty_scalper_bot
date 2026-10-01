@@ -237,7 +237,8 @@ def load_opportunity_outcomes(path: Path) -> dict[str, float]:
     return result
 
 
-def build_candidate_validation(    candidates: dict[str, list[float]],
+def build_candidate_validation(
+    candidates: dict[str, list[float]],
     *,
     n_groups: int,
     n_test_groups: int,
