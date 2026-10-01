@@ -357,6 +357,35 @@ def test_entry_path_allows_ready_ce_candidate_and_submits_order(
     ]
 
 
+@pytest.mark.parametrize("adjusted", [True, False])
+def test_entry_plan_preserves_target_research_facts(monkeypatch, adjusted):
+    runner, _ = _execution_runner(monkeypatch, ce_ok=True, pe_ok=False)
+    signal = _signal("NFO:CE")
+    signal = dataclasses.replace(
+        signal,
+        metadata={
+            **signal.metadata,
+            "premium_cost_target_adjusted": adjusted,
+            "premium_cost_floor_original_target": 115.0,
+            "premium_cost_adjusted_target": 120.0,
+        },
+    )
+    result = runner._handle_entry_signal_inner(
+        signal,
+        "NSE:NIFTY",
+        "NFO:CE",
+        100.0,
+        datetime(2026, 10, 1, 4, 0, tzinfo=timezone.utc),
+        trace_id="research",
+    )
+    assert result.accepted
+    plan = runner._order_manager.plans[0]
+    assert plan.trade_provenance["premium_cost_target_adjusted"] is adjusted
+    assert plan.trade_provenance["premium_cost_floor_original_target"] == 115.0
+    assert plan.trade_provenance["premium_cost_adjusted_target"] == 120.0
+    assert plan.trade_provenance["contract_expiry"] == plan.contract_expiry
+
+
 def test_entry_remains_accepted_when_strategy_notification_fails(
     monkeypatch,
 ) -> None:

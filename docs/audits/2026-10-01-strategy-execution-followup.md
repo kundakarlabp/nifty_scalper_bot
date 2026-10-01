@@ -73,3 +73,58 @@ and partial-target quantity failures. Corrections pass their focused regressions
 Run `scripts/agent_task.py full` for the changed files and final-head GitHub CI
 before merge. Broker-free simulation verifies engineering contracts, not live
 order execution or trading expectancy. Production was not restarted or redeployed.
+
+## Signal evidence follow-up (issue #1468)
+
+Objective: correct the existing temporal OFI authority and close missing research
+coverage without adding a strategy, scoring owner, broker path or dependency.
+
+Deterministic tests reproduced cached one-second OFI remaining ready on duplicate
+versions after its events expired, infinite ask/queue quantities passing book
+validation, and a bounded event buffer reporting truncated flow as ready.
+The accumulator now ages windows on every call without counting duplicates,
+rejects non-finite books/clocks, preserves the accepted book on late updates,
+and marks truncated windows explicitly. One-second readiness recovers when
+discarded events leave that window; three-second completeness remains separate.
+The unused cached snapshot was removed. Runner forwards both completeness facts.
+
+| Review recommendation | Canonical implementation and disposition |
+| --- | --- |
+| Calibrate score/confidence | Reuse `calibrate_signal_scores` and the existing report's alpha/final/setup bins, net expectancy and bootstrap uncertainty. A heuristic confidence is not a win probability. No new calibration layer or unsupported threshold change. |
+| Target reachability | Extend existing `label_forward_option_buy_path` with optional target and first target/stop timestamp. Original and adjusted targets can be compared on the same executable bid path. Same-timestamp contradictory barriers are explicitly ambiguous. MFE/terminal return remain full-horizon descriptive fields, not simulated realized returns. |
+| Correlated features | Reuse independent setup-score lineage and aligned candidate-return PBO/DSR analysis. Feature removal requires a predeclared baseline-vs-ablation replay, not a claim that correlated names prove redundancy. |
+| OFI reliability | Apply the reproduced freshness, finiteness, late-update and bounded-window corrections in the existing accumulator; retain existing context role and formula. |
+| Session/expiry behaviour | Extend the existing outcome-cohort function and report with IST decision hour, calendar days to contract expiry, and target-adjustment status. Missing, future or invalid timing facts stay `unknown`; no close-hour proxy or inferred expiry. |
+| Duplicate gates | Reuse deduplicated setup opportunities, labelled gate-effectiveness and replay parity. No newly demonstrated duplicate admission rule justified removing safeguards. |
+| Executable costs/fills | Reuse the canonical fee model, broker-cost ledger, execution-quality provenance and bid-path labeller. Runner now preserves existing expiry/original/adjusted-target facts in trade provenance. No replacement fill model. |
+| Holdouts/ablation | Reuse experiment records, chronological walk-forward, aligned candidate returns and PBO/DSR. Retain a final untouched session/expiry holdout and fit any calibration only on preceding data. |
+
+Run the existing report with a locally authorized canonical journal:
+
+```bash
+python scripts/reporting/analyze_completed_trades.py --trades-db /path/to/trades.db
+```
+
+The report adds `by_entry_hour_ist`, `by_days_to_expiry` and
+`by_target_adjustment` to `realized_post_cost_evidence`. These descriptive cohorts
+must be assessed within strategy/setup/regime and with sample size uncertainty;
+pooled differences do not establish a causal effect. Legacy rows remain included
+under `unknown` when new provenance is absent. Gate analysis additionally needs
+independent opportunity labels; ablation/selection analysis needs aligned
+post-cost candidate returns. Do not silently substitute completed winners for
+the full opportunity population.
+
+Research basis remains the primary sources above: Cont et al. support studying
+temporal OFI/depth, Gao et al. support horizon-specific session hypotheses, and
+Bailey et al. support controlling strategy-selection bias. LEAN/Nautilus provide
+execution/research engineering practices, not proof of NIFTY option profitability.
+The canonical fee defaults were checked against
+[Zerodha's current charges](https://zerodha.com/charges/).
+
+No adequate chronological NIFTY option dataset or independently labelled
+counterfactual sample was supplied for this follow-up. Synthetic regressions
+validate engineering behaviour only; they cannot justify new live score weights,
+session filters, target multipliers or removal of valid gates. Runtime admission,
+risk limits and target-repair policy remain unchanged. OFI corrections can change
+confirmation when the old evidence was stale, invalid or truncated. Rollback is
+a revert of the merge; additive outcome/report fields require no schema migration.

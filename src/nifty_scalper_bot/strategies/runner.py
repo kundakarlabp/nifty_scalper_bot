@@ -16711,6 +16711,8 @@ class StrategyRunner:
                             "ofi_3s_normalized",
                             "ofi_update_count_1s",
                             "ofi_update_count_3s",
+                            "ofi_1s_complete",
+                            "ofi_3s_complete",
                             "ofi_source",
                             "queue_imbalance_top",
                         ):
@@ -21387,6 +21389,10 @@ class StrategyRunner:
                     "entry_arrival_price": price,
                     "entry_quote_bid": selected_snapshot.get("bid"),
                     "entry_quote_ask": selected_snapshot.get("ask"),
+                    "contract_expiry": str(_contract_expiry) if _contract_expiry else None,
+                    "premium_cost_target_adjusted": bool(metadata.get("premium_cost_target_adjusted", False)),
+                    "premium_cost_floor_original_target": metadata.get("premium_cost_floor_original_target"),
+                    "premium_cost_adjusted_target": metadata.get("premium_cost_adjusted_target"),
                     "decision_ts": now_epoch,
                     "entry_submit_ts": _entry_submit_ts,
                     **(

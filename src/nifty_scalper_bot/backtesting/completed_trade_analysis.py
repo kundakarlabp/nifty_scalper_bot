@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from nifty_scalper_bot.backtesting.research_validation import bootstrap_mean_interval
+from nifty_scalper_bot.utils.market_hours import IST
 
 
 @dataclass(frozen=True, slots=True)
@@ -266,14 +267,44 @@ def post_cost_outcome_evidence(
 ) -> tuple[OutcomeEvidenceGroup, ...]:
     """Summarize realized post-cost expectancy and R excursions by cohort."""
 
-    if dimension not in {"strategy", "setup"}:
-        raise ValueError("dimension must be 'strategy' or 'setup'")
+    if dimension not in {
+        "strategy",
+        "setup",
+        "entry_hour_ist",
+        "days_to_expiry",
+        "target_adjustment",
+    }:
+        raise ValueError("unsupported outcome evidence dimension")
     grouped: dict[str, list[CanonicalCompletedTrade]] = {}
     for trade in trades:
         if dimension == "strategy":
             value = str(trade.strategy or "").strip() or "unknown"
-        else:
+        elif dimension == "setup":
             value = str(trade.outcome.get("setup_name") or "").strip() or "unknown"
+        elif dimension == "target_adjustment":
+            adjusted = trade.outcome.get("premium_cost_target_adjusted")
+            value = (
+                "adjusted"
+                if adjusted is True
+                else "original" if adjusted is False else "unknown"
+            )
+        else:
+            value = "unknown"
+            try:
+                decision_ts = _closed_timestamp(trade.outcome.get("decision_ts"))
+                decision = datetime.fromtimestamp(decision_ts, IST)
+                if decision_ts > 0 and decision_ts <= trade.closed_at:
+                    if dimension == "entry_hour_ist":
+                        value = decision.strftime("%H")
+                    else:
+                        expiry = datetime.fromisoformat(
+                            str(trade.outcome.get("contract_expiry"))
+                        ).date()
+                        days = (expiry - decision.date()).days
+                        if days >= 0:
+                            value = str(days)
+            except (ValueError, TypeError, OverflowError, OSError):
+                pass
         grouped.setdefault(value, []).append(trade)
     result: list[OutcomeEvidenceGroup] = []
     for value, sample in sorted(grouped.items()):

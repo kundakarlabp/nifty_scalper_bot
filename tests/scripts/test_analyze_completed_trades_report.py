@@ -15,6 +15,18 @@ module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 
 
+def test_build_analysis_emits_research_cohorts_without_fabricated_facts() -> None:
+    report = module.build_analysis([], block_size=20, components=())
+    assert report["realized_post_cost_evidence"] == {
+        "by_strategy": [],
+        "by_setup": [],
+        "by_entry_hour_ist": [],
+        "by_days_to_expiry": [],
+        "by_target_adjustment": [],
+    }
+    assert report["parameter_change"]["allowed"] is False
+
+
 def test_build_analysis_emits_post_cost_attribution_groups() -> None:
     quality = {"alpha_score": 8.0, "final_score": 8.1, "strategy_score": 7.5}
     outcome = {
