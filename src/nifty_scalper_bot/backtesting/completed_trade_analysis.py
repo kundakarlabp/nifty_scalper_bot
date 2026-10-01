@@ -318,7 +318,7 @@ def summarize_gate_effectiveness(
             reason=reason,
             opportunity_count=len(values),
             mean_post_cost_r=round(sum(values) / len(values), 6),
-            positive_fraction=round(sum(value > 0 for value in values) / len(values), 6),
+            positive_fraction=round(\n                sum(value > 0 for value in values) / len(values), 6\n            ),
         )
         for (decision, reason), values in sorted(grouped.items())
     )
