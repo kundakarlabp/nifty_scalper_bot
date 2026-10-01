@@ -3,9 +3,8 @@
 Option-premium data may trigger a setup but must never authorize NIFTY direction.
 Only fresh spot/futures observations participate. Futures is the primary
 price-discovery source when both underlying sources agree; spot is confirmation.
-Disagreement remains fail-closed unless one source is materially stronger and
-the opposing source is genuinely weak. This treats two credible opposing views
-as a transition/reversal warning instead of forcing a CE/PE decision.
+Any fresh disagreement remains fail-closed. This treats opposing underlying
+views as a transition/reversal warning instead of forcing a CE/PE decision.
 """
 
 from __future__ import annotations
@@ -31,13 +30,6 @@ def _state_for_bias(bias: str | None) -> UnderlyingDirectionState:
     if bias == "PE":
         return UnderlyingDirectionState.CONFIRMED_BEAR
     return UnderlyingDirectionState.UNAVAILABLE
-
-
-_DOMINANCE_GAP = 0.20
-_MIN_DOMINANT_CONFIDENCE = 0.70
-_MAX_WEAK_DISAGREEMENT_CONFIDENCE = 0.60
-_MIN_TRANSITION_LEADER_CONFIDENCE = 0.75
-_MIN_TRANSITION_GAP = 0.10
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,9 +80,7 @@ def arbitrate_underlying_direction(
     Futures is primary only when both sources agree. This reflects its empirical
     price-discovery role without turning that prior into an unconditional
     override. Opposing credible observations are treated as a possible
-    transition/reversal and fail closed. An override is allowed only when one
-    observation is high-conviction, materially stronger, and the contradictory
-    observation is genuinely weak.
+    transition/reversal and fail closed.
     """
 
     if spot is not None and futures is not None:

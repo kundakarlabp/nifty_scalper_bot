@@ -429,9 +429,11 @@ async def test_trend_vwap_trigger_can_use_fresh_orderflow_confirmation(
     assert result.metadata["regime_weight"] == 1.2
 
 
-async def test_weak_range_vwap_trigger_stays_blocked_with_context(
+async def test_weak_range_vwap_with_strong_context_reaches_runner_quality_owner(
     monkeypatch,
 ) -> None:
+    from nifty_scalper_bot.strategies.signal_quality import score_signal_metadata
+
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     monkeypatch.setenv("ENABLE_LIVE", "true")
     manager = _manager_probe()
@@ -447,9 +449,10 @@ async def test_weak_range_vwap_trigger_stays_blocked_with_context(
         indicators=_valid_entry_context(),
     )
 
-    assert result is None
-    decision = manager._last_no_signal_decision_by_symbol["NFO:NIFTY2670724050CE"]
-    assert decision.reason == "regime_weighted_score_below_min"
+    assert result is not None
+    assert result.metadata["approval_path"] == "single_trigger_context_confirmed"
+    quality = score_signal_metadata(result.metadata, strategy_name="VWAPPro")
+    assert quality.allowed is False
 
 
 async def test_stale_orderflow_context_cannot_unlock_single_trigger(

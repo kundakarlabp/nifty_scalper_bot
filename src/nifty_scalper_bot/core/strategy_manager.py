@@ -4861,7 +4861,6 @@ class StrategyManager(_BaseStrategyManager):
             )
             context_confirmed_single_allowed = bool(
                 mode_profile.get("allow_single_vote", True)
-                and (threshold_passed or canonical_smc_setup_pass)
                 and best_vote.confidence >= conf_min
                 and selected_option
                 and not vetoed
@@ -5332,15 +5331,6 @@ class StrategyManager(_BaseStrategyManager):
         quote_depth_ok = bool(metadata.get("quote_depth_valid") or indicator_map.get("quote_depth_valid") or metadata.get("tradable_quote") or indicator_map.get("tradable_quote"))
         no_vote_counts = dict(no_vote_reason_counts or indicator_map.get("no_vote_reason_counts") or {})
         neutral_no_votes = {"smc_insufficient_history", "strategy_feature_unavailable"}
-        hard_veto_reasons: list[str] = []
-        if no_vote_counts.get("underlying_direction_conflict"):
-            hard_veto_reasons.append("underlying_direction_conflict")
-        if no_vote_counts.get("negative_premium_flow"):
-            hard_veto_reasons.append("negative_premium_flow")
-        if no_vote_counts.get("smc_structure_required_live"):
-            hard_veto_reasons.append("smc_structure_required_live")
-        if bool(indicator_map.get("direction_transition")):
-            hard_veto_reasons.append("underlying_direction_transition")
         two_trigger_aligned = bool(
             confirmation
             and len(trigger_votes) >= 2
@@ -5350,12 +5340,10 @@ class StrategyManager(_BaseStrategyManager):
             and selected_ok_combined
             and quote_depth_ok
             and spread_pct <= resolve_entry_policy().execution_max_spread_pct
-            and not hard_veto_reasons
-            and not no_vote_counts.get("negative_premium_flow")
-        )
+         )
         if two_trigger_aligned:
             approval_path = "aligned_two_trigger_consensus"
-            log.info("CONSENSUS_CANDIDATE_QUALIFIED symbol=%s side=%s approval_path=%s trigger_vote_count=%s context_vote_count=%s", symbol_norm, best_vote.side, approval_path, len(trigger_votes), len(context_votes), extra={"event":"CONSENSUS_CANDIDATE_QUALIFIED","symbol":symbol_norm,"side":best_vote.side,"approval_path":"aligned_two_trigger_consensus","trigger_vote_count":len(trigger_votes),"context_vote_count":len(context_votes),"ignored_neutral_no_votes":[r for r in neutral_no_votes if no_vote_counts.get(r)],"hard_veto_reasons":hard_veto_reasons,"trade_quality_score":quality_score,"direction_bias":direction_bias,"context_age_seconds":context_age_seconds,"spread_pct":spread_pct,"selected_ok":bool(selected_ok),"near_atm_ok":bool(near_atm)})
+            log.info("CONSENSUS_CANDIDATE_QUALIFIED symbol=%s side=%s approval_path=%s trigger_vote_count=%s context_vote_count=%s", symbol_norm, best_vote.side, approval_path, len(trigger_votes), len(context_votes), extra={"event":"CONSENSUS_CANDIDATE_QUALIFIED","symbol":symbol_norm,"side":best_vote.side,"approval_path":"aligned_two_trigger_consensus","trigger_vote_count":len(trigger_votes),"context_vote_count":len(context_votes),"ignored_neutral_no_votes":[r for r in neutral_no_votes if no_vote_counts.get(r)],"trade_quality_score":quality_score,"direction_bias":direction_bias,"context_age_seconds":context_age_seconds,"spread_pct":spread_pct,"selected_ok":bool(selected_ok),"near_atm_ok":bool(near_atm)})
 
         metadata.setdefault("trigger_strategy_score", metadata.get("strategy_score"))
         metadata["setup_score"] = round(raw_trigger_score, 3)
