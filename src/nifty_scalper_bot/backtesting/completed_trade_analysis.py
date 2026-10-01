@@ -338,6 +338,7 @@ def summarize_gate_effectiveness(
         blockers=tuple(blockers),
     )
 
+
 @dataclass(frozen=True, slots=True)
 class ExecutionDataQuality:
     """Known execution-evidence caveats in the realized historical sample."""
