@@ -247,8 +247,11 @@ def _optional_outcome_mean(
 ) -> float | None:
     values: list[float] = []
     for trade in trades:
+        raw_value = trade.outcome.get(key)
+        if raw_value is None:
+            continue
         try:
-            value = float(trade.outcome.get(key))
+            value = float(raw_value)
         except (TypeError, ValueError):
             continue
         if math.isfinite(value):
