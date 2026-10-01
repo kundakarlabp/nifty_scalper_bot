@@ -99,3 +99,31 @@ def test_restart_seeds_only_loss_after_operator_baseline() -> None:
     RiskManager._seed_day_pnl_from_persisted_state(owner)
 
     assert switches.day_loss() == pytest.approx(100.0)
+
+def test_missing_operator_baseline_keeps_legacy_seed_behavior() -> None:
+    today = "2026-10-01"
+    manager = SimpleNamespace(
+        get_realized_pnl=lambda: -400.0,
+        _pnl_trading_date=today,
+        _trading_date_ist=lambda: today,
+    )
+    switches = RiskSwitches(
+        max_day_loss=500.0,
+        max_consecutive_losses=3,
+        cooldown_minutes=0.0,
+        reset_hour_utc=3,
+    )
+    owner = SimpleNamespace(
+        position_manager=manager,
+        _switches=switches,
+        _last_pnl_snapshot=-400.0,
+        _logger=SimpleNamespace(warning=lambda *args, **kwargs: None),
+        _record_realized_pnl_metrics=lambda *args, **kwargs: None,
+        _trip_on_switch_breach=lambda: None,
+        _trip_breaker=lambda reason: None,
+        _format_switch_reason=lambda reason: reason,
+    )
+
+    RiskManager._seed_day_pnl_from_persisted_state(owner)
+
+    assert switches.day_loss() == pytest.approx(400.0)
