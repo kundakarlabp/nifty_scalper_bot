@@ -220,6 +220,8 @@ class RiskManager:
     # [FIX] Declare the field so __post_init__ can use it
     _last_log_time: float = field(init=False, repr=False, default=0.0)
     _completed_trade_costs_today: float = field(init=False, repr=False, default=0.0)
+    _operator_reset_realized_baseline: float = field(init=False, repr=False, default=0.0)
+    _operator_reset_cost_baseline: float = field(init=False, repr=False, default=0.0)
 
     def __post_init__(self) -> None:
         self._logger = get_logger(__name__)
@@ -278,6 +280,7 @@ class RiskManager:
         # Must run after _switches exists: the seed writes into the day-loss
         # circuit, so calling it earlier raised AttributeError on any restart
         # that carried non-zero persisted realised P&L.
+        self._restore_operator_reset_baseline()
         self._seed_day_pnl_from_persisted_state()
         self._restore_risk_circuit_from_persisted_state()
         self._risk_state = self.risk_state
@@ -1307,7 +1310,10 @@ class RiskManager:
                 f"DAY_LOSS_LIMIT:{snap.day_loss:.2f}/{snap.max_day_loss:.2f}"
             )
             return False
-        if snap.daily_loss_limit > 0 and snap.daily_realized <= -snap.daily_loss_limit:
+        effective_daily_realized = (
+            snap.daily_realized - self._operator_reset_realized_baseline
+        )
+        if snap.daily_loss_limit > 0 and effective_daily_realized <= -snap.daily_loss_limit:
             self._last_rejection = (
                 f"DAILY_REALIZED_LIMIT:{snap.daily_realized:.2f}/{-snap.daily_loss_limit:.2f}"
             )
@@ -1540,6 +1546,74 @@ class RiskManager:
         if reason:
             self._trip_breaker(self._format_switch_reason(reason))
 
+    def _restore_operator_reset_baseline(self) -> None:
+        """Restore today's explicit operator risk-budget baseline, if any."""
+        reader = getattr(self.position_manager, "get_risk_circuit_state", None)
+        if not callable(reader):
+            return
+        try:
+            state = reader() or {}
+        except Exception:
+            return
+        if not isinstance(state, Mapping):
+            return
+        self._operator_reset_realized_baseline = float(
+            state.get("operator_reset_realized_baseline", 0.0) or 0.0
+        )
+        self._operator_reset_cost_baseline = max(
+            float(state.get("operator_reset_cost_baseline", 0.0) or 0.0), 0.0
+        )
+
+    def operator_reset_daily_loss_budget(self) -> dict[str, float]:
+        """Rebase only today's loss allowance; preserve accounting and loss streak."""
+        broker_realized = _resolve_broker_realized_pnl(
+            self.position_manager, force=True
+        )
+        realized = (
+            broker_realized
+            if broker_realized is not None
+            else float(self.position_manager.get_realized_pnl())
+        )
+        costs = float(getattr(self, "_completed_trade_costs_today", 0.0) or 0.0)
+        prior_day_loss = float(self._switches.day_loss())
+        self._operator_reset_realized_baseline = realized
+        self._operator_reset_cost_baseline = max(costs, 0.0)
+        self._last_pnl_snapshot = realized
+        self._switches.rebase_day_pnl()
+
+        remaining_reason = self._switches.breach_reason()
+        if remaining_reason:
+            self._breaker_tripped = True
+            self._breaker_reason = self._format_switch_reason(remaining_reason)
+        else:
+            self._breaker_tripped = False
+            self._breaker_reason = None
+            self._breaker_alerted = False
+            self._shadow_forced = False
+        self._last_rejection = None
+        self._persist_risk_circuit_state()
+        self._logger.warning(
+            "OPERATOR_DAILY_RISK_RESET prior_day_loss=%.2f realized_baseline=%.2f "
+            "cost_baseline=%.2f streak=%d",
+            prior_day_loss,
+            realized,
+            costs,
+            self._switches.consecutive_losses(),
+            extra={
+                "event": "OPERATOR_DAILY_RISK_RESET",
+                "prior_day_loss": prior_day_loss,
+                "realized_baseline": realized,
+                "cost_baseline": costs,
+                "consecutive_losses": self._switches.consecutive_losses(),
+            },
+        )
+        return {
+            "prior_day_loss": prior_day_loss,
+            "realized_baseline": realized,
+            "cost_baseline": costs,
+            "new_day_loss": float(self._switches.day_loss()),
+        }
+
     def _seed_day_pnl_from_persisted_state(self) -> None:
         """Seed the day-loss circuit from broker P&L or same-day local state.
 
@@ -1555,8 +1629,11 @@ class RiskManager:
         broker_realized = _resolve_broker_realized_pnl(manager, force=True)
         if broker_realized is not None:
             self._last_pnl_snapshot = broker_realized
-            if abs(broker_realized) >= 1e-6:
-                self._switches.record_pnl(broker_realized)
+            effective_realized = (
+                broker_realized - self._operator_reset_realized_baseline
+            )
+            if abs(effective_realized) >= 1e-6:
+                self._switches.record_pnl(effective_realized)
             self._logger.warning(
                 "DAY_PNL_SEEDED_FROM_BROKER realized=%.2f day_loss=%.2f "
                 "source=zerodha_margins_m2m",
@@ -1611,7 +1688,9 @@ class RiskManager:
                 },
             )
             return
-        self._switches.record_pnl(realized)
+        effective_realized = realized - self._operator_reset_realized_baseline
+        if abs(effective_realized) >= 1e-6:
+            self._switches.record_pnl(effective_realized)
         self._logger.warning(
             "DAY_PNL_SEEDED_FROM_RESTART realized=%.2f day_loss=%.2f trading_date=%s",
             realized,
@@ -1648,7 +1727,9 @@ class RiskManager:
         costs = abs(float(state.get("completed_trade_costs_today", 0.0) or 0.0))
         if costs > 0:
             self._completed_trade_costs_today = costs
-            self._switches.record_pnl(-costs)
+            effective_costs = max(costs - self._operator_reset_cost_baseline, 0.0)
+            if effective_costs > 0:
+                self._switches.record_pnl(-effective_costs)
         self._switches.restore_runtime(
             consecutive_losses=int(state.get("consecutive_losses", 0) or 0),
             cooldown_until_epoch=float(state.get("loss_cooldown_until_epoch", 0.0) or 0.0),
@@ -1680,6 +1761,10 @@ class RiskManager:
                 ),
                 consecutive_losses=int(self._switches.consecutive_losses()),
                 loss_cooldown_until_epoch=float(self._switches.cooldown_until_epoch()),
+                operator_reset_realized_baseline=float(
+                    self._operator_reset_realized_baseline
+                ),
+                operator_reset_cost_baseline=float(self._operator_reset_cost_baseline),
             )
         except Exception:  # noqa: BLE001 - persistence must not break trading
             self._logger.warning("RISK_CIRCUIT_PERSIST_FAILED", exc_info=True)
