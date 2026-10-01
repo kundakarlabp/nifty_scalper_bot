@@ -1374,18 +1374,29 @@ class ZerodhaKiteClient(BaseBrokerClient):
         quantity: int | None = None,
         price: float | None = None,
         variety: str = "regular",
+        *,
+        trigger_price: float | None = None,
     ) -> dict:
-        """Modify order."""
+        """Modify independent Kite order fields without changing order semantics.
 
-        if quantity is None and price is None:
-            raise OrderPlacementError("Must provide quantity or price to modify order")
+        ``price`` is the limit price used by LIMIT/SL orders. ``trigger_price`` is
+        the stop trigger used by SL/SL-M orders. They are intentionally independent:
+        callers modifying an SL order may provide both, while SL-M callers provide
+        only ``trigger_price``.
+        """
+
+        if quantity is None and price is None and trigger_price is None:
+            raise OrderPlacementError(
+                "Must provide quantity, price, or trigger_price to modify order"
+            )
 
         payload: dict[str, Any] = {}
         if quantity is not None:
             payload["quantity"] = quantity
         if price is not None:
             payload["price"] = float(price)
-            payload["trigger_price"] = float(price)
+        if trigger_price is not None:
+            payload["trigger_price"] = float(trigger_price)
 
         self._acquire_bucket(self._ORDER_BUCKET)
         response = self._ensure_json(
