@@ -335,7 +335,7 @@ def dashboard(request: Request) -> HTMLResponse:
     <form method=post action="/admin/risk/reset-day">
     <input type=hidden name=confirm value="RESET">
     <button class=amb type=submit
-    onclick="return confirm('Reset risk allowance from current P&amp;L? Existing losses stay recorded.')">
+    onclick="return confirm('Reset risk allowance? Ledger is preserved.')">
     Reset today&#39;s risk allowance</button>
     </form></div>
 
