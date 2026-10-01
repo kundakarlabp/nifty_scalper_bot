@@ -47,6 +47,66 @@ def test_equity_curve_alignment(
     )
 
 
+@pytest.mark.parametrize(
+    ("prices", "signals", "slippage", "expected_return", "expected_drawdown"),
+    [
+        ([100.0], [1], 0.0, -0.001, -0.001),
+        ([100.0], [1], 0.01, -0.00201, -0.00201),
+        ([100.0, 100.0, 100.0], [1, 0, 0], 0.0, -0.002, -0.002),
+        ([100.0, 120.0, 120.0], [1, 0, 0], 0.0, 0.0178, -0.001),
+        ([100.0, 100.0], [0, 0], 0.0, 0.0, 0.0),
+    ],
+)
+def test_backtest_includes_first_entry_cost_in_returns_and_drawdown(
+    tmp_path: Path, prices, signals, slippage, expected_return, expected_drawdown
+) -> None:
+    data = pd.DataFrame(
+        {"close": prices},
+        index=pd.date_range(
+            "2026-09-24T09:30:00+05:30", periods=len(prices), freq="min"
+        ),
+    )
+
+    class _Strategy:
+        name = "initial_cost_regression"
+
+        def generate_signals(self, market_data: pd.DataFrame) -> pd.Series:
+            return pd.Series(signals, index=market_data.index)
+
+    result = BacktestEngine(
+        data,
+        _Strategy(),
+        be.BacktestConfig(
+            initial_cash=10_000.0,
+            fixed_quantity=10,
+            commission_pct=0.01,
+            slippage_pct=slippage,
+            risk_free_rate=0.0,
+            output_directory=tmp_path,
+            generate_visualizations=False,
+        ),
+    ).run()
+
+    assert result.performance["total_return"] == pytest.approx(expected_return)
+    assert result.performance["max_drawdown"] == pytest.approx(expected_drawdown)
+    assert (1.0 + result.equity_curve["returns"]).prod() - 1.0 == pytest.approx(
+        expected_return
+    )
+    assert len(result.equity_curve) == len(data)
+
+
+def test_backtest_rejects_missing_timestamps_before_strategy_evaluation() -> None:
+    class _Strategy:
+        name = "must_not_run"
+
+        def generate_signals(self, market_data: pd.DataFrame) -> pd.Series:
+            raise AssertionError("invalid data reached strategy")
+
+    data = pd.DataFrame({"close": [100.0]}, index=pd.DatetimeIndex([pd.NaT]))
+    with pytest.raises(ValueError, match="missing timestamps"):
+        BacktestEngine(data, _Strategy())
+
+
 @pytest.mark.unit
 def test_discover_history_files_includes_cab_directory(tmp_path: Path) -> None:
     cab_dir = tmp_path / "cab"

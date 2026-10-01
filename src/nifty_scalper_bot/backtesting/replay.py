@@ -143,6 +143,9 @@ class ReplayHarness:
         frame = data.copy()
         if not isinstance(frame.index, pd.DatetimeIndex):
             frame.index = pd.to_datetime(frame.index)
+        if frame.index.hasnans:
+            raise ValueError("Replay data contains missing timestamps")
+        frame.sort_index(kind="stable", inplace=True)
         start_ts = frame.index[0].to_pydatetime()
         end_ts = frame.index[-1].to_pydatetime()
         bars = 0
@@ -354,9 +357,6 @@ def _load_frame(path: Path) -> pd.DataFrame:
         except Exception as exc:  # noqa: BLE001 - surface import errors cleanly
             msg = "Parquet replay requires pandas parquet dependencies"
             raise RuntimeError(msg) from exc
-    if not isinstance(frame.index, pd.DatetimeIndex):
-        frame.index = pd.to_datetime(frame.index)
-    frame.sort_index(inplace=True)
     return frame
 
 
