@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -121,6 +121,65 @@ class _ReplayClock:
     def time(self) -> float:
         assert self.current is not None
         return self.current.timestamp()
+
+
+@pytest.mark.parametrize("minutes", [1, 5])
+def test_bar_start_history_dispatches_only_after_interval_completion(minutes) -> None:
+    paper = PaperFillEngine(_DummyDataHub(), _DummyResolver())
+    runner = _DummyRunner()
+    clock = _ReplayClock()
+    harness = ReplayHarness(
+        runner, paper, option_symbol="OPT", index_symbol="IDX", clock=clock
+    )
+    frame = _sample_frame()
+    frame.index = frame.index.tz_localize("Asia/Kolkata")
+    expected = (frame.index + timedelta(minutes=minutes)).to_pydatetime().tolist()
+
+    result = harness.run_dataframe(
+        frame.iloc[::-1], bar_interval=timedelta(minutes=minutes)
+    )
+
+    assert clock.timestamps == expected
+    assert [tick["timestamp"] for _, tick in runner.ticks] == [
+        timestamp for timestamp in expected for _ in range(2)
+    ]
+    assert result.start == expected[0]
+    assert result.end == expected[-1]
+    assert runner.ticks[1][1]["close"] == 100.5
+
+
+@pytest.mark.parametrize("interval", [timedelta(0), timedelta(seconds=-1)])
+def test_invalid_bar_interval_fails_before_replay_side_effects(interval) -> None:
+    hub = _DummyDataHub()
+    runner = _DummyRunner()
+    clock = _ReplayClock()
+    harness = ReplayHarness(
+        runner, PaperFillEngine(hub, _DummyResolver()), option_symbol="OPT", clock=clock
+    )
+    with pytest.raises(ValueError, match="bar_interval must be positive"):
+        harness.run_dataframe(_sample_frame(), bar_interval=interval)
+    assert clock.timestamps == []
+    assert runner.ticks == []
+    assert hub.quotes == {}
+
+
+def test_day_file_replay_forwards_completed_bar_interval(tmp_path: Path) -> None:
+    runner = _DummyRunner()
+    clock = _ReplayClock()
+    harness = ReplayHarness(
+        runner,
+        PaperFillEngine(_DummyDataHub(), _DummyResolver()),
+        option_symbol="OPT",
+        clock=clock,
+    )
+    frame = _sample_frame()
+    frame.to_csv(tmp_path / "20240101.csv")
+    result = harness.run_day(tmp_path, "20240101", bar_interval=timedelta(minutes=1))
+    assert result.start == frame.index[0].to_pydatetime() + timedelta(minutes=1)
+    assert (
+        clock.timestamps
+        == (frame.index + timedelta(minutes=1)).to_pydatetime().tolist()
+    )
 
 
 def test_replay_advances_clock_once_per_synchronised_timestamp() -> None:
