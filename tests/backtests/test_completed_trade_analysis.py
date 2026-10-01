@@ -10,7 +10,9 @@ from nifty_scalper_bot.backtesting.completed_trade_analysis import (
     chronological_walk_forward,
     execution_data_quality,
     post_cost_attribution_groups,
+    post_cost_outcome_evidence,
     summarize_candidate_decisions,
+    summarize_gate_effectiveness,
     summarize_completed_trades,
     walk_forward_stability,
 )
@@ -506,3 +508,47 @@ def test_candidate_decision_funnel_preserves_reasons_and_quality() -> None:
         "alpha_below_threshold": 1,
         "risk_capacity_unavailable": 1,
     }
+
+
+def test_post_cost_outcome_evidence_reports_strategy_setup_and_r_excursions() -> None:
+    quality = {"alpha_score": 8.0, "strategy_score": 7.5}
+    rows = [
+        _trade("a", 1.0, strategy="VWAPPro", gross_pnl=120.0, net_pnl=100.0, signal_quality=quality),
+        _trade("b", 2.0, strategy="VWAPPro", gross_pnl=-20.0, net_pnl=-40.0, signal_quality=quality),
+    ]
+    for row, r_value, mfe, mae in zip(rows, (1.0, -0.4), (1.4, 0.3), (0.2, 0.8)):
+        row["outcome"]["r_multiple"] = r_value
+        row["outcome"]["mfe_r"] = mfe
+        row["outcome"]["mae_r"] = mae
+
+    trades = canonicalize_completed_trades(rows)
+    strategy = post_cost_outcome_evidence(trades, dimension="strategy")
+    setup = post_cost_outcome_evidence(trades, dimension="setup")
+
+    assert strategy[0].value == "VWAPPro"
+    assert strategy[0].net_expectancy == 30.0
+    assert strategy[0].mean_r_multiple == 0.3
+    assert strategy[0].mean_mfe_r == 0.85
+    assert strategy[0].mean_mae_r == 0.5
+    assert setup[0].value == "continuation_pullback"
+    assert setup[0].net_expectancy == 30.0
+
+
+def test_gate_effectiveness_requires_both_approved_and_blocked_labels() -> None:
+    incomplete = summarize_gate_effectiveness([
+        {"approved": False, "final_reason": "spread_too_wide", "post_cost_r": -0.5}
+    ])
+    assert incomplete.ready is False
+    assert incomplete.blockers == ("missing_approved_counterfactual_labels",)
+
+    report = summarize_gate_effectiveness([
+        {"approved": True, "final_reason": "order_submitted", "post_cost_r": 0.4},
+        {"approved": False, "final_reason": "spread_too_wide", "post_cost_r": -0.5},
+        {"approved": False, "final_reason": "spread_too_wide", "post_cost_r": 0.1},
+    ])
+    assert report.ready is True
+    assert report.labelled_opportunities == 3
+    blocked = next(group for group in report.groups if group.decision == "blocked")
+    assert blocked.reason == "spread_too_wide"
+    assert blocked.mean_post_cost_r == -0.2
+    assert blocked.positive_fraction == 0.5
