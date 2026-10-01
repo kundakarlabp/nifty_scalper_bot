@@ -283,8 +283,14 @@ def _flash(request: Request) -> str:
     if q.get("mode") == "err": return '<div class="flash err">Cannot go LIVE: enter API key, secret and access token first.</div>'
     if q.get("mode"): return '<div class="flash ok">Mode changed and bot restarted.</div>'
     if q.get("restart"): return '<div class="flash ok">Bot restarting…</div>'
-    if q.get("riskreset") == "ok": return '<div class="flash ok">Daily risk allowance rebased. Trade ledger and realised P&amp;L were preserved.</div>'
-    if q.get("riskreset") == "err": return f'<div class="flash err">Risk reset failed: {html.escape(q.get("msg", ""))}</div>'
+    if q.get("riskreset") == "ok":
+        return (
+            '<div class="flash ok">Daily risk allowance rebased. '
+            "Trade ledger and realised P&amp;L were preserved.</div>"
+        )
+    if q.get("riskreset") == "err":
+        msg = html.escape(q.get("msg", ""))
+        return f'<div class="flash err">Risk reset failed: {msg}</div>'
     if q.get("upd") == "ok": return '<div class="flash ok">Updated from GitHub and restarted.</div>'
     if q.get("upd") == "err": return f'<div class="flash err">Update failed: {html.escape(q.get("msg", ""))}</div>'
     return ""
@@ -323,10 +329,14 @@ def dashboard(request: Request) -> HTMLResponse:
     <div class=card><h2>Live Trading</h2><p>{'Placing REAL orders with REAL money.' if live_on else 'Analysing only — no real orders.'}</p>{toggle}</div>
 
     <div class="card"><h2>Daily Risk Allowance</h2>
-    <p>Explicit operator override: start a fresh daily-loss allowance from the current realised P&amp;L. This does <b>not</b> erase trades, P&amp;L, costs, loss streak, cooldown history, or the trade ledger.</p>
+    <p>Explicit operator override: start a fresh daily-loss allowance from the
+    current realised P&amp;L. This does <b>not</b> erase trades, P&amp;L,
+    costs, loss streak, cooldown history, or the trade ledger.</p>
     <form method=post action="/admin/risk/reset-day">
     <input type=hidden name=confirm value="RESET">
-    <button class=amb type=submit onclick="return confirm('Rebase today\'s risk allowance and permit additional risk from the current P&L baseline? Existing losses remain recorded.')">Reset today&#39;s risk allowance</button>
+    <button class=amb type=submit
+    onclick="return confirm('Rebase today\'s risk allowance from the current P&L baseline? Existing losses remain recorded.')">
+    Reset today&#39;s risk allowance</button>
     </form></div>
 
     <div class=card><h2>Credentials &amp; Settings</h2><p>Secrets show dots; leave them unchanged unless replacing them.</p>
@@ -414,7 +424,9 @@ def reset_daily_risk(request: Request, confirm: str = Form("")) -> RedirectRespo
     """Explicitly rebase the live daily-loss allowance without altering accounting."""
     _check_auth(request)
     if confirm != "RESET":
-        return RedirectResponse("/admin?riskreset=err&msg=confirmation+required", status_code=303)
+        return RedirectResponse(
+            "/admin?riskreset=err&msg=confirmation+required", status_code=303
+        )
     try:
         from nifty_scalper_bot.main import _latest_context
 
