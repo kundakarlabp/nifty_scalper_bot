@@ -93,7 +93,7 @@ def test_dashboard_rejects_cross_site_start(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("ledger_error", [False, True])
-def test_worker_reports_real_collection_as_blocked_not_backtest_success(
+def test_worker_completes_component_research_without_claiming_live_parity(
     tmp_path, monkeypatch, ledger_error
 ):
     import io
@@ -142,6 +142,15 @@ def test_worker_reports_real_collection_as_blocked_not_backtest_success(
         return {"saved_requests": 4, "empty_requests": [], "failed_requests": []}
 
     monkeypatch.setattr("scripts.archive_kite_history.archive_history", collect)
+    monkeypatch.setattr(
+        "nifty_scalper_bot.backtesting.strategy_research.run_archived_research",
+        lambda directory: {
+            "scope": "active_contract_strategy_components",
+            "evidence_label": "RESEARCH_CANDIDATE",
+            "coverage": {},
+            "scenarios": [],
+        },
+    )
     if ledger_error:
         journal = tmp_path / "no-ledger/trades.db"
         journal.parent.mkdir()
@@ -163,9 +172,11 @@ def test_worker_reports_real_collection_as_blocked_not_backtest_success(
     request = validate_request({"id": "real-job"}, today=date(2026, 10, 2))
     result = worker.run_worker(request, tmp_path / "empty.env")
     assert captures[0][0] == ["NSE:NIFTY 50", "NFO:NIFTY26OCTFUT", "NFO:CE", "NFO:PE"]
-    assert result["state"] == "blocked"
-    assert result["backtest_completed"] is False
-    assert result["blocker"] == "current_bot_offline_replay_adapter_unavailable"
+    assert result["state"] == "completed"
+    assert result["backtest_completed"] is True
+    assert result["live_equivalent"] is False
+    assert result["backtest_scope"] == "active_contract_strategy_components"
+    assert (tmp_path / "data/research/real-job/strategy_bar_research.json").is_file()
     if ledger_error:
         assert result["ledger_analysis_blocker"] == "ledger_requires_verified_costs"
         assert result["coverage"]["saved_requests"] == 4
