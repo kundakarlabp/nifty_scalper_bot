@@ -295,6 +295,16 @@ restart_streamlit() {
   return 1
 }
 
+# Fixed research poll runs outside the trading engine and never restarts it.
+# Requests are immutable IDs; the worker owns a separate cross-process lock.
+poll_research_request() {
+  if [ -f "$APP_DIR/scripts/run_research_job.py" ]; then
+    BOT_ENV_FILE="$ENV_FILE" PYTHONPATH="$APP_DIR/src" \
+      "$VENV/bin/python" "$APP_DIR/scripts/run_research_job.py" || \
+      log "WARNING: research request rejected; trading deployment unaffected"
+  fi
+}
+
 exec 9>"$LOCK_FILE"
 if ! flock -n 9; then log "Another deployment is already running"; exit 0; fi
 
@@ -335,6 +345,7 @@ if [ "$BEFORE" = "$AFTER" ] && [ "$FORCE_RESTART" = false ]; then
   if service_healthy_confirmed "$BEFORE"; then
     if [ "$current_runtime_sha" = "$BEFORE" ]; then
       write_status current "running ${BEFORE:0:7}"
+      poll_research_request
       exit 0
     fi
     log "runtime build SHA missing/mismatched; forcing one provenance restart"
@@ -366,6 +377,8 @@ TARGETED_TESTS=(
   tests/architecture/test_file_header_standard.py
   tests/architecture/test_canonical_bo_ownership.py
   tests/architecture/test_lightsail_release_contract.py
+  tests/ops/test_research_jobs.py
+  tests/scripts/test_archive_kite_history.py
   tests/infra/test_supabase_trade_replication.py
   tests/infra/test_daily_log_archive.py
   tests/infra/test_scheduled_tasks.py
@@ -445,6 +458,7 @@ if wait_for_service "$AFTER"; then
     logger -t niftybot-deploy "bot deployed; Streamlit health check failed"
   fi
   logger -t niftybot-deploy "validated and deployed ${BEFORE:0:7} -> ${AFTER:0:7}"
+  poll_research_request
   exit 0
 fi
 
