@@ -20,6 +20,12 @@ context. The exporter validates exact master identity before history requests;
 it does not infer ATM strikes or change the live basket. NSE/NFO NIFTY data
 only; no orders are placed. Do not put API credentials in command arguments.
 
+For the existing Lightsail installation, pass
+`--env-file /home/ubuntu/.config/niftybot/niftybot.env` to reuse the operator
+configuration outside the checkout. An explicitly missing file fails before
+broker initialization. Existing environment values take precedence; omitting
+the option preserves normal dotenv discovery. No credential values are printed.
+
 Requests cover at most 30 completed calendar days each. `oi=True` and
 `continuous=False` preserve option history semantics. Each atomic JSON archive
 contains the raw candle response, requested IST bounds, symbol/token, exact

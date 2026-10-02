@@ -160,8 +160,15 @@ def main(argv: list[str] | None = None) -> int:
         default=dt.datetime.now(IST).date() - dt.timedelta(days=1),
     )
     parser.add_argument("--outdir", type=Path, default=Path("data/kite_history"))
+    parser.add_argument(
+        "--env-file",
+        type=Path,
+        help="Existing operator env file; does not override environment values",
+    )
     args = parser.parse_args(argv)
-    load_dotenv(override=False)
+    if args.env_file is not None and not args.env_file.is_file():
+        raise FileNotFoundError("Environment file does not exist")
+    load_dotenv(dotenv_path=args.env_file, override=False)
     client = ZerodhaKiteClient()
     try:
         report = archive_history(
