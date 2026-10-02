@@ -123,10 +123,10 @@ def test_cli_loads_external_env_without_overwriting_existing_session(
 ):
     env_file = tmp_path / "operator.env"
     env_file.write_text("BROKER_ACCESS_TOKEN=file-session\n")
+    monkeypatch.setattr(os, "environ", os.environ.copy())
     monkeypatch.delenv("BROKER_ACCESS_TOKEN", raising=False)
     if existing_token is not None:
         monkeypatch.setenv("BROKER_ACCESS_TOKEN", existing_token)
-    # dotenv mutates the real environment; restore it through pytest's owner.
     seen = []
 
     class OfflineBroker(Broker):
