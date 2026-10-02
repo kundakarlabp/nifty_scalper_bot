@@ -38,3 +38,13 @@ the request manifest stops GitHub-initiated requests; dashboard requests remain
 explicit. No AppDeploy relay settings or version are changed.
 
 Deployment and the real broker job must be observed separately from local tests.
+
+## Observed deployment lifecycle correction
+
+The first deployed request remained queued. The auto-updater is a systemd
+oneshot, whose default control-group cleanup can terminate a detached worker
+when its parent exits. CLI polling now waits for the fixed worker (maximum
+30 minutes), then reports its actual terminal status; it records timeout or
+unexpected child exit as failure. Dashboard callers still launch separately
+from their persistent service. Request `research-20261002-02` explicitly retries
+collection after this correction. No systemd permissions are expanded.

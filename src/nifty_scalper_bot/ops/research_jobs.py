@@ -55,7 +55,9 @@ def read_status(root: Path) -> dict[str, Any]:
         return {"state": "not_requested", "backtest_completed": False}
 
 
-def start_job(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
+def start_job(
+    root: Path, payload: dict[str, Any], *, wait: bool = False
+) -> dict[str, Any]:
     """Launch one detached worker; an OS lock rejects overlapping requests."""
     import fcntl
 
@@ -93,7 +95,7 @@ def start_job(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
     write_json(directory / "latest.json", queued)
     try:
         with (directory / request["id"] / "worker.log").open("a") as log:
-            subprocess.Popen(
+            process = subprocess.Popen(
                 [
                     str(interpreter),
                     str(root / "scripts/run_research_job.py"),
@@ -110,6 +112,24 @@ def start_job(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
                 stderr=log,
                 start_new_session=True,
             )
+            if wait:
+                # A systemd oneshot kills remaining children when it exits.
+                # Keep that parent alive; dashboard callers remain detached.
+                try:
+                    process.wait(timeout=1800)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+                    queued.update(state="failed", error_type="WorkerTimeout")
+                    write_json(status_file, queued)
+                    write_json(directory / "latest.json", queued)
+                queued = json.loads(status_file.read_text())
+                if queued["state"] in {"queued", "collecting"}:
+                    queued.update(
+                        state="failed", error_type="WorkerExitedWithoutResult"
+                    )
+                    write_json(status_file, queued)
+                    write_json(directory / "latest.json", queued)
     except OSError as exc:
         queued.update(state="failed", error_type=type(exc).__name__)
         write_json(status_file, queued)

@@ -102,7 +102,7 @@ def main() -> int:
         path = ROOT / "deploy/research_request.json"
         if not path.is_file():
             return 0
-        print(json.dumps(start_job(ROOT, json.loads(path.read_text()))))
+        print(json.dumps(start_job(ROOT, json.loads(path.read_text()), wait=True)))
         return 0
     # Validate before using an identifier as a path, even for the fixed CLI.
     from nifty_scalper_bot.ops.research_jobs import validate_request
