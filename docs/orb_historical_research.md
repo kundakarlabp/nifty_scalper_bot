@@ -8,6 +8,11 @@ relevant changes merged into `main` and through **Actions → ORB historical
 research → Run workflow**. Results and the frozen protocol are downloadable
 artifacts; the job summary contains the comparison table.
 
+For connector-driven requests, the repository owner can create or reopen an
+issue whose title starts with `[ORB Research]`. This starts the same fixed,
+broker-free study without shell commands. Other issue authors cannot launch
+the research job, and issue text is never interpreted as code or settings.
+
 This is conditional component research, not a replay of live execution. It
 never writes live configuration, instantiates a broker client, places orders,
 or promotes a setting.

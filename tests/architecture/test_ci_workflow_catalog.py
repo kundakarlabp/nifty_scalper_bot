@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import yaml
+
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOWS = ROOT / ".github" / "workflows"
 EXPECTED_WORKFLOWS = {
@@ -14,6 +16,14 @@ EXPECTED_WORKFLOWS = {
 def test_workflow_catalog_has_only_canonical_workflows() -> None:
     discovered = {path.name for path in WORKFLOWS.glob("*.yml")}
     assert discovered == EXPECTED_WORKFLOWS
+
+
+def test_job_environment_does_not_reference_unavailable_runner_context() -> None:
+    for path in WORKFLOWS.glob("*.yml"):
+        workflow = yaml.safe_load(path.read_text())
+        for job in workflow.get("jobs", {}).values():
+            for value in job.get("env", {}).values():
+                assert "runner." not in str(value), path.name
 
 
 def test_ci_is_read_only_and_deduplicates_e2e_markers() -> None:
