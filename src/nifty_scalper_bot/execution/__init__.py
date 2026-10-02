@@ -17,11 +17,7 @@ from nifty_scalper_bot.execution.adaptive_trailing import (
 )
 from nifty_scalper_bot.execution.bracket_manager import BoundBracketManager, BracketManager
 from nifty_scalper_bot.execution.order_manager import OrderManager, RuntimeOrderManager
-from nifty_scalper_bot.execution.broker_pnl_authority_patch import apply_patches as _apply_broker_pnl_authority_patches
-from nifty_scalper_bot.execution.pnl_session_rollover_patch import apply_patches as _apply_pnl_session_rollover_patches
 
-_apply_broker_pnl_authority_patches()
-_apply_pnl_session_rollover_patches()
 
 CanonicalBracketManager = BracketManager
 _COMPAT_BRACKET_ALIASES = {
