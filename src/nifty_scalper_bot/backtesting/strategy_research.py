@@ -12,14 +12,17 @@ import json
 import math
 import os
 from collections import Counter
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, time, timedelta
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
 from nifty_scalper_bot.config.settings import get_settings
-from nifty_scalper_bot.risk.cost_model import estimate_round_trip_cost
+from nifty_scalper_bot.risk.cost_model import (
+    estimate_round_trip_cost,
+    evaluate_net_reward_risk,
+)
 from nifty_scalper_bot.strategies.elite_strategies.builder import build_elite_strategies
 from nifty_scalper_bot.strategies.indicators import IndicatorEngine
 
@@ -150,6 +153,10 @@ def _scenario(
     instruments: dict[str, dict[str, Any]],
     settings: Any,
     slippage_bps: float,
+    *,
+    components: set[str] | None = None,
+    minimum_net_rr: float | None = None,
+    minimum_opening_rvol: float | None = None,
 ) -> dict[str, Any]:
     options = sorted(
         symbol
@@ -216,7 +223,8 @@ def _scenario(
             strategies = [
                 strategy
                 for strategy in build_elite_strategies(settings, engine)
-                if strategy.name in COMPONENTS
+                if strategy.name
+                in (components if components is not None else COMPONENTS)
             ]
             if not strategies:
                 raise ValueError("research_components_unavailable")
@@ -240,12 +248,23 @@ def _scenario(
             if not intent["stop_loss"] < entry < intent["take_profit"]:
                 rejections[key[0]]["gap_invalidates_geometry"] += 1
                 continue
+            quantity = int(instruments[key[1]]["lot_size"])
+            if minimum_net_rr is not None:
+                economics = evaluate_net_reward_risk(
+                    entry_price=entry,
+                    stop_price=intent["stop_loss"] * (1 - slip),
+                    target_price=intent["take_profit"] * (1 - slip),
+                    quantity=quantity,
+                )
+                if economics.net_rr < minimum_net_rr:
+                    rejections[key[0]]["cost_net_rr_rejected"] += 1
+                    continue
             positions[key] = {
                 "entry_time": timestamp,
                 "entry_price": entry,
                 "stop_loss": intent["stop_loss"],
                 "take_profit": intent["take_profit"],
-                "quantity": int(instruments[key[1]]["lot_size"]),
+                "quantity": quantity,
             }
             intent["strategy"].notify_entry_accepted(
                 instruments[key[1]]["instrument_type"],
@@ -305,6 +324,19 @@ def _scenario(
                 ):
                     rejections[strategy.name]["invalid_signal_geometry"] += 1
                     continue
+                if minimum_opening_rvol is not None:
+                    rvol = opening_relative_volume(
+                        histories[future], timestamp, settings.orb.orb_minutes
+                    )
+                    if rvol is None or rvol < minimum_opening_rvol:
+                        rejections[strategy.name][
+                            (
+                                "opening_rvol_unavailable"
+                                if rvol is None
+                                else "opening_rvol_below_minimum"
+                            )
+                        ] += 1
+                        continue
                 pending[key] = {
                     "available_at": timestamp + timedelta(minutes=1),
                     "stop_loss": signal.stop_loss,
@@ -326,6 +358,10 @@ def _scenario(
             name: {
                 "metrics": summarize(trades),
                 "chronological_holdout_start": cutoff,
+                "development_metrics": summarize(
+                    [trade for trade in trades if trade["entry_time"][:10] < cutoff]
+                ),
+                "exit_reasons": dict(Counter(trade["exit_reason"] for trade in trades)),
                 "holdout_metrics": summarize(
                     [trade for trade in trades if trade["entry_time"][:10] >= cutoff]
                 ),
@@ -404,4 +440,166 @@ def run_archived_research(
             "Small or zero trade samples do not establish profitability",
         ],
         "scenarios": scenarios,
+    }
+
+
+def opening_relative_volume(
+    history: dict[datetime, dict[str, Any]], timestamp: datetime, minutes: int
+) -> float | None:
+    """Same-clock opening volume / preceding 14 complete session volumes.
+
+    Current/future sessions never enter the denominator; incomplete warmup is
+    explicitly unavailable. This is a research filter, not live context.
+    """
+    opening = timestamp.replace(hour=9, minute=15, second=0, microsecond=0)
+    if minutes < 1 or timestamp < opening + timedelta(minutes=minutes):
+        return None
+    prior_days = sorted({ts.date() for ts in history if ts.date() < timestamp.date()})[
+        -14:
+    ]
+    if len(prior_days) < 14:
+        return None
+    volumes = []
+    for day in [*prior_days, timestamp.date()]:
+        start = opening.replace(year=day.year, month=day.month, day=day.day)
+        keys = [start + timedelta(minutes=minute) for minute in range(minutes)]
+        if any(key not in history for key in keys):
+            return None
+        volumes.append(sum(float(history[key]["volume"]) for key in keys))
+    mean = sum(volumes[:-1]) / 14
+    return volumes[-1] / mean if mean > 0 else None
+
+
+def run_orb_comparison(directory: Path) -> dict[str, Any]:
+    """Compare a registered bounded set; never promote a live configuration.
+
+    The archive was already inspected. Its final 20% is a retrospective check,
+    not an untouched holdout. Rank solely on development-period stress results.
+    """
+    if os.getenv("EXECUTION_MODE", "SHADOW").upper() != "SHADOW":
+        raise ValueError("research_requires_shadow_process")
+    histories, instruments, digest = load_archive(directory)
+    settings = get_settings().elite
+    # All candidates differ in one hypothesis from the cost-gated reference.
+    variants: list[
+        tuple[str, dict[str, str], int | None, float | None, float | None]
+    ] = [
+        ("raw_reference", {}, None, None, None),
+        ("cost_gated_reference", {}, None, 1.5, None),
+        ("retest_only", {"ORB_MOMENTUM_BRANCH_ENABLED": "false"}, None, 1.5, None),
+        (
+            "early_entry_60",
+            {"ORB_MAX_ENTRY_MINUTES_AFTER_RANGE": "60"},
+            None,
+            1.5,
+            None,
+        ),
+        ("target_rr_2_2", {"ORB_TARGET_RR": "2.2"}, None, 1.5, None),
+        ("range_5", {}, 5, 1.5, None),
+        ("range_10", {}, 10, 1.5, None),
+        ("range_30", {}, 30, 1.5, None),
+        ("opening_rvol_1", {}, None, 1.5, 1.0),
+    ]
+    environment_keys = (
+        "ORB_MOMENTUM_BRANCH_ENABLED",
+        "ORB_MAX_ENTRY_MINUTES_AFTER_RANGE",
+        "ORB_TARGET_RR",
+        "ORB_QUALITY_MIN_SCORE_SHADOW",
+        "ORB_MOMENTUM_MIN_BODY_PCT",
+        "ORB_MOMENTUM_MIN_PENETRATION_ATR",
+        "ORB_MOMENTUM_MIN_VOLUME_RATIO",
+        "ORB_MAX_EVENTS_PER_SIDE",
+    )
+    baseline_environment = {key: os.environ.get(key) for key in environment_keys}
+    candidates: list[dict[str, Any]] = []
+    for name, overrides, minutes, minimum_rr, rvol in variants:
+        original = {key: os.environ.get(key) for key in overrides}
+        try:
+            os.environ.update(overrides)
+            candidate_settings = (
+                replace(settings, orb=replace(settings.orb, orb_minutes=minutes))
+                if minutes is not None
+                else settings
+            )
+            scenarios: list[dict[str, Any]] = []
+            for slippage in (10.0, 25.0, 50.0):
+                result = _scenario(
+                    histories,
+                    instruments,
+                    candidate_settings,
+                    slippage,
+                    components={"ORBPro"},
+                    minimum_net_rr=minimum_rr,
+                    minimum_opening_rvol=rvol,
+                )["strategies"]["ORBPro"]
+                scenarios.append({"slippage_bps_per_side": slippage, **result})
+            candidates.append(
+                {
+                    "name": name,
+                    "environment_overrides": overrides,
+                    "orb_minutes": candidate_settings.orb.orb_minutes,
+                    "minimum_net_rr": minimum_rr,
+                    "minimum_opening_rvol": rvol,
+                    "scenarios": scenarios,
+                }
+            )
+        finally:
+            for key, value in original.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+    ranked = sorted(
+        [
+            candidate
+            for candidate in candidates[1:]
+            if all(
+                row["development_metrics"]["trade_count"] > 0
+                for row in candidate["scenarios"]
+            )
+        ],
+        key=lambda candidate: min(
+            row["development_metrics"]["expectancy"] for row in candidate["scenarios"]
+        ),
+        reverse=True,
+    )
+    return {
+        "scope": "bounded_orb_active_contract_component_comparison",
+        "evidence_label": "RESEARCH_CANDIDATE",
+        "live_equivalent": False,
+        "data_sha256": digest,
+        "baseline_configuration": asdict(settings.orb),
+        "baseline_environment": baseline_environment,
+        "candidate_count": len(candidates),
+        "slippage_scenario_count": 3,
+        "retrospective_check_is_untouched": False,
+        "selection": {
+            "ranking_rule": "worst_development_expectancy_across_slippage",
+            "development_ranking": [candidate["name"] for candidate in ranked],
+            "best_observed_research_candidate": ranked[0]["name"] if ranked else None,
+            "minimum_development_trades_for_further_validation": 30,
+            "selected_for_live": None,
+            "promotion_eligible": False,
+            "blockers": [
+                "Retrospectively selected active contracts; no historical ATM rotation",
+                "Reused archive is not an untouched holdout",
+                "Full live pipeline and historical executable quotes unavailable",
+                "Prospective chronological and paper validation required",
+            ],
+        },
+        "assumptions": {
+            "net_rr_filter": (
+                "Research-only feasibility check at next open; "
+                "slipped target/stop plus canonical fees; no target repair"
+            ),
+            "quantity": "one_archived_lot",
+            "earliest_signal_bar_start": "09:30 IST",
+            "rvol": (
+                "Futures opening volume / prior 14 complete "
+                "same-window session volumes"
+            ),
+            "check": "Last 20 percent of option sessions; excluded from ranking",
+            "zero_trades": "Abstention, not demonstrated alpha",
+        },
+        "candidates": candidates,
     }

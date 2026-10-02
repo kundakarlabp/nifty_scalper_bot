@@ -151,6 +151,13 @@ def test_worker_completes_component_research_without_claiming_live_parity(
             "scenarios": [],
         },
     )
+    monkeypatch.setattr(
+        "nifty_scalper_bot.backtesting.strategy_research.run_orb_comparison",
+        lambda directory: {
+            "candidates": [],
+            "selection": {"promotion_eligible": False},
+        },
+    )
     if ledger_error:
         journal = tmp_path / "no-ledger/trades.db"
         journal.parent.mkdir()
@@ -174,6 +181,8 @@ def test_worker_completes_component_research_without_claiming_live_parity(
     assert captures[0][0] == ["NSE:NIFTY 50", "NFO:NIFTY26OCTFUT", "NFO:CE", "NFO:PE"]
     assert result["state"] == "completed"
     assert result["backtest_completed"] is True
+    assert result["orb_comparison"]["selection"]["promotion_eligible"] is False
+    assert (tmp_path / "data/research/real-job/orb_comparison.json").is_file()
     assert result["live_equivalent"] is False
     assert result["backtest_scope"] == "active_contract_strategy_components"
     assert (tmp_path / "data/research/real-job/strategy_bar_research.json").is_file()

@@ -89,7 +89,10 @@ def run_worker(request: dict[str, Any], env_file: Path) -> dict[str, Any]:
         load_trade_ledger_rows,
     )
 
-    from nifty_scalper_bot.backtesting.strategy_research import run_archived_research
+    from nifty_scalper_bot.backtesting.strategy_research import (
+        run_archived_research,
+        run_orb_comparison,
+    )
     from nifty_scalper_bot.config.paths import get_data_dir
     from nifty_scalper_bot.data.rest.zerodha_client import ZerodhaKiteClient
     from nifty_scalper_bot.instruments.active_contracts import (
@@ -149,6 +152,24 @@ def run_worker(request: dict[str, Any], env_file: Path) -> dict[str, Any]:
     write_json(ROOT / "data/research/latest.json", status)
     report = run_archived_research(directory / "history")
     write_json(directory / "strategy_bar_research.json", report)
+    status["stage"] = "orb_comparison"
+    write_json(directory / "status.json", status)
+    write_json(ROOT / "data/research/latest.json", status)
+    comparison = run_orb_comparison(directory / "history")
+    write_json(directory / "orb_comparison.json", comparison)
+    status["orb_comparison"] = {
+        key: value for key, value in comparison.items() if key != "candidates"
+    }
+    status["orb_comparison"]["candidates"] = [
+        {
+            **candidate,
+            "scenarios": [
+                {key: value for key, value in scenario.items() if key != "trades"}
+                for scenario in candidate["scenarios"]
+            ],
+        }
+        for candidate in comparison["candidates"]
+    ]
     status.update(
         state="completed",
         stage="finished",
