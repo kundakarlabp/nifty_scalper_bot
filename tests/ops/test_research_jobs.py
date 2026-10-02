@@ -92,8 +92,9 @@ def test_dashboard_rejects_cross_site_start(tmp_path, monkeypatch):
     assert client.get("/admin/research/status").json()["state"] == "not_requested"
 
 
+@pytest.mark.parametrize("ledger_error", [False, True])
 def test_worker_reports_real_collection_as_blocked_not_backtest_success(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, ledger_error
 ):
     import io
     from types import SimpleNamespace
@@ -141,12 +142,34 @@ def test_worker_reports_real_collection_as_blocked_not_backtest_success(
         return {"saved_requests": 4, "empty_requests": [], "failed_requests": []}
 
     monkeypatch.setattr("scripts.archive_kite_history.archive_history", collect)
+    if ledger_error:
+        journal = tmp_path / "no-ledger/trades.db"
+        journal.parent.mkdir()
+        journal.touch()
+        monkeypatch.setattr(
+            "scripts.reporting.analyze_completed_trades.load_trade_ledger_rows",
+            lambda path: [],
+        )
+
+        def reject_costs(*args, **kwargs):
+            raise ValueError(
+                "broker-calculated costs required for canonical research "
+                "dataset: private-id"
+            )
+
+        monkeypatch.setattr(
+            "scripts.reporting.analyze_completed_trades.build_analysis", reject_costs
+        )
     request = validate_request({"id": "real-job"}, today=date(2026, 10, 2))
     result = worker.run_worker(request, tmp_path / "empty.env")
     assert captures[0][0] == ["NSE:NIFTY 50", "NFO:NIFTY26OCTFUT", "NFO:CE", "NFO:PE"]
     assert result["state"] == "blocked"
     assert result["backtest_completed"] is False
     assert result["blocker"] == "current_bot_offline_replay_adapter_unavailable"
+    if ledger_error:
+        assert result["ledger_analysis_blocker"] == "ledger_requires_verified_costs"
+        assert result["coverage"]["saved_requests"] == 4
+        assert "private-id" not in json.dumps(result)
 
 
 def test_updater_waits_for_worker_before_oneshot_service_exits(tmp_path, monkeypatch):
@@ -201,3 +224,37 @@ def test_updater_records_worker_timeout_or_unexpected_exit(
         "WorkerTimeout" if timeout else "WorkerExitedWithoutResult"
     )
     assert bool(killed) is timeout
+
+
+def test_worker_waits_for_startup_basket_and_redacts_unknown_errors(monkeypatch):
+    import io
+
+    from scripts import run_research_job as worker
+
+    responses = iter(
+        [OSError("secret auth detail"), {}, {"ce": "NFO:CE", "pe": "NFO:PE"}]
+    )
+    pauses = []
+
+    def status(*args, **kwargs):
+        response = next(responses)
+        if isinstance(response, Exception):
+            raise response
+        return io.StringIO(json.dumps({"selected": response}))
+
+    monkeypatch.setattr(worker, "urlopen", status)
+    monkeypatch.setattr(worker.time, "sleep", pauses.append)
+    assert worker.load_active_basket()["ce"] == "NFO:CE"
+    assert pauses == [2, 2]
+    assert (
+        worker.safe_error_code(ValueError("secret auth detail")) == "validation_failed"
+    )
+    assert (
+        worker.safe_error_code(
+            ValueError(
+                "broker-calculated costs required for canonical research "
+                "dataset: private-id"
+            )
+        )
+        == "ledger_requires_verified_costs"
+    )
