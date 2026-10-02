@@ -564,7 +564,11 @@ def research_report(request: Request) -> JSONResponse:
     report = {"status": status}
     if status.get("id"):
         validate_request({"id": status["id"]})
-        for name in ("completed_trade_analysis", "strategy_bar_research"):
+        for name in (
+            "completed_trade_analysis",
+            "strategy_bar_research",
+            "orb_comparison",
+        ):
             path = APP_DIR / "data/research" / status["id"] / f"{name}.json"
             if path.is_file():
                 report[name] = json.loads(path.read_text())

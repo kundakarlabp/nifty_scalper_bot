@@ -187,3 +187,81 @@ def test_archive_identity_and_duplicate_defects_fail_closed(tmp_path, defect):
     path.write_text(json.dumps(payload))
     with pytest.raises(ValueError):
         run_archived_research(tmp_path)
+
+
+def test_bounded_comparison_restores_environment_and_never_promotes_small_sample(
+    tmp_path, monkeypatch
+):
+    import os
+
+    from nifty_scalper_bot.backtesting.strategy_research import run_orb_comparison
+
+    archive(tmp_path)
+    monkeypatch.setenv("ORB_TARGET_RR", "1.9")
+    before = dict(os.environ)
+    report = run_orb_comparison(tmp_path)
+    assert dict(os.environ) == before
+    assert len(report["candidates"]) == 9
+    assert report["selection"]["promotion_eligible"] is False
+    assert report["selection"]["selected_for_live"] is None
+    assert report["retrospective_check_is_untouched"] is False
+    assert {
+        row["slippage_bps_per_side"] for row in report["candidates"][0]["scenarios"]
+    } == {10, 25, 50}
+    assert all(
+        row["development_metrics"]["trade_count"] == 0
+        for candidate in report["candidates"]
+        for row in candidate["scenarios"]
+    )
+
+
+def test_cost_filter_uses_slipped_fill_and_does_not_widen_stop(tmp_path, monkeypatch):
+    from nifty_scalper_bot.backtesting.strategy_research import _scenario, load_archive
+
+    archive(tmp_path)
+
+    class Strategy:
+        name = "ORBPro"
+
+        def generate_signal(self, symbol, indicators, current_price, position=None):
+            if indicators["history_count"] == 1:
+                return SimpleNamespace(
+                    action="BUY", stop_loss=95, take_profit=105, metadata={}
+                )
+            return None
+
+        @property
+        def evaluation_health(self):
+            return {"healthy": True}
+
+        def notify_entry_accepted(self, side, *, setup_id=None):
+            raise AssertionError("cost-rejected setup must not be accepted")
+
+    monkeypatch.setattr(
+        "nifty_scalper_bot.backtesting.strategy_research.build_elite_strategies",
+        lambda settings, engine: [Strategy()],
+    )
+    histories, instruments, _ = load_archive(tmp_path)
+    result = _scenario(
+        histories, instruments, None, 10, components={"ORBPro"}, minimum_net_rr=1.5
+    )
+    orb = result["strategies"]["ORBPro"]
+    assert orb["trades"] == []
+    assert orb["no_vote_reasons"]["cost_net_rr_rejected"] == 2
+
+
+def test_opening_relative_volume_requires_prior_complete_sessions_only():
+    from nifty_scalper_bot.backtesting.strategy_research import opening_relative_volume
+
+    first = datetime.fromisoformat("2026-09-01T09:15:00+05:30")
+    history = {}
+    for day in range(16):
+        for minute in range(5):
+            history[first + timedelta(days=day, minutes=minute)] = {
+                "volume": 200 if day == 14 else 100
+            }
+    now = first + timedelta(days=14, minutes=5)
+    assert opening_relative_volume(history, now, 5) == 2
+    assert opening_relative_volume(history, now - timedelta(minutes=2), 5) is None
+    del history[first + timedelta(minutes=1)]
+    assert opening_relative_volume(history, now, 5) is None
