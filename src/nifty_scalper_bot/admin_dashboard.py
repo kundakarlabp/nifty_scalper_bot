@@ -344,13 +344,15 @@ def dashboard(request: Request) -> HTMLResponse:
 
     <div class=card><h2>On-demand Research</h2>
     <p>Collect real Kite minute history for the active NIFTY basket and analyse
-    completed trades. Runs separately without changing live trading settings.</p>
+    completed trades, then backtest strategy components with modeled costs.
+    Runs separately without changing live trading settings.</p>
     <form method=post action="/admin/research/start">
-    <button class=blu type=submit>Collect history &amp; analyse trades</button></form>
+    <button class=blu type=submit>Run research backtest</button></form>
     <p><a href="/admin/research/status">Job status</a> &middot;
     <a href="/admin/research/report">Latest evidence report</a></p>
-    <p class=muted>A full bot backtest remains blocked until the current strategies
-    have a verified offline replay adapter. Collection is not proof of profit.</p></div>
+    <p class=muted>Uses available active contracts, next-minute fills and assumed
+    slippage. This component backtest does not establish full live-bot parity
+    or profitability. Report includes coverage and limitations.</p></div>
 
     <div class=card><h2>Controls</h2><div class=row>
     <form method=post action="/admin/update"><button class=blu type=submit>Update from GitHub</button></form>
@@ -562,9 +564,8 @@ def research_report(request: Request) -> JSONResponse:
     report = {"status": status}
     if status.get("id"):
         validate_request({"id": status["id"]})
-        path = (
-            APP_DIR / "data/research" / status["id"] / "completed_trade_analysis.json"
-        )
-        if path.is_file():
-            report["completed_trade_analysis"] = json.loads(path.read_text())
+        for name in ("completed_trade_analysis", "strategy_bar_research"):
+            path = APP_DIR / "data/research" / status["id"] / f"{name}.json"
+            if path.is_file():
+                report[name] = json.loads(path.read_text())
     return JSONResponse(report, headers={"Cache-Control": "no-store"})

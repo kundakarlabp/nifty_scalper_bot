@@ -55,3 +55,28 @@ classifies only fixed known errors without exposing exception payloads, and
 waits for the selected basket during background engine startup. Missing verified
 ledger costs remain a blocker; the job does not replace them with estimates.
 Request `research-20261002-03` retries with these observable failure boundaries.
+
+## Strategy component bar research completion
+
+Request 03 deployed and saved four real Kite history requests. Its ledger analysis
+was blocked by missing verified costs. The follow-up adds research-only replay
+of the actual ORBPro, SMC and VWAPPro classes and canonical IndicatorEngine,
+loaded through the production builder and settings. The new request 04 runs it
+automatically after collection. Historical completed bars retain their start
+timestamp; decisions become available at minute end and fill only at the next
+minute's open. Missing next minutes cancel intents. Stop/target ambiguity uses
+stop-first, stop gaps use the opening price, and incomplete session/gap exits are
+explicit. Quantity is one archived lot per strategy and option, independent
+component portfolios. Canonical modeled fees and 10/25/50 bps per-side slippage
+are recorded separately from strict historical ledger analysis. No cost estimates
+are inserted into the canonical trade journal.
+
+Reports include data hashes, material config, actual bars/dates/sessions, complete
+simulated trades, rejection counts, post-cost expectancy, profit factor, wins and
+losses, realized drawdown, exposure, turnover and the last 20% of sessions without
+parameter tuning. Success means the modeled component run completed. It does
+not establish historical ATM/expiry-selection parity, depth/fill feasibility,
+full live direction context, global arbitration/risk sizing/trailing parity,
+mark-to-market portfolio drawdown or profitability. Missing live direction proof
+is not fabricated. The worker is isolated in SHADOW and has no order submission
+path; live settings, risk limits, strategies and execution are unchanged.

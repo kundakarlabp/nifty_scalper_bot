@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Poll a GitHub research request or run its fixed read-only worker.
 
-History and completed-trade evidence are saved locally. A missing current-bot
-replay adapter is a reported blocker, never replaced by the generic RSI demo.
+History, strategy component bar research and completed-trade evidence are saved
+locally. Modeled component research is never presented as live-pipeline parity.
 """
 
 from __future__ import annotations
@@ -40,6 +40,23 @@ def safe_error_code(exc: Exception) -> str:
         "broker-calculated costs missing": "ledger_requires_verified_costs",
         "completed trade violates gross_pnl": "ledger_net_pnl_inconsistent",
     }
+    for code in (
+        "research_history_unavailable",
+        "research_requires_shadow_process",
+        "research_strategy_evaluation_failed",
+        "research_components_unavailable",
+        "research_timestamp_convention_invalid",
+        "research_timestamp_timezone_missing",
+        "research_bar_alignment_invalid",
+        "research_bar_values_invalid",
+        "research_bar_geometry_invalid",
+        "research_duplicate_bar_conflict",
+        "research_instrument_identity_conflict",
+        "research_instrument_not_nifty",
+        "research_option_identity_invalid",
+        "research_option_expired",
+    ):
+        codes[code] = code
     return next(
         (code for prefix, code in codes.items() if message.startswith(prefix)),
         "validation_failed",
@@ -72,6 +89,7 @@ def run_worker(request: dict[str, Any], env_file: Path) -> dict[str, Any]:
         load_trade_ledger_rows,
     )
 
+    from nifty_scalper_bot.backtesting.strategy_research import run_archived_research
     from nifty_scalper_bot.config.paths import get_data_dir
     from nifty_scalper_bot.data.rest.zerodha_client import ZerodhaKiteClient
     from nifty_scalper_bot.instruments.active_contracts import (
@@ -126,15 +144,34 @@ def run_worker(request: dict[str, Any], env_file: Path) -> dict[str, Any]:
             status["completed_trade_analysis"] = "completed_trade_analysis.json"
     else:
         status["ledger_analysis_blocker"] = "canonical_trade_journal_unavailable"
+    status["stage"] = "strategy_bar_research"
+    write_json(directory / "status.json", status)
+    write_json(ROOT / "data/research/latest.json", status)
+    report = run_archived_research(directory / "history")
+    write_json(directory / "strategy_bar_research.json", report)
     status.update(
-        state="blocked",
+        state="completed",
         stage="finished",
-        blocker="current_bot_offline_replay_adapter_unavailable",
+        backtest_completed=True,
+        backtest_scope=report["scope"],
+        live_equivalent=False,
+        evidence_label=report["evidence_label"],
+        strategy_bar_research="strategy_bar_research.json",
+        backtest_coverage=report["coverage"],
+        backtest_summary=[
+            {
+                "slippage_bps_per_side": scenario["slippage_bps_per_side"],
+                "strategies": {
+                    name: result["metrics"]
+                    for name, result in scenario["strategies"].items()
+                },
+            }
+            for scenario in report["scenarios"]
+        ],
         explanation=(
-            "Real minute history and completed-trade analysis are prerequisites. "
-            "The generic RSI/demo backtest does not validate ORBPro/SMC/VWAPPro. "
-            "Kite active-contract bars lack historical bid/ask depth and cannot "
-            "recover expired options; no strategy profitability claim is made."
+            "Completed modeled strategy component bar research; historical ATM "
+            "selection, depth and full live-pipeline parity remain unverified. "
+            "See report assumptions and limitations."
         ),
     )
     return status

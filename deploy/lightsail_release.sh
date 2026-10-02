@@ -379,6 +379,7 @@ TARGETED_TESTS=(
   tests/architecture/test_lightsail_release_contract.py
   tests/ops/test_research_jobs.py
   tests/scripts/test_archive_kite_history.py
+  tests/backtests/test_strategy_bar_research.py
   tests/infra/test_supabase_trade_replication.py
   tests/infra/test_daily_log_archive.py
   tests/infra/test_scheduled_tasks.py
