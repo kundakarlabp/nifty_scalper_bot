@@ -48,3 +48,10 @@ when its parent exits. CLI polling now waits for the fixed worker (maximum
 unexpected child exit as failure. Dashboard callers still launch separately
 from their persistent service. Request `research-20261002-02` explicitly retries
 collection after this correction. No systemd permissions are expanded.
+
+The second request reached the worker but returned a generic `ValueError`.
+Stage reporting now preserves collected history when ledger validation fails,
+classifies only fixed known errors without exposing exception payloads, and
+waits for the selected basket during background engine startup. Missing verified
+ledger costs remain a blocker; the job does not replace them with estimates.
+Request `research-20261002-03` retries with these observable failure boundaries.

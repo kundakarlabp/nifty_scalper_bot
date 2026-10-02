@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,41 @@ from nifty_scalper_bot.ops.research_jobs import (  # noqa: E402
     start_job,
     write_json,
 )
+
+
+def safe_error_code(exc: Exception) -> str:
+    """Classify known validation failures without disclosing exception payloads."""
+    message = str(exc)
+    codes = {
+        "active_option_basket_unavailable": "active_option_basket_unavailable",
+        "active_nifty_future_unavailable": "active_nifty_future_unavailable",
+        "operator_env_file_unavailable": "operator_env_file_unavailable",
+        "Not in current instrument master:": "current_instrument_unavailable",
+        "Not a NIFTY option/context instrument:": "invalid_nifty_instrument",
+        "Invalid current instrument token:": "invalid_instrument_token",
+        "broker-calculated costs required": "ledger_requires_verified_costs",
+        "broker-calculated costs missing": "ledger_requires_verified_costs",
+        "completed trade violates gross_pnl": "ledger_net_pnl_inconsistent",
+    }
+    return next(
+        (code for prefix, code in codes.items() if message.startswith(prefix)),
+        "validation_failed",
+    )
+
+
+def load_active_basket() -> dict[str, Any]:
+    """Wait briefly for background startup before querying broker history."""
+    for attempt in range(30):
+        try:
+            with urlopen("http://127.0.0.1:8080/trading/status", timeout=5) as response:
+                selected = json.load(response).get("selected", {})
+            if selected.get("ce") and selected.get("pe"):
+                return selected
+        except (OSError, ValueError):
+            pass
+        if attempt < 29:
+            time.sleep(2)
+    raise ValueError("active_option_basket_unavailable")
 
 
 def run_worker(request: dict[str, Any], env_file: Path) -> dict[str, Any]:
@@ -43,13 +79,17 @@ def run_worker(request: dict[str, Any], env_file: Path) -> dict[str, Any]:
     )
 
     directory = ROOT / "data/research" / request["id"]
-    status = {**request, "state": "collecting", "backtest_completed": False}
+    status = {
+        **request,
+        "state": "collecting",
+        "stage": "history",
+        "backtest_completed": False,
+    }
     write_json(directory / "status.json", status)
     write_json(ROOT / "data/research/latest.json", status)
     client = ZerodhaKiteClient()
     try:
-        with urlopen("http://127.0.0.1:8080/trading/status", timeout=5) as response:
-            selected = json.load(response).get("selected", {})
+        selected = load_active_basket()
         ce, pe = selected.get("ce"), selected.get("pe")
         if not ce or not pe:
             raise ValueError("active_option_basket_unavailable")
@@ -66,21 +106,29 @@ def run_worker(request: dict[str, Any], env_file: Path) -> dict[str, Any]:
             directory / "history",
         )
         status["coverage"] = coverage
+        status["stage"] = "ledger_analysis"
+        write_json(directory / "status.json", status)
+        write_json(ROOT / "data/research/latest.json", status)
     finally:
         client.close()
     journal = get_data_dir() / "trades.db"
     if journal.is_file():
-        evidence = build_analysis(
-            load_trade_ledger_rows(journal),
-            block_size=20,
-            components=("ORBPro", "SMC", "VWAPPro"),
-        )
-        write_json(directory / "completed_trade_analysis.json", evidence)
-        status["completed_trade_analysis"] = "completed_trade_analysis.json"
+        try:
+            evidence = build_analysis(
+                load_trade_ledger_rows(journal),
+                block_size=20,
+                components=("ORBPro", "SMC", "VWAPPro"),
+            )
+        except ValueError as exc:
+            status["ledger_analysis_blocker"] = safe_error_code(exc)
+        else:
+            write_json(directory / "completed_trade_analysis.json", evidence)
+            status["completed_trade_analysis"] = "completed_trade_analysis.json"
     else:
         status["ledger_analysis_blocker"] = "canonical_trade_journal_unavailable"
     status.update(
         state="blocked",
+        stage="finished",
         blocker="current_bot_offline_replay_adapter_unavailable",
         explanation=(
             "Real minute history and completed-trade analysis are prerequisites. "
@@ -115,12 +163,14 @@ def main() -> int:
             raise FileNotFoundError("operator_env_file_unavailable")
         result = run_worker(request, args.env_file)
     except Exception as exc:
-        # Exception messages may include upstream credentials; record type only.
+        # Keep successful collection even if a later stage fails.
+        previous = json.loads((directory / "status.json").read_text())
         result = {
-            **request,
+            **previous,
             "state": "failed",
             "backtest_completed": False,
             "error_type": type(exc).__name__,
+            "error_code": safe_error_code(exc),
         }
     write_json(directory / "status.json", result)
     write_json(ROOT / "data/research/latest.json", result)
