@@ -822,6 +822,8 @@ def metrics() -> PlainTextResponse:
 @app.get("/trading/status")
 def trading_status():
     """Check if bot is configured for LIVE trading."""
+    from nifty_scalper_bot.ops.research_jobs import read_status
+
     enable_live = os.getenv("ENABLE_LIVE", "false").lower() == "true"
     exec_mode = os.getenv("EXECUTION_MODE", "SHADOW")
 
@@ -840,6 +842,9 @@ def trading_status():
     )
     return {
         "enable_live": enable_live,
+        "research_job": read_status(
+            Path(os.getenv("BOT_APP_DIR", "/home/ubuntu/nifty_scalper_bot"))
+        ),
         "execution_mode": exec_mode,
         "configured_for_live": configured_for_live,
         "can_place_live_order_now": can_place_live_order_now,

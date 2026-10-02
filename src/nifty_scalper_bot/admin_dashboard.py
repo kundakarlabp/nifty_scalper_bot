@@ -342,6 +342,16 @@ def dashboard(request: Request) -> HTMLResponse:
     <div class=card><h2>Credentials &amp; Settings</h2><p>Secrets show dots; leave them unchanged unless replacing them.</p>
     <form method=post action="/admin/save">{rows}<button type=submit>Save settings</button></form></div>
 
+    <div class=card><h2>On-demand Research</h2>
+    <p>Collect real Kite minute history for the active NIFTY basket and analyse
+    completed trades. Runs separately without changing live trading settings.</p>
+    <form method=post action="/admin/research/start">
+    <button class=blu type=submit>Collect history &amp; analyse trades</button></form>
+    <p><a href="/admin/research/status">Job status</a> &middot;
+    <a href="/admin/research/report">Latest evidence report</a></p>
+    <p class=muted>A full bot backtest remains blocked until the current strategies
+    have a verified offline replay adapter. Collection is not proof of profit.</p></div>
+
     <div class=card><h2>Controls</h2><div class=row>
     <form method=post action="/admin/update"><button class=blu type=submit>Update from GitHub</button></form>
     <form method=post action="/admin/restart"><button class=amb type=submit>Restart Bot</button></form>
@@ -521,3 +531,40 @@ def logs_download(request: Request, fmt: str = "txt", lines: int = 2000, contain
     else:
         data, media, ext = text, "text/plain", "txt"
     return PlainTextResponse(data, media_type=media, headers={"Content-Disposition": f'attachment; filename="niftybot-logs-{ts}.{ext}"'})
+
+
+@router.post("/admin/research/start")
+def start_research(request: Request) -> JSONResponse:
+    """Start the fixed research job; never accept shell commands from the UI."""
+    from nifty_scalper_bot.ops.research_jobs import new_request, start_job
+    from nifty_scalper_bot.superlite_admin_core import same_origin
+
+    _check_auth(request)
+    same_origin(request)
+    result = start_job(APP_DIR, new_request())
+    return JSONResponse(result, status_code=409 if result["state"] == "busy" else 202)
+
+
+@router.get("/admin/research/status")
+def research_status(request: Request) -> JSONResponse:
+    from nifty_scalper_bot.ops.research_jobs import read_status
+
+    _check_auth(request)
+    return JSONResponse(read_status(APP_DIR), headers={"Cache-Control": "no-store"})
+
+
+@router.get("/admin/research/report")
+def research_report(request: Request) -> JSONResponse:
+    from nifty_scalper_bot.ops.research_jobs import read_status, validate_request
+
+    _check_auth(request)
+    status = read_status(APP_DIR)
+    report = {"status": status}
+    if status.get("id"):
+        validate_request({"id": status["id"]})
+        path = (
+            APP_DIR / "data/research" / status["id"] / "completed_trade_analysis.json"
+        )
+        if path.is_file():
+            report["completed_trade_analysis"] = json.loads(path.read_text())
+    return JSONResponse(report, headers={"Cache-Control": "no-store"})

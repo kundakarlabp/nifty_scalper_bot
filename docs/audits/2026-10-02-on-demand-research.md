@@ -1,0 +1,40 @@
+# On-demand research using the existing AWS updater
+
+The validated Lightsail updater polls `deploy/research_request.json` on healthy
+current revisions and after successful releases. A new ID requests one job;
+repeated polls of the same ID return its existing status. The admin dashboard
+uses the same launcher. No shell commands, paths, broker credentials or strategy
+parameters are accepted from a request. The job runs separately with live flags
+disabled and does not restart or reconfigure trading.
+
+The worker uses the existing authenticated operator environment, current
+runtime option basket, canonical active-future resolver and Kite history
+exporter. Only completed calendar dates are requested, for at most 90 days.
+It also calls the existing canonical completed-trade analyzer with actual-cost
+requirements. Reports are stored in `data/research/<id>/`, with HTTP status and
+latest analysis at `/admin/research/status` and `/admin/research/report`.
+The existing `/trading/status` diagnostic also includes `research_job`, so the
+unchanged read-only AppDeploy relay can retrieve job status from ChatGPT.
+
+## Evidence boundary
+
+This change automates research prerequisites, **not a complete current-bot
+historical backtest**. The existing standalone backtest has an RSI bridge and
+the nightly script defaults to a demonstration momentum strategy. Neither is
+the live ORBPro/SMC/VWAPPro pipeline. The worker explicitly reports
+`current_bot_offline_replay_adapter_unavailable`, with
+`backtest_completed=false`, after collection. It never substitutes demonstration
+PnL or synthetic bid/ask depth. Active-contract minute history cannot recover
+expired option contracts or establish historical ATM selection before capture.
+
+## Operations and rollback
+
+The included request is one automatically picked up 30-day collection attempt
+when this revision is validated and deployed. Authentication failure or missing
+active basket leaves a failed status, never success. The immutable request ID
+prevents silent repeated retries. A fresh ID explicitly retries. The OS lock is
+held by the detached worker until exit; concurrent starts return busy. Removing
+the request manifest stops GitHub-initiated requests; dashboard requests remain
+explicit. No AppDeploy relay settings or version are changed.
+
+Deployment and the real broker job must be observed separately from local tests.
