@@ -1,0 +1,96 @@
+name: ORB historical research
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/orb-historical-research.yml
+      - scripts/research_orb_multiyear.py
+      - src/nifty_scalper_bot/backtesting/strategy_research.py
+
+permissions:
+  contents: read
+
+concurrency:
+  group: orb-historical-research-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  monthly-options-study:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      EXECUTION_MODE: SHADOW
+      LIVE_TRADING_ENABLED: "false"
+      PAPER_TRADING: "true"
+      BROKER_API_KEY: offline_research_unused
+      BROKER_API_SECRET: offline_research_unused
+      SOURCE_DIR: ${{ runner.temp }}/orb-public-source
+      STUDY_DIR: ${{ runner.temp }}/orb-study
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install research dependencies
+        run: python -m pip install -e .
+      - name: Cache checksum-verified public archive
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.SOURCE_DIR }}
+          key: zenodo-10899828-717d15361af52d1d654b4909d998967e
+      - name: Verify and prepare historical baskets
+        run: >-
+          python scripts/research_orb_multiyear.py prepare
+          --source "$SOURCE_DIR" --output "$STUDY_DIR"
+      - name: Select settings on development years
+        run: >-
+          python scripts/research_orb_multiyear.py development
+          --source "$SOURCE_DIR" --output "$STUDY_DIR" --workers 2
+      - name: Validate frozen settings
+        run: >-
+          python scripts/research_orb_multiyear.py validation
+          --source "$SOURCE_DIR" --output "$STUDY_DIR" --workers 2
+      - name: Evaluate final held-out year
+        run: >-
+          python scripts/research_orb_multiyear.py final
+          --source "$SOURCE_DIR" --output "$STUDY_DIR" --workers 2
+      - name: Summarize conditional research evidence
+        run: |
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          root = Path(os.environ["STUDY_DIR"])
+          manifest = json.loads((root / "data_manifest.json").read_text())
+          selection = json.loads((root / "selection.json").read_text())
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as stream:
+              stream.write("## ORB monthly-options research\n\n")
+              stream.write(f"Sessions: {len(manifest['sessions'])}. ")
+              stream.write(f"Frozen research candidate: {selection['candidate']}.\n\n")
+              stream.write("Conditional bar research only. Timestamp conventions, ")
+              stream.write("continuous future identity and executable quotes remain ")
+              stream.write("unverified. Live settings are never promoted.\n\n")
+              stream.write("| Period | Candidate | Slippage/side | Trades | Net P&L | PF |\n")
+              stream.write("|---|---|---:|---:|---:|---:|\n")
+              for phase in ("development", "validation", "final"):
+                  for row in json.loads((root / f"{phase}_results.json").read_text()):
+                      m = row["metrics"]
+                      pf = "—" if m["profit_factor"] is None else f"{m['profit_factor']:.2f}"
+                      stream.write(f"| {phase} | {row['candidate']} | ")
+                      stream.write(f"{row['slippage_bps_per_side']} bps | ")
+                      stream.write(f"{m['trade_count']} | {m['net_pnl']:.2f} | {pf} |\n")
+          PY
+      - name: Save research evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: orb-historical-research-${{ github.sha }}
+          if-no-files-found: warn
+          retention-days: 30
+          path: |
+            ${{ env.STUDY_DIR }}/data_manifest.json
+            ${{ env.STUDY_DIR }}/protocol.json
+            ${{ env.STUDY_DIR }}/selection.json
+            ${{ env.STUDY_DIR }}/*_results.json

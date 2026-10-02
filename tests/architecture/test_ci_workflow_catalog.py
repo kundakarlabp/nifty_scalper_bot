@@ -6,6 +6,7 @@ EXPECTED_WORKFLOWS = {
     "agent-context.yml",
     "ci.yml",
     "failure-memory-candidates.yml",
+    "orb-historical-research.yml",
     "slow-suite-weekly.yml",
 }
 
