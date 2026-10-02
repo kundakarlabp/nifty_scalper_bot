@@ -2,6 +2,8 @@ name: ORB historical research
 
 on:
   workflow_dispatch:
+  issues:
+    types: [opened, reopened]
   push:
     branches: [main]
     paths:
@@ -18,6 +20,10 @@ concurrency:
 
 jobs:
   monthly-options-study:
+    if: >-
+      github.event_name != 'issues' ||
+      (github.event.issue.user.login == github.repository_owner &&
+      startsWith(github.event.issue.title, '[ORB Research]'))
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
