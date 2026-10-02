@@ -147,3 +147,57 @@ def test_worker_reports_real_collection_as_blocked_not_backtest_success(
     assert result["state"] == "blocked"
     assert result["backtest_completed"] is False
     assert result["blocker"] == "current_bot_offline_replay_adapter_unavailable"
+
+
+def test_updater_waits_for_worker_before_oneshot_service_exits(tmp_path, monkeypatch):
+    from nifty_scalper_bot.ops.research_jobs import start_job, write_json
+
+    waited = []
+
+    class Worker:
+        def wait(self, timeout):
+            waited.append(timeout)
+            status = {"id": "oneshot", "state": "blocked", "backtest_completed": False}
+            write_json(tmp_path / "data/research/oneshot/status.json", status)
+            write_json(tmp_path / "data/research/latest.json", status)
+            return 0
+
+    monkeypatch.setattr(
+        "nifty_scalper_bot.ops.research_jobs.subprocess.Popen",
+        lambda *args, **kwargs: Worker(),
+    )
+    result = start_job(tmp_path, {"id": "oneshot"}, wait=True)
+    assert waited == [1800]
+    assert result["state"] == "blocked"
+
+
+@pytest.mark.parametrize("timeout", [True, False])
+def test_updater_records_worker_timeout_or_unexpected_exit(
+    tmp_path, monkeypatch, timeout
+):
+    import subprocess
+
+    from nifty_scalper_bot.ops.research_jobs import start_job
+
+    killed = []
+
+    class Worker:
+        def wait(self, timeout=None):
+            if timeout is not None and globals_timeout:
+                raise subprocess.TimeoutExpired("fixed-worker", timeout)
+            return 1
+
+        def kill(self):
+            killed.append(True)
+
+    globals_timeout = timeout
+    monkeypatch.setattr(
+        "nifty_scalper_bot.ops.research_jobs.subprocess.Popen",
+        lambda *args, **kwargs: Worker(),
+    )
+    result = start_job(tmp_path, {"id": "dead-worker"}, wait=True)
+    assert result["state"] == "failed"
+    assert result["error_type"] == (
+        "WorkerTimeout" if timeout else "WorkerExitedWithoutResult"
+    )
+    assert bool(killed) is timeout
