@@ -157,7 +157,11 @@ def _scenario(
     components: set[str] | None = None,
     minimum_net_rr: float | None = None,
     minimum_opening_rvol: float | None = None,
+    compact_orb_context: bool = False,
+    strict_liquidity: bool = False,
 ) -> dict[str, Any]:
+    if compact_orb_context and components != {"ORBPro"}:
+        raise ValueError("research_compact_context_requires_orb_only")
     options = sorted(
         symbol
         for symbol, row in instruments.items()
@@ -215,8 +219,8 @@ def _scenario(
                 close(
                     key,
                     last_bars[key[1]],
-                    last_bars[key[1]]["close"],
-                    "session_data_end",
+                    0.01 if strict_liquidity else last_bars[key[1]]["close"],
+                    "unpriced_session_end" if strict_liquidity else "session_data_end",
                 )
             pending.clear()
             engine = IndicatorEngine()
@@ -243,6 +247,9 @@ def _scenario(
             bar = bars.get(key[1])
             if bar is None or timestamp != intent["available_at"]:
                 rejections[key[0]]["next_minute_unavailable"] += 1
+                continue
+            if strict_liquidity and bar["volume"] <= 0:
+                rejections[key[0]]["next_minute_has_no_trades"] += 1
                 continue
             entry = bar["open"] * (1 + slip)
             if not intent["stop_loss"] < entry < intent["take_profit"]:
@@ -272,8 +279,20 @@ def _scenario(
             )
         for key, position in list(positions.items()):
             bar = bars.get(key[1])
-            if bar is None:
-                close(key, last_bars[key[1]], last_bars[key[1]]["close"], "history_gap")
+            if bar is None or (strict_liquidity and bar["volume"] <= 0):
+                if strict_liquidity:
+                    # No executable exit quote is known. Charge a conservative
+                    # full-premium loss rather than invent a fill at an old close.
+                    close(
+                        key, {"timestamp": timestamp}, 0.01, "unpriced_gap_worst_case"
+                    )
+                else:
+                    close(
+                        key,
+                        last_bars[key[1]],
+                        last_bars[key[1]]["close"],
+                        "history_gap",
+                    )
                 continue
             stop, target = position["stop_loss"], position["take_profit"]
             if bar["open"] <= stop:
@@ -289,11 +308,31 @@ def _scenario(
             last_bars[symbol] = bar
         if not time(9, 30) <= timestamp.time() < time(14, 59):
             continue
+        if compact_orb_context:
+            range_end = timestamp.replace(hour=9, minute=15) + timedelta(
+                minutes=settings.orb.orb_minutes
+            )
+            entry_end = range_end + timedelta(
+                minutes=max(
+                    1.0, float(os.getenv("ORB_MAX_ENTRY_MINUTES_AFTER_RANGE", "120"))
+                )
+            )
+            if timestamp > entry_end:
+                continue
         for symbol in options:
             if symbol not in bars or future not in bars or "NSE:NIFTY 50" not in bars:
                 continue
             bar = bars[symbol]
-            indicators = dict(engine.get_indicators(symbol))
+            if strict_liquidity and bar["volume"] <= 0:
+                continue
+            # ORB's only option-derived numeric feature is canonical ATR.
+            # Underlying structure still comes from the production strategy's
+            # completed-history interface. Other components require full context.
+            indicators = (
+                {"atr": engine.get_atr(symbol)}
+                if compact_orb_context
+                else dict(engine.get_indicators(symbol))
+            )
             indicators.update(
                 history_count=engine.history_count(symbol),
                 bar_timestamp=timestamp,
@@ -345,7 +384,12 @@ def _scenario(
                     "setup_id": signal.metadata.get("setup_id"),
                 }
     for key in list(positions):
-        close(key, last_bars[key[1]], last_bars[key[1]]["close"], "session_data_end")
+        close(
+            key,
+            last_bars[key[1]],
+            0.01 if strict_liquidity else last_bars[key[1]]["close"],
+            "unpriced_session_end" if strict_liquidity else "session_data_end",
+        )
     days = sorted(
         {ts.date().isoformat() for symbol in options for ts in histories[symbol]}
     )
@@ -372,6 +416,47 @@ def _scenario(
             for name, trades in outcomes.items()
         },
     }
+
+
+def run_orb_session_research(
+    directory: Path,
+    *,
+    overrides: dict[str, str],
+    slippage_bps: float,
+    minimum_net_rr: float | None = 1.5,
+) -> dict[str, Any]:
+    """Replay a preselected historical basket in an isolated research process.
+
+    Contract selection and chronological settings selection belong to the
+    research orchestrator. No broker or live execution path is instantiated.
+    """
+    if os.getenv("EXECUTION_MODE", "SHADOW").upper() != "SHADOW":
+        raise ValueError("research_requires_shadow_process")
+    if any(not key.startswith("ORB_") for key in overrides):
+        raise ValueError("research_override_not_orb_setting")
+    if not math.isfinite(slippage_bps) or not 0 <= slippage_bps <= 1000:
+        raise ValueError("research_slippage_invalid")
+    histories, instruments, _ = load_archive(directory)
+    original = {key: os.environ.get(key) for key in overrides}
+    try:
+        os.environ.update(overrides)
+        result = _scenario(
+            histories,
+            instruments,
+            get_settings().elite,
+            slippage_bps,
+            components={"ORBPro"},
+            minimum_net_rr=minimum_net_rr,
+            compact_orb_context=True,
+            strict_liquidity=True,
+        )
+        return result["strategies"]["ORBPro"]
+    finally:
+        for key, value in original.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 def run_archived_research(

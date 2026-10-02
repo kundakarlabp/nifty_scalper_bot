@@ -1,0 +1,4228 @@
+{
+  "study_date": "2026-10-02",
+  "scope": "conditional_monthly_option_component_research",
+  "live_equivalent": false,
+  "promotion_eligible": false,
+  "selection": {
+    "candidate": null,
+    "selected_from": "2017\u20132018 only",
+    "protocol_sha256": "cb3ec04c806b87a93a5c90693654c98e09b569476ea60b42e95163265e667c38",
+    "promotion_eligible": false
+  },
+  "coverage": {
+    "source": "https://doi.org/10.5281/zenodo.10899828",
+    "source_md5": {
+      "Nifty spot and futures data.zip": "240aecc77a7275ec2f05a092b976bf91",
+      "Nifty Options Data.zip": "717d15361af52d1d654b4909d998967e"
+    },
+    "excluded_sessions": {
+      "zero_volume_option_rows_removed": 396423,
+      "invalid_option_rows_removed": 278,
+      "missing_opening_spot": 5,
+      "opening_atm_pair_unavailable": 61
+    },
+    "underlying_sessions": 991,
+    "unprepared_underlying_sessions": 86,
+    "assumptions": [
+      "Context and options before March 2018 assumed bar-end; later options assumed bar-start; publisher-unverified",
+      "Monthly expiry label inferred from last traded date across that folder",
+      "Continuous NIFTY_F1 context; historical future roll identity unverified",
+      "Fixed daily ATM from opening-minute spot close; no intraday basket rotation",
+      "Quantity standardized to 75 units; current modeled fees, not historical account returns",
+      "No executable bid/ask or depth; slippage scenarios do not prove fills"
+    ]
+  },
+  "session_count": 905,
+  "expiry_count": 47,
+  "yearly_sessions": {
+    "2017": 244,
+    "2018": 217,
+    "2019": 229,
+    "2020": 215
+  },
+  "first_session": "2017-01-02",
+  "last_session": "2020-12-31",
+  "protocol": {
+    "candidates": [
+      {
+        "name": "raw_reference",
+        "overrides": {},
+        "minimum_net_rr": null
+      },
+      {
+        "name": "stop_0.75_rr_1.8",
+        "overrides": {
+          "ORB_PREMIUM_STOP_ATR_MULT": "0.75",
+          "ORB_TARGET_RR": "1.8"
+        },
+        "minimum_net_rr": 1.5
+      },
+      {
+        "name": "stop_0.75_rr_2.2",
+        "overrides": {
+          "ORB_PREMIUM_STOP_ATR_MULT": "0.75",
+          "ORB_TARGET_RR": "2.2"
+        },
+        "minimum_net_rr": 1.5
+      },
+      {
+        "name": "stop_0.75_rr_2.5",
+        "overrides": {
+          "ORB_PREMIUM_STOP_ATR_MULT": "0.75",
+          "ORB_TARGET_RR": "2.5"
+        },
+        "minimum_net_rr": 1.5
+      },
+      {
+        "name": "stop_1.0_rr_1.8",
+        "overrides": {
+          "ORB_PREMIUM_STOP_ATR_MULT": "1.0",
+          "ORB_TARGET_RR": "1.8"
+        },
+        "minimum_net_rr": 1.5
+      },
+      {
+        "name": "stop_1.0_rr_2.2",
+        "overrides": {
+          "ORB_PREMIUM_STOP_ATR_MULT": "1.0",
+          "ORB_TARGET_RR": "2.2"
+        },
+        "minimum_net_rr": 1.5
+      },
+      {
+        "name": "stop_1.0_rr_2.5",
+        "overrides": {
+          "ORB_PREMIUM_STOP_ATR_MULT": "1.0",
+          "ORB_TARGET_RR": "2.5"
+        },
+        "minimum_net_rr": 1.5
+      },
+      {
+        "name": "stop_1.25_rr_1.8",
+        "overrides": {
+          "ORB_PREMIUM_STOP_ATR_MULT": "1.25",
+          "ORB_TARGET_RR": "1.8"
+        },
+        "minimum_net_rr": 1.5
+      },
+      {
+        "name": "stop_1.25_rr_2.2",
+        "overrides": {
+          "ORB_PREMIUM_STOP_ATR_MULT": "1.25",
+          "ORB_TARGET_RR": "2.2"
+        },
+        "minimum_net_rr": 1.5
+      },
+      {
+        "name": "stop_1.25_rr_2.5",
+        "overrides": {
+          "ORB_PREMIUM_STOP_ATR_MULT": "1.25",
+          "ORB_TARGET_RR": "2.5"
+        },
+        "minimum_net_rr": 1.5
+      },
+      {
+        "name": "retest_only",
+        "overrides": {
+          "ORB_MOMENTUM_BRANCH_ENABLED": "false"
+        },
+        "minimum_net_rr": 1.5
+      },
+      {
+        "name": "early_entry_60",
+        "overrides": {
+          "ORB_MAX_ENTRY_MINUTES_AFTER_RANGE": "60"
+        },
+        "minimum_net_rr": 1.5
+      }
+    ],
+    "slippage_bps_per_side": [
+      10.0,
+      25.0,
+      50.0
+    ],
+    "development_years": [
+      "2017",
+      "2018"
+    ],
+    "validation_years": [
+      "2019"
+    ],
+    "final_years": [
+      "2020"
+    ],
+    "selection_rule": "Max worst-slippage development expectancy; >=100 trades at every stress level",
+    "entry_window": "09:30 through 120 minutes after the 15-minute range; early candidate 60",
+    "exit_rule": "Next-minute open; stop-first ambiguity; missing/zero-volume exit charged full-premium loss",
+    "promotion_eligible": false,
+    "replay_code_sha256": "6938ae83eec3be8c0cf74b70fc1587cb52f1bdb78bdcb299bd62cfeafdd2fc44",
+    "manifest_sha256": "997f6bb3b4e654453aebfefc25643c4815314245d6df25d4cfdf8a49aa025cf6"
+  },
+  "scenarios": [
+    {
+      "phase": "development",
+      "candidate": "early_entry_60",
+      "slippage_bps_per_side": 10.0,
+      "metrics": {
+        "trade_count": 12,
+        "net_pnl": -15677.837073394927,
+        "expectancy": -1306.4864227829105,
+        "profit_factor": 0.09933738494202067,
+        "win_rate": 0.3333333333333333,
+        "average_win": 432.2915457964964,
+        "average_loss": -2175.875407072614,
+        "max_realized_drawdown": 16320.851735738428,
+        "worst_trade": -15830.569192610883,
+        "fees": 833.841906923242,
+        "turnover": 234810.40983352828,
+        "exposure_minutes": 31.0
+      },
+      "yearly_metrics": {
+        "2017": {
+          "trade_count": 4,
+          "net_pnl": -90.57284424864946,
+          "expectancy": -22.643211062162365,
+          "profit_factor": 0.8100685879329813,
+          "win_rate": 0.25,
+          "average_win": 386.29848136804304,
+          "average_loss": -158.9571085388975,
+          "max_realized_drawdown": 476.8713256166925,
+          "worst_trade": -239.76426937995902,
+          "fees": 238.10256991972943,
+          "turnover": 41498.839725671074,
+          "exposure_minutes": 8.0
+        },
+        "2018": {
+          "trade_count": 8,
+          "net_pnl": -15587.264229146278,
+          "expectancy": -1948.4080286432848,
+          "profit_factor": 0.07931820657356581,
+          "win_rate": 0.375,
+          "average_win": 447.62256727264753,
+          "average_loss": -3386.0263861928443,
+          "max_realized_drawdown": 16320.851735738428,
+          "worst_trade": -15830.569192610883,
+          "fees": 595.7393370035127,
+          "turnover": 193311.5701078572,
+          "exposure_minutes": 23.0
+        }
+      },
+      "no_vote_reasons": {
+        "no_fresh_underlying_breakout": 42785,
+        "awaiting_orb_retest": 1497,
+        "below_strategy_min_confidence": 108,
+        "cost_net_rr_rejected": 475,
+        "orb_session_event_limit": 2537,
+        "orb_event_already_emitted": 6613,
+        "orb_breakout_invalidated": 182,
+        "wick_only_underlying_breakout": 81,
+        "orb_breakout_expired": 51,
+        "orb_event_inactive": 1488,
+        "next_minute_unavailable": 2,
+        "gap_invalidates_geometry": 2
+      },
+      "exit_reasons": {
+        "stop": 6,
+        "target": 4,
+        "unpriced_gap_worst_case": 1,
+        "gap_stop": 1
+      },
+      "priced_exit_subset_metrics": {
+        "trade_count": 11,
+        "net_pnl": 152.73211921595595,
+        "expectancy": 13.88473811054145,
+        "profit_factor": 1.0968845590860434,
+        "win_rate": 0.36363636363636365,
+        "average_win": 432.2915457964964,
+        "average_loss": -225.2048662814328,
+        "max_realized_drawdown": 832.4145702281821,
+        "worst_trade": -424.0168252969402,
+        "fees": 779.5339643123596,
+        "turnover": 219032.6485835283,
+        "exposure_minutes": 29.0
+      },
+      "unpriced_exit_count": 1,
+      "unpriced_exit_penalty_net": -15830.569192610883
+    },
+    {
+      "phase": "development",
+      "candidate": "early_entry_60",
+      "slippage_bps_per_side": 25.0,
+      "metrics": {
+        "trade_count": 7,
+        "net_pnl": -16769.947533313923,
+        "expectancy": -2395.7067904734176,
+        "profit_factor": 0.033466161496739776,
+        "win_rate": 0.14285714285714285,
+        "average_win": 580.6581726210753,
+        "average_loss": -2891.767617655833,
+        "max_realized_drawdown": 16769.947533313923,
+        "worst_trade": -15854.221716715207,
+        "fees": 493.8379821808292,
+        "turnover": 147963.46544886692,
+        "exposure_minutes": 13.0
+      },
+      "yearly_metrics": {
+        "2017": {
+          "trade_count": 2,
+          "net_pnl": -420.2197738479893,
+          "expectancy": -210.10988692399465,
+          "profit_factor": 0.0,
+          "win_rate": 0.0,
+          "average_win": null,
+          "average_loss": -210.10988692399465,
+          "max_realized_drawdown": 420.2197738479893,
+          "worst_trade": -254.3466943457546,
+          "fees": 114.33024365099065,
+          "turnover": 17002.272969803,
+          "exposure_minutes": 2.0
+        },
+        "2018": {
+          "trade_count": 5,
+          "net_pnl": -16349.727759465935,
+          "expectancy": -3269.9455518931873,
+          "profit_factor": 0.034296806638092835,
+          "win_rate": 0.2,
+          "average_win": 580.6581726210753,
+          "average_loss": -4232.596483021753,
+          "max_realized_drawdown": 16349.727759465935,
+          "worst_trade": -15854.221716715207,
+          "fees": 379.50773852983855,
+          "turnover": 130961.1924790639,
+          "exposure_minutes": 11.0
+        }
+      },
+      "no_vote_reasons": {
+        "no_fresh_underlying_breakout": 42786,
+        "awaiting_orb_retest": 1508,
+        "below_strategy_min_confidence": 108,
+        "cost_net_rr_rejected": 481,
+        "orb_session_event_limit": 2537,
+        "orb_event_already_emitted": 6580,
+        "orb_breakout_invalidated": 182,
+        "wick_only_underlying_breakout": 81,
+        "orb_breakout_expired": 52,
+        "orb_event_inactive": 1521,
+        "next_minute_unavailable": 2,
+        "gap_invalidates_geometry": 1
+      },
+      "exit_reasons": {
+        "stop": 4,
+        "unpriced_gap_worst_case": 1,
+        "target": 1,
+        "gap_stop": 1
+      },
+      "priced_exit_subset_metrics": {
+        "trade_count": 6,
+        "net_pnl": -915.7258165987174,
+        "expectancy": -152.62096943311957,
+        "profit_factor": 0.38804088843788526,
+        "win_rate": 0.16666666666666666,
+        "average_win": 580.6581726210753,
+        "average_loss": -299.27679784395855,
+        "max_realized_drawdown": 944.5781594256969,
+        "worst_trade": -482.0134369248585,
+        "fees": 439.51939046562296,
+        "turnover": 132162.0623238669,
+        "exposure_minutes": 11.0
+      },
+      "unpriced_exit_count": 1,
+      "unpriced_exit_penalty_net": -15854.221716715207
+    },
+    {
+      "phase": "development",
+      "candidate": "early_entry_60",
+      "slippage_bps_per_side": 50.0,
+      "metrics": {
+        "trade_count": 2,
+        "net_pnl": -857.3251922601363,
+        "expectancy": -428.66259613006815,
+        "profit_factor": 0.0,
+        "win_rate": 0.0,
+        "average_win": null,
+        "average_loss": -428.66259613006815,
+        "max_realized_drawdown": 857.3251922601363,
+        "worst_trade": -578.6744563047209,
+        "fees": 151.2837848712926,
+        "turnover": 48423.38359261115,
+        "exposure_minutes": 3.0
+      },
+      "yearly_metrics": {
+        "2017": {
+          "trade_count": 1,
+          "net_pnl": -278.65073595541537,
+          "expectancy": -278.65073595541537,
+          "profit_factor": 0.0,
+          "win_rate": 0.0,
+          "average_win": null,
+          "average_loss": -278.65073595541537,
+          "max_realized_drawdown": 278.65073595541537,
+          "worst_trade": -278.65073595541537,
+          "fees": 58.5718285665676,
+          "turnover": 9729.421092611152,
+          "exposure_minutes": 1.0
+        },
+        "2018": {
+          "trade_count": 1,
+          "net_pnl": -578.6744563047209,
+          "expectancy": -578.6744563047209,
+          "profit_factor": 0.0,
+          "win_rate": 0.0,
+          "average_win": null,
+          "average_loss": -578.6744563047209,
+          "max_realized_drawdown": 578.6744563047209,
+          "worst_trade": -578.6744563047209,
+          "fees": 92.711956304725,
+          "turnover": 38693.962499999994,
+          "exposure_minutes": 2.0
+        }
+      },
+      "no_vote_reasons": {
+        "no_fresh_underlying_breakout": 42786,
+        "awaiting_orb_retest": 1508,
+        "below_strategy_min_confidence": 108,
+        "cost_net_rr_rejected": 485,
+        "orb_session_event_limit": 2537,
+        "orb_event_already_emitted": 6585,
+        "orb_breakout_invalidated": 182,
+        "wick_only_underlying_breakout": 81,
+        "orb_breakout_expired": 52,
+        "orb_event_inactive": 1521,
+        "next_minute_unavailable": 2,
+        "gap_invalidates_geometry": 2
+      },
+      "exit_reasons": {
+        "stop": 1,
+        "gap_stop": 1
+      },
+      "priced_exit_subset_metrics": {
+        "trade_count": 2,
+        "net_pnl": -857.3251922601363,
+        "expectancy": -428.66259613006815,
+        "profit_factor": 0.0,
+        "win_rate": 0.0,
+        "average_win": null,
+        "average_loss": -428.66259613006815,
+        "max_realized_drawdown": 857.3251922601363,
+        "worst_trade": -578.6744563047209,
+        "fees": 151.2837848712926,
+        "turnover": 48423.38359261115,
+        "exposure_minutes": 3.0
+      },
+      "unpriced_exit_count": 0,
+      "unpriced_exit_penalty_net": 0
+    },
+    {
+      "phase": "development",
+      "candidate": "raw_reference",
+      "slippage_bps_per_side": 10.0,
+      "metrics": {
+        "trade_count": 707,
+        "net_pnl": -263437.87544569036,
+        "expectancy": -372.6136852131405,
+        "profit_factor": 0.10718031008579501,
+        "win_rate": 0.32248939179632247,
+        "average_win": 138.70579885973,
+        "average_loss": -615.9974897405195,
+        "max_realized_drawdown": 263681.84707694,
+        "worst_trade": -19672.38514802081,
+        "fees": 46359.157846551774,
+        "turnover": 11091558.62240086,
+        "exposure_minutes": 2272.0
+      },
+      "yearly_metrics": {
+        "2017": {
+          "trade_count": 339,
+          "net_pnl": -80198.89668682136,
+          "expectancy": -236.574916480299,
+          "profit_factor": 0.12416459314218665,
+          "win_rate": 0.336283185840708,
+          "average_win": 99.73298415053381,
+          "average_loss": -406.97091946658765,
+          "max_realized_drawdown": 80433.97772036129,
+          "worst_trade": -11462.991522873099,
+          "fees": 21135.08356312638,
+          "turnover": 4367763.591876305,
+          "exposure_minutes": 1121.0
+        },
+        "2018": {
+          "trade_count": 368,
+          "net_pnl": -183238.97875886902,
+          "expectancy": -497.9320074969267,
+          "profit_factor": 0.09953771626577511,
+          "win_rate": 0.30978260869565216,
+          "average_win": 177.67861356892618,
+          "average_loss": -801.158821676089,
+          "max_realized_drawdown": 183482.9503901188,
+          "worst_trade": -19672.38514802081,
+          "fees": 25224.074283425394,
+          "turnover": 6723795.030524556,
+          "exposure_minutes": 1151.0
+        }
+      },
+      "no_vote_reasons": {
+        "no_fresh_underlying_breakout": 77206,
+        "awaiting_orb_retest": 2108,
+        "below_strategy_min_confidence": 151,
+        "orb_session_event_limit": 8537,
+        "orb_event_already_emitted": 15175,
+        "orb_breakout_invalidated": 283,
+        "orb_breakout_expired": 78,
+        "orb_event_inactive": 4385,
+        "wick_only_underlying_breakout": 100,
+        "next_minute_unavailable": 6,
+        "gap_invalidates_geometry": 3
+      },
+      "exit_reasons": {
+        "stop": 431,
+        "target": 237,
+        "gap_stop": 21,
+        "unpriced_gap_worst_case": 18
+      },
+      "priced_exit_subset_metrics": {
+        "trade_count": 689,
+        "net_pnl": -61317.63263023065,
+        "expectancy": -88.99511267087176,
+        "profit_factor": 0.34026310357181594,
+        "win_rate": 0.3309143686502177,
+        "average_win": 138.70579885973,
+        "average_loss": -201.61074787472688,
+        "max_realized_drawdown": 61561.604261480374,
+        "worst_trade": -557.5330175695864,
+        "fees": 45418.90753109203,
+        "turnover": 10890351.62990086,
+        "exposure_minutes": 2185.0
+      },
+      "unpriced_exit_count": 18,
+      "unpriced_exit_penalty_net": -202120.24281545973
+    },
+    {
+      "phase": "development",
+      "candidate": "raw_reference",
+      "slippage_bps_per_side": 25.0,
+      "metrics": {
+        "trade_count": 708,
+        "net_pnl": -280205.88770181633,
+        "expectancy": -395.7710278274242,
+        "profit_factor": 0.08637645680230202,
+        "win_rate": 0.3022598870056497,
+        "average_win": 123.79171676757004,
+        "average_loss": -620.8447673888185,
+        "max_realized_drawdown": 280399.62494339864,
+        "worst_trade": -19701.794639091288,
+        "fees": 46420.58432032279,
+        "turnover": 11113918.209118506,
+        "exposure_minutes": 2273.0
+      },
+      "yearly_metrics": {
+        "2017": {
+          "trade_count": 340,
+          "net_pnl": -86846.41984279,
+          "expectancy": -255.43064659644116,
+          "profit_factor": 0.09698737431480303,
+          "win_rate": 0.3,
+          "average_win": 91.44777170796583,
+          "average_loss": -404.0928258697585,
+          "max_realized_drawdown": 86999.56800195343,
+          "worst_trade": -11480.0992252945,
+          "fees": 21194.751258319775,
+          "turnover": 4382365.643915529,
+          "exposure_minutes": 1122.0
+        },
+        "2018": {
+          "trade_count": 368,
+          "net_pnl": -193359.4678590263,
+          "expectancy": -525.433336573441,
+          "profit_factor": 0.08152903260518445,
+          "win_rate": 0.30434782608695654,
+          "average_win": 153.2478095897096,
+          "average_loss": -822.3563380198195,
+          "max_realized_drawdown": 193553.20510060884,
+          "worst_trade": -19701.794639091288,
+          "fees": 25225.833062003014,
+          "turnover": 6731552.565202977,
+          "exposure_minutes": 1151.0
+        }
+      },
+      "no_vote_reasons": {
+        "no_fresh_underlying_breakout": 77206,
+        "awaiting_orb_retest": 2108,
+        "below_strategy_min_confidence": 151,
+        "orb_session_event_limit": 8537,
+        "orb_event_already_emitted": 15175,
+        "orb_breakout_invalidated": 283,
+        "orb_breakout_expired": 78,
+        "orb_event_inactive": 4385,
+        "wick_only_underlying_breakout": 100,
+        "next_minute_unavailable": 6,
+        "gap_invalidates_geometry": 2
+      },
+      "exit_reasons": {
+        "stop": 431,
+        "target": 236,
+        "gap_stop": 23,
+        "unpriced_gap_worst_case": 18
+      },
+      "priced_exit_subset_metrics": {
+        "trade_count": 690,
+        "net_pnl": -77784.02033557296,
+        "expectancy": -112.73046425445357,
+        "profit_factor": 0.25405239647995465,
+        "win_rate": 0.3101449275362319,
+        "average_win": 123.79171676757004,
+        "average_loss": -219.06606664670787,
+        "max_realized_drawdown": 77977.75757715551,
+        "worst_trade": -616.6811144802741,
+        "fees": 45480.198204079425,
+        "turnover": 10912409.727868507,
+        "exposure_minutes": 2186.0
+      },
+      "unpriced_exit_count": 18,
+      "unpriced_exit_penalty_net": -202421.86736624336
+    },
+    {
+      "phase": "development",
+      "candidate": "raw_reference",
+      "slippage_bps_per_side": 50.0,
+      "metrics": {
+        "trade_count": 707,
+        "net_pnl": -307820.18768067175,
+        "expectancy": -435.38923292881435,
+        "profit_factor": 0.05820930074374314,
+        "win_rate": 0.2545968882602546,
+        "average_win": 105.69697995914551,
+        "average_loss": -620.2004631372257,
+        "max_realized_drawdown": 307930.2009394756,
+        "worst_trade": -19750.810457542073,
+        "fees": 46328.444244064434,
+        "turnover": 11093186.694063392,
+        "exposure_minutes": 2272.0
+      },
+      "yearly_metrics": {
+        "2017": {
+          "trade_count": 340,
+          "net_pnl": -97794.08872027103,
+          "expectancy": -287.6296727066795,
+          "profit_factor": 0.062448408915434385,
+          "win_rate": 0.24705882352941178,
+          "average_win": 77.54602139066137,
+          "average_loss": -407.4529473323695,
+          "max_realized_drawdown": 97838.67629825164,
+          "worst_trade": -11508.6120626635,
+          "fees": 21186.86103450877,
+          "turnover": 4382502.397314237,
+          "exposure_minutes": 1122.0
+        },
+        "2018": {
+          "trade_count": 367,
+          "net_pnl": -210026.09896040068,
+          "expectancy": -572.2781988021817,
+          "profit_factor": 0.05622234427247068,
+          "win_rate": 0.2615803814713896,
+          "average_win": 130.32906870656916,
+          "average_loss": -821.1722861853555,
+          "max_realized_drawdown": 210136.11221920454,
+          "worst_trade": -19750.810457542073,
+          "fees": 25141.583209555665,
+          "turnover": 6710684.296749154,
+          "exposure_minutes": 1150.0
+        }
+      },
+      "no_vote_reasons": {
+        "no_fresh_underlying_breakout": 77206,
+        "awaiting_orb_retest": 2108,
+        "below_strategy_min_confidence": 151,
+        "orb_session_event_limit": 8537,
+        "orb_event_already_emitted": 15175,
+        "orb_breakout_invalidated": 283,
+        "orb_breakout_expired": 78,
+        "orb_event_inactive": 4385,
+        "wick_only_underlying_breakout": 100,
+        "next_minute_unavailable": 6,
+        "gap_invalidates_geometry": 3
+      },
+      "exit_reasons": {
+        "stop": 431,
+        "target": 235,
+        "gap_stop": 23,
+        "unpriced_gap_worst_case": 18
+      },
+      "priced_exit_subset_metrics": {
+        "trade_count": 689,
+        "net_pnl": -104895.612729789,
+        "expectancy": -152.24326956428013,
+        "profit_factor": 0.1535288270782175,
+        "win_rate": 0.2612481857764877,
+        "average_win": 105.69697995914551,
+        "average_loss": -243.45986075134618,
+        "max_realized_drawdown": 105005.6259885929,
+        "worst_trade": -715.2612759980943,
+        "fees": 45387.831793181715,
+        "turnover": 10891175.731563391,
+        "exposure_minutes": 2185.0
+      },
+      "unpriced_exit_count": 18,
+      "unpriced_exit_penalty_net": -202924.5749508827
+    },
+    {
+      "phase": "development",
+      "candidate": "retest_only",
+      "slippage_bps_per_side": 10.0,
+      "metrics": {
+        "trade_count": 15,
+        "net_pnl": -16290.379957223002,
+        "expectancy": -1086.0253304815335,
+        "profit_factor": 0.0805351323701841,
+        "win_rate": 0.26666666666666666,
+        "average_win": 356.71507210424204,
+        "average_loss": -1610.6582041490883,
+        "max_realized_drawdown": 16927.23517303301,
+        "worst_trade": -15830.569192610883,
+        "fees": 954.4641031148967,
+        "turnover": 217419.10664589188,
+        "exposure_minutes": 36.0
+      },
+      "yearly_metrics": {
+        "2017": {
+          "trade_count": 7,
+          "net_pnl": 145.4625116791359,
+          "expectancy": 20.780358811305128,
+          "profit_factor": 1.2062566348303725,
+          "win_rate": 0.42857142857142855,
+          "average_win": 283.57086949203267,
+          "average_loss": -176.31252419924053,
+          "max_realized_drawdown": 321.8999669669505,
+          "worst_trade": -239.76426937995902,
+          "fees": 411.932136905515,
+          "turnover": 68432.70214858465,
+          "exposure_minutes": 16.0
+        },
+        "2018": {
+          "trade_count": 8,
+          "net_pnl": -16435.842468902138,
+          "expectancy": -2054.480308612767,
+          "profit_factor": 0.033867153395927295,
+          "win_rate": 0.125,
+          "average_win": 576.1476799408701,
+          "average_loss": -2430.2843069775727,
+          "max_realized_drawdown": 16927.23517303301,
+          "worst_trade": -15830.569192610883,
+          "fees": 542.5319662093817,
+          "turnover": 148986.40449730723,
+          "exposure_minutes": 20.0
+        }
+      },
+      "no_vote_reasons": {
+        "no_fresh_underlying_breakout": 78446,
+        "awaiting_orb_retest": 3768,
+        "below_strategy_min_confidence": 193,
+        "cost_net_rr_rejected": 541,
+        "orb_session_event_limit": 6994,
+        "orb_event_already_emitted": 10118,
+        "orb_breakout_invalidated": 395,
+        "orb_event_inactive": 9521,
+        "orb_breakout_expired": 169,
+        "wick_only_underlying_breakout": 106,
+        "next_minute_unavailable": 9,
+        "gap_invalidates_geometry": 3
+      },
+      "exit_reasons": {
+        "stop": 8,
+        "target": 4,
+        "gap_stop": 2,
+        "unpriced_gap_worst_case": 1
+      },
+      "priced_exit_subset_metrics": {
+        "trade_count": 14,
+        "net_pnl": -459.81076461211967,
+        "expectancy": -32.843626043722836,
+        "profit_factor": 0.7562846136458794,
+        "win_rate": 0.2857142857142857,
+        "average_win": 356.71507210424204,
+        "average_loss": -188.6671053029088,
+        "max_realized_drawdown": 1096.6659804221274,
+        "worst_trade": -399.2517156674644,
+        "fees": 900.1561605040142,
+        "turnover": 201641.34539589187,
+        "exposure_minutes": 34.0
+      },
+      "unpriced_exit_count": 1,
+      "unpriced_exit_penalty_net": -15830.569192610883
+    },
+    {
+      "phase": "development",
+      "candidate": "retest_only",
+      "slippage_bps_per_side": 25.0,
+      "metrics": {
+        "trade_count": 8,
+        "net_pnl": -16067.061672885293,
+        "expectancy": -2008.3827091106616,
+        "profit_factor": 0.048289096358529,
+        "win_rate": 0.25,
+        "average_win": 407.61532013122223,
+        "average_loss": -2813.715385524623,
+        "max_realized_drawdown": 16614.107561058234,
+        "worst_trade": -15854.221716715207,
+        "fees": 485.5873757349138,
+        "turnover": 100756.14445284962,
+        "exposure_minutes": 16.0
+      },
+      "yearly_metrics": {
+        "2017": {
+          "trade_count": 4,
+          "net_pnl": -390.7771717698954,
+          "expectancy": -97.69429294247385,
+          "profit_factor": 0.4069806499877912,
+          "win_rate": 0.25,
+          "average_win": 268.1847520895036,
+          "average_loss": -219.65397461979967,
+          "max_realized_drawdown": 658.961923859399,
+          "worst_trade": -254.3466943457546,
+          "fees": 225.27495314387514,
+          "turnover": 30871.89778137398,
+          "exposure_minutes": 8.0
+        },
+        "2018": {
+          "trade_count": 4,
+          "net_pnl": -15676.284501115397,
+          "expectancy": -3919.071125278849,
+          "profit_factor": 0.03371970335598509,
+          "win_rate": 0.25,
+          "average_win": 547.0458881729409,
+          "average_loss": -5407.776796429446,
+          "max_realized_drawdown": 16223.330389288338,
+          "worst_trade": -15854.221716715207,
+          "fees": 260.3124225910386,
+          "turnover": 69884.24667147564,
+          "exposure_minutes": 8.0
+        }
+      },
+      "no_vote_reasons": {
+        "no_fresh_underlying_breakout": 78449,
+        "awaiting_orb_retest": 3779,
+        "below_strategy_min_confidence": 193,
+        "cost_net_rr_rejected": 550,
+        "orb_session_event_limit": 6994,
+        "orb_event_already_emitted": 10023,
+        "orb_breakout_invalidated": 395,
+        "orb_event_inactive": 9614,
+        "orb_breakout_expired": 170,
+        "wick_only_underlying_breakout": 106,
+        "next_minute_unavailable": 9,
+        "gap_invalidates_geometry": 1
+      },
+      "exit_reasons": {
+        "stop": 5,
+        "target": 2,
+        "unpriced_gap_worst_case": 1
+      },
+      "priced_exit_subset_metrics": {
+        "trade_count": 7,
+        "net_pnl": -212.83995617008551,
+        "expectancy": -30.40570802429793,
+        "profit_factor": 0.7929714584692397,
+        "win_rate": 0.2857142857142857,
+        "average_win": 407.61532013122223,
+        "average_loss": -205.614119286506,
+        "max_realized_drawdown": 759.8858443430263,
+        "worst_trade": -254.3466943457546,
+        "fees": 431.26878401970754,
+        "turnover": 84954.74132784962,
+        "exposure_minutes": 14.0
+      },
+      "unpriced_exit_count": 1,
+      "unpriced_exit_penalty_net": -15854.221716715207
+    },
+    {
+      "phase": "development",
+      "candidate": "retest_only",
+      "slippage_bps_per_side": 50.0,
+      "metrics": {
+        "trade_count": 1,
+        "net_pnl": -278.65073595541537,
+        "expectancy": -278.65073595541537,
+        "profit_factor": 0.0,
+        "win_rate": 0.0,
+        "average_win": null,
+        "average_loss": -278.65073595541537,
+        "max_realized_drawdown": 278.65073595541537,
+        "worst_trade": -278.65073595541537,
+        "fees": 58.5718285665676,
+        "turnover": 9729.421092611152,
+        "exposure_minutes": 1.0
+      },
+      "yearly_metrics": {
+        "2017": {
+          "trade_count": 1,
+          "net_pnl": -278.65073595541537,
+          "expectancy": -278.65073595541537,
+          "profit_factor": 0.0,
+          "win_rate": 0.0,
+          "average_win": null,
+          "average_loss": -278.65073595541537,
+          "max_realized_drawdown": 278.65073595541537,
+          "worst_trade": -278.65073595541537,
+          "fees": 58.5718285665676,
+          "turnover": 9729.421092611152,
+          "exposure_minutes": 1.0
+        },
+        "2018": {
+          "trade_count": 0,
+          "net_pnl": 0,
+          "expectancy": null,
+          "profit_factor": null,
+          "win_rate": null,
+          "average_win": null,
+          "average_loss": null,
+          "max_realized_drawdown": 0.0,
+          "worst_trade": null,
+          "fees": 0,
+          "turnover": 0,
+          "exposure_minutes": 0
+        }
+      },
+      "no_vote_reasons": {
+        "no_fresh_underlying_breakout": 78449,
+        "awaiting_orb_retest": 3779,
+        "below_strategy_min_confidence": 193,
+        "cost_net_rr_rejected": 556,
+        "orb_session_event_limit": 6994,
+        "orb_event_already_emitted": 10031,
+        "orb_breakout_invalidated": 395,
+        "orb_event_inactive": 9614,
+        "orb_breakout_expired": 170,
+        "wick_only_underlying_breakout": 106,
+        "next_minute_unavailable": 9,
+        "gap_invalidates_geometry": 2
+      },
+      "exit_reasons": {
+        "stop": 1
+      },
+      "priced_exit_subset_metrics": {
+        "trade_count": 1,
+        "net_pnl": -278.65073595541537,
+        "expectancy": -278.65073595541537,
+        "profit_factor": 0.0,
+        "win_rate": 0.0,
+        "average_win": null,
+        "average_loss": -278.65073595541537,
+        "max_realized_drawdown": 278.65073595541537,
+        "worst_trade": -278.65073595541537,
+        "fees": 58.5718285665676,
+        "turnover": 9729.421092611152,
+        "exposure_minutes": 1.0
+      },
+      "unpriced_exit_count": 0,
+      "unpriced_exit_penalty_net": 0
+    },
+    {
+      "phase": "development",
+      "candidate": "stop_0.75_rr_1.8",
+      "slippage_bps_per_side": 10.0,
+      "metrics": {
+        "trade_count": 16,
+        "net_pnl": -15505.195917042038,
+        "expectancy": -969.0747448151274,
+        "profit_factor": 0.12393966012780118,
+        "win_rate": 0.375,
+        "average_win": 365.59671838234016,
+        "average_loss": -1769.877622733608,
+        "max_realized_drawdown": 16527.869730683597,
+        "worst_trade": -15830.569192610883,
+        "fees": 1097.7388937955086,
+        "turnover": 297889.5279767534,
+        "exposure_minutes": 44.0
+      },
+      "yearly_metrics": {
+        "2017": {
+          "trade_count": 6,
+          "net_pnl": 373.8412828594055,
+          "expectancy": 62.306880476567585,
+          "profit_factor": 1.783945820973723,
+          "win_rate": 0.5,
+          "average_win": 283.57086949203267,
+          "average_loss": -158.9571085388975,
+          "max_realized_drawdown": 321.8999669669505,
+          "worst_trade": -239.76426937995902,
+          "fees": 356.66331755001767,
+          "turnover": 61518.73210040941,
+          "exposure_minutes": 15.0
+        },
+        "2018": {
+          "trade_count": 10,
+          "net_pnl": -15879.037199901444,
+          "expectancy": -1587.9037199901445,
+          "profit_factor": 0.07797440001447659,
+          "win_rate": 0.3,
+          "average_win": 447.62256727264753,
+          "average_loss": -2460.272128817055,
+          "max_realized_drawdown": 16527.869730683597,
+          "worst_trade": -15830.569192610883,
+          "fees": 741.0755762454909,
+          "turnover": 236370.79587634403,
+          "exposure_minutes": 29.0
+        }
+      },
+      "no_vote_reasons": {
+        "no_fresh_underlying_breakout": 76927,
+        "awaiting_orb_retest": 2265,
+        "below_strategy_min_confidence": 162,
+        "cost_net_rr_rejected": 719,
+        "orb_session_event_limit": 9573,
+        "orb_event_already_emitted": 15452,
+        "orb_breakout_invalidated": 293,
+        "orb_breakout_expired": 86,
+        "orb_event_inactive": 4664,
+        "wick_only_underlying_breakout": 105,
+        "next_minute_unavailable": 6,
+        "gap_invalidates_geometry": 3
+      },
+      "exit_reasons": {
+        "stop": 7,
+        "target": 6,
+        "unpriced_gap_worst_case": 1,
+        "gap_stop": 2
+      },
+      "priced_exit_subset_metrics": {
+        "trade_count": 15,
+        "net_pnl": 325.373275568845,
+        "expectancy": 21.691551704589664,
+        "profit_factor": 1.1741633927723145,
+        "win_rate": 0.4,
+        "average_win": 365.59671838234016,
+        "average_loss": -207.57855941391063,
+        "max_realized_drawdown": 832.4145702281821,
+        "worst_trade": -424.0168252969402,
+        "fees": 1043.430951184626,
+        "turnover": 282111.76672675344,
+        "exposure_minutes": 42.0
+      },
+      "unpriced_exit_count": 1,
+      "unpriced_exit_penalty_net": -15830.569192610883
+    },
+    {
+      "phase": "development",
+      "candidate": "stop_0.75_rr_1.8",
+      "slippage_bps_per_side": 25.0,
+      "metrics": {
+        "trade_count": 8,
+        "net_pnl": -16501.76278122442,
+        "expectancy": -2062.7203476530526,
+        "profit_factor": 0.048922956298881326,
+        "win_rate": 0.25,
+        "average_win": 424.42146235528946,
+        "average_loss": -2891.767617655833,
+        "max_realized_drawdown": 16501.76278122442,
+        "worst_trade": -15854.221716715207,
+        "fees": 549.5211992651165,
+        "turnover": 154918.8709180407,
+        "exposure_minutes": 18.0
+      },
+      "yearly_metrics": {
+        "2017": {
+          "trade_count": 3,
+          "net_pnl": -152.0350217584857,
+          "expectancy": -50.6783405861619,
+          "profit_factor": 0.6382011718147205,
+          "win_rate": 0.3333333333333333,
+          "average_win": 268.1847520895036,
+          "average_loss": -210.10988692399465,
+          "max_realized_drawdown": 420.2197738479893,
+          "worst_trade": -254.3466943457546,
+          "fees": 170.01346073527793,
+          "turnover": 23957.678438976793,
+          "exposure_minutes": 7.0
+        },
+        "2018": {
+          "trade_count": 5,
+          "net_pnl": -16349.727759465935,
+          "expectancy": -3269.9455518931873,
+          "profit_factor": 0.034296806638092835,
+          "win_rate": 0.2,
+          "average_win": 580.6581726210753,
+          "average_loss": -4232.596483021753,
+          "max_realized_drawdown": 16349.727759465935,
+          "worst_trade": -15854.221716715207,
+          "fees": 379.50773852983855,
+          "turnover": 130961.1924790639,
+          "exposure_minutes": 11.0
+        }
+      },
+      "no_vote_reasons": {
+        "no_fresh_underlying_breakout": 76928,
+        "awaiting_orb_retest": 2276,
+        "below_strategy_min_confidence": 162,
+        "cost_net_rr_rejected": 728,
+        "orb_session_event_limit": 9573,
+        "orb_event_already_emitted": 15364,
+        "orb_breakout_invalidated": 293,
+        "orb_breakout_expired": 87,
+        "orb_event_inactive": 4757,
+        "wick_only_underlying_breakout": 105,
+        "next_minute_unavailable": 6,
+        "gap_invalidates_geometry": 2
+      },
+      "exit_reasons": {
+        "stop": 4,
+        "target": 2,
+        "unpriced_gap_worst_case": 1,
+        "gap_stop": 1
+      },
+      "priced_exit_subset_metrics": {
+        "trade_count": 7,
+        "net_pnl": -647.5410645092138,
+        "expectancy": -92.50586635845912,
+        "profit_factor": 0.5672627686648541,
+        "win_rate": 0.2857142857142857,
+        "average_win": 424.42146235528946,
+        "average_loss": -299.27679784395855,
+        "max_realized_drawdown": 944.5781594256969,
+        "worst_trade": -482.0134369248585,
+        "fees": 495.2026075499103,
+        "turnover": 139117.4677930407,
+        "exposure_minutes": 16.0
+      },
+      "unpriced_exit_count": 1,
+      "unpriced_exit_penalty_net": -15854.221716715207
+    },
+    {
+      "phase": "development",
+      "candidate": "stop_0.75_rr_1.8",
+      "slippage_bps_per_side": 50.0,
+      "metrics": {
+        "trade_count": 2,
+        "net_pnl": -857.3251922601363,
+        "expectancy": -428.66259613006815,
+        "profit_factor": 0.0,
+        "win_rate": 0.0,
+        "average_win": null,
+        "average_loss": -428.66259613006815,
+        "max_realized_drawdown": 857.3251922601363,
+        "worst_trade": -578.6744563047209,
+        "fees": 151.2837848712926,
+        "turnover": 48423.38359261115,
+        "exposure_minutes": 3.0
+      },
+      "yearly_metrics": {
+        "2017": {
+          "trade_count": 1,
+          "net_pnl": -278.65073595541537,
+          "expectancy": -278.65073595541537,
+          "profit_factor": 0.0,
+          "win_rate": 0.0,
+          "average_win": null,
+          "average_loss": -278.65073595541537,
+          "max_realized_drawdown": 278.65073595541537,
+          "worst_trade": -278.65073595541537,
+          "fees": 58.5718285665676,
+          "turnover": 9729.421092611152,
+          "exposure_minutes": 1.0
+        },
+        "2018": {
+          "trade_count": 1,
+          "net_pnl": -578.6744563047209,
+          "expectancy": -578.6744563047209,
+          "profit_factor": 0.0,
+          "win_rate": 0.0,
+          "average_win": null,
+          "average_loss": -578.6744563047209,
+          "max_realized_drawdown": 578.6744563047209,
+          "worst_trade": -578.6744563047209,
+          "fees": 92.711956304725,
+          "turnover": 38693.962499999994,
+          "exposure_minutes": 2.0
+        }
+      },
+      "no_vote_reasons": {
+        "no_fresh_underlying_breakout": 76928,
+        "awaiting_orb_retest": 2276,
+        "below_strategy_min_confidence": 162,
+        "cost_net_rr_rejected": 733,
+        "orb_session_event_limit": 9573,
+        "orb_event_already_emitted": 15373,
+        "orb_breakout_invalidated": 293,
+        "orb_breakout_expired": 87,
+        "orb_event_inactive": 4757,
+        "wick_only_underlying_breakout": 105,
+        "next_minute_unavailable": 6,
+        "gap_invalidates_geometry": 3
+      },
+      "exit_reasons": {
+        "stop": 1,
+        "gap_stop": 1
+      },
+      "priced_exit_subset_metrics": {
+        "trade_count": 2,
+        "net_pnl": -857.3251922601363,
+        "expectancy": -428.66259613006815,
+        "profit_factor": 0.0,
+        "win_rate": 0.0,
+        "average_win": null,
+        "average_loss": -428.66259613006815,
+        "max_realized_drawdown": 857.3251922601363,
+        "worst_trade": -578.6744563047209,
+        "fees": 151.2837848712926,
+        "turnover": 48423.38359261115,
+        "exposure_minutes": 3.0
+      },
+      "unpriced_exit_count": 0,
+      "unpriced_exit_penalty_net": 0
+    },
+    {
+      "phase": "development",
+      "candidate": "stop_0.75_rr_2.2",
+      "slippage_bps_per_side": 10.0,
+      "metrics": {
+        "trade_count": 63,
+        "net_pnl": -18644.853330435235,
+        "expectancy": -295.9500528640514,
+        "profit_factor": 0.2786043320282166,
+        "win_rate": 0.2698412698412698,
+        "average_win": 423.5692119428073,
+        "average_loss": -561.8593463796295,
+        "max_realized_drawdown": 18970.710302914435,
+        "worst_trade": -15830.569192610883,
+        "fees": 4245.116543197638,
+        "turnover": 1081545.1132127622,
+        "exposure_minutes": 224.0
+      },
+      "yearly_metrics": {
+        "2017": {
+          "trade_count": 23,
+          "net_pnl": -200.48842737751949,
+          "expectancy": -8.716888146848673,
+          "profit_factor": 0.9173114983939814,
+          "win_rate": 0.30434782608695654,
+          "average_win": 317.7334836789777,
+          "average_loss": -151.53892582064768,
+          "max_realized_drawdown": 633.6005797399831,
+          "worst_trade": -239.76426937995902,
+          "fees": 1435.2443442503186,
+          "turnover": 294184.91341687273,
+          "exposure_minutes": 94.0
+        },
+        "2018": {
+          "trade_count": 40,
+          "net_pnl": -18444.364903057714,
+          "expectancy": -461.10912257644287,
+          "profit_factor": 0.21248289793842154,
+          "win_rate": 0.25,
+          "average_win": 497.6542217274881,
+          "average_loss": -780.6969040110865,
+          "max_realized_drawdown": 18770.56873360362,
+          "worst_trade": -15830.569192610883,
+          "fees": 2809.8721989473192,
+          "turnover": 787360.1997958896,
+          "exposure_minutes": 130.0
+        }
+      },
+      "no_vote_reasons": {
+        "no_fresh_underlying_breakout": 76951,
+        "awaiting_orb_retest": 2262,
+        "below_strategy_min_confidence": 162,
+        "cost_net_rr_rejected": 671,
+        "orb_session_event_limit": 9396,
+        "orb_event_already_emitted": 15477,
+        "orb_breakout_invalidated": 293,
+        "orb_breakout_expired": 86,
+        "orb_event_inactive": 4664,
+        "wick_only_underlying_breakout": 105,
+        "next_minute_unavailable": 6,
+        "gap_invalidates_geometry": 2
+      },
+      "exit_reasons": {
+        "gap_stop": 3,
+        "stop": 42,
+        "target": 17,
+        "unpriced_gap_worst_case": 1
+      },
+      "priced_exit_subset_metrics": {
+        "trade_count": 62,
+        "net_pnl": -2814.284137824351,
+        "expectancy": -45.39167964232824,
+        "profit_factor": 0.718991995011564,
+        "win_rate": 0.27419354838709675,
+        "average_win": 423.5692119428073,
+        "average_loss": -222.55468313004616,
+        "max_realized_drawdown": 3140.1411103035534,
+        "worst_trade": -503.9368164568124,
+        "fees": 4190.808600586755,
+        "turnover": 1065767.3519627622,
+        "exposure_minutes": 222.0
+      },
+      "unpriced_exit_count": 1,
+      "unpriced_exit_penalty_net": -15830.569192610883
+    },
+    {
+      "phase": "development",
+      "candidate": "stop_0.75_rr_2.2",
+      "slippage_bps_per_side": 25.0,
+      "metrics": {
+        "trade_count": 20,
+        "net_pnl": -15467.99125256853,
+        "expectancy": -773.3995626284266,
+        "profit_factor": 0.17803718366601773,
+        "win_rate": 0.35,
+        "average_win": 478.62394482591,
+        "average_loss": -1447.5660666423,
+        "max_realized_drawdown": 16308.55817362025,
+        "worst_trade": -15854.221716715207,
+        "fees": 1314.444996514451,
+        "turnover": 321272.9287439459,
+        "exposure_minutes": 53.0
+      },
+      "yearly_metrics": {
+        "2017": {
+          "trade_count": 6,
+          "net_pnl": 33.115227687579434,
+          "expectancy": 5.519204614596572,
+          "profit_factor": 1.0436475237727614,
+          "win_rate": 0.3333333333333333,
+          "average_win": 395.9059115843969,
+          "average_loss": -189.67414887030358,
+          "max_realized_drawdown": 537.3871669422152,
+          "worst_trade": -254.3466943457546,
+          "fees": 346.30169240224075,
+          "turnover": 52995.62942008982,
+          "exposure_minutes": 23.0
+        },
+        "2018": {
+          "trade_count": 14,
+          "net_pnl": -15501.106480256109,
+          "expectancy": -1107.221891446865,
+          "profit_factor": 0.14167240517779114,
+          "win_rate": 0.35714285714285715,
+          "average_win": 511.7111581225152,
+          "average_loss": -2006.6291412076316,
+          "max_realized_drawdown": 16308.558173620251,
+          "worst_trade": -15854.221716715207,
+          "fees": 968.1433041122102,
+          "turnover": 268277.2993238561,
+          "exposure_minutes": 30.0
+        }
+      },
+      "no_vote_reasons": {
+        "no_fresh_underlying_breakout": 76927,
+        "awaiting_orb_retest": 2265,
+        "below_strategy_min_confidence": 162,
+        "cost_net_rr_rejected": 718,
+        "orb_session_event_limit": 9573,
+        "orb_event_already_emitted": 15447,
+        "orb_breakout_invalidated": 293,
+        "orb_breakout_expired": 86,
+        "orb_event_inactive": 4664,
+        "wick_only_underlying_breakout": 105,
+        "next_minute_unavailable": 6
+      },
+      "exit_reasons": {
+        "stop": 10,
+        "target": 7,
+        "unpriced_gap_worst_case": 1,
+        "gap_stop": 2
+      },
+      "priced_exit_subset_metrics": {
+        "trade_count": 19,
+        "net_pnl": 386.23046414667675,
+        "expectancy": 20.327919165614567,
+        "profit_factor": 1.1303011448691829,
+        "win_rate": 0.3684210526315789,
+        "average_win": 478.62394482591,
+        "average_loss": -247.01142913622445,
+        "max_realized_drawdown": 1117.4100181827835,
+        "worst_trade": -482.0134369248585,
+        "fees": 1260.1264047992447,
+        "turnover": 305471.5256189459,
+        "exposure_minutes": 51.0
+      },
+      "unpriced_exit_count": 1,
+      "unpriced_exit_penalty_net": -15854.221716715207
+    },
+    {
+      "phase": "development",
+      "candidate": "stop_0.75_rr_2.2",
+      "slippage_bps_per_side": 50.0,
+      "metrics": {
+        "trade_count": 7,
+        "net_pnl": -801.985472680713,
+        "expectancy": -114.56935324010185,
+        "profit_factor": 0.5491531733449981,
+        "win_rate": 0.2857142857142857,
+        "average_win": 488.4284875273345,
+        "average_loss": -355.7684895470764,
+        "max_realized_drawdown": 1131.517474754878,
+        "worst_trade": -578.6744563047209,
+        "fees": 495.3179373778332,
+        "turnover": 139310.44496469712,
+        "exposure_minutes": 18.0
+      },
+      "yearly_metrics": {
+        "2017": {
+          "trade_count": 3,
+          "net_pnl": -148.98790249862287,
+          "expectancy": -49.662634166207624,
+          "profit_factor": 0.6779986087320654,
+          "win_rate": 0.3333333333333333,
+          "average_win": 313.70544771318197,
+          "average_loss": -231.34667510590242,
+          "max_realized_drawdown": 462.69335021180484,
+          "worst_trade": -278.65073595541537,
+          "fees": 170.0902303675186,
+          "turnover": 24020.502327868893,
+          "exposure_minutes": 8.0
+        },
+        "2018": {
+          "trade_count": 4,
+          "net_pnl": -652.9975701820902,
+          "expectancy": -163.24939254552254,
+          "profit_factor": 0.5038574494251837,
+          "win_rate": 0.25,
+          "average_win": 663.151527341487,
+          "average_loss": -438.7163658411924,
+          "max_realized_drawdown": 1131.517474754878,
+          "worst_trade": -578.6744563047209,
+          "fees": 325.2277070103146,
+          "turnover": 115289.94263682821,
+          "exposure_minutes": 10.0
+        }
+      },
+      "no_vote_reasons": {
+        "no_fresh_underlying_breakout": 76928,
+        "awaiting_orb_retest": 2276,
+        "below_strategy_min_confidence": 162,
+        "cost_net_rr_rejected": 729,
+        "orb_session_event_limit": 9573,
+        "orb_event_already_emitted": 15363,
+        "orb_breakout_invalidated": 293,
+        "orb_breakout_expired": 87,
+        "orb_event_inactive": 4757,
+        "wick_only_underlying_breakout": 105,
+        "next_minute_unavailable": 6,
+        "gap_invalidates_geometry": 2
+      },
+      "exit_reasons": {
+        "stop": 4,
+        "target": 2,
+        "gap_stop": 1
+      },
+      "priced_exit_subset_metrics": {
+        "trade_count": 7,
+        "net_pnl": -801.985472680713,
+        "expectancy": -114.56935324010185,
+        "profit_factor": 0.5491531733449981,
+        "win_rate": 0.2857142857142857,
+        "average_win": 488.4284875273345,
+        "average_loss": -355.7684895470764,
+        "max_realized_drawdown": 1131.517474754878,
+        "worst_trade": -578.6744563047209,
+        "fees": 495.3179373778332,
+        "turnover": 139310.44496469712,
+        "exposure_minutes": 18.0
+      },
+      "unpriced_exit_count": 0,
+      "unpriced_exit_penalty_net": 0
+    },
+    {
+      "phase": "development",
+      "candidate": "stop_0.75_rr_2.5",
+      "slippage_bps_per_side": 10.0,
+      "metrics": {
+        "trade_count": 120,
+        "net_pnl": -35796.7565963822,
+        "expectancy": -298.3063049698516,
+        "profit_factor": 0.26660240526216905,
+        "win_rate": 0.25833333333333336,
+        "average_win": 419.7653310782173,
+        "average_loss": -548.4211444922128,
+        "max_realized_drawdown": 36343.64031062561,
+        "worst_trade": -15830.569192610883,
+        "fees": 8077.99003197303,
+        "turnover": 2053562.9359355906,
+        "exposure_minutes": 451.0
+      },
+      "yearly_metrics": {
+        "2017": {
+          "trade_count": 41,
+          "net_pnl": -499.8682409259679,
+          "expectancy": -12.19190831526751,
+          "profit_factor": 0.8976303052595607,
+          "win_rate": 0.3170731707317073,
+          "average_win": 337.16174335624925,
+          "average_loss": -174.39181801990028,
+          "max_realized_drawdown": 1203.5284335871136,
+          "worst_trade": -318.30875185992056,
+          "fees": 2597.009138079489,
+          "turnover": 556983.9733971534,
+          "exposure_minutes": 177.0
+        },
+        "2018": {
+          "trade_count": 79,
+          "net_pnl": -35296.888355456234,
+          "expectancy": -446.7960551323574,
+          "profit_factor": 0.1964559081094547,
+          "win_rate": 0.22784810126582278,
+          "average_win": 479.4234777663053,
+          "average_loss": -720.1067369713071,
+          "max_realized_drawdown": 36021.940580778624,
+          "worst_trade": -15830.569192610883,
+          "fees": 5480.980893893541,
+          "turnover": 1496578.9625384372,
+          "exposure_minutes": 274.0
+        }
+      },
+      "no_vote_reasons": {
+        "no_fresh_underlying_breakout": 76935,
+        "awaiting_orb_retest": 2235,
+        "below_strategy_min_confidence": 162,
+        "cost_net_rr_rejected": 612,
+        "orb_session_event_limit": 9374,
+        "orb_event_already_emitted": 15404,
+        "orb_breakout_invalidated": 292,
+        "orb_breakout_expired": 84,
+        "orb_event_inactive": 4637,
+        "wick_only_underlying_breakout": 105,
+        "next_minute_unavailable": 6,
+        "gap_invalidates_geometry": 2
+      },
+      "exit_reasons": {
+        "gap_stop": 6,
+        "stop": 81,
+        "target": 31,
+        "unpriced_gap_worst_case": 2
+      },
+      "priced_exit_subset_metrics": {
+        "trade_count": 118,
+        "net_pnl": -6591.676505234819,
+        "expectancy": -55.861665298600165,
+        "profit_factor": 0.6637654857812312,
+        "win_rate": 0.2627118644067797,
+        "average_win": 419.7653310782173,
+        "average_loss": -225.33795136390293,
+        "max_realized_drawdown": 7138.560219478228,
+        "worst_trade": -540.2115622600281,
+        "fees": 7970.47994082565,
+        "turnover": 2024462.3659355906,
+        "exposure_minutes": 447.0
+      },
+      "unpriced_exit_count": 2,
+      "unpriced_exit_penalty_net": -29205.080091147378
+    },
+    {
+      "phase": "development",
+      "candidate": "stop_0.75_rr_2.5",
+      "slippage_bps_per_side": 25.0,
+      "metrics": {
+        "trade_count": 55,
+        "net_pnl": -18748.63723975728,
+        "expectancy": -340.88431345013237,
+        "profit_factor": 0.2792899501329488,
+        "win_rate": 0.2727272727272727,
+        "average_win": 484.3654727000126,
+        "average_loss": -650.3529832564368,
+        "max_realized_drawdown": 19427.69904918522,
+        "worst_trade": -15854.221716715207,
+        "fees": 3584.946663187188,
+        "turnover": 843650.4906734299,
+        "exposure_minutes": 210.0
+      },
+      "yearly_metrics": {
+        "2017": {
+          "trade_count": 18,
+          "net_pnl": 303.70155621114344,
+          "expectancy": 16.87230867839686,
+          "profit_factor": 1.1356593343572692,
+          "win_rate": 0.3333333333333333,
+          "average_win": 423.7348266573992,
+          "average_loss": -186.55895031110433,
+          "max_realized_drawdown": 857.6105872815785,
+          "worst_trade": -299.8279103073273,
+          "fees": 1064.9277620394653,
+          "turnover": 180796.0793182506,
+          "exposure_minutes": 80.0
+        },
+        "2018": {
+          "trade_count": 37,
+          "net_pnl": -19052.338795968426,
+          "expectancy": -514.9280755667143,
+          "profit_factor": 0.19865368243259163,
+          "win_rate": 0.24324324324324326,
+          "average_win": 524.7859033950882,
+          "average_loss": -849.1218545187221,
+          "max_realized_drawdown": 19275.502110319845,
+          "worst_trade": -15854.221716715207,
+          "fees": 2520.0189011477223,
+          "turnover": 662854.4113551793,
+          "exposure_minutes": 130.0
+        }
+      },
+      "no_vote_reasons": {
+        "no_fresh_underlying_breakout": 76923,
+        "awaiting_orb_retest": 2264,
+        "below_strategy_min_confidence": 162,
+        "cost_net_rr_rejected": 682,
+        "orb_session_event_limit": 9465,
+        "orb_event_already_emitted": 15439,
+        "orb_breakout_invalidated": 293,
+        "orb_breakout_expired": 86,
+        "orb_event_inactive": 4664,
+        "wick_only_underlying_breakout": 105,
+        "next_minute_unavailable": 6
+      },
+      "exit_reasons": {
+        "target": 15,
+        "stop": 35,
+        "gap_stop": 4,
+        "unpriced_gap_worst_case": 1
+      },
+      "priced_exit_subset_metrics": {
+        "trade_count": 54,
+        "net_pnl": -2894.415523042075,
+        "expectancy": -53.600287463742134,
+        "profit_factor": 0.7151137114625968,
+        "win_rate": 0.2777777777777778,
+        "average_win": 484.3654727000126,
+        "average_loss": -260.5101952190324,
+        "max_realized_drawdown": 3573.4773324700095,
+        "worst_trade": -550.0851746994223,
+        "fees": 3530.6280714719815,
+        "turnover": 827849.0875484298,
+        "exposure_minutes": 208.0
+      },
+      "unpriced_exit_count": 1,
+      "unpriced_exit_penalty_net": -15854.221716715207
+    },
+    {
+      "phase": "development",
+      "candidate": "stop_0.75_rr_2.5",
+      "slippage_bps_per_side": 50.0,
+      "metrics": {
+        "trade_count": 15,
+        "net_pnl": -332.8061821058792,
+        "expectancy": -22.187078807058615,
+        "profit_factor": 0.896691891910957,
+        "win_rate": 0.3333333333333333,
+        "average_win": 577.7370442501299,
+        "average_loss": -322.1491403356528,
+        "max_realized_drawdown": 1131.517474754878,
+        "worst_trade": -578.6744563047209,
+        "fees": 994.2856171022178,
+        "turnover": 241092.6544349963,
+        "exposure_minutes": 38.0
+      },
+      "yearly_metrics": {
+        "2017": {
+          "trade_count": 5,
+          "net_pnl": 165.5312102792223,
+          "expectancy": 33.10624205584446,
+          "profit_factor": 1.2380648501781797,
+          "win_rate": 0.4,
+          "average_win": 430.42551830052196,
+          "average_loss": -231.7732754406072,
+          "max_realized_drawdown": 462.69335021180484,
+          "worst_trade": -278.65073595541537,
+          "fees": 284.13975303528696,
+          "turnover": 40330.583463314506,
+          "exposure_minutes": 15.0
+        },
+        "2018": {
+          "trade_count": 10,
+          "net_pnl": -498.33739238510145,
+          "expectancy": -49.83373923851015,
+          "profit_factor": 0.8027301878797701,
+          "win_rate": 0.3,
+          "average_win": 675.9447282165352,
+          "average_loss": -360.88165386210096,
+          "max_realized_drawdown": 1131.517474754878,
+          "worst_trade": -578.6744563047209,
+          "fees": 710.1458640669308,
+          "turnover": 200762.0709716818,
+          "exposure_minutes": 23.0
+        }
+      },
+      "no_vote_reasons": {
+        "no_fresh_underlying_breakout": 76927,
+        "awaiting_orb_retest": 2265,
+        "below_strategy_min_confidence": 162,
+        "cost_net_rr_rejected": 723,
+        "orb_session_event_limit": 9573,
+        "orb_event_already_emitted": 15457,
+        "orb_breakout_invalidated": 293,
+        "orb_breakout_expired": 86,
+        "orb_event_inactive": 4664,
+        "wick_only_underlying_breakout": 105,
+        "next_minute_unavailable": 6
+      },
+      "exit_reasons": {
+        "stop": 9,
+        "target": 5,
+        "gap_stop": 1
+      },
+      "priced_exit_subset_metrics": {
+        "trade_count": 15,
+        "net_pnl": -332.8061821058792,
+        "expectancy": -22.187078807058615,
+        "profit_factor": 0.896691891910957,
+        "win_rate": 0.3333333333333333,
+        "average_win": 577.7370442501299,
+        "average_loss": -322.1491403356528,
+        "max_realized_drawdown": 1131.517474754878,
+        "worst_trade": -578.6744563047209,
+        "fees": 994.2856171022178,
+        "turnover": 241092.6544349963,
+        "exposure_minutes": 38.0
+      },
+      "unpriced_exit_count": 0,
+      "unpriced_exit_penalty_net": 0
+    },
+    {
+      "phase": "development",
+      "candidate": "stop_1.0_rr_1.8",
+      "slippage_bps_per_side": 10.0,
+      "metrics": {
+        "trade_count": 26,
+        "net_pnl": -15462.386529356298,
+        "expectancy": -594.7071742060115,
+        "profit_factor": 0.21562480644685744,
+        "win_rate": 0.3076923076923077,
+        "average_win": 531.3264191043445,
+        "average_loss": -1095.166549010614,
+        "max_realized_drawdown": 16158.589138674657,
+        "worst_trade": -15830.569192610883,
+        "fees": 1786.987872067493,
+        "turnover": 480700.98384271114,
+        "exposure_minutes": 107.0
+      },
+      "yearly_metrics": {
+        "2017": {
+          "trade_count": 9,
+          "net_pnl": -258.40115899894863,
+          "expectancy": -28.71123988877207,
+          "profit_factor": 0.7764064708196338,
+          "win_rate": 0.2222222222222222,
+          "average_win": 448.6362656591888,
+          "average_loss": -165.09624147390375,
+          "max_realized_drawdown": 1155.6736903173262,
+          "worst_trade": -325.4089452082568,
+          "fees": 544.4800537125203,
+          "turnover": 100781.47389471356,
+          "exposure_minutes": 34.0
+        },
+        "2018": {
+          "trade_count": 17,
+          "net_pnl": -15203.985370357348,
+          "expectancy": -894.3520806092557,
+          "profit_factor": 0.18070163493639937,
+          "win_rate": 0.35294117647058826,
+          "average_win": 558.8898035860631,
+          "average_loss": -1687.0294719885205,
+          "max_realized_drawdown": 16158.589138674657,
+          "worst_trade": -15830.569192610883,
+          "fees": 1242.5078183549729,
+          "turnover": 379919.5099479976,
+          "exposure_minutes": 73.0
+        }
+      },
+      "no_vote_reasons": {
+        "no_fresh_underlying_breakout": 76952,
+        "awaiting_orb_retest": 2265,
+        "below_strategy_min_confidence": 162,
+        "cost_net_rr_rejected": 711,
+        "orb_session_event_limit": 9537,
+        "orb_event_already_emitted": 15418,
+        "orb_breakout_invalidated": 293,
+        "orb_breakout_expired": 86,
+        "orb_event_inactive": 4664,
+        "wick_only_underlying_breakout": 105,
+        "next_minute_unavailable": 6
+      },
+      "exit_reasons": {
+        "stop": 14,
+        "gap_stop": 3,
+        "target": 8,
+        "unpriced_gap_worst_case": 1
+      },
+      "priced_exit_subset_metrics": {
+        "trade_count": 25,
+        "net_pnl": 368.1826632545858,
+        "expectancy": 14.727306530183432,
+        "profit_factor": 1.09483307813038,
+        "win_rate": 0.32,
+        "average_win": 531.3264191043445,
+        "average_loss": -228.37815821059826,
+        "max_realized_drawdown": 1220.941918447512,
+        "worst_trade": -554.621525419446,
+        "fees": 1732.6799294566106,
+        "turnover": 464923.22259271116,
+        "exposure_minutes": 105.0
+      },
+      "unpriced_exit_count": 1,
+      "unpriced_exit_penalty_net": -15830.569192610883
+    },
+    {
+      "phase": "development",
+      "candidate": "stop_1.0_rr_1.8",
+      "slippage_bps_per_side": 25.0,
+      "metrics": {
+        "trade_count": 10,
+        "net_pnl": -16184.29079759733,
+        "expectancy": -1618.429079759733,
+        "profit_factor": 0.0929210755505706,
+        "win_rate": 0.3,
+        "average_win": 552.6390509876695,
+        "average_loss": -2548.8868500800486,
+        "max_realized_drawdown": 16350.529764949164,
+        "worst_trade": -15854.221716715207,
+        "fees": 687.2389809150816,
+        "turnover": 191178.34818331775,
+        "exposure_minutes": 44.0
+      },
+      "yearly_metrics": {
+        "2017": {
+          "trade_count": 4,
+          "net_pnl": -352.4661070346601,
+          "expectancy": -88.11652675866503,
+          "profit_factor": 0.5072018498783375,
+          "win_rate": 0.25,
+          "average_win": 362.7681261856614,
+          "average_loss": -238.41141107344052,
+          "max_realized_drawdown": 715.2342332203216,
+          "worst_trade": -339.8627745647007,
+          "fees": 232.16235900371643,
+          "turnover": 36653.90250196905,
+          "exposure_minutes": 18.0
+        },
+        "2018": {
+          "trade_count": 6,
+          "net_pnl": -15831.82469056267,
+          "expectancy": -2638.6374484271114,
+          "profit_factor": 0.07562042472606167,
+          "win_rate": 0.3333333333333333,
+          "average_win": 647.5745133886737,
+          "average_loss": -4281.743429335004,
+          "max_realized_drawdown": 16350.529764949164,
+          "worst_trade": -15854.221716715207,
+          "fees": 455.0766219113651,
+          "turnover": 154524.44568134868,
+          "exposure_minutes": 26.0
+        }
+      },
+      "no_vote_reasons": {
+        "no_fresh_underlying_breakout": 76928,
+        "awaiting_orb_retest": 2276,
+        "below_strategy_min_confidence": 162,
+        "cost_net_rr_rejected": 728,
+        "orb_session_event_limit": 9573,
+        "orb_event_already_emitted": 15340,
+        "orb_breakout_invalidated": 293,
+        "orb_breakout_expired": 87,
+        "orb_event_inactive": 4757,
+        "wick_only_underlying_breakout": 105,
+        "next_minute_unavailable": 6
+      },
+      "exit_reasons": {
+        "stop": 4,
+        "gap_stop": 2,
+        "target": 3,
+        "unpriced_gap_worst_case": 1
+      },
+      "priced_exit_subset_metrics": {
+        "trade_count": 9,
+        "net_pnl": -330.0690808821228,
+        "expectancy": -36.674342320235866,
+        "profit_factor": 0.8339681255017,
+        "win_rate": 0.3333333333333333,
+        "average_win": 552.6390509876695,
+        "average_loss": -331.33103897418863,
+        "max_realized_drawdown": 1090.5823846879412,
+        "worst_trade": -608.5689477630825,
+        "fees": 632.9203891998753,
+        "turnover": 175376.94505831774,
+        "exposure_minutes": 42.0
+      },
+      "unpriced_exit_count": 1,
+      "unpriced_exit_penalty_net": -15854.221716715207
+    },
+    {
+      "phase": "development",
+      "candidate": "stop_1.0_rr_1.8",
+      "slippage_bps_per_side": 50.0,
+      "metrics": {
+        "trade_count": 2,
+        "net_pnl": -942.6269464634962,
+        "expectancy": -471.3134732317481,
+        "profit_factor": 0.0,
+        "win_rate": 0.0,
+        "average_win": null,
+        "average_loss": -471.3134732317481,
+        "max_realized_drawdown": 942.6269464634962,
+        "worst_trade": -578.6744563047209,
+        "fees": 151.1196532783693,
+        "turnover": 48337.917706814864,
+        "exposure_minutes": 4.0
+      },
+      "yearly_metrics": {
+        "2017": {
+          "trade_count": 1,
+          "net_pnl": -363.9524901587753,
+          "expectancy": -363.9524901587753,
+          "profit_factor": 0.0,
+          "win_rate": 0.0,
+          "average_win": null,
+          "average_loss": -363.9524901587753,
+          "max_realized_drawdown": 363.9524901587753,
+          "worst_trade": -363.9524901587753,
+          "fees": 58.407696973644306,
+          "turnover": 9643.95520681487,
+          "exposure_minutes": 2.0
+        },
+        "2018": {
+          "trade_count": 1,
+          "net_pnl": -578.6744563047209,
+          "expectancy": -578.6744563047209,
+          "profit_factor": 0.0,
+          "win_rate": 0.0,
+          "average_win": null,
+          "average_loss": -578.6744563047209,
+          "max_realized_drawdown": 578.6744563047209,
+          "worst_trade": -578.6744563047209,
+          "fees": 92.711956304725,
+          "turnover": 38693.962499999994,
+          "exposure_minutes": 2.0
+        }
+      },
+      "no_vote_reasons": {
+        "no_fresh_underlying_breakout": 76928,
+        "awaiting_orb_retest": 2276,
+        "below_strategy_min_confidence": 162,
+        "cost_net_rr_rejected": 735,
+        "orb_session_event_limit": 9573,
+        "orb_event_already_emitted": 15372,
+        "orb_breakout_invalidated": 293,
+        "orb_breakout_expired": 87,
+        "orb_event_inactive": 4757,
+        "wick_only_underlying_breakout": 105,
+        "next_minute_unavailable": 6,
+        "gap_invalidates_geometry": 1
+      },
+      "exit_reasons": {
+        "stop": 1,
+        "gap_stop": 1
+      },
+      "priced_exit_subset_metrics": {
+        "trade_count": 2,
+        "net_pnl": -942.6269464634962,
+        "expectancy": -471.3134732317481,
+        "profit_factor": 0.0,
+        "win_rate": 0.0,
+        "average_win": null,
+        "average_loss": -471.3134732317481,
+        "max_realized_drawdown": 942.6269464634962,
+        "worst_trade": -578.6744563047209,
+        "fees": 151.1196532783693,
+        "turnover": 48337.917706814864,
+        "exposure_minutes": 4.0
+      },
+      "unpriced_exit_count": 0,
+      "unpriced_exit_penalty_net": 0
+    },
+    {
+      "phase": "development",
+      "candidate": "stop_1.0_rr_2.2",
+      "slippage_bps_per_side": 10.0,
+      "metrics": {
+        "trade_count": 110,
+        "net_pnl": -37058.341802114075,
+        "expectancy": -336.8940163828552,
+        "profit_factor": 0.27955362143206985,
+        "win_rate": 0.2636363636363636,
+        "average_win": 495.85128691642745,
+        "average_loss": -635.0373965764256,
+        "max_realized_drawdown": 37058.341802114075,
+        "worst_trade": -15830.569192610883,
+        "fees": 7379.574642691757,
+        "turnover": 1863780.3003405775,
+        "exposure_minutes": 627.0
+      },
+      "yearly_metrics": {
+        "2017": {
+          "trade_count": 41,
+          "net_pnl": -535.5254892422198,
+          "expectancy": -13.061597298590726,
+          "profit_factor": 0.9113871887586497,
+          "win_rate": 0.3170731707317073,
+          "average_win": 423.6851076843575,
+          "average_loss": -215.836853183531,
+          "max_realized_drawdown": 1565.326787532364,
+          "worst_trade": -349.08142093863137,
+          "fees": 2603.253601962769,
+          "turnover": 562269.8706127205,
+          "exposure_minutes": 267.0
+        },
+        "2018": {
+          "trade_count": 69,
+          "net_pnl": -36522.81631287185,
+          "expectancy": -529.3161784474181,
+          "profit_factor": 0.1954369343786693,
+          "win_rate": 0.2318840579710145,
+          "average_win": 554.4863075424843,
+          "average_loss": -856.5018345953133,
+          "max_realized_drawdown": 36862.54408611268,
+          "worst_trade": -15830.569192610883,
+          "fees": 4776.321040728987,
+          "turnover": 1301510.429727857,
+          "exposure_minutes": 360.0
+        }
+      },
+      "no_vote_reasons": {
+        "no_fresh_underlying_breakout": 77074,
+        "awaiting_orb_retest": 2226,
+        "below_strategy_min_confidence": 161,
+        "cost_net_rr_rejected": 621,
+        "orb_session_event_limit": 9207,
+        "orb_event_already_emitted": 15265,
+        "orb_breakout_invalidated": 292,
+        "orb_breakout_expired": 84,
+        "orb_event_inactive": 4642,
+        "wick_only_underlying_breakout": 106,
+        "next_minute_unavailable": 6
+      },
+      "exit_reasons": {
+        "stop": 69,
+        "target": 29,
+        "gap_stop": 10,
+        "unpriced_gap_worst_case": 2
+      },
+      "priced_exit_subset_metrics": {
+        "trade_count": 108,
+        "net_pnl": -7853.261710966695,
+        "expectancy": -72.7153862126546,
+        "profit_factor": 0.6467737275957028,
+        "win_rate": 0.26851851851851855,
+        "average_win": 495.85128691642745,
+        "average_loss": -281.4297345764948,
+        "max_realized_drawdown": 7853.261710966696,
+        "worst_trade": -676.9637045209104,
+        "fees": 7272.064551544377,
+        "turnover": 1834679.7303405774,
+        "exposure_minutes": 623.0
+      },
+      "unpriced_exit_count": 2,
+      "unpriced_exit_penalty_net": -29205.080091147378
+    },
+    {
+      "phase": "development",
+      "candidate": "stop_1.0_rr_2.2",
+      "slippage_bps_per_side": 25.0,
+      "metrics": {
+        "trade_count": 49,
+        "net_pnl": -19049.110300969533,
+        "expectancy": -388.7573530810109,
+        "profit_factor": 0.2929176369690033,
+        "win_rate": 0.2857142857142857,
+        "average_win": 563.6664398718397,
+        "average_loss": -769.7268702621511,
+        "max_realized_drawdown": 20254.76025962017,
+        "worst_trade": -15854.221716715207,
+        "fees": 3183.487064422921,
+        "turnover": 744325.1142634533,
+        "exposure_minutes": 272.0
+      },
+      "yearly_metrics": {
+        "2017": {
+          "trade_count": 15,
+          "net_pnl": 1014.5459704636581,
+          "expectancy": 67.63639803091054,
+          "profit_factor": 1.502327163785264,
+          "win_rate": 0.4,
+          "average_win": 505.7062674887834,
+          "average_loss": -224.41018160767135,
+          "max_realized_drawdown": 738.9129433321377,
+          "worst_trade": -339.8627745647007,
+          "fees": 893.2569024784206,
+          "turnover": 155094.81537294207,
+          "exposure_minutes": 106.0
+        },
+        "2018": {
+          "trade_count": 34,
+          "net_pnl": -20063.656271433192,
+          "expectancy": -590.1075373950939,
+          "profit_factor": 0.19490154920456362,
+          "win_rate": 0.23529411764705882,
+          "average_win": 607.1365691591319,
+          "average_loss": -958.4903394117787,
+          "max_realized_drawdown": 20063.656271433192,
+          "worst_trade": -15854.221716715207,
+          "fees": 2290.2301619445,
+          "turnover": 589230.2988905113,
+          "exposure_minutes": 166.0
+        }
+      },
+      "no_vote_reasons": {
+        "no_fresh_underlying_breakout": 76945,
+        "awaiting_orb_retest": 2264,
+        "below_strategy_min_confidence": 162,
+        "cost_net_rr_rejected": 687,
+        "orb_session_event_limit": 9435,
+        "orb_event_already_emitted": 15392,
+        "orb_breakout_invalidated": 293,
+        "orb_breakout_expired": 86,
+        "orb_event_inactive": 4664,
+        "wick_only_underlying_breakout": 105,
+        "next_minute_unavailable": 6
+      },
+      "exit_reasons": {
+        "target": 14,
+        "stop": 30,
+        "gap_stop": 4,
+        "unpriced_gap_worst_case": 1
+      },
+      "priced_exit_subset_metrics": {
+        "trade_count": 48,
+        "net_pnl": -3194.888584254327,
+        "expectancy": -66.56017883863181,
+        "profit_factor": 0.7118144014227373,
+        "win_rate": 0.2916666666666667,
+        "average_win": 563.6664398718397,
+        "average_loss": -326.0652571311789,
+        "max_realized_drawdown": 4400.538542904964,
+        "worst_trade": -686.8986723927858,
+        "fees": 3129.1684727077145,
+        "turnover": 728523.7111384533,
+        "exposure_minutes": 270.0
+      },
+      "unpriced_exit_count": 1,
+      "unpriced_exit_penalty_net": -15854.221716715207
+    },
+    {
+      "phase": "development",
+      "candidate": "stop_1.0_rr_2.2",
+      "slippage_bps_per_side": 50.0,
+      "metrics": {
+        "trade_count": 11,
+        "net_pnl": 644.919442461331,
+        "expectancy": 58.62904022375736,
+        "profit_factor": 1.2448734129985501,
+        "win_rate": 0.45454545454545453,
+        "average_win": 655.7208948206334,
+        "average_loss": -438.9475052736393,
+        "max_realized_drawdown": 1277.1557746405254,
+        "worst_trade": -698.4813183358045,
+        "fees": 754.2202540114059,
+        "turnover": 197389.2146964727,
+        "exposure_minutes": 82.0
+      },
+      "yearly_metrics": {
+        "2017": {
+          "trade_count": 4,
+          "net_pnl": 428.46071415673225,
+          "expectancy": 107.11517853918306,
+          "profit_factor": 1.7146535750172502,
+          "win_rate": 0.5,
+          "average_win": 513.9984749013199,
+          "average_loss": -299.76811782295374,
+          "max_realized_drawdown": 599.5362356459075,
+          "worst_trade": -363.9524901587753,
+          "fees": 231.75959367079244,
+          "turnover": 35830.19530782752,
+          "exposure_minutes": 40.0
+        },
+        "2018": {
+          "trade_count": 7,
+          "net_pnl": 216.4587283045987,
+          "expectancy": 30.92267547208553,
+          "profit_factor": 1.1064124358703167,
+          "win_rate": 0.42857142857142855,
+          "average_win": 750.2025081001757,
+          "average_loss": -508.53719899898215,
+          "max_realized_drawdown": 1277.1557746405256,
+          "worst_trade": -698.4813183358045,
+          "fees": 522.4606603406135,
+          "turnover": 161559.0193886452,
+          "exposure_minutes": 42.0
+        }
+      },
+      "no_vote_reasons": {
+        "no_fresh_underlying_breakout": 76952,
+        "awaiting_orb_retest": 2265,
+        "below_strategy_min_confidence": 162,
+        "cost_net_rr_rejected": 726,
+        "orb_session_event_limit": 9546,
+        "orb_event_already_emitted": 15417,
+        "orb_breakout_invalidated": 293,
+        "orb_breakout_expired": 86,
+        "orb_event_inactive": 4664,
+        "wick_only_underlying_breakout": 105,
+        "next_minute_unavailable": 6
+      },
+      "exit_reasons": {
+        "stop": 5,
+        "target": 5,
+        "gap_stop": 1
+      },
+      "priced_exit_subset_metrics": {
+        "trade_count": 11,
+        "net_pnl": 644.919442461331,
+        "expectancy": 58.62904022375736,
+        "profit_factor": 1.2448734129985501,
+        "win_rate": 0.45454545454545453,
+        "average_win": 655.7208948206334,
+        "average_loss": -438.9475052736393,
+        "max_realized_drawdown": 1277.1557746405254,
+        "worst_trade": -698.4813183358045,
+        "fees": 754.2202540114059,
+        "turnover": 197389.2146964727,
+        "exposure_minutes": 82.0
+      },
+      "unpriced_exit_count": 0,
+      "unpriced_exit_penalty_net": 0
+    },
+    {
+      "phase": "development",
+      "candidate": "stop_1.0_rr_2.5",
+      "slippage_bps_per_side": 10.0,
+      "metrics": {
+        "trade_count": 189,
+        "net_pnl": -66979.66534722163,
+        "expectancy": -354.3897637419134,
+        "profit_factor": 0.29576905253364943,
+        "win_rate": 0.2857142857142857,
+        "average_win": 520.9389584388051,
+        "average_loss": -704.5212526142008,
+        "max_realized_drawdown": 67906.8345573629,
+        "worst_trade": -16348.820025305477,
+        "fees": 12566.489212619552,
+        "turnover": 3109142.2188653974,
+        "exposure_minutes": 1319.0
+      },
+      "yearly_metrics": {
+        "2017": {
+          "trade_count": 69,
+          "net_pnl": -886.6555193388026,
+          "expectancy": -12.850079990417429,
+          "profit_factor": 0.9160064245361994,
+          "win_rate": 0.30434782608695654,
+          "average_win": 460.45593798044234,
+          "average_loss": -219.92146285266855,
+          "max_realized_drawdown": 2163.260643183624,
+          "worst_trade": -397.98306617289603,
+          "fees": 4319.754291789207,
+          "turnover": 894550.8262724503,
+          "exposure_minutes": 554.0
+        },
+        "2018": {
+          "trade_count": 120,
+          "net_pnl": -66093.00982788282,
+          "expectancy": -550.7750818990236,
+          "profit_factor": 0.21833501353492316,
+          "win_rate": 0.275,
+          "average_win": 559.428153275945,
+          "average_loss": -971.8866538619427,
+          "max_realized_drawdown": 67906.83455736292,
+          "worst_trade": -16348.820025305477,
+          "fees": 8246.734920830344,
+          "turnover": 2214591.3925929475,
+          "exposure_minutes": 765.0
+        }
+      },
+      "no_vote_reasons": {
+        "no_fresh_underlying_breakout": 77367,
+        "awaiting_orb_retest": 2159,
+        "below_strategy_min_confidence": 159,
+        "cost_net_rr_rejected": 536,
+        "orb_session_event_limit": 8795,
+        "orb_event_already_emitted": 14970,
+        "orb_breakout_invalidated": 288,
+        "orb_breakout_expired": 81,
+        "orb_event_inactive": 4552,
+        "wick_only_underlying_breakout": 104,
+        "next_minute_unavailable": 6
+      },
+      "exit_reasons": {
+        "stop": 118,
+        "target": 54,
+        "gap_stop": 13,
+        "unpriced_gap_worst_case": 4
+      },
+      "priced_exit_subset_metrics": {
+        "trade_count": 185,
+        "net_pnl": -8212.738287347252,
+        "expectancy": -44.39317993160677,
+        "profit_factor": 0.7740242028363566,
+        "win_rate": 0.2918918918918919,
+        "average_win": 520.9389584388051,
+        "average_loss": -277.4308552904025,
+        "max_realized_drawdown": 9139.907497488566,
+        "worst_trade": -676.9637045209104,
+        "fees": 12351.308402745179,
+        "turnover": 3050584.4726153975,
+        "exposure_minutes": 1309.0
+      },
+      "unpriced_exit_count": 4,
+      "unpriced_exit_penalty_net": -58766.927059874375
+    },
+    {
+      "phase": "development",
+      "candidate": "stop_1.0_rr_2.5",
+      "slippage_bps_per_side": 25.0,
+      "metrics": {
+        "trade_count": 113,
+        "net_pnl": -23632.400124081974,
+        "expectancy": -209.13628428391127,
+        "profit_factor": 0.4256802412935856,
+        "win_rate": 0.2743362831858407,
+        "average_win": 565.0356783051039,
+        "average_loss": -501.811050628539,
+        "max_realized_drawdown": 23632.40012408198,
+        "worst_trade": -15854.221716715207,
+        "fees": 7374.324860985991,
+        "turnover": 1731580.624736904,
+        "exposure_minutes": 846.0
+      },
+      "yearly_metrics": {
+        "2017": {
+          "trade_count": 43,
+          "net_pnl": -1677.7688037141818,
+          "expectancy": -39.01787915614376,
+          "profit_factor": 0.7748181389624879,
+          "win_rate": 0.27906976744186046,
+          "average_win": 481.0799354625436,
+          "average_loss": -240.34606546015178,
+          "max_realized_drawdown": 2498.963945569664,
+          "worst_trade": -429.80200897159443,
+          "fees": 2650.9389762321143,
+          "turnover": 523541.3326725179,
+          "exposure_minutes": 349.0
+        },
+        "2018": {
+          "trade_count": 70,
+          "net_pnl": -21954.631320367793,
+          "expectancy": -313.6375902909685,
+          "profit_factor": 0.34848430538347697,
+          "win_rate": 0.2714285714285714,
+          "average_win": 618.0603579951422,
+          "average_loss": -660.7407474955979,
+          "max_realized_drawdown": 22484.01542465141,
+          "worst_trade": -15854.221716715207,
+          "fees": 4723.385884753877,
+          "turnover": 1208039.292064386,
+          "exposure_minutes": 497.0
+        }
+      },
+      "no_vote_reasons": {
+        "no_fresh_underlying_breakout": 77240,
+        "awaiting_orb_retest": 2188,
+        "below_strategy_min_confidence": 160,
+        "cost_net_rr_rejected": 619,
+        "orb_session_event_limit": 9027,
+        "orb_event_already_emitted": 15200,
+        "orb_breakout_invalidated": 290,
+        "orb_breakout_expired": 82,
+        "orb_event_inactive": 4571,
+        "wick_only_underlying_breakout": 106,
+        "next_minute_unavailable": 6
+      },
+      "exit_reasons": {
+        "stop": 74,
+        "target": 31,
+        "gap_stop": 7,
+        "unpriced_gap_worst_case": 1
+      },
+      "priced_exit_subset_metrics": {
+        "trade_count": 112,
+        "net_pnl": -7778.1784073667695,
+        "expectancy": -69.44802149434615,
+        "profit_factor": 0.6924926487875724,
+        "win_rate": 0.2767857142857143,
+        "average_win": 565.0356783051039,
+        "average_loss": -312.2751164793209,
+        "max_realized_drawdown": 7778.1784073667695,
+        "worst_trade": -725.2069263779821,
+        "fees": 7320.006269270785,
+        "turnover": 1715779.221611904,
+        "exposure_minutes": 844.0
+      },
+      "unpriced_exit_count": 1,
+      "unpriced_exit_penalty_net": -15854.221716715207
+    },
+    {
+      "phase": "development",
+      "candidate": "stop_1.0_rr_2.5",
+      "slippage_bps_per_side": 50.0,
+      "metrics": {
+        "trade_count": 42,
+        "net_pnl": -16876.583229333184,
+        "expectancy": -401.8234102222187,
+        "profit_factor": 0.35050697216420046,
+        "win_rate": 0.35714285714285715,
+        "average_win": 607.1771709802125,
+        "average_loss": -962.3792886680137,
+        "max_realized_drawdown": 18750.611964657994,
+        "worst_trade": -15893.642590222411,
+        "fees": 2631.6085395107507,
+        "turnover": 556486.9878101775,
+        "exposure_minutes": 327.0
+      },
+      "yearly_metrics": {
+        "2017": {
+          "trade_count": 15,
+          "net_pnl": 1659.8461743131575,
+          "expectancy": 110.65641162087717,
+          "profit_factor": 1.786006436686844,
+          "win_rate": 0.4666666666666667,
+          "average_win": 538.79892305957,
+          "average_loss": -263.96828588797916,
+          "max_realized_drawdown": 901.062993731757,
+          "worst_trade": -375.96341191955764,
+          "fees": 862.5535251696015,
+          "turnover": 128813.21219948275,
+          "exposure_minutes": 155.0
+        },
+        "2018": {
+          "trade_count": 27,
+          "net_pnl": -18536.429403646343,
+          "expectancy": -686.534422357272,
+          "profit_factor": 0.22352356607461407,
+          "win_rate": 0.2962962962962963,
+          "average_win": 667.0081379107746,
+          "average_loss": -1256.4470793122389,
+          "max_realized_drawdown": 18681.30356382026,
+          "worst_trade": -15893.642590222411,
+          "fees": 1769.055014341149,
+          "turnover": 427673.7756106948,
+          "exposure_minutes": 172.0
+        }
+      },
+      "no_vote_reasons": {
+        "no_fresh_underlying_breakout": 76944,
+        "awaiting_orb_retest": 2253,
+        "below_strategy_min_confidence": 162,
+        "cost_net_rr_rejected": 694,
+        "orb_session_event_limit": 9437,
+        "orb_event_already_emitted": 15374,
+        "orb_breakout_invalidated": 293,
+        "orb_breakout_expired": 85,
+        "orb_event_inactive": 4648,
+        "wick_only_underlying_breakout": 105,
+        "next_minute_unavailable": 6
+      },
+      "exit_reasons": {
+        "stop": 22,
+        "target": 15,
+        "gap_stop": 4,
+        "unpriced_gap_worst_case": 1
+      },
+      "priced_exit_subset_metrics": {
+        "trade_count": 41,
+        "net_pnl": -982.9406391107735,
+        "expectancy": -23.97416192953106,
+        "profit_factor": 0.9025884670802521,
+        "win_rate": 0.36585365853658536,
+        "average_win": 607.1771709802125,
+        "average_loss": -388.09993091592156,
+        "max_realized_drawdown": 2856.969374435583,
+        "worst_trade": -763.4697118254725,
+        "fees": 2577.272199288338,
+        "turnover": 540646.1815601775,
+        "exposure_minutes": 325.0
+      },
+      "unpriced_exit_count": 1,
+      "unpriced_exit_penalty_net": -15893.642590222411
+    },
+    {
+      "phase": "development",
+      "candidate": "stop_1.25_rr_1.8",
+      "slippage_bps_per_side": 10.0,
+      "metrics": {
+        "trade_count": 31,
+        "net_pnl": -15640.32028728954,
+        "expectancy": -504.52646088030775,
+        "profit_factor": 0.2676586458387732,
+        "win_rate": 0.3548387096774194,
+        "average_win": 519.6616583725707,
+        "average_loss": -1067.829926469391,
+        "max_realized_drawdown": 17180.688357697723,
+        "worst_trade": -15830.569192610883,
+        "fees": 2106.51598071083,
+        "turnover": 551075.2406934212,
+        "exposure_minutes": 285.0
+      },
+      "yearly_metrics": {
+        "2017": {
+          "trade_count": 13,
+          "net_pnl": 603.0457002100349,
+          "expectancy": 46.3881307853873,
+          "profit_factor": 1.4176529487539884,
+          "win_rate": 0.46153846153846156,
+          "average_win": 341.1562629078671,
+          "average_loss": -206.27026817673823,
+          "max_realized_drawdown": 715.7961780085378,
+          "worst_trade": -384.5543727793245,
+          "fees": 807.8744539116354,
+          "turnover": 163009.85765412165,
+          "exposure_minutes": 162.0
+        },
+        "2018": {
+          "trade_count": 18,
+          "net_pnl": -16243.365987499576,
+          "expectancy": -902.4092215277542,
+          "profit_factor": 0.18427131623790444,
+          "win_rate": 0.2777777777777778,
+          "average_win": 733.8681329302151,
+          "average_loss": -1531.74666555005,
+          "max_realized_drawdown": 17180.688357697723,
+          "worst_trade": -15830.569192610883,
+          "fees": 1298.6415267991943,
+          "turnover": 388065.3830392996,
+          "exposure_minutes": 123.0
+        }
+      },
+      "no_vote_reasons": {
+        "no_fresh_underlying_breakout": 76961,
+        "awaiting_orb_retest": 2242,
+        "below_strategy_min_confidence": 162,
+        "cost_net_rr_rejected": 704,
+        "orb_session_event_limit": 9446,
+        "orb_event_already_emitted": 15374,
+        "orb_breakout_invalidated": 292,
+        "orb_breakout_expired": 86,
+        "orb_event_inactive": 4664,
+        "wick_only_underlying_breakout": 105,
+        "next_minute_unavailable": 6
+      },
+      "exit_reasons": {
+        "stop": 14,
+        "target": 11,
+        "gap_stop": 5,
+        "unpriced_gap_worst_case": 1
+      },
+      "priced_exit_subset_metrics": {
+        "trade_count": 30,
+        "net_pnl": 190.24890532134236,
+        "expectancy": 6.341630177378079,
+        "profit_factor": 1.034427776931113,
+        "win_rate": 0.36666666666666664,
+        "average_win": 519.6616583725707,
+        "average_loss": -290.8436493040492,
+        "max_realized_drawdown": 2103.950382440971,
+        "worst_trade": -700.8453059076459,
+        "fees": 2052.2080380999473,
+        "turnover": 535297.4794434212,
+        "exposure_minutes": 283.0
+      },
+      "unpriced_exit_count": 1,
+      "unpriced_exit_penalty_net": -15830.569192610883
+    },
+    {
+      "phase": "development",
+      "candidate": "stop_1.25_rr_1.8",
+      "slippage_bps_per_side": 25.0,
+      "metrics": {
+        "trade_count": 12,
+        "net_pnl": -15064.968500213272,
+        "expectancy": -1255.4140416844393,
+        "profit_factor": 0.17419914928321142,
+        "win_rate": 0.4166666666666667,
+        "average_win": 635.5781044395036,
+        "average_loss": -2606.1227174872556,
+        "max_realized_drawdown": 16351.33177043239,
+        "worst_trade": -15854.221716715207,
+        "fees": 810.9790573897607,
+        "turnover": 215158.11055717646,
+        "exposure_minutes": 95.0
+      },
+      "yearly_metrics": {
+        "2017": {
+          "trade_count": 5,
+          "net_pnl": 181.86669314972562,
+          "expectancy": 36.373338629945124,
+          "profit_factor": 1.1978322460673845,
+          "win_rate": 0.4,
+          "average_win": 550.5821064837486,
+          "average_loss": -306.43250660592383,
+          "max_realized_drawdown": 919.2975198177716,
+          "worst_trade": -398.9193951874639,
+          "fees": 293.7157582785637,
+          "turnover": 48392.57620142829,
+          "exposure_minutes": 51.0
+        },
+        "2018": {
+          "trade_count": 7,
+          "net_pnl": -15246.835193362998,
+          "expectancy": -2178.1193133375714,
+          "profit_factor": 0.11987871598569226,
+          "win_rate": 0.42857142857142855,
+          "average_win": 692.2421030766736,
+          "average_loss": -4330.890375648255,
+          "max_realized_drawdown": 16351.33177043239,
+          "worst_trade": -15854.221716715207,
+          "fees": 517.263299111197,
+          "turnover": 166765.53435574818,
+          "exposure_minutes": 44.0
+        }
+      },
+      "no_vote_reasons": {
+        "no_fresh_underlying_breakout": 76952,
+        "awaiting_orb_retest": 2265,
+        "below_strategy_min_confidence": 162,
+        "cost_net_rr_rejected": 725,
+        "orb_session_event_limit": 9546,
+        "orb_event_already_emitted": 15405,
+        "orb_breakout_invalidated": 293,
+        "orb_breakout_expired": 86,
+        "orb_event_inactive": 4664,
+        "wick_only_underlying_breakout": 105,
+        "next_minute_unavailable": 6
+      },
+      "exit_reasons": {
+        "stop": 4,
+        "gap_stop": 2,
+        "target": 5,
+        "unpriced_gap_worst_case": 1
+      },
+      "priced_exit_subset_metrics": {
+        "trade_count": 11,
+        "net_pnl": 789.2532165019339,
+        "expectancy": 71.75029240926672,
+        "profit_factor": 1.3304198651758472,
+        "win_rate": 0.45454545454545453,
+        "average_win": 635.5781044395036,
+        "average_loss": -398.1062176159307,
+        "max_realized_drawdown": 1236.5866099501811,
+        "worst_trade": -754.5731730253226,
+        "fees": 756.6604656745544,
+        "turnover": 199356.70743217648,
+        "exposure_minutes": 93.0
+      },
+      "unpriced_exit_count": 1,
+      "unpriced_exit_penalty_net": -15854.221716715207
+    },
+    {
+      "phase": "development",
+      "candidate": "stop_1.25_rr_1.8",
+      "slippage_bps_per_side": 50.0,
+      "metrics": {
+        "trade_count": 4,
+        "net_pnl": -365.1154534255909,
+        "expectancy": -91.27886335639772,
+        "profit_factor": 0.7166705485047195,
+        "win_rate": 0.25,
+        "average_win": 923.5449787980342,
+        "average_loss": -429.55347740787505,
+        "max_realized_drawdown": 709.9859759189042,
+        "worst_trade": -578.6744563047209,
+        "fees": 277.56399614225853,
+        "turnover": 74933.18604271665,
+        "exposure_minutes": 12.0
+      },
+      "yearly_metrics": {
+        "2017": {
+          "trade_count": 2,
+          "net_pnl": -709.9859759189042,
+          "expectancy": -354.9929879594521,
+          "profit_factor": 0.0,
+          "win_rate": 0.0,
+          "average_win": null,
+          "average_loss": -354.9929879594521,
+          "max_realized_drawdown": 709.9859759189042,
+          "worst_trade": -422.8610992010298,
+          "fees": 113.8239607967008,
+          "turnover": 16755.162984877796,
+          "exposure_minutes": 4.0
+        },
+        "2018": {
+          "trade_count": 2,
+          "net_pnl": 344.8705224933133,
+          "expectancy": 172.43526124665664,
+          "profit_factor": 1.595966382714688,
+          "win_rate": 0.5,
+          "average_win": 923.5449787980342,
+          "average_loss": -578.6744563047209,
+          "max_realized_drawdown": 578.6744563047209,
+          "worst_trade": -578.6744563047209,
+          "fees": 163.74003534555771,
+          "turnover": 58178.02305783886,
+          "exposure_minutes": 8.0
+        }
+      },
+      "no_vote_reasons": {
+        "no_fresh_underlying_breakout": 76928,
+        "awaiting_orb_retest": 2276,
+        "below_strategy_min_confidence": 162,
+        "cost_net_rr_rejected": 734,
+        "orb_session_event_limit": 9573,
+        "orb_event_already_emitted": 15366,
+        "orb_breakout_invalidated": 293,
+        "orb_breakout_expired": 87,
+        "orb_event_inactive": 4757,
+        "wick_only_underlying_breakout": 105,
+        "next_minute_unavailable": 6
+      },
+      "exit_reasons": {
+        "stop": 2,
+        "target": 1,
+        "gap_stop": 1
+      },
+      "priced_exit_subset_metrics": {
+        "trade_count": 4,
+        "net_pnl": -365.1154534255909,
+        "expectancy": -91.27886335639772,
+        "profit_factor": 0.7166705485047195,
+        "win_rate": 0.25,
+        "average_win": 923.5449787980342,
+        "average_loss": -429.55347740787505,
+        "max_realized_drawdown": 709.9859759189042,
+        "worst_trade": -578.6744563047209,
+        "fees": 277.56399614225853,
+        "turnover": 74933.18604271665,
+        "exposure_minutes": 12.0
+      },
+      "unpriced_exit_count": 0,
+      "unpriced_exit_penalty_net": 0
+    },
+    {
+      "phase": "development",
+      "candidate": "stop_1.25_rr_2.2",
+      "slippage_bps_per_side": 10.0,
+      "metrics": {
+        "trade_count": 155,
+        "net_pnl": -69824.81320197597,
+        "expectancy": -450.4826658191998,
+        "profit_factor": 0.2988724641697081,
+        "win_rate": 0.32903225806451614,
+        "average_win": 583.6177433083651,
+        "average_loss": -957.5895972182941,
+        "max_realized_drawdown": 71282.86931376827,
+        "worst_trade": -16348.820025305477,
+        "fees": 10343.103964281432,
+        "turnover": 2590463.088262305,
+        "exposure_minutes": 1539.0
+      },
+      "yearly_metrics": {
+        "2017": {
+          "trade_count": 54,
+          "net_pnl": -1773.4717380634565,
+          "expectancy": -32.842069223397345,
+          "profit_factor": 0.8723213447734741,
+          "win_rate": 0.46296296296296297,
+          "average_win": 484.66589774791436,
+          "average_loss": -478.9696269572868,
+          "max_realized_drawdown": 6911.417685003378,
+          "worst_trade": -6520.8314081913095,
+          "fees": 3383.9295592360504,
+          "turnover": 703494.1403211725,
+          "exposure_minutes": 652.0
+        },
+        "2018": {
+          "trade_count": 101,
+          "net_pnl": -68051.34146391251,
+          "expectancy": -673.7756580585398,
+          "profit_factor": 0.20592791631181684,
+          "win_rate": 0.25742574257425743,
+          "average_win": 678.7637486549525,
+          "average_loss": -1142.655985719217,
+          "max_realized_drawdown": 71133.22897357985,
+          "worst_trade": -16348.820025305477,
+          "fees": 6959.174405045382,
+          "turnover": 1886968.9479411326,
+          "exposure_minutes": 887.0
+        }
+      },
+      "no_vote_reasons": {
+        "no_fresh_underlying_breakout": 77306,
+        "awaiting_orb_retest": 2127,
+        "below_strategy_min_confidence": 158,
+        "cost_net_rr_rejected": 562,
+        "orb_session_event_limit": 8760,
+        "orb_event_already_emitted": 14899,
+        "orb_breakout_invalidated": 284,
+        "orb_breakout_expired": 81,
+        "orb_event_inactive": 4521,
+        "wick_only_underlying_breakout": 108,
+        "next_minute_unavailable": 6
+      },
+      "exit_reasons": {
+        "stop": 87,
+        "target": 51,
+        "gap_stop": 12,
+        "unpriced_gap_worst_case": 5
+      },
+      "priced_exit_subset_metrics": {
+        "trade_count": 150,
+        "net_pnl": -4537.054733910287,
+        "expectancy": -30.24703155940191,
+        "profit_factor": 0.8677303661647291,
+        "win_rate": 0.34,
+        "average_win": 583.6177433083651,
+        "average_loss": -346.48040043067584,
+        "max_realized_drawdown": 12366.301913705465,
+        "worst_trade": -813.7158467817948,
+        "fees": 10077.806746215749,
+        "turnover": 2525433.127012305,
+        "exposure_minutes": 1488.0
+      },
+      "unpriced_exit_count": 5,
+      "unpriced_exit_penalty_net": -65287.75846806568
+    },
+    {
+      "phase": "development",
+      "candidate": "stop_1.25_rr_2.2",
+      "slippage_bps_per_side": 25.0,
+      "metrics": {
+        "trade_count": 79,
+        "net_pnl": -25341.5873166965,
+        "expectancy": -320.77958628729743,
+        "profit_factor": 0.40188557960893806,
+        "win_rate": 0.34177215189873417,
+        "average_win": 630.6497094604754,
+        "average_loss": -814.7909513871025,
+        "max_realized_drawdown": 25706.221187906587,
+        "worst_trade": -15854.221716715207,
+        "fees": 5190.092845660047,
+        "turnover": 1245201.4992789635,
+        "exposure_minutes": 917.0
+      },
+      "yearly_metrics": {
+        "2017": {
+          "trade_count": 25,
+          "net_pnl": -3818.7895430502826,
+          "expectancy": -152.7515817220113,
+          "profit_factor": 0.6218601195188289,
+          "win_rate": 0.48,
+          "average_win": 523.3409302215324,
+          "average_loss": -776.8369773622054,
+          "max_realized_drawdown": 7147.4120899168975,
+          "worst_trade": -6530.533276275024,
+          "fees": 1531.8867791665812,
+          "turnover": 298260.09098611627,
+          "exposure_minutes": 393.0
+        },
+        "2018": {
+          "trade_count": 54,
+          "net_pnl": -21522.797773646216,
+          "expectancy": -398.5703291415966,
+          "profit_factor": 0.3330451856930797,
+          "win_rate": 0.2777777777777778,
+          "average_win": 716.4967328516298,
+          "average_loss": -827.4422760620682,
+          "max_realized_drawdown": 22303.325185536833,
+          "worst_trade": -15854.221716715207,
+          "fees": 3658.2060664934656,
+          "turnover": 946941.4082928472,
+          "exposure_minutes": 524.0
+        }
+      },
+      "no_vote_reasons": {
+        "no_fresh_underlying_breakout": 77070,
+        "awaiting_orb_retest": 2184,
+        "below_strategy_min_confidence": 160,
+        "cost_net_rr_rejected": 648,
+        "orb_session_event_limit": 9118,
+        "orb_event_already_emitted": 15231,
+        "orb_breakout_invalidated": 288,
+        "orb_breakout_expired": 83,
+        "orb_event_inactive": 4538,
+        "wick_only_underlying_breakout": 108,
+        "next_minute_unavailable": 6
+      },
+      "exit_reasons": {
+        "stop": 44,
+        "target": 27,
+        "gap_stop": 6,
+        "unpriced_gap_worst_case": 2
+      },
+      "priced_exit_subset_metrics": {
+        "trade_count": 77,
+        "net_pnl": -2956.8323237062673,
+        "expectancy": -38.40041978839308,
+        "profit_factor": 0.85204278838986,
+        "win_rate": 0.35064935064935066,
+        "average_win": 630.6497094604754,
+        "average_loss": -399.687489582782,
+        "max_realized_drawdown": 6449.103468821634,
+        "worst_trade": -861.7537350919274,
+        "fees": 5085.653477669815,
+        "turnover": 1222918.1836539635,
+        "exposure_minutes": 874.0
+      },
+      "unpriced_exit_count": 2,
+      "unpriced_exit_penalty_net": -22384.75499299023
+    },
+    {
+      "phase": "development",
+      "candidate": "stop_1.25_rr_2.2",
+      "slippage_bps_per_side": 50.0,
+      "metrics": {
+        "trade_count": 25,
+        "net_pnl": 1596.821771376895,
+        "expectancy": 63.872870855075796,
+        "profit_factor": 1.2572538138540643,
+        "win_rate": 0.44,
+        "average_win": 709.4550751018521,
+        "average_loss": -443.37028962453417,
+        "max_realized_drawdown": 1741.9832685094393,
+        "worst_trade": -844.1196182214497,
+        "fees": 1597.5025658564755,
+        "turnover": 350213.28683723335,
+        "exposure_minutes": 269.0
+      },
+      "yearly_metrics": {
+        "2017": {
+          "trade_count": 9,
+          "net_pnl": 2701.416241490561,
+          "expectancy": 300.1573601656179,
+          "profit_factor": 3.822880554142753,
+          "win_rate": 0.6666666666666666,
+          "average_win": 609.7312904415948,
+          "average_loss": -318.9905003863358,
+          "max_realized_drawdown": 422.8610992010298,
+          "worst_trade": -422.8610992010298,
+          "fees": 525.4868872788201,
+          "turnover": 82935.96562876937,
+          "exposure_minutes": 143.0
+        },
+        "2018": {
+          "trade_count": 16,
+          "net_pnl": -1104.5944701136657,
+          "expectancy": -69.0371543821041,
+          "profit_factor": 0.7896095712621144,
+          "win_rate": 0.3125,
+          "average_win": 829.123616694161,
+          "average_loss": -477.292050325861,
+          "max_realized_drawdown": 1741.9832685094395,
+          "worst_trade": -844.1196182214497,
+          "fees": 1072.0156785776553,
+          "turnover": 267277.321208464,
+          "exposure_minutes": 126.0
+        }
+      },
+      "no_vote_reasons": {
+        "no_fresh_underlying_breakout": 76946,
+        "awaiting_orb_retest": 2263,
+        "below_strategy_min_confidence": 162,
+        "cost_net_rr_rejected": 710,
+        "orb_session_event_limit": 9435,
+        "orb_event_already_emitted": 15389,
+        "orb_breakout_invalidated": 293,
+        "orb_breakout_expired": 86,
+        "orb_event_inactive": 4664,
+        "wick_only_underlying_breakout": 105,
+        "next_minute_unavailable": 6
+      },
+      "exit_reasons": {
+        "stop": 12,
+        "target": 11,
+        "gap_stop": 2
+      },
+      "priced_exit_subset_metrics": {
+        "trade_count": 25,
+        "net_pnl": 1596.821771376895,
+        "expectancy": 63.872870855075796,
+        "profit_factor": 1.2572538138540643,
+        "win_rate": 0.44,
+        "average_win": 709.4550751018521,
+        "average_loss": -443.37028962453417,
+        "max_realized_drawdown": 1741.9832685094393,
+        "worst_trade": -844.1196182214497,
+        "fees": 1597.5025658564755,
+        "turnover": 350213.28683723335,
+        "exposure_minutes": 269.0
+      },
+      "unpriced_exit_count": 0,
+      "unpriced_exit_penalty_net": 0
+    },
+    {
+      "phase": "development",
+      "candidate": "stop_1.25_rr_2.5",
+      "slippage_bps_per_side": 10.0,
+      "metrics": {
+        "trade_count": 269,
+        "net_pnl": -106967.43059114361,
+        "expectancy": -397.6484408592699,
+        "profit_factor": 0.28356417683419877,
+        "win_rate": 0.25650557620817843,
+        "average_win": 613.587558138473,
+        "average_loss": -746.5248605134911,
+        "max_realized_drawdown": 108169.96174628234,
+        "worst_trade": -16348.820025305477,
+        "fees": 17808.842619076444,
+        "turnover": 4367661.279527932,
+        "exposure_minutes": 3002.0
+      },
+      "yearly_metrics": {
+        "2017": {
+          "trade_count": 101,
+          "net_pnl": -9717.869635313042,
+          "expectancy": -96.21653104270338,
+          "profit_factor": 0.6053351357514513,
+          "win_rate": 0.2871287128712871,
+          "average_win": 513.9732176448925,
+          "average_loss": -341.98740204187396,
+          "max_realized_drawdown": 13931.303447172066,
+          "worst_trade": -6520.8314081913095,
+          "fees": 6279.089206446991,
+          "turnover": 1277520.8995711338,
+          "exposure_minutes": 1235.0
+        },
+        "2018": {
+          "trade_count": 168,
+          "net_pnl": -97249.56095583056,
+          "expectancy": -578.8664342608962,
+          "profit_factor": 0.22001848532936807,
+          "win_rate": 0.23809523809523808,
+          "average_win": 685.8079549963188,
+          "average_loss": -974.0771809037759,
+          "max_realized_drawdown": 100110.33303692557,
+          "worst_trade": -16348.820025305477,
+          "fees": 11529.753412629454,
+          "turnover": 3090140.3799567986,
+          "exposure_minutes": 1767.0
+        }
+      },
+      "no_vote_reasons": {
+        "no_fresh_underlying_breakout": 77530,
+        "awaiting_orb_retest": 2046,
+        "below_strategy_min_confidence": 151,
+        "cost_net_rr_rejected": 434,
+        "orb_session_event_limit": 8294,
+        "orb_event_already_emitted": 14053,
+        "orb_breakout_invalidated": 272,
+        "orb_breakout_expired": 78,
+        "orb_event_inactive": 4394,
+        "wick_only_underlying_breakout": 106,
+        "next_minute_unavailable": 6
+      },
+      "exit_reasons": {
+        "stop": 175,
+        "target": 69,
+        "gap_stop": 18,
+        "unpriced_gap_worst_case": 7
+      },
+      "priced_exit_subset_metrics": {
+        "trade_count": 262,
+        "net_pnl": -19057.87978347855,
+        "expectancy": -72.73999917358226,
+        "profit_factor": 0.6895879304761721,
+        "win_rate": 0.2633587786259542,
+        "average_win": 613.587558138473,
+        "average_loss": -318.11099116597507,
+        "max_realized_drawdown": 20260.410938617333,
+        "worst_trade": -813.7158467817948,
+        "fees": 17438.99931141139,
+        "turnover": 4280111.072027932,
+        "exposure_minutes": 2906.0
+      },
+      "unpriced_exit_count": 7,
+      "unpriced_exit_penalty_net": -87909.55080766506
+    },
+    {
+      "phase": "development",
+      "candidate": "stop_1.25_rr_2.5",
+      "slippage_bps_per_side": 25.0,
+      "metrics": {
+        "trade_count": 167,
+        "net_pnl": -75761.23798319581,
+        "expectancy": -453.66010768380727,
+        "profit_factor": 0.2939124348870954,
+        "win_rate": 0.2874251497005988,
+        "average_win": 656.999777892905,
+        "average_loss": -901.6573724542459,
+        "max_realized_drawdown": 76560.11238671838,
+        "worst_trade": -16373.249149059195,
+        "fees": 10884.71470255414,
+        "turnover": 2572896.4642193583,
+        "exposure_minutes": 1859.0
+      },
+      "yearly_metrics": {
+        "2017": {
+          "trade_count": 62,
+          "net_pnl": -5734.223697698464,
+          "expectancy": -92.48747899513651,
+          "profit_factor": 0.6776689721173113,
+          "win_rate": 0.3709677419354839,
+          "average_win": 524.1580782496342,
+          "average_loss": -456.15024352410376,
+          "max_realized_drawdown": 10054.611058819692,
+          "worst_trade": -6530.533276275024,
+          "fees": 3800.276003701251,
+          "turnover": 738377.2148060028,
+          "exposure_minutes": 782.0
+        },
+        "2018": {
+          "trade_count": 105,
+          "net_pnl": -70027.01428549735,
+          "expectancy": -666.9239455761652,
+          "profit_factor": 0.21763966489650932,
+          "win_rate": 0.23809523809523808,
+          "average_win": 779.2141415647143,
+          "average_loss": -1118.8420978076902,
+          "max_realized_drawdown": 71358.32976503675,
+          "worst_trade": -16373.249149059195,
+          "fees": 7084.438698852888,
+          "turnover": 1834519.2494133555,
+          "exposure_minutes": 1077.0
+        }
+      },
+      "no_vote_reasons": {
+        "no_fresh_underlying_breakout": 77285,
+        "awaiting_orb_retest": 2106,
+        "below_strategy_min_confidence": 158,
+        "cost_net_rr_rejected": 551,
+        "orb_session_event_limit": 8762,
+        "orb_event_already_emitted": 14697,
+        "orb_breakout_invalidated": 284,
+        "orb_breakout_expired": 79,
+        "orb_event_inactive": 4466,
+        "wick_only_underlying_breakout": 106,
+        "next_minute_unavailable": 6
+      },
+      "exit_reasons": {
+        "stop": 104,
+        "target": 48,
+        "gap_stop": 10,
+        "unpriced_gap_worst_case": 5
+      },
+      "priced_exit_subset_metrics": {
+        "trade_count": 162,
+        "net_pnl": -10218.028878283221,
+        "expectancy": -63.07425233508161,
+        "profit_factor": 0.755280346309566,
+        "win_rate": 0.2962962962962963,
+        "average_win": 656.999777892905,
+        "average_loss": -366.2633176942339,
+        "max_realized_drawdown": 12345.653936399163,
+        "worst_trade": -861.7537350919274,
+        "fees": 10619.302472641546,
+        "turnover": 2507611.1673443583,
+        "exposure_minutes": 1780.0
+      },
+      "unpriced_exit_count": 5,
+      "unpriced_exit_penalty_net": -65543.20910491259
+    },
+    {
+      "phase": "development",
+      "candidate": "stop_1.25_rr_2.5",
+      "slippage_bps_per_side": 50.0,
+      "metrics": {
+        "trade_count": 70,
+        "net_pnl": -34147.01829279213,
+        "expectancy": -487.81454703988754,
+        "profit_factor": 0.3200516205333846,
+        "win_rate": 0.3,
+        "average_win": 765.3808289699269,
+        "average_loss": -1024.8982796155224,
+        "max_realized_drawdown": 35634.229889138885,
+        "worst_trade": -15893.642590222411,
+        "fees": 4416.5681373776115,
+        "turnover": 956965.9873445854,
+        "exposure_minutes": 872.0
+      },
+      "yearly_metrics": {
+        "2017": {
+          "trade_count": 21,
+          "net_pnl": -443.270787046838,
+          "expectancy": -21.108132716516096,
+          "profit_factor": 0.9067702001164596,
+          "win_rate": 0.3333333333333333,
+          "average_win": 615.9047563552466,
+          "average_loss": -339.61457725239745,
+          "max_realized_drawdown": 2953.4962605291175,
+          "worst_trade": -485.74248455173677,
+          "fees": 1229.1079669990193,
+          "turnover": 200205.47467995217,
+          "exposure_minutes": 280.0
+        },
+        "2018": {
+          "trade_count": 49,
+          "net_pnl": -33703.74750574529,
+          "expectancy": -687.8315817499039,
+          "profit_factor": 0.2586947680641767,
+          "win_rate": 0.2857142857142857,
+          "average_win": 840.1188652772671,
+          "average_loss": -1299.0117605607725,
+          "max_realized_drawdown": 35634.22988913888,
+          "worst_trade": -15893.642590222411,
+          "fees": 3187.4601703785925,
+          "turnover": 756760.5126646332,
+          "exposure_minutes": 592.0
+        }
+      },
+      "no_vote_reasons": {
+        "no_fresh_underlying_breakout": 77047,
+        "awaiting_orb_retest": 2205,
+        "below_strategy_min_confidence": 160,
+        "cost_net_rr_rejected": 661,
+        "orb_session_event_limit": 9227,
+        "orb_event_already_emitted": 15073,
+        "orb_breakout_invalidated": 287,
+        "orb_breakout_expired": 83,
+        "orb_event_inactive": 4601,
+        "wick_only_underlying_breakout": 107,
+        "next_minute_unavailable": 6
+      },
+      "exit_reasons": {
+        "stop": 42,
+        "gap_stop": 5,
+        "target": 21,
+        "unpriced_gap_worst_case": 2
+      },
+      "priced_exit_subset_metrics": {
+        "trade_count": 68,
+        "net_pnl": -4829.376272752369,
+        "expectancy": -71.0202393051819,
+        "profit_factor": 0.7689556054050314,
+        "win_rate": 0.3088235294117647,
+        "average_win": 765.3808289699269,
+        "average_loss": -444.7313549174645,
+        "max_realized_drawdown": 6316.587869099126,
+        "worst_trade": -941.8168822754805,
+        "fees": 4309.007367337849,
+        "turnover": 927752.9060945854,
+        "exposure_minutes": 838.0
+      },
+      "unpriced_exit_count": 2,
+      "unpriced_exit_penalty_net": -29317.642020039762
+    },
+    {
+      "phase": "validation",
+      "candidate": "raw_reference",
+      "slippage_bps_per_side": 10.0,
+      "metrics": {
+        "trade_count": 299,
+        "net_pnl": -174871.68892798416,
+        "expectancy": -584.855146916335,
+        "profit_factor": 0.10469453099271708,
+        "win_rate": 0.34782608695652173,
+        "average_win": 196.62508506432425,
+        "average_loss": -1001.6446039726865,
+        "max_realized_drawdown": 174906.61125469147,
+        "worst_trade": -24133.848838174283,
+        "fees": 20992.73180457347,
+        "turnover": 5899133.007876589,
+        "exposure_minutes": 848.0
+      },
+      "yearly_metrics": {
+        "2019": {
+          "trade_count": 299,
+          "net_pnl": -174871.68892798416,
+          "expectancy": -584.855146916335,
+          "profit_factor": 0.10469453099271708,
+          "win_rate": 0.34782608695652173,
+          "average_win": 196.62508506432425,
+          "average_loss": -1001.6446039726865,
+          "max_realized_drawdown": 174906.61125469147,
+          "worst_trade": -24133.848838174283,
+          "fees": 20992.73180457347,
+          "turnover": 5899133.007876589,
+          "exposure_minutes": 848.0
+        }
+      },
+      "no_vote_reasons": {
+        "no_fresh_underlying_breakout": 37503,
+        "orb_event_already_emitted": 6385,
+        "below_strategy_min_confidence": 72,
+        "orb_session_event_limit": 3748,
+        "awaiting_orb_retest": 1115,
+        "orb_breakout_invalidated": 163,
+        "orb_event_inactive": 2621,
+        "orb_breakout_expired": 48,
+        "wick_only_underlying_breakout": 58,
+        "gap_invalidates_geometry": 5,
+        "next_minute_unavailable": 7,
+        "history_cold": 3
+      },
+      "exit_reasons": {
+        "stop": 165,
+        "unpriced_gap_worst_case": 9,
+        "target": 106,
+        "gap_stop": 19
+      },
+      "priced_exit_subset_metrics": {
+        "trade_count": 290,
+        "net_pnl": -24130.840957089084,
+        "expectancy": -83.20979640375546,
+        "profit_factor": 0.45870519835076623,
+        "win_rate": 0.3586206896551724,
+        "average_win": 196.62508506432425,
+        "average_loss": -239.67661184827313,
+        "max_realized_drawdown": 24165.763283796532,
+        "worst_trade": -561.9732017711743,
+        "fees": 20500.2388336784,
+        "turnover": 5748871.1528765885,
+        "exposure_minutes": 825.0
+      },
+      "unpriced_exit_count": 9,
+      "unpriced_exit_penalty_net": -150740.84797089506
+    },
+    {
+      "phase": "validation",
+      "candidate": "raw_reference",
+      "slippage_bps_per_side": 25.0,
+      "metrics": {
+        "trade_count": 301,
+        "net_pnl": -184069.8998584777,
+        "expectancy": -611.5279065065704,
+        "profit_factor": 0.087290967626876,
+        "win_rate": 0.31561461794019935,
+        "average_win": 185.30883683075348,
+        "average_loss": -979.0011619291226,
+        "max_realized_drawdown": 184076.30771742322,
+        "worst_trade": -24169.94383926996,
+        "fees": 21154.195540172892,
+        "turnover": 5961309.176931695,
+        "exposure_minutes": 850.0
+      },
+      "yearly_metrics": {
+        "2019": {
+          "trade_count": 301,
+          "net_pnl": -184069.8998584777,
+          "expectancy": -611.5279065065704,
+          "profit_factor": 0.087290967626876,
+          "win_rate": 0.31561461794019935,
+          "average_win": 185.30883683075348,
+          "average_loss": -979.0011619291226,
+          "max_realized_drawdown": 184076.30771742322,
+          "worst_trade": -24169.94383926996,
+          "fees": 21154.195540172892,
+          "turnover": 5961309.176931695,
+          "exposure_minutes": 850.0
+        }
+      },
+      "no_vote_reasons": {
+        "no_fresh_underlying_breakout": 37503,
+        "orb_event_already_emitted": 6385,
+        "below_strategy_min_confidence": 72,
+        "orb_session_event_limit": 3748,
+        "awaiting_orb_retest": 1115,
+        "orb_breakout_invalidated": 163,
+        "orb_event_inactive": 2621,
+        "orb_breakout_expired": 48,
+        "wick_only_underlying_breakout": 58,
+        "gap_invalidates_geometry": 3,
+        "next_minute_unavailable": 7,
+        "history_cold": 3
+      },
+      "exit_reasons": {
+        "stop": 165,
+        "unpriced_gap_worst_case": 9,
+        "target": 105,
+        "gap_stop": 22
+      },
+      "priced_exit_subset_metrics": {
+        "trade_count": 292,
+        "net_pnl": -33103.79296898927,
+        "expectancy": -113.3691540033879,
+        "profit_factor": 0.34716994379672667,
+        "win_rate": 0.3253424657534247,
+        "average_win": 185.30883683075348,
+        "average_loss": -257.4016876543698,
+        "max_realized_drawdown": 33110.200827935,
+        "worst_trade": -615.8989587375847,
+        "fees": 20661.601150684466,
+        "turnover": 5810822.164431695,
+        "exposure_minutes": 827.0
+      },
+      "unpriced_exit_count": 9,
+      "unpriced_exit_penalty_net": -150966.1068894884
+    },
+    {
+      "phase": "validation",
+      "candidate": "raw_reference",
+      "slippage_bps_per_side": 50.0,
+      "metrics": {
+        "trade_count": 299,
+        "net_pnl": -182508.55254858706,
+        "expectancy": -610.3964968180169,
+        "profit_factor": 0.06824730595281758,
+        "win_rate": 0.27759197324414714,
+        "average_win": 161.06084884487535,
+        "average_loss": -906.8361250125542,
+        "max_realized_drawdown": 182508.55254858712,
+        "worst_trade": -24230.102174429423,
+        "fees": 21016.69398797754,
+        "turnover": 5924067.05393939,
+        "exposure_minutes": 847.0
+      },
+      "yearly_metrics": {
+        "2019": {
+          "trade_count": 299,
+          "net_pnl": -182508.55254858706,
+          "expectancy": -610.3964968180169,
+          "profit_factor": 0.06824730595281758,
+          "win_rate": 0.27759197324414714,
+          "average_win": 161.06084884487535,
+          "average_loss": -906.8361250125542,
+          "max_realized_drawdown": 182508.55254858712,
+          "worst_trade": -24230.102174429423,
+          "fees": 21016.69398797754,
+          "turnover": 5924067.05393939,
+          "exposure_minutes": 847.0
+        }
+      },
+      "no_vote_reasons": {
+        "no_fresh_underlying_breakout": 37503,
+        "orb_event_already_emitted": 6386,
+        "below_strategy_min_confidence": 72,
+        "orb_session_event_limit": 3748,
+        "awaiting_orb_retest": 1115,
+        "orb_breakout_invalidated": 163,
+        "orb_event_inactive": 2621,
+        "orb_breakout_expired": 48,
+        "wick_only_underlying_breakout": 58,
+        "gap_invalidates_geometry": 5,
+        "next_minute_unavailable": 7,
+        "history_cold": 3
+      },
+      "exit_reasons": {
+        "stop": 164,
+        "unpriced_gap_worst_case": 8,
+        "target": 105,
+        "gap_stop": 22
+      },
+      "priced_exit_subset_metrics": {
+        "trade_count": 291,
+        "net_pnl": -47200.16327853823,
+        "expectancy": -162.19987380940972,
+        "profit_factor": 0.2207106604320346,
+        "win_rate": 0.2852233676975945,
+        "average_win": 161.06084884487535,
+        "average_loss": -291.19333525318694,
+        "max_realized_drawdown": 47200.16327853825,
+        "worst_trade": -727.304641455025,
+        "fees": 20578.32971792869,
+        "turnover": 5789185.02893939,
+        "exposure_minutes": 826.0
+      },
+      "unpriced_exit_count": 8,
+      "unpriced_exit_penalty_net": -135308.38927004885
+    },
+    {
+      "phase": "validation",
+      "candidate": "stop_0.75_rr_1.8",
+      "slippage_bps_per_side": 10.0,
+      "metrics": {
+        "trade_count": 18,
+        "net_pnl": -490.9417456358127,
+        "expectancy": -27.27454142421182,
+        "profit_factor": 0.8155304712265652,
+        "win_rate": 0.3333333333333333,
+        "average_win": 361.7381109184981,
+        "average_loss": -221.78086759556678,
+        "max_realized_drawdown": 1150.7999739230354,
+        "worst_trade": -490.3104623065416,
+        "fees": 1273.0609124217624,
+        "turnover": 356735.2166667859,
+        "exposure_minutes": 38.0
+      },
+      "yearly_metrics": {
+        "2019": {
+          "trade_count": 18,
+          "net_pnl": -490.9417456358127,
+          "expectancy": -27.27454142421182,
+          "profit_factor": 0.8155304712265652,
+          "win_rate": 0.3333333333333333,
+          "average_win": 361.7381109184981,
+          "average_loss": -221.78086759556678,
+          "max_realized_drawdown": 1150.7999739230354,
+          "worst_trade": -490.3104623065416,
+          "fees": 1273.0609124217624,
+          "turnover": 356735.2166667859,
+          "exposure_minutes": 38.0
+        }
+      },
+      "no_vote_reasons": {
+        "no_fresh_underlying_breakout": 37390,
+        "cost_net_rr_rejected": 286,
+        "orb_event_already_emitted": 6551,
+        "below_strategy_min_confidence": 75,
+        "orb_session_event_limit": 4053,
+        "awaiting_orb_retest": 1151,
+        "orb_breakout_invalidated": 167,
+        "orb_event_inactive": 2740,
+        "orb_breakout_expired": 50,
+        "wick_only_underlying_breakout": 60,
+        "gap_invalidates_geometry": 5,
+        "next_minute_unavailable": 7,
+        "history_cold": 3
+      },
+      "exit_reasons": {
+        "target": 6,
+        "stop": 8,
+        "gap_stop": 4
+      },
+      "priced_exit_subset_metrics": {
+        "trade_count": 18,
+        "net_pnl": -490.9417456358127,
+        "expectancy": -27.27454142421182,
+        "profit_factor": 0.8155304712265652,
+        "win_rate": 0.3333333333333333,
+        "average_win": 361.7381109184981,
+        "average_loss": -221.78086759556678,
+        "max_realized_drawdown": 1150.7999739230354,
+        "worst_trade": -490.3104623065416,
+        "fees": 1273.0609124217624,
+        "turnover": 356735.2166667859,
+        "exposure_minutes": 38.0
+      },
+      "unpriced_exit_count": 0,
+      "unpriced_exit_penalty_net": 0
+    },
+    {
+      "phase": "validation",
+      "candidate": "stop_0.75_rr_1.8",
+      "slippage_bps_per_side": 25.0,
+      "metrics": {
+        "trade_count": 10,
+        "net_pnl": -511.28927197145805,
+        "expectancy": -51.128927197145806,
+        "profit_factor": 0.6764686377164452,
+        "win_rate": 0.3,
+        "average_win": 356.34995306001787,
+        "average_loss": -225.7627330216445,
+        "max_realized_drawdown": 1033.2666748040247,
+        "worst_trade": -384.19301853470665,
+        "fees": 701.9020818697517,
+        "turnover": 193820.98155989827,
+        "exposure_minutes": 16.0
+      },
+      "yearly_metrics": {
+        "2019": {
+          "trade_count": 10,
+          "net_pnl": -511.28927197145805,
+          "expectancy": -51.128927197145806,
+          "profit_factor": 0.6764686377164452,
+          "win_rate": 0.3,
+          "average_win": 356.34995306001787,
+          "average_loss": -225.7627330216445,
+          "max_realized_drawdown": 1033.2666748040247,
+          "worst_trade": -384.19301853470665,
+          "fees": 701.9020818697517,
+          "turnover": 193820.98155989827,
+          "exposure_minutes": 16.0
+        }
+      },
+      "no_vote_reasons": {
+        "no_fresh_underlying_breakout": 37390,
+        "cost_net_rr_rejected": 296,
+        "orb_event_already_emitted": 6565,
+        "below_strategy_min_confidence": 75,
+        "orb_session_event_limit": 4053,
+        "awaiting_orb_retest": 1151,
+        "orb_breakout_invalidated": 167,
+        "orb_event_inactive": 2740,
+        "orb_breakout_expired": 50,
+        "wick_only_underlying_breakout": 60,
+        "gap_invalidates_geometry": 3,
+        "next_minute_unavailable": 7,
+        "history_cold": 3
+      },
+      "exit_reasons": {
+        "target": 3,
+        "gap_stop": 4,
+        "stop": 3
+      },
+      "priced_exit_subset_metrics": {
+        "trade_count": 10,
+        "net_pnl": -511.28927197145805,
+        "expectancy": -51.128927197145806,
+        "profit_factor": 0.6764686377164452,
+        "win_rate": 0.3,
+        "average_win": 356.34995306001787,
+        "average_loss": -225.7627330216445,
+        "max_realized_drawdown": 1033.2666748040247,
+        "worst_trade": -384.19301853470665,
+        "fees": 701.9020818697517,
+        "turnover": 193820.98155989827,
+        "exposure_minutes": 16.0
+      },
+      "unpriced_exit_count": 0,
+      "unpriced_exit_penalty_net": 0
+    },
+    {
+      "phase": "validation",
+      "candidate": "stop_0.75_rr_1.8",
+      "slippage_bps_per_side": 50.0,
+      "metrics": {
+        "trade_count": 1,
+        "net_pnl": -313.7582325473625,
+        "expectancy": -313.7582325473625,
+        "profit_factor": 0.0,
+        "win_rate": 0.0,
+        "average_win": null,
+        "average_loss": -313.7582325473625,
+        "max_realized_drawdown": 313.7582325473625,
+        "worst_trade": -313.7582325473625,
+        "fees": 62.147904525741126,
+        "turnover": 12765.652171978378,
+        "exposure_minutes": 1.0
+      },
+      "yearly_metrics": {
+        "2019": {
+          "trade_count": 1,
+          "net_pnl": -313.7582325473625,
+          "expectancy": -313.7582325473625,
+          "profit_factor": 0.0,
+          "win_rate": 0.0,
+          "average_win": null,
+          "average_loss": -313.7582325473625,
+          "max_realized_drawdown": 313.7582325473625,
+          "worst_trade": -313.7582325473625,
+          "fees": 62.147904525741126,
+          "turnover": 12765.652171978378,
+          "exposure_minutes": 1.0
+        }
+      },
+      "no_vote_reasons": {
+        "no_fresh_underlying_breakout": 37390,
+        "cost_net_rr_rejected": 303,
+        "orb_event_already_emitted": 6570,
+        "below_strategy_min_confidence": 75,
+        "orb_session_event_limit": 4053,
+        "awaiting_orb_retest": 1151,
+        "orb_breakout_invalidated": 168,
+        "orb_event_inactive": 2740,
+        "orb_breakout_expired": 50,
+        "wick_only_underlying_breakout": 60,
+        "gap_invalidates_geometry": 5,
+        "next_minute_unavailable": 7,
+        "history_cold": 3
+      },
+      "exit_reasons": {
+        "stop": 1
+      },
+      "priced_exit_subset_metrics": {
+        "trade_count": 1,
+        "net_pnl": -313.7582325473625,
+        "expectancy": -313.7582325473625,
+        "profit_factor": 0.0,
+        "win_rate": 0.0,
+        "average_win": null,
+        "average_loss": -313.7582325473625,
+        "max_realized_drawdown": 313.7582325473625,
+        "worst_trade": -313.7582325473625,
+        "fees": 62.147904525741126,
+        "turnover": 12765.652171978378,
+        "exposure_minutes": 1.0
+      },
+      "unpriced_exit_count": 0,
+      "unpriced_exit_penalty_net": 0
+    },
+    {
+      "phase": "final",
+      "candidate": "raw_reference",
+      "slippage_bps_per_side": 10.0,
+      "metrics": {
+        "trade_count": 305,
+        "net_pnl": -174650.31941685427,
+        "expectancy": -572.6239980880467,
+        "profit_factor": 0.14443712484064183,
+        "win_rate": 0.3475409836065574,
+        "average_win": 278.15727463444534,
+        "average_loss": -1025.8039725030426,
+        "max_realized_drawdown": 174829.80227858902,
+        "worst_trade": -20562.42462156153,
+        "fees": 25197.42801723407,
+        "turnover": 9204456.67360038,
+        "exposure_minutes": 951.0
+      },
+      "yearly_metrics": {
+        "2020": {
+          "trade_count": 305,
+          "net_pnl": -174650.31941685427,
+          "expectancy": -572.6239980880467,
+          "profit_factor": 0.14443712484064183,
+          "win_rate": 0.3475409836065574,
+          "average_win": 278.15727463444534,
+          "average_loss": -1025.8039725030426,
+          "max_realized_drawdown": 174829.80227858902,
+          "worst_trade": -20562.42462156153,
+          "fees": 25197.42801723407,
+          "turnover": 9204456.67360038,
+          "exposure_minutes": 951.0
+        }
+      },
+      "no_vote_reasons": {
+        "no_fresh_underlying_breakout": 35315,
+        "awaiting_orb_retest": 1286,
+        "orb_breakout_invalidated": 208,
+        "orb_event_already_emitted": 5994,
+        "below_strategy_min_confidence": 84,
+        "orb_session_event_limit": 4139,
+        "orb_breakout_expired": 56,
+        "orb_event_inactive": 2357,
+        "wick_only_underlying_breakout": 56,
+        "next_minute_unavailable": 5,
+        "gap_invalidates_geometry": 5
+      },
+      "exit_reasons": {
+        "target": 109,
+        "stop": 165,
+        "gap_stop": 23,
+        "unpriced_gap_worst_case": 8
+      },
+      "priced_exit_subset_metrics": {
+        "trade_count": 297,
+        "net_pnl": -36367.654785238585,
+        "expectancy": -122.45001611191442,
+        "profit_factor": 0.4477392515732366,
+        "win_rate": 0.3569023569023569,
+        "average_win": 278.15727463444534,
+        "average_loss": -344.7765753742921,
+        "max_realized_drawdown": 36547.13764697341,
+        "worst_trade": -1480.6205054806592,
+        "fees": 24757.72463561839,
+        "turnover": 9066601.71235038,
+        "exposure_minutes": 923.0
+      },
+      "unpriced_exit_count": 8,
+      "unpriced_exit_penalty_net": -138282.66463161568
+    },
+    {
+      "phase": "final",
+      "candidate": "raw_reference",
+      "slippage_bps_per_side": 25.0,
+      "metrics": {
+        "trade_count": 306,
+        "net_pnl": -188634.98425309482,
+        "expectancy": -616.4541969055387,
+        "profit_factor": 0.11561035630220592,
+        "win_rate": 0.3464052287581699,
+        "average_win": 232.63200631215145,
+        "average_loss": -1066.4698846109145,
+        "max_realized_drawdown": 188771.41280618563,
+        "worst_trade": -20593.167838116828,
+        "fees": 25280.00222494553,
+        "turnover": 9242917.05547185,
+        "exposure_minutes": 952.0
+      },
+      "yearly_metrics": {
+        "2020": {
+          "trade_count": 306,
+          "net_pnl": -188634.98425309482,
+          "expectancy": -616.4541969055387,
+          "profit_factor": 0.11561035630220592,
+          "win_rate": 0.3464052287581699,
+          "average_win": 232.63200631215145,
+          "average_loss": -1066.4698846109145,
+          "max_realized_drawdown": 188771.41280618563,
+          "worst_trade": -20593.167838116828,
+          "fees": 25280.00222494553,
+          "turnover": 9242917.05547185,
+          "exposure_minutes": 952.0
+        }
+      },
+      "no_vote_reasons": {
+        "no_fresh_underlying_breakout": 35315,
+        "awaiting_orb_retest": 1286,
+        "orb_breakout_invalidated": 208,
+        "orb_event_already_emitted": 5994,
+        "below_strategy_min_confidence": 84,
+        "orb_session_event_limit": 4139,
+        "orb_breakout_expired": 56,
+        "orb_event_inactive": 2357,
+        "wick_only_underlying_breakout": 56,
+        "next_minute_unavailable": 5,
+        "gap_invalidates_geometry": 4
+      },
+      "exit_reasons": {
+        "target": 109,
+        "stop": 165,
+        "gap_stop": 24,
+        "unpriced_gap_worst_case": 8
+      },
+      "priced_exit_subset_metrics": {
+        "trade_count": 298,
+        "net_pnl": -50145.65970173537,
+        "expectancy": -168.27402584474956,
+        "profit_factor": 0.3296451742980891,
+        "win_rate": 0.35570469798657717,
+        "average_win": 232.63200631215145,
+        "average_loss": -389.60756443137205,
+        "max_realized_drawdown": 50282.08825482619,
+        "worst_trade": -1526.2149447287195,
+        "fees": 24840.20579858607,
+        "turnover": 9104855.52734685,
+        "exposure_minutes": 924.0
+      },
+      "unpriced_exit_count": 8,
+      "unpriced_exit_penalty_net": -138489.32455135946
+    },
+    {
+      "phase": "final",
+      "candidate": "raw_reference",
+      "slippage_bps_per_side": 50.0,
+      "metrics": {
+        "trade_count": 302,
+        "net_pnl": -172157.78556620688,
+        "expectancy": -570.058892603334,
+        "profit_factor": 0.0910288230765349,
+        "win_rate": 0.2814569536423841,
+        "average_win": 202.8320395294532,
+        "average_loss": -872.804188600048,
+        "max_realized_drawdown": 172222.50860002017,
+        "worst_trade": -20644.40653237566,
+        "fees": 24959.699429616863,
+        "turnover": 9121967.16386341,
+        "exposure_minutes": 943.0
+      },
+      "yearly_metrics": {
+        "2020": {
+          "trade_count": 302,
+          "net_pnl": -172157.78556620688,
+          "expectancy": -570.058892603334,
+          "profit_factor": 0.0910288230765349,
+          "win_rate": 0.2814569536423841,
+          "average_win": 202.8320395294532,
+          "average_loss": -872.804188600048,
+          "max_realized_drawdown": 172222.50860002017,
+          "worst_trade": -20644.40653237566,
+          "fees": 24959.699429616863,
+          "turnover": 9121967.16386341,
+          "exposure_minutes": 943.0
+        }
+      },
+      "no_vote_reasons": {
+        "no_fresh_underlying_breakout": 35315,
+        "awaiting_orb_retest": 1286,
+        "orb_breakout_invalidated": 208,
+        "orb_event_already_emitted": 5999,
+        "below_strategy_min_confidence": 84,
+        "orb_session_event_limit": 4139,
+        "orb_breakout_expired": 56,
+        "orb_event_inactive": 2357,
+        "wick_only_underlying_breakout": 56,
+        "next_minute_unavailable": 5,
+        "gap_invalidates_geometry": 8
+      },
+      "exit_reasons": {
+        "target": 108,
+        "stop": 164,
+        "gap_stop": 24,
+        "unpriced_gap_worst_case": 6
+      },
+      "priced_exit_subset_metrics": {
+        "trade_count": 296,
+        "net_pnl": -71916.97086523248,
+        "expectancy": -242.96273940956917,
+        "profit_factor": 0.19337336513491343,
+        "win_rate": 0.28716216216216217,
+        "average_win": 202.8320395294532,
+        "average_loss": -422.54831386367766,
+        "max_realized_drawdown": 71981.69389904573,
+        "worst_trade": -1602.2056768088246,
+        "fees": 24631.484728642463,
+        "turnover": 9022045.56386341,
+        "exposure_minutes": 919.0
+      },
+      "unpriced_exit_count": 6,
+      "unpriced_exit_penalty_net": -100240.8147009744
+    },
+    {
+      "phase": "final",
+      "candidate": "stop_0.75_rr_1.8",
+      "slippage_bps_per_side": 10.0,
+      "metrics": {
+        "trade_count": 14,
+        "net_pnl": -21606.899517710113,
+        "expectancy": -1543.3499655507223,
+        "profit_factor": 0.06519301357305268,
+        "win_rate": 0.21428571428571427,
+        "average_win": 502.285111251944,
+        "average_loss": -2101.250441042359,
+        "max_realized_drawdown": 21606.899517710113,
+        "worst_trade": -20562.42462156153,
+        "fees": 1069.9735323001753,
+        "turnover": 357901.13401459,
+        "exposure_minutes": 34.0
+      },
+      "yearly_metrics": {
+        "2020": {
+          "trade_count": 14,
+          "net_pnl": -21606.899517710113,
+          "expectancy": -1543.3499655507223,
+          "profit_factor": 0.06519301357305268,
+          "win_rate": 0.21428571428571427,
+          "average_win": 502.285111251944,
+          "average_loss": -2101.250441042359,
+          "max_realized_drawdown": 21606.899517710113,
+          "worst_trade": -20562.42462156153,
+          "fees": 1069.9735323001753,
+          "turnover": 357901.13401459,
+          "exposure_minutes": 34.0
+        }
+      },
+      "no_vote_reasons": {
+        "no_fresh_underlying_breakout": 35232,
+        "awaiting_orb_retest": 1323,
+        "orb_breakout_invalidated": 208,
+        "cost_net_rr_rejected": 300,
+        "orb_event_already_emitted": 6316,
+        "below_strategy_min_confidence": 87,
+        "orb_session_event_limit": 4320,
+        "orb_breakout_expired": 58,
+        "orb_event_inactive": 2500,
+        "wick_only_underlying_breakout": 59,
+        "next_minute_unavailable": 5,
+        "gap_invalidates_geometry": 6
+      },
+      "exit_reasons": {
+        "stop": 9,
+        "gap_stop": 1,
+        "target": 3,
+        "unpriced_gap_worst_case": 1
+      },
+      "priced_exit_subset_metrics": {
+        "trade_count": 13,
+        "net_pnl": -1044.4748961485836,
+        "expectancy": -80.34422278066027,
+        "profit_factor": 0.5906155605000947,
+        "win_rate": 0.23076923076923078,
+        "average_win": 502.285111251944,
+        "average_loss": -255.1330229904416,
+        "max_realized_drawdown": 1726.0759289665039,
+        "worst_trade": -431.2275145621528,
+        "fees": 1013.5351607386427,
+        "turnover": 337393.64776459004,
+        "exposure_minutes": 25.0
+      },
+      "unpriced_exit_count": 1,
+      "unpriced_exit_penalty_net": -20562.42462156153
+    },
+    {
+      "phase": "final",
+      "candidate": "stop_0.75_rr_1.8",
+      "slippage_bps_per_side": 25.0,
+      "metrics": {
+        "trade_count": 5,
+        "net_pnl": -547.3983676946793,
+        "expectancy": -109.47967353893587,
+        "profit_factor": 0.5488810750692168,
+        "win_rate": 0.2,
+        "average_win": 666.0252717118667,
+        "average_loss": -303.3559098516365,
+        "max_realized_drawdown": 643.8931469913133,
+        "worst_trade": -408.9157380713473,
+        "fees": 362.61055418759287,
+        "turnover": 106919.8059364929,
+        "exposure_minutes": 10.0
+      },
+      "yearly_metrics": {
+        "2020": {
+          "trade_count": 5,
+          "net_pnl": -547.3983676946793,
+          "expectancy": -109.47967353893587,
+          "profit_factor": 0.5488810750692168,
+          "win_rate": 0.2,
+          "average_win": 666.0252717118667,
+          "average_loss": -303.3559098516365,
+          "max_realized_drawdown": 643.8931469913133,
+          "worst_trade": -408.9157380713473,
+          "fees": 362.61055418759287,
+          "turnover": 106919.8059364929,
+          "exposure_minutes": 10.0
+        }
+      },
+      "no_vote_reasons": {
+        "no_fresh_underlying_breakout": 35232,
+        "awaiting_orb_retest": 1323,
+        "orb_breakout_invalidated": 208,
+        "cost_net_rr_rejected": 310,
+        "orb_event_already_emitted": 6331,
+        "below_strategy_min_confidence": 87,
+        "orb_session_event_limit": 4320,
+        "orb_breakout_expired": 58,
+        "orb_event_inactive": 2500,
+        "wick_only_underlying_breakout": 59,
+        "next_minute_unavailable": 5,
+        "gap_invalidates_geometry": 5
+      },
+      "exit_reasons": {
+        "stop": 3,
+        "target": 1,
+        "gap_stop": 1
+      },
+      "priced_exit_subset_metrics": {
+        "trade_count": 5,
+        "net_pnl": -547.3983676946793,
+        "expectancy": -109.47967353893587,
+        "profit_factor": 0.5488810750692168,
+        "win_rate": 0.2,
+        "average_win": 666.0252717118667,
+        "average_loss": -303.3559098516365,
+        "max_realized_drawdown": 643.8931469913133,
+        "worst_trade": -408.9157380713473,
+        "fees": 362.61055418759287,
+        "turnover": 106919.8059364929,
+        "exposure_minutes": 10.0
+      },
+      "unpriced_exit_count": 0,
+      "unpriced_exit_penalty_net": 0
+    },
+    {
+      "phase": "final",
+      "candidate": "stop_0.75_rr_1.8",
+      "slippage_bps_per_side": 50.0,
+      "metrics": {
+        "trade_count": 2,
+        "net_pnl": -874.564186515076,
+        "expectancy": -437.282093257538,
+        "profit_factor": 0.0,
+        "win_rate": 0.0,
+        "average_win": null,
+        "average_loss": -437.282093257538,
+        "max_realized_drawdown": 874.564186515076,
+        "worst_trade": -467.0583244939771,
+        "fees": 133.8202895454921,
+        "turnover": 33713.16860303041,
+        "exposure_minutes": 6.0
+      },
+      "yearly_metrics": {
+        "2020": {
+          "trade_count": 2,
+          "net_pnl": -874.564186515076,
+          "expectancy": -437.282093257538,
+          "profit_factor": 0.0,
+          "win_rate": 0.0,
+          "average_win": null,
+          "average_loss": -437.282093257538,
+          "max_realized_drawdown": 874.564186515076,
+          "worst_trade": -467.0583244939771,
+          "fees": 133.8202895454921,
+          "turnover": 33713.16860303041,
+          "exposure_minutes": 6.0
+        }
+      },
+      "no_vote_reasons": {
+        "no_fresh_underlying_breakout": 35232,
+        "awaiting_orb_retest": 1323,
+        "orb_breakout_invalidated": 208,
+        "cost_net_rr_rejected": 309,
+        "orb_event_already_emitted": 6332,
+        "below_strategy_min_confidence": 87,
+        "orb_session_event_limit": 4320,
+        "orb_breakout_expired": 58,
+        "orb_event_inactive": 2500,
+        "wick_only_underlying_breakout": 59,
+        "next_minute_unavailable": 5,
+        "gap_invalidates_geometry": 9
+      },
+      "exit_reasons": {
+        "stop": 2
+      },
+      "priced_exit_subset_metrics": {
+        "trade_count": 2,
+        "net_pnl": -874.564186515076,
+        "expectancy": -437.282093257538,
+        "profit_factor": 0.0,
+        "win_rate": 0.0,
+        "average_win": null,
+        "average_loss": -437.282093257538,
+        "max_realized_drawdown": 874.564186515076,
+        "worst_trade": -467.0583244939771,
+        "fees": 133.8202895454921,
+        "turnover": 33713.16860303041,
+        "exposure_minutes": 6.0
+      },
+      "unpriced_exit_count": 0,
+      "unpriced_exit_penalty_net": 0
+    }
+  ],
+  "combined_reference_metrics": [
+    {
+      "candidate": "raw_reference",
+      "slippage_bps_per_side": 10,
+      "metrics": {
+        "trade_count": 1311,
+        "net_pnl": -612959.8837905288,
+        "expectancy": -467.55139877233313,
+        "profit_factor": 0.11743186647310411,
+        "win_rate": 0.3340961098398169,
+        "average_win": 186.20685410493007,
+        "average_loss": -795.5538211781078,
+        "max_realized_drawdown": 613063.0939922346,
+        "worst_trade": -24133.848838174283,
+        "fees": 92549.31766835932,
+        "turnover": 26195148.303877827,
+        "exposure_minutes": 4071.0
+      },
+      "priced_exit_subset_metrics": {
+        "trade_count": 1276,
+        "net_pnl": -121816.12837255832,
+        "expectancy": -95.46718524495166,
+        "profit_factor": 0.4010262332457402,
+        "win_rate": 0.3432601880877743,
+        "average_win": 186.20685410493007,
+        "average_loss": -242.69060915336237,
+        "max_realized_drawdown": 121919.33857426472,
+        "worst_trade": -1480.6205054806592,
+        "fees": 90676.87100038881,
+        "turnover": 25705824.495127827,
+        "exposure_minutes": 3933.0
+      },
+      "unpriced_exit_count": 35
+    },
+    {
+      "candidate": "raw_reference",
+      "slippage_bps_per_side": 25,
+      "metrics": {
+        "trade_count": 1315,
+        "net_pnl": -652910.7718133888,
+        "expectancy": -496.51009263375573,
+        "profit_factor": 0.09527233402124537,
+        "win_rate": 0.3155893536121673,
+        "average_win": 165.67411941269788,
+        "average_loss": -801.8505904107316,
+        "max_realized_drawdown": 652999.5493271347,
+        "worst_trade": -24169.94383926996,
+        "fees": 92854.78208544121,
+        "turnover": 26318144.44152205,
+        "exposure_minutes": 4075.0
+      },
+      "priced_exit_subset_metrics": {
+        "trade_count": 1280,
+        "net_pnl": -161033.4730062976,
+        "expectancy": -125.80740078617,
+        "profit_factor": 0.29920922751146073,
+        "win_rate": 0.32421875,
+        "average_win": 165.67411941269788,
+        "average_loss": -265.65113591048237,
+        "max_realized_drawdown": 161122.250520044,
+        "worst_trade": -1526.2149447287195,
+        "fees": 90982.00515334996,
+        "turnover": 25828087.41964705,
+        "exposure_minutes": 3937.0
+      },
+      "unpriced_exit_count": 35
+    },
+    {
+      "candidate": "raw_reference",
+      "slippage_bps_per_side": 50,
+      "metrics": {
+        "trade_count": 1308,
+        "net_pnl": -662486.5257954657,
+        "expectancy": -506.48816956839886,
+        "profit_factor": 0.06969917642257045,
+        "win_rate": 0.26605504587155965,
+        "average_win": 142.62709829532866,
+        "average_loss": -741.792454169,
+        "max_realized_drawdown": 662551.2488292778,
+        "worst_trade": -24230.102174429423,
+        "fees": 92304.83766165884,
+        "turnover": 26139220.91186619,
+        "exposure_minutes": 4062.0
+      },
+      "priced_exit_subset_metrics": {
+        "trade_count": 1276,
+        "net_pnl": -224012.74687355972,
+        "expectancy": -175.5585790545139,
+        "profit_factor": 0.1813805171039888,
+        "win_rate": 0.2727272727272727,
+        "average_win": 142.62709829532866,
+        "average_loss": -294.8782080607048,
+        "max_realized_drawdown": 224077.4699073728,
+        "worst_trade": -1602.2056768088246,
+        "fees": 90597.64623975287,
+        "turnover": 25702406.32436619,
+        "exposure_minutes": 3930.0
+      },
+      "unpriced_exit_count": 32
+    },
+    {
+      "candidate": "stop_0.75_rr_1.8",
+      "slippage_bps_per_side": 10,
+      "metrics": {
+        "trade_count": 48,
+        "net_pnl": -37603.03718038797,
+        "expectancy": -783.3966079247493,
+        "profit_factor": 0.13504341934708128,
+        "win_rate": 0.3125,
+        "average_win": 391.39095397072407,
+        "average_loss": -1317.3909542408735,
+        "max_realized_drawdown": 38393.32270916197,
+        "worst_trade": -20562.42462156153,
+        "fees": 3440.773338517446,
+        "turnover": 1012525.8786581294,
+        "exposure_minutes": 116.0
+      },
+      "priced_exit_subset_metrics": {
+        "trade_count": 46,
+        "net_pnl": -1210.0433662155515,
+        "expectancy": -26.305290569903292,
+        "profit_factor": 0.8291118283669937,
+        "win_rate": 0.32608695652173914,
+        "average_win": 391.39095397072407,
+        "average_loss": -228.4163766379488,
+        "max_realized_drawdown": 2876.8759028895392,
+        "worst_trade": -490.3104623065416,
+        "fees": 3330.0270243450314,
+        "turnover": 976240.6311581293,
+        "exposure_minutes": 105.0
+      },
+      "unpriced_exit_count": 2
+    },
+    {
+      "candidate": "stop_0.75_rr_1.8",
+      "slippage_bps_per_side": 25,
+      "metrics": {
+        "trade_count": 23,
+        "net_pnl": -17560.450420890556,
+        "expectancy": -763.4978443865459,
+        "profit_factor": 0.12826999558798452,
+        "win_rate": 0.2608695652173913,
+        "average_win": 430.6530092670832,
+        "average_loss": -1184.9628515584152,
+        "max_realized_drawdown": 17656.945200187194,
+        "worst_trade": -15854.221716715207,
+        "fees": 1614.033835322461,
+        "turnover": 455659.65841443185,
+        "exposure_minutes": 44.0
+      },
+      "priced_exit_subset_metrics": {
+        "trade_count": 22,
+        "net_pnl": -1706.2287041753511,
+        "expectancy": -77.55585018978869,
+        "profit_factor": 0.6022912968451218,
+        "win_rate": 0.2727272727272727,
+        "average_win": 430.6530092670832,
+        "average_loss": -268.13417248611563,
+        "max_realized_drawdown": 2099.7605783884683,
+        "worst_trade": -482.0134369248585,
+        "fees": 1559.7152436072547,
+        "turnover": 439858.2552894319,
+        "exposure_minutes": 42.0
+      },
+      "unpriced_exit_count": 1
+    },
+    {
+      "candidate": "stop_0.75_rr_1.8",
+      "slippage_bps_per_side": 50,
+      "metrics": {
+        "trade_count": 5,
+        "net_pnl": -2045.647611322575,
+        "expectancy": -409.129522264515,
+        "profit_factor": 0.0,
+        "win_rate": 0.0,
+        "average_win": null,
+        "average_loss": -409.129522264515,
+        "max_realized_drawdown": 2045.647611322575,
+        "worst_trade": -578.6744563047209,
+        "fees": 347.25197894252585,
+        "turnover": 94902.20436761994,
+        "exposure_minutes": 10.0
+      },
+      "priced_exit_subset_metrics": {
+        "trade_count": 5,
+        "net_pnl": -2045.647611322575,
+        "expectancy": -409.129522264515,
+        "profit_factor": 0.0,
+        "win_rate": 0.0,
+        "average_win": null,
+        "average_loss": -409.129522264515,
+        "max_realized_drawdown": 2045.647611322575,
+        "worst_trade": -578.6744563047209,
+        "fees": 347.25197894252585,
+        "turnover": 94902.20436761994,
+        "exposure_minutes": 10.0
+      },
+      "unpriced_exit_count": 0
+    }
+  ]
+}
