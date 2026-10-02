@@ -348,6 +348,10 @@ def dashboard(request: Request) -> HTMLResponse:
     Runs separately without changing live trading settings.</p>
     <form method=post action="/admin/research/start">
     <button class=blu type=submit>Run research backtest</button></form>
+    <form method=post action="/admin/research/start?mode=runtime">
+    <button class=blu type=submit>Replay recorded bot sessions</button></form>
+    <p>Recorded-feed replay uses the production pipeline with simulated fills.
+    Missing sessions and replay limitations are shown in the report.</p>
     <p><a href="/admin/research/status">Job status</a> &middot;
     <a href="/admin/research/report">Latest evidence report</a></p>
     <p class=muted>Uses available active contracts, next-minute fills and assumed
@@ -536,14 +540,19 @@ def logs_download(request: Request, fmt: str = "txt", lines: int = 2000, contain
 
 
 @router.post("/admin/research/start")
-def start_research(request: Request) -> JSONResponse:
+def start_research(request: Request, mode: str = "all", days: int = 30) -> JSONResponse:
     """Start the fixed research job; never accept shell commands from the UI."""
     from nifty_scalper_bot.ops.research_jobs import new_request, start_job
     from nifty_scalper_bot.superlite_admin_core import same_origin
 
     _check_auth(request)
     same_origin(request)
-    result = start_job(APP_DIR, new_request())
+    try:
+        result = start_job(APP_DIR, new_request(days=days, mode=mode))
+    except ValueError:
+        return JSONResponse(
+            {"error": "Invalid research mode or date range"}, status_code=422
+        )
     return JSONResponse(result, status_code=409 if result["state"] == "busy" else 202)
 
 
@@ -568,6 +577,7 @@ def research_report(request: Request) -> JSONResponse:
             "completed_trade_analysis",
             "strategy_bar_research",
             "orb_comparison",
+            "runtime_replay",
         ):
             path = APP_DIR / "data/research" / status["id"] / f"{name}.json"
             if path.is_file():

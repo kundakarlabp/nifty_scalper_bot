@@ -286,6 +286,12 @@ class PaperFillEngine:
         ref_price = metrics.ask if side == "BUY" else metrics.bid
         if ref_price <= 0:
             ref_price = metrics.mid or metrics.ltp
+        slip_bps = (
+            self._calibrated_slippage_bps
+            if self._calibrated_slippage_bps is not None
+            else self._slip_bps
+        )
+        ref_price *= 1.0 + (slip_bps / 10000.0) * (1.0 if side == "BUY" else -1.0)
         fillable = False
         if side == "BUY":
             fillable = limit_price >= ref_price
@@ -299,7 +305,14 @@ class PaperFillEngine:
             )
             return
 
-        partial = self._consume_queue(quantity)
+        remaining = max(quantity - int(order.get("filled_quantity", 0)), 0)
+        best_quantity = metrics.ask_quantity if side == "BUY" else metrics.bid_quantity
+        available = (
+            remaining
+            if best_quantity is None
+            else min(remaining, max(best_quantity, 0))
+        )
+        partial = min(remaining, self._consume_queue(available)) if available > 0 else 0
         if partial <= 0:
             order["status"] = "open"
             order["remaining_quantity"] = quantity - int(
@@ -320,6 +333,12 @@ class PaperFillEngine:
         order["average_price"] = weighted_price
         order["remaining_quantity"] = max(quantity - new_total, 0)
         order["status"] = "complete" if new_total >= quantity else "open"
+        order["filled_turnover"] = weighted_price * new_total
+        order["fees"] = self._execution_simulator.commission_model.calculate(
+            float(order["filled_turnover"]), side=cast(Literal["BUY", "SELL"], side)
+        )
+        order.setdefault("first_fill_timestamp", self._clock())
+        order["last_fill_timestamp"] = self._clock()
 
     def _fill_market(self, order: dict[str, Any], metrics: _QuoteMetrics) -> None:
         side = str(order.get("transaction_type") or "").upper()

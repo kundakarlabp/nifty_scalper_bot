@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 import pytest
+from freezegun import freeze_time
 
 from nifty_scalper_bot.core import app as core_app
 from nifty_scalper_bot.core.app import BotContext, initialize_components
@@ -587,6 +588,11 @@ def test_live_runtime_expiry_day_after_cutoff_clock_remains_blocked(monkeypatch)
 
 
 @pytest.mark.live_runtime_e2e
+@freeze_time(
+    _FIXED_RUNTIME_NOW_IST.replace(hour=10, minute=0, second=0, microsecond=0),
+    tick=True,
+    real_asyncio=True,
+)
 def test_live_runtime_bullish_spot_future_selects_ce_and_exits_target(
     monkeypatch, tmp_path
 ):
@@ -648,7 +654,8 @@ def test_live_runtime_bullish_spot_future_selects_ce_and_exits_target(
         assert selected_ce == basket.selected_ce
         assert selected_pe == basket.selected_pe
 
-        end = pd.Timestamp.now(tz="Asia/Kolkata").floor("min") - pd.Timedelta(minutes=2)
+        # LIVE_SIMULATION now uses live freshness policy: seed the latest closed bar.
+        end = pd.Timestamp(datetime.now(tz=_FIXED_RUNTIME_NOW_IST.tzinfo)).floor("min")
         histories = {
             "NSE:NIFTY": _bars(end, 80, 24900.0, 1.25),
             basket.futures_symbol: _bars(end, 80, 24920.0, 1.20),
@@ -722,7 +729,9 @@ def test_live_runtime_bullish_spot_future_selects_ce_and_exits_target(
             ctx.order_manager.apply_broker_order_update
         )
 
-        base_tick_time = pd.Timestamp(_FIXED_RUNTIME_NOW_IST).tz_convert("UTC")
+        base_tick_time = pd.Timestamp(
+            datetime.now(tz=_FIXED_RUNTIME_NOW_IST.tzinfo)
+        ).tz_convert("UTC")
         startup_ticks = (
             ("NSE:NIFTY", basket.spot_token, 25000.0, 1),
             (basket.futures_symbol, basket.futures_token, 25020.0, 2),

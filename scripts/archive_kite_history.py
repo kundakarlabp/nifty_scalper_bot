@@ -5,7 +5,10 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import json
+import math
+import time
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -23,12 +26,73 @@ def _write_json(path: Path, payload: dict) -> None:
     temporary.replace(path)
 
 
+def _candle_digest(candles: list) -> str:
+    return hashlib.sha256(
+        json.dumps(candles, default=str, sort_keys=True).encode()
+    ).hexdigest()
+
+
+def _validate_candles(candles: list, first: dt.datetime, last: dt.datetime) -> None:
+    previous: dt.datetime | None = None
+    for row in candles:
+        if not isinstance(row, (list, tuple)) or len(row) < 6:
+            raise ValueError("historical_candle_shape_invalid")
+        timestamp = dt.datetime.fromisoformat(str(row[0]))
+        if (
+            timestamp.tzinfo is None
+            or not first <= timestamp <= last
+            or (previous is not None and timestamp <= previous)
+        ):
+            raise ValueError("historical_candle_timestamp_invalid")
+        values = [float(value) for value in row[1:6]]
+        opening, high, low, close, volume = values
+        if (
+            not all(math.isfinite(value) for value in values)
+            or min(values[:4]) <= 0
+            or volume < 0
+            or high < max(opening, low, close)
+            or low > min(opening, high, close)
+        ):
+            raise ValueError("historical_candle_values_invalid")
+        previous = timestamp
+
+
+def history_universe(rows: list[dict], selected: dict, future: str) -> list[str]:
+    """Collect nominated and adjacent current contracts; do not infer past baskets."""
+    nominated = ["NSE:NIFTY 50", future, selected["ce"], selected["pe"]]
+    ce = next(
+        (row for row in rows if f"NFO:{row.get('tradingsymbol')}" == selected["ce"]),
+        None,
+    )
+    if ce is None or not ce.get("strike"):
+        return nominated
+    atm = float(ce["strike"])
+    options = [
+        row
+        for row in rows
+        if row.get("name") == "NIFTY"
+        and row.get("instrument_type") in {"CE", "PE"}
+        and row.get("expiry")
+    ]
+    expiries = sorted({str(row["expiry"]) for row in options})[:2]
+    extra = [
+        f"NFO:{row['tradingsymbol']}"
+        for row in options
+        if str(row["expiry"]) in expiries
+        and abs(float(row.get("strike") or 0) - atm) <= 500
+    ]
+    return list(dict.fromkeys(nominated + sorted(extra)))
+
+
 def archive_history(
     client: ZerodhaKiteClient,
     symbols: list[str],
     start: dt.date,
     end: dt.date,
     outdir: Path,
+    *,
+    cache_dir: Path | None = None,
+    allow_completed_today: bool = False,
 ) -> dict:
     """Save raw minute/OI responses and contemporaneous instrument identity.
 
@@ -36,7 +100,13 @@ def archive_history(
     Only complete past calendar dates may be cached. Empty/failed responses are
     reported and retried on subsequent runs rather than claimed as full coverage.
     """
-    if start > end or end >= dt.datetime.now(IST).date():
+    now = dt.datetime.now(IST)
+    latest = (
+        now.date()
+        if allow_completed_today and now.time() >= dt.time(15, 35)
+        else now.date() - dt.timedelta(days=1)
+    )
+    if start > end or end > latest:
         raise ValueError("Require start <= end and end before today's IST date")
     requested = list(dict.fromkeys(symbol.strip().upper() for symbol in symbols))
     if not requested or any(":" not in symbol for symbol in requested):
@@ -104,10 +174,13 @@ def archive_history(
             }
             name = f"{symbol.replace(':', '_').replace(' ', '_')}_{cursor}_{last}.json"
             path = outdir / "candles" / name
+            cache_path = (
+                (cache_dir / "candles" / name) if cache_dir is not None else path
+            )
             cached = None
-            if path.exists():
+            if cache_path.exists():
                 try:
-                    cached = json.loads(path.read_text())
+                    cached = json.loads(cache_path.read_text())
                 except (OSError, ValueError):
                     pass
             if (
@@ -115,30 +188,47 @@ def archive_history(
                 and all(cached.get(k) == v for k, v in identity.items())
                 and isinstance(cached.get("candles"), list)
                 and cached["candles"]
+                and cached.get("instrument")
+                == json.loads(json.dumps(instrument, default=str))
+                and cached.get("candles_sha256") == _candle_digest(cached["candles"])
             ):
                 report["cached_requests"] += 1
+                if cache_path != path:
+                    _write_json(path, cached)
             else:
                 try:
-                    candles = client.historical_data(
-                        token, first_ts, last_ts, "minute", continuous=False, oi=True
-                    )
+                    for attempt in range(3):
+                        try:
+                            candles = client.historical_data(
+                                token,
+                                first_ts,
+                                last_ts,
+                                "minute",
+                                continuous=False,
+                                oi=True,
+                            )
+                            break
+                        except Exception:
+                            if attempt == 2:
+                                raise
+                            time.sleep(0.35 * (attempt + 1))
                     if not isinstance(candles, list):
                         raise ValueError("Historical response is not a candle list")
                     if not candles:
                         report["empty_requests"].append(identity)
                     else:
-                        _write_json(
-                            path,
-                            {
-                                **identity,
-                                "instrument": instrument,
-                                "captured_at": dt.datetime.now(
-                                    dt.timezone.utc
-                                ).isoformat(),
-                                "timestamp_convention": "bar_start",
-                                "candles": candles,
-                            },
-                        )
+                        _validate_candles(candles, first_ts, last_ts)
+                        payload = {
+                            **identity,
+                            "instrument": instrument,
+                            "captured_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+                            "timestamp_convention": "bar_start",
+                            "candles": candles,
+                            "candles_sha256": _candle_digest(candles),
+                        }
+                        _write_json(path, payload)
+                        if cache_path != path:
+                            _write_json(cache_path, payload)
                         report["saved_requests"] += 1
                 except Exception as exc:
                     # Do not persist exception text that may contain auth/request data.

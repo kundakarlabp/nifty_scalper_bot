@@ -4122,8 +4122,7 @@ class StrategyManager(_BaseStrategyManager):
         )
         shadow_enabled = self._env_bool("SHADOW_MODE", False)
         return (
-            execution_mode == "LIVE"
-            and enable_live
+            (execution_mode == "LIVE_SIMULATION" or (execution_mode == "LIVE" and enable_live))
             and not paper_enabled
             and not shadow_enabled
         )

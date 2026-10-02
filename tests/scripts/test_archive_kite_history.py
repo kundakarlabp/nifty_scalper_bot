@@ -97,7 +97,7 @@ def test_empty_and_failed_requests_remain_explicit_and_retryable(tmp_path):
     assert not list(tmp_path.glob("candles/*.json"))
     assert "sensitive" not in (tmp_path / "coverage.json").read_text()
     archive_history(*args)
-    assert len(broker.calls) == 4
+    assert len(broker.calls) == 10  # bounded retries; failures remain retryable
 
 
 def test_corrupt_cache_is_refetched(tmp_path):
@@ -183,3 +183,21 @@ def test_cli_missing_external_env_fails_before_broker_access(tmp_path, monkeypat
             ]
         )
     assert broker_calls == []
+
+
+def test_shared_history_cache_reuses_valid_bytes_between_jobs(tmp_path):
+    broker = Broker()
+    common = (
+        broker,
+        ["NFO:NIFTY26OCT25000CE"],
+        dt.date(2026, 9, 1),
+        dt.date(2026, 9, 2),
+    )
+    archive_history(*common, tmp_path / "one", cache_dir=tmp_path / "shared")
+    second = archive_history(*common, tmp_path / "two", cache_dir=tmp_path / "shared")
+    assert second["cached_requests"] == 1
+    assert len(broker.calls) == 1
+    assert (
+        next((tmp_path / "one/candles").glob("*.json")).read_bytes()
+        == next((tmp_path / "two/candles").glob("*.json")).read_bytes()
+    )

@@ -137,7 +137,7 @@ def test_worker_completes_component_research_without_claiming_live_parity(
         "nifty_scalper_bot.config.paths.get_data_dir", lambda: tmp_path / "no-ledger"
     )
 
-    def collect(client, symbols, start, end, outdir):
+    def collect(client, symbols, start, end, outdir, **kwargs):
         captures.append((symbols, start, end))
         return {"saved_requests": 4, "empty_requests": [], "failed_requests": []}
 
@@ -278,3 +278,27 @@ def test_worker_waits_for_startup_basket_and_redacts_unknown_errors(monkeypatch)
         )
         == "ledger_requires_verified_costs"
     )
+
+
+def test_runtime_mode_is_bounded_and_requires_no_operator_login(tmp_path, monkeypatch):
+    from scripts import run_research_job as worker
+
+    from nifty_scalper_bot.ops.research_jobs import run_recorded_replays
+
+    monkeypatch.setattr(worker, "ROOT", tmp_path)
+    monkeypatch.setattr(
+        "nifty_scalper_bot.config.paths.get_data_dir", lambda: tmp_path / "data"
+    )
+    request = validate_request(
+        {"id": "offline", "mode": "runtime", "days": 2}, today=date(2026, 10, 2)
+    )
+    result = worker.run_worker(request, None)
+    assert result["state"] == "blocked"
+    assert result["runtime_replay"]["blocker"] == "recorded_live_feed_unavailable"
+    assert result["backtest_completed"] is False
+    assert run_recorded_replays(tmp_path, request)["missing_dates"] == [
+        "2026-09-30",
+        "2026-10-01",
+    ]
+    with pytest.raises(ValueError):
+        validate_request({"id": "bad", "mode": "shell"})

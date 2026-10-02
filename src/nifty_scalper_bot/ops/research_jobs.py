@@ -11,6 +11,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import uuid
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -24,10 +25,13 @@ def validate_request(
     payload: dict[str, Any], *, today: date | None = None
 ) -> dict[str, Any]:
     """Accept bounded data requests only, never arbitrary commands or paths."""
-    if set(payload) - {"id", "days"}:
-        raise ValueError("Only id and days are supported")
+    if set(payload) - {"id", "days", "mode"}:
+        raise ValueError("Only id, days and mode are supported")
     job_id = payload.get("id")
     days = payload.get("days", 30)
+    mode = payload.get("mode", "all")
+    if mode not in {"all", "components", "runtime"}:
+        raise ValueError("mode must be all, components or runtime")
     if not isinstance(job_id, str) or not re.fullmatch(r"[a-zA-Z0-9_-]{1,80}", job_id):
         raise ValueError("Invalid request id")
     if type(days) is not int or not 1 <= days <= 90:
@@ -36,6 +40,7 @@ def validate_request(
     return {
         "id": job_id,
         "days": days,
+        "mode": mode,
         "start": (end - timedelta(days=days - 1)).isoformat(),
         "end": end.isoformat(),
     }
@@ -140,5 +145,124 @@ def start_job(
     return queued
 
 
-def new_request(days: int = 30) -> dict[str, Any]:
-    return {"id": f"dashboard-{uuid.uuid4().hex}", "days": days}
+def new_request(days: int = 30, mode: str = "all") -> dict[str, Any]:
+    return {"id": f"dashboard-{uuid.uuid4().hex}", "days": days, "mode": mode}
+
+
+def run_recorded_replays(root: Path, request: dict[str, Any]) -> dict[str, Any]:
+    """Replay each complete captured session in its own credential-free process."""
+    from nifty_scalper_bot.config.paths import get_data_dir
+
+    source = get_data_dir() / "replay_archive"
+    output = root / "data/research" / request["id"] / "runtime"
+    report: dict[str, Any] = {
+        "scope": "production_composition_recorded_feed_replay",
+        "live_equivalent": False,
+        "sessions": [],
+        "missing_dates": [],
+        "requested_start": request["start"],
+        "requested_end": request["end"],
+    }
+    cursor = date.fromisoformat(request["start"])
+    end = date.fromisoformat(request["end"])
+    deadline = time.monotonic() + 1500
+    while cursor <= end:
+        day = cursor.isoformat()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            report["budget_exhausted"] = True
+            report["deferred_from"] = day
+            break
+        path = source / f"{day}.jsonl"
+        if not path.is_file():
+            # Calendar dates; holidays are not assumed to be missing trading data.
+            report["missing_dates"].append(day)
+            cursor += timedelta(days=1)
+            continue
+        directory = output / day
+        directory.mkdir(parents=True, exist_ok=True)
+        # No operator env file or inherited credential/path settings cross here.
+        env = {
+            key: value
+            for key, value in os.environ.items()
+            if key in {"PATH", "LANG", "LC_ALL", "TZ", "VIRTUAL_ENV"}
+        }
+        env.update(
+            REPLAY_ISOLATED_PROCESS="true",
+            EXECUTION_MODE="LIVE_SIMULATION",
+            ENABLE_LIVE="false",
+            ENABLE_LIVE_TRADING="false",
+            BROKER_API_KEY="offline_replay",
+            BROKER_API_SECRET="offline_replay",
+            BROKER_ACCESS_TOKEN="offline_replay",
+            ALLOW_NETWORK="false",
+            ALLOW_REAL_BROKER="false",
+            DATA_DIR=str(directory.resolve()),
+            PYTHONPATH=str(root / "src"),
+        )
+        interpreter = root / ".venv/bin/python"
+        if not interpreter.is_file():
+            interpreter = Path(sys.executable)
+        with (directory / "worker.log").open("w") as log:
+            try:
+                result = subprocess.run(
+                    [
+                        str(interpreter),
+                        str(root / "scripts/run_runtime_replay.py"),
+                        "--session",
+                        str(path.resolve()),
+                        "--output",
+                        str(directory.resolve()),
+                    ],
+                    cwd=directory,
+                    env=env,
+                    stdout=log,
+                    stderr=log,
+                    timeout=min(600, remaining),
+                )
+            except subprocess.TimeoutExpired:
+                report["sessions"].append(
+                    {"date": day, "state": "failed", "error_code": "replay_timeout"}
+                )
+            else:
+                evidence = directory / (
+                    "report.json" if result.returncode == 0 else "failure.json"
+                )
+                if evidence.is_file():
+                    payload = json.loads(evidence.read_text())
+                    report["sessions"].append(
+                        {
+                            "date": day,
+                            "state": (
+                                "completed" if result.returncode == 0 else "failed"
+                            ),
+                            **{
+                                key: value
+                                for key, value in payload.items()
+                                if key not in {"orders", "runner_status"}
+                            },
+                        }
+                    )
+                else:
+                    report["sessions"].append(
+                        {
+                            "date": day,
+                            "state": "failed",
+                            "error_code": "replay_worker_exited_without_report",
+                        }
+                    )
+        cursor += timedelta(days=1)
+    completed = sum(row["state"] == "completed" for row in report["sessions"])
+    report["completed_sessions"] = completed
+    report["state"] = (
+        "completed"
+        if completed and completed == len(report["sessions"])
+        else "partial" if completed else "blocked"
+    )
+    report["full_requested_period_covered"] = (
+        False  # calendar/quote/initial-state parity remains unverified
+    )
+    if not report["sessions"]:
+        report["blocker"] = "recorded_live_feed_unavailable"
+    write_json(root / "data/research" / request["id"] / "runtime_replay.json", report)
+    return report

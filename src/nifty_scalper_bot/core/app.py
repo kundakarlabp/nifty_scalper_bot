@@ -6989,6 +6989,37 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     )
     ensure_bot_context_runtime_fields(ctx)
 
+    def _replay_metadata() -> dict[str, Any]:
+        from nifty_scalper_bot.storage.replay_archive import (
+            capture_environment,
+            capture_settings,
+        )
+        from nifty_scalper_bot.utils.serialization import to_json_safe
+
+        return {
+            "configuration": capture_environment(),
+            "effective_settings": capture_settings(settings),
+            "runner_config": to_json_safe(strategy_runner._config),
+            "app_risk": config.risk.model_dump(mode="json"),
+            "quote_stale_threshold_ms": config.quote_stale_threshold_ms,
+            "instruments": [
+                row
+                for row in instrument_manager.get_nifty_instruments_snapshot()
+                if row.get("name") == "NIFTY"
+            ],
+            "initial_balance": getattr(ctx, "last_valid_broker_balance", None),
+            "initial_positions": to_json_safe(position_manager.get_open_positions()),
+            "code_revision": fingerprint["release"],
+            "strategy_profile": strategy_profile,
+            "decision_state_restored": False,
+        }
+
+    if (
+        not _is_live_simulation_mode()
+        and str(os.getenv("EXECUTION_MODE", "")).upper() != "SHADOW"
+    ):
+        market_data_manager.replay_metadata_provider = _replay_metadata
+
     def _on_broker_auth_failure(snapshot: Mapping[str, Any]) -> None:
         apply_broker_auth_failure_to_context(ctx, snapshot)
         reason = str(snapshot.get("reason") or "broker_auth_invalid")

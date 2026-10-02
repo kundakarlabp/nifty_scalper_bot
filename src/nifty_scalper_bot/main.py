@@ -845,6 +845,16 @@ def trading_status():
         "research_job": read_status(
             Path(os.getenv("BOT_APP_DIR", "/home/ubuntu/nifty_scalper_bot"))
         ),
+        "replay_capture": (
+            getattr(
+                getattr(ctx, "market_data_manager", None), "_replay_archive", None
+            ).stats()
+            if getattr(
+                getattr(ctx, "market_data_manager", None), "_replay_archive", None
+            )
+            is not None
+            else {"state": "waiting_for_live_basket"}
+        ),
         "execution_mode": exec_mode,
         "configured_for_live": configured_for_live,
         "can_place_live_order_now": can_place_live_order_now,

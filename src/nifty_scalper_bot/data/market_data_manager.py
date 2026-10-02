@@ -41,6 +41,7 @@ from collections import defaultdict, deque
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from random import uniform
 from typing import (
     Any,
@@ -367,6 +368,10 @@ class MarketDataManager:
         MarketDataManager constructor.
         """
         self._external_tick_handler: Callable[[dict[str, Any]], None] | None = None
+        self._replay_capture_lock = threading.RLock()
+        self._replay_archive: Any | None = None
+        self._replay_snapshot_key: tuple[str, str] | None = None
+        self.replay_metadata_provider: Callable[[], dict[str, Any]] | None = None
         self._broker = broker
         self._rest_client = broker
         self._websocket = websocket
@@ -2052,6 +2057,9 @@ class MarketDataManager:
         return task.done()
 
     def stop(self) -> None:
+        archive = getattr(self, "_replay_archive", None)
+        if archive is not None:
+            archive.close()
         self._stop_candle_flush_task()
         stop_fallback_worker = getattr(self, "_stop_fallback_tick_worker", None)
         if callable(stop_fallback_worker):
@@ -9890,6 +9898,70 @@ class MarketDataManager:
         tick_payload = dict(tick)
         self._emit_tick(symbol, tick_payload, source=source)
 
+    def _capture_replay_tick(self, tick: Mapping[str, Any]) -> None:
+        """Archive exactly delivered observations without changing market quality."""
+        provider = getattr(self, "replay_metadata_provider", None)
+        if (
+            provider is None
+            or os.getenv("REPLAY_CAPTURE_ENABLED", "true").lower() != "true"
+        ):
+            return
+        with self._replay_capture_lock:
+            try:
+                from nifty_scalper_bot.config.paths import get_data_dir
+                from nifty_scalper_bot.storage.replay_archive import ReplayArchive
+
+                now = datetime.now(timezone.utc)
+                if self._replay_archive is None:
+                    self._replay_archive = ReplayArchive(
+                        get_data_dir() / "replay_archive"
+                    )
+                basket = getattr(self, "_active_contract_basket", None)
+                basket_payload = to_json_safe(basket) if basket is not None else {}
+                if not isinstance(basket_payload, dict) or not basket_payload:
+                    return
+                key = (
+                    now.astimezone(ZoneInfo("Asia/Kolkata")).date().isoformat(),
+                    str(
+                        basket_payload.get("basket_version")
+                        or basket_payload.get("version")
+                        or basket_payload
+                    ),
+                )
+                if key != self._replay_snapshot_key:
+                    metadata = provider()
+                    symbols = list((basket_payload.get("token_by_symbol") or {}).keys())
+                    symbols += list(basket_payload.get("option_symbols") or [])
+                    symbols += [
+                        "NSE:NIFTY 50",
+                        str(basket_payload.get("futures_symbol") or ""),
+                    ]
+                    history = {
+                        sym: self.get_ohlc_bars(sym, limit=500)
+                        for sym in dict.fromkeys(symbols)
+                        if sym
+                    }
+                    self._replay_archive.record(
+                        "snapshot",
+                        {
+                            **metadata,
+                            "basket": basket_payload,
+                            "history": history,
+                        },
+                        now,
+                    )
+                    self._replay_snapshot_key = key
+                self._replay_archive.record("tick", tick, now)
+            except Exception as exc:  # noqa: BLE001 - archive cannot break trading
+                log_throttled(
+                    self._logger,
+                    "replay_capture_failed",
+                    "REPLAY_CAPTURE_FAILED error_type=%s",
+                    type(exc).__name__,
+                    interval_sec=60.0,
+                    level=logging.WARNING,
+                )
+
     def _emit_tick(self, symbol: str, tick: dict[str, Any], *, source: str) -> None:
         source = str(source or "unknown").lower()
         tick.pop("_volume_delta_normalized", None)
@@ -10013,6 +10085,7 @@ class MarketDataManager:
         tick_payload["received_at"] = float(
             tick_payload.get("received_at") or time.time()
         )
+        self._capture_replay_tick({**tick_payload, "symbol": symbol, "source": source})
         with self._lock:
             self._last_tick_source[canonical_emit_symbol] = source
             callbacks = list(self._subscribers.get(canonical_emit_symbol, ()))
