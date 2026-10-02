@@ -2,8 +2,10 @@
 
 import datetime as dt
 import json
+import os
 
 import pytest
+from scripts import archive_kite_history as collector
 from scripts.archive_kite_history import archive_history
 
 
@@ -113,3 +115,71 @@ def test_corrupt_cache_is_refetched(tmp_path):
     report = archive_history(*args)
     assert report["saved_requests"] == 1
     assert len(broker.calls) == 2
+
+
+@pytest.mark.parametrize("existing_token", [None, "existing-session"])
+def test_cli_loads_external_env_without_overwriting_existing_session(
+    tmp_path, monkeypatch, capsys, existing_token
+):
+    env_file = tmp_path / "operator.env"
+    env_file.write_text("BROKER_ACCESS_TOKEN=file-session\n")
+    monkeypatch.setattr(os, "environ", os.environ.copy())
+    monkeypatch.delenv("BROKER_ACCESS_TOKEN", raising=False)
+    if existing_token is not None:
+        monkeypatch.setenv("BROKER_ACCESS_TOKEN", existing_token)
+    seen = []
+
+    class OfflineBroker(Broker):
+        def __init__(self):
+            super().__init__()
+            seen.append(os.environ.get("BROKER_ACCESS_TOKEN"))
+
+        def close(self):
+            seen.append("closed")
+
+    monkeypatch.setattr(collector, "ZerodhaKiteClient", OfflineBroker)
+    assert (
+        collector.main(
+            [
+                "--env-file",
+                str(env_file),
+                "--symbols",
+                "NFO:NIFTY26OCT25000CE",
+                "--start",
+                "2026-09-01",
+                "--end",
+                "2026-09-02",
+                "--outdir",
+                str(tmp_path / "archive"),
+            ]
+        )
+        == 0
+    )
+    assert seen == [existing_token or "file-session", "closed"]
+    assert (
+        json.loads((tmp_path / "archive/coverage.json").read_text())["saved_requests"]
+        == 1
+    )
+    output = capsys.readouterr().out
+    assert "file-session" not in output and "existing-session" not in output
+
+
+def test_cli_missing_external_env_fails_before_broker_access(tmp_path, monkeypatch):
+    broker_calls = []
+    monkeypatch.setattr(
+        collector, "ZerodhaKiteClient", lambda: broker_calls.append(True)
+    )
+    with pytest.raises(FileNotFoundError, match="Environment file does not exist"):
+        collector.main(
+            [
+                "--env-file",
+                str(tmp_path / "absent.env"),
+                "--symbols",
+                "NFO:NIFTY26OCT25000CE",
+                "--start",
+                "2026-09-01",
+                "--end",
+                "2026-09-02",
+            ]
+        )
+    assert broker_calls == []
