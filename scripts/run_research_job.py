@@ -21,6 +21,7 @@ sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT))
 
 from nifty_scalper_bot.ops.research_jobs import (  # noqa: E402
+    run_recorded_replays,
     start_job,
     write_json,
 )
@@ -80,10 +81,22 @@ def load_active_basket() -> dict[str, Any]:
 
 def run_worker(request: dict[str, Any], env_file: Path) -> dict[str, Any]:
     """Use broker read methods and the canonical completed-trade analyzer only."""
+    if request.get("mode") == "runtime":
+        runtime = run_recorded_replays(ROOT, request)
+        return {
+            **request,
+            "state": runtime["state"],
+            "stage": "finished",
+            "backtest_completed": runtime["state"] == "completed",
+            "backtest_scope": runtime["scope"],
+            "runtime_replay": runtime,
+            "live_equivalent": False,
+        }
+
     from dotenv import load_dotenv
 
     load_dotenv(env_file, override=False)
-    from scripts.archive_kite_history import archive_history
+    from scripts.archive_kite_history import archive_history, history_universe
     from scripts.reporting.analyze_completed_trades import (
         build_analysis,
         load_trade_ledger_rows,
@@ -114,17 +127,17 @@ def run_worker(request: dict[str, Any], env_file: Path) -> dict[str, Any]:
         ce, pe = selected.get("ce"), selected.get("pe")
         if not ce or not pe:
             raise ValueError("active_option_basket_unavailable")
-        future = resolve_active_nifty_future_from_instruments(
-            client.instruments("NFO")
-        ).symbol
+        rows = client.instruments("NFO")
+        future = resolve_active_nifty_future_from_instruments(rows).symbol
         if not future:
             raise ValueError("active_nifty_future_unavailable")
         coverage = archive_history(
             client,
-            ["NSE:NIFTY 50", future, ce, pe],
+            history_universe(rows, selected, future),
             date.fromisoformat(request["start"]),
             date.fromisoformat(request["end"]),
             directory / "history",
+            cache_dir=get_data_dir() / "historical_archive",
         )
         status["coverage"] = coverage
         status["stage"] = "ledger_analysis"
@@ -195,6 +208,12 @@ def run_worker(request: dict[str, Any], env_file: Path) -> dict[str, Any]:
             "See report assumptions and limitations."
         ),
     )
+    if request.get("mode", "all") == "all":
+        status["stage"] = "runtime_replay"
+        write_json(directory / "status.json", status)
+        write_json(ROOT / "data/research/latest.json", status)
+        status["runtime_replay"] = run_recorded_replays(ROOT, request)
+        status["stage"] = "finished"
     return status
 
 
@@ -217,7 +236,9 @@ def main() -> int:
     directory = ROOT / "data/research" / args.request_id
     request = json.loads((directory / "status.json").read_text())
     try:
-        if args.env_file is None or not args.env_file.is_file():
+        if request.get("mode") != "runtime" and (
+            args.env_file is None or not args.env_file.is_file()
+        ):
             raise FileNotFoundError("operator_env_file_unavailable")
         result = run_worker(request, args.env_file)
     except Exception as exc:
