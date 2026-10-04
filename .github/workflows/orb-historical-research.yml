@@ -16,7 +16,10 @@ permissions:
   contents: read
 
 concurrency:
-  group: orb-historical-research-${{ github.ref }}
+  # Issue-triggered lifecycle studies use isolated temp paths and may safely run
+  # alongside a routine push study. Keeping the event in the key prevents an
+  # ordinary merge from blocking an explicit backtest requested from ChatGPT.
+  group: orb-historical-research-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
