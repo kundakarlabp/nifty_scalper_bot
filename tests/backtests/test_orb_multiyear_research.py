@@ -224,6 +224,7 @@ def test_compact_context_preserves_actual_orb_trades(monkeypatch, tmp_path):
     assert strict["no_vote_reasons"]["next_minute_has_no_trades"] == 1
     assert strict["metrics"]["trade_count"] == 0
 
+
 def test_lifecycle_proxy_ratchets_stop_from_completed_bar_only():
     from nifty_scalper_bot.backtesting.strategy_research import (
         _apply_bar_lifecycle_proxy,
@@ -281,4 +282,3 @@ def test_lifecycle_time_stop_matches_12_minute_half_r_progress_rule():
     assert (
         _bar_lifecycle_time_stop_due(position, opened + timedelta(minutes=12)) is False
     )
-
