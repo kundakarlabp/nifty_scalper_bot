@@ -271,14 +271,14 @@ def test_lifecycle_time_stop_matches_12_minute_half_r_progress_rule():
         "high_water": 102.0,
         "trail_updates": 0,
     }
-    assert _bar_lifecycle_time_stop_due(
-        position, opened + timedelta(minutes=11)
-    ) is False
-    assert _bar_lifecycle_time_stop_due(
-        position, opened + timedelta(minutes=12)
-    ) is True
+    assert (
+        _bar_lifecycle_time_stop_due(position, opened + timedelta(minutes=11)) is False
+    )
+    assert (
+        _bar_lifecycle_time_stop_due(position, opened + timedelta(minutes=12)) is True
+    )
     position["high_water"] = 102.5
-    assert _bar_lifecycle_time_stop_due(
-        position, opened + timedelta(minutes=12)
-    ) is False
+    assert (
+        _bar_lifecycle_time_stop_due(position, opened + timedelta(minutes=12)) is False
+    )
 
