@@ -212,9 +212,7 @@ def _scenario(
             "fees": cost.total,
             "net_pnl": gross - cost.total,
             "cost_source": "canonical_model_estimate",
-            "duration_minutes": (
-                exit_time - position["entry_time"]
-            ).total_seconds()
+            "duration_minutes": (exit_time - position["entry_time"]).total_seconds()
             / 60,
         }
 
@@ -467,10 +465,7 @@ def _scenario(
                 ),
                 "exit_reasons": dict(Counter(trade["exit_reason"] for trade in trades)),
                 "worst_case_stress_exit_reasons": dict(
-                    Counter(
-                        trade["exit_reason"]
-                        for trade in stress_outcomes[name]
-                    )
+                    Counter(trade["exit_reason"] for trade in stress_outcomes[name])
                 ),
                 "data_quality": {
                     "resolved_exit_count": len(trades),
