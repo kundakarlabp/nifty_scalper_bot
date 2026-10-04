@@ -421,10 +421,7 @@ def select_candidate(results: list[dict[str, Any]]) -> str | None:
         if {row["slippage_bps_per_side"] for row in rows} == set(SLIPPAGE)
         and len(rows) == len(SLIPPAGE)
         and all(row["metrics"]["trade_count"] >= 100 for row in rows)
-        and all(
-            row["data_quality"]["unresolved_exit_count"] == 0
-            for row in rows
-        )
+        and all(row["data_quality"]["unresolved_exit_count"] == 0 for row in rows)
     ]
     return max(eligible)[1] if eligible else None
 
