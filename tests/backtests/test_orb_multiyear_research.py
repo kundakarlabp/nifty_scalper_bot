@@ -229,7 +229,7 @@ def test_lifecycle_proxy_ratchets_stop_from_completed_bar_only():
         _apply_bar_lifecycle_proxy,
     )
 
-    opened = datetime(2026, 1, 5, 10, 0, tzinfo=IST)
+    opened = datetime(2026, 1, 5, 10, 0)
     position = {
         "entry_time": opened,
         "entry_price": 100.0,
@@ -260,7 +260,7 @@ def test_lifecycle_time_stop_matches_12_minute_half_r_progress_rule():
         _bar_lifecycle_time_stop_due,
     )
 
-    opened = datetime(2026, 1, 5, 10, 0, tzinfo=IST)
+    opened = datetime(2026, 1, 5, 10, 0)
     position = {
         "entry_time": opened,
         "entry_price": 100.0,
