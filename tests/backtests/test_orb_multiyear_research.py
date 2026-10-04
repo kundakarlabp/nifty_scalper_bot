@@ -223,3 +223,62 @@ def test_compact_context_preserves_actual_orb_trades(monkeypatch, tmp_path):
     )["strategies"]["ORBPro"]
     assert strict["no_vote_reasons"]["next_minute_has_no_trades"] == 1
     assert strict["metrics"]["trade_count"] == 0
+
+
+def test_lifecycle_proxy_ratchets_stop_from_completed_bar_only():
+    from nifty_scalper_bot.backtesting.strategy_research import (
+        _apply_bar_lifecycle_proxy,
+    )
+
+    opened = datetime(2026, 1, 5, 10, 0)
+    position = {
+        "entry_time": opened,
+        "entry_price": 100.0,
+        "stop_loss": 95.0,
+        "initial_stop_loss": 95.0,
+        "take_profit": 112.5,
+        "quantity": 75,
+        "high_water": 100.0,
+        "trail_updates": 0,
+    }
+    bar = {
+        "timestamp": opened + timedelta(minutes=5),
+        "open": 104.0,
+        "high": 110.0,
+        "low": 103.0,
+        "close": 109.0,
+        "volume": 100.0,
+    }
+    changed = _apply_bar_lifecycle_proxy(position, bar, prior_atr=2.0)
+    assert changed is True
+    assert position["stop_loss"] > 100.0
+    assert position["stop_loss"] < bar["high"]
+    assert position["trail_updates"] == 1
+
+
+def test_lifecycle_time_stop_matches_12_minute_half_r_progress_rule():
+    from nifty_scalper_bot.backtesting.strategy_research import (
+        _bar_lifecycle_time_stop_due,
+    )
+
+    opened = datetime(2026, 1, 5, 10, 0)
+    position = {
+        "entry_time": opened,
+        "entry_price": 100.0,
+        "stop_loss": 95.0,
+        "initial_stop_loss": 95.0,
+        "take_profit": 112.5,
+        "quantity": 75,
+        "high_water": 102.0,
+        "trail_updates": 0,
+    }
+    assert (
+        _bar_lifecycle_time_stop_due(position, opened + timedelta(minutes=11)) is False
+    )
+    assert (
+        _bar_lifecycle_time_stop_due(position, opened + timedelta(minutes=12)) is True
+    )
+    position["high_water"] = 102.5
+    assert (
+        _bar_lifecycle_time_stop_due(position, opened + timedelta(minutes=12)) is False
+    )
