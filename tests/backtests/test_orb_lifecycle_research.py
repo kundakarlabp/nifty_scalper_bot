@@ -3,10 +3,7 @@
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from nifty_scalper_bot.backtesting.strategy_research import (
-    _apply_bar_lifecycle_proxy,
-    _bar_lifecycle_time_stop_due,
-)
+from nifty_scalper_bot.backtesting import strategy_research
 
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -36,7 +33,7 @@ def test_lifecycle_proxy_ratchets_stop_from_completed_bar_only():
         "close": 109.0,
         "volume": 100.0,
     }
-    changed = _apply_bar_lifecycle_proxy(position, bar, prior_atr=2.0)
+    changed = strategy_research._apply_bar_lifecycle_proxy(position, bar, prior_atr=2.0)
     assert changed is True
     assert position["stop_loss"] > 100.0
     assert position["stop_loss"] < bar["high"]
@@ -46,14 +43,14 @@ def test_lifecycle_proxy_ratchets_stop_from_completed_bar_only():
 def test_lifecycle_time_stop_matches_12_minute_half_r_progress_rule():
     position = _position()
     position["high_water"] = 102.0  # 0.4R
-    assert _bar_lifecycle_time_stop_due(
+    assert strategy_research._bar_lifecycle_time_stop_due(
         position, position["entry_time"] + timedelta(minutes=11)
     ) is False
-    assert _bar_lifecycle_time_stop_due(
+    assert strategy_research._bar_lifecycle_time_stop_due(
         position, position["entry_time"] + timedelta(minutes=12)
     ) is True
     position["high_water"] = 102.5  # exactly 0.5R
-    assert _bar_lifecycle_time_stop_due(
+    assert strategy_research._bar_lifecycle_time_stop_due(
         position, position["entry_time"] + timedelta(minutes=12)
     ) is False
 
