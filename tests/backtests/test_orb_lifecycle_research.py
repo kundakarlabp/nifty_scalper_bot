@@ -3,11 +3,12 @@
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
+from scripts.research_orb_iterative import BASE_OVERRIDES, candidates
+
 from nifty_scalper_bot.backtesting.strategy_research import (
     _apply_bar_lifecycle_proxy,
     _bar_lifecycle_time_stop_due,
 )
-from scripts.research_orb_iterative import BASE_OVERRIDES, candidates
 
 
 IST = ZoneInfo("Asia/Kolkata")
