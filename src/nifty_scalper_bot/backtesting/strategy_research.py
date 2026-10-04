@@ -148,6 +148,90 @@ def summarize(trades: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _round_research_tick(price: float, tick_size: float = 0.05) -> float:
+    """Round a modeled option stop to the broker tick without importing runtime I/O."""
+    return round(round(float(price) / tick_size) * tick_size, 2)
+
+
+def _apply_bar_lifecycle_proxy(
+    position: dict[str, Any],
+    bar: dict[str, Any],
+    *,
+    prior_atr: float | None,
+) -> bool:
+    """Causally mirror the production long-option trailing tiers on minute bars.
+
+    The current completed bar may advance the MFE watermark and compute a new
+    stop, but that stop is only available to the caller for the *next* bar.
+    This avoids assuming whether the high or low happened first inside one OHLC
+    candle. Production uses executable tick prices; this research proxy therefore
+    remains lower-fidelity than recorded-feed runtime replay.
+    """
+    entry = float(position["entry_price"])
+    initial_stop = float(position["initial_stop_loss"])
+    current_stop = float(position["stop_loss"])
+    quantity = int(position["quantity"])
+    initial_risk = entry - initial_stop
+    if initial_risk <= 0 or quantity <= 0:
+        return False
+
+    high_water = max(float(position.get("high_water", entry)), float(bar["high"]))
+    position["high_water"] = high_water
+    mfe = max(0.0, high_water - entry)
+    mfe_r = mfe / initial_risk
+    if mfe_r < 0.75:
+        return False
+
+    atr = float(prior_atr or 0.0)
+    if not math.isfinite(atr) or atr <= 0:
+        atr = entry * 0.02
+
+    if mfe_r < 1.0:
+        candidate = entry
+    elif mfe_r < 2.0:
+        candidate = entry + (mfe * 0.40)
+    elif mfe_r < 3.0:
+        candidate = max(entry + (mfe * 0.50), high_water - (atr * 1.50))
+    else:
+        candidate = max(entry + (mfe * 0.60), high_water - atr)
+
+    breakeven_cost = (
+        estimate_round_trip_cost(
+            entry_price=entry,
+            exit_price=entry,
+            quantity=quantity,
+        ).total
+        / quantity
+    )
+    candidate = max(candidate, entry + breakeven_cost + (initial_risk * 0.10))
+    candidate = _round_research_tick(candidate)
+    # Production refuses a trail at/through the executable price. Using the bar
+    # high as the favorable observation gives the proxy the same geometric guard.
+    if candidate <= current_stop or candidate >= high_water:
+        return False
+
+    position["stop_loss"] = candidate
+    position["trail_updates"] = int(position.get("trail_updates", 0)) + 1
+    return True
+
+
+def _bar_lifecycle_time_stop_due(
+    position: dict[str, Any],
+    timestamp: datetime,
+) -> bool:
+    """Mirror the 12-minute / <0.5R progress time stop using prior-bar MFE."""
+    held_minutes = (timestamp - position["entry_time"]).total_seconds() / 60.0
+    if held_minutes < 12.0:
+        return False
+    entry = float(position["entry_price"])
+    initial_stop = float(position["initial_stop_loss"])
+    initial_risk = entry - initial_stop
+    if initial_risk <= 0:
+        return False
+    prior_mfe = max(0.0, float(position.get("high_water", entry)) - entry)
+    return (prior_mfe / initial_risk) < 0.50
+
+
 def _scenario(
     histories: dict[str, dict[datetime, dict[str, Any]]],
     instruments: dict[str, dict[str, Any]],
@@ -159,6 +243,7 @@ def _scenario(
     minimum_opening_rvol: float | None = None,
     compact_orb_context: bool = False,
     strict_liquidity: bool = False,
+    lifecycle_proxy: bool = False,
 ) -> dict[str, Any]:
     if compact_orb_context and components != {"ORBPro"}:
         raise ValueError("research_compact_context_requires_orb_only")
@@ -317,8 +402,11 @@ def _scenario(
                 "entry_time": timestamp,
                 "entry_price": entry,
                 "stop_loss": intent["stop_loss"],
+                "initial_stop_loss": intent["stop_loss"],
                 "take_profit": intent["take_profit"],
                 "quantity": quantity,
+                "high_water": entry,
+                "trail_updates": 0,
             }
             intent["strategy"].notify_entry_accepted(
                 instruments[key[1]]["instrument_type"],
@@ -339,10 +427,15 @@ def _scenario(
                 )
                 continue
             stop, target = position["stop_loss"], position["take_profit"]
+            initial_stop = position["initial_stop_loss"]
+            stop_reason = "trailing_stop" if stop > initial_stop else "stop"
+            gap_reason = "gap_trailing_stop" if stop > initial_stop else "gap_stop"
             hit_stop = bar["low"] <= stop
             hit_target = bar["high"] >= target
             if bar["open"] <= stop:
-                close(key, bar, bar["open"], "gap_stop")
+                close(key, bar, bar["open"], gap_reason)
+            elif lifecycle_proxy and _bar_lifecycle_time_stop_due(position, timestamp):
+                close(key, bar, bar["open"], "time_stop")
             elif hit_stop and hit_target:
                 mark_unresolved(
                     key,
@@ -352,11 +445,14 @@ def _scenario(
                     stress_reason="ambiguous_stop_first_stress",
                 )
             elif hit_stop:
-                close(key, bar, stop, "stop")
+                close(key, bar, stop, stop_reason)
             elif hit_target:
                 close(key, bar, target, "target")
             elif timestamp.time() >= time(14, 59):
                 close(key, bar, bar["close"], "session_exit")
+            elif lifecycle_proxy:
+                prior_atr = engine.get_atr(key[1])
+                _apply_bar_lifecycle_proxy(position, bar, prior_atr=prior_atr)
         for symbol, bar in bars.items():
             engine.ingest_historical_bar(symbol, bar)
             last_bars[symbol] = bar
@@ -507,6 +603,7 @@ def run_orb_session_research(
     overrides: dict[str, str],
     slippage_bps: float,
     minimum_net_rr: float | None = 1.5,
+    lifecycle_proxy: bool = False,
 ) -> dict[str, Any]:
     """Replay a preselected historical basket in an isolated research process.
 
@@ -532,6 +629,7 @@ def run_orb_session_research(
             minimum_net_rr=minimum_net_rr,
             compact_orb_context=True,
             strict_liquidity=True,
+            lifecycle_proxy=lifecycle_proxy,
         )
         return result["strategies"]["ORBPro"]
     finally:
