@@ -46,6 +46,7 @@ def test_selection_rejects_tiny_stress_samples_and_missing_scenarios():
             "candidate": "stable",
             "slippage_bps_per_side": slip,
             "metrics": {"trade_count": 100, "expectancy": 4 - slip / 10},
+            "data_quality": {"unresolved_exit_count": 0},
         }
         for slip in (10, 25, 50)
     ]
@@ -54,11 +55,18 @@ def test_selection_rejects_tiny_stress_samples_and_missing_scenarios():
             "candidate": "tiny_peak",
             "slippage_bps_per_side": slip,
             "metrics": {"trade_count": 3, "expectancy": 10000},
+            "data_quality": {"unresolved_exit_count": 0},
         }
         for slip in (10, 25, 50)
     )
     assert select_candidate(results) == "stable"
     assert select_candidate(results[:2]) is None
+    contaminated = [dict(row) for row in results[:3]]
+    contaminated[0] = {
+        **contaminated[0],
+        "data_quality": {"unresolved_exit_count": 1},
+    }
+    assert select_candidate(contaminated) is None
 
 
 def test_nested_csv_and_txt_copies_are_not_double_counted():
@@ -195,8 +203,13 @@ def test_compact_context_preserves_actual_orb_trades(monkeypatch, tmp_path):
         compact_orb_context=True,
         strict_liquidity=True,
     )["strategies"]["ORBPro"]
-    assert strict["exit_reasons"]["unpriced_gap_worst_case"] == 1
-    assert strict["trades"][0]["exit_price"] == 0.01
+    assert strict["metrics"]["trade_count"] == 0
+    assert strict["data_quality"]["unresolved_exit_count"] == 1
+    unresolved_reason = strict["unresolved_trades"][0]["unresolved_reason"]
+    assert unresolved_reason == "history_gap_unresolved"
+    stress_reasons = strict["worst_case_stress_exit_reasons"]
+    assert stress_reasons["unpriced_gap_full_premium_stress"] == 1
+    assert strict["worst_case_stress_trades"][0]["exit_price"] == 0.01
     history[missing_time] = removed
     history[entry_time]["volume"] = 0
     strict = _scenario(

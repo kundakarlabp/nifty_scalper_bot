@@ -41,6 +41,10 @@ dev = [
     "mypy>=1.9.0",
     "pytest>=7.4",
     "hypothesis>=6.112,<7",
+    "backtrader>=1.9.78,<2",
+]
+research = [
+    "backtrader>=1.9.78,<2",
 ]
 
 [tool.ruff]

@@ -174,6 +174,8 @@ def _scenario(
     )
     timestamps = sorted(set().union(*(set(history) for history in histories.values())))
     outcomes: dict[str, list[dict[str, Any]]] = {}
+    unresolved_outcomes: dict[str, list[dict[str, Any]]] = {}
+    stress_outcomes: dict[str, list[dict[str, Any]]] = {}
     rejections: dict[str, Counter[str]] = {}
     evaluated: Counter[str] = Counter()
     pending: dict[tuple[str, str], dict[str, Any]] = {}
@@ -184,10 +186,13 @@ def _scenario(
     last_bars: dict[str, dict[str, Any]] = {}
     slip = slippage_bps / 10000.0
 
-    def close(
-        key: tuple[str, str], bar: dict[str, Any], price: float, reason: str
-    ) -> None:
-        position = positions.pop(key)
+    def _trade_record(
+        key: tuple[str, str],
+        position: dict[str, Any],
+        observed_at: datetime,
+        price: float,
+        reason: str,
+    ) -> dict[str, Any]:
         exit_price = max(0.01, price * (1 - slip))
         cost = estimate_round_trip_cost(
             entry_price=position["entry_price"],
@@ -195,32 +200,72 @@ def _scenario(
             quantity=position["quantity"],
         )
         gross = (exit_price - position["entry_price"]) * position["quantity"]
-        exit_time = bar["timestamp"] + timedelta(minutes=1)
-        outcomes[key[0]].append(
+        exit_time = observed_at + timedelta(minutes=1)
+        return {
+            **position,
+            "symbol": key[1],
+            "entry_time": position["entry_time"].isoformat(),
+            "exit_time": exit_time.isoformat(),
+            "exit_price": exit_price,
+            "exit_reason": reason,
+            "gross_pnl": gross,
+            "fees": cost.total,
+            "net_pnl": gross - cost.total,
+            "cost_source": "canonical_model_estimate",
+            "duration_minutes": (exit_time - position["entry_time"]).total_seconds()
+            / 60,
+        }
+
+    def close(
+        key: tuple[str, str], bar: dict[str, Any], price: float, reason: str
+    ) -> None:
+        position = positions.pop(key)
+        trade = _trade_record(key, position, bar["timestamp"], price, reason)
+        outcomes[key[0]].append(trade)
+        stress_outcomes[key[0]].append(dict(trade))
+
+    def mark_unresolved(
+        key: tuple[str, str],
+        observed_at: datetime,
+        reason: str,
+        *,
+        stress_price: float = 0.01,
+        stress_reason: str = "unpriced_full_premium_stress",
+    ) -> None:
+        """Remove an unpriceable position without inventing a primary P&L."""
+        position = positions.pop(key)
+        unresolved_outcomes[key[0]].append(
             {
                 **position,
                 "symbol": key[1],
                 "entry_time": position["entry_time"].isoformat(),
-                "exit_time": exit_time.isoformat(),
-                "exit_price": exit_price,
-                "exit_reason": reason,
-                "gross_pnl": gross,
-                "fees": cost.total,
-                "net_pnl": gross - cost.total,
-                "cost_source": "canonical_model_estimate",
-                "duration_minutes": (exit_time - position["entry_time"]).total_seconds()
-                / 60,
+                "observed_at": observed_at.isoformat(),
+                "unresolved_reason": reason,
             }
+        )
+        stress_outcomes[key[0]].append(
+            _trade_record(
+                key,
+                position,
+                observed_at,
+                stress_price,
+                stress_reason,
+            )
         )
 
     for timestamp in timestamps:
         if current_day != timestamp.date():
             for key in list(positions):
-                close(
+                observed = last_bars.get(key[1])
+                mark_unresolved(
                     key,
-                    last_bars[key[1]],
-                    0.01 if strict_liquidity else last_bars[key[1]]["close"],
-                    "unpriced_session_end" if strict_liquidity else "session_data_end",
+                    (
+                        observed["timestamp"]
+                        if observed is not None
+                        else timestamp - timedelta(minutes=1)
+                    ),
+                    "session_data_end_unresolved",
+                    stress_reason="unpriced_session_end_stress",
                 )
             pending.clear()
             engine = IndicatorEngine()
@@ -234,6 +279,8 @@ def _scenario(
                 raise ValueError("research_components_unavailable")
             for strategy in strategies:
                 outcomes.setdefault(strategy.name, [])
+                unresolved_outcomes.setdefault(strategy.name, [])
+                stress_outcomes.setdefault(strategy.name, [])
                 rejections.setdefault(strategy.name, Counter())
             current_day = timestamp.date()
         bars = {
@@ -280,26 +327,33 @@ def _scenario(
         for key, position in list(positions.items()):
             bar = bars.get(key[1])
             if bar is None or (strict_liquidity and bar["volume"] <= 0):
-                if strict_liquidity:
-                    # No executable exit quote is known. Charge a conservative
-                    # full-premium loss rather than invent a fill at an old close.
-                    close(
-                        key, {"timestamp": timestamp}, 0.01, "unpriced_gap_worst_case"
-                    )
-                else:
-                    close(
-                        key,
-                        last_bars[key[1]],
-                        last_bars[key[1]]["close"],
-                        "history_gap",
-                    )
+                mark_unresolved(
+                    key,
+                    timestamp,
+                    (
+                        "zero_volume_exit_unresolved"
+                        if bar is not None
+                        else "history_gap_unresolved"
+                    ),
+                    stress_reason="unpriced_gap_full_premium_stress",
+                )
                 continue
             stop, target = position["stop_loss"], position["take_profit"]
+            hit_stop = bar["low"] <= stop
+            hit_target = bar["high"] >= target
             if bar["open"] <= stop:
                 close(key, bar, bar["open"], "gap_stop")
-            elif bar["low"] <= stop:
+            elif hit_stop and hit_target:
+                mark_unresolved(
+                    key,
+                    timestamp,
+                    "ambiguous_intrabar_stop_target",
+                    stress_price=stop,
+                    stress_reason="ambiguous_stop_first_stress",
+                )
+            elif hit_stop:
                 close(key, bar, stop, "stop")
-            elif bar["high"] >= target:
+            elif hit_target:
                 close(key, bar, target, "target")
             elif timestamp.time() >= time(14, 59):
                 close(key, bar, bar["close"], "session_exit")
@@ -384,11 +438,12 @@ def _scenario(
                     "setup_id": signal.metadata.get("setup_id"),
                 }
     for key in list(positions):
-        close(
+        observed = last_bars.get(key[1])
+        mark_unresolved(
             key,
-            last_bars[key[1]],
-            0.01 if strict_liquidity else last_bars[key[1]]["close"],
-            "unpriced_session_end" if strict_liquidity else "session_data_end",
+            observed["timestamp"] if observed is not None else timestamps[-1],
+            "session_data_end_unresolved",
+            stress_reason="unpriced_session_end_stress",
         )
     days = sorted(
         {ts.date().isoformat() for symbol in options for ts in histories[symbol]}
@@ -396,22 +451,50 @@ def _scenario(
     cutoff = days[max(0, int(len(days) * 0.8))] if days else ""
     for trades in outcomes.values():
         trades.sort(key=lambda trade: (trade["exit_time"], trade["symbol"]))
+    for trades in stress_outcomes.values():
+        trades.sort(key=lambda trade: (trade["exit_time"], trade["symbol"]))
     return {
         "slippage_bps_per_side": slippage_bps,
         "strategies": {
             name: {
                 "metrics": summarize(trades),
+                "worst_case_stress_metrics": summarize(stress_outcomes[name]),
                 "chronological_holdout_start": cutoff,
                 "development_metrics": summarize(
                     [trade for trade in trades if trade["entry_time"][:10] < cutoff]
                 ),
                 "exit_reasons": dict(Counter(trade["exit_reason"] for trade in trades)),
+                "worst_case_stress_exit_reasons": dict(
+                    Counter(trade["exit_reason"] for trade in stress_outcomes[name])
+                ),
+                "data_quality": {
+                    "resolved_exit_count": len(trades),
+                    "unresolved_exit_count": len(unresolved_outcomes[name]),
+                    "unresolved_exit_rate": (
+                        len(unresolved_outcomes[name])
+                        / (len(trades) + len(unresolved_outcomes[name]))
+                        if trades or unresolved_outcomes[name]
+                        else 0.0
+                    ),
+                    "primary_metrics_complete": not unresolved_outcomes[name],
+                    "primary_metrics_exclude_unresolved": True,
+                    "development_unresolved_exit_count": sum(
+                        trade["entry_time"][:10] < cutoff
+                        for trade in unresolved_outcomes[name]
+                    ),
+                    "holdout_unresolved_exit_count": sum(
+                        trade["entry_time"][:10] >= cutoff
+                        for trade in unresolved_outcomes[name]
+                    ),
+                },
                 "holdout_metrics": summarize(
                     [trade for trade in trades if trade["entry_time"][:10] >= cutoff]
                 ),
                 "evaluations": evaluated[name],
                 "no_vote_reasons": dict(rejections[name]),
+                "unresolved_trades": unresolved_outcomes[name],
                 "trades": trades,
+                "worst_case_stress_trades": stress_outcomes[name],
             }
             for name, trades in outcomes.items()
         },
@@ -506,7 +589,12 @@ def run_archived_research(
         },
         "assumptions": {
             "entry": "next_minute_open",
-            "ambiguous_stop_target": "stop_first",
+            "ambiguous_stop_target": (
+                "unresolved_in_primary; stop_first only in worst_case_stress"
+            ),
+            "missing_exit_data": (
+                "unresolved_in_primary; full-premium loss only in worst_case_stress"
+            ),
             "quantity": "one_archived_lot_per_component_and_option",
             "costs": "canonical_model_estimate",
             "strategy_mode": "SHADOW",
@@ -639,7 +727,8 @@ def run_orb_comparison(directory: Path) -> dict[str, Any]:
             candidate
             for candidate in candidates[1:]
             if all(
-                row["development_metrics"]["trade_count"] > 0
+                row["development_metrics"]["trade_count"] >= 30
+                and row["data_quality"]["development_unresolved_exit_count"] == 0
                 for row in candidate["scenarios"]
             )
         ],
@@ -659,7 +748,11 @@ def run_orb_comparison(directory: Path) -> dict[str, Any]:
         "slippage_scenario_count": 3,
         "retrospective_check_is_untouched": False,
         "selection": {
-            "ranking_rule": "worst_development_expectancy_across_slippage",
+            "ranking_rule": (
+                "worst_development_expectancy_across_slippage; "
+                ">=30 resolved development trades per scenario; "
+                "zero unresolved development exits"
+            ),
             "development_ranking": [candidate["name"] for candidate in ranked],
             "best_observed_research_candidate": ranked[0]["name"] if ranked else None,
             "minimum_development_trades_for_further_validation": 30,

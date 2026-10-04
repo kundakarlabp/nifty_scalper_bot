@@ -359,6 +359,8 @@ def run_task(task: tuple[str, dict[str, Any], float, list[str]]) -> dict[str, An
     )
     logging.disable(logging.CRITICAL)
     trades: list[dict[str, Any]] = []
+    unresolved: list[dict[str, Any]] = []
+    stress_trades: list[dict[str, Any]] = []
     reasons: Counter[str] = Counter()
     for index, day in enumerate(days):
         result = run_orb_session_research(
@@ -368,6 +370,8 @@ def run_task(task: tuple[str, dict[str, Any], float, list[str]]) -> dict[str, An
             minimum_net_rr=candidate["minimum_net_rr"],
         )
         trades.extend(result["trades"])
+        unresolved.extend(result["unresolved_trades"])
+        stress_trades.extend(result["worst_case_stress_trades"])
         reasons.update(result["no_vote_reasons"])
         if (index + 1) % 100 == 0:
             print(
@@ -379,6 +383,18 @@ def run_task(task: tuple[str, dict[str, Any], float, list[str]]) -> dict[str, An
         "candidate": candidate["name"],
         "slippage_bps_per_side": slippage,
         "metrics": summarize(trades),
+        "worst_case_stress_metrics": summarize(stress_trades),
+        "data_quality": {
+            "resolved_exit_count": len(trades),
+            "unresolved_exit_count": len(unresolved),
+            "unresolved_exit_rate": (
+                len(unresolved) / (len(trades) + len(unresolved))
+                if trades or unresolved
+                else 0.0
+            ),
+            "primary_metrics_complete": not unresolved,
+            "primary_metrics_exclude_unresolved": True,
+        },
         "yearly_metrics": {
             year: summarize(
                 [trade for trade in trades if trade["entry_time"].startswith(year)]
@@ -387,7 +403,9 @@ def run_task(task: tuple[str, dict[str, Any], float, list[str]]) -> dict[str, An
         },
         "no_vote_reasons": dict(reasons),
         "exit_reasons": dict(Counter(trade["exit_reason"] for trade in trades)),
+        "unresolved_trades": unresolved,
         "trades": trades,
+        "worst_case_stress_trades": stress_trades,
     }
 
 
@@ -403,6 +421,7 @@ def select_candidate(results: list[dict[str, Any]]) -> str | None:
         if {row["slippage_bps_per_side"] for row in rows} == set(SLIPPAGE)
         and len(rows) == len(SLIPPAGE)
         and all(row["metrics"]["trade_count"] >= 100 for row in rows)
+        and all(row["data_quality"]["unresolved_exit_count"] == 0 for row in rows)
     ]
     return max(eligible)[1] if eligible else None
 
@@ -417,14 +436,16 @@ def run_phase(output: Path, phase: str, workers: int) -> None:
         "final_years": ["2020"],
         "selection_rule": (
             "Max worst-slippage development expectancy; "
-            ">=100 trades at every stress level"
+            ">=100 resolved trades at every stress level; "
+            "zero unresolved exits"
         ),
         "entry_window": (
             "09:30 through 120 minutes after the 15-minute range; " "early candidate 60"
         ),
         "exit_rule": (
-            "Next-minute open; stop-first ambiguity; "
-            "missing/zero-volume exit charged full-premium loss"
+            "Next-minute open; ambiguous stop/target and missing/zero-volume "
+            "exits are unresolved in primary metrics; stop-first/full-premium "
+            "losses are reported only as worst-case stress"
         ),
         "promotion_eligible": False,
         "replay_code_sha256": hashlib.sha256(

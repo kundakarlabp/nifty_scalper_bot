@@ -9,8 +9,9 @@ research → Run workflow**. Results and the frozen protocol are downloadable
 artifacts; the job summary contains the comparison table.
 
 For connector-driven requests, the repository owner can create or reopen an
-issue whose title starts with `[ORB Research]`. This starts the same fixed,
-broker-free study without shell commands. Other issue authors cannot launch
+issue whose title starts with `[ORB Research]` or `[Backtest] ORB`. This starts
+the same fixed, broker-free study without shell commands. Other issue authors
+cannot launch
 the research job, and issue text is never interpreted as code or settings.
 
 This is conditional component research, not a replay of live execution. It
@@ -69,11 +70,14 @@ Signals start at 09:30; the opening range remains 15 minutes. Expired entry
 windows stop evaluations but pending fills and open-position exits continue.
 
 Fill at the next available minute's opening price with adverse slippage. Require
-a positive-volume option candle, reject invalid gapped geometry, include the
-canonical modeled fees, and resolve a candle hitting both stop and target as a
-stop. A missing/zero-volume exit observation is charged a full-premium loss as
-an explicit worst-case penalty. It is not a claim that such a fill occurred.
-Scheduled session exits occur at the 14:59 bar close.
+a positive-volume option candle, reject invalid gapped geometry and include the
+canonical modeled fees. A candle that touches both stop and target, or an exit
+minute with no observable option trade, is **unresolved** in primary metrics.
+Those positions are removed from primary P&L and counted explicitly in
+`data_quality`; candidate selection requires zero unresolved exits. A separate
+worst-case stress ledger resolves ambiguous candles stop-first and unpriced exits
+as full-premium losses. The stress ledger is a sensitivity bound, not a claim
+that such fills occurred. Scheduled session exits occur at the 14:59 bar close.
 
 Quantity is standardized to 75 units per trade and fees use the code's current
 cost model. Results are rupee P&L for that standardized experiment, not historical
@@ -103,3 +107,9 @@ Each phase saves atomic candidate results, trades, yearly metrics, rejection
 reasons and exit reasons. Completed tasks resume without repeating the entire
 study. Review `data_manifest.json`, `protocol.json`, `selection.json` and the
 three `*_results.json` files together.
+
+## Independent free execution oracle
+
+The workflow also runs the resolved trade ledger through the external open-source Backtrader engine. Backtrader independently executes each long round trip at the already-modeled entry and exit prices with zero commission and verifies that its portfolio gross P&L matches this repository's reported gross P&L. This catches sign, quantity and cash-accounting regressions without sharing the bot's P&L calculation. It does **not** independently reproduce ORB signal generation, historical option selection, fees, bid/ask depth or broker fills.
+
+Because this repository is public, standard GitHub-hosted Actions are free. From ordinary ChatGPT chat the GitHub connector can create an owner issue titled `[Backtest] ORB ...`; the fixed workflow runs without a TradingView/Streak login. TradingView/Streak remain optional manual signal spot-checks, not the automated research backend.
