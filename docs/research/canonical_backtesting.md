@@ -9,6 +9,15 @@
 
 No layer may silently upgrade its evidence label.
 
+Several requested professional controls already existed and are reused rather
+than reimplemented: `HistoricalContractCatalog` provides point-in-time basket
+resolution, `ReplayHarness` delays bar-start observations until availability,
+`PaperFillEngine` supports quote/depth-aware execution and calibration from
+measured completed-trade slippage/latency, and the canonical completed-trade
+analysis already provides chronological walk-forward, execution-quality checks,
+PBO/deflated-Sharpe evidence and broker-cost provenance. The admin dashboard
+already exposes one-click component research and recorded-session replay.
+
 ## Data and causality rules
 
 - Every bar is acted on only after it is complete; entries occur no earlier than the next executable observation.
@@ -23,6 +32,15 @@ No layer may silently upgrade its evidence label.
 ## Promotion rules
 
 A strategy/configuration is not promotable from a profitable headline alone. Promotion requires causal historical selection, complete primary exits, adequate sample size, transaction-cost/slippage stress, development-only parameter selection, untouched later-period evaluation and prospective recorded-feed replay. Runtime/live settings are never changed by a research workflow.
+
+## Legacy committed result artifact
+
+`docs/research/orb_monthly_2017_2020_results.json` was generated before the
+unresolved-exit correction and therefore contains the former full-premium
+penalty inside headline P&L. It is retained only as historical audit evidence.
+Do not use it for current strategy selection. Post-change workflow artifacts
+(`development_results.json`, `validation_results.json`, `final_results.json`
+and `external_backtrader.json`) are authoritative for this protocol.
 
 ## Ordinary ChatGPT chat operation
 
