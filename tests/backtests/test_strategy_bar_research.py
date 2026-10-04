@@ -54,7 +54,7 @@ def archive(tmp_path, *, gap=False):
     return first
 
 
-def test_component_replay_uses_completed_history_next_open_and_stop_first(
+def test_component_replay_marks_intrabar_order_ambiguous_and_stresses_stop_first(
     tmp_path, monkeypatch
 ):
     from nifty_scalper_bot.backtesting.strategy_research import run_archived_research
@@ -88,13 +88,21 @@ def test_component_replay_uses_completed_history_next_open_and_stop_first(
     report = run_archived_research(tmp_path, slippage_bps=0)
     assert report["scope"] == "active_contract_strategy_components"
     assert report["live_equivalent"] is False
-    trades = report["scenarios"][0]["strategies"]["ORBPro"]["trades"]
-    assert len(trades) == 2
-    assert trades[0]["entry_time"] == (first + timedelta(minutes=1)).isoformat()
-    assert trades[0]["exit_reason"] == "stop"
-    assert trades[0]["exit_price"] == 95
-    assert trades[0]["fees"] > 0
-    assert trades[0]["net_pnl"] < trades[0]["gross_pnl"]
+    result = report["scenarios"][0]["strategies"]["ORBPro"]
+    assert result["trades"] == []
+    assert result["data_quality"]["unresolved_exit_count"] == 2
+    unresolved = result["unresolved_trades"]
+    assert unresolved[0]["entry_time"] == (first + timedelta(minutes=1)).isoformat()
+    assert all(
+        trade["unresolved_reason"] == "ambiguous_intrabar_stop_target"
+        for trade in unresolved
+    )
+    stress = result["worst_case_stress_trades"]
+    assert len(stress) == 2
+    assert stress[0]["exit_reason"] == "ambiguous_stop_first_stress"
+    assert stress[0]["exit_price"] == 95
+    assert stress[0]["fees"] > 0
+    assert stress[0]["net_pnl"] < stress[0]["gross_pnl"]
     assert observed[:2] == [1, 1]
 
 
@@ -126,8 +134,12 @@ def test_missing_next_minute_never_creates_a_delayed_entry(tmp_path, monkeypatch
         lambda settings, engine: [Strategy()],
     )
     report = run_archived_research(tmp_path, slippage_bps=0)
-    trades = report["scenarios"][0]["strategies"]["SMC"]["trades"]
-    assert [trade["symbol"] for trade in trades] == ["NFO:NIFTY26O0622400PE"]
+    result = report["scenarios"][0]["strategies"]["SMC"]
+    assert result["trades"] == []
+    assert [trade["symbol"] for trade in result["unresolved_trades"]] == [
+        "NFO:NIFTY26O0622400PE"
+    ]
+    assert result["no_vote_reasons"]["next_minute_unavailable"] == 1
 
 
 def test_invalid_archive_fails_instead_of_reporting_empty_success(tmp_path):
