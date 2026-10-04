@@ -10,6 +10,7 @@ on:
       - .github/workflows/orb-historical-research.yml
       - scripts/research_orb_multiyear.py
       - src/nifty_scalper_bot/backtesting/strategy_research.py
+      - scripts/external_backtrader_oracle.py
 
 permissions:
   contents: read
@@ -23,7 +24,8 @@ jobs:
     if: >-
       github.event_name != 'issues' ||
       (github.event.issue.user.login == github.repository_owner &&
-      startsWith(github.event.issue.title, '[ORB Research]'))
+      (startsWith(github.event.issue.title, '[ORB Research]') ||
+      startsWith(github.event.issue.title, '[Backtest] ORB')))
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
@@ -43,7 +45,7 @@ jobs:
           python-version: "3.11"
           cache: pip
       - name: Install research dependencies
-        run: python -m pip install -e .
+        run: python -m pip install -e '.[research]'
       - name: Cache checksum-verified public archive
         uses: actions/cache@v4
         with:
@@ -65,6 +67,11 @@ jobs:
         run: >-
           python scripts/research_orb_multiyear.py final
           --source "$SOURCE_DIR" --output "$STUDY_DIR" --workers 2
+      - name: Verify gross P&L with independent Backtrader engine
+        run: >-
+          python scripts/external_backtrader_oracle.py
+          --study-dir "$STUDY_DIR"
+          --output "$STUDY_DIR/external_backtrader.json"
       - name: Summarize conditional research evidence
         run: |
           python - <<'PY'
@@ -86,9 +93,13 @@ jobs:
                   for row in json.loads((root / f"{phase}_results.json").read_text()):
                       m = row["metrics"]
                       pf = "—" if m["profit_factor"] is None else f"{m['profit_factor']:.2f}"
+                      unresolved = row["data_quality"]["unresolved_exit_count"]
                       stream.write(f"| {phase} | {row['candidate']} | ")
                       stream.write(f"{row['slippage_bps_per_side']} bps | ")
-                      stream.write(f"{m['trade_count']} | {m['net_pnl']:.2f} | {pf} |\n")
+                      stream.write(
+                          f"{m['trade_count']} (+{unresolved} unresolved) | "
+                          f"{m['net_pnl']:.2f} | {pf} |\n"
+                      )
           PY
       - name: Save research evidence
         if: always()
@@ -102,3 +113,4 @@ jobs:
             ${{ env.STUDY_DIR }}/protocol.json
             ${{ env.STUDY_DIR }}/selection.json
             ${{ env.STUDY_DIR }}/*_results.json
+            ${{ env.STUDY_DIR }}/external_backtrader.json
