@@ -24,6 +24,4 @@ def test_backtrader_oracle_replays_long_round_trip_gross_pnl():
 
 def test_backtrader_oracle_rejects_invalid_trade():
     with pytest.raises(ValueError, match="external_oracle_trade_invalid"):
-        backtrader_gross_pnl(
-            [{"entry_price": 0, "exit_price": 10, "quantity": 1}]
-        )
+        backtrader_gross_pnl([{"entry_price": 0, "exit_price": 10, "quantity": 1}])
