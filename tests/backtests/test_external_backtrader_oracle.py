@@ -1,7 +1,6 @@
 """Independent Backtrader oracle must agree on resolved long-trade gross P&L."""
 
 import pytest
-
 from scripts.external_backtrader_oracle import backtrader_gross_pnl
 
 
