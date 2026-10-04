@@ -483,6 +483,14 @@ def _scenario(
                     ),
                     "primary_metrics_complete": not unresolved_outcomes[name],
                     "primary_metrics_exclude_unresolved": True,
+                    "development_unresolved_exit_count": sum(
+                        trade["entry_time"][:10] < cutoff
+                        for trade in unresolved_outcomes[name]
+                    ),
+                    "holdout_unresolved_exit_count": sum(
+                        trade["entry_time"][:10] >= cutoff
+                        for trade in unresolved_outcomes[name]
+                    ),
                 },
                 "holdout_metrics": summarize(
                     [trade for trade in trades if trade["entry_time"][:10] >= cutoff]
@@ -724,7 +732,8 @@ def run_orb_comparison(directory: Path) -> dict[str, Any]:
             candidate
             for candidate in candidates[1:]
             if all(
-                row["development_metrics"]["trade_count"] > 0
+                row["development_metrics"]["trade_count"] >= 30
+                and row["data_quality"]["development_unresolved_exit_count"] == 0
                 for row in candidate["scenarios"]
             )
         ],
@@ -744,7 +753,11 @@ def run_orb_comparison(directory: Path) -> dict[str, Any]:
         "slippage_scenario_count": 3,
         "retrospective_check_is_untouched": False,
         "selection": {
-            "ranking_rule": "worst_development_expectancy_across_slippage",
+            "ranking_rule": (
+                "worst_development_expectancy_across_slippage; "
+                ">=30 resolved development trades per scenario; "
+                "zero unresolved development exits"
+            ),
             "development_ranking": [candidate["name"] for candidate in ranked],
             "best_observed_research_candidate": ranked[0]["name"] if ranked else None,
             "minimum_development_trades_for_further_validation": 30,
