@@ -179,11 +179,7 @@ def main() -> None:
 
     all_results: dict[str, list[dict[str, Any]]] = {}
     for phase, years in phases.items():
-        days = [
-            row["day"]
-            for row in manifest["sessions"]
-            if row["day"][:4] in years
-        ]
+        days = [row["day"] for row in manifest["sessions"] if row["day"][:4] in years]
         tasks = [
             (str(args.study_dir), candidate, slip, days)
             for candidate in candidates()
@@ -216,8 +212,7 @@ def main() -> None:
             matches = [
                 item
                 for item in all_results[phase]
-                if item["candidate"] == name
-                and item["slippage_bps_per_side"] == 10.0
+                if item["candidate"] == name and item["slippage_bps_per_side"] == 10.0
             ]
             if matches:
                 metrics = matches[0]["metrics"]
