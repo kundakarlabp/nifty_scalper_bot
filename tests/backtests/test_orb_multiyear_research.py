@@ -61,6 +61,12 @@ def test_selection_rejects_tiny_stress_samples_and_missing_scenarios():
     )
     assert select_candidate(results) == "stable"
     assert select_candidate(results[:2]) is None
+    contaminated = [dict(row) for row in results[:3]]
+    contaminated[0] = {
+        **contaminated[0],
+        "data_quality": {"unresolved_exit_count": 1},
+    }
+    assert select_candidate(contaminated) is None
 
 
 def test_nested_csv_and_txt_copies_are_not_double_counted():
