@@ -55,7 +55,11 @@ def backtrader_gross_pnl(trades: list[dict[str, Any]]) -> float:
             or quantity <= 0
         ):
             raise ValueError("external_oracle_trade_invalid")
-        prices.extend((entry, exit_price, exit_price))
+        # Default Backtrader market orders fill at the next bar open.
+        # Bar 0 queues BUY, bar 1 opens at entry and queues SELL, and bar 2
+        # opens at exit. This independently reproduces the resolved ledger fill
+        # chronology instead of accidentally buying at the exit price.
+        prices.extend((entry, entry, exit_price))
         quantities.append(quantity)
 
     index = pd.date_range("2000-01-01", periods=len(prices), freq="min")
@@ -74,7 +78,6 @@ def backtrader_gross_pnl(trades: list[dict[str, Any]]) -> float:
     cerebro = bt.Cerebro(stdstats=False)
     cerebro.broker.setcash(starting_cash)
     cerebro.broker.setcommission(commission=0.0)
-    cerebro.broker.set_coc(True)
     cerebro.adddata(bt.feeds.PandasData(dataname=frame))
     cerebro.addstrategy(_LedgerReplay, quantities=tuple(quantities))
     cerebro.run(runonce=False, preload=False)

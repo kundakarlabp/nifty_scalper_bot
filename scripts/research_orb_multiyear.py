@@ -409,12 +409,19 @@ def run_task(task: tuple[str, dict[str, Any], float, list[str]]) -> dict[str, An
     }
 
 
-def select_candidate(results: list[dict[str, Any]]) -> str | None:
-    """Only development results may select; require a meaningful stress sample."""
+def _group_candidate_results(
+    results: list[dict[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
     grouped: dict[str, list[dict[str, Any]]] = {}
     for row in results:
         if row["candidate"] != "raw_reference":
             grouped.setdefault(row["candidate"], []).append(row)
+    return grouped
+
+
+def select_candidate(results: list[dict[str, Any]]) -> str | None:
+    """Only development results may select; require a meaningful stress sample."""
+    grouped = _group_candidate_results(results)
     eligible = [
         (min(row["metrics"]["expectancy"] for row in rows), name)
         for name, rows in grouped.items()
@@ -424,6 +431,35 @@ def select_candidate(results: list[dict[str, Any]]) -> str | None:
         and all(row["data_quality"]["unresolved_exit_count"] == 0 for row in rows)
     ]
     return max(eligible)[1] if eligible else None
+
+
+def select_exploratory_top5(results: list[dict[str, Any]]) -> list[str]:
+    """Freeze five development-only candidates for later out-of-sample comparison.
+
+    This is exploratory evidence, never a live-promotion rule. Candidates need
+    at least 100 resolved trades in the 10 bps development scenario. Ranking
+    uses 10 bps post-cost expectancy, then the worst expectancy across the three
+    registered slippage scenarios as a robustness tie-breaker.
+    """
+    ranked: list[tuple[float, float, str]] = []
+    for name, rows in _group_candidate_results(results).items():
+        if {row["slippage_bps_per_side"] for row in rows} != set(SLIPPAGE):
+            continue
+        by_slip = {row["slippage_bps_per_side"]: row for row in rows}
+        base = by_slip[10.0]
+        if base["metrics"]["trade_count"] < 100:
+            continue
+        expectancy = base["metrics"]["expectancy"]
+        if expectancy is None:
+            continue
+        worst = min(
+            row["metrics"]["expectancy"]
+            for row in rows
+            if row["metrics"]["expectancy"] is not None
+        )
+        ranked.append((float(expectancy), float(worst), name))
+    ranked.sort(reverse=True)
+    return [name for _, _, name in ranked[:5]]
 
 
 def run_phase(output: Path, phase: str, workers: int) -> None:
@@ -469,11 +505,14 @@ def run_phase(output: Path, phase: str, workers: int) -> None:
     selected = protocol["candidates"]
     if phase != "development":
         frozen = json.loads((output / "selection.json").read_text())
-        selected = [
-            row
-            for row in selected
-            if row["name"] in {"raw_reference", "stop_0.75_rr_1.8", frozen["candidate"]}
-        ]
+        selected_names = {
+            "raw_reference",
+            "stop_0.75_rr_1.8",
+            *frozen.get("exploratory_top5", []),
+        }
+        if frozen["candidate"] is not None:
+            selected_names.add(frozen["candidate"])
+        selected = [row for row in selected if row["name"] in selected_names]
     tasks = [
         (str(output), candidate, slip, days)
         for candidate in selected
@@ -509,6 +548,11 @@ def run_phase(output: Path, phase: str, workers: int) -> None:
             output / "selection.json",
             {
                 "candidate": select_candidate(results),
+                "exploratory_top5": select_exploratory_top5(results),
+                "exploratory_top5_rule": (
+                    "development-only 10 bps expectancy; >=100 resolved trades "
+                    "at 10 bps; worst three-slippage expectancy tie-breaker"
+                ),
                 "selected_from": "2017–2018 only",
                 "protocol_sha256": hashlib.sha256(
                     protocol_path.read_bytes()
