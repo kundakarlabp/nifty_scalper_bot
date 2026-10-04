@@ -279,12 +279,8 @@ def _instrument_dump() -> list[dict[str, Any]]:
             )
     return rows
 
-_FIXED_RUNTIME_DAY_IST = (
-    pd.Timestamp.now(tz="Asia/Kolkata").floor("D") - pd.Timedelta(days=1)
-)
-_FIXED_RUNTIME_NOW_IST = _FIXED_RUNTIME_DAY_IST.to_pydatetime().replace(
-    hour=10, minute=30
-)
+_RUNTIME_NOW_IST = pd.Timestamp.now(tz="Asia/Kolkata")
+_FIXED_RUNTIME_NOW_IST = (_RUNTIME_NOW_IST - pd.Timedelta(days=1)).to_pydatetime()
 
 
 def _patch_runtime_clock(
