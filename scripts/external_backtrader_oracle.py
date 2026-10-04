@@ -78,7 +78,6 @@ def backtrader_gross_pnl(trades: list[dict[str, Any]]) -> float:
     cerebro = bt.Cerebro(stdstats=False)
     cerebro.broker.setcash(starting_cash)
     cerebro.broker.setcommission(commission=0.0)
-    cerebro.broker.set_coc(True)
     cerebro.adddata(bt.feeds.PandasData(dataname=frame))
     cerebro.addstrategy(_LedgerReplay, quantities=tuple(quantities))
     cerebro.run(runonce=False, preload=False)
