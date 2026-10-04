@@ -89,9 +89,7 @@ def validate_result_file(path: Path) -> list[dict[str, Any]]:
         external = backtrader_gross_pnl(trades)
         reported = sum(float(trade["gross_pnl"]) for trade in trades)
         tolerance = max(1e-6, abs(reported) * 1e-10)
-        parity = math.isclose(
-            external, reported, rel_tol=1e-10, abs_tol=tolerance
-        )
+        parity = math.isclose(external, reported, rel_tol=1e-10, abs_tol=tolerance)
         rows.append(
             {
                 "candidate": result["candidate"],
@@ -126,9 +124,7 @@ def main() -> int:
         "signal_generation_independent": False,
         "fee_model_independent": False,
         "all_rows_match": all(
-            row["gross_pnl_parity"]
-            for rows in phases.values()
-            for row in rows
+            row["gross_pnl_parity"] for rows in phases.values() for row in rows
         ),
         "phases": phases,
     }
