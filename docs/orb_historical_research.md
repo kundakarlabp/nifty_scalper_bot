@@ -60,7 +60,7 @@ sample screen, not a statistical proof. Separately, freeze the five candidates
 with the best 10 bps development expectancy among those with at least 100
 resolved 10 bps trades; those five are carried unchanged into 2019 and 2020
 for an exploratory out-of-sample comparison. This top-five comparison is not
-a promotion rule and unresolved exits remain reported explicitly. If none qualifies, the frozen candidate
+a promotion rule and unresolved exits remain reported explicitly. If none qualifies, the\nfrozen candidate
 is null and later periods evaluate the references only. Never lower the sample
 threshold or choose another candidate after inspecting the held-out results.
 Negative results remain negative; abstention is not demonstrated alpha.
