@@ -1,0 +1,94 @@
+name: ORB five-run lifecycle research
+
+on:
+  workflow_dispatch:
+  issues:
+    types: [opened, reopened]
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/orb-iterative-lifecycle-research.yml
+      - scripts/research_orb_iterative.py
+      - src/nifty_scalper_bot/backtesting/strategy_research.py
+
+permissions:
+  contents: read
+
+concurrency:
+  group: orb-five-run-lifecycle-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  five-run-study:
+    if: >-
+      github.event_name != 'issues' ||
+      (github.event.issue.user.login == github.repository_owner &&
+      startsWith(github.event.issue.title, '[Backtest] ORB Lifecycle'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      EXECUTION_MODE: SHADOW
+      LIVE_TRADING_ENABLED: "false"
+      PAPER_TRADING: "true"
+      BROKER_API_KEY: offline_research_unused
+      BROKER_API_SECRET: offline_research_unused
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set isolated research paths
+        run: |
+          printf 'SOURCE_DIR=%s/orb-public-source\nSTUDY_DIR=%s/orb-lifecycle-study\n' \
+            "$RUNNER_TEMP" "$RUNNER_TEMP" >> "$GITHUB_ENV"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install research dependencies
+        run: python -m pip install -e '.[research]'
+      - name: Cache checksum-verified public archive
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.SOURCE_DIR }}
+          key: zenodo-10899828-717d15361af52d1d654b4909d998967e
+      - name: Prepare historical baskets
+        run: >-
+          python scripts/research_orb_multiyear.py prepare
+          --source "$SOURCE_DIR" --output "$STUDY_DIR"
+      - name: Run five ORB lifecycle experiments
+        run: >-
+          python scripts/research_orb_iterative.py
+          --study-dir "$STUDY_DIR" --workers 2
+      - name: Summarize results
+        run: |
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          root = Path(os.environ["STUDY_DIR"])
+          rows = json.loads((root / "iterative_summary.json").read_text())
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as stream:
+              stream.write("## ORB five-run lifecycle research\n\n")
+              stream.write("10 bps/side headline view; inspect artifacts for 25/50 bps stress.\n\n")
+              stream.write("| Candidate | Dev P&L | 2019 P&L | 2020 P&L | Final PF | Final trades |\n")
+              stream.write("|---|---:|---:|---:|---:|---:|\n")
+              for row in rows:
+                  dev = row.get("development", {})
+                  val = row.get("validation", {})
+                  final = row.get("final", {})
+                  pf = final.get("profit_factor")
+                  pf_text = "—" if pf is None else f"{pf:.2f}"
+                  stream.write(
+                      f"| {row['candidate']} | {dev.get('net_pnl', 0):.2f} | "
+                      f"{val.get('net_pnl', 0):.2f} | {final.get('net_pnl', 0):.2f} | "
+                      f"{pf_text} | {final.get('trades', 0)} |\n"
+                  )
+          PY
+      - name: Save lifecycle evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: orb-five-run-lifecycle-${{ github.sha }}
+          retention-days: 30
+          if-no-files-found: error
+          path: |
+            ${{ env.STUDY_DIR }}/data_manifest.json
+            ${{ env.STUDY_DIR }}/iterative_protocol.json
+            ${{ env.STUDY_DIR }}/iterative_*.json
