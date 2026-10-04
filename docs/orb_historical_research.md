@@ -107,4 +107,9 @@ Each phase saves atomic candidate results, trades, yearly metrics, rejection
 reasons and exit reasons. Completed tasks resume without repeating the entire
 study. Review `data_manifest.json`, `protocol.json`, `selection.json` and the
 three `*_results.json` files together.
-\n## Independent free execution oracle\n\nThe workflow also runs the resolved trade ledger through the external open-source Backtrader engine. Backtrader independently executes each long round trip at the already-modeled entry and exit prices with zero commission and verifies that its portfolio gross P&L matches this repository's reported gross P&L. This catches sign, quantity and cash-accounting regressions without sharing the bot's P&L calculation. It does **not** independently reproduce ORB signal generation, historical option selection, fees, bid/ask depth or broker fills.\n\nBecause this repository is public, standard GitHub-hosted Actions are free. From ordinary ChatGPT chat the GitHub connector can create an owner issue titled `[Backtest] ORB ...`; the fixed workflow runs without a TradingView/Streak login. TradingView/Streak remain optional manual signal spot-checks, not the automated research backend.\n
+
+## Independent free execution oracle
+
+The workflow also runs the resolved trade ledger through the external open-source Backtrader engine. Backtrader independently executes each long round trip at the already-modeled entry and exit prices with zero commission and verifies that its portfolio gross P&L matches this repository's reported gross P&L. This catches sign, quantity and cash-accounting regressions without sharing the bot's P&L calculation. It does **not** independently reproduce ORB signal generation, historical option selection, fees, bid/ask depth or broker fills.
+
+Because this repository is public, standard GitHub-hosted Actions are free. From ordinary ChatGPT chat the GitHub connector can create an owner issue titled `[Backtest] ORB ...`; the fixed workflow runs without a TradingView/Streak login. TradingView/Streak remain optional manual signal spot-checks, not the automated research backend.
