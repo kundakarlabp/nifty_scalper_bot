@@ -205,16 +205,10 @@ def test_compact_context_preserves_actual_orb_trades(monkeypatch, tmp_path):
     )["strategies"]["ORBPro"]
     assert strict["metrics"]["trade_count"] == 0
     assert strict["data_quality"]["unresolved_exit_count"] == 1
-    assert (
-        strict["unresolved_trades"][0]["unresolved_reason"]
-        == "history_gap_unresolved"
-    )
-    assert (
-        strict["worst_case_stress_exit_reasons"][
-            "unpriced_gap_full_premium_stress"
-        ]
-        == 1
-    )
+    unresolved_reason = strict["unresolved_trades"][0]["unresolved_reason"]
+    assert unresolved_reason == "history_gap_unresolved"
+    stress_reasons = strict["worst_case_stress_exit_reasons"]
+    assert stress_reasons["unpriced_gap_full_premium_stress"] == 1
     assert strict["worst_case_stress_trades"][0]["exit_price"] == 0.01
     history[missing_time] = removed
     history[entry_time]["volume"] = 0
