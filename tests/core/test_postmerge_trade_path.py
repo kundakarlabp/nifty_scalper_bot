@@ -105,7 +105,12 @@ def test_aligned_independent_trigger_can_clear_unchanged_live_quality_floor(
     manager._last_no_signal_decision_by_symbol = {}
 
     vwap = _signal_vote("VWAPPro", raw_score=8.5, weighted_score=6.8, confidence=0.85)
-    orb = _signal_vote("ORBPro", raw_score=7.0, weighted_score=5.6, confidence=0.70)
+    independent = _signal_vote(
+        "PremiumMomentum",
+        raw_score=7.0,
+        weighted_score=5.6,
+        confidence=0.70,
+    )
     orderflow = _signal_vote(
         "OrderFlow",
         raw_score=8.0,
@@ -116,7 +121,7 @@ def test_aligned_independent_trigger_can_clear_unchanged_live_quality_floor(
 
     result = manager._combine_strategy_votes(
         symbol=_SYMBOL,
-        signals=[vwap, orb, orderflow],
+        signals=[vwap, independent, orderflow],
         indicators=_live_indicators(),
     )
 
