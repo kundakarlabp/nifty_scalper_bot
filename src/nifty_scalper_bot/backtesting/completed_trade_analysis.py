@@ -96,7 +96,6 @@ class ComponentCoverage:
 
     completed_trades: int
     with_structural_provenance: int
-    with_attribution_provenance: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -772,19 +771,15 @@ def attribution_readiness(
         with_structural = sum(
             _has_attribution_provenance(trade.outcome) for trade in component_trades
         )
-        with_attribution = sum(
-            _has_attribution_provenance(trade.outcome) for trade in component_trades
-        )
         coverage[component] = ComponentCoverage(
             completed_trades=len(component_trades),
             with_structural_provenance=with_structural,
-            with_attribution_provenance=with_attribution,
         )
         if not component_trades:
             blockers.append(f"missing_completed_trades:{component}")
         else:
-            if with_attribution != len(component_trades):
-                blockers.append(f"missing_attribution_provenance:{component}")
+            if with_structural != len(component_trades):
+                blockers.append(f"missing_structural_provenance:{component}")
 
     return AttributionReadiness(
         ready=not blockers,
