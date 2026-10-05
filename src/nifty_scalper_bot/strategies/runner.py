@@ -18702,12 +18702,12 @@ class StrategyRunner:
             if expires_at > 0.0 and now_epoch >= expires_at:
                 self._signal_attempt_debounce_state.pop(key, None)
                 prev = None
-        score_raw = metadata.get("candidate_score")
-        if score_raw is None:
-            score_raw = metadata.get("strategy_score")
-        if score_raw is None:
-            score_raw = signal.confidence
-        score = float(score_raw) if score_raw is not None else 0.0
+        # Dedup improvement is based on executable economics/market quality,
+        # never the legacy candidate/strategy/confidence scores.
+        net_rr_raw = metadata.get("candidate_net_rr")
+        if net_rr_raw is None:
+            net_rr_raw = metadata.get("candidate_rr")
+        net_rr = float(net_rr_raw) if net_rr_raw is not None else 0.0
         tradable_quote = bool(metadata.get("tradable_quote"))
         spread_pct_raw = metadata.get("candidate_spread_pct")
         if spread_pct_raw is None:
@@ -18754,7 +18754,7 @@ class StrategyRunner:
         # explicit distance nor both strikes are resolvable.
         distance_atm = abs(float(distance_raw)) if distance_raw is not None else 999.0
         rank_score = (
-            score * 10.0
+            net_rr * 10.0
             + (2.0 if tradable_quote else -5.0)
             + (1.0 if depth_available else 0.0)
             + (1.0 if premium_ok else -2.0)
@@ -18763,7 +18763,7 @@ class StrategyRunner:
             - min(distance_atm / 100.0, 10.0) * 0.5
         )
         ranking_fields = {
-            "score": score,
+            "net_rr": net_rr,
             "tradable_quote": tradable_quote,
             "spread_pct": spread_pct,
             "tick_age_ms": tick_age_ms,
@@ -20195,6 +20195,7 @@ class StrategyRunner:
                 metadata["candidate_stop_loss"] = candidate.stop_loss
                 metadata["candidate_target"] = candidate.target
                 metadata["candidate_rr"] = candidate.rr
+                metadata["candidate_net_rr"] = candidate.net_rr
                 metadata["candidate_data_quality_score"] = candidate.data_quality_score
                 metadata["candidate_spread_pct"] = candidate.spread_pct
                 metadata["candidate_tick_age_s"] = getattr(
