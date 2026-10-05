@@ -213,6 +213,25 @@ class Strategy(ABC):
         """Clamp *value* to the inclusive range [0.0, 1.0]."""
         return max(0.0, min(1.0, value))
 
+    @staticmethod
+    def _structural_entry_metadata(
+        metadata: Mapping[str, Any],
+        *,
+        setup_name: str,
+        reasons: Iterable[str],
+    ) -> dict[str, Any]:
+        """Stamp explicit boolean entry evidence after native conditions pass."""
+        return {
+            **dict(metadata),
+            "role": "trigger",
+            "setup_name": setup_name,
+            "setup_pass": True,
+            "trigger_conditions_met": True,
+            "required_data_present": True,
+            "stale_data_used": False,
+            "setup_reasons": list(reasons),
+        }
+
 
 class RSIMeanReversionStrategy(Strategy):
     """RSI Mean Reversion Strategy."""
@@ -490,7 +509,18 @@ class EMACrossoverStrategy(Strategy):
             reason = "Fast EMA crossed above slow EMA"
             logger.info(f"SIGNAL {self.name}: BUY | {reason}")
             return Signal(
-                "BUY", symbol, qty, confidence, reason, stop_loss, take_profit, metadata
+                "BUY",
+                symbol,
+                qty,
+                confidence,
+                reason,
+                stop_loss,
+                take_profit,
+                self._structural_entry_metadata(
+                    metadata,
+                    setup_name="ema_bullish_crossover",
+                    reasons=("ema_bullish_crossover", "risk_geometry_valid"),
+                ),
             )
 
         if crossed_down and (position is None or position.side != "SHORT"):
@@ -515,7 +545,11 @@ class EMACrossoverStrategy(Strategy):
                 reason,
                 stop_loss,
                 take_profit,
-                metadata,
+                self._structural_entry_metadata(
+                    metadata,
+                    setup_name="ema_bearish_crossover",
+                    reasons=("ema_bearish_crossover", "risk_geometry_valid"),
+                ),
             )
 
         logger.debug(f"SKIP {self.name}: neutral (no cross) | {symbol}")
@@ -658,7 +692,18 @@ class MACDStrategy(Strategy):
             reason = "MACD bullish crossover confirmed"
             logger.info(f"SIGNAL {self.name}: BUY | {reason}")
             return Signal(
-                "BUY", symbol, qty, confidence, reason, stop_loss, take_profit, metadata
+                "BUY",
+                symbol,
+                qty,
+                confidence,
+                reason,
+                stop_loss,
+                take_profit,
+                self._structural_entry_metadata(
+                    metadata,
+                    setup_name="macd_bullish_crossover",
+                    reasons=("macd_bullish_crossover", "risk_geometry_valid"),
+                ),
             )
 
         if crossed_down and (position is None or position.side != "SHORT"):
@@ -684,7 +729,11 @@ class MACDStrategy(Strategy):
                 reason,
                 stop_loss,
                 take_profit,
-                metadata,
+                self._structural_entry_metadata(
+                    metadata,
+                    setup_name="macd_bearish_crossover",
+                    reasons=("macd_bearish_crossover", "risk_geometry_valid"),
+                ),
             )
 
         logger.debug(f"SKIP {self.name}: neutral (no cross) | {symbol}")
@@ -816,7 +865,18 @@ class BollingerBandStrategy(Strategy):
             reason = "Price at lower band with oversold RSI"
             logger.info(f"SIGNAL {self.name}: BUY | {reason}")
             return Signal(
-                "BUY", symbol, qty, confidence, reason, stop_loss, take_profit, metadata
+                "BUY",
+                symbol,
+                qty,
+                confidence,
+                reason,
+                stop_loss,
+                take_profit,
+                self._structural_entry_metadata(
+                    metadata,
+                    setup_name="bollinger_lower_band_reversion",
+                    reasons=("lower_band_touch", "rsi_oversold", "risk_geometry_valid"),
+                ),
             )
 
         if (
@@ -848,7 +908,11 @@ class BollingerBandStrategy(Strategy):
                 reason,
                 stop_loss,
                 take_profit,
-                metadata,
+                self._structural_entry_metadata(
+                    metadata,
+                    setup_name="bollinger_upper_band_reversion",
+                    reasons=("upper_band_touch", "rsi_overbought", "risk_geometry_valid"),
+                ),
             )
 
         logger.debug(f"SKIP {self.name}: neutral | {symbol}")
@@ -976,7 +1040,18 @@ class VWAPMeanReversionStrategy(Strategy):
                 reason = "Price below VWAP with oversold RSI"
                 logger.info(f"SIGNAL {self.name}: BUY | {reason}")
                 return Signal(
-                    "BUY", symbol, qty, confidence, reason, None, None, metadata
+                    "BUY",
+                    symbol,
+                    qty,
+                    confidence,
+                    reason,
+                    None,
+                    None,
+                    self._structural_entry_metadata(
+                        metadata,
+                        setup_name="vwap_mean_reversion_oversold",
+                        reasons=("below_vwap_deviation", "rsi_oversold"),
+                    ),
                 )
 
             if (
@@ -989,7 +1064,18 @@ class VWAPMeanReversionStrategy(Strategy):
                 reason = "Price above VWAP with overbought RSI"
                 logger.info(f"SIGNAL {self.name}: SELL | {reason}")
                 return Signal(
-                    "SELL", symbol, qty, confidence, reason, None, None, metadata
+                    "SELL",
+                    symbol,
+                    qty,
+                    confidence,
+                    reason,
+                    None,
+                    None,
+                    self._structural_entry_metadata(
+                        metadata,
+                        setup_name="vwap_mean_reversion_overbought",
+                        reasons=("above_vwap_deviation", "rsi_overbought"),
+                    ),
                 )
 
         except Exception as exc:
