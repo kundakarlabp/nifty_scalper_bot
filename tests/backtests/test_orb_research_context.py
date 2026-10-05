@@ -49,7 +49,7 @@ class _FakeEngine:
         return self.rows[symbol][-1]["close"] - 1.0
 
 
-def test_research_orb_structural_context_supplies_production_score_inputs():
+def test_research_orb_structural_context_supplies_entry_inputs():
     context = strategy_research._research_orb_structural_context(  # noqa: SLF001
         _FakeEngine(),
         spot_symbol="SPOT",
