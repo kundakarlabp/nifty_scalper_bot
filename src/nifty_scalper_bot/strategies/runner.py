@@ -1262,7 +1262,7 @@ class StrategyRunner:
         )
         self._eval_counter = 0
         self._candidate_counter = 0
-        self._final_quality_approved_counter = 0
+        self._structural_approved_counter = 0
         self._regime_block_counter = 0
         self._capital_block_counter = 0
         self._last_candle_eval: dict[str, float] = {}
@@ -5687,7 +5687,7 @@ class StrategyRunner:
                 "symbols": symbols,
                 "candidate_generated_count": getattr(self, "_candidate_counter", 0),
                 "approved_candidate_count": getattr(
-                    self, "_final_quality_approved_counter", 0
+                    self, "_structural_approved_counter", 0
                 ),
                 "setup_lifecycle": SETUP_LIFECYCLE.snapshot(),
                 "tick_count": getattr(self, "_eval_counter", 0),
@@ -8417,14 +8417,14 @@ class StrategyRunner:
                     "regime_blocks=%d capital_blocks=%d runner_state=%s",
                     self._eval_counter,
                     self._candidate_counter,
-                    self._final_quality_approved_counter,
+                    self._structural_approved_counter,
                     self._regime_block_counter,
                     self._capital_block_counter,
                     str(self._runner_state),
                     extra={
                         "evals": self._eval_counter,
                         "candidate_generated": self._candidate_counter,
-                        "approved_candidates": self._final_quality_approved_counter,
+                        "approved_candidates": self._structural_approved_counter,
                         "regime_blocks": self._regime_block_counter,
                         "capital_blocks": self._capital_block_counter,
                         "runner_state": str(self._runner_state),
@@ -8432,7 +8432,7 @@ class StrategyRunner:
                 )
                 self._eval_counter = 0
                 self._candidate_counter = 0
-                self._final_quality_approved_counter = 0
+                self._structural_approved_counter = 0
                 self._regime_block_counter = 0
                 self._capital_block_counter = 0
                 self._last_summary_log = now
@@ -19771,8 +19771,8 @@ class StrategyRunner:
                 side=current_side,
                 reason="runner_structural_execution_validation",
             )
-            self._final_quality_approved_counter = (
-                getattr(self, "_final_quality_approved_counter", 0) + 1
+            self._structural_approved_counter = (
+                getattr(self, "_structural_approved_counter", 0) + 1
             )
             self._logger.info(
                 "SIGNAL_APPROVED symbol=%s strategy=%s side=%s "
