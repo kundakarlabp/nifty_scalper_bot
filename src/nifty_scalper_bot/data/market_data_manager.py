@@ -13820,6 +13820,16 @@ class MarketDataManager:
             normalized["source"] = source
             if tradable_quote and not depth:
                 normalized["bid_ask_source"] = source.lower()
+
+        # Preserve explicit live-tick direction through canonical quote
+        # normalization. Strategy evaluation may derive a direction from closed
+        # bars when this field is absent, but that fallback must never overwrite
+        # fresher broker/WebSocket microstructure.
+        tick_direction = str(tick.get("tick_direction") or "").strip().upper()
+        if tick_direction in {"UP", "DOWN", "BUY", "SELL", "FLAT"}:
+            normalized["tick_direction"] = tick_direction
+            normalized["tick_direction_source"] = "market_tick"
+
         broker_timestamp = tick.get("broker_timestamp")
         if broker_timestamp is not None:
             normalized["broker_timestamp"] = broker_timestamp
