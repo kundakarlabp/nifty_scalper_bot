@@ -76,6 +76,7 @@ class StrategyRejectionStats:
     by_strategy: Counter[str] = field(default_factory=Counter)
     by_symbol: Counter[str] = field(default_factory=Counter)
 
+
 class LogThrottle:
     """Thread-safe per-key log throttle with monotonic timing and summaries."""
 
@@ -93,18 +94,29 @@ class LogThrottle:
 
     def should_log(self, key: str, interval_seconds: float | None = None) -> bool:
         """Return True when the key's monotonic interval has elapsed."""
-        interval = self.default_interval_seconds if interval_seconds is None else float(interval_seconds)
+        interval = (
+            self.default_interval_seconds
+            if interval_seconds is None
+            else float(interval_seconds)
+        )
         now = time.monotonic()
         wall = _utc_iso()
         with self._lock:
             state = self._states.get(key)
             if state is None:
-                state = ThrottleState(first_seen=wall, last_seen=wall, interval_seconds=max(0.0, interval))
+                state = ThrottleState(
+                    first_seen=wall,
+                    last_seen=wall,
+                    interval_seconds=max(0.0, interval),
+                )
                 self._states[key] = state
             else:
                 state.last_seen = wall
                 state.interval_seconds = max(0.0, interval)
-            if state.last_emit_mono > 0.0 and (now - state.last_emit_mono) < state.interval_seconds:
+            if (
+                state.last_emit_mono > 0.0
+                and (now - state.last_emit_mono) < state.interval_seconds
+            ):
                 return False
             state.last_emit_mono = now
             self._last_emit_mono[key] = now
@@ -115,7 +127,11 @@ class LogThrottle:
         with self._lock:
             state = self._states.get(key)
             if state is None:
-                state = ThrottleState(first_seen=wall, last_seen=wall, interval_seconds=0.0)
+                state = ThrottleState(
+                    first_seen=wall,
+                    last_seen=wall,
+                    interval_seconds=0.0,
+                )
                 self._states[key] = state
             state.last_seen = wall
             state.suppressed_count += 1
@@ -124,7 +140,11 @@ class LogThrottle:
     def pop_suppressed(self, key: str) -> int:
         with self._lock:
             state = self._states.get(key)
-            value = int(state.suppressed_count if state else self._suppressed.get(key, 0) or 0)
+            value = int(
+                state.suppressed_count
+                if state
+                else self._suppressed.get(key, 0) or 0
+            )
             if state:
                 state.suppressed_count = 0
             self._suppressed[key] = 0
@@ -142,20 +162,35 @@ class LogThrottle:
                 "suppressed_count": state.suppressed_count,
             }
 
-    def maybe_emit_summary(self, logger: logging.Logger, *, interval_seconds: float = 60.0, top_n: int = 10) -> None:
+    def maybe_emit_summary(
+        self,
+        logger: logging.Logger,
+        *,
+        interval_seconds: float = 60.0,
+        top_n: int = 10,
+    ) -> None:
         """Emit a compact aggregate suppression summary periodically."""
         now = time.monotonic()
         with self._lock:
-            if self._summary_last_emit_mono > 0 and (now - self._summary_last_emit_mono) < float(interval_seconds):
+            if (
+                self._summary_last_emit_mono > 0
+                and (now - self._summary_last_emit_mono) < float(interval_seconds)
+            ):
                 return
-            pending = {k: s.suppressed_count for k, s in self._states.items() if s.suppressed_count > 0}
+            pending = {
+                key: state.suppressed_count
+                for key, state in self._states.items()
+                if state.suppressed_count > 0
+            }
             if not pending:
                 return
             self._summary_last_emit_mono = now
             for key in pending:
                 self._states[key].suppressed_count = 0
                 self._suppressed[key] = 0
-        top = sorted(pending.items(), key=lambda item: item[1], reverse=True)[: max(1, int(top_n))]
+        top = sorted(
+            pending.items(), key=lambda item: item[1], reverse=True
+        )[: max(1, int(top_n))]
         total_suppressed = sum(int(v) for v in pending.values())
         keys = ",".join(f"{k}:{v}" for k, v in top)
         logger.info(
@@ -171,22 +206,52 @@ class LogThrottle:
             },
         )
 
-    def log_on_change(self, logger: logging.Logger, *, key: str, state: Any, message: str, reminder_seconds: float = 600, level: int = logging.INFO, extra: dict[str, Any] | None = None) -> bool:
+    def log_on_change(
+        self,
+        logger: logging.Logger,
+        *,
+        key: str,
+        state: Any,
+        message: str,
+        reminder_seconds: float = 600,
+        level: int = logging.INFO,
+        extra: dict[str, Any] | None = None,
+    ) -> bool:
         now = time.monotonic()
         wall = _utc_iso()
         payload = dict(extra or {})
         with self._lock:
             previous = self._change_states.get(key)
             changed = previous is None or previous.state != state
-            reminder_due = previous is not None and (now - previous.last_emit_mono) >= max(0.0, float(reminder_seconds))
+            reminder_due = (
+                previous is not None
+                and (now - previous.last_emit_mono)
+                >= max(0.0, float(reminder_seconds))
+            )
             if not changed and not reminder_due:
                 previous.suppressed_count += 1
                 previous.last_seen = wall
                 return False
             suppressed = int(previous.suppressed_count) if previous else 0
             first_seen = previous.first_seen if previous else wall
-            self._change_states[key] = ChangeState(state=state, first_seen=first_seen, last_seen=wall, last_emit_mono=now, suppressed_count=0)
-        payload.update({"log_key": key, "state": state, "previous_state": None if previous is None else previous.state, "suppressed_count": suppressed, "first_seen": first_seen, "last_seen": wall, "reminder_seconds": float(reminder_seconds)})
+            self._change_states[key] = ChangeState(
+                state=state,
+                first_seen=first_seen,
+                last_seen=wall,
+                last_emit_mono=now,
+                suppressed_count=0,
+            )
+        payload.update(
+            {
+                "log_key": key,
+                "state": state,
+                "previous_state": None if previous is None else previous.state,
+                "suppressed_count": suppressed,
+                "first_seen": first_seen,
+                "last_seen": wall,
+                "reminder_seconds": float(reminder_seconds),
+            }
+        )
         logger.log(level, message, extra=payload)
         return True
 
