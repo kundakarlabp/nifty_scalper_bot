@@ -2607,37 +2607,79 @@ class StrategyManager(_BaseStrategyManager):
         vwap_slope = _f("vwap_slope")
         ema_slope = _f("ema_slope")
         futures_volume_ratio = _f("futures_volume_ratio")
-        ce_score = pe_score = 0.0
         reasons: list[str] = []
-        if close is not None and vwap is not None and vwap > 0:
-            if close > vwap: ce_score += 1.0; reasons.append("close_above_vwap")
-            elif close < vwap: pe_score += 1.0; reasons.append("close_below_vwap")
-        if ema_fast is not None and ema_slow is not None:
-            if ema_fast > ema_slow: ce_score += 1.0; reasons.append("ema_fast_above_slow")
-            elif ema_fast < ema_slow: pe_score += 1.0; reasons.append("ema_fast_below_slow")
-        if close is not None and ema_50 is not None:
-            if close > ema_50: ce_score += 0.5; reasons.append("close_above_ema50")
-            elif close < ema_50: pe_score += 0.5; reasons.append("close_below_ema50")
-        if vwap_slope is not None and vwap_slope > 0: ce_score += 0.5; reasons.append("vwap_slope_positive")
-        elif vwap_slope is not None and vwap_slope < 0: pe_score += 0.5; reasons.append("vwap_slope_negative")
-        if ema_slope is not None and ema_slope > 0: ce_score += 0.5; reasons.append("ema_slope_positive")
-        elif ema_slope is not None and ema_slope < 0: pe_score += 0.5; reasons.append("ema_slope_negative")
+        location_votes: list[str] = []
+        trend_votes: list[str] = []
+
+        def _vote_from_pair(
+            lhs: float | None,
+            rhs: float | None,
+            *,
+            up_reason: str,
+            down_reason: str,
+            bucket: list[str],
+        ) -> None:
+            if lhs is None or rhs is None:
+                return
+            if lhs > rhs:
+                bucket.append("CE")
+                reasons.append(up_reason)
+            elif lhs < rhs:
+                bucket.append("PE")
+                reasons.append(down_reason)
+
+        _vote_from_pair(
+            close,
+            vwap,
+            up_reason="close_above_vwap",
+            down_reason="close_below_vwap",
+            bucket=location_votes,
+        )
+        _vote_from_pair(
+            close,
+            ema_50,
+            up_reason="close_above_ema50",
+            down_reason="close_below_ema50",
+            bucket=location_votes,
+        )
+        _vote_from_pair(
+            close,
+            previous_close,
+            up_reason="close_above_previous_close",
+            down_reason="close_below_previous_close",
+            bucket=location_votes,
+        )
+        _vote_from_pair(
+            ltp,
+            day_open,
+            up_reason="ltp_above_open",
+            down_reason="ltp_below_open",
+            bucket=location_votes,
+        )
+        _vote_from_pair(
+            ema_fast,
+            ema_slow,
+            up_reason="ema_fast_above_slow",
+            down_reason="ema_fast_below_slow",
+            bucket=trend_votes,
+        )
+        if vwap_slope is not None:
+            if vwap_slope > 0:
+                trend_votes.append("CE")
+                reasons.append("vwap_slope_positive")
+            elif vwap_slope < 0:
+                trend_votes.append("PE")
+                reasons.append("vwap_slope_negative")
+        if ema_slope is not None:
+            if ema_slope > 0:
+                trend_votes.append("CE")
+                reasons.append("ema_slope_positive")
+            elif ema_slope < 0:
+                trend_votes.append("PE")
+                reasons.append("ema_slope_negative")
         if role == "futures_context" and futures_volume_ratio is not None and futures_volume_ratio >= 1.0:
             reasons.append("futures_volume_active")
-        if close is not None and previous_close is not None:
-            if close > previous_close:
-                ce_score += 0.8
-                reasons.append("close_above_previous_close")
-            elif close < previous_close:
-                pe_score += 0.8
-                reasons.append("close_below_previous_close")
-        if ltp is not None and day_open is not None:
-            if ltp > day_open:
-                ce_score += 0.7
-                reasons.append("ltp_above_open")
-            elif ltp < day_open:
-                pe_score += 0.7
-                reasons.append("ltp_below_open")
+
         delta_signal = recent_ltp_delta if recent_ltp_delta not in (None, 0.0) else tick_slope
         tick_side: str | None = None
         if delta_signal is not None:
@@ -2647,35 +2689,33 @@ class StrategyManager(_BaseStrategyManager):
             elif delta_signal < 0:
                 tick_side = "PE"
                 reasons.append("tick_slope_negative")
-        total = ce_score + pe_score
-        if total <= 0:
+
+        def _family_side(votes: list[str], family: str) -> str | None:
+            if not votes:
+                return None
+            sides = set(votes)
+            if len(sides) == 1:
+                return votes[0]
+            reasons.append(f"{family}_conflict")
+            return None
+
+        location_side = _family_side(location_votes, "price_location")
+        trend_side = _family_side(trend_votes, "trend_structure")
+        if location_side and trend_side and location_side != trend_side:
+            return None, 0.0, [*reasons, "direction_family_conflict"]
+
+        side = trend_side or location_side
+        if side is None:
             return None, 0.0, [*reasons, "direction_unavailable"]
-        margin = abs(ce_score - pe_score)
-        if margin < 0.5:
-            return None, min(0.55, total / 4.0), reasons + ["direction_tie"]
-        side = "CE" if ce_score > pe_score else "PE"
-        strong_reason_tags = {
-            "close_above_vwap",
-            "close_below_vwap",
-            "ema_fast_above_slow",
-            "ema_fast_below_slow",
-            "vwap_slope_positive",
-            "vwap_slope_negative",
-            "ema_slope_positive",
-            "ema_slope_negative",
-            "close_above_ema50",
-            "close_below_ema50",
-        }
-        has_strong_reasons = any(tag in strong_reason_tags for tag in reasons)
-        raw_confidence = 0.50 + margin / max(total, 1.0) * 0.45
-        if has_strong_reasons:
-            confidence = min(0.95, max(0.50, raw_confidence))
-        else:
-            confidence = min(0.70, max(0.55, raw_confidence))
+
+        # Confidence is observability only; it never authorizes direction.
+        structural_families = int(location_side is not None) + int(trend_side is not None)
+        confidence = 0.80 if structural_families == 2 else 0.65
         if tick_side == side:
-            confidence = min(0.95, confidence + 0.03)
+            confidence = min(0.90, confidence + 0.05)
         elif tick_side is not None:
             confidence = max(0.50, confidence - 0.05)
+            reasons.append("tick_direction_disagrees")
         return side, confidence, reasons
 
     @staticmethod
