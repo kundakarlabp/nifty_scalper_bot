@@ -350,9 +350,8 @@ def capture_entry_market_baseline(manager: Any, bracket: Any) -> bool:
 
 def assess_continuation(manager: Any, bracket: Any, ltp: float) -> ContinuationDecision:
     """Assess continuation using explicit evidence contracts, not weighted values."""
-    empty = lambda reason: ContinuationDecision(
-        False, 0, (), (), False, {"reason": reason}
-    )
+    def empty(reason: str) -> ContinuationDecision:
+        return ContinuationDecision(False, 0, (), (), False, {"reason": reason})
     if not _env_bool("MARKET_AWARE_PROFIT_EXTENSION_ENABLED", True):
         return empty("disabled")
     if str(getattr(bracket, "side", "BUY") or "BUY").upper() != "BUY":
@@ -384,9 +383,29 @@ def assess_continuation(manager: Any, bracket: Any, ltp: float) -> ContinuationD
     if momentum is not None:
         evidence_count += 1
         if momentum >= 0.20:
-            _record_evidence("premium_momentum", True, positive=positive, negative=negative)
+            _record_evidence(
+
+                "premium_momentum",
+
+                True,
+
+                positive=positive,
+
+                negative=negative,
+
+            )
         elif momentum <= -0.15:
-            _record_evidence("premium_momentum_reversal", False, positive=positive, negative=negative)
+            _record_evidence(
+
+                "premium_momentum_reversal",
+
+                False,
+
+                positive=positive,
+
+                negative=negative,
+
+            )
 
     premium_vwap = _field(option, "exchange_vwap", "session_vwap", "vwap")
     if premium_vwap is not None:
@@ -413,9 +432,29 @@ def assess_continuation(manager: Any, bracket: Any, ltp: float) -> ContinuationD
     if adx is not None:
         evidence_count += 1
         if adx >= 20.0:
-            _record_evidence("premium_adx", True, positive=positive, negative=negative)
+            _record_evidence(
+
+                "premium_adx",
+
+                True,
+
+                positive=positive,
+
+                negative=negative,
+
+            )
         elif adx < 15.0:
-            _record_evidence("premium_adx_weak", False, positive=positive, negative=negative)
+            _record_evidence(
+
+                "premium_adx_weak",
+
+                False,
+
+                positive=positive,
+
+                negative=negative,
+
+            )
 
     volume = _field(quote, "volume", "volume_traded") or _field(option, "volume")
     avg_volume = _field(option, "avg_volume")
@@ -430,9 +469,29 @@ def assess_continuation(manager: Any, bracket: Any, ltp: float) -> ContinuationD
     if volume_ratio is not None:
         evidence_count += 1
         if volume_ratio >= 1.20:
-            _record_evidence("premium_volume_expansion", True, positive=positive, negative=negative)
+            _record_evidence(
+
+                "premium_volume_expansion",
+
+                True,
+
+                positive=positive,
+
+                negative=negative,
+
+            )
         elif volume_ratio <= 0.70:
-            _record_evidence("premium_volume_fade", False, positive=positive, negative=negative)
+            _record_evidence(
+
+                "premium_volume_fade",
+
+                False,
+
+                positive=positive,
+
+                negative=negative,
+
+            )
 
     current_oi = _market_metric(manager, symbol, "oi", quote)
     entry_oi = _positive(provenance.get("profit_extension_entry_oi"))
@@ -441,7 +500,17 @@ def assess_continuation(manager: Any, bracket: Any, ltp: float) -> ContinuationD
         evidence_count += 1
         oi_change_pct = ((current_oi - entry_oi) / entry_oi) * 100.0
         if oi_change_pct >= 5.0 and (momentum is None or momentum >= 0):
-            _record_evidence("option_oi_build_with_price", True, positive=positive, negative=negative)
+            _record_evidence(
+
+                "option_oi_build_with_price",
+
+                True,
+
+                positive=positive,
+
+                negative=negative,
+
+            )
 
     current_iv = _market_metric(manager, symbol, "iv", quote)
     entry_iv = _positive(provenance.get("profit_extension_entry_iv"))
@@ -450,31 +519,91 @@ def assess_continuation(manager: Any, bracket: Any, ltp: float) -> ContinuationD
         evidence_count += 1
         iv_change_pct = ((current_iv - entry_iv) / entry_iv) * 100.0
         if iv_change_pct >= 3.0:
-            _record_evidence("iv_support", True, positive=positive, negative=negative)
+            _record_evidence(
+
+                "iv_support",
+
+                True,
+
+                positive=positive,
+
+                negative=negative,
+
+            )
         elif iv_change_pct <= -5.0:
-            _record_evidence("iv_crush", False, positive=positive, negative=negative)
+            _record_evidence(
+
+                "iv_crush",
+
+                False,
+
+                positive=positive,
+
+                negative=negative,
+
+            )
 
     greeks = _greeks(manager, symbol)
     delta = _as_float(greeks.get("delta"))
     if delta is not None:
         evidence_count += 1
         if 0.35 <= abs(delta) <= 0.85:
-            _record_evidence("responsive_delta", True, positive=positive, negative=negative)
+            _record_evidence(
+
+                "responsive_delta",
+
+                True,
+
+                positive=positive,
+
+                negative=negative,
+
+            )
 
     spread_pct = _spread_pct(quote)
     if spread_pct is not None:
         evidence_count += 1
         if spread_pct <= 1.0:
-            _record_evidence("executable_spread", True, positive=positive, negative=negative)
+            _record_evidence(
+
+                "executable_spread",
+
+                True,
+
+                positive=positive,
+
+                negative=negative,
+
+            )
         elif spread_pct > _env_float("PROFIT_EXTENSION_MAX_SPREAD_PCT", 1.5):
-            _record_evidence("wide_spread", False, positive=positive, negative=negative)
+            _record_evidence(
+
+                "wide_spread",
+
+                False,
+
+                positive=positive,
+
+                negative=negative,
+
+            )
             critical_block = True
 
     quote_age = _quote_age_seconds(quote)
     if quote_age is not None:
         evidence_count += 1
         if quote_age > _env_float("PROFIT_EXTENSION_QUOTE_MAX_AGE_SEC", 3.0):
-            _record_evidence("held_quote_stale", False, positive=positive, negative=negative)
+            _record_evidence(
+
+                "held_quote_stale",
+
+                False,
+
+                positive=positive,
+
+                negative=negative,
+
+            )
             critical_block = True
 
     context_votes = 0
@@ -482,7 +611,9 @@ def assess_continuation(manager: Any, bracket: Any, ltp: float) -> ContinuationD
     for payload, live_quote in ((spot, spot_quote), (future, future_quote)):
         if not payload and not live_quote:
             continue
-        price = _field(live_quote, "ltp", "last_price", "price") or _field(payload, "ltp", "price", "close")
+        price = _field(live_quote, "ltp", "last_price", "price") or _field(
+            payload, "ltp", "price", "close"
+        )
         vwap = _field(payload, "exchange_vwap", "session_vwap", "vwap")
         alignment = _side_alignment(symbol, price, vwap)
         if price is not None and vwap is not None:
@@ -491,18 +622,62 @@ def assess_continuation(manager: Any, bracket: Any, ltp: float) -> ContinuationD
     if context_available:
         evidence_count += 1
         if context_votes == context_available:
-            _record_evidence("underlying_vwap_alignment", True, positive=positive, negative=negative)
-        elif context_votes <= -context_available:
-            _record_evidence("underlying_vwap_conflict", False, positive=positive, negative=negative)
+            _record_evidence(
 
-    ema_votes = [_ema_alignment(symbol, payload) for payload in (spot, future) if payload]
+                "underlying_vwap_alignment",
+
+                True,
+
+                positive=positive,
+
+                negative=negative,
+
+            )
+        elif context_votes <= -context_available:
+            _record_evidence(
+
+                "underlying_vwap_conflict",
+
+                False,
+
+                positive=positive,
+
+                negative=negative,
+
+            )
+
+    ema_votes = [
+        _ema_alignment(symbol, payload)
+        for payload in (spot, future)
+        if payload
+    ]
     ema_votes = [vote for vote in ema_votes if vote != 0]
     if ema_votes:
         evidence_count += 1
         if all(vote > 0 for vote in ema_votes):
-            _record_evidence("underlying_ema_alignment", True, positive=positive, negative=negative)
+            _record_evidence(
+
+                "underlying_ema_alignment",
+
+                True,
+
+                positive=positive,
+
+                negative=negative,
+
+            )
         elif all(vote < 0 for vote in ema_votes):
-            _record_evidence("underlying_ema_conflict", False, positive=positive, negative=negative)
+            _record_evidence(
+
+                "underlying_ema_conflict",
+
+                False,
+
+                positive=positive,
+
+                negative=negative,
+
+            )
 
     futures_volume_ratio = _raw_float(future, "futures_volume_ratio", "volume_ratio")
     if futures_volume_ratio is None:
@@ -513,9 +688,29 @@ def assess_continuation(manager: Any, bracket: Any, ltp: float) -> ContinuationD
     if futures_volume_ratio is not None:
         evidence_count += 1
         if futures_volume_ratio >= 1.10:
-            _record_evidence("futures_volume_confirmation", True, positive=positive, negative=negative)
+            _record_evidence(
+
+                "futures_volume_confirmation",
+
+                True,
+
+                positive=positive,
+
+                negative=negative,
+
+            )
         elif futures_volume_ratio <= 0.80:
-            _record_evidence("futures_volume_fade", False, positive=positive, negative=negative)
+            _record_evidence(
+
+                "futures_volume_fade",
+
+                False,
+
+                positive=positive,
+
+                negative=negative,
+
+            )
 
     direction_bias = str(
         future.get("direction_bias")
@@ -529,11 +724,19 @@ def assess_continuation(manager: Any, bracket: Any, ltp: float) -> ContinuationD
         "underlying_direction_confidence",
         "direction_confidence",
     ) or _raw_float(spot, "underlying_direction_confidence", "direction_confidence")
-    if direction_bias in {"CE", "PE"} and direction_conf is not None and direction_conf >= 0.55:
+    if (
+        direction_bias in {"CE", "PE"}
+        and direction_conf is not None
+        and direction_conf >= 0.55
+    ):
         evidence_count += 1
         aligned = direction_bias == symbol[-2:]
         _record_evidence(
-            "underlying_direction_context" if aligned else "underlying_direction_conflict",
+            (
+                "underlying_direction_context"
+                if aligned
+                else "underlying_direction_conflict"
+            ),
             aligned,
             positive=positive,
             negative=negative,
@@ -550,9 +753,29 @@ def assess_continuation(manager: Any, bracket: Any, ltp: float) -> ContinuationD
     if regime is not MarketRegime.UNKNOWN:
         evidence_count += 1
         if regime is MarketRegime.TREND and direction_bias == symbol[-2:]:
-            _record_evidence("trend_regime", True, positive=positive, negative=negative)
+            _record_evidence(
+
+                "trend_regime",
+
+                True,
+
+                positive=positive,
+
+                negative=negative,
+
+            )
         elif regime in {MarketRegime.RANGE, MarketRegime.LOW_ACTIVITY}:
-            _record_evidence("nontrend_regime", False, positive=positive, negative=negative)
+            _record_evidence(
+
+                "nontrend_regime",
+
+                False,
+
+                positive=positive,
+
+                negative=negative,
+
+            )
 
     current_pcr = _chain_pcr(manager)
     entry_pcr = _positive(provenance.get("profit_extension_entry_chain_pcr"))
@@ -562,13 +785,35 @@ def assess_continuation(manager: Any, bracket: Any, ltp: float) -> ContinuationD
         if entry_pcr is not None:
             pcr_change_pct = ((current_pcr - entry_pcr) / entry_pcr) * 100.0
         if symbol.endswith("CE") and (
-            current_pcr >= 1.05 or (pcr_change_pct is not None and pcr_change_pct >= 3.0)
+            current_pcr >= 1.05
+            or (pcr_change_pct is not None and pcr_change_pct >= 3.0)
         ):
-            _record_evidence("chain_put_support", True, positive=positive, negative=negative)
+            _record_evidence(
+
+                "chain_put_support",
+
+                True,
+
+                positive=positive,
+
+                negative=negative,
+
+            )
         elif symbol.endswith("PE") and (
-            current_pcr <= 0.95 or (pcr_change_pct is not None and pcr_change_pct <= -3.0)
+            current_pcr <= 0.95
+            or (pcr_change_pct is not None and pcr_change_pct <= -3.0)
         ):
-            _record_evidence("chain_call_pressure", True, positive=positive, negative=negative)
+            _record_evidence(
+
+                "chain_call_pressure",
+
+                True,
+
+                positive=positive,
+
+                negative=negative,
+
+            )
 
     min_evidence = max(1, int(_env_float("MARKET_AWARE_PROFIT_MIN_EVIDENCE", 4.0)))
     premium_support = any(
@@ -585,7 +830,11 @@ def assess_continuation(manager: Any, bracket: Any, ltp: float) -> ContinuationD
     )
     activity_support = any(
         item in positive
-        for item in ("premium_volume_expansion", "futures_volume_confirmation", "premium_adx")
+        for item in (
+            "premium_volume_expansion",
+            "futures_volume_confirmation",
+            "premium_adx",
+        )
     )
     should_extend = bool(
         not critical_block
@@ -757,7 +1006,11 @@ def extend_final_target_if_supported(
     current_target = float(getattr(bracket, "tp_trigger_price", 0.0) or 0.0)
     max_r = max(1.0, _env_float("PROFIT_EXTENSION_MAX_R", 4.0))
     max_target = entry + risk * max_r if side == "BUY" else entry - risk * max_r
-    at_cap = current_target >= max_target - (_TICK_SIZE / 2) if side == "BUY" else current_target <= max_target + (_TICK_SIZE / 2)
+    at_cap = (
+        current_target >= max_target - (_TICK_SIZE / 2)
+        if side == "BUY"
+        else current_target <= max_target + (_TICK_SIZE / 2)
+    )
     if at_cap:
         return action
 
@@ -766,7 +1019,11 @@ def extend_final_target_if_supported(
         return action
 
     step_r = max(0.25, _env_float("PROFIT_EXTENSION_STEP_R", 0.75))
-    candidate_target = current_target + risk * step_r if side == "BUY" else current_target - risk * step_r
+    candidate_target = (
+        current_target + risk * step_r
+        if side == "BUY"
+        else current_target - risk * step_r
+    )
     if side == "BUY":
         new_target = min(candidate_target, max_target)
         if new_target <= current_target + (_TICK_SIZE / 2):
@@ -778,10 +1035,15 @@ def extend_final_target_if_supported(
     new_target = _round_tick(new_target)
 
     mfe = _mfe_points(bracket, ltp)
-    lock_fraction = min(0.90, max(0.0, _env_float("PROFIT_EXTENSION_LOCK_FRACTION", 0.50)))
+    lock_fraction = min(
+        0.90,
+        max(0.0, _env_float("PROFIT_EXTENSION_LOCK_FRACTION", 0.50)),
+    )
     cost = _cost_floor(manager, bracket)
     protected_points = max(cost, mfe * lock_fraction)
-    candidate_sl = entry + protected_points if side == "BUY" else entry - protected_points
+    candidate_sl = (
+        entry + protected_points if side == "BUY" else entry - protected_points
+    )
 
     old_sl = float(getattr(bracket, "sl_trigger_price", 0.0) or 0.0)
     old_target = current_target
@@ -800,16 +1062,22 @@ def extend_final_target_if_supported(
         bracket.updated_at = time.time()
         provenance = getattr(bracket, "trade_provenance", None)
         if not isinstance(provenance, dict):
-            provenance = dict(provenance or {}) if isinstance(provenance, Mapping) else {}
+            provenance = (
+                dict(provenance or {}) if isinstance(provenance, Mapping) else {}
+            )
             bracket.trade_provenance = provenance
         provenance.setdefault("profit_extension_original_tp", old_target)
-        provenance["profit_extension_count"] = int(provenance.get("profit_extension_count", 0) or 0) + 1
+        provenance["profit_extension_count"] = (
+            int(provenance.get("profit_extension_count", 0) or 0) + 1
+        )
         provenance["profit_extension_last_evidence_count"] = decision.evidence_count
         provenance["profit_extension_last_positive"] = list(decision.positive)
         provenance["profit_extension_last_negative"] = list(decision.negative)
         provenance["profit_extension_last_snapshot"] = dict(decision.snapshot)
         provenance["profit_extension_last_target"] = new_target
-        provenance["profit_extension_last_sl"] = float(getattr(bracket, "sl_trigger_price", old_sl) or old_sl)
+        provenance["profit_extension_last_sl"] = float(
+            getattr(bracket, "sl_trigger_price", old_sl) or old_sl
+        )
         provenance["profit_extension_last_at"] = time.time()
 
     saver = getattr(manager, "save_state", None)
@@ -823,13 +1091,17 @@ def extend_final_target_if_supported(
         "old_tp": round(old_target, 2),
         "new_tp": round(new_target, 2),
         "old_sl": round(old_sl, 2),
-        "new_sl": round(float(getattr(bracket, "sl_trigger_price", old_sl) or old_sl), 2),
+        "new_sl": round(
+            float(getattr(bracket, "sl_trigger_price", old_sl) or old_sl),
+            2,
+        ),
         "stop_changed": stop_changed,
         "positive": list(decision.positive),
         "negative": list(decision.negative),
     }
     LOGGER.info(
-        "PROFIT_TARGET_EXTENDED symbol=%s evidence=%s old_tp=%.2f new_tp=%.2f old_sl=%.2f new_sl=%.2f",
+        "PROFIT_TARGET_EXTENDED symbol=%s evidence=%s old_tp=%.2f "
+        "new_tp=%.2f old_sl=%.2f new_sl=%.2f",
         payload["symbol"],
         decision.evidence_count,
         old_target,
