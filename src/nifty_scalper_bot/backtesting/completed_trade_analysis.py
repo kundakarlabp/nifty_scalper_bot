@@ -492,7 +492,7 @@ def _has_attribution_provenance(outcome: Mapping[str, Any]) -> bool:
         "context_veto_penalty",
         "manager_reference_score",
         "manager_reference_threshold",
-        "manager_reference_pass",
+        "manager_reference_above_min",
         "score_admission_role",
     }
     if not required_lineage.issubset(lineage):
