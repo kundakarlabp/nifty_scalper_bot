@@ -16932,13 +16932,9 @@ class StrategyRunner:
                         suppress_opposite = str(
                             os.getenv("SUPPRESS_OPPOSITE_SIDE_TRIGGERS", "true")
                         ).lower() in {"1", "true", "yes", "on"}
-                        suppress_conf = float(
-                            os.getenv("OPPOSITE_SIDE_SUPPRESSION_CONFIDENCE", "0.85")
-                        )
                         if (
                             suppress_opposite
                             and resolved_bias in {"CE", "PE"}
-                            and resolved_confidence >= suppress_conf
                         ):
                             upper_sym = symbol.upper()
                             opposite = (
