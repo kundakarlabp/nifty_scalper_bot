@@ -83,7 +83,7 @@ def test_execution_quality_cannot_rescue_weak_directional_alpha(monkeypatch) -> 
     assert quality.final_score > quality.components["threshold"]
     assert quality.components["alpha_score"] < quality.components["threshold"]
     assert quality.allowed is True
-    assert quality.reasons == []
+    assert "alpha_below_threshold" in quality.reasons
 
 
 def test_strong_direction_cannot_rescue_marginal_native_setup(monkeypatch) -> None:
