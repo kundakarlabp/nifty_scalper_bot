@@ -5,6 +5,7 @@ from scripts.research_orb_iterative import (
     _selected_candidates,
     candidates,
     quality_score_8_candidate,
+    score_v2_candidate,
 )
 
 
@@ -32,3 +33,11 @@ def test_quality_score_8_candidate_is_focused_and_preserves_canonical_five():
     row = quality_score_8_candidate()
     assert row["overrides"]["ORB_QUALITY_MIN_SCORE_SHADOW"] == "8.0"
     assert _selected_candidates(["quality_score_8"]) == [row]
+
+
+def test_score_v2_candidate_is_frozen_research_only_profile():
+    row = score_v2_candidate()
+    assert row["name"] == "score_v2_dev_2017_2018"
+    assert row["lifecycle_proxy"] is True
+    assert row["research_quality_profile"] == "score_v2_dev_2017_2018"
+    assert _selected_candidates(["score_v2_dev_2017_2018"]) == [row]

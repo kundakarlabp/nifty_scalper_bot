@@ -80,8 +80,25 @@ def quality_score_8_candidate() -> dict[str, Any]:
     }
 
 
+def score_v2_candidate() -> dict[str, Any]:
+    """Return the frozen development-derived score-v2 holdout candidate."""
+    return {
+        "name": "score_v2_dev_2017_2018",
+        "overrides": dict(BASE_OVERRIDES),
+        "lifecycle_proxy": True,
+        "research_quality_profile": "score_v2_dev_2017_2018",
+    }
+
+
 def _selected_candidates(names: list[str]) -> list[dict[str, Any]]:
-    pool = {row["name"]: row for row in [*candidates(), quality_score_8_candidate()]}
+    pool = {
+        row["name"]: row
+        for row in [
+            *candidates(),
+            quality_score_8_candidate(),
+            score_v2_candidate(),
+        ]
+    }
     if not names:
         return candidates()
     missing = [name for name in names if name not in pool]
@@ -120,6 +137,7 @@ def _run_task(task: tuple[str, dict[str, Any], float, list[str]]) -> dict[str, A
             slippage_bps=slippage,
             minimum_net_rr=1.5,
             lifecycle_proxy=bool(candidate["lifecycle_proxy"]),
+            research_quality_profile=candidate.get("research_quality_profile"),
         )
         trades.extend(result["trades"])
         unresolved.extend(result["unresolved_trades"])
@@ -137,6 +155,7 @@ def _run_task(task: tuple[str, dict[str, Any], float, list[str]]) -> dict[str, A
         "candidate": candidate["name"],
         "overrides": candidate["overrides"],
         "lifecycle_proxy": candidate["lifecycle_proxy"],
+        "research_quality_profile": candidate.get("research_quality_profile"),
         "slippage_bps_per_side": slippage,
         "metrics": summarize(trades),
         "stress_metrics": summarize(stress),
