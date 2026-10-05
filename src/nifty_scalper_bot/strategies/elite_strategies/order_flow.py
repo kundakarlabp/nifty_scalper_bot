@@ -275,9 +275,14 @@ class OrderFlowStrategy(EliteStrategy):
                 )
             )
             ofi_conflicts_side = bool(ofi_directional and not ofi_supports_side)
+            tick_directional = tick_direction in {"UP", "BUY", "DOWN", "SELL"}
+            tick_conflicts_side = bool(
+                not ofi_directional and tick_directional and not tick_supports_side
+            )
             flow_supports_side = (
                 ofi_supports_side if ofi_directional else tick_supports_side
             )
+            flow_conflicts_side = ofi_conflicts_side or tick_conflicts_side
             flow_confirmation_source = (
                 "temporal_ofi" if ofi_directional else "tick_direction"
             )
@@ -303,8 +308,8 @@ class OrderFlowStrategy(EliteStrategy):
                 context_quality_eligible
                 and side_aligns
                 and depth_supports_side
-                and flow_supports_side
-                and not ofi_conflicts_side
+                and not flow_conflicts_side
+                and (flow_supports_side or strong_depth_supports_side)
             )
             effective_context_conflict = bool(
                 context_quality_eligible and direction_available and direction != side
@@ -361,8 +366,10 @@ class OrderFlowStrategy(EliteStrategy):
                 "ofi_directional": ofi_directional,
                 "ofi_supports_side": ofi_supports_side,
                 "ofi_conflicts_side": ofi_conflicts_side,
+                "tick_conflicts_side": tick_conflicts_side,
                 "flow_confirmation_source": flow_confirmation_source,
                 "flow_supports_side": flow_supports_side,
+                "flow_conflicts_side": flow_conflicts_side,
                 "context_age_seconds": context_age_seconds,
                 "context_fresh": context_fresh,
                 "context_quality_eligible": context_quality_eligible,
