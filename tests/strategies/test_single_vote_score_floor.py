@@ -629,7 +629,7 @@ async def test_range_smc_setup_reaches_strong_context_before_runner_quality(
     assert result.metadata["approval_path"] == "single_trigger_context_confirmed"
     assert result.metadata["raw_setup_score"] == 7.0
     assert result.metadata["regime_weighted_score"] == 5.95
-    assert result.metadata["manager_context_score_reference_pass"] is False
+    assert result.metadata["manager_context_score_reference_above_min"] is False
     assert result.metadata["quality_reference_role"] == "diagnostic_only"
 
 
