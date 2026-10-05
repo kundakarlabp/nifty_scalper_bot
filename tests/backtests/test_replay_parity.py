@@ -341,7 +341,6 @@ def test_daily_report_aggregates_completed_trades_by_strategy_and_regime(
                     "gross_pnl": 500.0,
                     "estimated_costs": {"total": 25.0},
                     "net_pnl": 475.0,
-                    "final_score": 8.4,
                     "mfe_pnl": 650.0,
                     "mae_pnl": 100.0,
                     "holding_seconds": 180.0,
@@ -373,7 +372,6 @@ def test_daily_report_aggregates_completed_trades_by_strategy_and_regime(
                     "gross_pnl": -200.0,
                     "estimated_costs": {"total": 20.0},
                     "net_pnl": -220.0,
-                    "final_score": 8.8,
                     "mfe_pnl": 40.0,
                     "mae_pnl": 240.0,
                     "holding_seconds": 90.0,
@@ -487,22 +485,6 @@ def test_daily_report_aggregates_completed_trades_by_strategy_and_regime(
     assert summary["groups"][1]["win_rate_pct"] == 50.0
     assert summary["groups"][1]["net_pnl"] == 255.0
     assert summary["groups"][1]["profit_factor"] == 2.1591
-    assert summary["score_buckets"] == [
-        {
-            "score_bucket": "8.0–<9.0",
-            "measured_trades": 2,
-            "wins": 1,
-            "win_rate_pct": 50.0,
-            "average_net_pnl": 127.5,
-            "profit_factor": 2.1591,
-            "max_drawdown": 220.0,
-        }
-    ]
-    assert summary["score_coverage"] == {
-        "measured_trades": 2,
-        "trades_with_score": 2,
-        "trades_without_score": 0,
-    }
     assert summary["execution_quality"]["measured_trades"] == 2
     assert summary["execution_quality"]["entry_slippage_bps"]["average"] == 3.0
     assert summary["execution_quality"]["entry_slippage_bps"]["p95"] == 5.0
@@ -521,8 +503,6 @@ def test_daily_report_aggregates_completed_trades_by_strategy_and_regime(
     }
     assert "Daily Strategy-by-Regime Outcome Report" in report
     assert "| VWAPPro | TREND | continuation_pullback | 2 | 2 | 50.0% |" in report
-    assert "## Score Calibration (observational)" in report
-    assert "| 8.0–<9.0 | 2 | 50.0% | 127.5 | 2.1591 | 220.0 |" in report
     assert "## Execution Quality (observational)" in report
     assert "Entry slippage (bps)" in report
     assert "## Exit Quality (observational)" in report
@@ -648,110 +628,6 @@ def test_daily_report_builds_entry_attempt_funnel_without_assuming_fills(
     assert "not assumed to be an unfilled or losing trade" in report
 
 
-def test_daily_report_calibrates_independent_alpha_components() -> None:
-    module = _load_daily_report_module()
-    trades = [
-        {
-            "strategy_name": "ORBPro",
-            "regime": "TREND",
-            "bracket_id": "orb-1",
-            "net_pnl": 300.0,
-            "ledger_complete": True,
-            "closed_timestamp": 1.0,
-            "signal_quality": {
-                "alpha_score": 8.4,
-                "direction_score": 8.7,
-                "strategy_score": 7.6,
-            },
-        },
-        {
-            "strategy_name": "ORBPro",
-            "regime": "TREND",
-            "bracket_id": "orb-2",
-            "net_pnl": -100.0,
-            "ledger_complete": True,
-            "closed_timestamp": 2.0,
-            "signal_quality": {
-                "alpha_score": 8.8,
-                "direction_score": 8.2,
-                "strategy_score": 7.9,
-            },
-        },
-        {
-            "strategy_name": "SMC",
-            "regime": "RANGE",
-            "bracket_id": "smc-1",
-            "net_pnl": 120.0,
-            "ledger_complete": True,
-            "closed_timestamp": 3.0,
-            "signal_quality": {
-                "alpha_score": 7.2,
-                "direction_score": 8.1,
-                "strategy_score": 6.4,
-            },
-        },
-        {
-            "strategy_name": "VWAPPro",
-            "regime": "TREND",
-            "bracket_id": "legacy-1",
-            "net_pnl": -50.0,
-            "ledger_complete": True,
-            "closed_timestamp": 4.0,
-            "signal_quality": {},
-        },
-    ]
-
-    summary = module.summarise_completed_trades(trades)
-    rows = summary["quality_component_buckets"]
-    coverage = summary["quality_component_coverage"]
-
-    assert coverage == {
-        "measured_trades": 4,
-        "trades_with_signal_quality": 3,
-        "component_values": {
-            "alpha_score": 3,
-            "direction_score": 3,
-            "strategy_score": 3,
-        },
-    }
-    assert {
-        "strategy": "ORBPro",
-        "regime": "TREND",
-        "component": "alpha_score",
-        "score_bucket": "8.0–<9.0",
-        "measured_trades": 2,
-        "wins": 1,
-        "win_rate_pct": 50.0,
-        "average_net_pnl": 100.0,
-        "profit_factor": 3.0,
-        "max_drawdown": 100.0,
-    } in rows
-    assert {
-        "strategy": "SMC",
-        "regime": "RANGE",
-        "component": "strategy_score",
-        "score_bucket": "6.0–<7.0",
-        "measured_trades": 1,
-        "wins": 1,
-        "win_rate_pct": 100.0,
-        "average_net_pnl": 120.0,
-        "profit_factor": None,
-        "max_drawdown": 0.0,
-    } in rows
-
-    report = module.build_trade_outcome_report(
-        summary,
-        report_date="2026-07-31",
-        timezone_name="Asia/Kolkata",
-    )
-    assert "## Alpha Component Calibration (observational)" in report
-    expected_row = (
-        "| ORBPro | TREND | alpha_score | 8.0–<9.0 | 2 | 50.0% | "
-        "100.0 | 3.0 | 100.0 |"
-    )
-    assert expected_row in report
-
-
 def test_daily_report_summarises_microstructure_confirmation_outcomes() -> None:
     module = _load_daily_report_module()
     trades = [
@@ -765,8 +641,6 @@ def test_daily_report_summarises_microstructure_confirmation_outcomes() -> None:
             "context_confirmation_evidence": [
                 {
                     "strategy": "OrderFlow",
-                    "raw_score": 9.0,
-                    "confidence": 0.90,
                     "flow_confirmation_source": "temporal_ofi",
                     "ofi_1s_normalized": 0.25,
                     "depth_imbalance": 0.30,
@@ -785,8 +659,6 @@ def test_daily_report_summarises_microstructure_confirmation_outcomes() -> None:
             "context_confirmation_evidence": [
                 {
                     "strategy": "OrderFlow",
-                    "raw_score": 8.0,
-                    "confidence": 0.80,
                     "flow_confirmation_source": "temporal_ofi",
                     "ofi_1s_normalized": 0.15,
                     "depth_imbalance": 0.20,
@@ -805,8 +677,6 @@ def test_daily_report_summarises_microstructure_confirmation_outcomes() -> None:
             "context_confirmation_evidence": [
                 {
                     "strategy": "OrderFlow",
-                    "raw_score": 8.5,
-                    "confidence": 0.82,
                     "flow_confirmation_source": "tick_direction",
                     "depth_imbalance": 0.18,
                     "spread_pct": 0.25,
@@ -843,8 +713,6 @@ def test_daily_report_summarises_microstructure_confirmation_outcomes() -> None:
         "average_net_pnl": 100.0,
         "profit_factor": 5.0,
         "max_drawdown": 50.0,
-        "average_raw_score": 8.5,
-        "average_confirmation_confidence": 0.85,
         "average_ofi_1s_normalized": 0.2,
         "average_depth_imbalance": 0.25,
         "average_spread_pct": 0.25,
