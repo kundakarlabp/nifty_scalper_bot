@@ -26,7 +26,7 @@ class _Clock:
 
 def _strategy(now: datetime, *, quantity: int = 1) -> EliteTuesdayGammaBuyer:
     strategy = EliteTuesdayGammaBuyer(
-        TuesdayGammaBuyerStrategyConfig(min_confidence=0.0, quantity=quantity),
+        TuesdayGammaBuyerStrategyConfig(quantity=quantity),
         indicator_engine=None,
     )
     strategy.clock = _Clock(now)
@@ -83,7 +83,7 @@ def test_expiry_gate_applies_even_without_injected_clock(monkeypatch) -> None:
     monkeypatch.setenv("STRATEGY_MODE", "expiry_gamma")
     monkeypatch.setenv("ALLOW_EXPIRY_GAMMA_STRATEGIES", "true")
     strategy = EliteTuesdayGammaBuyer(
-        TuesdayGammaBuyerStrategyConfig(min_confidence=0.0),
+        TuesdayGammaBuyerStrategyConfig(),
         indicator_engine=None,
     )
     indicators = _context("CE")
