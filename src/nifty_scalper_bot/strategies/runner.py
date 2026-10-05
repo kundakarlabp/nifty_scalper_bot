@@ -20413,8 +20413,8 @@ class StrategyRunner:
                             reason="runtime_symbol_execution_not_ready",
                             details=readiness_details,
                         )
-            requires_final_score = bool(metadata.get("preliminary_only")) or bool(
-                metadata.get("requires_runner_final_score")
+            requires_execution_validation = bool(metadata.get("preliminary_only")) or bool(
+                metadata.get("requires_runner_execution_validation")
             )
             quality_hint = max(
                 0.0,
@@ -20562,7 +20562,7 @@ class StrategyRunner:
             metadata["regime_decision"] = "observe_only"
             metadata["regime_reason"] = "manager_weighted_observe_only"
             missing_components = missing_score_components(metadata)
-            if requires_final_score:
+            if requires_execution_validation:
                 has_candidate = bool(metadata.get("candidate_selected"))
                 has_quote_usable = bool(metadata.get("quote_usable_for_order_plan"))
 
@@ -20584,7 +20584,7 @@ class StrategyRunner:
                         strategy_name,
                         infer_option_side(signal.symbol, metadata),
                         False,
-                        "runner_final_score_precheck",
+                        "runner_execution_precheck",
                         final_score_block_reason,
                         missing_components,
                         has_candidate,
@@ -20600,7 +20600,7 @@ class StrategyRunner:
                             "strategy": strategy_name,
                             "side": infer_option_side(signal.symbol, metadata),
                             "allowed": False,
-                            "blocked_at": "runner_final_score_precheck",
+                            "blocked_at": "runner_execution_precheck",
                             "blocked_reason": final_score_block_reason,
                             "trace_id": trace_id,
                             "missing_components": missing_components,
@@ -20650,7 +20650,7 @@ class StrategyRunner:
             decision_research_context = self._decision_research_context(
                 metadata=metadata,
                 quality=quality,
-                stage="runner_final_score",
+                stage="runner_quality_diagnostic",
             )
             self._logger.info(
                 "SIGNAL_SCORE strategy_name=%s threshold=%.2f final=%.2f alpha=%.2f direction=%.2f strategy=%.2f option=%.2f data=%.2f rr=%.2f confidence=%.2f allowed=%s reasons=%s trace_id=%s",
@@ -20687,7 +20687,7 @@ class StrategyRunner:
                 ):
                     quality_reject_reason = "alpha_below_threshold"
                 elif (
-                    requires_final_score
+                    requires_execution_validation
                     and "score_below_threshold" in rejection_reasons
                 ):
                     quality_reject_reason = "final_score_below_live_threshold"
@@ -20710,7 +20710,7 @@ class StrategyRunner:
                     rejection_reasons,
                     quality.components,
                 )
-                if requires_final_score:
+                if requires_execution_validation:
                     self._logger.info(
                         "TRADE_DECISION_TRACE symbol=%s strategy=%s side=%s allowed=%s blocked_at=%s blocked_reason=%s final_score=%.2f alpha_score=%.2f threshold=%.2f reasons=%s trace_id=%s",
                         base_symbol,
