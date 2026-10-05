@@ -352,7 +352,7 @@ async def test_range_vwap_trigger_can_reach_runner_with_strong_orderflow_confirm
 
     assert result is not None
     assert result.metadata["approval_path"] == "single_trigger_context_confirmed"
-    assert result.metadata["quality_gate_owner"] == "runner_final_execution_score"
+    assert result.metadata["quality_reference_role"] == "diagnostic_only"
     assert not any(
         "VWAP_CONTEXT_PROMOTION_BLOCKED" in record.getMessage()
         for record in caplog.records
@@ -563,7 +563,7 @@ async def test_regime_downweighted_context_reaches_runner_quality_owner(
 
     assert result is not None
     assert result.metadata["approval_path"] == "single_trigger_context_confirmed"
-    assert result.metadata["quality_gate_owner"] == "runner_final_execution_score"
+    assert result.metadata["quality_reference_role"] == "diagnostic_only"
     assert result.metadata["final_trade_score"] < 7.0
 
 
@@ -614,7 +614,7 @@ async def test_range_smc_setup_reaches_strong_context_before_runner_quality(
             "setup_min": 6.5,
             "preliminary_only": True,
             "requires_orderflow_confirmation": True,
-            "requires_runner_final_score": True,
+            "requires_runner_execution_validation": True,
         }
     )
     context = _context_vote(score=8.0, confidence=0.80)
@@ -630,7 +630,7 @@ async def test_range_smc_setup_reaches_strong_context_before_runner_quality(
     assert result.metadata["raw_setup_score"] == 7.0
     assert result.metadata["regime_weighted_score"] == 5.95
     assert result.metadata["manager_context_score_reference_pass"] is False
-    assert result.metadata["quality_gate_owner"] == "runner_final_execution_score"
+    assert result.metadata["quality_reference_role"] == "diagnostic_only"
 
 
 async def test_range_smc_setup_still_rejects_weak_orderflow_context(
@@ -650,7 +650,7 @@ async def test_range_smc_setup_still_rejects_weak_orderflow_context(
             "setup_min": 6.5,
             "preliminary_only": True,
             "requires_orderflow_confirmation": True,
-            "requires_runner_final_score": True,
+            "requires_runner_execution_validation": True,
         }
     )
     context = _context_vote(score=6.0, confidence=0.60)
@@ -718,7 +718,7 @@ async def test_smc_required_orderflow_cannot_be_bypassed_by_single_vote_override
                     "setup_min": 6.5,
                     "preliminary_only": True,
                     "requires_orderflow_confirmation": True,
-                    "requires_runner_final_score": True,
+                    "requires_runner_execution_validation": True,
                     "is_selected_option": True,
                 }
             )
@@ -748,7 +748,7 @@ async def test_orderflow_confirmation_requires_canonical_context_quality(monkeyp
             "is_selected_option": True,
             "preliminary_only": True,
             "requires_orderflow_confirmation": True,
-            "requires_runner_final_score": True,
+            "requires_runner_execution_validation": True,
             "setup_pass": True,
             "setup_min": 7.0,
         }
