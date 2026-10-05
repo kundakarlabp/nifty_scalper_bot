@@ -167,7 +167,7 @@ class VWAPProStrategy(EliteStrategy):
         Only completed bars belonging to the executable option contract and the
         current trading session are considered. This restores state that was
         already observable before process restart; it does not create a new
-        trigger, lower a score threshold, or borrow state from another strike.
+        trigger, relax a structural prerequisite, or borrow state from another strike.
         """
         if session_scope == "unknown" or vwap <= 0:
             return None
@@ -569,7 +569,7 @@ class VWAPProStrategy(EliteStrategy):
 
             # Structural contract: a VWAP continuation/pullback entry must have
             # a premium event, fresh underlying alignment, futures slope support
-            # and observed activity.  No weighted score may compensate for a
+            # and observed activity.  No downstream component may compensate for a
             # missing prerequisite.
             structural_failures: list[str] = []
             if not premium_above_vwap:
