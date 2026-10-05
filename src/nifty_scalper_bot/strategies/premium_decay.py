@@ -501,21 +501,21 @@ class PremiumDecayStrategy:
 
         ce_candidate: SelectedContract | None = None
         pe_candidate: SelectedContract | None = None
-        best_ce_score = float("inf")
-        best_pe_score = float("inf")
+        best_ce_distance = float("inf")
+        best_pe_distance = float("inf")
         for contract in option_chain:
             option_type = getattr(contract, "option_type", "").upper()
             delta = getattr(contract, "delta", None)
             ltp = getattr(contract, "ltp", 0.0)
             if ltp <= 0 or delta is None:
                 continue
-            score = abs(abs(float(delta)) - 0.25)
-            if option_type == "CE" and score < best_ce_score:
+            distance = abs(abs(float(delta)) - 0.25)
+            if option_type == "CE" and distance < best_ce_distance:
                 ce_candidate = contract
-                best_ce_score = score
-            elif option_type == "PE" and score < best_pe_score:
+                best_ce_distance = distance
+            elif option_type == "PE" and distance < best_pe_distance:
                 pe_candidate = contract
-                best_pe_score = score
+                best_pe_distance = distance
         if ce_candidate is None or pe_candidate is None:
             return None
         return ce_candidate, pe_candidate
