@@ -17166,6 +17166,22 @@ class StrategyRunner:
                 self._update_symbol_execution_phase(
                     symbol, "LIVE_READY", "symbol_live_ready"
                 )
+                # Phase-10 readiness is the canonical proof that this concrete
+                # option contract is an eligible, orderable candidate with a
+                # usable quote. Preserve those already-validated facts on the
+                # signal so LIVE and LIVE_SIMULATION reach the same structural
+                # execution contract without rerunning a numeric quality gate.
+                signal_metadata = dict(signal.metadata or {})
+                signal_metadata["candidate_selected"] = True
+                signal_metadata["candidate_symbol"] = normalize_symbol(symbol)
+                signal_metadata["quote_usable_for_order_plan"] = bool(
+                    live_ready_details.get("tradable_quote")
+                    and live_ready_details.get("candidate_bid_ask_ready")
+                )
+                signal_metadata["candidate_eligibility_source"] = (
+                    live_ready_details.get("eligibility_source")
+                )
+                signal = dataclasses.replace(signal, metadata=signal_metadata)
                 if signal_phase == "HYDRATION":
                     self._logger.info(
                         "DATA_PHASE_HYDRATION_SYMBOL_LIVE_READY symbol=%s trace_id=%s",
