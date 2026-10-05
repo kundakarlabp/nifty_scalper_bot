@@ -108,6 +108,23 @@ def _orb_indicators(side: str, latest_ts: datetime) -> dict[str, object]:
     }
 
 
+def test_directional_mode_rejects_non_core_trigger_taxonomy_entries(monkeypatch) -> None:
+    monkeypatch.setenv("STRATEGY_MODE", "directional_scalp")
+
+    from nifty_scalper_bot.strategies.elite_strategies.builder import (
+        _strategy_runtime_role,
+    )
+
+    assert (
+        _strategy_runtime_role(
+            "premium_squeeze",
+            strategy_mode="directional_scalp",
+            allow_expiry_gamma=False,
+        )
+        is None
+    )
+
+
 def test_directional_mode_disables_gamma_theta_and_context(monkeypatch) -> None:
     monkeypatch.setenv("STRATEGY_MODE", "directional_scalp")
     monkeypatch.setenv("ALLOW_EXPIRY_GAMMA_STRATEGIES", "false")
