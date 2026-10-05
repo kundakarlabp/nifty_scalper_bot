@@ -139,7 +139,7 @@ def test_aligned_independent_trigger_can_clear_unchanged_live_quality_floor(
         "PremiumMomentum",
     ]
     assert result.metadata["context_confirmation_strategies"] == ["OrderFlow"]
-    assert result.metadata["confirming_votes"] == ["VWAPPro", "ORBPro"]
+    assert result.metadata["confirming_votes"] == ["VWAPPro", "PremiumMomentum"]
     lineage = result.metadata["score_lineage"]
     assert lineage["raw_setup_score"] == 8.5
     assert lineage["regime_adjusted_setup_score"] == 6.8
