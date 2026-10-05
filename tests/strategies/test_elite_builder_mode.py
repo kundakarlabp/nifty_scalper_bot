@@ -133,7 +133,7 @@ def test_orb_enabled_config_is_not_overridden_by_legacy_env(monkeypatch) -> None
     monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
     rows = _orb_rows(side="CE")
     strategy = ORBProStrategy(
-        ORBProStrategyConfig(min_confidence=0.0, orb_minutes=15),
+        ORBProStrategyConfig(orb_minutes=15),
         indicator_engine=_OrbIndicatorEngine(rows),
     )
     indicators = _orb_indicators("CE", rows[-1]["timestamp"])
@@ -150,7 +150,7 @@ def test_orb_pe_underlying_breakout_uses_contract_side(monkeypatch) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
     rows = _orb_rows(side="PE")
     strategy = ORBProStrategy(
-        ORBProStrategyConfig(min_confidence=0.0, orb_minutes=15),
+        ORBProStrategyConfig(orb_minutes=15),
         indicator_engine=_OrbIndicatorEngine(rows),
     )
     indicators = _orb_indicators("PE", rows[-1]["timestamp"])
@@ -166,7 +166,7 @@ def test_orb_pe_underlying_breakout_uses_contract_side(monkeypatch) -> None:
 
 def test_orb_option_premium_breakdown_does_not_create_buy_vote() -> None:
     strategy = ORBProStrategy(
-        ORBProStrategyConfig(min_confidence=0.0), indicator_engine=None
+        ORBProStrategyConfig(), indicator_engine=None
     )
     indicators = {
         "orb_ready": True,
