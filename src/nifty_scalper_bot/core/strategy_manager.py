@@ -1315,6 +1315,87 @@ class StrategyManager(_BaseStrategyManager):
         symbol_norm = str(normalize_symbol(symbol) or symbol or "").strip().upper()
         return self._last_no_signal_decision_by_symbol.get(symbol_norm)
 
+    @staticmethod
+    def _canonical_no_signal_root_cause(
+        indicators: t.Mapping[str, t.Any],
+    ) -> tuple[str, str] | None:
+        """Return an explicit upstream structural no-trade cause when present."""
+        if (
+            bool(indicators.get("direction_transition"))
+            and str(indicators.get("direction_resolution_reason") or "")
+            == "fresh_spot_futures_disagreement"
+        ):
+            return (
+                "context_direction_transition",
+                "underlying_direction_transition",
+            )
+        return None
+
+    def _record_no_signal_decision(
+        self,
+        *,
+        symbol: str,
+        category: str,
+        reason: str,
+        blocked_at: str,
+        indicators: t.Mapping[str, t.Any],
+        no_vote_reason_counts: t.Mapping[str, int] | None = None,
+        strategy_reasons: t.Mapping[str, str] | None = None,
+        trigger_vote_count: int = 0,
+        context_vote_count: int = 0,
+        trace_id: str | None = None,
+        eval_id: str | None = None,
+        final_block_reason: str | None = None,
+    ) -> None:
+        """Persist one canonical fail-closed strategy decision."""
+        symbol_norm = str(normalize_symbol(symbol) or symbol or "").strip().upper()
+        self._last_no_signal_decision_by_symbol[symbol_norm] = StrategyNoSignalDecision(
+            symbol=symbol_norm,
+            eval_id=eval_id,
+            final_block_reason=final_block_reason,
+            category=category,
+            reason=reason,
+            blocked_at=blocked_at,
+            no_vote_reason_counts=dict(no_vote_reason_counts or {}),
+            strategy_reasons=dict(strategy_reasons or {}),
+            direction_bias=str(indicators.get("direction_bias") or "").upper() or None,
+            underlying_direction_bias=(
+                str(indicators.get("underlying_direction_bias") or "").upper() or None
+            ),
+            context_age_seconds=(
+                float(indicators.get("context_age_seconds"))
+                if indicators.get("context_age_seconds") is not None
+                else None
+            ),
+            trigger_vote_count=trigger_vote_count,
+            context_vote_count=context_vote_count,
+            selected_ce=str(indicators.get("selected_ce") or "") or None,
+            selected_pe=str(indicators.get("selected_pe") or "") or None,
+            trace_id=trace_id,
+        )
+
+    def get_strategy_mode_profile(self) -> dict[str, t.Any]:
+        """Return the structural admission profile for the effective mode."""
+        raw_mode = str(os.getenv("EXECUTION_MODE", "SHADOW") or "SHADOW").strip().upper()
+        live_effective = self._is_live_mode()
+        execution_mode = "LIVE" if live_effective else raw_mode
+        if execution_mode not in {
+            "LIVE",
+            "LIVE_SIMULATION",
+            "PAPER",
+            "SHADOW",
+            "SIMULATION",
+        }:
+            execution_mode = "SHADOW"
+        return {
+            "mode": execution_mode,
+            "raw_mode": raw_mode,
+            "live_effective": live_effective,
+            "context_promotion": False,
+            "single_trigger_requires_confirmation": True,
+            "countertrend_requires_reversal_contract": True,
+        }
+
     def record_trade_result(
         self,
         strategy_name: str,
