@@ -11,7 +11,7 @@ class _IndicatorEngine:
         return [1] * 30
 
 
-def test_premium_squeeze_has_local_scores():
+def test_premium_squeeze_has_structural_setup_contract():
     runner = StrategyRunner.__new__(StrategyRunner)
     runner._premium_squeeze_last_signal_ts = {}
     runner._underlying_signal_cooldown_seconds = 0.0
@@ -30,5 +30,12 @@ def test_premium_squeeze_has_local_scores():
     signal = runner._maybe_generate_premium_squeeze_signal('NFO:NIFTY26MAY24100CE', 101.0)
     assert signal is not None
     assert signal.metadata['strategy_name'] == 'premium_momentum_squeeze'
-    for key in ('direction_score', 'strategy_score', 'option_score', 'data_score', 'rr_score'):
-        assert key in signal.metadata
+    assert signal.metadata["setup_pass"] is True
+    assert signal.metadata["setup_reasons"] == [
+        "premium_above_vwap",
+        "premium_above_ema",
+        "momentum_window_active",
+        "selected_or_near_atm",
+        "history_ready",
+    ]
+    assert signal.metadata["required_data_present"] is True
