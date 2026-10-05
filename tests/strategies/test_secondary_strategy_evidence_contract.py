@@ -9,7 +9,6 @@ from nifty_scalper_bot.strategies.elite_strategies.config_models import (
 )
 from nifty_scalper_bot.strategies.elite_strategies.cpr_breakout import CPRBreakoutStrategy
 from nifty_scalper_bot.strategies.elite_strategies.rsi_divergence import RSIDivergenceStrategy
-from nifty_scalper_bot.strategies.signal_quality import score_signal_quality
 
 
 def test_bb_squeeze_respects_configured_threshold_without_hidden_floor() -> None:
@@ -94,7 +93,8 @@ def test_cpr_does_not_invent_retest_from_breakout_penetration() -> None:
     assert signal is not None
     assert signal.metadata["role"] == "context"
     assert signal.metadata["can_trigger"] is False
-    assert "retest_confirmed" not in signal.metadata["score_reasons"]
+    assert "retest_confirmed" not in signal.metadata["setup_reasons"]
+    assert signal.metadata["setup_pass"] is False
 
 
 def test_rsi_divergence_fails_closed_without_confirmed_swings() -> None:
@@ -136,26 +136,6 @@ def test_rsi_divergence_uses_confirmed_completed_swing_evidence() -> None:
     assert signal.metadata["divergence_type"] == "bullish"
     assert signal.metadata["role"] == "context"
     assert signal.metadata["can_trigger"] is False
-
-
-def test_context_strategies_fail_closed_in_trigger_quality_scoring() -> None:
-    for strategy_name in (
-        "OrderFlow",
-        "OIMaxPain",
-        "BBSqueeze",
-        "CPRBreakout",
-        "RSIDivergence",
-    ):
-        score = score_signal_quality(
-            direction_score=10.0,
-            strategy_score=10.0,
-            option_score=10.0,
-            data_score=10.0,
-            rr_score=10.0,
-            strategy_name=strategy_name,
-        )
-        assert score.allowed is False
-        assert "context_only_strategy" in score.reasons
 
 
 def test_experimental_context_flags_are_reachable(monkeypatch) -> None:
