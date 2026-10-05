@@ -823,68 +823,55 @@ class SMCStrategy(EliteStrategy):
                     and effective_direction == contract_side
                 )
 
-                # One canonical score lives here. Core sweep/reclaim/displacement
-                # proves the setup exists but does not, by itself, make a high-
-                # quality live entry. Independent participation/structure/retest
-                # evidence must lift the setup above the live admission floor.
-                score = 4.0
-                independent_setup_score = 4.0
+                depth_atr = float(event["depth_atr"])
                 reasons = [
                     "underlying_liquidity_sweep",
                     "reclaim",
                     "displacement_confirmation",
                 ]
-                independent_setup_reasons = list(reasons)
                 if direction_aligned:
-                    score += 1.5
                     reasons.append("direction_alignment")
                 if bool(event["volume_confirmation"]):
-                    score += 1.0
-                    independent_setup_score += 1.0
                     reasons.append("volume_confirmation")
-                    independent_setup_reasons.append("volume_confirmation")
                 if structure_confirmed:
-                    score += 1.0
-                    independent_setup_score += 1.0
                     reasons.append("structure_confirmation")
-                    independent_setup_reasons.append("structure_confirmation")
-                if retest_confirmed or premium_reclaim:
-                    score += 0.5
-                    independent_setup_score += 0.5
-                    if retest_confirmed:
-                        reasons.append("retest_mitigation")
-                        independent_setup_reasons.append("retest_mitigation")
-                    if premium_reclaim:
-                        reasons.append("premium_reclaim_support")
-                        independent_setup_reasons.append("premium_reclaim_support")
-                depth_atr = float(event["depth_atr"])
-                if 0.12 <= depth_atr <= 0.50:
-                    score += 0.5
-                    independent_setup_score += 0.5
+                if retest_confirmed:
+                    reasons.append("retest_mitigation")
+                if premium_reclaim:
+                    reasons.append("premium_reclaim_support")
+                balanced_sweep_depth = 0.12 <= depth_atr <= 0.50
+                if balanced_sweep_depth:
                     reasons.append("balanced_sweep_depth")
-                    independent_setup_reasons.append("balanced_sweep_depth")
 
-                independent_quality_confirmation = bool(
+                independent_confirmation = bool(
                     bool(event["volume_confirmation"])
                     or structure_confirmed
                     or retest_confirmed
                     or premium_reclaim
-                    or 0.12 <= depth_atr <= 0.50
+                    or balanced_sweep_depth
                 )
-                strategy_score = max(0.0, min(10.0, score))
-                independent_setup_score = max(0.0, min(10.0, independent_setup_score))
-                direction_score = (
-                    round(10.0 * underlying_direction_confidence, 3)
-                    if direction_aligned and context_fresh
-                    else 0.0
-                )
-                min_score = float(
-                    os.getenv("SMC_MIN_SCORE_LIVE", "6.5")
-                    if is_live
-                    else os.getenv("SMC_MIN_SCORE_SHADOW", "4.5")
-                )
-                if strategy_score < min_score:
-                    reasons.append("score_below_legacy_minimum")
+                structural_failures: list[str] = []
+                if not direction_aligned:
+                    structural_failures.append("smc_direction_conflict")
+                if not context_fresh:
+                    structural_failures.append("underlying_context_stale")
+                if not independent_confirmation:
+                    structural_failures.append("smc_independent_confirmation_missing")
+                if structural_failures:
+                    self._no_vote(structural_failures[0])
+                    LOGGER.info(
+                        "SMC_STRUCTURAL_SETUP_REJECTED symbol=%s side=%s failures=%s",
+                        symbol,
+                        contract_side,
+                        structural_failures,
+                        extra={
+                            "event": "SMC_STRUCTURAL_SETUP_REJECTED",
+                            "symbol": symbol,
+                            "side": contract_side,
+                            "failures": structural_failures,
+                        },
+                    )
+                    return None
 
                 option_atr = max(
                     float(indicators.get("atr") or 0.0),
@@ -947,21 +934,11 @@ class SMCStrategy(EliteStrategy):
                         contract_side,
                         event["sweep_ts"],
                     ),
-                    "preliminary_only": True,
                     "requires_runner_execution_validation": True,
                     "requires_orderflow_confirmation": True,
                     "orderflow_confirmation_owner": "StrategyManager",
-                    "raw_setup_score": strategy_score,
-                    "setup_score": strategy_score,
-                    "setup_min": min_score,
                     "setup_pass": True,
-                    "direction_score": direction_score,
-                    "strategy_score": strategy_score,
-                    "independent_setup_score": round(independent_setup_score, 3),
-                    "independent_setup_reasons": independent_setup_reasons,
-                    "data_score": 8.0,
-                    "score_reasons": reasons,
-                    "setup_quality": strategy_score,
+                    "setup_reasons": reasons,
                     "setup_type": "liquidity_sweep_reclaim_confirmation",
                     "required_data_present": True,
                     "stale_data_used": stale_data,
@@ -975,7 +952,7 @@ class SMCStrategy(EliteStrategy):
                         event["reclaim_points"]
                     ),
                     "reclaim_distance_atr": float(event["reclaim_atr"]),
-                    "displacement_score": round(displacement_score, 3),
+                    "displacement_atr": round(displacement_score, 3),
                     "structure_confirmed": structure_confirmed,
                     "momentum_confirmed": True,
                     "structure_or_momentum_confirmed": True,
@@ -1005,8 +982,7 @@ class SMCStrategy(EliteStrategy):
                     "premium_target_rr": 2.0,
                     "partial_features_used": False,
                     "feature_completeness": feature_completeness,
-                    "smc_quality_score": strategy_score,
-                    "smc_quality_independent_confirmation": independent_quality_confirmation,
+                    "smc_independent_confirmation": independent_confirmation,
                     "smc_block_reason": "",
                     "latest_bar_ts": current_ts,
                     "setup_candle_timestamp": current_ts,
@@ -1020,10 +996,9 @@ class SMCStrategy(EliteStrategy):
                 # OrderFlow confirmation. Broker-accepted entry owns consumption.
                 event["confirmation_ts"] = current_ts
                 LOGGER.info(
-                    "STRATEGY_VOTE strategy=SMC side=%s score=%.2f source=%s "
+                    "STRATEGY_EVIDENCE strategy=SMC side=%s source=%s "
                     "sweep_depth_atr=%.3f displacement_atr=%.3f",
                     contract_side,
-                    strategy_score,
                     snapshot["source"],
                     depth_atr,
                     displacement_score,
@@ -1031,9 +1006,7 @@ class SMCStrategy(EliteStrategy):
                 return EliteSignal(
                     symbol=symbol,
                     signal="BUY",
-                    confidence=max(
-                        0.1, min(0.88, strategy_score / 10.0)
-                    ),
+                    confidence=1.0,
                     entry_price=current_price,
                     stop_loss=None,
                     target=None,
