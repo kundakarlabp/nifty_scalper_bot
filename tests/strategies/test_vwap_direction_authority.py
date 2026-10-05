@@ -72,8 +72,8 @@ def test_generic_fallback_remains_available_without_underlying_direction(
     "updates",
     [{"context_age_seconds": 121.0}, {"underlying_direction_confidence": 0.5}],
 )
-def test_weak_or_stale_conflict_keeps_existing_soft_penalty(monkeypatch, updates):
-    strategy, signal = _evaluate(monkeypatch, "CE", "PE", "CE", **updates)
+def test_weak_or_stale_conflict_keeps_score_as_diagnostic(monkeypatch, updates):
+    _strategy, signal = _evaluate(monkeypatch, "CE", "PE", "CE", **updates)
 
-    assert signal is None
-    assert strategy.last_no_vote_reason == "weak_score"
+    assert signal is not None
+    assert "score_below_legacy_minimum" in signal.metadata["score_reasons"]
