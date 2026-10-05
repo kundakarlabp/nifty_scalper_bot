@@ -1,15 +1,15 @@
-import datetime
-import zoneinfo
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from nifty_scalper_bot.backtesting import strategy_research
 
 
-IST = zoneinfo.ZoneInfo("Asia/Kolkata")
+IST = ZoneInfo("Asia/Kolkata")
 
 
 class _FakeEngine:
     def __init__(self) -> None:
-        start = datetime.datetime(2026, 1, 5, 9, 15, tzinfo=IST)
+        start = datetime(2026, 1, 5, 9, 15, tzinfo=IST)
         self.rows = {}
         for symbol, step in (("SPOT", 1.0), ("FUT", 1.2)):
             rows = []
@@ -17,7 +17,7 @@ class _FakeEngine:
                 close = 100.0 + idx * step
                 rows.append(
                     {
-                        "timestamp": start + datetime.timedelta(minutes=idx),
+                        "timestamp": start + timedelta(minutes=idx),
                         "open": close - 0.4,
                         "high": close + 0.5,
                         "low": close - 0.5,
