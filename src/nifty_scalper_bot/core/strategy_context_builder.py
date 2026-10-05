@@ -2,7 +2,7 @@
 
 This module owns the small, deterministic context-building contract consumed by
 strategy evaluation. It does not select contracts, fetch broker instruments,
-place orders, import execution, or change strategy scores.
+place orders, import execution, or change strategy admission.
 """
 
 from __future__ import annotations
