@@ -160,7 +160,7 @@ class MetricsCollector:
         )
         self._regime_confidence = Gauge(
             "market_regime_confidence",
-            "Latest confidence score reported per regime",
+            "Latest confidence value reported per regime",
             ["regime"],
         )
         self._strategy_allocation = Gauge(
@@ -545,7 +545,7 @@ class MetricsCollector:
 
         Args:
             regime: Regime identifier whose confidence is recorded.
-            confidence: Confidence score bounded to ``0.0``–``1.0``.
+            confidence: Confidence value bounded to ``0.0``–``1.0``.
             now: Optional timestamp used when recording update time.
 
         Returns:
@@ -588,7 +588,7 @@ class MetricsCollector:
 
         Args:
             regime: Canonical name of the detected market regime.
-            confidence: Detector confidence score expressed as 0.0–1.0.
+            confidence: Detector confidence value expressed as 0.0–1.0.
             event_id: Optional identifier preventing duplicate increments.
             now: Optional timestamp override for deterministic testing.
 
@@ -915,7 +915,6 @@ class MetricsCollector:
         *,
         strategy: str,
         weight: float,
-        score: float,
         regime: str | None = None,
     ) -> None:
         """Publish the latest allocation weight for *strategy*.
@@ -923,7 +922,6 @@ class MetricsCollector:
         Args:
             strategy: Strategy identifier whose allocation changed.
             weight: Capital allocation fraction (0.0–1.0) being applied.
-            score: Composite score backing the allocation decision.
             regime: Optional regime context associated with the allocation.
 
         Returns:
