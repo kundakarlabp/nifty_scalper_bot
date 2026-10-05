@@ -2,8 +2,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from nifty_scalper_bot.strategies.elite_strategies.base_elite import EliteSignal, EliteStrategy
-from nifty_scalper_bot.strategies.elite_strategies.config_models import CPRBreakoutStrategyConfig
+from nifty_scalper_bot.strategies.elite_strategies.base_elite import (
+    EliteSignal,
+    EliteStrategy,
+)
+from nifty_scalper_bot.strategies.elite_strategies.config_models import (
+    CPRBreakoutStrategyConfig,
+)
 from nifty_scalper_bot.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
@@ -120,7 +125,12 @@ class CPRBreakoutStrategy(EliteStrategy):
                 "side": side,
                 "direction_bias": side,
                 "requires_runner_execution_validation": True,
-                "setup_pass": bool(direction_aligned and retest_confirmed and adequate_room and momentum_confirmed),
+                "setup_pass": bool(
+                    direction_aligned
+                    and retest_confirmed
+                    and adequate_room
+                    and momentum_confirmed
+                ),
                 "setup_type": "cpr_breakout_context",
                 "required_data_present": True,
                 "stale_data_used": bool(indicators.get("stale_data_used")),
