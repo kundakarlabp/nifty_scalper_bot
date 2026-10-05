@@ -21,12 +21,13 @@ def test_orderflow_is_context_only_even_if_legacy_metadata_claims_trigger():
     assert vote_role(vote) == "context"
 
 
-def test_setup_contract_fails_closed_below_own_minimum():
+def test_setup_numeric_minimum_is_diagnostic_when_setup_passes():
     decision = setup_gate_decision(
         _vote(raw_setup_score=4.9, setup_min=5.5, setup_pass=True)
     )
-    assert decision.passed is False
-    assert decision.reason == "setup_below_minimum"
+    assert decision.passed is True
+    assert decision.score == 4.9
+    assert decision.minimum == 5.5
 
 
 def test_partition_never_promotes_context_to_trigger():
@@ -39,7 +40,7 @@ def test_partition_never_promotes_context_to_trigger():
 
 
 def test_failed_setup_cannot_be_rescued_by_context():
-    weak = (_signal(), _vote(strategy="VWAPPro", role="trigger", raw_setup_score=4.0, setup_min=5.0, setup_pass=True))
+    weak = (_signal(), _vote(strategy="VWAPPro", role="trigger", raw_setup_score=4.0, setup_min=5.0, setup_pass=False))
     context = (_signal(), _vote(strategy="OrderFlow", role="context", score=10.0))
     triggers, contexts, rejected = partition_votes([weak, context])
     assert triggers == []
