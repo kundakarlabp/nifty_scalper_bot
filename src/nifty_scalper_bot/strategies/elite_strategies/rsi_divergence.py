@@ -3,8 +3,13 @@ from __future__ import annotations
 from typing import Any
 
 from nifty_scalper_bot.config.regime_ontology import MarketRegime, normalize_regime
-from nifty_scalper_bot.strategies.elite_strategies.base_elite import EliteSignal, EliteStrategy
-from nifty_scalper_bot.strategies.elite_strategies.config_models import RSIDivergenceStrategyConfig
+from nifty_scalper_bot.strategies.elite_strategies.base_elite import (
+    EliteSignal,
+    EliteStrategy,
+)
+from nifty_scalper_bot.strategies.elite_strategies.config_models import (
+    RSIDivergenceStrategyConfig,
+)
 from nifty_scalper_bot.strategies.entry_evidence import resolve_signal_domain
 from nifty_scalper_bot.utils.logging import get_logger
 
@@ -155,13 +160,19 @@ class RSIDivergenceStrategy(EliteStrategy):
                 "strategy_name": "RSIDivergence",
                 "role": "context",
                 "can_trigger": False,
-                "source_domain": "option_premium" if option_premium_domain else source_domain,
+                "source_domain": (
+                    "option_premium" if option_premium_domain else source_domain
+                ),
                 "signal_family": "directional_context",
                 "trade_side": side,
                 "side": side,
                 "direction_bias": side,
                 "requires_runner_execution_validation": True,
-                "setup_pass": bool(regime_support and direction_aligned and divergence_strength_confirmed),
+                "setup_pass": bool(
+                    regime_support
+                    and direction_aligned
+                    and divergence_strength_confirmed
+                ),
                 "setup_type": "rsi_confirmed_swing_reversal",
                 "required_data_present": True,
                 "stale_data_used": bool(indicators.get("stale_data_used")),
