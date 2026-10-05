@@ -13,6 +13,10 @@ def test_extract_strike_from_symbol_returns_none_for_fut_and_spot() -> None:
     assert StrategyRunner._extract_strike_from_symbol('NSE:NIFTY') is None
 
 
+def test_extract_strike_helper_remains_available() -> None:
+    assert hasattr(StrategyRunner, "_extract_strike_from_symbol")
+
+
 def test_strategy_runner_required_helpers_exist() -> None:
     required_helpers = [
         '_extract_underlying',
