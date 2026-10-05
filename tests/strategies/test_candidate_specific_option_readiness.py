@@ -180,8 +180,6 @@ class _OrderManager:
 
 
 def _execution_runner(monkeypatch, *, ce_ok=True, pe_ok=False):
-    import nifty_scalper_bot.strategies.runner as runner_mod
-
     runner = object.__new__(StrategyRunner)
     runner._logger = _Logger()
     runner._order_manager = _OrderManager()
