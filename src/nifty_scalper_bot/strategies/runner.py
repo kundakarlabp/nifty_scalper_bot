@@ -12021,10 +12021,6 @@ class StrategyRunner:
                 os.getenv("RUNNER_INTRABAR_VOLUME_DELTA_MIN", "100") or "100"
             )
             current_score = float(tick.get("candidate_score") or 0.0)
-            prev_score = float(last_quote.get("candidate_score") or 0.0)
-            score_trigger = current_score > prev_score + float(
-                os.getenv("RUNNER_INTRABAR_CANDIDATE_SCORE_DELTA_MIN", "0.15") or "0.15"
-            )
             detail.update(
                 {
                     "volume_delta": round(volume_delta, 2),
@@ -12033,10 +12029,10 @@ class StrategyRunner:
                     "bid_ask_fresh": bool(ts_changed),
                     "tick_ts": tick_ts,
                     "volume_now": volume_now,
-                    "candidate_score": current_score,
+                    "legacy_candidate_score": current_score,
                 }
             )
-            if spread_trigger or ts_changed or volume_trigger or score_trigger:
+            if spread_trigger or ts_changed or volume_trigger:
                 self._last_same_bar_eval_block_reason_by_symbol.pop(symbol, None)
                 self._last_same_bar_eval_block_detail_by_symbol.pop(symbol, None)
                 return "same_bar_market_update_eval"
@@ -13392,13 +13388,6 @@ class StrategyRunner:
             trigger_evidence = bool(
                 metadata.get("trigger_conditions_met")
                 or metadata.get("trigger_eligible")
-                or (
-                    str(
-                        metadata.get("strategy") or getattr(signal, "reason", "")
-                    ).upper()
-                    == "ORDERFLOW"
-                    and float(metadata.get("strategy_score") or 0.0) >= 5.0
-                )
             )
             if (
                 trigger_evidence
@@ -16943,13 +16932,9 @@ class StrategyRunner:
                         suppress_opposite = str(
                             os.getenv("SUPPRESS_OPPOSITE_SIDE_TRIGGERS", "true")
                         ).lower() in {"1", "true", "yes", "on"}
-                        suppress_conf = float(
-                            os.getenv("OPPOSITE_SIDE_SUPPRESSION_CONFIDENCE", "0.85")
-                        )
                         if (
                             suppress_opposite
                             and resolved_bias in {"CE", "PE"}
-                            and resolved_confidence >= suppress_conf
                         ):
                             upper_sym = symbol.upper()
                             opposite = (
@@ -18702,12 +18687,12 @@ class StrategyRunner:
             if expires_at > 0.0 and now_epoch >= expires_at:
                 self._signal_attempt_debounce_state.pop(key, None)
                 prev = None
-        score_raw = metadata.get("candidate_score")
-        if score_raw is None:
-            score_raw = metadata.get("strategy_score")
-        if score_raw is None:
-            score_raw = signal.confidence
-        score = float(score_raw) if score_raw is not None else 0.0
+        # Dedup improvement is based on executable economics/market quality,
+        # never the legacy candidate/strategy/confidence scores.
+        net_rr_raw = metadata.get("candidate_net_rr")
+        if net_rr_raw is None:
+            net_rr_raw = metadata.get("candidate_rr")
+        net_rr = float(net_rr_raw) if net_rr_raw is not None else 0.0
         tradable_quote = bool(metadata.get("tradable_quote"))
         spread_pct_raw = metadata.get("candidate_spread_pct")
         if spread_pct_raw is None:
@@ -18754,7 +18739,7 @@ class StrategyRunner:
         # explicit distance nor both strikes are resolvable.
         distance_atm = abs(float(distance_raw)) if distance_raw is not None else 999.0
         rank_score = (
-            score * 10.0
+            net_rr * 10.0
             + (2.0 if tradable_quote else -5.0)
             + (1.0 if depth_available else 0.0)
             + (1.0 if premium_ok else -2.0)
@@ -18763,7 +18748,7 @@ class StrategyRunner:
             - min(distance_atm / 100.0, 10.0) * 0.5
         )
         ranking_fields = {
-            "score": score,
+            "net_rr": net_rr,
             "tradable_quote": tradable_quote,
             "spread_pct": spread_pct,
             "tick_age_ms": tick_age_ms,
@@ -20195,6 +20180,7 @@ class StrategyRunner:
                 metadata["candidate_stop_loss"] = candidate.stop_loss
                 metadata["candidate_target"] = candidate.target
                 metadata["candidate_rr"] = candidate.rr
+                metadata["candidate_net_rr"] = candidate.net_rr
                 metadata["candidate_data_quality_score"] = candidate.data_quality_score
                 metadata["candidate_spread_pct"] = candidate.spread_pct
                 metadata["candidate_tick_age_s"] = getattr(
@@ -20423,8 +20409,8 @@ class StrategyRunner:
                             reason="runtime_symbol_execution_not_ready",
                             details=readiness_details,
                         )
-            requires_final_score = bool(metadata.get("preliminary_only")) or bool(
-                metadata.get("requires_runner_final_score")
+            requires_execution_validation = bool(metadata.get("preliminary_only")) or bool(
+                metadata.get("requires_runner_execution_validation")
             )
             quality_hint = max(
                 0.0,
@@ -20572,7 +20558,7 @@ class StrategyRunner:
             metadata["regime_decision"] = "observe_only"
             metadata["regime_reason"] = "manager_weighted_observe_only"
             missing_components = missing_score_components(metadata)
-            if requires_final_score:
+            if requires_execution_validation:
                 has_candidate = bool(metadata.get("candidate_selected"))
                 has_quote_usable = bool(metadata.get("quote_usable_for_order_plan"))
 
@@ -20594,7 +20580,7 @@ class StrategyRunner:
                         strategy_name,
                         infer_option_side(signal.symbol, metadata),
                         False,
-                        "runner_final_score_precheck",
+                        "runner_execution_precheck",
                         final_score_block_reason,
                         missing_components,
                         has_candidate,
@@ -20610,7 +20596,7 @@ class StrategyRunner:
                             "strategy": strategy_name,
                             "side": infer_option_side(signal.symbol, metadata),
                             "allowed": False,
-                            "blocked_at": "runner_final_score_precheck",
+                            "blocked_at": "runner_execution_precheck",
                             "blocked_reason": final_score_block_reason,
                             "trace_id": trace_id,
                             "missing_components": missing_components,
@@ -20660,7 +20646,7 @@ class StrategyRunner:
             decision_research_context = self._decision_research_context(
                 metadata=metadata,
                 quality=quality,
-                stage="runner_final_score",
+                stage="runner_quality_diagnostic",
             )
             self._logger.info(
                 "SIGNAL_SCORE strategy_name=%s threshold=%.2f final=%.2f alpha=%.2f direction=%.2f strategy=%.2f option=%.2f data=%.2f rr=%.2f confidence=%.2f allowed=%s reasons=%s trace_id=%s",
@@ -20697,7 +20683,7 @@ class StrategyRunner:
                 ):
                     quality_reject_reason = "alpha_below_threshold"
                 elif (
-                    requires_final_score
+                    requires_execution_validation
                     and "score_below_threshold" in rejection_reasons
                 ):
                     quality_reject_reason = "final_score_below_live_threshold"
@@ -20720,14 +20706,14 @@ class StrategyRunner:
                     rejection_reasons,
                     quality.components,
                 )
-                if requires_final_score:
+                if requires_execution_validation:
                     self._logger.info(
                         "TRADE_DECISION_TRACE symbol=%s strategy=%s side=%s allowed=%s blocked_at=%s blocked_reason=%s final_score=%.2f alpha_score=%.2f threshold=%.2f reasons=%s trace_id=%s",
                         base_symbol,
                         str(quality.components.get("strategy_name", "")),
                         infer_option_side(signal.symbol, metadata),
                         False,
-                        "runner_final_score",
+                        "runner_strategy_role",
                         quality_reject_reason,
                         quality.final_score,
                         alpha_score,
@@ -20742,7 +20728,7 @@ class StrategyRunner:
                             "alpha_score": alpha_score,
                             "threshold": threshold,
                             "allowed": False,
-                            "blocked_at": "runner_final_score",
+                            "blocked_at": "runner_strategy_role",
                             "blocked_reason": quality_reject_reason,
                             "reasons": rejection_reasons,
                         },
@@ -20768,7 +20754,7 @@ class StrategyRunner:
                     signal_score=quality.final_score,
                     research_context={
                         **(decision_research_context or {}),
-                        "rejection_stage": "runner_final_score",
+                        "rejection_stage": "runner_strategy_role",
                         "rejection_reasons": rejection_reasons,
                     },
                 )
@@ -20785,7 +20771,7 @@ class StrategyRunner:
                 strategy=metadata.get("strategy"),
                 symbol=signal.symbol,
                 side=infer_option_side(signal.symbol, metadata),
-                reason="runner_final_quality",
+                reason="runner_execution_validation",
             )
             self._final_quality_approved_counter = (
                 getattr(self, "_final_quality_approved_counter", 0) + 1
@@ -20813,16 +20799,20 @@ class StrategyRunner:
                     ),
                     "approval_path": metadata.get("approval_path"),
                     "trace_id": trace_id,
-                    "approval_stage": "runner_final_quality",
+                    "approval_stage": "runner_execution_validation",
                 },
             )
+            # Legacy quality confidence is research telemetry only. Preserve the
+            # strategy's native confidence field; do not let the diagnostic
+            # weighted score silently become an execution/risk input.
             signal = dataclasses.replace(
                 signal,
-                confidence=final_confidence,
                 metadata={
                     **metadata,
                     "final_score": quality.final_score,
                     "signal_quality": quality.components,
+                    "diagnostic_quality_confidence": final_confidence,
+                    "score_admission_role": "diagnostic_only",
                 },
             )
 

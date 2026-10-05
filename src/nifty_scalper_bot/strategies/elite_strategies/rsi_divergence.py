@@ -167,7 +167,7 @@ class RSIDivergenceStrategy(EliteStrategy):
                 "side": side,
                 "direction_bias": side,
                 "preliminary_only": True,
-                "requires_runner_final_score": True,
+                "requires_runner_execution_validation": True,
                 "direction_score": strategy_score,
                 "strategy_score": strategy_score,
                 "context_score": strategy_score,

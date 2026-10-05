@@ -229,9 +229,6 @@ class OrderFlowStrategy(EliteStrategy):
             # Setup families own entries; OrderFlow supplies measured confirmation.
             # This permission must not be restored through an environment flag.
             allow_orderflow_trigger = False
-            allow_ltp_trigger = str(
-                os.getenv("ORDERFLOW_ALLOW_LTP_FALLBACK_TRIGGER", "false")
-            ).strip().lower() in {"1", "true", "yes", "on"}
             trigger_min_score = (
                 safe_float_env("ORDERFLOW_MIN_SCORE_LIVE", 8.0)
                 if is_live_mode
@@ -363,34 +360,10 @@ class OrderFlowStrategy(EliteStrategy):
                 if tick_direction in {"UP", "DOWN", "BUY", "SELL"}:
                     fallback_score += 1.0
                 strategy_score = min(5.5, max(0.0, fallback_score))
-                if strategy_score < context_min_score:
-                    self._no_vote("weak_tick_confirmation")
-                    return None
-                trigger_conditions_met = bool(
-                    allow_ltp_trigger
-                    and not is_live_mode
-                    and strategy_score >= trigger_min_score
-                    and spread_pct > 0
-                    and spread_pct <= trigger_max_spread_pct
-                    and stale_age_s <= 2.0
-                )
-                trigger_block_reason = (
-                    ""
-                    if trigger_conditions_met
-                    else (
-                        "ltp_fallback_not_allowed_live"
-                        if is_live_mode
-                        else "ltp_trigger_disabled"
-                    )
-                )
-                if not trigger_conditions_met and strategy_score < trigger_min_score:
-                    trigger_block_reason = "score_below_trigger_min"
-                elif not trigger_conditions_met and (
-                    spread_pct <= 0 or spread_pct > trigger_max_spread_pct
-                ):
-                    trigger_block_reason = "spread_above_trigger_max"
-                elif not trigger_conditions_met and stale_age_s > 2.0:
-                    trigger_block_reason = "stale_tick_for_ltp_trigger"
+                # OrderFlow is permanently context-only. Legacy score thresholds
+                # remain research telemetry and cannot promote it into a trigger.
+                trigger_conditions_met = False
+                trigger_block_reason = "context_only_role"
 
                 side_aligns = direction in {"CE", "PE"} and direction == side
                 context_evidence_score, context_confirmation_score = (
@@ -409,7 +382,7 @@ class OrderFlowStrategy(EliteStrategy):
                     "risk_label": "ltp_only_orderflow_reduced_confidence",
                     "strategy": "OrderFlow",
                     "strategy_name": "OrderFlow",
-                    "role": "trigger" if trigger_conditions_met else "context",
+                    "role": "context",
                     "source_domain": "market_microstructure",
                     "context_score": strategy_score,
                     "side": side,
@@ -596,10 +569,6 @@ class OrderFlowStrategy(EliteStrategy):
                 score += freshness_score
                 reasons.append("fresh_context")
             strategy_score = max(0.0, min(10.0, score))
-            if strategy_score < context_min_score:
-                self._no_vote("low_score")
-                return None
-
             bias_conflict = direction in {"CE", "PE"} and not side_aligns
             min_reversal_imbalance = safe_float_env(
                 "ORDERFLOW_REVERSAL_MIN_IMBALANCE", 0.20
@@ -707,41 +676,8 @@ class OrderFlowStrategy(EliteStrategy):
             if is_live_mode and not selected_meta_available:
                 selected_or_near_atm = False
 
-            trigger_conditions_met = bool(
-                allow_orderflow_trigger
-                and quote_depth_valid
-                and (
-                    tradable_quote or not (is_live_mode and require_tradable_quote_live)
-                )
-                and bid > 0.0
-                and ask > 0.0
-                and depth_available
-                and strategy_score >= trigger_min_score
-                and spread_pct <= trigger_max_spread_pct
-                and side_alignment_ok
-                and direction_context_ok
-                and context_age_ok
-                and flow_supports
-                and quote_readiness.allowed
-                and tick_age_ms is not None
-                and tick_age_ms <= max_tick_age_ms
-            )
-            conflict_override_requested = bool(
-                not is_live_mode
-                and not side_alignment_ok
-                and strategy_score
-                >= float(
-                    os.getenv("ORDERFLOW_CONFLICT_OVERRIDE_MIN_SCORE", "9.0") or "9.0"
-                )
-                and bool(quote_depth_valid)
-                and bool(depth_available)
-                and spread_pct <= trigger_max_spread_pct
-                and bool(context_age_ok)
-                and bool(flow_supports)
-                and tick_age_ms is not None
-                and tick_age_ms <= max_tick_age_ms
-                and bool(selected_or_near_atm)
-            )
+            trigger_conditions_met = False
+            conflict_override_requested = False
             conflict_override_applied = False
             if conflict_override_requested and not trigger_conditions_met:
                 trigger_conditions_met = bool(
@@ -827,12 +763,6 @@ class OrderFlowStrategy(EliteStrategy):
                 )
             elif spread_pct > trigger_max_spread_pct:
                 trigger_block_reason = "spread_too_wide"
-            elif strategy_score < trigger_min_score:
-                trigger_block_reason = (
-                    "score_below_live_trigger_min"
-                    if is_live_mode
-                    else "score_below_trigger_min"
-                )
             elif not flow_supports:
                 trigger_block_reason = "negative_premium_flow"
 
@@ -862,7 +792,7 @@ class OrderFlowStrategy(EliteStrategy):
             metadata = {
                 "strategy": "OrderFlow",
                 "strategy_name": "OrderFlow",
-                "role": "trigger" if trigger_conditions_met else "context",
+                "role": "context",
                 "source_domain": "market_microstructure",
                 "context_score": strategy_score,
                 "side": side,
@@ -874,7 +804,7 @@ class OrderFlowStrategy(EliteStrategy):
                 "raw_setup_score": strategy_score,
                 "setup_score": strategy_score,
                 "setup_min": context_min_score,
-                "setup_pass": strategy_score >= context_min_score,
+                "setup_pass": bool(context_quality_eligible),
                 "setup_type": "microstructure_imbalance",
                 "required_data_present": depth_available,
                 "stale_data_used": bool(indicators.get("stale_data_used")),

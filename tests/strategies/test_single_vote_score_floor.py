@@ -1,10 +1,10 @@
 # fmt: off
 # ruff: noqa: E501,I001
-"""Selected-option single-vote scalps require a high score floor (default 9.0).
+"""Regression coverage for score-independent single-trigger admission.
 
-A lone vote remains disabled by default. A selected-option trigger may pass only
-when a fresh, strong, explicitly allowed context strategy confirms it and the
-combined score clears the same conservative floor.
+Legacy setup/quality/confidence scores remain observable, but structural setup,
+authoritative direction, selected-contract eligibility and fresh executable
+context own admission.
 """
 
 from __future__ import annotations
@@ -114,6 +114,7 @@ def _signal_vote(
     raw_score: float,
     weighted_score: float,
     regime_name: str | None = None,
+    confidence: float = 0.9,
 ):
     from nifty_scalper_bot.core.strategy_manager import Signal, StrategyVote
 
@@ -121,7 +122,7 @@ def _signal_vote(
         action="BUY",
         symbol="NFO:NIFTY2670724050CE",
         quantity=65,
-        confidence=0.9,
+        confidence=confidence,
         reason=strategy,
         stop_loss=140.0,
         take_profit=150.0,
@@ -136,7 +137,7 @@ def _signal_vote(
         strategy=strategy,
         side="CE",
         score=weighted_score,
-        confidence=0.9,
+        confidence=confidence,
         reasons=[],
         metadata={
             "role": "trigger",
@@ -162,7 +163,7 @@ def _valid_entry_context() -> dict:
     }
 
 
-async def test_regime_weighted_score_selects_trigger_winner(monkeypatch) -> None:
+async def test_regime_weighted_score_does_not_select_trigger_winner(monkeypatch) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
     manager = _manager_probe()
     high_raw = _signal_vote(strategy="SMC", raw_score=9.0, weighted_score=1.8)
@@ -175,10 +176,10 @@ async def test_regime_weighted_score_selects_trigger_winner(monkeypatch) -> None
     )
 
     assert result is not None
-    assert result.reason == "VWAPPro"
-    assert result.metadata["raw_setup_score"] == 7.0
-    assert result.metadata["regime_weighted_score"] == 8.4
-    assert result.metadata["final_trade_score"] == 8.4
+    assert result.reason == "SMC"
+    assert result.metadata["raw_setup_score"] == 9.0
+    assert result.metadata["regime_weighted_score"] == 1.8
+    assert result.metadata["final_trade_score"] == 1.8
 
 
 async def test_regime_downweighted_single_vote_score_is_diagnostic(
@@ -327,7 +328,7 @@ async def test_range_vwap_trigger_can_reach_runner_with_strong_orderflow_confirm
     monkeypatch,
     caplog,
 ) -> None:
-    """Strong RANGE VWAP + independent OrderFlow reaches Runner; Runner owns final alpha."""
+    """Strong RANGE VWAP + independent OrderFlow reaches execution validation without a numeric admission owner."""
     caplog.set_level(logging.INFO)
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     monkeypatch.setenv("ENABLE_LIVE", "true")
@@ -352,7 +353,7 @@ async def test_range_vwap_trigger_can_reach_runner_with_strong_orderflow_confirm
 
     assert result is not None
     assert result.metadata["approval_path"] == "single_trigger_context_confirmed"
-    assert result.metadata["quality_gate_owner"] == "runner_final_execution_score"
+    assert result.metadata["quality_reference_role"] == "diagnostic_only"
     assert not any(
         "VWAP_CONTEXT_PROMOTION_BLOCKED" in record.getMessage()
         for record in caplog.records
@@ -513,17 +514,16 @@ async def test_unapproved_context_strategy_cannot_unlock_single_trigger(
     assert decision.reason == "single_trigger_context_confirmation_invalid"
 
 
-async def test_opposite_side_context_remains_a_veto_not_confirmation(
+async def test_opposite_side_numeric_context_cannot_veto_without_direction_conflict(
     monkeypatch,
 ) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     monkeypatch.setenv("ENABLE_LIVE", "true")
-    monkeypatch.delenv("STRATEGY_ALLOW_SINGLE_VOTE_SCALP", raising=False)
+    monkeypatch.setenv("STRATEGY_ALLOW_SINGLE_VOTE_SCALP", "true")
     monkeypatch.delenv("STRATEGY_ALLOW_SELECTED_OPTION_SINGLE_VOTE", raising=False)
     manager = _manager_probe()
-    trigger = _signal_vote(strategy="SMC", raw_score=8.0, weighted_score=8.0)
-    trigger[0].metadata.update({"strategy": "SMC", "is_selected_option": True})
-    opposite_context = _context_vote(side="PE", score=10.0, confidence=0.85)
+    trigger = _signal_vote(strategy="VWAPPro", raw_score=2.0, weighted_score=1.0)
+    opposite_context = _context_vote(side="PE", score=10.0, confidence=0.99)
 
     result = manager._combine_strategy_votes(
         symbol="NFO:NIFTY2670724050CE",
@@ -531,9 +531,9 @@ async def test_opposite_side_context_remains_a_veto_not_confirmation(
         indicators=_valid_entry_context(),
     )
 
-    assert result is None
-    decision = manager._last_no_signal_decision_by_symbol["NFO:NIFTY2670724050CE"]
-    assert decision.reason == "hard_context_veto"
+    assert result is not None
+    assert result.metadata["context_penalty"] == 1.5
+    assert result.metadata["approval_path"] == "single_vote_fallback"
 
 
 async def test_regime_downweighted_context_reaches_runner_quality_owner(
@@ -563,7 +563,7 @@ async def test_regime_downweighted_context_reaches_runner_quality_owner(
 
     assert result is not None
     assert result.metadata["approval_path"] == "single_trigger_context_confirmed"
-    assert result.metadata["quality_gate_owner"] == "runner_final_execution_score"
+    assert result.metadata["quality_reference_role"] == "diagnostic_only"
     assert result.metadata["final_trade_score"] < 7.0
 
 
@@ -614,7 +614,7 @@ async def test_range_smc_setup_reaches_strong_context_before_runner_quality(
             "setup_min": 6.5,
             "preliminary_only": True,
             "requires_orderflow_confirmation": True,
-            "requires_runner_final_score": True,
+            "requires_runner_execution_validation": True,
         }
     )
     context = _context_vote(score=8.0, confidence=0.80)
@@ -629,14 +629,14 @@ async def test_range_smc_setup_reaches_strong_context_before_runner_quality(
     assert result.metadata["approval_path"] == "single_trigger_context_confirmed"
     assert result.metadata["raw_setup_score"] == 7.0
     assert result.metadata["regime_weighted_score"] == 5.95
-    assert result.metadata["manager_context_score_reference_pass"] is False
-    assert result.metadata["quality_gate_owner"] == "runner_final_execution_score"
+    assert result.metadata["manager_context_score_reference_above_min"] is False
+    assert result.metadata["quality_reference_role"] == "diagnostic_only"
 
 
-async def test_range_smc_setup_still_rejects_weak_orderflow_context(
+async def test_range_smc_setup_accepts_low_numeric_orderflow_when_structurally_eligible(
     monkeypatch,
 ) -> None:
-    """Removing the duplicate score gate must not weaken confirmation quality."""
+    """Legacy OrderFlow score/confidence cannot veto valid structural context."""
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     monkeypatch.setenv("ENABLE_LIVE", "true")
     monkeypatch.delenv("STRATEGY_ALLOW_SINGLE_VOTE_SCALP", raising=False)
@@ -650,7 +650,7 @@ async def test_range_smc_setup_still_rejects_weak_orderflow_context(
             "setup_min": 6.5,
             "preliminary_only": True,
             "requires_orderflow_confirmation": True,
-            "requires_runner_final_score": True,
+            "requires_runner_execution_validation": True,
         }
     )
     context = _context_vote(score=6.0, confidence=0.60)
@@ -661,11 +661,10 @@ async def test_range_smc_setup_still_rejects_weak_orderflow_context(
         indicators=_valid_entry_context(),
     )
 
-    assert result is None
-    decision = manager._last_no_signal_decision_by_symbol[
-        "NFO:NIFTY2670724050CE"
-    ]
-    assert decision.reason == "single_trigger_context_confirmation_invalid"
+    assert result is not None
+    assert result.metadata["approval_path"] == "single_trigger_context_confirmed"
+    assert result.metadata["context_confirmation_evidence"][0]["raw_score"] == 6.0
+    assert result.metadata["context_confirmation_evidence"][0]["confidence"] == 0.60
 
 
 async def test_weak_underlying_disagreement_cannot_promote_single_trigger(monkeypatch) -> None:
@@ -718,7 +717,7 @@ async def test_smc_required_orderflow_cannot_be_bypassed_by_single_vote_override
                     "setup_min": 6.5,
                     "preliminary_only": True,
                     "requires_orderflow_confirmation": True,
-                    "requires_runner_final_score": True,
+                    "requires_runner_execution_validation": True,
                     "is_selected_option": True,
                 }
             )
@@ -748,7 +747,7 @@ async def test_orderflow_confirmation_requires_canonical_context_quality(monkeyp
             "is_selected_option": True,
             "preliminary_only": True,
             "requires_orderflow_confirmation": True,
-            "requires_runner_final_score": True,
+            "requires_runner_execution_validation": True,
             "setup_pass": True,
             "setup_min": 7.0,
         }
@@ -826,7 +825,7 @@ async def test_hard_veto_uses_canonical_vote_timestamp(monkeypatch, legacy_times
     assert result.metadata["context_penalty"] == 1.5
 
 
-async def test_fresh_canonical_timestamp_keeps_hard_veto(monkeypatch):
+async def test_fresh_numeric_context_score_is_diagnostic_not_hard_veto(monkeypatch):
     monkeypatch.setattr(time, "time", lambda: 1000.0)
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     monkeypatch.setenv("STRATEGY_ALLOW_SINGLE_VOTE_SCALP", "true")
@@ -842,5 +841,97 @@ async def test_fresh_canonical_timestamp_keeps_hard_veto(monkeypatch):
         indicators=_valid_entry_context(),
     )
 
-    assert result is None
-    assert manager._last_no_signal_decision_by_symbol["NFO:NIFTY2670724050CE"].reason == "hard_context_veto"
+    assert result is not None
+    assert result.metadata["context_penalty"] == 1.5
+
+
+async def test_low_trigger_confidence_is_diagnostic_not_admission_gate(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    monkeypatch.setenv("STRATEGY_ALLOW_SINGLE_VOTE_SCALP", "true")
+    manager = _manager_probe()
+    trigger = _signal_vote(
+        strategy="VWAPPro",
+        raw_score=2.0,
+        weighted_score=1.0,
+        confidence=0.05,
+    )
+
+    result = manager._combine_strategy_votes(
+        symbol="NFO:NIFTY2670724050CE",
+        signals=[trigger],
+        indicators=_valid_entry_context(),
+    )
+
+    assert result is not None
+    assert result.metadata["approval_path"] == "single_vote_fallback"
+    assert result.metadata["final_trade_score"] < 4.5
+
+
+async def test_low_orderflow_score_and_confidence_can_confirm_structurally_valid_trigger(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    monkeypatch.delenv("STRATEGY_ALLOW_SINGLE_VOTE_SCALP", raising=False)
+    monkeypatch.delenv("STRATEGY_ALLOW_SELECTED_OPTION_SINGLE_VOTE", raising=False)
+    manager = _manager_probe()
+    trigger = _signal_vote(
+        strategy="VWAPPro",
+        raw_score=2.0,
+        weighted_score=1.0,
+        confidence=0.05,
+    )
+    context = _context_vote(score=0.5, confidence=0.05)
+
+    result = manager._combine_strategy_votes(
+        symbol="NFO:NIFTY2670724050CE",
+        signals=[trigger, context],
+        indicators=_valid_entry_context(),
+    )
+
+    assert result is not None
+    assert result.metadata["approval_path"] == "single_trigger_context_confirmed"
+    assert result.metadata["context_confirmation_strategies"] == ["OrderFlow"]
+
+
+async def test_smc_legacy_setup_minimum_does_not_veto_structural_setup(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    monkeypatch.delenv("STRATEGY_ALLOW_SINGLE_VOTE_SCALP", raising=False)
+    manager = _manager_probe()
+    trigger = _signal_vote(
+        strategy="SMC",
+        raw_score=2.0,
+        weighted_score=1.0,
+        confidence=0.05,
+    )
+    trigger[0].metadata.update(
+        {
+            "strategy": "SMC",
+            "is_selected_option": True,
+            "preliminary_only": True,
+            "requires_orderflow_confirmation": True,
+            "requires_runner_execution_validation": True,
+            "setup_pass": True,
+            "setup_min": 6.5,
+            "raw_setup_score": 2.0,
+        }
+    )
+    trigger[1].metadata.update(trigger[0].metadata)
+    context = _context_vote(score=0.5, confidence=0.05)
+
+    result = manager._combine_strategy_votes(
+        symbol="NFO:NIFTY2670724050CE",
+        signals=[trigger, context],
+        indicators=_valid_entry_context(),
+    )
+
+    assert result is not None
+    assert result.metadata["approval_path"] == "single_trigger_context_confirmed"
+    assert result.metadata["raw_setup_score"] == 2.0
+    assert result.metadata["setup_min"] == 6.5

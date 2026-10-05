@@ -26,9 +26,6 @@ from nifty_scalper_bot.utils.smart_symbol import (
 
 LOGGER = get_logger(__name__)
 
-BaseEliteStrategy = EliteStrategy
-
-
 def _positive_float(value: Any) -> float | None:
     try:
         parsed = float(value)
@@ -47,7 +44,7 @@ def _aligned(side: str, bullish: bool) -> bool:
     return bullish if side == "CE" else not bullish
 
 
-class EliteTuesdayGammaBuyer(BaseEliteStrategy):
+class EliteTuesdayGammaBuyer(EliteStrategy):
     """Expiry-day long-premium trigger using canonical underlying context."""
 
     def __init__(
@@ -219,8 +216,7 @@ class EliteTuesdayGammaBuyer(BaseEliteStrategy):
             strategy_score = max(0.0, min(10.0, score))
             setup_min = 6.0
             if strategy_score < setup_min:
-                self._no_vote("expiry_gamma_quality_below_minimum")
-                return None
+                reasons.append("score_below_legacy_minimum")
 
             atr_multiplier = max(float(self._config.atr_multiplier), 0.1)
             target_multiplier = max(float(self._config.target_multiplier), 0.1)
@@ -249,7 +245,7 @@ class EliteTuesdayGammaBuyer(BaseEliteStrategy):
                 "setup_quality": strategy_score,
                 "setup_type": "expiry_gamma",
                 "preliminary_only": True,
-                "requires_runner_final_score": True,
+                "requires_runner_execution_validation": True,
                 "required_data_present": True,
                 "stale_data_used": bool(indicators.get("stale_data_used")),
                 "candidate_symbol": symbol,

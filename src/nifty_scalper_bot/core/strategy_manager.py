@@ -2607,37 +2607,79 @@ class StrategyManager(_BaseStrategyManager):
         vwap_slope = _f("vwap_slope")
         ema_slope = _f("ema_slope")
         futures_volume_ratio = _f("futures_volume_ratio")
-        ce_score = pe_score = 0.0
         reasons: list[str] = []
-        if close is not None and vwap is not None and vwap > 0:
-            if close > vwap: ce_score += 1.0; reasons.append("close_above_vwap")
-            elif close < vwap: pe_score += 1.0; reasons.append("close_below_vwap")
-        if ema_fast is not None and ema_slow is not None:
-            if ema_fast > ema_slow: ce_score += 1.0; reasons.append("ema_fast_above_slow")
-            elif ema_fast < ema_slow: pe_score += 1.0; reasons.append("ema_fast_below_slow")
-        if close is not None and ema_50 is not None:
-            if close > ema_50: ce_score += 0.5; reasons.append("close_above_ema50")
-            elif close < ema_50: pe_score += 0.5; reasons.append("close_below_ema50")
-        if vwap_slope is not None and vwap_slope > 0: ce_score += 0.5; reasons.append("vwap_slope_positive")
-        elif vwap_slope is not None and vwap_slope < 0: pe_score += 0.5; reasons.append("vwap_slope_negative")
-        if ema_slope is not None and ema_slope > 0: ce_score += 0.5; reasons.append("ema_slope_positive")
-        elif ema_slope is not None and ema_slope < 0: pe_score += 0.5; reasons.append("ema_slope_negative")
+        location_votes: list[str] = []
+        trend_votes: list[str] = []
+
+        def _vote_from_pair(
+            lhs: float | None,
+            rhs: float | None,
+            *,
+            up_reason: str,
+            down_reason: str,
+            bucket: list[str],
+        ) -> None:
+            if lhs is None or rhs is None:
+                return
+            if lhs > rhs:
+                bucket.append("CE")
+                reasons.append(up_reason)
+            elif lhs < rhs:
+                bucket.append("PE")
+                reasons.append(down_reason)
+
+        _vote_from_pair(
+            close,
+            vwap,
+            up_reason="close_above_vwap",
+            down_reason="close_below_vwap",
+            bucket=location_votes,
+        )
+        _vote_from_pair(
+            close,
+            ema_50,
+            up_reason="close_above_ema50",
+            down_reason="close_below_ema50",
+            bucket=location_votes,
+        )
+        _vote_from_pair(
+            close,
+            previous_close,
+            up_reason="close_above_previous_close",
+            down_reason="close_below_previous_close",
+            bucket=location_votes,
+        )
+        _vote_from_pair(
+            ltp,
+            day_open,
+            up_reason="ltp_above_open",
+            down_reason="ltp_below_open",
+            bucket=location_votes,
+        )
+        _vote_from_pair(
+            ema_fast,
+            ema_slow,
+            up_reason="ema_fast_above_slow",
+            down_reason="ema_fast_below_slow",
+            bucket=trend_votes,
+        )
+        if vwap_slope is not None:
+            if vwap_slope > 0:
+                trend_votes.append("CE")
+                reasons.append("vwap_slope_positive")
+            elif vwap_slope < 0:
+                trend_votes.append("PE")
+                reasons.append("vwap_slope_negative")
+        if ema_slope is not None:
+            if ema_slope > 0:
+                trend_votes.append("CE")
+                reasons.append("ema_slope_positive")
+            elif ema_slope < 0:
+                trend_votes.append("PE")
+                reasons.append("ema_slope_negative")
         if role == "futures_context" and futures_volume_ratio is not None and futures_volume_ratio >= 1.0:
             reasons.append("futures_volume_active")
-        if close is not None and previous_close is not None:
-            if close > previous_close:
-                ce_score += 0.8
-                reasons.append("close_above_previous_close")
-            elif close < previous_close:
-                pe_score += 0.8
-                reasons.append("close_below_previous_close")
-        if ltp is not None and day_open is not None:
-            if ltp > day_open:
-                ce_score += 0.7
-                reasons.append("ltp_above_open")
-            elif ltp < day_open:
-                pe_score += 0.7
-                reasons.append("ltp_below_open")
+
         delta_signal = recent_ltp_delta if recent_ltp_delta not in (None, 0.0) else tick_slope
         tick_side: str | None = None
         if delta_signal is not None:
@@ -2647,35 +2689,33 @@ class StrategyManager(_BaseStrategyManager):
             elif delta_signal < 0:
                 tick_side = "PE"
                 reasons.append("tick_slope_negative")
-        total = ce_score + pe_score
-        if total <= 0:
+
+        def _family_side(votes: list[str], family: str) -> str | None:
+            if not votes:
+                return None
+            sides = set(votes)
+            if len(sides) == 1:
+                return votes[0]
+            reasons.append(f"{family}_conflict")
+            return None
+
+        location_side = _family_side(location_votes, "price_location")
+        trend_side = _family_side(trend_votes, "trend_structure")
+        if location_side and trend_side and location_side != trend_side:
+            return None, 0.0, [*reasons, "direction_family_conflict"]
+
+        side = trend_side or location_side
+        if side is None:
             return None, 0.0, [*reasons, "direction_unavailable"]
-        margin = abs(ce_score - pe_score)
-        if margin < 0.5:
-            return None, min(0.55, total / 4.0), reasons + ["direction_tie"]
-        side = "CE" if ce_score > pe_score else "PE"
-        strong_reason_tags = {
-            "close_above_vwap",
-            "close_below_vwap",
-            "ema_fast_above_slow",
-            "ema_fast_below_slow",
-            "vwap_slope_positive",
-            "vwap_slope_negative",
-            "ema_slope_positive",
-            "ema_slope_negative",
-            "close_above_ema50",
-            "close_below_ema50",
-        }
-        has_strong_reasons = any(tag in strong_reason_tags for tag in reasons)
-        raw_confidence = 0.50 + margin / max(total, 1.0) * 0.45
-        if has_strong_reasons:
-            confidence = min(0.95, max(0.50, raw_confidence))
-        else:
-            confidence = min(0.70, max(0.55, raw_confidence))
+
+        # Confidence is observability only; it never authorizes direction.
+        structural_families = int(location_side is not None) + int(trend_side is not None)
+        confidence = 0.80 if structural_families == 2 else 0.65
         if tick_side == side:
-            confidence = min(0.95, confidence + 0.03)
+            confidence = min(0.90, confidence + 0.05)
         elif tick_side is not None:
             confidence = max(0.50, confidence - 0.05)
+            reasons.append("tick_direction_disagrees")
         return side, confidence, reasons
 
     @staticmethod
@@ -3744,18 +3784,22 @@ class StrategyManager(_BaseStrategyManager):
             vote = self._apply_regime_vote_weight(vote=vote, regime_name=regime_name)
             signal_votes.append((adjusted, vote))
 
-        # Rank after evaluating every eligible strategy. Capping inside the loop
-        # made the outcome depend on registration order rather than on the market.
+        # Preserve every structurally valid vote. MAX_STRATEGY_VOTES is kept
+        # as observability only: score/confidence must not decide which strategy
+        # evidence is discarded before consensus.
         if len(signal_votes) > max_votes:
-            signal_votes.sort(
-                key=lambda pair: (
-                    -float(pair[1].score or 0.0),
-                    -float(pair[1].confidence or 0.0),
-                    str(pair[1].strategy),
-                )
+            log.info(
+                "STRATEGY_VOTE_COUNT_ABOVE_REFERENCE symbol=%s votes=%s reference_max=%s",
+                symbol,
+                len(signal_votes),
+                max_votes,
+                extra={
+                    "event": "STRATEGY_VOTE_COUNT_ABOVE_REFERENCE",
+                    "symbol": symbol,
+                    "votes": len(signal_votes),
+                    "reference_max": max_votes,
+                },
             )
-            del signal_votes[max_votes:]
-            signals = [item for item, _vote in signal_votes]
 
         elapsed = time.monotonic() - evaluation_start
         if elapsed > 3.0:
@@ -4630,12 +4674,11 @@ class StrategyManager(_BaseStrategyManager):
                 _record_no_signal("strategy_partial_no_consensus", "no_trigger_vote", "no_trigger_vote", trigger_vote_count=0, context_vote_count=len(context_votes), final_block_reason="partial")
                 return None
         else:
-            best_signal, best_vote = max(
-                trigger_votes, key=lambda pair: _weighted_score(pair[1])
-            )
+            # Legacy score/regime weights are research telemetry only. Multiple
+            # structurally valid triggers keep deterministic strategy order.
+            best_signal, best_vote = trigger_votes[0]
         metadata = dict(best_signal.metadata or {})
         threshold = float(os.getenv("STRATEGY_TRIGGER_MIN_SCORE", "4.5") or "4.5")
-        single_high = float(os.getenv("STRATEGY_SINGLE_VOTE_HIGH_CONVICTION", "8.8") or "8.8")
         allow_scalp_single = bool(mode_profile.get("allow_single_vote", True)) and str(os.getenv("STRATEGY_ALLOW_SINGLE_VOTE_SCALP", "false")).lower() in {"1", "true", "yes", "on"}
         raw_trigger_score = self._extract_raw_score(best_vote)
         weighted_trigger_score = _weighted_score(best_vote)
@@ -4658,17 +4701,10 @@ class StrategyManager(_BaseStrategyManager):
         context_penalty = min(1.5, 0.60 * negative_context)
         final_score = weighted_trigger_score + context_bonus - context_penalty
         final_score = max(0.0, min(10.0, final_score))
-        context_confidence_floor = float(os.getenv("STRATEGY_CONTEXT_HARD_VETO_MIN_CONFIDENCE", "0.80") or "0.80")
-        context_freshness_max_age_s = float(os.getenv("STRATEGY_CONTEXT_HARD_VETO_MAX_AGE_SECONDS", "120") or "120")
-        hard_veto_candidates = []
-        for vote in opposite_context:
-            if (
-                self._extract_context_veto_score(vote) >= 8.0
-                and float(vote.confidence) >= context_confidence_floor
-                and self._context_vote_is_timestamped(vote, max_age_s=context_freshness_max_age_s)
-            ):
-                hard_veto_candidates.append(vote)
-        vetoed = bool(hard_veto_candidates)
+        # Opposing context scores/confidences are attribution only. Authoritative
+        # direction conflict is enforced by the spot/futures direction contract.
+        hard_veto_candidates: list[StrategyVote] = []
+        vetoed = False
         selected_ok = True
         near_atm = indicator_near_atm
         if trigger_votes and len(trigger_votes) == 1:
@@ -4711,8 +4747,6 @@ class StrategyManager(_BaseStrategyManager):
                 near_atm = strike_distance_from_atm <= near_atm_threshold
             score_min, conf_min = self._single_vote_thresholds(best_vote.strategy)
             regime_weight = _regime_weight(best_vote)
-            score_ok = weighted_trigger_score >= score_min
-            conf_ok = best_vote.confidence >= conf_min
             selected_ok = selected_option or near_atm
             selected_ok_reason = "selected_option" if selected_option else "near_atm" if near_atm else "not_selected_or_near_atm"
             metadata["selected_ce"] = selected_ce
@@ -4720,13 +4754,10 @@ class StrategyManager(_BaseStrategyManager):
             metadata["strike_distance_from_atm"] = strike_distance_from_atm
             metadata["is_selected_option"] = selected_option
             metadata["selected_ok_reason"] = selected_ok_reason
-            # Numeric strategy scores are diagnostic. Structural/context
-            # validity, selected-contract eligibility and confidence own this gate.
-            threshold_passed = bool(
-                best_vote.confidence >= conf_min
-                and selected_ok
-                and not vetoed
-            )
+            # Legacy numeric score/confidence are attribution telemetry only.
+            # Admission here is structural: selected/near-ATM eligibility plus
+            # authoritative context safety. Execution/economics/risk gate later.
+            threshold_passed = bool(selected_ok and not vetoed)
             setup_min = _safe_float_value(metadata.get("setup_min"))
             requires_orderflow_confirmation = (
                 metadata.get("requires_orderflow_confirmation") is True
@@ -4736,9 +4767,8 @@ class StrategyManager(_BaseStrategyManager):
                 and metadata.get("setup_pass") is True
                 and metadata.get("preliminary_only") is True
                 and requires_orderflow_confirmation
-                and metadata.get("requires_runner_final_score") is True
+                and metadata.get("requires_runner_execution_validation") is True
                 and setup_min is not None
-                and raw_trigger_score >= setup_min
             )
             # STRATEGY_ALLOW_SINGLE_VOTE_SCALP=false is the master default block
             # for an unconfirmed lone trigger. High-conviction/selected-option
@@ -4754,7 +4784,6 @@ class StrategyManager(_BaseStrategyManager):
             )
             high_conviction_allowed = bool(
                 not requires_orderflow_confirmation
-                and best_vote.confidence >= conf_min
                 and selected_ok
                 and not vetoed
                 and allow_high_conviction
@@ -4769,11 +4798,6 @@ class StrategyManager(_BaseStrategyManager):
                 and selected_option
                 and allow_selected_option
             )
-            # Former selected-option score floor remains telemetry only.
-            selected_single_min = self._env_float(
-                "STRATEGY_SELECTED_OPTION_SINGLE_VOTE_MIN_SCORE", 9.0
-            )
-
             # A trigger plus a fresh, same-side context vote is not an unconfirmed
             # single vote. OrderFlow remains permanently context-only, but its
             # validated market-microstructure evidence may confirm an SMC/VWAP
@@ -4823,10 +4847,6 @@ class StrategyManager(_BaseStrategyManager):
                     context_vote.strategy.strip().lower()
                     in context_confirm_allowed_strategies
                     and self._context_vote_is_timestamped(context_vote)
-                    and self._extract_raw_score(context_vote)
-                    >= context_confirm_min_score
-                    and float(context_vote.confidence)
-                    >= context_confirm_min_confidence
                     and context_quote_ready
                     and context_quality_eligible
                 ):
@@ -4845,12 +4865,11 @@ class StrategyManager(_BaseStrategyManager):
             if ambiguous_underlying:
                 qualifying_context_votes = []
 
-            # StrategyManager owns structural/context qualification only. A fresh,
-            # strong, same-side OrderFlow vote may confirm a threshold-passing VWAP
-            # trigger in any regime; Runner remains the sole final numeric alpha/
-            # execution-quality owner. Regime fit is already represented exactly once
-            # in weighted_trigger_score, so a second regime hard block here would
-            # duplicate the same evidence and can strand otherwise valid candidates.
+            # StrategyManager owns structural/context qualification only. Fresh,
+            # same-side OrderFlow evidence may confirm a structurally valid trigger.
+            # Legacy score/regime arithmetic below is retained for attribution only;
+            # Runner owns objective candidate/quote execution validation, not a
+            # synthetic numeric admission score.
             confirmed_raw_context_score = _independent_context_total(
                 qualifying_context_votes, self._extract_raw_context_score
             )
@@ -4870,15 +4889,12 @@ class StrategyManager(_BaseStrategyManager):
                 ),
             )
             # This score is telemetry only. StrategyManager owns structural/context
-            # qualification; Runner is the sole final numeric quality owner.
-            # Re-applying a final score floor here strands confirmed candidates
-            # before Runner can evaluate the canonical independent-alpha contract.
-            manager_context_score_reference_pass = bool(
+            # qualification; Runner owns candidate/quote execution validation.
+            manager_context_score_reference_above_min = bool(
                 context_confirmed_final_score >= context_confirmed_final_min
             )
             context_confirmed_single_allowed = bool(
                 mode_profile.get("allow_single_vote", True)
-                and best_vote.confidence >= conf_min
                 and selected_option
                 and not vetoed
                 and qualifying_context_votes
@@ -4943,9 +4959,7 @@ class StrategyManager(_BaseStrategyManager):
             )
             blocked_reason = None
             if not final_allowed:
-                if not conf_ok:
-                    blocked_reason = "confidence_below_min"
-                elif not selected_ok:
+                if not selected_ok:
                     blocked_reason = "not_selected_or_near_atm"
                 elif vetoed:
                     blocked_reason = "hard_context_veto"
@@ -5059,15 +5073,20 @@ class StrategyManager(_BaseStrategyManager):
                 metadata["context_confirmation_score_min"] = round(
                     context_confirmed_final_min, 3
                 )
-                metadata["manager_context_score_reference_pass"] = (
-                    manager_context_score_reference_pass
+                metadata["manager_context_score_reference_above_min"] = (
+                    manager_context_score_reference_above_min
                 )
                 metadata["canonical_smc_setup_pass"] = canonical_smc_setup_pass
             elif scalp_fallback_allowed:
                 metadata_stage = "single_vote_scalp_controlled"
                 approval_path = approval_path_single or "single_vote_fallback"
             else:
-                allow_candidate_switch = str(os.getenv("STRATEGY_ALLOW_CANDIDATE_SWITCH_ON_HIGH_SCORE", "false")).lower() in {"1", "true", "yes", "on"}
+                allow_candidate_switch = str(
+                    os.getenv(
+                        "STRATEGY_ALLOW_CANDIDATE_SWITCH",
+                        os.getenv("STRATEGY_ALLOW_CANDIDATE_SWITCH_ON_HIGH_SCORE", "false"),
+                    )
+                ).lower() in {"1", "true", "yes", "on"}
                 max_candidate_switch_distance = float(os.getenv("CANDIDATE_SWITCH_MAX_DISTANCE_POINTS", "100") or "100")
                 raw_qdv = metadata.get("quote_depth_valid")
                 if raw_qdv is None:
@@ -5080,12 +5099,10 @@ class StrategyManager(_BaseStrategyManager):
                     switch_spread_pct = float(raw_spread) if raw_spread is not None else 999.0
                 except (TypeError, ValueError):
                     switch_spread_pct = 999.0
-                switch_min_score = 8.0 if best_vote.strategy == "OrderFlow" else 8.5
                 switch_allowed = (
                     not requires_orderflow_confirmation
                     and allow_candidate_switch
                     and (strike_distance_from_atm is not None)
-                    and weighted_trigger_score >= switch_min_score
                     and quote_depth_valid
                     and switch_spread_pct <= resolve_entry_policy().execution_max_spread_pct
                     and strike_distance_from_atm <= max_candidate_switch_distance
@@ -5093,11 +5110,9 @@ class StrategyManager(_BaseStrategyManager):
                 if switch_allowed:
                     metadata_stage = "single_vote_candidate_switch"
                     metadata["candidate_switch_requested"] = True
-                    metadata["candidate_switch_reason"] = "high_score_nearby_option_candidate"
+                    metadata["candidate_switch_reason"] = "executable_nearby_option_candidate"
                 else:
-                    if not conf_ok:
-                        blocked_reason = "confidence_below_min"
-                    elif not selected_ok:
+                    if not selected_ok:
                         blocked_reason = "not_selected_or_near_atm"
                     elif not bool(metadata.get("quote_depth_valid", True)):
                         blocked_reason = "quote_depth_invalid"
@@ -5157,7 +5172,7 @@ class StrategyManager(_BaseStrategyManager):
         metadata["final_trade_score"] = round(final_score, 3)
         metadata["final_trade_threshold_reference"] = round(threshold, 3)
         metadata["manager_final_score_reference_only"] = True
-        metadata["manager_final_score_reference_pass"] = final_score >= threshold
+        metadata["manager_final_score_reference_above_min"] = final_score >= threshold
         # Canonical score lineage is diagnostic only. It names each transformation
         # explicitly so research can attribute setup, regime and context effects
         # without treating correlated representations as independent evidence.
@@ -5170,60 +5185,9 @@ class StrategyManager(_BaseStrategyManager):
             "context_veto_penalty": round(context_penalty, 3),
             "manager_reference_score": round(final_score, 3),
             "manager_reference_threshold": round(threshold, 3),
-            "manager_reference_pass": final_score >= threshold,
-            "final_numeric_gate_owner": "runner_final_execution_score",
+            "manager_reference_above_min": final_score >= threshold,
+            "score_admission_role": "diagnostic_only",
         }
-        if vetoed:
-            blocked_reason = "hard_context_veto"
-            log_throttled_live(
-                log,
-                logging.INFO,
-                "TRADE_DECISION_TRACE",
-                f"TRADE_DECISION_TRACE:{best_vote.strategy}:{symbol_norm}:{blocked_reason}",
-                float(
-                    os.getenv("LOG_THROTTLE_STRATEGY_REJECT_SECONDS", "120")
-                    or "120"
-                ),
-                "TRADE_DECISION_TRACE symbol=%s strategy=%s side=%s "
-                "data_gate=%s final_score=%.2f reference_min=%.2f allowed=%s "
-                "blocked_at=%s blocked_reason=%s",
-                symbol_norm,
-                best_vote.strategy,
-                best_vote.side,
-                True,
-                final_score,
-                threshold,
-                False,
-                "strategy_manager_combine",
-                blocked_reason,
-                extra={
-                    "event": "TRADE_DECISION_TRACE",
-                    "symbol": symbol_norm,
-                    "strategy": best_vote.strategy,
-                    "side": best_vote.side,
-                    "final_score": final_score,
-                    "reference_min": threshold,
-                    "allowed": False,
-                    "blocked_at": "strategy_manager_combine",
-                    "blocked_reason": blocked_reason,
-                },
-            )
-            record_strategy_evaluation(
-                strategy=str(best_vote.strategy),
-                symbol=symbol_norm,
-                accepted=False,
-                reason=blocked_reason,
-                score=final_score,
-            )
-            maybe_emit_strategy_rejection_summary(log, interval_seconds=300.0)
-            _record_no_signal(
-                "strategy_score_below_threshold",
-                blocked_reason,
-                "strategy_manager_combine",
-                trigger_vote_count=len(trigger_votes),
-                context_vote_count=len(context_votes),
-            )
-            return None
         if final_score < threshold:
             log_throttled_live(
                 log,
@@ -5236,7 +5200,7 @@ class StrategyManager(_BaseStrategyManager):
                 ),
                 "STRATEGY_MANAGER_SCORE_REFERENCE_BELOW_MIN symbol=%s "
                 "strategy=%s side=%s score=%.2f reference_min=%.2f "
-                "final_owner=runner",
+                "final_owner=execution_validation",
                 symbol_norm,
                 best_vote.strategy,
                 best_vote.side,
@@ -5249,7 +5213,7 @@ class StrategyManager(_BaseStrategyManager):
                     "side": best_vote.side,
                     "score": final_score,
                     "reference_min": threshold,
-                    "final_owner": "runner_final_execution_score",
+                    "final_owner": "runner_execution_validation",
                 },
             )
         quality_score, quality_meta = self._compute_trade_quality_score(
@@ -5261,11 +5225,11 @@ class StrategyManager(_BaseStrategyManager):
             context_votes=[v for _, v in context_votes],
         )
         quality_min_required = float(mode_profile.get("min_trade_quality", 5.0))
-        quality_pass = quality_score >= quality_min_required
+        quality_reference_above_min = quality_score >= quality_min_required
         metadata.update(quality_meta)
         metadata["quality_min_required"] = quality_min_required
-        metadata["quality_pass"] = quality_pass
-        metadata["quality_gate_owner"] = "runner_final_execution_score"
+        metadata["quality_reference_above_min"] = quality_reference_above_min
+        metadata["quality_reference_role"] = "diagnostic_only"
         metadata["manager_quality_reference_only"] = True
 
         explicit_strategy_block = bool(quality_meta.get("already_blocked_by_strategy"))
@@ -5312,14 +5276,14 @@ class StrategyManager(_BaseStrategyManager):
             )
             return None
 
-        if not quality_pass:
+        if not quality_reference_above_min:
             log_throttled_live(
                 log,
                 logging.INFO,
                 "STRATEGY_QUALITY_REFERENCE_BELOW_MIN",
                 f"STRATEGY_QUALITY_REFERENCE_BELOW_MIN:{best_vote.strategy}:{symbol_norm}",
                 float(os.getenv("LOG_THROTTLE_STRATEGY_REJECT_SECONDS", "120") or "120"),
-                "STRATEGY_QUALITY_REFERENCE_BELOW_MIN symbol=%s strategy=%s side=%s score=%.2f reference_min=%.2f final_owner=runner",
+                "STRATEGY_QUALITY_REFERENCE_BELOW_MIN symbol=%s strategy=%s side=%s score=%.2f reference_min=%.2f final_owner=execution_validation",
                 symbol_norm,
                 best_vote.strategy,
                 best_vote.side,
@@ -5332,7 +5296,7 @@ class StrategyManager(_BaseStrategyManager):
                     "side": best_vote.side,
                     "score": quality_score,
                     "reference_min": quality_min_required,
-                    "final_owner": "runner_final_execution_score",
+                    "final_owner": "runner_execution_validation",
                 },
             )
 
@@ -5573,8 +5537,8 @@ class StrategyManager(_BaseStrategyManager):
         allowed_strategies = {s.strip() for s in str(os.getenv("STRATEGY_CONTEXT_PROMOTION_ALLOWED_STRATEGIES", "OrderFlow,VWAPPro")).split(",") if s.strip()}
         min_score = self._env_float("STRATEGY_CONTEXT_PROMOTION_MIN_SCORE", 5.0)
         min_conf = self._env_float("STRATEGY_CONTEXT_PROMOTION_MIN_CONFIDENCE", 0.45)
-        min_direction_conf = self._env_float("STRATEGY_CONTEXT_PROMOTION_MIN_DIRECTION_CONF", 0.05)
-        best_signal, best_vote = max(context_votes, key=lambda pair: self._extract_raw_score(pair[1]))
+        # Context promotion never ranks candidates by legacy score.
+        best_signal, best_vote = context_votes[0]
         raw_score = self._extract_raw_score(best_vote)
         md0 = dict(best_signal.metadata or {})
         selected_ok, selected_meta = self._is_selected_or_near_atm(symbol, md0, indicators)
@@ -5613,11 +5577,7 @@ class StrategyManager(_BaseStrategyManager):
                 if midpoint > 0.0:
                     spread_pct = ((ask - bid) / midpoint) * 100.0
             live_reject_reason = None
-            if raw_score < live_min_score:
-                live_reject_reason = "live_context_score_below_min"
-            elif float(best_vote.confidence) < live_min_conf:
-                live_reject_reason = "live_context_confidence_below_min"
-            elif best_vote.side not in {"CE", "PE"}:
+            if best_vote.side not in {"CE", "PE"}:
                 live_reject_reason = "live_context_invalid_side"
             elif not selected_ok:
                 live_reject_reason = "live_context_not_selected_or_near_atm"
@@ -5660,7 +5620,9 @@ class StrategyManager(_BaseStrategyManager):
                 )
                 return None
         opposite = [v for _, v in context_votes if v.side in {"CE", "PE"} and v.side != best_vote.side]
-        vetoed = bool(opposite and max(self._extract_context_veto_score(v) for v in opposite) >= 8.0)
+        # Opposing context-score magnitude is telemetry only; authoritative
+        # direction alignment below owns the promotion safety decision.
+        vetoed = False
         direction_bias = str(
             md0.get("direction_bias")
             or md0.get("underlying_direction_bias")
@@ -5684,7 +5646,7 @@ class StrategyManager(_BaseStrategyManager):
             direction_conf = float(conf_raw) if conf_raw is not None else 0.0
         except (TypeError, ValueError):
             direction_conf = 0.0
-        if best_vote.strategy not in allowed_strategies or raw_score < min_score or best_vote.confidence < min_conf or best_vote.side not in {"CE", "PE"} or not selected_ok or vetoed or not direction_aligned or not context_fresh or direction_conf < min_direction_conf:
+        if best_vote.strategy not in allowed_strategies or best_vote.side not in {"CE", "PE"} or not selected_ok or not direction_aligned or not context_fresh:
             return None
         md = dict(best_signal.metadata or {})
         md.update(selected_meta)
@@ -6226,6 +6188,11 @@ class StrategyManager(_BaseStrategyManager):
         )
 
         regime_bias = self._regime_bias_map.get(regime_key, {})
+        # Small-sample composite performance scores are research/adaptation
+        # telemetry in LIVE; they must not silently disable an entry strategy.
+        dynamic_auto_toggle_allowed = not self._is_live_mode()
+        if not dynamic_auto_toggle_allowed:
+            self._dynamic_disabled.clear()
         regime_changed = regime_key != self._regime_last_key
         self._regime_last_key = regime_key
         confidence = self._regime_state.confidence
@@ -6298,7 +6265,8 @@ class StrategyManager(_BaseStrategyManager):
             enabled = name not in self._disabled_strategies
             dynamic_flag = name in self._dynamic_disabled
             should_disable = (
-                enabled
+                dynamic_auto_toggle_allowed
+                and enabled
                 and not dynamic_flag
                 and manual is None
                 and trade_count >= max(1, self._dynamic_trade_threshold)
@@ -6307,7 +6275,7 @@ class StrategyManager(_BaseStrategyManager):
                 and rolling_pnl_value <= 0
                 and drawdown_value > 0
             )
-            should_enable = dynamic_flag and (
+            should_enable = dynamic_auto_toggle_allowed and dynamic_flag and (
                 composite_score >= self._dynamic_enable_threshold
                 or rolling_pnl_value > 0
                 or ratio_value >= 1.1
