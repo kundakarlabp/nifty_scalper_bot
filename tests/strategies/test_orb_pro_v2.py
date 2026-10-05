@@ -103,7 +103,7 @@ def _strategy(
     rows_by_symbol: dict[str, list[dict[str, object]]], *, orb_minutes: int = 15
 ) -> ORBProStrategy:
     return ORBProStrategy(
-        ORBProStrategyConfig(min_confidence=0.0, orb_minutes=orb_minutes),
+        ORBProStrategyConfig(orb_minutes=orb_minutes),
         indicator_engine=_IndicatorEngine(rows_by_symbol),
     )
 
@@ -179,7 +179,7 @@ def test_retest_must_follow_breakout_before_retest_branch_votes(monkeypatch) -> 
     )
     engine = _IndicatorEngine({FUTURE: rows})
     strategy = ORBProStrategy(
-        ORBProStrategyConfig(min_confidence=0.0, orb_minutes=15),
+        ORBProStrategyConfig(orb_minutes=15),
         indicator_engine=engine,
     )
     first = _base_indicators("CE", rows[-1]["timestamp"])
