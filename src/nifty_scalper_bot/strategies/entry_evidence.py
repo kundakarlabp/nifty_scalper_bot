@@ -1,7 +1,7 @@
 """Canonical entry-evidence helpers.
 
-This module contains objective execution evidence only; admission remains structural.  Live admission
-is structural and fail-closed: direction, setup validity, market-data freshness,
+This module contains objective execution evidence only; admission remains
+structural and fail-closed: direction, setup validity, market-data freshness,
 quote executability, post-cost economics and risk retain separate owners.
 """
 
