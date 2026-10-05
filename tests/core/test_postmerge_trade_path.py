@@ -210,10 +210,10 @@ def _trend_vwap_context_candidate(
     return result
 
 
-def test_context_confirmed_trend_vwap_still_fails_closed_on_weak_independent_alpha(
+def test_context_confirmed_trend_vwap_keeps_weak_alpha_as_diagnostic_only(
     monkeypatch,
 ) -> None:
-    """Manager qualification must never bypass Runner's independent VWAP alpha floor."""
+    """Legacy VWAP alpha floor remains observable but no longer vetoes capital."""
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     monkeypatch.setenv("ENABLE_LIVE", "true")
     manager = StrategyManager.__new__(StrategyManager)
@@ -232,14 +232,14 @@ def test_context_confirmed_trend_vwap_still_fails_closed_on_weak_independent_alp
 
     assert quality.final_score >= quality.components["threshold"]
     assert quality.components["alpha_score"] < quality.components["threshold"]
-    assert quality.allowed is False
-    assert "alpha_below_threshold" in quality.reasons
+    assert quality.allowed is True
+    assert quality.reasons == []
 
 
-def test_range_vwap_context_reaches_runner_but_weak_alpha_still_fails_closed(
+def test_range_vwap_context_keeps_weak_alpha_as_diagnostic_only(
     monkeypatch,
 ) -> None:
-    """RANGE context confirmation restores routing, not permission to bypass Runner."""
+    """RANGE context routes normally; the legacy alpha threshold is diagnostic only."""
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     monkeypatch.setenv("ENABLE_LIVE", "true")
     manager = StrategyManager.__new__(StrategyManager)
