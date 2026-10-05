@@ -2,16 +2,6 @@ meta:
   version: 1
   name: "nifty_scalper_default"
 
-strategy:
-  # Accepts 0..1 or 0..100 (e.g. 70 == 0.70)
-  min_score: 0.30
-  atr_period: 14
-  weights:
-    trend: 0.4
-    momentum: 0.3
-    pullback: 0.2
-    breakout: 0.1
-
 windows:
   timezone: "Asia/Kolkata"
   trading:
@@ -26,7 +16,7 @@ gates:
   atr_pct_min: 0.015
   atr_pct_max: 2.00
   mtf_confirm: true
-  iv_percentile_limit: 85   # block if IVpct > limit AND score below trend min+1
+  iv_percentile_limit: 85   # block if IV percentile exceeds the declared limit
   adx_min_trend: 18         # require ADX≥18 in TREND regime
 
 micro:
@@ -74,7 +64,4 @@ rr_threshold: 1.5            # set to null to disable
 
 warmup:
   min_bars: 15
-
-debug:
-  lower_score_temp: false
 
