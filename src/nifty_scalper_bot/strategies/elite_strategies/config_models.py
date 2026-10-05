@@ -84,7 +84,7 @@ class CPRBreakoutStrategyConfig(EliteStrategyConfig):
 
 @dataclass(slots=True)
 class OrderFlowStrategyConfig(EliteStrategyConfig):
-    """OrderFlow native context-scoring thresholds.
+    """OrderFlow native microstructure context thresholds.
 
     ``large_order_threshold_pct`` becomes the normalized depth-imbalance support
     floor. ``imbalance_ratio_min`` is converted to normalized imbalance for
