@@ -414,7 +414,7 @@ def test_manager_quality_reference_is_diagnostic_runner_owns_final_score(
     )
 
     assert result is not None
-    assert result.metadata["quality_pass"] is False
+    assert result.metadata["quality_reference_above_min"] is False
     assert result.metadata["manager_quality_reference_only"] is True
     assert result.metadata["quality_reference_role"] == "diagnostic_only"
 
@@ -489,7 +489,7 @@ def test_manager_final_trade_score_is_reference_only_runner_owns_numeric_quality
     assert result is not None
     assert result.metadata["final_trade_score"] < 4.5
     assert result.metadata["manager_final_score_reference_only"] is True
-    assert result.metadata["manager_final_score_reference_pass"] is False
+    assert result.metadata["manager_final_score_reference_above_min"] is False
     assert result.metadata["quality_reference_role"] == "diagnostic_only"
 
 
