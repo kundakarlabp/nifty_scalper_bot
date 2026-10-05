@@ -443,6 +443,17 @@ class ORBProStrategy(EliteStrategy):
         branch: str,
         retest_timestamp: datetime | None,
     ) -> EliteSignal | None:
+        # ORB is research-only until its frozen rule demonstrates robust
+        # post-cost out-of-sample edge. Preserve shadow/backtest telemetry but
+        # never let it authorize a LIVE entry.
+        is_live = (
+            str(os.getenv("EXECUTION_MODE", "SHADOW") or "SHADOW").strip().upper()
+            == "LIVE"
+        )
+        if is_live:
+            self._no_vote("orb_live_research_only")
+            return None
+
         option_atr = max(float(indicators.get("atr") or 0.0), current_price * 0.01, 1.0)
         max_stop_pct = max(0.5, _env_float("ORB_PREMIUM_STOP_MAX_PCT", 8.0)) / 100.0
         atr_stop = max(0.5, _env_float("ORB_PREMIUM_STOP_ATR_MULT", 0.75) * option_atr)
@@ -502,11 +513,7 @@ class ORBProStrategy(EliteStrategy):
             if direction == side and context_fresh
             else 0.0
         )
-        is_live = str(os.getenv("EXECUTION_MODE", "SHADOW") or "SHADOW").strip().upper() == "LIVE"
-        min_score = _env_float(
-            "ORB_QUALITY_MIN_SCORE_LIVE" if is_live else "ORB_QUALITY_MIN_SCORE_SHADOW",
-            6.0 if is_live else 5.0,
-        )
+        min_score = _env_float("ORB_QUALITY_MIN_SCORE_SHADOW", 5.0)
         if strategy_score < min_score:
             self._no_vote("orb_quality_below_minimum")
             return None
