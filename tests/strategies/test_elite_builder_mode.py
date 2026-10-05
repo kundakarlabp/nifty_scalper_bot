@@ -206,30 +206,27 @@ def test_production_profile_is_stable_and_changes_with_material_settings(
         "mode": "LIVE",
         "allow_context_promotion": False,
         "allow_single_vote": True,
-        "min_trade_quality": 7.0,
     }
 
     first = build_production_strategy_profile(
         settings=runtime,
         strategies=strategies,
         mode_profile=mode_profile,
-        global_min_confidence=0.35,
     )
     repeated = build_production_strategy_profile(
         settings=runtime,
         strategies=strategies,
         mode_profile=mode_profile,
-        global_min_confidence=0.35,
     )
 
     assert first == repeated
-    assert first["version"].startswith("production-v2-")
+    assert first["version"].startswith("production-v3-")
     assert first["execution_mode"] == "LIVE"
     assert "OrderFlow" in first["strategies"]["context_only"]
     assert {"SMC", "VWAPPro", "ORBPro"}.issubset(
         first["strategies"]["trigger_capable"]
     )
-    assert first["score_thresholds"]["global_min_confidence"] == 0.35
+    assert first["structural_entry_policy"]["setup"] == "strategy_owned_boolean_contract"
     assert first["strategy_configs"]["ORBPro"]["orb_minutes"] == 15
 
     changed_runtime = SimpleNamespace(
@@ -242,7 +239,6 @@ def test_production_profile_is_stable_and_changes_with_material_settings(
         settings=changed_runtime,
         strategies=strategies,
         mode_profile=mode_profile,
-        global_min_confidence=0.35,
     )
 
     assert changed["risk"]["per_trade_risk_pct"] == 4.0
@@ -269,14 +265,12 @@ def test_production_profile_changes_when_material_strategy_environment_changes(
         settings=runtime,
         strategies=strategies,
         mode_profile=mode_profile,
-        global_min_confidence=0.35,
     )
     monkeypatch.setenv("ORB_TARGET_RR", "2.0")
     changed = build_production_strategy_profile(
         settings=runtime,
         strategies=strategies,
         mode_profile=mode_profile,
-        global_min_confidence=0.35,
     )
 
     assert first["decision_environment"]["ORB_TARGET_RR"] == "1.8"
@@ -303,7 +297,6 @@ def test_production_profile_does_not_capture_unrelated_or_secret_environment(
         settings=runtime,
         strategies=strategies,
         mode_profile={"mode": "LIVE"},
-        global_min_confidence=0.35,
     )
 
     assert "BROKER_ACCESS_TOKEN" not in profile["decision_environment"]
