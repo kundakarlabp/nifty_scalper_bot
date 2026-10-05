@@ -745,7 +745,7 @@ class SMCStrategy(EliteStrategy):
 
                 atr = max(1.0, float(snapshot["atr"]))
                 body = abs(float(current["close"]) - float(current["open"]))
-                displacement_score = body / atr
+                displacement_atr = body / atr
                 displacement_min = max(
                     0.05,
                     safe_float_env("SMC_CONFIRMATION_DISPLACEMENT_ATR", 0.25),
@@ -759,7 +759,7 @@ class SMCStrategy(EliteStrategy):
                         event["sweep_bar_low"]
                     )
                 displacement_confirmed = bool(
-                    price_confirmation and displacement_score >= displacement_min
+                    price_confirmation and displacement_atr >= displacement_min
                 )
                 if not displacement_confirmed:
                     self._no_vote("smc_awaiting_confirmation")
@@ -920,7 +920,7 @@ class SMCStrategy(EliteStrategy):
                     "sweep_depth_atr": depth_atr,
                     "reclaim_distance_points": float(event["reclaim_points"]),
                     "reclaim_distance_atr": float(event["reclaim_atr"]),
-                    "displacement_atr": round(displacement_score, 3),
+                    "displacement_atr": round(displacement_atr, 3),
                     "structure_confirmed": structure_confirmed,
                     "momentum_confirmed": True,
                     "structure_or_momentum_confirmed": True,
@@ -965,7 +965,7 @@ class SMCStrategy(EliteStrategy):
                     contract_side,
                     snapshot["source"],
                     depth_atr,
-                    displacement_score,
+                    displacement_atr,
                 )
                 return EliteSignal(
                     symbol=symbol,
