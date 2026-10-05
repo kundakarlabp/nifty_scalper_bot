@@ -10,4 +10,6 @@ def test_runner_has_no_legacy_confidence_weighted_signal_aggregation() -> None:
 
     assert "def aggregate_signals_by_symbol(" not in source
     assert "def _normalize_confidence(" not in source
+    assert "def _passes_spot_trend_filter(" not in source
     assert "Confidence threshold" not in source
+    assert "VWAP filter" not in source
