@@ -12021,10 +12021,6 @@ class StrategyRunner:
                 os.getenv("RUNNER_INTRABAR_VOLUME_DELTA_MIN", "100") or "100"
             )
             current_score = float(tick.get("candidate_score") or 0.0)
-            prev_score = float(last_quote.get("candidate_score") or 0.0)
-            score_trigger = current_score > prev_score + float(
-                os.getenv("RUNNER_INTRABAR_CANDIDATE_SCORE_DELTA_MIN", "0.15") or "0.15"
-            )
             detail.update(
                 {
                     "volume_delta": round(volume_delta, 2),
@@ -12033,10 +12029,10 @@ class StrategyRunner:
                     "bid_ask_fresh": bool(ts_changed),
                     "tick_ts": tick_ts,
                     "volume_now": volume_now,
-                    "candidate_score": current_score,
+                    "legacy_candidate_score": current_score,
                 }
             )
-            if spread_trigger or ts_changed or volume_trigger or score_trigger:
+            if spread_trigger or ts_changed or volume_trigger:
                 self._last_same_bar_eval_block_reason_by_symbol.pop(symbol, None)
                 self._last_same_bar_eval_block_detail_by_symbol.pop(symbol, None)
                 return "same_bar_market_update_eval"
