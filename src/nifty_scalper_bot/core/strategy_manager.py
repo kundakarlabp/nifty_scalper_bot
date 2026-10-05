@@ -30,7 +30,6 @@ from math import isfinite, sqrt
 from statistics import mean, pstdev
 
 from nifty_scalper_bot.config import settings as app_settings
-from nifty_scalper_bot.config.entry_policy import resolve_entry_policy
 from nifty_scalper_bot.config.regime_ontology import normalize_regime
 from nifty_scalper_bot.config.strategy_taxonomy import (
     canonical_signal_family,
@@ -45,7 +44,6 @@ from nifty_scalper_bot.core.market_regime import RegimeSnapshot
 from nifty_scalper_bot.core.market_regime_manager import MarketRegimeManager
 from nifty_scalper_bot.core.strategy_vote_policy import (
     independent_same_side_confirmation,
-    is_permanent_context_only,
     partition_votes,
 )
 from nifty_scalper_bot.core.underlying_direction import (
@@ -66,12 +64,10 @@ from nifty_scalper_bot.strategies.signal_generator import Signal
 from nifty_scalper_bot.strategies.signal_generator import (
     StrategyManager as _BaseStrategyManager,
 )
-from nifty_scalper_bot.utils.log_throttle import maybe_emit_strategy_rejection_summary, record_strategy_evaluation, log_throttled as log_throttled_live
 from nifty_scalper_bot.utils.logging import get_logger, log_state_change, log_throttled
 from nifty_scalper_bot.utils.symbols import normalize_symbol
 from nifty_scalper_bot.execution.readiness import HistoryReadinessPolicy
 from nifty_scalper_bot.execution.quote_readiness import resolve_tick_age_seconds
-from nifty_scalper_bot.strategies.runtime_context_contract import resolve_context_age_seconds
 
 log = get_logger(__name__)
 
