@@ -5149,57 +5149,6 @@ class StrategyManager(_BaseStrategyManager):
             "manager_reference_pass": final_score >= threshold,
             "score_admission_role": "diagnostic_only",
         }
-        if vetoed:
-            blocked_reason = "hard_context_veto"
-            log_throttled_live(
-                log,
-                logging.INFO,
-                "TRADE_DECISION_TRACE",
-                f"TRADE_DECISION_TRACE:{best_vote.strategy}:{symbol_norm}:{blocked_reason}",
-                float(
-                    os.getenv("LOG_THROTTLE_STRATEGY_REJECT_SECONDS", "120")
-                    or "120"
-                ),
-                "TRADE_DECISION_TRACE symbol=%s strategy=%s side=%s "
-                "data_gate=%s final_score=%.2f reference_min=%.2f allowed=%s "
-                "blocked_at=%s blocked_reason=%s",
-                symbol_norm,
-                best_vote.strategy,
-                best_vote.side,
-                True,
-                final_score,
-                threshold,
-                False,
-                "strategy_manager_combine",
-                blocked_reason,
-                extra={
-                    "event": "TRADE_DECISION_TRACE",
-                    "symbol": symbol_norm,
-                    "strategy": best_vote.strategy,
-                    "side": best_vote.side,
-                    "final_score": final_score,
-                    "reference_min": threshold,
-                    "allowed": False,
-                    "blocked_at": "strategy_manager_combine",
-                    "blocked_reason": blocked_reason,
-                },
-            )
-            record_strategy_evaluation(
-                strategy=str(best_vote.strategy),
-                symbol=symbol_norm,
-                accepted=False,
-                reason=blocked_reason,
-                score=final_score,
-            )
-            maybe_emit_strategy_rejection_summary(log, interval_seconds=300.0)
-            _record_no_signal(
-                "strategy_score_below_threshold",
-                blocked_reason,
-                "strategy_manager_combine",
-                trigger_vote_count=len(trigger_votes),
-                context_vote_count=len(context_votes),
-            )
-            return None
         if final_score < threshold:
             log_throttled_live(
                 log,
