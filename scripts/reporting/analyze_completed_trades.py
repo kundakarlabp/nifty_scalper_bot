@@ -17,7 +17,6 @@ if str(SRC_PATH) not in sys.path:
 
 from nifty_scalper_bot.backtesting.completed_trade_analysis import (  # noqa: E402, I001
     attribution_readiness,
-    calibrate_signal_scores,
     canonicalize_completed_trades,
     chronological_post_cost_blocks,
     chronological_walk_forward,
@@ -86,16 +85,6 @@ def build_analysis(
         walk_forward_folds,
         minimum_folds=walk_forward_min_folds,
     )
-    score_calibration = {
-        key: asdict(
-            calibrate_signal_scores(
-                trades,
-                score_key=key,
-                minimum_trades_per_bin=10,
-            )
-        )
-        for key in ("alpha_score", "final_score", "strategy_score")
-    }
     r_values: list[float] = []
     for trade in trades:
         raw_r = trade.outcome.get("r_multiple")
@@ -186,7 +175,6 @@ def build_analysis(
                 overall.broker_cost_trade_count == overall.trade_count
             ),
         },
-        "score_calibration": score_calibration,
         "deflated_sharpe": dsr,
         "attribution": {
             "ready": readiness.ready,
