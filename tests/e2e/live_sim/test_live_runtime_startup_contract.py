@@ -355,7 +355,7 @@ def _patch_no_network_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(om_core, "get_time_status", lambda: (True, "open"))
 
     def _build_test_strategies(settings, indicator_engine):
-        del settings, indicator_engine
+        del settings
         strategy = RSIMeanReversionStrategy(
             oversold_threshold=95, overbought_threshold=99, default_quantity=1
         )
