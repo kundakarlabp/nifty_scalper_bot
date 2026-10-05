@@ -383,7 +383,7 @@ class ORBProStrategy(EliteStrategy):
         opening_range_atr: float,
         indicators: Mapping[str, Any],
     ) -> tuple[bool, list[str], bool, float, float]:
-        """Return explicit ORB setup evidence without weighted scoring."""
+        """Return explicit ORB structural setup evidence."""
         reasons = [
             "underlying_opening_range_complete",
             "fresh_underlying_breakout",
