@@ -62,9 +62,9 @@ def test_orderflow_consumes_upstream_ofi_instead_of_tick_bonus() -> None:
     assert signal is not None
     assert signal.metadata["flow_confirmation_source"] == "temporal_ofi"
     assert signal.metadata["ofi_supports_side"] is True
-    assert signal.metadata["tick_score"] == 2.0
-    assert "temporal_ofi_alignment" in signal.metadata["score_reasons"]
-    assert "tick_direction_alignment" not in signal.metadata["score_reasons"]
+    assert signal.metadata["flow_supports_side"] is True
+    assert "temporal_ofi_alignment" in signal.metadata["setup_reasons"]
+    assert "tick_direction_alignment" not in signal.metadata["setup_reasons"]
     assert not hasattr(strategy, "_ofi_state")
 
 
@@ -83,6 +83,6 @@ def test_adverse_upstream_ofi_cannot_add_context_bonus() -> None:
     assert signal is not None
     assert signal.metadata["ofi_conflicts_side"] is True
     assert signal.metadata["ofi_supports_side"] is False
-    assert signal.metadata["tick_score"] == 0.0
-    assert signal.metadata["context_bonus_score"] == 0.0
-    assert "temporal_ofi_conflict" in signal.metadata["score_reasons"]
+    assert signal.metadata["flow_supports_side"] is False
+    assert signal.metadata["effective_context_alignment"] is False
+    assert "temporal_ofi_alignment" not in signal.metadata["setup_reasons"]
