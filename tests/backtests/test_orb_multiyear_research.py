@@ -186,8 +186,32 @@ def test_compact_context_preserves_actual_orb_trades(monkeypatch, tmp_path):
         compact_orb_context=True,
     )["strategies"]["ORBPro"]
     assert baseline["metrics"]["trade_count"] > 0
-    assert compact["trades"] == baseline["trades"]
     assert compact["metrics"] == baseline["metrics"]
+
+    economic_fields = (
+        "entry_time",
+        "entry_price",
+        "stop_loss",
+        "take_profit",
+        "quantity",
+        "symbol",
+        "exit_time",
+        "exit_price",
+        "exit_reason",
+        "gross_pnl",
+        "fees",
+        "net_pnl",
+    )
+    assert [
+        {field: trade[field] for field in economic_fields}
+        for trade in compact["trades"]
+    ] == [
+        {field: trade[field] for field in economic_fields}
+        for trade in baseline["trades"]
+    ]
+    assert compact["trades"][0]["raw_setup_score"] >= baseline["trades"][0]["raw_setup_score"]
+    assert "underlying_direction_alignment" in compact["trades"][0]["score_reasons"]
+    assert "futures_vwap_slope_alignment" in compact["trades"][0]["score_reasons"]
 
     first = baseline["trades"][0]
     entry_time = datetime.fromisoformat(first["entry_time"])
