@@ -61,6 +61,7 @@ class TradeCandidate:
     stop_loss: float | None = None
     target: float | None = None
     rr: float | None = None
+    net_rr: float | None = None
     liquidity_score: float | None = None
     microstructure_score: float | None = None
     final_score: float | None = None
@@ -242,9 +243,40 @@ class TradeCandidateSelector:
                 if opt_delta:
                     final = max(0.0, min(10.0, final + opt_delta))
                 reasons.extend(opt_reasons)
-            ranked.append(TradeCandidate(symbol=symbol, side=side, score=final, reasons=reasons, spread_pct=spread_pct, tick_age_s=tick_age_s, premium=premium, atm_distance=atm_distance, data_quality_score=dq.score, entry_price=entry, stop_loss=sl, target=target, rr=rr, liquidity_score=liquidity, microstructure_score=micro, final_score=final))
+            ranked.append(
+                TradeCandidate(
+                    symbol=symbol,
+                    side=side,
+                    score=final,
+                    reasons=reasons,
+                    spread_pct=spread_pct,
+                    tick_age_s=tick_age_s,
+                    premium=premium,
+                    atm_distance=atm_distance,
+                    data_quality_score=dq.score,
+                    entry_price=entry,
+                    stop_loss=sl,
+                    target=target,
+                    rr=rr,
+                    net_rr=economics.net_rr,
+                    liquidity_score=liquidity,
+                    microstructure_score=micro,
+                    final_score=final,
+                )
+            )
 
-        sorted_ranked = sorted(ranked, key=lambda c: c.final_score or 0.0, reverse=True)
+        # Rank only candidates that already passed the hard execution/economic
+        # gates. Prefer measured post-cost economics, then tighter/fresher/nearer
+        # contracts. The legacy 0-10 score remains telemetry for calibration.
+        sorted_ranked = sorted(
+            ranked,
+            key=lambda c: (
+                -(c.net_rr if c.net_rr is not None else float("-inf")),
+                c.spread_pct if c.spread_pct is not None else float("inf"),
+                c.tick_age_s if c.tick_age_s is not None else float("inf"),
+                c.atm_distance if c.atm_distance is not None else 10**9,
+            ),
+        )
         self._last_rejects = dict(rejects)
         event_extra = {'event': 'CANDIDATE_SELECTION_SUMMARY', 'direction': direction_bias, 'atm': atm_strike, 'total': len(snapshots), 'ranked': len(sorted_ranked), 'rejects': rejects, 'ltp_only_used': ltp_only_used}
         if sorted_ranked:

@@ -140,8 +140,9 @@ def test_smc_native_live_core_plus_direction_does_not_auto_pass(monkeypatch) -> 
         current_price=100.0,
     )
 
-    assert signal is None
-    assert strategy.last_no_vote_reason == "smc_low_score"
+    assert signal is not None
+    assert signal.metadata["strategy_score"] < signal.metadata["setup_min"]
+    assert "score_below_legacy_minimum" in signal.metadata["score_reasons"]
 
 
 def test_smc_native_independent_confirmation_reaches_live_floor(monkeypatch) -> None:
@@ -310,47 +311,28 @@ def _orb_snapshot(*, high: float, low: float, current_close: float) -> dict[str,
     }
 
 
-def test_orb_native_opening_range_quality_controls_admission(monkeypatch) -> None:
+def test_orb_is_research_only_in_live_mode(monkeypatch) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     strategy = ORBProStrategy(ORBProStrategyConfig(), indicator_engine=None)
     event_time = datetime(2026, 9, 11, 4, 29, tzinfo=timezone.utc)
     event = {
-        "boundary": 101.0,
+        "boundary": 105.0,
         "breakout_timestamp": event_time,
         "body_ratio": 0.7,
         "recovered_from_history": False,
     }
-    indicators = {"atr": 2.0, "stale_data_used": False}
-
-    weak = strategy._build_signal(
+    signal = strategy._build_signal(
         symbol="NFO:NIFTY26SEP25000CE",
         side="CE",
         current_price=100.0,
-        indicators=indicators,
-        snapshot=_orb_snapshot(high=101.0, low=100.9, current_close=101.1),
-        event=event,
-        branch="momentum",
-        retest_timestamp=None,
-    )
-    assert weak is None
-    assert strategy.last_no_vote_reason == "orb_quality_below_minimum"
-
-    event["boundary"] = 105.0
-    accepted = strategy._build_signal(
-        symbol="NFO:NIFTY26SEP25000CE",
-        side="CE",
-        current_price=100.0,
-        indicators=indicators,
+        indicators={"atr": 2.0, "stale_data_used": False},
         snapshot=_orb_snapshot(high=105.0, low=100.0, current_close=105.1),
         event=event,
         branch="momentum",
         retest_timestamp=None,
     )
-    assert accepted is not None
-    assert accepted.metadata["opening_range_width_atr"] == 0.5
-    assert accepted.metadata["opening_range_balanced"] is True
-    assert accepted.metadata["strategy_score"] == 6.0
-    assert accepted.metadata["setup_min"] == 6.0
+    assert signal is None
+    assert strategy.last_no_vote_reason == "orb_live_research_only"
 
 
 def test_vwap_direction_score_comes_from_underlying_confidence(monkeypatch) -> None:

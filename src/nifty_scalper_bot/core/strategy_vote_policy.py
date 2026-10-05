@@ -72,10 +72,10 @@ def setup_gate_decision(vote: Any) -> SetupGateDecision:
         return SetupGateDecision(True, score, minimum)
     if explicit_pass is False:
         return SetupGateDecision(False, score, minimum, block_reason or "setup_pass_false")
-    if block_reason in {"weak_score", "setup_below_minimum", "setup_failed"}:
+    # Numeric setup scores/minima are retained for attribution and calibration,
+    # not authorization. Only an explicit structural failure may reject a trigger.
+    if block_reason == "setup_failed":
         return SetupGateDecision(False, score, minimum, block_reason)
-    if score is not None and minimum is not None and score < minimum:
-        return SetupGateDecision(False, score, minimum, "setup_below_minimum")
     return SetupGateDecision(True, score, minimum)
 
 

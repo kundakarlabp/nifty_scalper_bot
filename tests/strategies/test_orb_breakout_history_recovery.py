@@ -23,7 +23,7 @@ def _new_strategy(rows):
 
 
 def test_restart_recovers_unconfirmed_breakout_for_current_retest(monkeypatch) -> None:
-    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
     monkeypatch.setenv("ORB_MOMENTUM_BRANCH_ENABLED", "false")
     rows = _opening_rows()
     breakout = _bar(
@@ -57,7 +57,7 @@ def test_restart_recovers_unconfirmed_breakout_for_current_retest(monkeypatch) -
 
 
 def test_recovery_does_not_late_enter_after_prior_retest(monkeypatch) -> None:
-    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
     monkeypatch.setenv("ORB_MOMENTUM_BRANCH_ENABLED", "false")
     rows = _opening_rows()
     rows.extend(
@@ -102,7 +102,7 @@ def test_recovery_does_not_late_enter_after_prior_retest(monkeypatch) -> None:
 
 
 def test_recovery_never_replays_a_momentum_breakout(monkeypatch) -> None:
-    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
     monkeypatch.setenv("ORB_MOMENTUM_BRANCH_ENABLED", "true")
     rows = _opening_rows()
     rows.extend(

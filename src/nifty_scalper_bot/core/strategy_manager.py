@@ -4391,6 +4391,30 @@ class StrategyManager(_BaseStrategyManager):
             entry_signals.append((signal, vote))
 
         trigger_votes, context_votes, rejected_setups = partition_votes(entry_signals)
+        execution_mode = str(
+            os.getenv("EXECUTION_MODE", "SHADOW") or "SHADOW"
+        ).strip().upper()
+        if execution_mode == "LIVE":
+            live_orb = [
+                (signal, vote)
+                for signal, vote in trigger_votes
+                if normalize_strategy_name(vote.strategy) == "orb_pro"
+            ]
+            if live_orb:
+                trigger_votes = [
+                    (signal, vote)
+                    for signal, vote in trigger_votes
+                    if normalize_strategy_name(vote.strategy) != "orb_pro"
+                ]
+                rejected_setups.extend(
+                    {
+                        "strategy": vote.strategy,
+                        "score": self._extract_raw_score(vote),
+                        "minimum": None,
+                        "reason": "orb_live_research_only",
+                    }
+                    for _signal, vote in live_orb
+                )
         if rejected_setups and not trigger_votes:
             log_throttled(
                 log,
@@ -4696,9 +4720,10 @@ class StrategyManager(_BaseStrategyManager):
             metadata["strike_distance_from_atm"] = strike_distance_from_atm
             metadata["is_selected_option"] = selected_option
             metadata["selected_ok_reason"] = selected_ok_reason
+            # Numeric strategy scores are diagnostic. Structural/context
+            # validity, selected-contract eligibility and confidence own this gate.
             threshold_passed = bool(
-                weighted_trigger_score >= score_min
-                and best_vote.confidence >= conf_min
+                best_vote.confidence >= conf_min
                 and selected_ok
                 and not vetoed
             )
@@ -4729,7 +4754,7 @@ class StrategyManager(_BaseStrategyManager):
             )
             high_conviction_allowed = bool(
                 not requires_orderflow_confirmation
-                and weighted_trigger_score >= single_high
+                and best_vote.confidence >= conf_min
                 and selected_ok
                 and not vetoed
                 and allow_high_conviction
@@ -4744,15 +4769,10 @@ class StrategyManager(_BaseStrategyManager):
                 and selected_option
                 and allow_selected_option
             )
-            # Single-vote (no consensus) is riskier, so a lone selected-option scalp
-            # must clear a high score floor (default 9.0) on top of the normal gates.
-            # This keeps unconfirmed single-vote trades to only the strongest signals.
-            selected_single_min = self._env_float("STRATEGY_SELECTED_OPTION_SINGLE_VOTE_MIN_SCORE", 9.0)
-            if (
-                selected_option_scalp_allowed
-                and weighted_trigger_score < selected_single_min
-            ):
-                selected_option_scalp_allowed = False
+            # Former selected-option score floor remains telemetry only.
+            selected_single_min = self._env_float(
+                "STRATEGY_SELECTED_OPTION_SINGLE_VOTE_MIN_SCORE", 9.0
+            )
 
             # A trigger plus a fresh, same-side context vote is not an unconfirmed
             # single vote. OrderFlow remains permanently context-only, but its
@@ -4923,9 +4943,7 @@ class StrategyManager(_BaseStrategyManager):
             )
             blocked_reason = None
             if not final_allowed:
-                if not score_ok and not canonical_smc_setup_pass:
-                    blocked_reason = "regime_weighted_score_below_min"
-                elif not conf_ok:
+                if not conf_ok:
                     blocked_reason = "confidence_below_min"
                 elif not selected_ok:
                     blocked_reason = "not_selected_or_near_atm"
@@ -5077,9 +5095,7 @@ class StrategyManager(_BaseStrategyManager):
                     metadata["candidate_switch_requested"] = True
                     metadata["candidate_switch_reason"] = "high_score_nearby_option_candidate"
                 else:
-                    if not score_ok and not canonical_smc_setup_pass:
-                        blocked_reason = "regime_weighted_score_below_min"
-                    elif not conf_ok:
+                    if not conf_ok:
                         blocked_reason = "confidence_below_min"
                     elif not selected_ok:
                         blocked_reason = "not_selected_or_near_atm"

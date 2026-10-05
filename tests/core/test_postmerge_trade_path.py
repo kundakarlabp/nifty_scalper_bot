@@ -105,7 +105,12 @@ def test_aligned_independent_trigger_can_clear_unchanged_live_quality_floor(
     manager._last_no_signal_decision_by_symbol = {}
 
     vwap = _signal_vote("VWAPPro", raw_score=8.5, weighted_score=6.8, confidence=0.85)
-    orb = _signal_vote("ORBPro", raw_score=7.0, weighted_score=5.6, confidence=0.70)
+    independent = _signal_vote(
+        "PremiumMomentum",
+        raw_score=7.0,
+        weighted_score=5.6,
+        confidence=0.70,
+    )
     orderflow = _signal_vote(
         "OrderFlow",
         raw_score=8.0,
@@ -116,7 +121,7 @@ def test_aligned_independent_trigger_can_clear_unchanged_live_quality_floor(
 
     result = manager._combine_strategy_votes(
         symbol=_SYMBOL,
-        signals=[vwap, orb, orderflow],
+        signals=[vwap, independent, orderflow],
         indicators=_live_indicators(),
     )
 
@@ -129,9 +134,12 @@ def test_aligned_independent_trigger_can_clear_unchanged_live_quality_floor(
     assert result.metadata["trade_quality_score"] >= 7.0
     assert result.metadata["approval_path"] == "aligned_two_trigger_consensus"
     assert result.metadata["score_contract_version"] == 1
-    assert result.metadata["confirming_trigger_strategies"] == ["VWAPPro", "ORBPro"]
+    assert result.metadata["confirming_trigger_strategies"] == [
+        "VWAPPro",
+        "PremiumMomentum",
+    ]
     assert result.metadata["context_confirmation_strategies"] == ["OrderFlow"]
-    assert result.metadata["confirming_votes"] == ["VWAPPro", "ORBPro"]
+    assert result.metadata["confirming_votes"] == ["VWAPPro", "PremiumMomentum"]
     lineage = result.metadata["score_lineage"]
     assert lineage["raw_setup_score"] == 8.5
     assert lineage["regime_adjusted_setup_score"] == 6.8
@@ -145,8 +153,12 @@ def test_opposite_trigger_does_not_receive_quality_confirmation(monkeypatch) -> 
     manager._last_no_signal_decision_by_symbol = {}
 
     vwap = _signal_vote("VWAPPro", raw_score=8.5, weighted_score=6.8, confidence=0.85)
-    opposite_orb = _signal_vote(
-        "ORBPro", side="PE", raw_score=7.0, weighted_score=5.6, confidence=0.70
+    opposite_independent = _signal_vote(
+        "PremiumMomentum",
+        side="PE",
+        raw_score=7.0,
+        weighted_score=5.6,
+        confidence=0.70,
     )
     orderflow = _signal_vote(
         "OrderFlow",
@@ -158,7 +170,7 @@ def test_opposite_trigger_does_not_receive_quality_confirmation(monkeypatch) -> 
 
     result = manager._combine_strategy_votes(
         symbol=_SYMBOL,
-        signals=[vwap, opposite_orb, orderflow],
+        signals=[vwap, opposite_independent, orderflow],
         indicators=_live_indicators(),
     )
 
@@ -388,11 +400,16 @@ def test_manager_quality_reference_is_diagnostic_runner_owns_final_score(
         },
     )
     vwap = _signal_vote("VWAPPro", raw_score=8.5, weighted_score=8.5, confidence=0.90)
-    orb = _signal_vote("ORBPro", raw_score=8.0, weighted_score=8.0, confidence=0.85)
+    independent = _signal_vote(
+        "PremiumMomentum",
+        raw_score=8.0,
+        weighted_score=8.0,
+        confidence=0.85,
+    )
 
     result = manager._combine_strategy_votes(
         symbol=_SYMBOL,
-        signals=[vwap, orb],
+        signals=[vwap, independent],
         indicators=_live_indicators(),
     )
 
@@ -419,11 +436,16 @@ def test_structural_strategy_invalid_state_remains_a_hard_block(monkeypatch) -> 
         },
     )
     vwap = _signal_vote("VWAPPro", raw_score=8.5, weighted_score=8.5, confidence=0.90)
-    orb = _signal_vote("ORBPro", raw_score=8.0, weighted_score=8.0, confidence=0.85)
+    independent = _signal_vote(
+        "PremiumMomentum",
+        raw_score=8.0,
+        weighted_score=8.0,
+        confidence=0.85,
+    )
 
     result = manager._combine_strategy_votes(
         symbol=_SYMBOL,
-        signals=[vwap, orb],
+        signals=[vwap, independent],
         indicators=_live_indicators(),
     )
 
@@ -442,7 +464,12 @@ def test_manager_final_trade_score_is_reference_only_runner_owns_numeric_quality
     manager._last_no_signal_decision_by_symbol = {}
 
     vwap = _signal_vote("VWAPPro", raw_score=8.5, weighted_score=5.5, confidence=0.90)
-    orb = _signal_vote("ORBPro", raw_score=8.0, weighted_score=5.0, confidence=0.85)
+    independent = _signal_vote(
+        "PremiumMomentum",
+        raw_score=8.0,
+        weighted_score=5.0,
+        confidence=0.85,
+    )
     opposing_context = _signal_vote(
         "OrderFlow",
         side="PE",
@@ -455,7 +482,7 @@ def test_manager_final_trade_score_is_reference_only_runner_owns_numeric_quality
 
     result = manager._combine_strategy_votes(
         symbol=_SYMBOL,
-        signals=[vwap, orb, opposing_context],
+        signals=[vwap, independent, opposing_context],
         indicators=_live_indicators(),
     )
 

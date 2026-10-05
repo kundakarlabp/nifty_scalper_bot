@@ -15,15 +15,15 @@ def _vote(**metadata):
     return SimpleNamespace(strategy=metadata.get("strategy", "VWAPPro"), metadata=metadata)
 
 
-def test_setup_gate_rejects_score_below_strategy_minimum() -> None:
+def test_setup_gate_retains_numeric_minimum_as_diagnostic() -> None:
     passed, score, minimum, reason = setup_gate_result(
         _vote(role="trigger", raw_setup_score=4.9, setup_min=5.5, setup_pass=True)
     )
 
-    assert passed is False
+    assert passed is True
     assert score == 4.9
     assert minimum == 5.5
-    assert reason == "setup_below_minimum"
+    assert reason is None
 
 
 def test_setup_gate_accepts_setup_that_cleared_its_own_threshold() -> None:

@@ -155,7 +155,7 @@ def _downweighted_trigger() -> tuple[Signal, StrategyVote]:
     return signal, vote
 
 
-def test_weighted_score_rejection_is_not_mislabeled_as_raw_score_failure(monkeypatch) -> None:
+def test_orb_trigger_is_quarantined_from_live_manager(monkeypatch) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     monkeypatch.setenv("ENABLE_LIVE", "true")
     monkeypatch.setenv("STRATEGY_ALLOW_SINGLE_VOTE_SCALP", "true")
@@ -178,7 +178,7 @@ def test_weighted_score_rejection_is_not_mislabeled_as_raw_score_failure(monkeyp
 
     assert result is None
     decision = manager._last_no_signal_decision_by_symbol["NFO:NIFTY26AUG24550CE"]
-    assert decision.reason == "regime_weighted_score_below_min"
+    assert decision.reason == "setup_contract_failed"
 
 
 def test_cpu_summary_counts_dynamic_active_options_when_whitelist_is_empty() -> None:
