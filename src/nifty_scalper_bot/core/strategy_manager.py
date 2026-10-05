@@ -4679,7 +4679,6 @@ class StrategyManager(_BaseStrategyManager):
             best_signal, best_vote = trigger_votes[0]
         metadata = dict(best_signal.metadata or {})
         threshold = float(os.getenv("STRATEGY_TRIGGER_MIN_SCORE", "4.5") or "4.5")
-        single_high = float(os.getenv("STRATEGY_SINGLE_VOTE_HIGH_CONVICTION", "8.8") or "8.8")
         allow_scalp_single = bool(mode_profile.get("allow_single_vote", True)) and str(os.getenv("STRATEGY_ALLOW_SINGLE_VOTE_SCALP", "false")).lower() in {"1", "true", "yes", "on"}
         raw_trigger_score = self._extract_raw_score(best_vote)
         weighted_trigger_score = _weighted_score(best_vote)
@@ -4799,11 +4798,6 @@ class StrategyManager(_BaseStrategyManager):
                 and selected_option
                 and allow_selected_option
             )
-            # Former selected-option score floor remains telemetry only.
-            selected_single_min = self._env_float(
-                "STRATEGY_SELECTED_OPTION_SINGLE_VOTE_MIN_SCORE", 9.0
-            )
-
             # A trigger plus a fresh, same-side context vote is not an unconfirmed
             # single vote. OrderFlow remains permanently context-only, but its
             # validated market-microstructure evidence may confirm an SMC/VWAP
@@ -4897,7 +4891,7 @@ class StrategyManager(_BaseStrategyManager):
             )
             # This score is telemetry only. StrategyManager owns structural/context
             # qualification; Runner owns candidate/quote execution validation.
-            manager_context_score_reference_pass = bool(
+            manager_context_score_reference_above_min = bool(
                 context_confirmed_final_score >= context_confirmed_final_min
             )
             context_confirmed_single_allowed = bool(
@@ -5080,8 +5074,8 @@ class StrategyManager(_BaseStrategyManager):
                 metadata["context_confirmation_score_min"] = round(
                     context_confirmed_final_min, 3
                 )
-                metadata["manager_context_score_reference_pass"] = (
-                    manager_context_score_reference_pass
+                metadata["manager_context_score_reference_above_min"] = (
+                    manager_context_score_reference_above_min
                 )
                 metadata["canonical_smc_setup_pass"] = canonical_smc_setup_pass
             elif scalp_fallback_allowed:
@@ -5179,7 +5173,7 @@ class StrategyManager(_BaseStrategyManager):
         metadata["final_trade_score"] = round(final_score, 3)
         metadata["final_trade_threshold_reference"] = round(threshold, 3)
         metadata["manager_final_score_reference_only"] = True
-        metadata["manager_final_score_reference_pass"] = final_score >= threshold
+        metadata["manager_final_score_reference_above_min"] = final_score >= threshold
         # Canonical score lineage is diagnostic only. It names each transformation
         # explicitly so research can attribute setup, regime and context effects
         # without treating correlated representations as independent evidence.
@@ -5192,7 +5186,7 @@ class StrategyManager(_BaseStrategyManager):
             "context_veto_penalty": round(context_penalty, 3),
             "manager_reference_score": round(final_score, 3),
             "manager_reference_threshold": round(threshold, 3),
-            "manager_reference_pass": final_score >= threshold,
+            "manager_reference_above_min": final_score >= threshold,
             "score_admission_role": "diagnostic_only",
         }
         if final_score < threshold:
@@ -5232,10 +5226,10 @@ class StrategyManager(_BaseStrategyManager):
             context_votes=[v for _, v in context_votes],
         )
         quality_min_required = float(mode_profile.get("min_trade_quality", 5.0))
-        quality_pass = quality_score >= quality_min_required
+        quality_reference_above_min = quality_score >= quality_min_required
         metadata.update(quality_meta)
         metadata["quality_min_required"] = quality_min_required
-        metadata["quality_pass"] = quality_pass
+        metadata["quality_reference_above_min"] = quality_reference_above_min
         metadata["quality_reference_role"] = "diagnostic_only"
         metadata["manager_quality_reference_only"] = True
 
@@ -5283,7 +5277,7 @@ class StrategyManager(_BaseStrategyManager):
             )
             return None
 
-        if not quality_pass:
+        if not quality_reference_above_min:
             log_throttled_live(
                 log,
                 logging.INFO,
