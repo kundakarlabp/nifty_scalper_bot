@@ -1199,8 +1199,8 @@ class RegimeState:
     updated_at: datetime | None = None
 
 
-class StrategyManager(_BaseStrategyManager):class StrategyManager(_BaseStrategyManager):
-    """Augment the base manager with performance scoring and allocations."""
+class StrategyManager(_BaseStrategyManager):
+    """Augment the base manager with structural arbitration and performance telemetry."""
 
     _context_only_fast_path_native = True
 
@@ -1214,24 +1214,22 @@ class StrategyManager(_BaseStrategyManager):class StrategyManager(_BaseStrategyM
         orchestrator: t.Any | None = None,
         futures_symbol: str | None = None,
         *,
-        score_weights: StrategyScoreWeights | None = None,
         regime_signal_getter: (
             t.Callable[[], t.Mapping[str, t.Any] | None] | None
         ) = None,
         regime_bias_map: t.Mapping[str, t.Mapping[str, float]] | None = None,
         market_regime_manager: MarketRegimeManager | None = None,
     ) -> None:
-        """Initialise strategy manager with scoring configuration.
+        """Initialise the structural strategy manager.
 
         Args:
             strategies: Strategy instances producing signals.
             indicator_engine: Indicator engine shared across strategies.
             position_manager: Position manager used for exposure checks.
-            min_confidence: Minimum confidence threshold for signals.
+            min_confidence: Compatibility input for the base manager; not an entry gate.
             data_hub: Optional data hub providing futures context.
             orchestrator: Optional orchestrator enforcing allocations.
             futures_symbol: Futures symbol used for futures metrics.
-            score_weights: Optional override for score weighting.
             regime_signal_getter: Callable returning regime snapshots.
             regime_bias_map: Optional per-regime weighting overrides.
             market_regime_manager: Optional central regime manager used for
@@ -1266,32 +1264,14 @@ class StrategyManager(_BaseStrategyManager):class StrategyManager(_BaseStrategyM
             orchestrator,
             futures_symbol,
         )
-        self._score_weights = (
-            score_weights.normalised()
-            if score_weights
-            else StrategyScoreWeights().normalised()
-        )
         self._regime_signal_getter = regime_signal_getter
-        self._regime_bias_map = {
-            regime.lower(): {k: float(v) for k, v in mapping.items()}
-            for regime, mapping in (regime_bias_map or {}).items()
-        }
         self._regime_manager = market_regime_manager
         self._performance: dict[str, StrategyPerformance] = {}
         self._manual_allocations: dict[str, float] = {}
         self._disabled_strategies: set[str] = set()
-        self._dynamic_disabled: set[str] = set()
         self._regime_state = RegimeState()
-        self._score_cache: dict[str, StrategyScore] = {}
-        self._score_floor = 0.05
-        self._score_ceiling = 3.0
         self._last_no_signal_decision_by_symbol: dict[str, StrategyNoSignalDecision] = {}
-        self._allocation_state: dict[str, float] = {}
         self._regime_last_key: str | None = None
-        self._dynamic_disable_threshold = 0.2
-        self._dynamic_enable_threshold = 0.35
-        self._dynamic_trade_threshold = 5
-        self._dynamic_confidence_floor = 0.45
         self._last_regime_gate: tuple[bool, tuple[str, ...], str | None] | None = None
         self._last_regime_gate_at: float = 0.0
         self._regime_gate_cooldown = 10.0
@@ -1310,7 +1290,6 @@ class StrategyManager(_BaseStrategyManager):class StrategyManager(_BaseStrategyM
             recalibrate_every=app_settings.ADAPTIVE_RECALIBRATE_EVERY
         )
         self._regime_fallback_scale = float(app_settings.REGIME_FALLBACK_SCALE)
-        self._avg_confidence_window: deque[float] = deque(maxlen=500)
         self._avg_kelly_window: deque[float] = deque(maxlen=500)
         self._market_open_since_ts: float | None = None
         self._last_zero_signal_check_ts = 0.0
@@ -1331,18 +1310,6 @@ class StrategyManager(_BaseStrategyManager):class StrategyManager(_BaseStrategyM
             getattr(strategy, "name", strategy.__class__.__name__): set(strategy.get_required_indicators())
             for strategy in strategies
         }
-        allow_scalp_single = str(os.getenv("STRATEGY_ALLOW_SINGLE_VOTE_SCALP", "false")).lower() in {"1", "true", "yes", "on"}
-        vwap_min_score, vwap_min_conf = self._single_vote_thresholds("VWAPPro")
-        generic_min_score, generic_min_conf = self._single_vote_thresholds("generic")
-        log.info(
-            "STRATEGY_SINGLE_VOTE_CONFIG allow_scalp_single=%s vwap_min_score=%s vwap_min_conf=%s generic_min_score=%s generic_min_conf=%s",
-            allow_scalp_single,
-            vwap_min_score,
-            vwap_min_conf,
-            generic_min_score,
-            generic_min_conf,
-        )
-
     def record_trade_result(
         self,
         strategy_name: str,
@@ -1411,7 +1378,6 @@ class StrategyManager(_BaseStrategyManager):class StrategyManager(_BaseStrategyM
         perf = self._performance.setdefault(strategy_name, StrategyPerformance())
         perf.record(pnl, regime=regime_label)
         self._adaptive_store.record_trade(strategy_name, pnl)
-        self._score_cache.pop(strategy_name, None)
 
     def restore_performance_history(
         self,
@@ -1490,132 +1456,32 @@ class StrategyManager(_BaseStrategyManager):class StrategyManager(_BaseStrategyM
                 )
             return
 
-    def get_strategy_scores(self, limit: int | None = None) -> list[StrategyScore]:
-        """Return ordered strategy scores for observability.
-
-        Args:
-            limit: Optional limit on the number of scores returned.
-
-        Returns:
-            list[StrategyScore]: Strategy scores sorted by composite score.
-
-        Raises:
-            None.
-        """
-
-        log.debug("Entered StrategyManager.get_strategy_scores")
-        scores = list(self._recompute_scores().values())
-        scores.sort(key=lambda entry: entry.score, reverse=True)
-        if limit is not None:
-            return scores[: max(limit, 0)]
-        return scores
-
-    def get_performance_snapshot(self) -> dict[str, dict[str, t.Any]]:
-        """Return rolling performance metrics per strategy.
-
-        Args:
-            None.
-
-        Returns:
-            dict[str, dict[str, t.Any]]: Snapshot of aggregate and regime metrics.
-
-        Raises:
-            None.
-        """
-
-        log.debug("Entered StrategyManager.get_performance_snapshot")
-        snapshot: dict[str, dict[str, t.Any]] = {}
-        try:
-            for name, performance in self._performance.items():
-                snapshot[name] = {
-                    "aggregate": performance.snapshot(),
-                    "regimes": _regime_breakdown(performance),
-                }
-            return snapshot
-        except Exception as exc:  # noqa: BLE001
-            log.error(
-                "Failure in StrategyManager.get_performance_snapshot: %s",
-                exc,
-                exc_info=exc,
-            )
-            return snapshot
-
-    def get_top_strategies(self, limit: int = 3) -> list[str]:
-        """Return the names of the highest scoring strategies.
-
-        Args:
-            limit: Maximum number of strategy names to return.
-
-        Returns:
-            list[str]: Ordered list of strategy names by score.
-
-        Raises:
-            None.
-        """
-
-        log.debug("Entered StrategyManager.get_top_strategies")
-        limit = max(limit, 0)
-        ordered = self.get_strategy_scores(limit)
-        return [entry.strategy for entry in ordered]
-
-    def select_strategy_for_activation(
-        self, *, weight_floor: float = 0.1
-    ) -> StrategyScore | None:
-        """Return the best candidate strategy above ``weight_floor``.
-
-        Args:
-            weight_floor: Minimum allocation weight required to qualify.
-
-        Returns:
-            StrategyScore | None: Selected strategy score snapshot when
-            available.
-
-        Raises:
-            None.
-        """
-
-        log.debug("Entered StrategyManager.select_strategy_for_activation")
-        candidates = self.get_strategy_scores()
-        for entry in candidates:
-            if entry.allocation >= weight_floor:
-                log.info(
-                    "Condition met: strategy_selected",
-                    extra={
-                        "event": "strategy_selected",
-                        "strategy": entry.strategy,
-                        "weight": entry.allocation,
-                    },
-                )
-                return entry
-        return None
-
     def get_allocation_snapshot(self) -> dict[str, float]:
-        """Return capital allocation fractions derived from scores.
+        """Return deterministic manual/equal allocation across enabled strategies.
 
-        Args:
-            None.
-
-        Returns:
-            dict[str, float]: Mapping of strategy names to allocation
-            fractions summing to one when possible.
-
-        Raises:
-            None.
+        Allocation is not inferred from signal quality or historical performance.
+        Explicit manual fractions are honored and remaining capacity is shared
+        equally among enabled strategies without an override.
         """
-
-        log.debug("Entered StrategyManager.get_allocation_snapshot")
-        scores = self._recompute_scores()
-        active_scores = {name: entry for name, entry in scores.items() if entry.enabled}
-        if not active_scores:
+        active = [
+            str(strategy.name)
+            for strategy in self._strategies
+            if str(strategy.name) not in self._disabled_strategies
+        ]
+        if not active:
             return {}
-        total = sum(max(entry.allocation, 0.0) for entry in active_scores.values())
-        if total <= 0:
-            even = 1.0 / len(active_scores)
-            return {name: even for name in active_scores}
-        return {
-            name: max(entry.allocation, 0.0) / total
-            for name, entry in active_scores.items()
+        manual = {
+            name: max(0.0, float(self._manual_allocations.get(name, 0.0)))
+            for name in active
+            if name in self._manual_allocations
         }
+        manual_total = sum(manual.values())
+        if manual_total >= 1.0 and manual_total > 0.0:
+            return {name: manual.get(name, 0.0) / manual_total for name in active}
+        unspecified = [name for name in active if name not in manual]
+        remaining = max(0.0, 1.0 - manual_total)
+        equal = remaining / len(unspecified) if unspecified else 0.0
+        return {name: manual.get(name, equal) for name in active}
 
     def set_manual_allocation(self, strategy_name: str, fraction: float | None) -> None:
         """Set manual capital *fraction* override for *strategy_name*.
@@ -1641,110 +1507,10 @@ class StrategyManager(_BaseStrategyManager):class StrategyManager(_BaseStrategyM
         )
         if fraction is None:
             self._manual_allocations.pop(strategy_name, None)
-            self._score_cache.pop(strategy_name, None)
             return
         if fraction < 0:
             raise ValueError("Manual allocation fraction must be non-negative")
         self._manual_allocations[strategy_name] = fraction
-        self._score_cache.pop(strategy_name, None)
-
-    def configure_score_thresholds(
-        self,
-        *,
-        disable: float | None = None,
-        enable: float | None = None,
-        min_trades: int | None = None,
-        confidence_floor: float | None = None,
-    ) -> None:
-        """Configure dynamic score thresholds used for auto toggles.
-
-        Args:
-            disable: Optional disable threshold override.
-            enable: Optional enable threshold override.
-            min_trades: Minimum trades required before toggles activate.
-            confidence_floor: Minimum regime confidence before auto actions.
-
-        Returns:
-            None.
-
-        Raises:
-            ValueError: If supplied thresholds are invalid.
-        """
-
-        log.debug(
-            "Entered StrategyManager.configure_score_thresholds",
-            extra={
-                "event": "strategy_configure_thresholds",
-                "disable": disable,
-                "enable": enable,
-                "min_trades": min_trades,
-                "confidence_floor": confidence_floor,
-            },
-        )
-        try:
-            if disable is not None:
-                if disable < 0.0:
-                    raise ValueError("Disable threshold must be non-negative")
-                self._dynamic_disable_threshold = float(disable)
-            if enable is not None:
-                if enable < 0.0:
-                    raise ValueError("Enable threshold must be non-negative")
-                self._dynamic_enable_threshold = float(enable)
-            if (
-                disable is not None
-                and enable is not None
-                and self._dynamic_enable_threshold <= self._dynamic_disable_threshold
-            ):
-                raise ValueError("Enable threshold must exceed disable threshold")
-            if min_trades is not None:
-                if min_trades < 0:
-                    raise ValueError("Minimum trades must be non-negative")
-                self._dynamic_trade_threshold = int(min_trades)
-            if confidence_floor is not None:
-                if not 0.0 <= confidence_floor <= 1.0:
-                    raise ValueError("Confidence floor must be between 0 and 1")
-                self._dynamic_confidence_floor = float(confidence_floor)
-        except Exception as exc:  # noqa: BLE001
-            log.error(
-                "Failure in StrategyManager.configure_score_thresholds: %s",
-                exc,
-                exc_info=exc,
-            )
-            raise
-
-    def get_score_thresholds(self) -> dict[str, float | int]:
-        """Return the currently configured score thresholds.
-
-        Args:
-            None.
-
-        Returns:
-            dict[str, float | int]: Mapping of threshold names to values.
-
-        Raises:
-            None.
-        """
-
-        log.debug("Entered StrategyManager.get_score_thresholds")
-        try:
-            return {
-                "disable": float(self._dynamic_disable_threshold),
-                "enable": float(self._dynamic_enable_threshold),
-                "min_trades": int(self._dynamic_trade_threshold),
-                "confidence_floor": float(self._dynamic_confidence_floor),
-            }
-        except Exception as exc:  # noqa: BLE001
-            log.error(
-                "Failure in StrategyManager.get_score_thresholds: %s",
-                exc,
-                exc_info=exc,
-            )
-            return {
-                "disable": 0.0,
-                "enable": 0.0,
-                "min_trades": 0,
-                "confidence_floor": 0.0,
-            }
 
     def disable_strategy(self, strategy_name: str) -> bool:
         """Disable strategy execution for *strategy_name*.
@@ -1774,8 +1540,6 @@ class StrategyManager(_BaseStrategyManager):class StrategyManager(_BaseStrategyM
             if resolved in self._disabled_strategies:
                 return False
             self._disabled_strategies.add(resolved)
-            self._dynamic_disabled.discard(resolved)
-            self._score_cache.pop(resolved, None)
             log.info(
                 "Condition met: strategy_disabled",
                 extra={
@@ -1820,8 +1584,6 @@ class StrategyManager(_BaseStrategyManager):class StrategyManager(_BaseStrategyM
             if resolved not in self._disabled_strategies:
                 return False
             self._disabled_strategies.discard(resolved)
-            self._dynamic_disabled.discard(resolved)
-            self._score_cache.pop(resolved, None)
             log.info(
                 "Condition met: strategy_enabled",
                 extra={
@@ -1922,10 +1684,7 @@ class StrategyManager(_BaseStrategyManager):class StrategyManager(_BaseStrategyM
 
         try:
             resolved = str(strategy_name)
-            return (
-                resolved not in self._disabled_strategies
-                and resolved not in self._dynamic_disabled
-            )
+            return resolved not in self._disabled_strategies
         except Exception as exc:  # noqa: BLE001
             log.error(
                 "Failure in StrategyManager.is_strategy_enabled: %s",
@@ -4468,42 +4227,6 @@ class StrategyManager(_BaseStrategyManager):class StrategyManager(_BaseStrategyM
             log.error("Failure in StrategyManager._extract_regime_scale: %s", exc)
             return 1.0
 
-    def _bounded_confidence(self, candidate: float | None) -> float:
-        """Clamp candidate confidence to an acceptable range.
-
-        Args:
-            candidate: Proposed confidence multiplier for the signal.
-
-        Returns:
-            float: Confidence bounded between the configured minimum and one.
-
-        Raises:
-            None.
-        """
-
-        try:
-            value = float(candidate if candidate is not None else 0.0)
-        except Exception as exc:  # noqa: BLE001 - defensive conversion
-            log.error(
-                "Failure in StrategyManager._bounded_confidence: %s",
-                exc,
-                exc_info=exc,
-            )
-            lower_bound = max(0.0, float(getattr(self, "_min_confidence", 0.0)))
-            return lower_bound
-        lower_bound = max(0.0, float(getattr(self, "_min_confidence", 0.0)))
-        bounded = max(lower_bound, min(value, 1.0))
-        if bounded != value:
-            log.info(
-                "Condition met: confidence_bounded",
-                extra={
-                    "event": "confidence_bounded",
-                    "candidate": value,
-                    "bounded": bounded,
-                },
-            )
-        return bounded
-
     def _log_regime_gate_decision(
         self,
         *,
@@ -4575,7 +4298,7 @@ class StrategyManager(_BaseStrategyManager):class StrategyManager(_BaseStrategyM
         else:
             log.info("Condition met: strategy_regime_gate_block", extra=extras)
 
-    def _extract_strike_from_symbol(    def _extract_strike_from_symbol(symbol: str) -> int | None:
+    def _extract_strike_from_symbol(symbol: str) -> int | None:
         """Extract option strike from symbol. Args: symbol. Returns: strike/None. Raises: none."""
         raw = str(symbol or "").strip().upper()
         if ":" in raw:
@@ -4591,8 +4314,8 @@ class StrategyManager(_BaseStrategyManager):class StrategyManager(_BaseStrategyM
 
 __all__ = [
     "StrategyManager",
-    "StrategyScore",
-    "StrategyScoreWeights",
+    "StrategyEvidence",
+    "signal_to_evidence",
     "StrategyPerformance",
     "RegimeState",
     "RegimePerformanceBucket",
