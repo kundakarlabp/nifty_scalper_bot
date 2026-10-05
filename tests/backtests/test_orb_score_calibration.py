@@ -1,3 +1,4 @@
+# ruff: noqa: I001
 import datetime
 
 from nifty_scalper_bot.backtesting import strategy_research
