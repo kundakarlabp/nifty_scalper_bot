@@ -93,7 +93,7 @@ def test_restart_recovers_unconfirmed_recent_underlying_sweep(monkeypatch) -> No
     confirm = _bar(31, open_=23984, high=24000, low=23982, close=23998, volume=2200)
     rows.extend([sweep, confirm])
 
-    strategy = SMCStrategy(SMCStrategyConfig(min_confidence=0.0), _Engine(rows))
+    strategy = SMCStrategy(SMCStrategyConfig(), _Engine(rows))
     signal = strategy.generate_signal(CE, _indicators(confirm["timestamp"]), 103.0)
 
     assert signal is not None
@@ -110,7 +110,7 @@ def test_recovery_does_not_late_enter_after_prior_confirmation(monkeypatch) -> N
     current = _bar(32, open_=23998, high=24002, low=23995, close=24000, volume=1500)
     rows.extend([sweep, prior_confirm, current])
 
-    strategy = SMCStrategy(SMCStrategyConfig(min_confidence=0.0), _Engine(rows))
+    strategy = SMCStrategy(SMCStrategyConfig(), _Engine(rows))
     signal = strategy.generate_signal(CE, _indicators(current["timestamp"]), 103.0)
 
     assert signal is None
@@ -119,7 +119,7 @@ def test_recovery_does_not_late_enter_after_prior_confirmation(monkeypatch) -> N
 
 def test_recovery_remains_underlying_only_in_live(monkeypatch) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
-    strategy = SMCStrategy(SMCStrategyConfig(min_confidence=0.0), _Engine([]))
+    strategy = SMCStrategy(SMCStrategyConfig(), _Engine([]))
     indicators = _indicators(START + timedelta(minutes=31))
     indicators.update(
         {
