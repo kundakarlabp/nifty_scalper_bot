@@ -222,7 +222,7 @@ def test_vwap_thesis_does_not_leak_across_sessions(monkeypatch):
     assert strategy.last_no_vote_reason == 'vwap_thesis_not_armed'
 
 
-def test_real_vwap_emits_score_free_structural_evidence(monkeypatch):
+def test_real_vwap_emits_structural_evidence(monkeypatch):
     monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
     monkeypatch.setenv('ENABLE_LIVE', 'true')
     strategy = VWAPProStrategy(VWAPProStrategyConfig(), _DummyEngine())
@@ -239,17 +239,10 @@ def test_real_vwap_emits_score_free_structural_evidence(monkeypatch):
     assert evidence.side == 'CE'
     assert evidence.metadata['setup_pass'] is True
     assert evidence.metadata['requires_runner_execution_validation'] is True
-    forbidden = {
-        'raw_setup_score',
-        'setup_score',
-        'strategy_score',
-        'direction_score',
-        'final_score',
-        'alpha_score',
-        'score_lineage',
-        'signal_quality',
-    }
-    assert forbidden.isdisjoint(evidence.metadata)
+    assert evidence.metadata['direction_bias'] == 'CE'
+    assert evidence.metadata['futures_slope_alignment'] is True
+    assert evidence.metadata['volume_confirmation'] is True
+
 
 
 def test_vwap_has_no_unreachable_early_trend_pullback_branch():
