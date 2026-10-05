@@ -243,7 +243,27 @@ class TradeCandidateSelector:
                 if opt_delta:
                     final = max(0.0, min(10.0, final + opt_delta))
                 reasons.extend(opt_reasons)
-            ranked.append(TradeCandidate(symbol=symbol, side=side, score=final, reasons=reasons, spread_pct=spread_pct, tick_age_s=tick_age_s, premium=premium, atm_distance=atm_distance, data_quality_score=dq.score, entry_price=entry, stop_loss=sl, target=target, rr=rr, net_rr=economics.net_rr, liquidity_score=liquidity, microstructure_score=micro, final_score=final))
+            ranked.append(
+                TradeCandidate(
+                    symbol=symbol,
+                    side=side,
+                    score=final,
+                    reasons=reasons,
+                    spread_pct=spread_pct,
+                    tick_age_s=tick_age_s,
+                    premium=premium,
+                    atm_distance=atm_distance,
+                    data_quality_score=dq.score,
+                    entry_price=entry,
+                    stop_loss=sl,
+                    target=target,
+                    rr=rr,
+                    net_rr=economics.net_rr,
+                    liquidity_score=liquidity,
+                    microstructure_score=micro,
+                    final_score=final,
+                )
+            )
 
         # Rank only candidates that already passed the hard execution/economic
         # gates. Prefer measured post-cost economics, then tighter/fresher/nearer
