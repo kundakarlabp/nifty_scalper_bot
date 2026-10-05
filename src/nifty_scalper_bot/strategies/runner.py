@@ -20713,7 +20713,7 @@ class StrategyRunner:
                         str(quality.components.get("strategy_name", "")),
                         infer_option_side(signal.symbol, metadata),
                         False,
-                        "runner_final_score",
+                        "runner_strategy_role",
                         quality_reject_reason,
                         quality.final_score,
                         alpha_score,
@@ -20728,7 +20728,7 @@ class StrategyRunner:
                             "alpha_score": alpha_score,
                             "threshold": threshold,
                             "allowed": False,
-                            "blocked_at": "runner_final_score",
+                            "blocked_at": "runner_strategy_role",
                             "blocked_reason": quality_reject_reason,
                             "reasons": rejection_reasons,
                         },
@@ -20754,7 +20754,7 @@ class StrategyRunner:
                     signal_score=quality.final_score,
                     research_context={
                         **(decision_research_context or {}),
-                        "rejection_stage": "runner_final_score",
+                        "rejection_stage": "runner_strategy_role",
                         "rejection_reasons": rejection_reasons,
                     },
                 )
@@ -20771,7 +20771,7 @@ class StrategyRunner:
                 strategy=metadata.get("strategy"),
                 symbol=signal.symbol,
                 side=infer_option_side(signal.symbol, metadata),
-                reason="runner_final_quality",
+                reason="runner_execution_validation",
             )
             self._final_quality_approved_counter = (
                 getattr(self, "_final_quality_approved_counter", 0) + 1
@@ -20799,16 +20799,20 @@ class StrategyRunner:
                     ),
                     "approval_path": metadata.get("approval_path"),
                     "trace_id": trace_id,
-                    "approval_stage": "runner_final_quality",
+                    "approval_stage": "runner_execution_validation",
                 },
             )
+            # Legacy quality confidence is research telemetry only. Preserve the
+            # strategy's native confidence field; do not let the diagnostic
+            # weighted score silently become an execution/risk input.
             signal = dataclasses.replace(
                 signal,
-                confidence=final_confidence,
                 metadata={
                     **metadata,
                     "final_score": quality.final_score,
                     "signal_quality": quality.components,
+                    "diagnostic_quality_confidence": final_confidence,
+                    "score_admission_role": "diagnostic_only",
                 },
             )
 
