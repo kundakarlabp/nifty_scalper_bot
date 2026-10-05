@@ -407,7 +407,7 @@ class StrategyInterface(ABC):
     def performance_metrics(
         self, trade_history: t.Sequence[t.Mapping[str, t.Any]]
     ) -> dict[str, float]:
-        """Score the strategy using *trade_history* derived metrics.
+        """Summarize strategy performance from *trade_history* metrics.
 
         Args:
             trade_history: Ordered trade snapshots with realised PnL values.
@@ -561,7 +561,7 @@ class StrategyAdapter(StrategyInterface):
                     return result
         except Exception as exc:  # noqa: BLE001 - continue with fallback
             log.error(
-                "Failure in StrategyAdapter score hook: %s",
+                "Failure in StrategyAdapter performance hook: %s",
                 exc,
                 exc_info=exc,
             )
@@ -992,7 +992,7 @@ class StrategyPerformance:
             return 0.0
 
     def hit_rate(self) -> float:
-        """Return alias for win rate aiding external score reporters.
+        """Return alias for win rate aiding external performance reports.
 
         Args:
             None.
@@ -1021,7 +1021,7 @@ class StrategyPerformance:
             None.
 
         Returns:
-            float: Sharpe-like score derived from recorded returns.
+            float: Sharpe-like performance ratio derived from recorded returns.
 
         Raises:
             None.
