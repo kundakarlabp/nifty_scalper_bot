@@ -181,7 +181,11 @@ class TradeCandidateSelector:
             log_once_or_throttled(
                 LOGGER,
                 f"entry_window_blocked:{gate_reason}:{direction_bias}",
-                f"CANDIDATE_SELECTION_BLOCKED reason={gate_reason} direction={direction_bias} total={len(snapshots)}",
+                (
+                    "CANDIDATE_SELECTION_BLOCKED "
+                    f"reason={gate_reason} direction={direction_bias} "
+                    f"total={len(snapshots)}"
+                ),
                 interval_sec=self._candidate_summary_log_throttle_seconds,
                 level=logging.INFO,
                 extra={
@@ -516,7 +520,8 @@ class TradeCandidateSelector:
         }
         if sorted_ranked:
             LOGGER.debug(
-                "CANDIDATE_SELECTION_SUMMARY direction=%s atm=%s total=%s ranked=%s ltp_only_used=%s rejects=%s",
+                "CANDIDATE_SELECTION_SUMMARY direction=%s atm=%s total=%s "
+                "ranked=%s ltp_only_used=%s rejects=%s",
                 direction_bias,
                 atm_strike,
                 len(snapshots),
@@ -529,7 +534,12 @@ class TradeCandidateSelector:
             log_once_or_throttled(
                 LOGGER,
                 f"candidate_summary_empty:{direction_bias}:{atm_strike}",
-                f"CANDIDATE_SELECTION_SUMMARY direction={direction_bias} atm={atm_strike} total={len(snapshots)} ranked=0 ltp_only_used={ltp_only_used} rejects={rejects}",
+                (
+                    "CANDIDATE_SELECTION_SUMMARY "
+                    f"direction={direction_bias} atm={atm_strike} "
+                    f"total={len(snapshots)} ranked=0 "
+                    f"ltp_only_used={ltp_only_used} rejects={rejects}"
+                ),
                 interval_sec=self._candidate_summary_log_throttle_seconds,
                 level=logging.INFO,
                 extra=event_extra,
