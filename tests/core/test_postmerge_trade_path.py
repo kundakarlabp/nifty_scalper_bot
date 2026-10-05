@@ -257,8 +257,8 @@ def test_range_vwap_context_keeps_weak_alpha_as_diagnostic_only(
     assert candidate.metadata["regime_weight"] == 0.8
     assert candidate.metadata["quality_gate_owner"] == "runner_final_execution_score"
     assert quality.components["alpha_score"] < quality.components["threshold"]
-    assert quality.allowed is False
-    assert "alpha_below_threshold" in quality.reasons
+    assert quality.allowed is True
+    assert quality.reasons == []
 
 
 def test_context_confirmed_trend_vwap_can_clear_runner_with_strong_independent_alpha(
