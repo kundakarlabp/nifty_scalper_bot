@@ -572,7 +572,7 @@ class OrderFlowStrategy(EliteStrategy):
                 score += freshness_score
                 reasons.append("fresh_context")
             strategy_score = max(0.0, min(10.0, score))
-             bias_conflict = direction in {"CE", "PE"} and not side_aligns
+            bias_conflict = direction in {"CE", "PE"} and not side_aligns
             min_reversal_imbalance = safe_float_env(
                 "ORDERFLOW_REVERSAL_MIN_IMBALANCE", 0.20
             )
