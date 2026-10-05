@@ -17,17 +17,23 @@ SYMBOL = "NFO:NIFTY2680424400CE"
 
 
 class _Boom(EliteStrategy):
-    def _evaluate_signal(self, symbol="", indicators=None, current_price=0.0, position=None):
+    def _evaluate_signal(
+        self, symbol="", indicators=None, current_price=0.0, position=None
+    ):
         raise TypeError("must be real number, not NoneType")
 
 
 class _Quiet(EliteStrategy):
-    def _evaluate_signal(self, symbol="", indicators=None, current_price=0.0, position=None):
+    def _evaluate_signal(
+        self, symbol="", indicators=None, current_price=0.0, position=None
+    ):
         return None
 
 
 class _Good(EliteStrategy):
-    def _evaluate_signal(self, symbol="", indicators=None, current_price=0.0, position=None):
+    def _evaluate_signal(
+        self, symbol="", indicators=None, current_price=0.0, position=None
+    ):
         return EliteSignal(
             symbol=symbol,
             signal="BUY",
