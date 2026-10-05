@@ -267,8 +267,6 @@ def _microstructure_confirmation_summary(
                 "average_net_pnl": round(sum(net_values) / len(trades), 2),
                 "profit_factor": _profit_factor(net_values),
                 "max_drawdown": _max_drawdown(trades),
-                "average_raw_score": _average("raw_score"),
-                "average_confirmation_confidence": _average("confidence"),
                 "average_ofi_1s_normalized": _average("ofi_1s_normalized"),
                 "average_depth_imbalance": _average("depth_imbalance"),
                 "average_spread_pct": _average("spread_pct"),
