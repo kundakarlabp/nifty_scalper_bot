@@ -4244,6 +4244,36 @@ class StrategyManager(_BaseStrategyManager):
             independent_same_side_confirmation(trigger_votes)
         )
         if not independent_trigger_confirmation and not same_side_context:
+            context_diagnostics = [
+                {
+                    "strategy": evidence.strategy,
+                    "side": evidence.side,
+                    "fresh_vote": self._context_vote_is_timestamped(evidence),
+                    "eligible": bool(
+                        (evidence.metadata or {}).get("context_quality_eligible")
+                    ),
+                    "aligned": bool(
+                        (evidence.metadata or {}).get("effective_context_alignment")
+                    ),
+                    "conflict": bool(
+                        (evidence.metadata or {}).get("effective_context_conflict")
+                    ),
+                    "reasons": list(evidence.reasons),
+                }
+                for _signal, evidence in context_votes
+            ]
+            log.info(
+                "STRATEGY_CONFIRMATION_MISSING symbol=%s side=%s context=%s",
+                symbol_norm,
+                side,
+                context_diagnostics,
+                extra={
+                    "event": "STRATEGY_CONFIRMATION_MISSING",
+                    "symbol": symbol_norm,
+                    "side": side,
+                    "context_diagnostics": context_diagnostics,
+                },
+            )
             _record_no_signal(
                 "strategy_confirmation_missing",
                 "independent_confirmation_missing",
