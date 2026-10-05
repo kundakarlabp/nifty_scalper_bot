@@ -108,7 +108,9 @@ def _orb_indicators(side: str, latest_ts: datetime) -> dict[str, object]:
     }
 
 
-def test_directional_mode_rejects_non_core_trigger_taxonomy_entries(monkeypatch) -> None:
+def test_directional_mode_rejects_non_core_trigger_taxonomy_entries(
+    monkeypatch,
+) -> None:
     monkeypatch.setenv("STRATEGY_MODE", "directional_scalp")
 
     from nifty_scalper_bot.strategies.elite_strategies.builder import (
