@@ -3,7 +3,22 @@ from nifty_scalper_bot.risk.trade_gate import TradeGate
 
 
 def decision():
-    return TradeDecision('BUY','CE','SYM','NIFTY',8,0.8,100,92,113,1.6,['ok'],[],{},'t',1.0)
+    return TradeDecision(
+        action='BUY',
+        direction='CE',
+        symbol='SYM',
+        underlying='NIFTY',
+        confidence=0.8,
+        entry_price=100,
+        stop_loss=92,
+        target=113,
+        rr=1.6,
+        reasons=['ok'],
+        votes=[],
+        candidate_meta={},
+        trace_id='t',
+        timestamp=1.0,
+    )
 
 
 def test_pause_blocks():
