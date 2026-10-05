@@ -1,7 +1,6 @@
 """Canonical entry-evidence helpers.
 
-This module deliberately contains no signal score, confidence threshold, weighted
-quality model, bonus, penalty, or numeric admission threshold.  Live admission
+This module contains objective execution evidence only; admission remains structural.  Live admission
 is structural and fail-closed: direction, setup validity, market-data freshness,
 quote executability, post-cost economics and risk retain separate owners.
 """
