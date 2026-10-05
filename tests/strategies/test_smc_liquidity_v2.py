@@ -107,7 +107,7 @@ def _indicators(side: str = "CE", **overrides: Any) -> dict[str, Any]:
 
 
 def _strategy(rows: list[dict[str, Any]], **config_overrides: Any) -> SMCStrategy:
-    config = SMCStrategyConfig(min_confidence=0.0, **config_overrides)
+    config = SMCStrategyConfig(**config_overrides)
     return SMCStrategy(config, FakeIndicatorEngine({FUTURES: rows, SPOT: rows}))
 
 
@@ -139,7 +139,7 @@ def test_bullish_underlying_sweep_requires_later_confirmation_bar(monkeypatch) -
     monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
     rows = _base_rows()
     engine = FakeIndicatorEngine({FUTURES: rows, SPOT: rows})
-    strategy = SMCStrategy(SMCStrategyConfig(min_confidence=0.0), engine)
+    strategy = SMCStrategy(SMCStrategyConfig(), engine)
 
     sweep = _bar(
         30,
@@ -326,7 +326,6 @@ def test_volume_spike_config_is_consumed_as_quality_confirmation(monkeypatch) ->
     engine = FakeIndicatorEngine({FUTURES: rows})
     strategy = SMCStrategy(
         SMCStrategyConfig(
-            min_confidence=0.0,
             volume_spike_mult=1.5,
         ),
         engine,
@@ -359,7 +358,7 @@ def test_bearish_underlying_sweep_confirms_long_pe(monkeypatch) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
     rows = _base_rows()
     engine = FakeIndicatorEngine({FUTURES: rows})
-    strategy = SMCStrategy(SMCStrategyConfig(min_confidence=0.0), engine)
+    strategy = SMCStrategy(SMCStrategyConfig(), engine)
     sweep = _bar(
         30,
         open_=24012.0,
@@ -396,7 +395,7 @@ def test_same_confirmation_bar_reuses_identity_until_entry_is_accepted(monkeypat
     monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
     rows = _base_rows()
     engine = FakeIndicatorEngine({FUTURES: rows})
-    strategy = SMCStrategy(SMCStrategyConfig(min_confidence=0.0), engine)
+    strategy = SMCStrategy(SMCStrategyConfig(), engine)
     sweep = _bar(30, open_=23988, high=23991, low=23974, close=23984, volume=2500)
     rows.append(sweep)
     assert strategy.generate_signal(CE, _indicators(latest_bar_ts=sweep["timestamp"]), 102.0) is None
