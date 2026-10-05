@@ -40,7 +40,7 @@ class FillRateSnapshot:
             "fill_rate": self.fill_rate,
             "partial_fill_rate": self.partial_fill_rate,
             "average_fill_ratio": self.average_fill_ratio,
-            "fill_quality_score": self.fill_quality_score,
+            "fill_quality_index": self.fill_quality_index,
             "fill_ratio_histogram": dict(self.fill_ratio_histogram),
         }
 
@@ -61,14 +61,14 @@ class FillRateSnapshot:
         return self.partially_filled_orders / self.total_orders
 
     @property
-    def fill_quality_score(self) -> float:
-        """Return composite score balancing fill rates and ratios.
+    def fill_quality_index(self) -> float:
+        """Return composite index balancing fill rates and ratios.
 
         Args:
             None.
 
         Returns:
-            float: Weighted fill quality score clamped to ``[0, 1]``.
+            float: Weighted fill quality index clamped to ``[0, 1]``.
 
         Raises:
             None.
