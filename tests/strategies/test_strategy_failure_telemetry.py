@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 
-
 from nifty_scalper_bot.strategies.elite_strategies.base_elite import (
     EliteSignal,
     EliteStrategy,
