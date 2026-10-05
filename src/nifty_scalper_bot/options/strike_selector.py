@@ -963,7 +963,7 @@ class StrikeSelector:
             target = abs(float(self._selector_settings.delta_target))
             return sorted(
                 contracts,
-                key=lambda c: _delta_score(c.delta, target),
+                key=lambda c: _delta_distance(c.delta, target),
             )
         step = int(getattr(self._selector_settings, "strike_step", 50) or 50)
         atm = _nearest_strike(underlying_price, step)
@@ -1005,7 +1005,7 @@ class StrikeSelector:
         return True
 
 
-def _delta_score(delta: float | None, target: float) -> float:
+def _delta_distance(delta: float | None, target: float) -> float:
     if delta is None or not isfinite(delta):
         return float("inf")
     return abs(abs(delta) - target)
