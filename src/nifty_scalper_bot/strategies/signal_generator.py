@@ -992,7 +992,6 @@ class StrategyManager:
         strategies: list[Strategy],
         indicator_engine: IndicatorEngine,
         position_manager: PositionManager,
-        min_confidence: float = 0.60,
         data_hub: Any | None = None,
         orchestrator: Any | None = None,
         futures_symbol: str | None = None,
@@ -1001,7 +1000,6 @@ class StrategyManager:
         self._strategies = strategies
         self._indicator_engine = indicator_engine
         self._position_manager = position_manager
-        self._min_confidence = min_confidence
         self._data_hub = data_hub
         self._logger = logger
         self._orchestrator = orchestrator
@@ -1316,13 +1314,6 @@ class StrategyManager:
                             metadata=getattr(signal, "metadata", {}),
                         )
 
-                    # 🛡️ FIX 2: SCORE NORMALIZER (0-100 -> 0.0-1.0)
-                    # Automatically fix strategies returning 80.0 instead of 0.80
-                    if signal.confidence > 1.0:
-                        new_conf = signal.confidence / 100.0
-                        new_conf = min(new_conf, 0.99)  # Cap at 0.99
-                        signal = dataclasses.replace(signal, confidence=new_conf)
-
                     # Tag metadata and collect
                     all_signals.append(
                         signal.with_metadata(
@@ -1332,12 +1323,11 @@ class StrategyManager:
                     )
 
                     self._logger.info(
-                        f"📊 SIGNAL: {strategy.name} → {signal.action} | conf={signal.confidence:.2f} | {symbol}",
+                        f"📊 SIGNAL: {strategy.name} → {signal.action} | {symbol}",
                         extra={
                             "event": "strategy_signal_generated",
                             "strategy": strategy.name,
                             "action": signal.action,
-                            "confidence": signal.confidence,
                         },
                     )
                 else:
@@ -1435,7 +1425,6 @@ class StrategyManager:
                         "event": "strategy_manager_signal_ready",
                         "symbol": symbol,
                         "action": combined.action,
-                        "conf": combined.confidence,
                         "sl": combined.stop_loss,
                     },
                 )
@@ -1444,7 +1433,7 @@ class StrategyManager:
             # ✅ NEW: Log when filter rejects signal
             self._logger.info(
                 f"⛔ FILTER REJECT: {symbol} | "
-                f"Action={combined.action} | Conf={combined.confidence:.2f}",
+                f"Action={combined.action}",
                 extra={"event": "signal_filter_reject", "symbol": symbol},
             )
 
@@ -1455,144 +1444,70 @@ class StrategyManager:
         self._signal_arbitrator.release(symbol)
 
     def _combine_signals_ensemble(self, signals: list[Signal]) -> Signal | None:
-        """Combine signals using confidence weights. Args: signals. Returns: Signal|None. Raises: None."""
-        self._logger.debug(
-            "Entered StrategyManager._combine_signals_ensemble",
-            extra={"event": "ensemble_enter", "count": len(signals)},
-        )
-        try:
-            if not signals:
-                return None
+        """Combine signals structurally without confidence weighting."""
+        if not signals:
+            return None
+        actionable = [signal for signal in signals if signal.action != "HOLD"]
+        if not actionable:
+            return None
 
-            if len(signals) == 1:
-                signal = signals[0]
-                raw_conf = float(getattr(signal, "confidence", 0.0) or 0.0)
-                normalized_conf = raw_conf / 100.0 if raw_conf > 1.0 else raw_conf
-                preliminary_score = max(0.0, min(10.0, normalized_conf * 10.0))
-                # Legacy confidence-derived score is telemetry only. Structural
-                # strategy validity, execution feasibility, economics and risk own
-                # admission; an arbitrary 8.5/10 boundary must not erase a setup.
-                return dataclasses.replace(
-                    signal,
-                    metadata={
-                        **(signal.metadata or {}),
-                        "legacy_preliminary_score": preliminary_score,
-                        "preliminary_only": True,
-                        "requires_runner_execution_validation": True,
-                    },
-                )
+        # Exit intent always has priority, but strategy ordering—not a numeric
+        # confidence value—selects the representative exit.
+        for exit_action in ("CLOSE_LONG", "CLOSE_SHORT"):
+            exits = [signal for signal in actionable if signal.action == exit_action]
+            if exits:
+                return exits[0]
 
-            def _normalize_confidence(value: float) -> float:
-                scaled = float(value)
-                if scaled > 1.0:
-                    scaled /= 100.0
-                return max(0.0, min(1.0, scaled))
-
-            normalized: list[tuple[Signal, float]] = [
-                (signal, _normalize_confidence(signal.confidence)) for signal in signals
-            ]
-
-            buy_signals = [
-                (signal, conf) for signal, conf in normalized if signal.action == "BUY"
-            ]
-            buy_ce_signals = [
-                (signal, conf)
-                for signal, conf in buy_signals
-                if str(signal.symbol).upper().endswith("CE")
-            ]
-            buy_pe_signals = [
-                (signal, conf)
-                for signal, conf in buy_signals
-                if str(signal.symbol).upper().endswith("PE")
-            ]
-            if buy_ce_signals and buy_pe_signals:
-                self._logger.info(
-                    "STRATEGY_CONSENSUS side=NO_TRADE votes=%s reason=ce_pe_conflict",
-                    len(buy_signals),
-                    extra={
-                        "event": "STRATEGY_CONSENSUS",
-                        "side": "NO_TRADE",
-                        "votes": len(buy_signals),
-                        "reason": "ce_pe_conflict",
-                    },
-                )
-                return None
-            sell_signals = [
-                (signal, conf) for signal, conf in normalized if signal.action == "SELL"
-            ]
-
-            # Legacy confidence values remain telemetry only. Conflicting BUY/SELL
-            # actions fail closed; otherwise deterministic strategy order chooses
-            # the representative signal without confidence weighting.
-            buy_confidences = [conf for _, conf in buy_signals]
-            sell_confidences = [conf for _, conf in sell_signals]
-            legacy_low_confidence_count = sum(
-                1 for _, conf in normalized if conf < float(self._min_confidence)
-            )
-
+        buy_signals = [signal for signal in actionable if signal.action == "BUY"]
+        sell_signals = [signal for signal in actionable if signal.action == "SELL"]
+        if buy_signals and sell_signals:
             self._logger.info(
-                "Condition met: ensemble_structural_vote",
+                "STRATEGY_CONSENSUS side=NO_TRADE votes=%s reason=buy_sell_conflict",
+                len(actionable),
                 extra={
-                    "event": "ensemble_structural_vote",
-                    "buy_count": len(buy_signals),
-                    "sell_count": len(sell_signals),
-                    "legacy_low_confidence_count": legacy_low_confidence_count,
+                    "event": "STRATEGY_CONSENSUS",
+                    "side": "NO_TRADE",
+                    "votes": len(actionable),
+                    "reason": "buy_sell_conflict",
                 },
-            )
-
-            if buy_signals and sell_signals:
-                self._logger.info(
-                    "STRATEGY_CONSENSUS side=NO_TRADE votes=%s "
-                    "reason=buy_sell_conflict",
-                    len(signals),
-                    extra={
-                        "event": "STRATEGY_CONSENSUS",
-                        "side": "NO_TRADE",
-                        "votes": len(signals),
-                        "reason": "buy_sell_conflict",
-                    },
-                )
-                return None
-            if buy_signals:
-                best_signal, _ = buy_signals[0]
-                return dataclasses.replace(
-                    best_signal,
-                    metadata={
-                        **(best_signal.metadata or {}),
-                        "ensemble_count": len(buy_signals),
-                        "legacy_ensemble_confidence_mean": (
-                            sum(buy_confidences) / len(buy_confidences)
-                            if buy_confidences
-                            else 0.0
-                        ),
-                        "legacy_low_confidence_count": legacy_low_confidence_count,
-                    },
-                )
-            if sell_signals:
-                best_signal, _ = sell_signals[0]
-                return dataclasses.replace(
-                    best_signal,
-                    metadata={
-                        **(best_signal.metadata or {}),
-                        "ensemble_count": len(sell_signals),
-                        "legacy_ensemble_confidence_mean": (
-                            sum(sell_confidences) / len(sell_confidences)
-                            if sell_confidences
-                            else 0.0
-                        ),
-                        "legacy_low_confidence_count": legacy_low_confidence_count,
-                    },
-                )
-        except Exception as exc:
-            self._logger.error(
-                "Failure in StrategyManager._combine_signals_ensemble: %s",
-                exc,
-                extra={"event": "ensemble_error"},
-                exc_info=exc,
             )
             return None
 
-        return None
+        selected = buy_signals or sell_signals
+        if not selected:
+            return None
+        option_sides = {
+            "CE" if str(signal.symbol).upper().endswith("CE") else
+            "PE" if str(signal.symbol).upper().endswith("PE") else ""
+            for signal in selected
+        }
+        option_sides.discard("")
+        if len(option_sides) > 1:
+            self._logger.info(
+                "STRATEGY_CONSENSUS side=NO_TRADE votes=%s reason=ce_pe_conflict",
+                len(selected),
+                extra={
+                    "event": "STRATEGY_CONSENSUS",
+                    "side": "NO_TRADE",
+                    "votes": len(selected),
+                    "reason": "ce_pe_conflict",
+                },
+            )
+            return None
+
+        representative = selected[0]
+        confirming = [
+            str((signal.metadata or {}).get("strategy") or signal.reason or "")
+            for signal in selected[1:]
+        ]
+        return dataclasses.replace(
+            representative,
+            metadata={
+                **(representative.metadata or {}),
+                "ensemble_count": len(selected),
+                "confirming_strategies": [name for name in confirming if name],
+            },
+        )
 
     def _validate_option_physics(self, symbol: str, action: str) -> bool:
         """Rejects 'Garbage Options' based on Greeks, Spread, and Liquidity."""
@@ -1937,88 +1852,8 @@ class StrategyManager:
         return None
 
     def _combine_signals(self, signals: list[Signal]) -> Signal | None:
-        by_action = defaultdict(list)
-
-        # Collect actionable signals only
-        for sig in signals:
-            if sig.action != "HOLD":
-                by_action[sig.action].append(sig)
-
-        # Nothing actionable at all
-        if not by_action:
-            logger.debug("No actionable signals after filtering HOLD")
-            return None
-
-        # 1️⃣ Hard priority: exit signals always win
-        for exit_act in ("CLOSE_LONG", "CLOSE_SHORT"):
-            if exit_act in by_action:
-                chosen = max(by_action[exit_act], key=lambda s: s.confidence)
-                logger.debug(
-                    f"Exit signal selected: {exit_act} @ {chosen.confidence:.2f}"
-                )
-                return chosen
-
-        # 2️⃣ BUY vs SELL conflict resolution
-        if {"BUY", "SELL"}.issubset(by_action.keys()):
-            buy_list = by_action["BUY"]
-            sell_list = by_action["SELL"]
-
-            buy_conf = sum(s.confidence for s in buy_list) / len(buy_list)
-            sell_conf = sum(s.confidence for s in sell_list) / len(sell_list)
-            diff = abs(buy_conf - sell_conf)
-
-            if diff < 0.15:
-                # 🔴 CRITICAL FIX: Return None (SKIP) instead of crashing on self.symbol
-                # StrategyManager does not have self.symbol/self.name attributes.
-                logger.debug(
-                    f"Consensus WEAK -> SKIP "
-                    f"(Buy:{buy_conf:.2f} Sell:{sell_conf:.2f} Diff:{diff:.2f})"
-                )
-                return None
-
-        # 3️⃣ Select best action by average confidence
-        best_action, selected_list = max(
-            by_action.items(),
-            key=lambda i: sum(s.confidence for s in i[1]) / len(i[1]),
-        )
-
-        best_signal = max(selected_list, key=lambda s: s.confidence)
-
-        # Single strategy -> return as-is
-        if len(selected_list) == 1:
-            logger.debug(
-                f"Single signal selected: {best_signal.action} @ {best_signal.confidence:.2f}"
-            )
-            return best_signal
-
-        # 4️⃣ Multi-strategy consensus boost (bounded)
-        avg_conf = sum(s.confidence for s in selected_list) / len(selected_list)
-        final_conf = min(1.0, max(0.0, avg_conf + 0.05))
-
-        reasons = ", ".join(s.reason for s in selected_list if s.reason)
-        meta = dict(best_signal.metadata or {})
-
-        # Safely extract confirming strategies
-        confirming = []
-        for s in selected_list:
-            if s.metadata and "strategy" in s.metadata:
-                confirming.append(s.metadata["strategy"])
-
-        if confirming:
-            meta["confirming_strategies"] = confirming
-
-        logger.debug(
-            f"Consensus signal: {best_signal.action} "
-            f"Avg:{avg_conf:.2f} Final:{final_conf:.2f} "
-            f"Strategies:{len(selected_list)}"
-        )
-
-        return dataclasses.replace(
-            best_signal,
-            confidence=final_conf,
-            reason=f"Consensus: {reasons}" if reasons else "Consensus signal",
-            metadata=meta,
-        )
+        """Compatibility combiner using structural conflict resolution only."""
+        return self._combine_signals_ensemble(signals)
 
     def _filter_signal(self, signal: Signal) -> bool:
         # Legacy confidence is diagnostic only; structural/data filters below
