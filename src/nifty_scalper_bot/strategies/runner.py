@@ -20573,19 +20573,16 @@ class StrategyRunner:
             metadata["regime_reason"] = "manager_weighted_observe_only"
             missing_components = missing_score_components(metadata)
             if requires_final_score:
-                has_components = not missing_components
                 has_candidate = bool(metadata.get("candidate_selected"))
                 has_quote_usable = bool(metadata.get("quote_usable_for_order_plan"))
 
-                if not (has_components and has_candidate and has_quote_usable):
-                    if missing_components:
-                        final_score_block_reason = "missing_final_score_components"
-                    elif not has_candidate:
+                if not (has_candidate and has_quote_usable):
+                    if not has_candidate:
                         final_score_block_reason = "candidate_not_selected"
                     elif not has_quote_usable:
                         final_score_block_reason = "quote_not_usable_for_order_plan"
                     else:
-                        final_score_block_reason = "final_score_precheck_failed_unknown"
+                        final_score_block_reason = "execution_precheck_failed_unknown"
                     strategy_name = (
                         metadata.get("strategy_name")
                         or metadata.get("strategy")
@@ -20637,22 +20634,9 @@ class StrategyRunner:
                 metadata["missing_reason"] = (
                     "premium_squeeze_score_components_not_implemented"
                 )
-            if missing_components and is_live_mode:
-                self._logger.info(
-                    "SIGNAL_SCORE_BLOCKED reason=missing_signal_score_components missing=%s trace_id=%s",
-                    missing_components,
-                    trace_id,
-                    extra={
-                        "event": "SIGNAL_SCORE_BLOCKED",
-                        "reason": "missing_signal_score_components",
-                        "missing": missing_components,
-                        "trace_id": trace_id,
-                    },
-                )
-                return _reject_after_dedup(
-                    reason="missing_signal_score_components",
-                    details={"missing": missing_components},
-                )
+            # Missing legacy score components are diagnostic only. Objective
+            # candidate/quote readiness and downstream cost-aware risk remain
+            # fail-closed at their existing owners.
             resolved_strategy_name = (
                 metadata.get("strategy_name")
                 or metadata.get("strategy")

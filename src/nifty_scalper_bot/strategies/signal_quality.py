@@ -272,6 +272,11 @@ def score_signal_quality(
         "orb_pro",
         "smc_lite",
     }
+    # Legacy weighted scores remain diagnostic telemetry only. They were never
+    # calibrated probabilities or net-expectancy estimates, so they must not
+    # authorize or veto capital. Structural context-only strategies remain
+    # non-tradable; strategy validity, execution readiness and cost-aware risk
+    # keep their existing canonical owners.
     reasons: list[str] = []
     if context_only:
         reasons.append("context_only_strategy")
@@ -288,12 +293,7 @@ def score_signal_quality(
         option_score=option,
         data_score=data,
         rr_score=rr,
-        allowed=(
-            not context_only
-            and final >= threshold
-            and (not alpha_floor_required or alpha_score >= threshold)
-            and direction >= 6.0
-        ),
+        allowed=not context_only,
         reasons=reasons,
         components={
             "direction_score": direction,

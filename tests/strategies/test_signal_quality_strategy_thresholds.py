@@ -26,7 +26,9 @@ def test_strategy_threshold_aliases_live(monkeypatch):
         strategy_name="unknown",
     )
     assert unk.components["threshold"] == 8.0
-    assert not (unk.final_score < 8.0 and unk.allowed)
+    assert unk.final_score < 8.0
+    assert unk.allowed
+    assert "score_below_threshold" in unk.reasons
 
     premium = score_signal_quality(
         direction_score=7.5,

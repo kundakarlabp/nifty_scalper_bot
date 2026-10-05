@@ -33,7 +33,7 @@ def test_orb_pro_publishes_independent_direction_evidence() -> None:
     assert '"independent_setup_score": round(independent_setup_score, 3)' in source
 
 
-def test_signal_quality_allowed_owns_threshold_and_direction(monkeypatch) -> None:
+def test_signal_quality_threshold_and_direction_are_diagnostic(monkeypatch) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     low_score = score_signal_quality(
         direction_score=7.0,
@@ -43,7 +43,8 @@ def test_signal_quality_allowed_owns_threshold_and_direction(monkeypatch) -> Non
         rr_score=7.0,
         strategy_name="VWAPPro",
     )
-    assert low_score.allowed is False
+    assert low_score.allowed is True
+    assert low_score.final_score < low_score.components["threshold"]
     assert "score_below_threshold" in low_score.reasons
 
     low_direction = score_signal_quality(
@@ -54,7 +55,7 @@ def test_signal_quality_allowed_owns_threshold_and_direction(monkeypatch) -> Non
         rr_score=10.0,
         strategy_name="VWAPPro",
     )
-    assert low_direction.allowed is False
+    assert low_direction.allowed is True
     assert "direction_below_minimum" in low_direction.reasons
 
     context_only = score_signal_quality(
@@ -81,12 +82,12 @@ def test_execution_quality_cannot_rescue_weak_directional_alpha(monkeypatch) -> 
     )
     assert quality.final_score > quality.components["threshold"]
     assert quality.components["alpha_score"] < quality.components["threshold"]
-    assert quality.allowed is False
+    assert quality.allowed is True
     assert "alpha_below_threshold" in quality.reasons
 
 
-def test_strong_direction_cannot_rescue_marginal_native_setup(monkeypatch) -> None:
-    """Regression: the 2026-10-01 VWAP shape must fail the alpha gate."""
+def test_strong_direction_does_not_hide_marginal_native_setup_diagnostic(monkeypatch) -> None:
+    """Regression: the 2026-10-01 VWAP shape remains tagged as weak native alpha."""
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     quality = score_signal_quality(
         direction_score=9.5,
@@ -98,7 +99,7 @@ def test_strong_direction_cannot_rescue_marginal_native_setup(monkeypatch) -> No
     )
     assert quality.final_score > quality.components["threshold"]
     assert quality.components["alpha_score"] < quality.components["threshold"]
-    assert quality.allowed is False
+    assert quality.allowed is True
     assert "alpha_below_threshold" in quality.reasons
 
 
@@ -130,7 +131,7 @@ def test_vwap_runner_uses_canonical_metadata_quality_adapter() -> None:
 
 
 
-def test_primary_trigger_alpha_floor_cannot_be_rescued_by_execution_quality(monkeypatch) -> None:
+def test_primary_trigger_alpha_floor_remains_diagnostic_with_execution_quality(monkeypatch) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
 
     for strategy_name, weak_alpha in (("ORBPro", 7.3), ("SMC", 6.9)):
@@ -145,5 +146,5 @@ def test_primary_trigger_alpha_floor_cannot_be_rescued_by_execution_quality(monk
 
         assert quality.final_score > quality.components["threshold"]
         assert quality.components["alpha_score"] < quality.components["threshold"]
-        assert quality.allowed is False
+        assert quality.allowed is True
         assert "alpha_below_threshold" in quality.reasons
