@@ -29,7 +29,8 @@ jobs:
       (startsWith(github.event.issue.title, '[ORB Research]') ||
       (startsWith(github.event.issue.title, '[Backtest] ORB') &&
       !startsWith(github.event.issue.title, '[Backtest] ORB Lifecycle') &&
-      !startsWith(github.event.issue.title, '[Backtest] ORB Quality8'))))
+      !startsWith(github.event.issue.title, '[Backtest] ORB Quality8') &&
+      !startsWith(github.event.issue.title, '[Backtest] ORB ScoreCalibration'))))
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
@@ -269,3 +270,60 @@ jobs:
             ${{ env.STUDY_DIR }}/data_manifest.json
             ${{ env.STUDY_DIR }}/iterative_protocol.json
             ${{ env.STUDY_DIR }}/iterative_*.json
+
+
+  score-calibration-study:
+    if: >-
+      github.event_name == 'issues' &&
+      github.event.issue.user.login == github.repository_owner &&
+      startsWith(github.event.issue.title, '[Backtest] ORB ScoreCalibration')
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      EXECUTION_MODE: SHADOW
+      LIVE_TRADING_ENABLED: "false"
+      PAPER_TRADING: "true"
+      BROKER_API_KEY: offline_research_unused
+      BROKER_API_SECRET: offline_research_unused
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set isolated score-calibration paths
+        run: |
+          printf 'SOURCE_DIR=%s/orb-public-source\nSTUDY_DIR=%s/orb-score-calibration\n' \
+            "$RUNNER_TEMP" "$RUNNER_TEMP" >> "$GITHUB_ENV"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install research dependencies
+        run: python -m pip install -e '.[research]'
+      - name: Cache checksum-verified public archive
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.SOURCE_DIR }}
+          key: zenodo-10899828-717d15361af52d1d654b4909d998967e
+      - name: Verify and prepare historical baskets
+        run: >-
+          python scripts/research_orb_multiyear.py prepare
+          --source "$SOURCE_DIR" --output "$STUDY_DIR"
+      - name: Run score-calibration reference
+        run: >-
+          python scripts/research_orb_iterative.py
+          --study-dir "$STUDY_DIR" --workers 2
+          --candidate lifecycle_reference_075_25
+      - name: Analyze score calibration
+        run: >-
+          python scripts/analyze_orb_score_calibration.py
+          --study-dir "$STUDY_DIR"
+      - name: Save score-calibration evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: orb-score-calibration-${{ github.sha }}
+          if-no-files-found: error
+          retention-days: 30
+          path: |
+            ${{ env.STUDY_DIR }}/data_manifest.json
+            ${{ env.STUDY_DIR }}/iterative_protocol.json
+            ${{ env.STUDY_DIR }}/iterative_*.json
+            ${{ env.STUDY_DIR }}/score_calibration.json
