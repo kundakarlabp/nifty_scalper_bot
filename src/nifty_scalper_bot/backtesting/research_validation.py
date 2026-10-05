@@ -42,8 +42,8 @@ class PBOFold:
     train_observations: int
     test_observations: int
     selected_candidate: str
-    selected_train_score: float
-    selected_test_score: float
+    selected_train_objective: float
+    selected_test_objective: float
     oos_rank_percentile: float
     oos_rank_logit: float
 
@@ -230,17 +230,17 @@ def _contiguous_groups(length: int, groups: int) -> tuple[tuple[int, ...], ...]:
     return tuple(result)
 
 
-def _mean_score(values: Sequence[float]) -> float:
+def _mean_objective(values: Sequence[float]) -> float:
     return mean(values)
 
 
 def _average_rank_percentile(
-    selected_score: float,
-    scores: Sequence[float],
+    selected_objective: float,
+    objectives: Sequence[float],
 ) -> float:
-    ordered = sorted(float(score) for score in scores)
-    lower = sum(score < selected_score for score in ordered)
-    equal = sum(score == selected_score for score in ordered)
+    ordered = sorted(float(value) for value in objectives)
+    lower = sum(value < selected_objective for value in ordered)
+    equal = sum(value == selected_objective for value in ordered)
     average_rank = lower + (equal + 1.0) / 2.0
     return average_rank / (len(ordered) + 1.0)
 
@@ -308,22 +308,22 @@ def combinatorial_purged_pbo(
         if not train_indices or not ordered_test:
             continue
 
-        train_scores = {
-            candidate: _mean_score(
+        train_objectives = {
+            candidate: _mean_objective(
                 [resolved[candidate][index] for index in train_indices]
             )
             for candidate in candidates
         }
-        selected = max(candidates, key=lambda name: (train_scores[name], name))
-        test_scores = {
-            candidate: _mean_score(
+        selected = max(candidates, key=lambda name: (train_objectives[name], name))
+        test_objectives = {
+            candidate: _mean_objective(
                 [resolved[candidate][index] for index in ordered_test]
             )
             for candidate in candidates
         }
         percentile = _average_rank_percentile(
-            test_scores[selected],
-            list(test_scores.values()),
+            test_objectives[selected],
+            list(test_objectives.values()),
         )
         logit = math.log(percentile / (1.0 - percentile))
         folds.append(
@@ -332,8 +332,8 @@ def combinatorial_purged_pbo(
                 train_observations=len(train_indices),
                 test_observations=len(ordered_test),
                 selected_candidate=selected,
-                selected_train_score=round(train_scores[selected], 8),
-                selected_test_score=round(test_scores[selected], 8),
+                selected_train_objective=round(train_objectives[selected], 8),
+                selected_test_objective=round(test_objectives[selected], 8),
                 oos_rank_percentile=round(percentile, 8),
                 oos_rank_logit=round(logit, 8),
             )
