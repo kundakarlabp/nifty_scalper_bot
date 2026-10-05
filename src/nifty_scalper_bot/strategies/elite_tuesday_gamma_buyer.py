@@ -219,8 +219,7 @@ class EliteTuesdayGammaBuyer(BaseEliteStrategy):
             strategy_score = max(0.0, min(10.0, score))
             setup_min = 6.0
             if strategy_score < setup_min:
-                self._no_vote("expiry_gamma_quality_below_minimum")
-                return None
+                reasons.append("score_below_legacy_minimum")
 
             atr_multiplier = max(float(self._config.atr_multiplier), 0.1)
             target_multiplier = max(float(self._config.target_multiplier), 0.1)
