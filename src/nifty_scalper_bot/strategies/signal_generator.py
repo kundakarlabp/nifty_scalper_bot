@@ -1478,7 +1478,7 @@ class StrategyManager:
                         **(signal.metadata or {}),
                         "legacy_preliminary_score": preliminary_score,
                         "preliminary_only": True,
-                        "requires_runner_final_score": True,
+                        "requires_runner_execution_validation": True,
                     },
                 )
 
