@@ -131,6 +131,7 @@ def test_directional_mode_disables_gamma_theta_and_context(monkeypatch) -> None:
 def test_orb_enabled_config_is_not_overridden_by_legacy_env(monkeypatch) -> None:
     monkeypatch.setenv("ENABLE_ORB_STRATEGY", "false")
     monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    monkeypatch.setenv("ORB_BALANCED_RANGE_MAX_ATR", "2.0")
     rows = _orb_rows(side="CE")
     strategy = ORBProStrategy(
         ORBProStrategyConfig(orb_minutes=15),
