@@ -13,8 +13,8 @@ def test_extract_strike_from_symbol_returns_none_for_fut_and_spot() -> None:
     assert StrategyRunner._extract_strike_from_symbol('NSE:NIFTY') is None
 
 
-def test_premium_squeeze_near_atm_filter_does_not_raise_missing_helper() -> None:
-    assert hasattr(StrategyRunner, '_extract_strike_from_symbol')
+def test_extract_strike_helper_remains_available() -> None:
+    assert hasattr(StrategyRunner, "_extract_strike_from_symbol")
 
 
 def test_strategy_runner_required_helpers_exist() -> None:

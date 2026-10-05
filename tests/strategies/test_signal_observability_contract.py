@@ -254,7 +254,7 @@ def test_runner_reports_candidate_and_final_approval_counts() -> None:
     runner._runner_state = "TEST"
     runner._active_symbols = set()
     runner._candidate_counter = 3
-    runner._final_quality_approved_counter = 1
+    runner._structural_approved_counter = 1
     runner._eval_counter = 9
     runner._last_tick_seen_ts = 0.0
     runner._last_global_eval_ts = 0.0

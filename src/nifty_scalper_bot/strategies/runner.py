@@ -953,7 +953,6 @@ class StrategyRunner:
         self._underlying_last_signal_ts: dict[str, float] = {}
         self._reason_last_signal_ts: dict[str, float] = {}
         self._submitted_entry_order_context: dict[str, dict[str, Any]] = {}
-        self._premium_squeeze_last_signal_ts: dict[str, float] = {}
         self._signal_reject_cooldown_ts: dict[str, float] = {}
         self._execution_reject_cooldown_ts: dict[str, float] = {}
         self._exec_reject_runtime_not_ready_seconds = max(
@@ -1263,7 +1262,7 @@ class StrategyRunner:
         )
         self._eval_counter = 0
         self._candidate_counter = 0
-        self._final_quality_approved_counter = 0
+        self._structural_approved_counter = 0
         self._regime_block_counter = 0
         self._capital_block_counter = 0
         self._last_candle_eval: dict[str, float] = {}
@@ -1306,15 +1305,6 @@ class StrategyRunner:
         self._max_trades_per_symbol_per_candle = 1
         self._min_trade_interval_seconds = 60.0
         self._session_allow_out_of_hours = allow_offhours_testing_safe()
-        self._force_signal_enabled = os.getenv("FORCE_SIGNAL", "").lower() == "true"
-        self._disable_early_forced_signals = (
-            os.getenv("FEATURE_DISABLE_EARLY_FORCED_SIGNALS", "").lower() == "true"
-        )
-        self._vwap_crossover_enabled = (
-            os.getenv("ENABLE_VWAP_CROSSOVER", "false").lower() == "true"
-        )
-        self._vwap_sl_pct = float(os.getenv("VWAP_SL_PCT", "1.5"))
-        self._vwap_tp_pct = float(os.getenv("VWAP_TP_PCT", "2.0"))
         self._max_nifty_positions = int(os.getenv("MAX_NIFTY_POSITIONS", "1"))
         self._last_regime_by_symbol: dict[str, MarketRegime] = {}
         self._last_regime_inputs_by_symbol: dict[str, dict[str, Any]] = {}
@@ -5697,7 +5687,7 @@ class StrategyRunner:
                 "symbols": symbols,
                 "candidate_generated_count": getattr(self, "_candidate_counter", 0),
                 "approved_candidate_count": getattr(
-                    self, "_final_quality_approved_counter", 0
+                    self, "_structural_approved_counter", 0
                 ),
                 "setup_lifecycle": SETUP_LIFECYCLE.snapshot(),
                 "tick_count": getattr(self, "_eval_counter", 0),
@@ -8427,14 +8417,14 @@ class StrategyRunner:
                     "regime_blocks=%d capital_blocks=%d runner_state=%s",
                     self._eval_counter,
                     self._candidate_counter,
-                    self._final_quality_approved_counter,
+                    self._structural_approved_counter,
                     self._regime_block_counter,
                     self._capital_block_counter,
                     str(self._runner_state),
                     extra={
                         "evals": self._eval_counter,
                         "candidate_generated": self._candidate_counter,
-                        "approved_candidates": self._final_quality_approved_counter,
+                        "approved_candidates": self._structural_approved_counter,
                         "regime_blocks": self._regime_block_counter,
                         "capital_blocks": self._capital_block_counter,
                         "runner_state": str(self._runner_state),
@@ -8442,7 +8432,7 @@ class StrategyRunner:
                 )
                 self._eval_counter = 0
                 self._candidate_counter = 0
-                self._final_quality_approved_counter = 0
+                self._structural_approved_counter = 0
                 self._regime_block_counter = 0
                 self._capital_block_counter = 0
                 self._last_summary_log = now
@@ -15216,145 +15206,10 @@ class StrategyRunner:
                         self._logger.info("SPOT_RECOVERED")
 
                 # =============================================================
-                # PHASE 8: SIGNAL GENERATION
+                # PHASE 8: TICK STATE
                 # =============================================================
-                generated_signal = None
-
-                # 8A. FORCED SIGNAL (Testing only)
-                if (
-                    self._force_signal_enabled
-                    and not self._disable_early_forced_signals
-                ):
-                    generated_signal = Signal(
-                        action="BUY",
-                        symbol=symbol,
-                        quantity=1,
-                        confidence=1.0,
-                        reason="forced_signal_validation",
-                        stop_loss=None,
-                        take_profit=None,
-                        metadata={"source": "forced"},
-                    )
-                    self._logger.warning(f"⚠️ FORCED SIGNAL EMITTED for {symbol}")
-
-                # 8B. PREMIUM MOMENTUM SQUEEZE (disabled in runner by default)
-                premium_squeeze_enabled = str(
-                    os.getenv("RUNNER_ENABLE_PREMIUM_SQUEEZE", "false")
-                ).strip().lower() in {"1", "true", "yes", "on"}
-                if (
-                    generated_signal is None
-                    and premium_squeeze_enabled
-                    and self._indicator_engine.has_min_bars(symbol, 20)
-                ):
-                    phase = "phase8_premium_squeeze"
-                    try:
-                        generated_signal = self._maybe_generate_premium_squeeze_signal(
-                            symbol,
-                            price,
-                            trace_id=trace_id,
-                        )
-                    except Exception as exc:
-                        self._logger.exception(
-                            "PREMIUM_SQUEEZE_ERROR symbol=%s error_type=%s error=%s trace_id=%s",
-                            symbol,
-                            type(exc).__name__,
-                            exc,
-                            trace_id,
-                            extra={
-                                "event": "PREMIUM_SQUEEZE_ERROR",
-                                "symbol": symbol,
-                                "trace_id": trace_id,
-                                "error_type": type(exc).__name__,
-                            },
-                        )
-                        generated_signal = None
-
-                # 8C. VWAP CROSSOVER (Requires VWAP > 0)
-                runner_vwap_crossover_enabled = str(
-                    os.getenv("RUNNER_ENABLE_LEGACY_VWAP_CROSSOVER", "false")
-                ).strip().lower() in {"1", "true", "yes", "on"}
-                if (
-                    runner_vwap_crossover_enabled
-                    and self._vwap_crossover_enabled
-                    and generated_signal is None
-                    and state.vwap
-                    and state.vwap > 0
-                    and "FUT" not in symbol.upper()
-                ):
-                    phase = "phase8_vwap_crossover"
-                    prev_ltp = (
-                        _extract_float(state.last_tick, "ltp", "last_price")
-                        if state.last_tick
-                        else None
-                    )
-                    curr_vwap = state.vwap
-
-                    if prev_ltp and curr_vwap and price > 0:
-                        threshold = curr_vwap * 0.0005  # 0.05% buffer
-                        is_cross_up = prev_ltp < (curr_vwap + threshold) and price > (
-                            curr_vwap + threshold
-                        )
-                        is_cross_down = prev_ltp > (curr_vwap - threshold) and price < (
-                            curr_vwap - threshold
-                        )
-
-                        sl_pct = self._vwap_sl_pct  # 1.5% SL
-                        tp_pct = self._vwap_tp_pct  # 2.0% TP (1:1.33 RR)
-
-                        if is_cross_up:
-                            # BUY signal - SL below, TP above
-                            calculated_sl = price * (1 - sl_pct / 100)
-                            calculated_tp = price * (1 + tp_pct / 100)
-
-                            self._logger.info(
-                                f"⚡ VWAP CROSSOVER UP: {symbol} | {prev_ltp:.2f} -> {price:.2f} (VWAP: {curr_vwap:.2f})",
-                                extra={"event": "vwap_crossover", "symbol": symbol},
-                            )
-                            generated_signal = Signal(
-                                action="BUY",
-                                symbol=symbol,
-                                quantity=1,
-                                confidence=0.0,
-                                reason="vwap_crossover_up",
-                                stop_loss=calculated_sl,
-                                take_profit=calculated_tp,
-                                metadata={
-                                    "strategy": "vwap_scalp",
-                                    "vwap": curr_vwap,
-                                    "tag": "vwap_scalp",
-                                    "sl_pct": sl_pct,
-                                    "tp_pct": tp_pct,
-                                },
-                            )
-                        elif is_cross_down:
-                            # SELL signal - SL above, TP below
-                            calculated_sl = price * (1 + sl_pct / 100)
-                            calculated_tp = price * (1 - tp_pct / 100)
-
-                            self._logger.info(
-                                f"⚡ VWAP CROSSOVER DOWN: {symbol} | {prev_ltp:.2f} -> {price:.2f} (VWAP: {curr_vwap:.2f})",
-                                extra={"event": "vwap_crossover", "symbol": symbol},
-                            )
-                            generated_signal = Signal(
-                                action="SELL",
-                                symbol=symbol,
-                                quantity=1,
-                                confidence=0.0,
-                                reason="vwap_crossover_down",
-                                stop_loss=calculated_sl,
-                                take_profit=calculated_tp,
-                                metadata={
-                                    "strategy": "vwap_scalp",
-                                    "vwap": curr_vwap,
-                                    "tag": "vwap_scalp_short",
-                                    "sl_pct": sl_pct,
-                                    "tp_pct": tp_pct,
-                                },
-                            )
-
-                # 8D. FALLBACK STRATEGY: Momentum Breakout (When VWAP is Missing/0)
-
-                # Update last tick
+                # Entry generation is intentionally centralized in StrategyManager.
+                # Runner owns readiness, execution validation and order lifecycle only.
                 state.last_tick = dict(tick)
 
             # =================================================================
@@ -15435,7 +15290,7 @@ class StrategyRunner:
             )
 
             self._last_global_eval_ts = time.monotonic()
-            signal = generated_signal
+            signal = None
             upstream_version = int(
                 tick.get("candle_version")
                 or tick.get("version")
@@ -17463,222 +17318,6 @@ class StrategyRunner:
                 exc_info=exc,
             )
 
-    def _maybe_generate_premium_squeeze_signal(
-        self,
-        symbol: str,
-        price: float,
-        *,
-        trace_id: str | None = None,
-    ) -> Signal | None:
-        """Args: symbol, price, trace_id. Returns: Signal | None. Raises: none."""
-        upper_symbol = symbol.upper()
-        if not upper_symbol.endswith(("CE", "PE")) or "FUT" in upper_symbol:
-            return None
-        underlying = self._extract_underlying(symbol) or "NIFTY"
-        now_epoch = time.time()
-        last_ts = float(self._premium_squeeze_last_signal_ts.get(underlying, 0.0))
-        if now_epoch - last_ts < self._underlying_signal_cooldown_seconds:
-            log_throttled(
-                self._logger,
-                f"premium_squeeze_generation_suppressed_{underlying}",
-                "PREMIUM_SQUEEZE_GENERATION_SUPPRESSED",
-                interval_sec=self._cooldown_log_throttle_seconds,
-                level=logging.DEBUG,
-                extra={
-                    "event": "PREMIUM_SQUEEZE_GENERATION_SUPPRESSED",
-                    "underlying": underlying,
-                    "trace_id": trace_id,
-                },
-            )
-            return None
-        inds = self._indicator_engine.get_indicators(symbol)
-        rsi = inds.get("rsi")
-        vwap = inds.get("vwap")
-        ema = inds.get("ema")
-        if rsi is None or vwap is None or vwap <= 0:
-            return None
-        is_bullish_premium = price > vwap
-        if ema is not None:
-            is_bullish_premium = is_bullish_premium and price > ema
-        is_momentum_active = 60 < rsi < 85
-        if not (is_bullish_premium and is_momentum_active):
-            return None
-        selected = False
-        near_atm = False
-        in_active_universe = False
-        if _env_flag("PREMIUM_FALLBACK_ONLY_SELECTED_OR_NEAR_ATM", True):
-            max_strike_distance = float(
-                os.getenv("PREMIUM_FALLBACK_MAX_STRIKE_DISTANCE", "100") or "100"
-            )
-            selected_ce = self._active_selected_ce
-            selected_pe = self._active_selected_pe
-            atm_strike = self._active_atm_strike
-            active_option_symbols = {
-                normalize_symbol(option_symbol)
-                for option_symbol in getattr(self, "_active_option_symbols", set())
-                if option_symbol
-            }
-            normalized_selected_ce = (
-                normalize_symbol(selected_ce) if selected_ce else ""
-            )
-            normalized_selected_pe = (
-                normalize_symbol(selected_pe) if selected_pe else ""
-            )
-            normalized_symbol = normalize_symbol(symbol)
-            if (
-                not (normalized_selected_ce or normalized_selected_pe)
-                and active_option_symbols
-                and atm_strike
-            ):
-                selected_candidates = [
-                    item
-                    for item in active_option_symbols
-                    if self._extract_strike_from_symbol(item)
-                ]
-                ce_candidates = [
-                    item for item in selected_candidates if item.endswith("CE")
-                ]
-                pe_candidates = [
-                    item for item in selected_candidates if item.endswith("PE")
-                ]
-                if ce_candidates:
-                    normalized_selected_ce = min(
-                        ce_candidates,
-                        key=lambda item: abs(
-                            float(self._extract_strike_from_symbol(item) or 0)
-                            - float(atm_strike)
-                        ),
-                    )
-                if pe_candidates:
-                    normalized_selected_pe = min(
-                        pe_candidates,
-                        key=lambda item: abs(
-                            float(self._extract_strike_from_symbol(item) or 0)
-                            - float(atm_strike)
-                        ),
-                    )
-            strike_value = self._extract_strike_from_symbol(symbol)
-            inds = self._indicator_engine.get_indicators(symbol)
-            recovered_atm = inds.get("atm_strike") if isinstance(inds, dict) else None
-            if atm_strike in (None, 0) and recovered_atm not in (None, ""):
-                try:
-                    atm_strike = int(float(recovered_atm))
-                except (TypeError, ValueError):
-                    atm_strike = atm_strike
-            if (atm_strike in (None, 0)) and not selected_ce and not selected_pe:
-                self._logger.info(
-                    "PREMIUM_SQUEEZE_SKIPPED reason=missing_active_option_context symbol=%s trace_id=%s",
-                    symbol,
-                    trace_id,
-                )
-                return None
-            strike = float(strike_value or 0.0)
-            atm_strike_float = float(atm_strike or 0.0)
-            selected = normalized_symbol in {
-                normalized_selected_ce,
-                normalized_selected_pe,
-            }
-            near_atm = bool(
-                atm_strike > 0
-                and strike > 0
-                and abs(strike - atm_strike_float) <= max_strike_distance
-            )
-            in_active_universe = normalized_symbol in active_option_symbols
-            if not (selected or near_atm or in_active_universe):
-                if self._should_log_throttled(
-                    f"premium_outside_window:{normalized_symbol}", 60.0
-                ):
-                    self._logger.info(
-                        "PREMIUM_SQUEEZE_SKIPPED reason=outside_selected_strike_window symbol=%s selected_ce=%s selected_pe=%s atm_strike=%s strike=%s max_distance=%s trace_id=%s",
-                        symbol,
-                        normalized_selected_ce,
-                        normalized_selected_pe,
-                        atm_strike_float,
-                        strike,
-                        max_strike_distance,
-                        trace_id,
-                    )
-                return None
-        sl_pct = self._vwap_sl_pct
-        tp_pct = self._vwap_tp_pct
-        calculated_sl = price * (1 - sl_pct / 100)
-        calculated_tp = price * (1 + tp_pct / 100)
-        log_throttled(
-            self._logger,
-            f"premium_squeeze_signal_emitted:{symbol}",
-            f"PREMIUM_SQUEEZE_SIGNAL_EMITTED symbol={symbol} rsi={float(rsi):.2f} trace_id={trace_id}",
-            interval_sec=60.0,
-            level=logging.INFO,
-        )
-        price_above_vwap = False
-        price_above_ema = False
-        momentum_window_active = False
-        selected_or_near_atm = bool(selected or near_atm)
-        try:
-            price_above_vwap = bool(float(price) > float(vwap))
-        except (TypeError, ValueError):
-            pass
-        try:
-            price_above_ema = bool(ema is not None and float(price) > float(ema))
-        except (TypeError, ValueError):
-            pass
-        try:
-            momentum_window_active = 65.0 <= float(rsi) <= 82.0
-        except (TypeError, ValueError):
-            pass
-        try:
-            history_count = len(self._indicator_engine.get_history(symbol))
-        except Exception:
-            history_count = 0
-        required_history = int(getattr(self, "_warmup_bars_required", 20) or 20)
-        setup_pass = bool(
-            price_above_vwap
-            and price_above_ema
-            and momentum_window_active
-            and selected_or_near_atm
-            and history_count >= required_history
-        )
-        if not setup_pass:
-            return None
-        premium_rr = (float(calculated_tp) - float(price)) / max(
-            float(price) - float(calculated_sl), 1e-9
-        )
-        return Signal(
-            action="BUY",
-            symbol=symbol,
-            quantity=1,
-            confidence=1.0,
-            reason="premium_momentum_squeeze",
-            stop_loss=calculated_sl,
-            take_profit=calculated_tp,
-            metadata={
-                "strategy": "premium_momentum_squeeze",
-                "vwap": vwap,
-                "rsi": rsi,
-                "tag": "premium_squeeze",
-                "feature": "premium_momentum_squeeze",
-                "strategy_name": "premium_momentum_squeeze",
-                "is_selected_option": bool(selected),
-                "strike_distance_from_atm": (
-                    abs(strike - atm_strike_float)
-                    if strike > 0 and atm_strike_float > 0
-                    else None
-                ),
-                "premium_stop_distance": max(float(price) - float(calculated_sl), 0.0),
-                "premium_target_rr": premium_rr,
-                "setup_pass": True,
-                "setup_reasons": [
-                    "premium_above_vwap",
-                    "premium_above_ema",
-                    "momentum_window_active",
-                    "selected_or_near_atm",
-                    "history_ready",
-                ],
-                "required_data_present": True,
-                "stale_data_used": False,
-            },
-        )
-
     def _materialize_option_trade_plan(
         self,
         signal: Signal,
@@ -18649,80 +18288,6 @@ class StrategyRunner:
                 return SignalExecutionResult(
                     False, "structural_reject_cooldown"
                 )
-            if reason_key == "premium_momentum_squeeze":
-                upper_symbol = (trade_symbol or base_symbol).upper()
-                if (
-                    "CE" not in upper_symbol and "PE" not in upper_symbol
-                ) or "FUT" in upper_symbol:
-                    log_throttled(
-                        self._logger,
-                        f"premium_squeeze_skipped_{upper_symbol}",
-                        "PREMIUM_SQUEEZE_SKIPPED",
-                        interval_sec=self._cooldown_log_throttle_seconds,
-                        level=logging.DEBUG,
-                        extra={
-                            "event": "PREMIUM_SQUEEZE_SKIPPED",
-                            "symbol": trade_symbol or base_symbol,
-                            "reason": "non_option_instrument",
-                        },
-                    )
-                    self._reset_execution_state(base_symbol)
-                    return SignalExecutionResult(False, "non_option_instrument")
-                last_premium_ts = float(
-                    self._premium_squeeze_last_signal_ts.get(underlying, 0.0)
-                )
-                if (
-                    now_epoch - last_premium_ts
-                    < self._underlying_signal_cooldown_seconds
-                ):
-                    premium_age = now_epoch - last_premium_ts
-                    log_throttled(
-                        self._logger,
-                        f"premium_squeeze_suppressed_{underlying}",
-                        "PREMIUM_SQUEEZE_SUPPRESSED",
-                        interval_sec=self._cooldown_log_throttle_seconds,
-                        level=logging.INFO,
-                        extra={
-                            "event": "PREMIUM_SQUEEZE_SUPPRESSED",
-                            "underlying": underlying,
-                            "reason": "cooldown",
-                        },
-                    )
-                    self._logger.info(
-                        "PREMIUM_SQUEEZE_COOLDOWN_BLOCKED symbol=%s trace_id=%s cooldown_key=%s age_seconds=%.2f required_seconds=%.2f remaining_seconds=%.2f reason_key=%s underlying=%s strategy=%s last_ts=%.3f now_epoch=%.3f",
-                        base_symbol,
-                        trace_id,
-                        underlying,
-                        premium_age,
-                        self._underlying_signal_cooldown_seconds,
-                        max(
-                            0.0, self._underlying_signal_cooldown_seconds - premium_age
-                        ),
-                        reason_key,
-                        underlying,
-                        reason_key,
-                        last_premium_ts,
-                        now_epoch,
-                        extra={
-                            "event": "PREMIUM_SQUEEZE_COOLDOWN_BLOCKED",
-                            "symbol": base_symbol,
-                            "trace_id": trace_id,
-                            "cooldown_key": underlying,
-                            "age_seconds": premium_age,
-                            "required_seconds": self._underlying_signal_cooldown_seconds,
-                            "remaining_seconds": max(
-                                0.0,
-                                self._underlying_signal_cooldown_seconds - premium_age,
-                            ),
-                            "reason_key": reason_key,
-                            "underlying": underlying,
-                            "strategy": reason_key,
-                            "last_ts": last_premium_ts,
-                            "now_epoch": now_epoch,
-                        },
-                    )
-                    self._reset_execution_state(base_symbol)
-                    return SignalExecutionResult(False, "premium_squeeze_cooldown")
             underlying_last_ts = self._underlying_last_signal_ts.get(underlying)
             reason_last_ts = self._reason_last_signal_ts.get(underlying_reason_key)
             underlying_age = (
@@ -20206,8 +19771,8 @@ class StrategyRunner:
                 side=current_side,
                 reason="runner_structural_execution_validation",
             )
-            self._final_quality_approved_counter = (
-                getattr(self, "_final_quality_approved_counter", 0) + 1
+            self._structural_approved_counter = (
+                getattr(self, "_structural_approved_counter", 0) + 1
             )
             self._logger.info(
                 "SIGNAL_APPROVED symbol=%s strategy=%s side=%s "
@@ -20958,8 +20523,6 @@ class StrategyRunner:
                         "order_id": order_id,
                     },
                 )
-                if reason_key == "premium_momentum_squeeze":
-                    self._premium_squeeze_last_signal_ts[underlying] = now_epoch
                 self._submitted_entry_order_context[str(order_id)] = {
                     "symbol": base_symbol,
                     "base_symbol": base_symbol,

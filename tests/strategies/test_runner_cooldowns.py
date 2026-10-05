@@ -7,13 +7,6 @@ import pytest
 from nifty_scalper_bot.strategies.runner import StrategyRunner
 
 
-def test_on_tick_error_phase_updates_for_premium_squeeze() -> None:
-    source = Path("src/nifty_scalper_bot/strategies/runner.py").read_text(
-        encoding="utf-8"
-    )
-    assert 'phase = "phase8_premium_squeeze"' in source
-
-
 def test_active_option_selection_uses_atm_strike_key() -> None:
     source = Path("src/nifty_scalper_bot/core/app.py").read_text(encoding="utf-8")
     assert 'atm=basket.get("atm_strike")' in source
@@ -128,7 +121,7 @@ def test_net_rr_broker_attempt_does_not_latch_cooldown() -> None:
     assert runner._execution_reject_cooldown_ts == {}
 
 
-def test_hard_score_rejection_is_scoped_to_structural_setup_identity() -> None:
+def test_structural_reject_cooldown_is_scoped_to_setup_identity() -> None:
     source = Path("src/nifty_scalper_bot/strategies/runner.py").read_text(
         encoding="utf-8"
     )
