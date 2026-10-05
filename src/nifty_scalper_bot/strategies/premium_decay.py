@@ -347,7 +347,8 @@ class PremiumDecayStrategy:
             )
             if not pe_order_id:
                 self._logger.error(
-                    "Failure in PremiumDecayStrategy.evaluate_entry: second leg rejected",
+                    "Failure in PremiumDecayStrategy.evaluate_entry: "
+                    "second leg rejected",
                     extra={
                         "event": "premium_decay_second_leg_failed",
                         "underlying": underlying,
