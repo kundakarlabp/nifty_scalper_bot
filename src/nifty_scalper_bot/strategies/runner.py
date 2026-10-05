@@ -973,9 +973,6 @@ class StrategyRunner:
         self._signal_attempt_debounce_seconds = max(
             0.5, float(os.getenv("SIGNAL_ATTEMPT_DEBOUNCE_SECONDS", "2") or 2)
         )
-        self._signal_attempt_debounce_min_improvement = float(
-            os.getenv("SIGNAL_DIRECTION_DEDUP_MIN_IMPROVEMENT", "2.0") or 2.0
-        )
         self._signal_attempt_debounce_state: dict[str, dict[str, Any]] = {}
         # Live scalping tuning note (documentation only; defaults remain unchanged):
         # RUNNER_UNDERLYING_SIGNAL_COOLDOWN_SECONDS=20
@@ -5215,7 +5212,6 @@ class StrategyRunner:
         order_submitted: bool = False,
         trace_id: str | None = None,
         signal_id: str | None = None,
-        signal_score: float | None = None,
         research_context: Mapping[str, Any] | None = None,
     ) -> None:
         """Update diagnostics and persist the decision in the existing journal."""
@@ -5243,8 +5239,6 @@ class StrategyRunner:
                 if order_submitted and signal_id:
                     payload["signal_id"] = signal_id
                     payload["trade_id"] = f"TRD_{signal_id}"
-                    if signal_score is not None:
-                        payload["signal_score"] = signal_score
                 recorder(payload, trace_id=trace_id)
         except Exception as exc:  # noqa: BLE001 - diagnostics must never block trading
             self._logger.debug(
@@ -5294,11 +5288,6 @@ class StrategyRunner:
             risk_allowed=None,
             order_submitted=False,
             trace_id=trace_id,
-            signal_score=(
-                payload.get("signal_score")
-                if isinstance(payload.get("signal_score"), (int, float))
-                else None
-            ),
             research_context=(
                 payload.get("research_context")
                 if isinstance(payload.get("research_context"), Mapping)
@@ -7414,18 +7403,13 @@ class StrategyRunner:
 
         best = candidates[0]
         label = base_symbol.strip().upper() or best.symbol.strip().upper()
+        metadata = dict(best.metadata or {})
         try:
-            delta_value = best.greeks.delta if best.greeks else best.delta or 0.0
+            delta_value = best.delta or 0.0
             _NIFTY_OPTION_DELTA_GAUGE.labels(underlying=label).set(float(delta_value))
-
-            if best.iv is not None:
-                _NIFTY_OPTION_IV_GAUGE.labels(underlying=label).set(float(best.iv))
-
-            if best.liquidity_score is not None:
-                _NIFTY_OPTION_LIQUIDITY_GAUGE.labels(underlying=label).set(
-                    float(best.liquidity_score)
-                )
-
+            iv = metadata.get("iv")
+            if isinstance(iv, (int, float)):
+                _NIFTY_OPTION_IV_GAUGE.labels(underlying=label).set(float(iv))
         except Exception:
             LOGGER.exception("[CRITICAL] unhandled exception", exc_info=True)
             raise
@@ -7435,9 +7419,9 @@ class StrategyRunner:
             extra={
                 "symbol": best.symbol,
                 "underlying": label,
-                "liquidity": best.liquidity_score,
-                "iv": best.iv,
-                "iv_rank": best.iv_rank,
+                "spread_pct": metadata.get("spread_pct"),
+                "iv": metadata.get("iv"),
+                "iv_rank": metadata.get("iv_rank"),
             },
         )
 
@@ -18561,15 +18545,6 @@ class StrategyRunner:
         # 999.0 remains the last-resort "unknown" marker when neither an
         # explicit distance nor both strikes are resolvable.
         distance_atm = abs(float(distance_raw)) if distance_raw is not None else 999.0
-        rank_score = (
-            net_rr * 10.0
-            + (2.0 if tradable_quote else -5.0)
-            + (1.0 if depth_available else 0.0)
-            + (1.0 if premium_ok else -2.0)
-            - min(spread_pct, 10.0) * 1.5
-            - min(tick_age_ms / 1000.0, 10.0) * 0.5
-            - min(distance_atm / 100.0, 10.0) * 0.5
-        )
         ranking_fields = {
             "net_rr": net_rr,
             "tradable_quote": tradable_quote,
@@ -18578,7 +18553,6 @@ class StrategyRunner:
             "depth_available": depth_available,
             "premium_within_range": premium_ok,
             "distance_from_atm": distance_atm,
-            "rank_score": rank_score,
         }
         rejected_symbols: list[str] = []
         snapshots = metadata.get("candidate_snapshots")
@@ -18675,10 +18649,24 @@ class StrategyRunner:
         if prev is not None:
             elapsed = now_epoch - float(prev.get("ts", 0.0))
             if elapsed < self._signal_attempt_debounce_seconds:
-                prev_rank_score = float(prev.get("rank_score", 0.0) or 0.0)
-                if (
-                    rank_score - prev_rank_score
-                ) < self._signal_attempt_debounce_min_improvement:
+                prev_fields = (
+                    prev.get("ranking_fields")
+                    if isinstance(prev.get("ranking_fields"), Mapping)
+                    else {}
+                )
+                previous_key = (
+                    float(prev_fields.get("net_rr", float("-inf"))),
+                    -float(prev_fields.get("spread_pct", float("inf"))),
+                    -float(prev_fields.get("tick_age_ms", float("inf"))),
+                    -float(prev_fields.get("distance_from_atm", float("inf"))),
+                )
+                current_key = (
+                    float(net_rr),
+                    -float(spread_pct),
+                    -float(tick_age_ms),
+                    -float(distance_atm),
+                )
+                if current_key <= previous_key:
                     log_throttled_live(
                         self._logger,
                         logging.INFO,
@@ -18705,7 +18693,6 @@ class StrategyRunner:
             "ts": now_epoch,
             "symbol": selected_symbol,
             "status": "reserved",
-            "rank_score": rank_score,
             "ranking_fields": ranking_fields,
         }
         return None
