@@ -316,7 +316,9 @@ def test_configured_sweep_distance_is_used_as_normalized_threshold_cap(monkeypat
     assert strategy.last_sweep_diagnostics["effective_min_sweep_points"] == 0.5
 
 
-def test_volume_spike_config_is_consumed_as_structural_confirmation(monkeypatch) -> None:
+def test_volume_spike_config_is_consumed_as_structural_confirmation(
+    monkeypatch,
+) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
     rows = _base_rows()
     engine = FakeIndicatorEngine({FUTURES: rows})
