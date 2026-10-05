@@ -1,7 +1,7 @@
 # fmt: off
 # ruff: noqa: E501,I001,F841,E701,E702
 # mypy: ignore-errors
-"""Strategy scoring and dynamic allocation manager.
+"""Strategy arbitration and dynamic allocation manager.
 
 Runtime role:
 - Evaluates strategies using prepared DataHub/ActiveContractBasket context.
@@ -32,10 +32,6 @@ from statistics import mean, pstdev
 from nifty_scalper_bot.config import settings as app_settings
 from nifty_scalper_bot.config.entry_policy import resolve_entry_policy
 from nifty_scalper_bot.config.regime_ontology import normalize_regime
-from nifty_scalper_bot.config.regime_strategy_policy import (
-    regime_strategy_compatibility,
-    regime_strategy_weight,
-)
 from nifty_scalper_bot.config.strategy_taxonomy import (
     canonical_signal_family,
     canonical_strategy_role,
@@ -60,7 +56,7 @@ from nifty_scalper_bot.core.underlying_direction import (
 from nifty_scalper_bot.infra.metrics import METRICS
 from nifty_scalper_bot.instruments.active_contracts import canonical_nifty_future_symbol
 from nifty_scalper_bot.strategies.elite_strategies.base_elite import EliteStrategy
-from nifty_scalper_bot.strategies.signal_quality import infer_option_side
+from nifty_scalper_bot.strategies.entry_evidence import infer_option_side
 from nifty_scalper_bot.strategies.setup_lifecycle import SetupStage, transition_setup
 from nifty_scalper_bot.core.strategy_context_builder import (
     build_strategy_history_context,
@@ -101,25 +97,6 @@ def _safe_float_value(value: t.Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return result
-
-
-_SIGNAL_SCORE_METADATA_KEYS = (
-    "final_trade_score",
-    "consensus_score",
-    "setup_score",
-    "raw_setup_score",
-    "strategy_score",
-)
-
-
-def _signal_score_for_diagnostics(signal: Signal) -> float | None:
-    """Return the canonical strategy score for exit telemetry, never order quantity."""
-    metadata = dict(getattr(signal, "metadata", {}) or {})
-    for key in _SIGNAL_SCORE_METADATA_KEYS:
-        score = _safe_float_value(metadata.get(key))
-        if score is not None:
-            return score
-    return None
 
 
 def _normalise_ohlcv_bars(bars: t.Any) -> list[dict[str, float]]:
@@ -610,25 +587,24 @@ StrategyFactory = t.Callable[..., StrategyInterface | t.Any]
 
 
 @dataclass(slots=True)
-class StrategyVote:
-    """Args: strategy vote fields. Returns: structured vote. Raises: none."""
+class StrategyEvidence:
+    """One strategy's structural evidence; no numeric vote or confidence."""
 
     strategy: str
     side: str
-    score: float
-    confidence: float
     reasons: list[str]
     metadata: dict[str, t.Any]
 
 
-def signal_to_vote(signal: Signal, strategy_name: str) -> StrategyVote:
-    """Args: signal + strategy name. Returns: normalized vote. Raises: none."""
+def signal_to_evidence(signal: Signal, strategy_name: str) -> StrategyEvidence:
+    """Normalize a strategy signal into explicit structural evidence."""
     metadata = dict(signal.metadata or {})
     symbol_side = infer_option_side(signal.symbol, metadata)
-    metadata_side = str(metadata.get("trade_side") or metadata.get("side") or "").upper()
+    metadata_side = str(
+        metadata.get("trade_side") or metadata.get("side") or ""
+    ).upper()
     if symbol_side in {"CE", "PE"}:
         if metadata_side in {"CE", "PE"} and metadata_side != symbol_side:
-            # A strategy asking for PE must never be reinterpreted as a CE vote.
             metadata["side_conflict"] = True
             metadata["side_from_metadata"] = metadata_side
             metadata["no_vote_reason"] = "strategy_contract_side_conflict"
@@ -637,29 +613,17 @@ def signal_to_vote(signal: Signal, strategy_name: str) -> StrategyVote:
         side = metadata_side or symbol_side
     if signal.action == "HOLD" and side not in {"CE", "PE"}:
         side = "NO_TRADE"
-    score_candidate = float(
-        metadata.get("raw_setup_score")
-        if metadata.get("raw_setup_score") is not None
-        else metadata.get("setup_score")
-        if metadata.get("setup_score") is not None
-        else metadata.get("strategy_score")
-        if metadata.get("strategy_score") is not None
-        else metadata.get("setup_quality")
-        if metadata.get("setup_quality") is not None
-        else 0.0
-    )
-    confidence_score = float(signal.confidence or 0.0) * 10.0
 
-    raw_setup_score = max(0.0, min(10.0, score_candidate))
-    # Confidence is derived from the same indicators that produced the setup
-    # score, so max() double-counted the strongest representation and let a 4.0
-    # setup with 0.92 confidence present as a 9.2 vote. Confidence stays a
-    # separate gate; the setup score alone is authoritative.
-    vote_score = raw_setup_score
-    reason = str(signal.reason or '').strip()
-    reason_list = list(metadata.get("score_reasons") or [])
+    reason = str(signal.reason or "").strip()
+    reason_list = list(
+        metadata.get("evidence_reasons")
+        or metadata.get("setup_reasons")
+        or metadata.get("reasons")
+        or []
+    )
     if reason and reason not in reason_list:
         reason_list.append(reason)
+
     strategy_key = normalize_strategy_name(strategy_name)
     metadata["strategy"] = strategy_name
     metadata["strategy_key"] = strategy_key
@@ -674,19 +638,10 @@ def signal_to_vote(signal: Signal, strategy_name: str) -> StrategyVote:
     ).strip()
     metadata["setup_name"] = setup_name or strategy_key
     metadata.setdefault("required_data_present", True)
-    metadata.setdefault("setup_quality", raw_setup_score)
-    metadata["vote_score_raw_strategy"] = raw_setup_score
-    metadata["vote_score_from_confidence"] = max(0.0, min(10.0, confidence_score))
-    metadata["vote_score"] = vote_score
-    metadata["raw_setup_score"] = raw_setup_score
-    metadata["setup_score"] = raw_setup_score
-    metadata["raw_confidence"] = max(0.0, min(1.0, float(signal.confidence or 0.0)))
-    metadata["score_reasons"] = reason_list
-    return StrategyVote(
+    metadata["evidence_reasons"] = reason_list
+    return StrategyEvidence(
         strategy=strategy_name,
-        side=side if side in {'CE', 'PE', 'NO_TRADE'} else 'UNKNOWN',
-        score=vote_score,
-        confidence=max(0.0, min(1.0, float(signal.confidence or 0.0))),
+        side=side if side in {"CE", "PE", "NO_TRADE"} else "UNKNOWN",
         reasons=reason_list,
         metadata=metadata,
     )
@@ -2773,7 +2728,7 @@ class StrategyManager(_BaseStrategyManager):
         no_signal_reasons: list[str] = []
         error_strategies: list[str] = []
         signals: list[Signal] = []
-        signal_votes: list[tuple[Signal, StrategyVote]] = []
+        signal_votes: list[tuple[Signal, StrategyEvidence]] = []
         disabled: list[str] = []
         empty: list[str] = []
         no_vote_reason_counts: dict[str, int] = {}
@@ -3757,7 +3712,7 @@ class StrategyManager(_BaseStrategyManager):
             entry = score_map.get(strategy.name)
             adjusted = self._apply_weighted_confidence(base_signal, strategy.name, entry)
             signals.append(adjusted)
-            vote = signal_to_vote(adjusted, strategy.name)
+            vote = signal_to_evidence(adjusted, strategy.name)
             if vote.metadata.get("side_conflict"):
                 signals.pop()
                 reason = "strategy_contract_side_conflict"
@@ -4188,7 +4143,7 @@ class StrategyManager(_BaseStrategyManager):
             return max(0.1, default_age)
         return max(0.1, self._env_float("STRATEGY_CONTEXT_MAX_AGE_SECONDS", 120.0))
 
-    def _extract_raw_score(self, vote: StrategyVote) -> float:
+    def _extract_raw_score(self, vote: StrategyEvidence) -> float:
         """Args: vote. Returns: raw score. Raises: none."""
         payload = dict(vote.metadata or {})
         for key in ("raw_vote_score", "raw_setup_score", "vote_score"):
@@ -4202,7 +4157,7 @@ class StrategyManager(_BaseStrategyManager):
         except (TypeError, ValueError):
             return 0.0
 
-    def _extract_raw_context_score(self, vote: StrategyVote) -> float:
+    def _extract_raw_context_score(self, vote: StrategyEvidence) -> float:
         """Return context evidence before regime weighting."""
         payload = dict(vote.metadata or {})
         for key in (
@@ -4219,7 +4174,7 @@ class StrategyManager(_BaseStrategyManager):
                 continue
         return max(0.0, self._extract_raw_score(vote))
 
-    def _extract_context_score(self, vote: StrategyVote) -> float:
+    def _extract_context_score(self, vote: StrategyEvidence) -> float:
         """Return positive context evidence after exactly one regime weighting."""
         payload = dict(vote.metadata or {})
         explicit_weighted = payload.get("regime_weighted_context_score")
@@ -4235,7 +4190,7 @@ class StrategyManager(_BaseStrategyManager):
             regime_weight = 1.0
         return max(0.0, raw_context_score * max(0.0, regime_weight))
 
-    def _context_vote_is_timestamped(self, vote: StrategyVote, *, max_age_s: float | None = None) -> bool:
+    def _context_vote_is_timestamped(self, vote: StrategyEvidence, *, max_age_s: float | None = None) -> bool:
         """Return whether a context vote proves it is current.
 
         A hard veto blocks an otherwise valid trade, so it requires an
@@ -4255,7 +4210,7 @@ class StrategyManager(_BaseStrategyManager):
             max_age = min(max_age, max(0.0, max_age_s))
         return 0.0 <= (time.time() - stamped) <= max_age
 
-    def _extract_context_veto_score(self, vote: StrategyVote) -> float:
+    def _extract_context_veto_score(self, vote: StrategyEvidence) -> float:
         """Args: vote. Returns: context veto score. Raises: none."""
         if not self._context_vote_is_timestamped(vote):
             return 0.0
@@ -4292,7 +4247,7 @@ class StrategyManager(_BaseStrategyManager):
         self,
         *,
         symbol: str,
-        signal_votes: list[tuple[Signal, StrategyVote]],
+        signal_votes: list[tuple[Signal, StrategyEvidence]],
         indicators: t.Mapping[str, t.Any],
         combined: Signal | None,
         blocked_reason: str | None,
@@ -4300,8 +4255,8 @@ class StrategyManager(_BaseStrategyManager):
     ) -> None:
         """Log exact strategy combiner blocker details without changing vote outcomes."""
         indicator_map = dict(indicators or {})
-        trigger_votes: list[StrategyVote] = []
-        context_votes: list[StrategyVote] = []
+        trigger_votes: list[StrategyEvidence] = []
+        context_votes: list[StrategyEvidence] = []
         for _signal, vote in signal_votes:
             role = str((vote.metadata or {}).get("role") or "trigger").lower()
             if role == "context":
@@ -4371,7 +4326,7 @@ class StrategyManager(_BaseStrategyManager):
         self,
         *,
         symbol: str,
-        signals: list[tuple[Signal, StrategyVote]],
+        signals: list[tuple[Signal, StrategyEvidence]],
         indicators: t.Mapping[str, t.Any],
         no_vote_reason_counts: t.Mapping[str, int] | None = None,
     ) -> Signal | None:
@@ -4414,18 +4369,18 @@ class StrategyManager(_BaseStrategyManager):
             indicator_near_atm = False
         if not signals:
             return None
-        def _weighted_score(vote: StrategyVote) -> float:
+        def _weighted_score(vote: StrategyEvidence) -> float:
             try:
                 return float(vote.score or 0.0)
             except (TypeError, ValueError):
                 return 0.0
-        def _regime_weight(vote: StrategyVote) -> float:
+        def _regime_weight(vote: StrategyEvidence) -> float:
             try:
                 return float((vote.metadata or {}).get("regime_weight", 1.0) or 1.0)
             except (TypeError, ValueError):
                 return 1.0
         mode_profile = self.get_strategy_mode_profile()
-        entry_signals: list[tuple[Signal, StrategyVote]] = []
+        entry_signals: list[tuple[Signal, StrategyEvidence]] = []
         for signal, vote in signals:
             if signal.action in {"CLOSE_LONG", "CLOSE_SHORT"}:
                 signal.metadata = dict(signal.metadata or {})
@@ -4688,7 +4643,7 @@ class StrategyManager(_BaseStrategyManager):
         # Correlated context is one evidence family, not multiple independent votes.
         # Keep the strongest observation per canonical family so repeated/overlapping
         # context cannot manufacture conviction while distinct families still add.
-        def _independent_context_total(votes: t.Sequence[StrategyVote], extractor: t.Callable[[StrategyVote], float]) -> float:
+        def _independent_context_total(votes: t.Sequence[StrategyEvidence], extractor: t.Callable[[StrategyEvidence], float]) -> float:
             strongest: dict[str, float] = {}
             for vote in votes:
                 family = canonical_signal_family(vote.strategy)
@@ -4703,7 +4658,7 @@ class StrategyManager(_BaseStrategyManager):
         final_score = max(0.0, min(10.0, final_score))
         # Opposing context scores/confidences are attribution only. Authoritative
         # direction conflict is enforced by the spot/futures direction contract.
-        hard_veto_candidates: list[StrategyVote] = []
+        hard_veto_candidates: list[StrategyEvidence] = []
         vetoed = False
         selected_ok = True
         near_atm = indicator_near_atm
@@ -4829,7 +4784,7 @@ class StrategyManager(_BaseStrategyManager):
                 ).split(",")
                 if name.strip()
             }
-            qualifying_context_votes: list[StrategyVote] = []
+            qualifying_context_votes: list[StrategyEvidence] = []
             for context_vote in same_side_context:
                 context_metadata = dict(context_vote.metadata or {})
                 context_quote_ready = bool(
@@ -5520,10 +5475,10 @@ class StrategyManager(_BaseStrategyManager):
     def _try_context_promotion(
         self,
         symbol: str,
-        context_votes: list[tuple[Signal, StrategyVote]],
+        context_votes: list[tuple[Signal, StrategyEvidence]],
         indicators: t.Mapping[str, t.Any],
         mode_profile: dict[str, t.Any],
-    ) -> tuple[Signal, StrategyVote] | None:
+    ) -> tuple[Signal, StrategyEvidence] | None:
         """Args: symbol/context votes/indicators/profile. Returns: promoted candidate or None. Raises: none."""
         if not context_votes:
             return None
@@ -5669,7 +5624,7 @@ class StrategyManager(_BaseStrategyManager):
             if value is not None:
                 md[key] = value
         promoted = Signal(action="BUY", symbol=best_signal.symbol, quantity=best_signal.quantity, confidence=best_signal.confidence, reason=best_signal.reason, stop_loss=best_signal.stop_loss, take_profit=best_signal.take_profit, metadata=md)
-        promoted_vote = StrategyVote(strategy=best_vote.strategy, side=best_vote.side, score=best_vote.score, confidence=best_vote.confidence, reasons=list(best_vote.reasons), metadata=md)
+        promoted_vote = StrategyEvidence(strategy=best_vote.strategy, side=best_vote.side, score=best_vote.score, confidence=best_vote.confidence, reasons=list(best_vote.reasons), metadata=md)
         record_strategy_evaluation(strategy=str(best_vote.strategy), symbol=str(symbol), accepted=True, reason="direction_context_aligned", score=raw_score)
         maybe_emit_strategy_rejection_summary(log, interval_seconds=300.0)
         log.info(
@@ -5692,13 +5647,13 @@ class StrategyManager(_BaseStrategyManager):
 
     def _compute_trade_quality_score(
         self,
-        vote: StrategyVote,
+        vote: StrategyEvidence,
         indicators: t.Mapping[str, t.Any],
         *,
         symbol: str,
         selected_ok: bool,
         near_atm_ok: bool,
-        context_votes: list[StrategyVote],
+        context_votes: list[StrategyEvidence],
     ) -> tuple[float, dict[str, t.Any]]:
         """Args: vote+indicators. Returns: trade quality score and metadata. Raises: none."""
         payload = dict(vote.metadata or {})
@@ -5832,9 +5787,9 @@ class StrategyManager(_BaseStrategyManager):
         )
 
     def _apply_regime_vote_weight(
-        self, *, vote: StrategyVote, regime_name: str | None
-    ) -> StrategyVote:
-        """Args: vote + regime_name. Returns: weighted StrategyVote. Raises: none."""
+        self, *, vote: StrategyEvidence, regime_name: str | None
+    ) -> StrategyEvidence:
+        """Args: vote + regime_name. Returns: weighted StrategyEvidence. Raises: none."""
         try:
             regime_key = normalize_regime(regime_name).value
             weight = regime_strategy_weight(regime_key, vote.strategy)
@@ -5862,7 +5817,7 @@ class StrategyManager(_BaseStrategyManager):
                 regime_key, vote.strategy
             )
             metadata["regime_routing_mode"] = "observe_only"
-            return StrategyVote(
+            return StrategyEvidence(
                 strategy=vote.strategy,
                 side=vote.side,
                 score=weighted_score,
