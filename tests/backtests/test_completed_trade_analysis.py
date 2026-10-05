@@ -409,7 +409,7 @@ def test_candidate_decision_funnel_preserves_reasons_and_structural_provenance()
 
 
 def test_post_cost_outcome_evidence_reports_strategy_setup_and_r_excursions() -> None:
-        rows = [
+    rows = [
         _trade(
             "a",
             1.0,
