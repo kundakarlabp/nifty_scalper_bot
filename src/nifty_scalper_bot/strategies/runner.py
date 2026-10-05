@@ -5141,11 +5141,6 @@ class StrategyRunner:
                 "source": str(snapshot.source or "signal_snapshot"),
                 "atr_option": float(metadata.get("atr", 0.0) or 0.0),
                 "history_bars": int(metadata.get("history_bars", 0) or 0),
-                "data_quality_score": float(
-                    metadata.get("data_quality_score")
-                    if metadata.get("data_quality_score") is not None
-                    else metadata.get("data_score", 0.0) or 0.0
-                ),
                 "candidate_selected": candidate_selected,
                 "is_selected_option": candidate_selected,
                 "selected_ce": selected_ce,
@@ -17860,91 +17855,44 @@ class StrategyRunner:
             interval_sec=60.0,
             level=logging.INFO,
         )
-        # --- Premium squeeze quality components: local to this function ---
-        direction_score = 7.0
-        strategy_score = 6.5
-        option_score = 6.5
-        data_score = 6.5
-        rr_score = 6.0
-
         price_above_vwap = False
         price_above_ema = False
         momentum_window_active = False
         selected_or_near_atm = bool(selected or near_atm)
-
         try:
             price_above_vwap = bool(float(price) > float(vwap))
         except (TypeError, ValueError):
-            price_above_vwap = False
-
+            pass
         try:
             price_above_ema = bool(ema is not None and float(price) > float(ema))
         except (TypeError, ValueError):
-            price_above_ema = False
-
+            pass
         try:
             momentum_window_active = 65.0 <= float(rsi) <= 82.0
         except (TypeError, ValueError):
-            momentum_window_active = False
-
-        if price_above_vwap and price_above_ema:
-            direction_score += 1.0
-        if momentum_window_active:
-            direction_score += 1.0
-
-        if momentum_window_active:
-            strategy_score += 1.0
-        if price_above_vwap:
-            strategy_score += 1.0
-
-        if selected_or_near_atm:
-            option_score = max(option_score, 7.5)
-        elif in_active_universe:
-            option_score = max(option_score, 7.0)
-
+            pass
         try:
             history_count = len(self._indicator_engine.get_history(symbol))
         except Exception:
             history_count = 0
-
         required_history = int(getattr(self, "_warmup_bars_required", 20) or 20)
-        if history_count >= required_history:
-            data_score = 9.0
-        elif history_count >= 5:
-            data_score = 8.0
-
-        risk = max(float(price) - float(calculated_sl), 0.0)
-        reward = max(float(calculated_tp) - float(price), 0.0)
-        if risk > 0 and reward > 0:
-            rr_score = max(0.0, min(10.0, (reward / risk) * 5.0))
-
-        direction_score = max(0.0, min(10.0, direction_score))
-        strategy_score = max(0.0, min(10.0, strategy_score))
-        option_score = max(0.0, min(10.0, option_score))
-        data_score = max(0.0, min(10.0, data_score))
-        rr_score = max(0.0, min(10.0, rr_score))
+        setup_pass = bool(
+            price_above_vwap
+            and price_above_ema
+            and momentum_window_active
+            and selected_or_near_atm
+            and history_count >= required_history
+        )
+        if not setup_pass:
+            return None
         premium_rr = (float(calculated_tp) - float(price)) / max(
             float(price) - float(calculated_sl), 1e-9
-        )
-        confidence = max(
-            0.55,
-            min(
-                0.85,
-                (
-                    direction_score
-                    + strategy_score
-                    + option_score
-                    + data_score
-                    + rr_score
-                )
-                / 50.0,
-            ),
         )
         return Signal(
             action="BUY",
             symbol=symbol,
             quantity=1,
-            confidence=confidence,
+            confidence=1.0,
             reason="premium_momentum_squeeze",
             stop_loss=calculated_sl,
             take_profit=calculated_tp,
@@ -17963,13 +17911,16 @@ class StrategyRunner:
                 ),
                 "premium_stop_distance": max(float(price) - float(calculated_sl), 0.0),
                 "premium_target_rr": premium_rr,
-                "direction_score": direction_score,
-                "strategy_score": strategy_score,
-                "setup_quality": strategy_score,
-                "confidence": confidence,
-                "option_score": option_score,
-                "data_score": data_score,
-                "rr_score": rr_score,
+                "setup_pass": True,
+                "setup_reasons": [
+                    "premium_above_vwap",
+                    "premium_above_ema",
+                    "momentum_window_active",
+                    "selected_or_near_atm",
+                    "history_ready",
+                ],
+                "required_data_present": True,
+                "stale_data_used": False,
             },
         )
 
@@ -18424,61 +18375,6 @@ class StrategyRunner:
                 f"📊 Orphan Adoption Complete: {adopted_count} positions protected"
             )
 
-    def _calculate_signal_score(self, symbol: str, side: str, price: float) -> float:
-        """
-        Calculate confidence using INSTANT metrics (No history required).
-
-        ✅ WORLD CLASS FIX: Better handling of market hours and volume.
-        """
-        from datetime import datetime
-        from zoneinfo import ZoneInfo
-
-        # Check session override for testing
-        allow_off_hours = self._session_allow_out_of_hours
-        ist_now = datetime.now(ZoneInfo("Asia/Kolkata"))
-        is_market_hours = 9 <= ist_now.hour < 16
-
-        # Base score
-        score = 0.5
-
-        with self._lock:
-            state = self._symbol_state.get(symbol)
-            if not state:
-                return 0.75  # Trust signal if no state
-
-            # 1. VWAP Proximity
-            if state.vwap and state.vwap > 0 and price > 0:
-                dist_pct = abs(price - state.vwap) / state.vwap
-                if dist_pct < 0.005:  # <0.5%
-                    score += 0.3
-                elif dist_pct < 0.01:  # <1.0%
-                    score += 0.2
-                elif dist_pct < 0.02:  # <2.0%
-                    score += 0.1
-                elif dist_pct > 0.03:  # >3%
-                    score -= 0.2
-
-            # 2. Volume Check - Relaxed for off-hours
-            if state.last_tick:
-                vol = float(state.last_tick.get("volume", 0))
-                if vol > 100000:
-                    score += 0.2
-                elif vol > 50000:
-                    score += 0.15
-                elif vol > 10000:
-                    score += 0.1
-                elif vol > 0:
-                    score += 0.05
-                elif allow_off_hours and not is_market_hours:
-                    # Off-hours: don't penalize zero volume
-                    score += 0.1
-
-        # 3. Boost for testing mode
-        if allow_off_hours and not is_market_hours:
-            score = max(score, 0.6)  # Ensure signals pass during testing
-
-        return min(1.0, max(0.0, score))
-
     def _resolve_contract_safely(
         self, base_symbol: str, action: str, price: float, option_type: str | None
     ) -> SelectedContract | None:
@@ -18677,7 +18573,7 @@ class StrategyRunner:
                 self._signal_attempt_debounce_state.pop(key, None)
                 prev = None
         # Dedup improvement is based on executable economics/market quality,
-        # never the legacy candidate/strategy/confidence scores.
+        # never synthetic strategy-ranking values.
         net_rr_raw = metadata.get("candidate_net_rr")
         if net_rr_raw is None:
             net_rr_raw = metadata.get("candidate_rr")
@@ -20134,28 +20030,7 @@ class StrategyRunner:
                         take_profit=candidate.target or signal.take_profit,
                         metadata=metadata,
                     )
-                metadata["option_score"] = max(
-                    float(metadata.get("option_score", 0.0) or 0.0),
-                    float(candidate.score or 0.0),
-                )
-                metadata["data_score"] = max(
-                    float(metadata.get("data_score", 0.0) or 0.0),
-                    float(candidate.data_quality_score or 0.0),
-                )
-                metadata["rr_score"] = max(
-                    float(metadata.get("rr_score", 0.0) or 0.0),
-                    min(10.0, float(candidate.rr or 0.0) * 5.0),
-                )
-                # Candidate identity is not independent underlying-direction evidence.
-                # Candidate selection may contribute option/data/RR quality only;
-                # direction quality must come from the strategy/context path.
-                metadata["strategy_score"] = max(
-                    float(metadata.get("strategy_score", 0.0) or 0.0),
-                    float(metadata.get("raw_setup_score", 0.0) or 0.0),
-                    float(metadata.get("setup_score", 0.0) or 0.0),
-                )
                 metadata["spread_pct"] = candidate.spread_pct
-                metadata["candidate_score"] = candidate.score
                 metadata["candidate_selected"] = True
                 metadata["candidate_symbol"] = candidate.symbol
                 metadata["candidate_entry_price"] = candidate.entry_price
@@ -20163,7 +20038,6 @@ class StrategyRunner:
                 metadata["candidate_target"] = candidate.target
                 metadata["candidate_rr"] = candidate.rr
                 metadata["candidate_net_rr"] = candidate.net_rr
-                metadata["candidate_data_quality_score"] = candidate.data_quality_score
                 metadata["candidate_spread_pct"] = candidate.spread_pct
                 metadata["candidate_tick_age_s"] = getattr(
                     candidate, "tick_age_s", None
@@ -20190,7 +20064,7 @@ class StrategyRunner:
                 )
                 if selected_symbol != original_symbol:
                     self._logger.info(
-                        "SIGNAL_SYMBOL_REPLACED_BY_CANDIDATE original_symbol=%s selected_symbol=%s original_trade_price=%s selected_trade_price=%s candidate_entry_price=%s selected_snapshot_ask=%s selected_snapshot_ltp=%s candidate_stop_loss=%s candidate_target=%s candidate_rr=%s candidate_score=%s trace_id=%s",
+                        "SIGNAL_SYMBOL_REPLACED_BY_CANDIDATE original_symbol=%s selected_symbol=%s original_trade_price=%s selected_trade_price=%s candidate_entry_price=%s selected_snapshot_ask=%s selected_snapshot_ltp=%s candidate_stop_loss=%s candidate_target=%s candidate_rr=%s trace_id=%s",
                         original_symbol,
                         candidate.symbol,
                         original_trade_price,
@@ -20201,7 +20075,6 @@ class StrategyRunner:
                         getattr(candidate, "stop_loss", None),
                         getattr(candidate, "target", None),
                         getattr(candidate, "rr", None),
-                        getattr(candidate, "score", None),
                         trace_id,
                         extra={
                             "event": "SIGNAL_SYMBOL_REPLACED_BY_CANDIDATE",
@@ -20221,7 +20094,6 @@ class StrategyRunner:
                             ),
                             "candidate_target": getattr(candidate, "target", None),
                             "candidate_rr": getattr(candidate, "rr", None),
-                            "candidate_score": getattr(candidate, "score", None),
                             "trace_id": trace_id,
                         },
                     )
@@ -20625,24 +20497,6 @@ class StrategyRunner:
                     "approval_stage": "runner_structural_execution_validation",
                 },
             )
-            for obsolete_key in (
-                "final_score",
-                "alpha_score",
-                "signal_quality",
-                "strategy_score",
-                "setup_score",
-                "raw_setup_score",
-                "independent_setup_score",
-                "direction_score",
-                "option_score",
-                "data_score",
-                "rr_score",
-                "score_lineage",
-                "score_contract_version",
-                "diagnostic_quality_confidence",
-                "score_admission_role",
-            ):
-                metadata.pop(obsolete_key, None)
             signal = dataclasses.replace(signal, metadata=dict(metadata))
 
             self._logger.info(
