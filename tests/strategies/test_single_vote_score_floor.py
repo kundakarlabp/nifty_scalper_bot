@@ -1,10 +1,10 @@
 # fmt: off
 # ruff: noqa: E501,I001
-"""Selected-option single-vote scalps require a high score floor (default 9.0).
+"""Regression coverage for score-independent single-trigger admission.
 
-A lone vote remains disabled by default. A selected-option trigger may pass only
-when a fresh, strong, explicitly allowed context strategy confirms it and the
-combined score clears the same conservative floor.
+Legacy setup/quality/confidence scores remain observable, but structural setup,
+authoritative direction, selected-contract eligibility and fresh executable
+context own admission.
 """
 
 from __future__ import annotations
@@ -328,7 +328,7 @@ async def test_range_vwap_trigger_can_reach_runner_with_strong_orderflow_confirm
     monkeypatch,
     caplog,
 ) -> None:
-    """Strong RANGE VWAP + independent OrderFlow reaches Runner; Runner owns final alpha."""
+    """Strong RANGE VWAP + independent OrderFlow reaches execution validation without a numeric admission owner."""
     caplog.set_level(logging.INFO)
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     monkeypatch.setenv("ENABLE_LIVE", "true")
