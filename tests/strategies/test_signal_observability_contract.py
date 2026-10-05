@@ -22,7 +22,7 @@ from nifty_scalper_bot.strategies.signal_identity import (
 
 class _ObservableStrategy(EliteStrategy):
     def __init__(self) -> None:
-        super().__init__(EliteStrategyConfig(min_confidence=0.0), SimpleNamespace())
+        super().__init__(EliteStrategyConfig(), SimpleNamespace())
 
     def get_required_indicators(self) -> list[str]:
         return []
