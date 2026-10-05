@@ -584,6 +584,14 @@ class VWAPProStrategy(EliteStrategy):
                 structural_failures.append("volume_confirmation_missing")
             if structural_failures:
                 self._no_vote(structural_failures[0])
+                transition_setup(
+                    SetupStage.CONTRACT_REJECTED,
+                    strategy="VWAPPro",
+                    setup_id=setup_lifecycle_id,
+                    symbol=symbol,
+                    side=contract_side,
+                    reason=structural_failures[0],
+                )
                 LOGGER.info(
                     "VWAP_STRUCTURAL_SETUP_REJECTED symbol=%s side=%s failures=%s",
                     symbol,
