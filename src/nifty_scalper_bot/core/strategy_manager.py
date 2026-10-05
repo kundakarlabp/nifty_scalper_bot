@@ -4658,17 +4658,10 @@ class StrategyManager(_BaseStrategyManager):
         context_penalty = min(1.5, 0.60 * negative_context)
         final_score = weighted_trigger_score + context_bonus - context_penalty
         final_score = max(0.0, min(10.0, final_score))
-        context_confidence_floor = float(os.getenv("STRATEGY_CONTEXT_HARD_VETO_MIN_CONFIDENCE", "0.80") or "0.80")
-        context_freshness_max_age_s = float(os.getenv("STRATEGY_CONTEXT_HARD_VETO_MAX_AGE_SECONDS", "120") or "120")
-        hard_veto_candidates = []
-        for vote in opposite_context:
-            if (
-                self._extract_context_veto_score(vote) >= 8.0
-                and float(vote.confidence) >= context_confidence_floor
-                and self._context_vote_is_timestamped(vote, max_age_s=context_freshness_max_age_s)
-            ):
-                hard_veto_candidates.append(vote)
-        vetoed = bool(hard_veto_candidates)
+        # Opposing context scores/confidences are attribution only. Authoritative
+        # direction conflict is enforced by the spot/futures direction contract.
+        hard_veto_candidates: list[StrategyVote] = []
+        vetoed = False
         selected_ok = True
         near_atm = indicator_near_atm
         if trigger_votes and len(trigger_votes) == 1:
