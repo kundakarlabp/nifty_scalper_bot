@@ -2230,17 +2230,12 @@ class StrategyManager(_BaseStrategyManager):
                 return float(value)
             except (TypeError, ValueError):
                 return None
-        explicit = str(indicators.get("direction_bias") or indicators.get("underlying_direction_bias") or "").upper()
-        if explicit in {"CE", "PE"}:
-            try:
-                conf = float(indicators.get("underlying_direction_confidence") or indicators.get("direction_confidence") or 0.75)
-            except (TypeError, ValueError):
-                conf = 0.75
-            return explicit, max(0.0, min(1.0, conf)), ["explicit_direction_bias"]
         close = _f("close") or _f("ltp") or _f("price")
         ltp = _f("ltp") or _f("last_price") or _f("price")
         previous_close = _f("previous_close") or _f("prev_close") or _f("previous_price")
-        day_open = _f("open") or _f("day_open") or _f("first_ltp")
+        # Session location must use a session anchor. Generic candle-open data
+        # is too short-horizon to define the underlying market direction.
+        day_open = _f("day_open") or _f("session_open") or _f("first_ltp")
         recent_ltp_delta = _f("recent_ltp_delta") or _f("net_change") or _f("price_change_pct")
         tick_slope = _f("tick_slope")
         vwap = _f("exchange_vwap") or _f("session_vwap") or _f("vwap")
@@ -2344,16 +2339,15 @@ class StrategyManager(_BaseStrategyManager):
 
         location_side = _family_side(location_votes, "price_location")
         trend_side = _family_side(trend_votes, "trend_structure")
-        if location_side and trend_side and location_side != trend_side:
+        if location_side is None or trend_side is None:
+            return None, 0.0, [*reasons, "direction_requires_location_and_trend"]
+        if location_side != trend_side:
             return None, 0.0, [*reasons, "direction_family_conflict"]
 
-        side = trend_side or location_side
-        if side is None:
-            return None, 0.0, [*reasons, "direction_unavailable"]
-
-        # Confidence is observability only; it never authorizes direction.
-        structural_families = int(location_side is not None) + int(trend_side is not None)
-        confidence = 0.80 if structural_families == 2 else 0.65
+        side = trend_side
+        # Confidence is provenance telemetry only. Admission depends on the
+        # explicit structural agreement above, never on a numeric threshold.
+        confidence = 0.80
         if tick_side == side:
             confidence = min(0.90, confidence + 0.05)
         elif tick_side is not None:
@@ -3061,6 +3055,10 @@ class StrategyManager(_BaseStrategyManager):
                 direction_valid=fut_direction_valid,
                 tick_age_s=fut_tick_age_s,
             )
+            pending_reversal = bool(
+                spot_ctx.get("direction_reversal_candidate")
+                or fut_ctx.get("direction_reversal_candidate")
+            )
             resolution = arbitrate_underlying_direction(
                 spot_observation,
                 futures_observation,
@@ -3081,7 +3079,40 @@ class StrategyManager(_BaseStrategyManager):
             context_resolved = False
             context_available = False
             direction_context_source: str | None = None
-            if resolution.conflict:
+            if pending_reversal:
+                pending_ages = [
+                    obs.age_seconds
+                    for obs in (spot_observation, futures_observation)
+                    if obs is not None
+                ]
+                indicators["context_fresh"] = bool(pending_ages)
+                if pending_ages:
+                    indicators["context_age_seconds"] = max(pending_ages)
+                indicators["underlying_direction_state"] = UnderlyingDirectionState.TRANSITION.value
+                indicators["direction_transition"] = True
+                indicators["direction_resolution_reason"] = "underlying_reversal_pending"
+                indicators["direction_context_source"] = "reversal_transition"
+                direction_context_source = "reversal_transition"
+                context_available = True
+                log_throttled(
+                    log,
+                    f"direction_reversal_pending:{symbol}",
+                    "DIRECTION_CONTEXT_TRANSITION symbol=%s reason=underlying_reversal_pending "
+                    "spot_candidate=%s futures_candidate=%s",
+                    symbol,
+                    spot_ctx.get("direction_reversal_candidate"),
+                    fut_ctx.get("direction_reversal_candidate"),
+                    interval_sec=30.0,
+                    level=logging.WARNING,
+                    extra={
+                        "event": "DIRECTION_CONTEXT_TRANSITION",
+                        "symbol": symbol,
+                        "reason": "underlying_reversal_pending",
+                        "spot_candidate": spot_ctx.get("direction_reversal_candidate"),
+                        "futures_candidate": fut_ctx.get("direction_reversal_candidate"),
+                    },
+                )
+            elif resolution.conflict:
                 # Fresh contradictory evidence is a transition, not stale/missing
                 # context. Keep execution fail-closed (no CE/PE bias) while
                 # preserving freshness/provenance for strategy diagnostics.
@@ -3121,7 +3152,13 @@ class StrategyManager(_BaseStrategyManager):
                         "futures_bias": futures_observation.bias if futures_observation else None,
                     },
                 )
-            elif resolution.observation is not None:
+            elif (
+                resolution.observation is not None
+                and (
+                    str(os.getenv("EXECUTION_MODE", "SHADOW")).strip().upper() != "LIVE"
+                    or resolution.reason == "spot_futures_agree"
+                )
+            ):
                 observation = resolution.observation
                 indicators["direction_bias"] = observation.bias
                 indicators["underlying_direction_bias"] = observation.bias
@@ -3155,6 +3192,8 @@ class StrategyManager(_BaseStrategyManager):
                     level=logging.INFO,
                 )
             else:
+                indicators.pop("direction_bias", None)
+                indicators.pop("underlying_direction_bias", None)
                 indicators["context_fresh"] = False
                 indicators["underlying_direction_state"] = UnderlyingDirectionState.UNAVAILABLE.value
                 indicators["direction_transition"] = False
