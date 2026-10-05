@@ -6190,6 +6190,11 @@ class StrategyManager(_BaseStrategyManager):
         )
 
         regime_bias = self._regime_bias_map.get(regime_key, {})
+        # Small-sample composite performance scores are research/adaptation
+        # telemetry in LIVE; they must not silently disable an entry strategy.
+        dynamic_auto_toggle_allowed = not self._is_live_mode()
+        if not dynamic_auto_toggle_allowed:
+            self._dynamic_disabled.clear()
         regime_changed = regime_key != self._regime_last_key
         self._regime_last_key = regime_key
         confidence = self._regime_state.confidence
@@ -6262,7 +6267,8 @@ class StrategyManager(_BaseStrategyManager):
             enabled = name not in self._disabled_strategies
             dynamic_flag = name in self._dynamic_disabled
             should_disable = (
-                enabled
+                dynamic_auto_toggle_allowed
+                and enabled
                 and not dynamic_flag
                 and manual is None
                 and trade_count >= max(1, self._dynamic_trade_threshold)
@@ -6271,7 +6277,7 @@ class StrategyManager(_BaseStrategyManager):
                 and rolling_pnl_value <= 0
                 and drawdown_value > 0
             )
-            should_enable = dynamic_flag and (
+            should_enable = dynamic_auto_toggle_allowed and dynamic_flag and (
                 composite_score >= self._dynamic_enable_threshold
                 or rolling_pnl_value > 0
                 or ratio_value >= 1.1
