@@ -1521,61 +1521,65 @@ class StrategyManager:
                 (signal, conf) for signal, conf in normalized if signal.action == "SELL"
             ]
 
-            buy_weight = sum(conf**2 for _, conf in buy_signals)
-            sell_weight = sum(conf**2 for _, conf in sell_signals)
-
-            suppressed = [
-                signal
-                for signal, conf in normalized
-                if conf < float(self._min_confidence)
-            ]
+            # Legacy confidence values remain telemetry only. Conflicting BUY/SELL
+            # actions fail closed; otherwise deterministic strategy order chooses
+            # the representative signal without confidence weighting.
+            buy_confidences = [conf for _, conf in buy_signals]
+            sell_confidences = [conf for _, conf in sell_signals]
+            legacy_low_confidence_count = sum(
+                1 for _, conf in normalized if conf < float(self._min_confidence)
+            )
 
             self._logger.info(
-                "Condition met: ensemble_weighted_vote",
+                "Condition met: ensemble_structural_vote",
                 extra={
-                    "event": "ensemble_weighted_vote",
+                    "event": "ensemble_structural_vote",
                     "buy_count": len(buy_signals),
                     "sell_count": len(sell_signals),
-                    "buy_weight": round(buy_weight, 4),
-                    "sell_weight": round(sell_weight, 4),
-                    "suppressed": len(suppressed),
+                    "legacy_low_confidence_count": legacy_low_confidence_count,
                 },
             )
 
-            if buy_weight > sell_weight and buy_signals:
-                best_signal, _ = max(buy_signals, key=lambda item: item[1])
-                weight_sum = sum(conf**2 for _, conf in buy_signals)
-                avg_conf = (
-                    sum(conf * (conf**2) for _, conf in buy_signals) / weight_sum
-                    if weight_sum > 0
-                    else 0.0
+            if buy_signals and sell_signals:
+                self._logger.info(
+                    "STRATEGY_CONSENSUS side=NO_TRADE votes=%s reason=buy_sell_conflict",
+                    len(signals),
+                    extra={
+                        "event": "STRATEGY_CONSENSUS",
+                        "side": "NO_TRADE",
+                        "votes": len(signals),
+                        "reason": "buy_sell_conflict",
+                    },
                 )
+                return None
+            if buy_signals:
+                best_signal, _ = buy_signals[0]
                 return dataclasses.replace(
                     best_signal,
-                    confidence=min(avg_conf, 1.0),
                     metadata={
                         **(best_signal.metadata or {}),
                         "ensemble_count": len(buy_signals),
-                        "ensemble_weight": round(buy_weight, 4),
-                        "ensemble_suppressed": len(suppressed),
+                        "legacy_ensemble_confidence_mean": (
+                            sum(buy_confidences) / len(buy_confidences)
+                            if buy_confidences
+                            else 0.0
+                        ),
+                        "legacy_low_confidence_count": legacy_low_confidence_count,
                     },
                 )
             if sell_signals:
-                best_signal, _ = max(sell_signals, key=lambda item: item[1])
-                weight_sum = sum(conf**2 for _, conf in sell_signals)
-                avg_conf = (
-                    sum(conf * (conf**2) for _, conf in sell_signals) / weight_sum
-                    if weight_sum > 0
-                    else 0.0
-                )
+                best_signal, _ = sell_signals[0]
                 return dataclasses.replace(
                     best_signal,
-                    confidence=min(avg_conf, 1.0),
                     metadata={
                         **(best_signal.metadata or {}),
                         "ensemble_count": len(sell_signals),
-                        "ensemble_weight": round(sell_weight, 4),
-                        "ensemble_suppressed": len(suppressed),
+                        "legacy_ensemble_confidence_mean": (
+                            sum(sell_confidences) / len(sell_confidences)
+                            if sell_confidences
+                            else 0.0
+                        ),
+                        "legacy_low_confidence_count": legacy_low_confidence_count,
                     },
                 )
         except Exception as exc:
@@ -2016,11 +2020,8 @@ class StrategyManager:
         )
 
     def _filter_signal(self, signal: Signal) -> bool:
-        if signal.confidence < self._min_confidence:
-            logger.debug(
-                f"Filter REJECT {signal.symbol}: Low Confidence ({signal.confidence:.2f} < {self._min_confidence})"
-            )
-            return False
+        # Legacy confidence is diagnostic only; structural/data filters below
+        # remain responsible for this compatibility path.
 
         indicators = (
             signal.metadata.get("indicators", {})
