@@ -237,7 +237,7 @@ def _research_orb_quality_context(
     spot_symbol: str,
     futures_symbol: str,
 ) -> dict[str, Any]:
-    """Return exactly the external context fields consumed by ORB quality scoring."""
+    """Return the external structural context consumed by ORB."""
     spot_payload, spot_observation = _research_direction_payload(
         engine, spot_symbol, role="spot_context"
     )
@@ -267,30 +267,6 @@ def _research_orb_quality_context(
         "research_spot_vwap_slope": spot_payload.get("vwap_slope"),
         "research_futures_vwap_slope": futures_payload.get("vwap_slope"),
     }
-
-
-def _orb_research_score_v2(metadata: dict[str, Any]) -> tuple[float, bool]:
-    """Frozen 2017-2018 calibration candidate; research-only and not live policy.
-
-    Development evidence showed retest, penetration and direction alignment
-    improved gross expectancy, while the existing high-volume point moved many
-    poor trades from score 8 to score 9. The candidate therefore rewards the
-    three former features and penalizes volume confirmation. A score of 8
-    requires all three positive features with no volume penalty.
-    """
-    reasons = {
-        str(reason) for reason in (metadata.get("score_reasons") or []) if reason
-    }
-    score = 5.0
-    if "retest_hold" in reasons:
-        score += 1.0
-    if "normalized_breakout_penetration" in reasons:
-        score += 1.0
-    if "underlying_direction_alignment" in reasons:
-        score += 1.0
-    if "underlying_volume_confirmation" in reasons:
-        score -= 1.0
-    return score, score >= 8.0
 
 
 def _round_research_tick(price: float, tick_size: float = 0.05) -> float:
@@ -389,14 +365,9 @@ def _scenario(
     compact_orb_context: bool = False,
     strict_liquidity: bool = False,
     lifecycle_proxy: bool = False,
-    research_quality_profile: str | None = None,
 ) -> dict[str, Any]:
     if compact_orb_context and components != {"ORBPro"}:
         raise ValueError("research_compact_context_requires_orb_only")
-    if research_quality_profile not in {None, "score_v2_dev_2017_2018"}:
-        raise ValueError("research_quality_profile_invalid")
-    if research_quality_profile and components != {"ORBPro"}:
-        raise ValueError("research_quality_profile_requires_orb_only")
     options = sorted(
         symbol
         for symbol, row in instruments.items()
@@ -686,13 +657,6 @@ def _scenario(
                         ] += 1
                         continue
                 metadata = dict(signal.metadata or {})
-                if research_quality_profile == "score_v2_dev_2017_2018":
-                    score_v2, score_v2_pass = _orb_research_score_v2(metadata)
-                    if not score_v2_pass:
-                        rejections[strategy.name]["research_score_v2_rejected"] += 1
-                        continue
-                    metadata["research_score_v2"] = score_v2
-                    metadata["research_score_v2_profile"] = research_quality_profile
                 pending[key] = {
                     "available_at": timestamp + timedelta(minutes=1),
                     "stop_loss": signal.stop_loss,
@@ -702,12 +666,7 @@ def _scenario(
                     "research_signal_metadata": {
                         field: metadata.get(field)
                         for field in (
-                            "raw_setup_score",
-                            "setup_score",
-                            "strategy_score",
-                            "independent_setup_score",
-                            "score_reasons",
-                            "independent_setup_reasons",
+                            "setup_reasons",
                             "entry_branch",
                             "retest_confirmed",
                             "underlying_volume_ratio",
@@ -716,8 +675,9 @@ def _scenario(
                             "opening_range_balanced",
                             "underlying_breakout_body_pct",
                             "underlying_direction_confidence",
-                            "research_score_v2",
-                            "research_score_v2_profile",
+                            "direction_contract",
+                            "setup_contract",
+                            "confirmation_contract",
                         )
                     },
                 }
@@ -792,7 +752,6 @@ def run_orb_session_research(
     slippage_bps: float,
     minimum_net_rr: float | None = 1.5,
     lifecycle_proxy: bool = False,
-    research_quality_profile: str | None = None,
 ) -> dict[str, Any]:
     """Replay a preselected historical basket in an isolated research process.
 
@@ -819,7 +778,6 @@ def run_orb_session_research(
             compact_orb_context=True,
             strict_liquidity=True,
             lifecycle_proxy=lifecycle_proxy,
-            research_quality_profile=research_quality_profile,
         )
         return result["strategies"]["ORBPro"]
     finally:
@@ -965,7 +923,6 @@ def run_orb_comparison(directory: Path) -> dict[str, Any]:
         "ORB_MOMENTUM_BRANCH_ENABLED",
         "ORB_MAX_ENTRY_MINUTES_AFTER_RANGE",
         "ORB_TARGET_RR",
-        "ORB_QUALITY_MIN_SCORE_SHADOW",
         "ORB_MOMENTUM_MIN_BODY_PCT",
         "ORB_MOMENTUM_MIN_PENETRATION_ATR",
         "ORB_MOMENTUM_MIN_VOLUME_RATIO",
