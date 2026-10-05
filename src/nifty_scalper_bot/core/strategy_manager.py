@@ -1270,12 +1270,10 @@ class StrategyManager(_BaseStrategyManager):
         self._regime_gate_cooldown = 10.0
         self._use_regime_adaptive = bool(app_settings.USE_REGIME_ADAPTIVE)
         self._observability_counters: dict[str, int] = {
-            "signals_generated": 0,
             "signals_blocked_by_regime": 0,
             "signals_blocked_by_risk": 0,
             "orders_submitted": 0,
         }
-        self._last_metrics_log_ts = time.time()
         self._adaptive_store = AdaptiveParameterStore(
             window_trades=app_settings.ADAPTIVE_WINDOW_TRADES
         )
@@ -1283,7 +1281,6 @@ class StrategyManager(_BaseStrategyManager):
             recalibrate_every=app_settings.ADAPTIVE_RECALIBRATE_EVERY
         )
         self._regime_fallback_scale = float(app_settings.REGIME_FALLBACK_SCALE)
-        self._avg_kelly_window: deque[float] = deque(maxlen=500)
         self._market_open_since_ts: float | None = None
         self._last_zero_signal_check_ts = 0.0
         self._no_signal_summary: dict[str, int] = {
@@ -3759,61 +3756,7 @@ class StrategyManager(_BaseStrategyManager):
             signal_action = combined.action
             _emit_strategy_exit()
             return combined
-        if combined and self._filter_signal(combined):
-            orchestrator = self._orchestrator
-            if orchestrator is not None:
-                try:
-                    combined = orchestrator.filter_signal(
-                        combined, indicators, self._position_manager
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    log.error(
-                        "Failure in orchestrator.filter_signal: %s",
-                        exc,
-                        exc_info=exc,
-                    )
-                    combined = None
-            if combined:
-                # Quantity belongs to the risk engine. Scaling it here could
-                # never protect capital anyway: the requested size is one lot,
-                # and max(1, round(1 * 0.6)) is still one lot, so a defensive
-                # regime multiplier was a no-op while an expansive one could
-                # still raise size outside the 2% risk owner. The regime scale
-                # stays in metadata as sizing evidence for the risk layer.
-                combined = Signal(
-                    action=combined.action,
-                    symbol=combined.symbol,
-                    quantity=combined.quantity,
-                    confidence=combined.confidence,
-                    reason=combined.reason,
-                    stop_loss=combined.stop_loss,
-                    take_profit=combined.take_profit,
-                    metadata={
-                        **dict(combined.metadata),
-                        "regime_scale": regime_scale,
-                        "regime": regime_name,
-                    },
-                )
-                log.info(
-                    "Condition met: structural_signal_ready",
-                    extra={
-                        "event": "structural_signal_ready",
-                        "symbol": symbol,
-                        "action": combined.action,
-                        "confidence": combined.confidence,
-                        "quantity": combined.quantity,
-                    },
-                )
-                self._observability_counters["signals_generated"] += 1
-                self._avg_kelly_window.append(
-                    float(dict(combined.metadata).get("kelly_fraction", 0.0))
-                )
-                self._emit_metrics_snapshot()
-                exit_result = "signal"
-                signal_action = combined.action
-                _emit_strategy_exit()
-                return combined
-        elif combined is None:
+        if combined is None:
             log_throttled(
                 log,
                 f"strategy_manager_no_combined:{symbol}",
@@ -3848,24 +3791,11 @@ class StrategyManager(_BaseStrategyManager):
             _emit_no_signal("data_invalid", {"stage": "combine"})
             no_signal_reasons.append("combine_none")
         else:
-            log_throttled(
-                log,
-                key=f"strategy_manager_filtered:{symbol}",
-                msg="strategy_manager_filtered_signal",
-                interval_sec=30.0,
-                extra={
-                    "event": "strategy_manager_filtered_signal",
-                    "symbol": symbol,
-                    "action": combined.action,
-                    "confidence": combined.confidence,
-                },
-            )
             _log_reject(
                 "no_strategy_signal",
                 {
-                    "stage": "filter",
+                    "stage": "combine_not_approved",
                     "action": combined.action,
-                    "confidence": combined.confidence,
                     "ltp": current_price,
                     "vwap": vwap,
                     "volume": volume,
@@ -3874,52 +3804,10 @@ class StrategyManager(_BaseStrategyManager):
                     "symbol_role": symbol_role,
                 },
             )
-            _emit_no_signal(
-                "data_invalid",
-                {
-                    "stage": "filter",
-                    "action": combined.action,
-                    "confidence": combined.confidence,
-                },
-            )
-            no_signal_reasons.append("filtered_signal")
+            _emit_no_signal("data_invalid", {"stage": "combine_not_approved"})
+            no_signal_reasons.append("combine_not_approved")
         _emit_strategy_exit()
         return None
-
-    def _emit_metrics_snapshot(self) -> None:
-        """Args: None. Returns: None. Raises: Exception."""
-
-        now_ts = time.time()
-        if now_ts - self._last_metrics_log_ts < 300.0:
-            return
-        self._last_metrics_log_ts = now_ts
-        log.info(
-            "Condition met: strategy_metrics_snapshot",
-            extra={
-                "event": "strategy_metrics_snapshot",
-                "metrics": dict(self._observability_counters),
-                "avg_confidence": (
-                    (
-                        sum(self._avg_confidence_window)
-                        / len(self._avg_confidence_window)
-                    )
-                    if self._avg_confidence_window
-                    else 0.0
-                ),
-                "avg_kelly_fraction": (
-                    (sum(self._avg_kelly_window) / len(self._avg_kelly_window))
-                    if self._avg_kelly_window
-                    else 0.0
-                ),
-                "regime": getattr(self._regime_state, "regime", None),
-                "rolling_sharpe": float(
-                    self._performance.get(
-                        "_aggregate", StrategyPerformance()
-                    ).sharpe_ratio()
-                ),
-            },
-        )
-
 
     def _is_live_mode(self) -> bool:
         """Return True only when strategy logic is allowed to behave as live."""
