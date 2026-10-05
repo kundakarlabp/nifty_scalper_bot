@@ -264,6 +264,7 @@ def test_futures_unavailable_uses_spot_context_but_never_executes_spot(
     monkeypatch,
 ) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    monkeypatch.setenv("ORB_BALANCED_RANGE_MAX_ATR", "2.0")
     rows = _opening_rows()
     rows.append(
         _bar(
