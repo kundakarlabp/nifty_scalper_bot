@@ -209,7 +209,10 @@ def test_compact_context_preserves_actual_orb_trades(monkeypatch, tmp_path):
         {field: trade[field] for field in economic_fields}
         for trade in baseline["trades"]
     ]
-    assert compact["trades"][0]["raw_setup_score"] >= baseline["trades"][0]["raw_setup_score"]
+    assert (
+        compact["trades"][0]["raw_setup_score"]
+        >= baseline["trades"][0]["raw_setup_score"]
+    )
     assert "underlying_direction_alignment" in compact["trades"][0]["score_reasons"]
     assert "futures_vwap_slope_alignment" in compact["trades"][0]["score_reasons"]
 
