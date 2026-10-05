@@ -13,10 +13,10 @@ from nifty_scalper_bot.strategies.elite_strategies.base_elite import (
 from nifty_scalper_bot.strategies.elite_strategies.config_models import (
     OrderFlowStrategyConfig,
 )
+from nifty_scalper_bot.strategies.entry_evidence import resolve_signal_domain
 from nifty_scalper_bot.strategies.runtime_context_contract import (
     resolve_context_age_seconds,
 )
-from nifty_scalper_bot.strategies.entry_evidence import resolve_signal_domain
 from nifty_scalper_bot.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
