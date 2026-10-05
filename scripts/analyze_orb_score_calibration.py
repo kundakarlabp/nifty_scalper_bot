@@ -47,9 +47,7 @@ def analyze(rows: list[dict[str, Any]]) -> dict[str, Any]:
             buckets[_score_bucket(trade.get("raw_setup_score"))].append(trade)
             branches[str(trade.get("entry_branch") or "missing")].append(trade)
             reasons = {
-                str(reason)
-                for reason in (trade.get("score_reasons") or [])
-                if reason
+                str(reason) for reason in (trade.get("score_reasons") or []) if reason
             }
             all_reasons.update(reasons)
             for reason in reasons:
