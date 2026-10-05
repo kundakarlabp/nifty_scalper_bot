@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from nifty_scalper_bot.backtesting.strategy_research import _research_orb_quality_context
+from nifty_scalper_bot.backtesting import strategy_research
 
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -53,7 +53,7 @@ class _FakeEngine:
 
 
 def test_research_orb_quality_context_supplies_production_score_inputs():
-    context = _research_orb_quality_context(
+    context = strategy_research._research_orb_quality_context(  # noqa: SLF001
         _FakeEngine(),
         spot_symbol="SPOT",
         futures_symbol="FUT",
