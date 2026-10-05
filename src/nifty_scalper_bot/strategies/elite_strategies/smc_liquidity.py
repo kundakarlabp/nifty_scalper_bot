@@ -884,8 +884,7 @@ class SMCStrategy(EliteStrategy):
                     else os.getenv("SMC_MIN_SCORE_SHADOW", "4.5")
                 )
                 if strategy_score < min_score:
-                    self._no_vote("smc_low_score")
-                    return None
+                    reasons.append("score_below_legacy_minimum")
 
                 option_atr = max(
                     float(indicators.get("atr") or 0.0),
