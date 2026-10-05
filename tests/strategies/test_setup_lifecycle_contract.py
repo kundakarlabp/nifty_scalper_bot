@@ -92,7 +92,8 @@ def test_native_strategy_sources_cover_direct_and_terminal_lifecycle_paths() -> 
     unconfirmed_idx = vwap.index("if is_live and not event_confirmed:", setup_idx)
     assert "SetupStage.ARMED" in vwap[setup_idx:unconfirmed_idx]
     weak_idx = vwap.index("if score < min_score:", unconfirmed_idx)
-    assert "SetupStage.QUALITY_REJECTED" in vwap[weak_idx : weak_idx + 700]
+    assert "score_below_legacy_minimum" in vwap[weak_idx : weak_idx + 300]
+    assert "SetupStage.QUALITY_REJECTED" not in vwap[weak_idx : weak_idx + 700]
 
     # SMC structural sweeps remain the native owner of setup formation.
     assert "SetupStage.ARMED" in smc
