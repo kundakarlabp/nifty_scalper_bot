@@ -182,31 +182,6 @@ class _OrderManager:
 def _execution_runner(monkeypatch, *, ce_ok=True, pe_ok=False):
     import nifty_scalper_bot.strategies.runner as runner_mod
 
-    monkeypatch.setattr(
-        runner_mod,
-        "score_signal_metadata",
-        lambda *args, **kwargs: SimpleNamespace(
-            allowed=True,
-            final_score=10.0,
-            direction_score=10.0,
-            strategy_score=10.0,
-            option_score=10.0,
-            data_score=10.0,
-            rr_score=10.0,
-            components={
-                "threshold": 7.5,
-                "final_score": 10.0,
-                "alpha_score": 9.5,
-                "direction_score": 10.0,
-                "strategy_score": 9.0,
-                "option_score": 8.5,
-                "data_score": 9.0,
-                "rr_score": 8.0,
-                "normalized_strategy_name": "test",
-            },
-            reasons=[],
-        ),
-    )
     runner = object.__new__(StrategyRunner)
     runner._logger = _Logger()
     runner._order_manager = _OrderManager()
@@ -308,6 +283,8 @@ def _execution_runner(monkeypatch, *, ce_ok=True, pe_ok=False):
 
 
 def _signal(symbol: str) -> Signal:
+    side = "CE" if symbol.upper().endswith("CE") else "PE"
+    state = "CONFIRMED_BULL" if side == "CE" else "CONFIRMED_BEAR"
     return Signal(
         "BUY",
         symbol,
@@ -317,9 +294,34 @@ def _signal(symbol: str) -> Signal:
         90.0,
         120.0,
         metadata={
+            "strategy": "test",
             "strategy_name": "test",
-            "final_score": 10.0,
-            "setup_id": "test:CE:setup-1",
+            "strategy_key": "test",
+            "strategy_role": "trigger",
+            "signal_family": "directional_trigger",
+            "setup_id": f"test:{side}:setup-1",
+            "setup_name": "test_setup",
+            "approval_path": "single_trigger_context_confirmed",
+            "direction_contract": {
+                "passed": True,
+                "side": side,
+                "underlying_direction": side,
+                "underlying_state": state,
+                "source": "test",
+            },
+            "setup_contract": {
+                "passed": True,
+                "strategy": "test",
+                "setup_id": f"test:{side}:setup-1",
+                "reasons": ["fixture"],
+            },
+            "confirmation_contract": {
+                "passed": True,
+                "trigger_consensus": False,
+                "context_strategies": ["OrderFlow"],
+            },
+            "confirming_trigger_strategies": [],
+            "context_confirmation_strategies": ["OrderFlow"],
         },
     )
 
@@ -341,17 +343,11 @@ def test_entry_path_allows_ready_ce_candidate_and_submits_order(
     assert result.accepted is True
     assert len(runner._order_manager.plans) == 1
     assert runner._order_manager.plans[0].symbol == "NFO:CE"
-    assert runner._order_manager.plans[0].trade_provenance["signal_quality"] == {
-        "threshold": 7.5,
-        "final_score": 10.0,
-        "alpha_score": 9.5,
-        "direction_score": 10.0,
-        "strategy_score": 9.0,
-        "option_score": 8.5,
-        "data_score": 9.0,
-        "rr_score": 8.0,
-        "normalized_strategy_name": "test",
-    }
+    provenance = runner._order_manager.plans[0].trade_provenance
+    assert provenance["direction_contract"]["passed"] is True
+    assert provenance["direction_contract"]["underlying_direction"] == "CE"
+    assert provenance["setup_contract"]["passed"] is True
+    assert provenance["confirmation_contract"]["passed"] is True
     assert runner._accepted_strategy_notifications == [
         ("test", "CE", "test:CE:setup-1")
     ]
@@ -633,7 +629,6 @@ def test_capacity_exhaustion_arms_existing_prebroker_risk_cooldown(monkeypatch) 
         _signal("NFO:CE"),
         metadata={
             "strategy_name": "test",
-            "final_score": 10.0,
             "atm_strike": 25000,
             "candidate_snapshots": [
                 {
@@ -818,25 +813,29 @@ def test_entry_plan_preserves_context_confirmation_provenance(monkeypatch) -> No
             "strategy_role": "trigger",
             "signal_family": "directional_trigger",
             "setup_name": "continuation_pullback",
-            "score_contract_version": 1,
-            "score_lineage": {
-                "raw_setup_score": 7.8,
-                "regime_weight": 1.2,
-                "regime_adjusted_setup_score": 9.36,
-                "context_confirmation_bonus": 0.4,
-                "context_veto_penalty": 0.0,
-                "manager_reference_score": 9.76,
-                "manager_reference_threshold": 7.5,
-                "manager_reference_above_min": True,
-                "score_admission_role": "diagnostic_only",
+            "direction_contract": {
+                "passed": True,
+                "side": "CE",
+                "underlying_direction": "CE",
+                "underlying_state": "CONFIRMED_BULL",
+                "source": "spot_futures_agree",
+            },
+            "setup_contract": {
+                "passed": True,
+                "strategy": "VWAPPro",
+                "setup_id": "test:CE:setup-1",
+                "reasons": ["premium_above_vwap"],
+            },
+            "confirmation_contract": {
+                "passed": True,
+                "trigger_consensus": False,
+                "context_strategies": ["OrderFlow"],
             },
             "confirming_trigger_strategies": ["VWAPPro"],
             "context_confirmation_strategies": ["OrderFlow"],
             "context_confirmation_evidence": [
                 {
                     "strategy": "OrderFlow",
-                    "raw_score": 9.0,
-                    "confidence": 0.85,
                     "flow_confirmation_source": "temporal_ofi",
                     "ofi_1s_normalized": 0.22,
                     "depth_imbalance": 0.28,
@@ -861,17 +860,14 @@ def test_entry_plan_preserves_context_confirmation_provenance(monkeypatch) -> No
     assert provenance["strategy_role"] == "trigger"
     assert provenance["signal_family"] == "directional_trigger"
     assert provenance["setup_name"] == "continuation_pullback"
-    assert provenance["score_contract_version"] == 1
-    assert provenance["score_lineage"]["raw_setup_score"] == 7.8
-    assert provenance["score_lineage"]["score_admission_role"] == "diagnostic_only"
-    assert provenance["score_lineage"]["manager_reference_above_min"] is True
+    assert provenance["direction_contract"]["passed"] is True
+    assert provenance["setup_contract"]["strategy"] == "VWAPPro"
+    assert provenance["confirmation_contract"]["context_strategies"] == ["OrderFlow"]
     assert provenance["confirming_trigger_strategies"] == ["VWAPPro"]
     assert provenance["context_confirmation_strategies"] == ["OrderFlow"]
     assert provenance["context_confirmation_evidence"] == [
         {
             "strategy": "OrderFlow",
-            "raw_score": 9.0,
-            "confidence": 0.85,
             "flow_confirmation_source": "temporal_ofi",
             "ofi_1s_normalized": 0.22,
             "depth_imbalance": 0.28,
