@@ -168,6 +168,7 @@ def test_same_completed_breakout_bar_cannot_vote_twice(monkeypatch) -> None:
 def test_retest_must_follow_breakout_before_retest_branch_votes(monkeypatch) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
     monkeypatch.setenv("ORB_MOMENTUM_BRANCH_ENABLED", "false")
+    monkeypatch.setenv("ORB_BALANCED_RANGE_MAX_ATR", "2.0")
     rows = _opening_rows()
     rows.append(
         _bar(
