@@ -374,19 +374,19 @@ _STRATEGY_SKIP_COUNTER = Counter(
 
 _NIFTY_OPTION_DELTA_GAUGE = metrics.Gauge(
     "nifty_option_best_delta",
-    "Delta of the best scoring NIFTY option candidate",
+    "Delta of the selected NIFTY option candidate",
     ["underlying"],
 )
 
 _NIFTY_OPTION_IV_GAUGE = metrics.Gauge(
     "nifty_option_best_iv",
-    "Implied volatility of the best scoring NIFTY option candidate",
+    "Implied volatility of the selected NIFTY option candidate",
     ["underlying"],
 )
 
 _NIFTY_OPTION_LIQUIDITY_GAUGE = metrics.Gauge(
     "nifty_option_best_liquidity",
-    "Liquidity score of the best scoring NIFTY option candidate",
+    "Liquidity metric of the selected NIFTY option candidate",
     ["underlying"],
 )
 
@@ -1056,17 +1056,6 @@ class StrategyRunner:
         self._options_long_only = True
         self._legacy_side_to_type = False
         self._monthly_halt_minutes = 0
-        self._option_delta_target = 0.35
-        self._option_max_iv_rank = 0.75
-        self._option_min_liquidity = 0.6
-        self._option_score_weights: Mapping[str, float] = {
-            "delta": 0.4,
-            "theta": 0.2,
-            "gamma": 0.2,
-            "iv": 0.1,
-            "liquidity": 0.1,
-        }
-
         if strike_selector is not None:
             try:
                 selector_settings = strike_selector.settings
@@ -1090,34 +1079,6 @@ class StrategyRunner:
         )
         self._trade_counter_by_symbol_candle: Dict[str, dict] = {}
         self._settings = get_settings()
-        try:
-            settings = self._settings
-            option_cfg = getattr(settings, "nifty_options", None)
-            if option_cfg is not None:
-                self._option_delta_target = float(option_cfg.delta_target)
-                self._option_max_iv_rank = float(option_cfg.max_iv_rank)
-                self._option_min_liquidity = float(option_cfg.min_liquidity_score)
-                weights = option_cfg.weights.normalized()
-                if weights:
-                    self._option_score_weights = weights
-                self._logger.info(
-                    "Condition met: nifty_option_score_config",
-                    extra={
-                        "event": "nifty_option_score_config",
-                        "delta_target": self._option_delta_target,
-                        "max_iv_rank": self._option_max_iv_rank,
-                        "min_liquidity": self._option_min_liquidity,
-                        "weights": dict(self._option_score_weights),
-                    },
-                )
-        except Exception as exc:
-            self._logger.error(
-                "Failure in StrategyRunner settings load: %s",
-                exc,
-                extra={"event": "strategy_runner_settings_load_error"},
-                exc_info=exc,
-            )
-
         self._lock = threading.RLock()
         self._eval_lock = threading.Lock()
         self._trade_counter_lock = threading.Lock()
@@ -3441,9 +3402,6 @@ class StrategyRunner:
                         "refresh_pending": symbol_refresh_pending,
                         "atr_option": float(getattr(snap, "atr_option", 0.0) or 0.0),
                         "history_bars": int(getattr(snap, "history_bars", 0) or 0),
-                        "data_quality_score": float(
-                            getattr(snap, "data_quality_score", 0.0) or 0.0
-                        ),
                         "quote_quality": (
                             "bid_ask" if bool(snap.tradable_quote) else "ltp_only"
                         ),
@@ -7456,11 +7414,6 @@ class StrategyRunner:
 
         best = candidates[0]
         label = base_symbol.strip().upper() or best.symbol.strip().upper()
-        selection_score = None
-
-        if isinstance(best.metadata, Mapping):
-            selection_score = best.metadata.get("selection_score")
-
         try:
             delta_value = best.greeks.delta if best.greeks else best.delta or 0.0
             _NIFTY_OPTION_DELTA_GAUGE.labels(underlying=label).set(float(delta_value))
@@ -7482,7 +7435,6 @@ class StrategyRunner:
             extra={
                 "symbol": best.symbol,
                 "underlying": label,
-                "score": selection_score,
                 "liquidity": best.liquidity_score,
                 "iv": best.iv,
                 "iv_rank": best.iv_rank,
@@ -7490,18 +7442,6 @@ class StrategyRunner:
         )
 
         return best
-
-    def _build_option_score_config(
-        self, side: Literal["BUY", "SELL"]
-    ) -> Mapping[str, Any]:
-        """Return strike selector score configuration for the supplied side."""
-        return {
-            "weights": dict(self._option_score_weights),
-            "delta_target": float(self._option_delta_target),
-            "max_iv_rank": float(self._option_max_iv_rank),
-            "min_liquidity": float(self._option_min_liquidity),
-            "side": side,
-        }
 
     def _get_spot_tick(self) -> dict[str, Any] | None:
         """Resilient spot tick fetcher with aliases and snapshot fallback."""
@@ -12004,7 +11944,6 @@ class StrategyRunner:
             volume_trigger = volume_delta >= float(
                 os.getenv("RUNNER_INTRABAR_VOLUME_DELTA_MIN", "100") or "100"
             )
-            current_score = float(tick.get("candidate_score") or 0.0)
             detail.update(
                 {
                     "volume_delta": round(volume_delta, 2),
@@ -12013,7 +11952,6 @@ class StrategyRunner:
                     "bid_ask_fresh": bool(ts_changed),
                     "tick_ts": tick_ts,
                     "volume_now": volume_now,
-                    "legacy_candidate_score": current_score,
                 }
             )
             if spread_trigger or ts_changed or volume_trigger:
