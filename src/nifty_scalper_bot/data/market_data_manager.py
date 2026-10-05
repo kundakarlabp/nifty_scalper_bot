@@ -7683,7 +7683,11 @@ class MarketDataManager:
         # wrong field this telemetry was fixed to stop producing.
         _loop_owner = getattr(self, "_event_loop_thread_id", None)
         event_loop_thread = None if _loop_owner is None else thread_id == _loop_owner
-        key = f"tick_stage_slow:{id(self)}:{metric_key}"
+        instance_nonce = getattr(self, "_slow_tick_log_instance_nonce", None)
+        if instance_nonce is None:
+            instance_nonce = time.monotonic_ns()
+            self._slow_tick_log_instance_nonce = instance_nonce
+        key = f"tick_stage_slow:{instance_nonce}:{metric_key}"
         log_throttled(
             self._logger,
             key,
@@ -13409,6 +13413,11 @@ class MarketDataManager:
                 volume_cumulative_value = _coerce_int(raw.get("volume_traded"))
             else:
                 volume_cumulative_value = None
+            tick_direction = str(raw.get("tick_direction") or "").strip().upper()
+            tick_direction_source = raw.get("tick_direction_source")
+            if tick_direction not in {"UP", "DOWN", "BUY", "SELL", "FLAT"}:
+                tick_direction = ""
+
             return {
                 "symbol": self._canonical_symbol(symbol),
                 "token": token,
@@ -13435,6 +13444,12 @@ class MarketDataManager:
                 "depth_available": bool(depth_obj),
                 "bid_ask_source": bid_ask_source,
                 "tradable_quote": tradable_quote,
+                "tick_direction": tick_direction or None,
+                "tick_direction_source": (
+                    str(tick_direction_source)
+                    if tick_direction and tick_direction_source
+                    else ("market_tick" if tick_direction else None)
+                ),
                 "timestamp": ts_py,
                 "timestamp_source": timestamp_source,
                 "source_timestamp_valid": source_timestamp_valid,
