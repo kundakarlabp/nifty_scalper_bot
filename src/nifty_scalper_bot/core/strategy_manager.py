@@ -1209,7 +1209,6 @@ class StrategyManager(_BaseStrategyManager):
         strategies: list[t.Any],
         indicator_engine: t.Any,
         position_manager: t.Any,
-        min_confidence: float = 0.35,
         data_hub: t.Any | None = None,
         orchestrator: t.Any | None = None,
         futures_symbol: str | None = None,
@@ -1258,10 +1257,9 @@ class StrategyManager(_BaseStrategyManager):
             strategies,
             indicator_engine,
             position_manager,
-            min_confidence,
-            data_hub,
-            orchestrator,
-            futures_symbol,
+            data_hub=data_hub,
+            orchestrator=orchestrator,
+            futures_symbol=futures_symbol,
         )
         self._regime_signal_getter = regime_signal_getter
         self._regime_manager = market_regime_manager
