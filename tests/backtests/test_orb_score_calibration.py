@@ -3,9 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from nifty_scalper_bot.backtesting.strategy_research import (
-    _research_orb_quality_context,
-)
+from nifty_scalper_bot.backtesting.strategy_research import _research_orb_quality_context
 
 
 IST = ZoneInfo("Asia/Kolkata")
