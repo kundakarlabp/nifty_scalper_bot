@@ -773,7 +773,6 @@ def debug_env():
     return {
         "ENABLE_LIVE": os.getenv("ENABLE_LIVE", "NOT_SET"),
         "EXECUTION_MODE": os.getenv("EXECUTION_MODE", "NOT_SET"),
-        "FORCE_SIGNAL": os.getenv("FORCE_SIGNAL", "NOT_SET"),
         "DATA_DIR": os.getenv("DATA_DIR", "NOT_SET"),
     }
 
