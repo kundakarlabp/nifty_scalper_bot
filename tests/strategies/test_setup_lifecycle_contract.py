@@ -60,15 +60,15 @@ def test_setup_lifecycle_requires_structural_identity() -> None:
 def test_setup_lifecycle_terminal_rejection_is_counted() -> None:
     registry = SetupLifecycleRegistry(limit=128)
     registry.transition(
-        SetupStage.QUALITY_REJECTED,
+        SetupStage.CONTRACT_REJECTED,
         strategy="VWAPPro",
         setup_id="vwap:PE:anchor",
         side="PE",
-        reason="alpha_below_threshold",
+        reason="setup_contract_not_passed",
     )
     snapshot = registry.snapshot()
-    assert snapshot["terminal_counts"][SetupStage.QUALITY_REJECTED.value] == 1
-    assert snapshot["transition_counts"][SetupStage.QUALITY_REJECTED.value] == 1
+    assert snapshot["terminal_counts"][SetupStage.CONTRACT_REJECTED.value] == 1
+    assert snapshot["transition_counts"][SetupStage.CONTRACT_REJECTED.value] == 1
 
 
 def test_native_strategy_sources_cover_direct_and_terminal_lifecycle_paths() -> None:
@@ -84,16 +84,15 @@ def test_native_strategy_sources_cover_direct_and_terminal_lifecycle_paths() -> 
     momentum = orb[momentum_idx - 700 : momentum_idx + 900]
     assert "SetupStage.ARMED" in momentum
     assert "SetupStage.CONFIRMING" in momentum
-    assert "SetupStage.QUALITY_REJECTED" in momentum
+    assert "SetupStage.CONTRACT_REJECTED" in momentum
 
-    # A confirmed VWAP event bypasses the unconfirmed-return branch, so ARMED
-    # must be recorded before that branch and weak quality must terminate it.
+    # A confirmed VWAP event must arm before confirmation and every failed
+    # structural prerequisite must terminate the lifecycle explicitly.
     setup_idx = vwap.index("setup_lifecycle_id =")
-    unconfirmed_idx = vwap.index("if is_live and not event_confirmed:", setup_idx)
+    unconfirmed_idx = vwap.index("if not event_confirmed:", setup_idx)
     assert "SetupStage.ARMED" in vwap[setup_idx:unconfirmed_idx]
-    weak_idx = vwap.index("if score < min_score:", unconfirmed_idx)
-    assert "score_below_legacy_minimum" in vwap[weak_idx : weak_idx + 300]
-    assert "SetupStage.QUALITY_REJECTED" not in vwap[weak_idx : weak_idx + 700]
+    rejected_idx = vwap.index("if structural_failures:", unconfirmed_idx)
+    assert "SetupStage.CONTRACT_REJECTED" in vwap[rejected_idx : rejected_idx + 700]
 
     # SMC structural sweeps remain the native owner of setup formation.
     assert "SetupStage.ARMED" in smc
