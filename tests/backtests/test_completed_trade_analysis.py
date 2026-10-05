@@ -4,7 +4,6 @@ import pytest
 
 from nifty_scalper_bot.backtesting.completed_trade_analysis import (
     attribution_readiness,
-    calibrate_signal_scores,
     canonicalize_completed_trades,
     chronological_post_cost_blocks,
     chronological_walk_forward,
@@ -28,15 +27,14 @@ def _trade(
     net_pnl: float = 80.0,
     ledger_complete: bool = True,
     state: str = "CLOSED",
-    signal_quality: dict[str, float] | None = None,
+    structural_evidence: bool = False,
     exit_reason: str = "HARD_SL_BREACH src=ltp sl=90.0",
 ) -> dict[str, object]:
     outcome: dict[str, object] = {
         "cost_source": "broker_virtual_contract_note",
         "effective_costs": {"total": estimated_costs},
     }
-    if signal_quality is not None:
-        outcome["signal_quality"] = signal_quality
+    if structural_evidence:
         outcome.update(
             {
                 "strategy_key": str(strategy).lower(),
@@ -44,19 +42,10 @@ def _trade(
                 "signal_family": "directional_trigger",
                 "setup_name": "continuation_pullback",
                 "regime": "TREND",
-                "approval_path": "multi_trigger",
-                "score_contract_version": 1,
-                "score_lineage": {
-                    "raw_setup_score": 7.5,
-                    "regime_weight": 1.0,
-                    "regime_adjusted_setup_score": 7.5,
-                    "context_confirmation_bonus": 0.0,
-                    "context_veto_penalty": 0.0,
-                    "manager_reference_score": 7.5,
-                    "manager_reference_threshold": 7.0,
-                    "manager_reference_above_min": True,
-                    "score_admission_role": "diagnostic_only",
-                },
+                "approval_path": "aligned_trigger_consensus",
+                "direction_contract": {"passed": True},
+                "setup_contract": {"passed": True},
+                "confirmation_contract": {"passed": True},
                 "confirming_trigger_strategies": [strategy],
                 "context_confirmation_strategies": [],
             }
@@ -281,99 +270,80 @@ def test_summary_uses_post_cost_net_pnl() -> None:
     assert summary.profit_factor == 2.0
 
 
-def test_attribution_readiness_fails_closed_for_missing_component_or_quality() -> None:
+def test_attribution_readiness_fails_closed_for_missing_component_or_structural_evidence() -> None:
     trades = canonicalize_completed_trades(
         [
             _trade("vwap", 1.0, strategy="VWAPPro"),
-            _trade(
-                "smc",
-                2.0,
-                strategy="SMC",
-                signal_quality={"alpha_score": 8.0, "strategy_score": 7.5},
-            ),
+            _trade("smc", 2.0, strategy="SMC", structural_evidence=True),
         ]
     )
-
     readiness = attribution_readiness(
         trades,
         required_components=("ORBPro", "SMC", "VWAPPro"),
     )
-
     assert readiness.ready is False
     assert readiness.coverage["ORBPro"].completed_trades == 0
-    assert readiness.coverage["VWAPPro"].with_signal_quality == 0
+    assert readiness.coverage["VWAPPro"].with_structural_provenance == 0
     assert "missing_completed_trades:ORBPro" in readiness.blockers
-    assert "missing_signal_quality:VWAPPro" in readiness.blockers
+    assert "missing_structural_provenance:VWAPPro" in readiness.blockers
 
 
 def test_attribution_readiness_accepts_complete_component_evidence() -> None:
-    quality = {"alpha_score": 8.0, "strategy_score": 7.5}
     trades = canonicalize_completed_trades(
         [
-            _trade("orb", 1.0, strategy="ORBPro", signal_quality=quality),
-            _trade("smc", 2.0, strategy="SMC", signal_quality=quality),
-            _trade("vwap", 3.0, strategy="VWAPPro", signal_quality=quality),
+            _trade("orb", 1.0, strategy="ORBPro", structural_evidence=True),
+            _trade("smc", 2.0, strategy="SMC", structural_evidence=True),
+            _trade("vwap", 3.0, strategy="VWAPPro", structural_evidence=True),
         ]
     )
-
     readiness = attribution_readiness(
         trades,
         required_components=("ORBPro", "SMC", "VWAPPro"),
     )
-
     assert readiness.ready is True
     assert readiness.blockers == ()
 
 
-def test_attribution_readiness_fails_closed_when_score_lineage_is_missing() -> None:
-    quality = {"alpha_score": 8.0, "strategy_score": 7.5}
-    rows = [_trade("vwap", 1.0, strategy="VWAPPro", signal_quality=quality)]
-    rows[0]["outcome"].pop("score_lineage")
-
+def test_attribution_readiness_fails_closed_when_structural_contract_is_missing() -> None:
+    rows = [_trade("vwap", 1.0, strategy="VWAPPro", structural_evidence=True)]
+    rows[0]["outcome"].pop("setup_contract")
     readiness = attribution_readiness(
         canonicalize_completed_trades(rows),
         required_components=("VWAPPro",),
     )
-
     assert readiness.ready is False
-    assert readiness.coverage["VWAPPro"].with_signal_quality == 1
-    assert readiness.coverage["VWAPPro"].with_attribution_provenance == 0
-    assert "missing_attribution_provenance:VWAPPro" in readiness.blockers
+    assert readiness.coverage["VWAPPro"].with_structural_provenance == 0
+    assert "missing_structural_provenance:VWAPPro" in readiness.blockers
 
 
 def test_attribution_readiness_requires_canonical_strategy_identity() -> None:
-    quality = {"alpha_score": 8.0, "strategy_score": 7.5}
-    rows = [_trade("vwap", 1.0, strategy="VWAPPro", signal_quality=quality)]
+    rows = [_trade("vwap", 1.0, strategy="VWAPPro", structural_evidence=True)]
     rows[0]["outcome"].pop("strategy_key")
-
     readiness = attribution_readiness(
         canonicalize_completed_trades(rows),
         required_components=("VWAPPro",),
     )
-
     assert readiness.ready is False
-    assert readiness.coverage["VWAPPro"].with_attribution_provenance == 0
-    assert "missing_attribution_provenance:VWAPPro" in readiness.blockers
+    assert readiness.coverage["VWAPPro"].with_structural_provenance == 0
+    assert "missing_structural_provenance:VWAPPro" in readiness.blockers
 
 
 def test_post_cost_attribution_groups_regime_setup_and_confirmation() -> None:
-    quality = {"alpha_score": 8.0, "strategy_score": 7.5}
     rows = [
-        _trade("context", 1.0, signal_quality=quality, net_pnl=80.0),
+        _trade("context", 1.0, structural_evidence=True, net_pnl=80.0),
         _trade(
             "multi",
             2.0,
-            signal_quality=quality,
+            structural_evidence=True,
             gross_pnl=-20.0,
             estimated_costs=20.0,
             net_pnl=-40.0,
         ),
     ]
     rows[0]["outcome"]["context_confirmation_strategies"] = ["OrderFlow"]
+    rows[0]["outcome"]["confirming_trigger_strategies"] = ["VWAPPro"]
     rows[1]["outcome"]["confirming_trigger_strategies"] = ["VWAPPro", "ORBPro"]
-
     groups = post_cost_attribution_groups(canonicalize_completed_trades(rows))
-
     assert [group.confirmation_type for group in groups] == [
         "multi_trigger",
         "single_trigger_context_confirmed",
@@ -401,86 +371,16 @@ def test_execution_data_quality_flags_explicit_stale_quote_exits() -> None:
     assert quality.blockers == ("known_stale_quote_exit_trades:1",)
 
 
-def test_score_calibration_reports_post_cost_expectancy_and_r_uncertainty() -> None:
-    rows = [
-        _trade(
-            "s1",
-            1.0,
-            gross_pnl=100.0,
-            net_pnl=80.0,
-            signal_quality={"alpha_score": 6.2, "strategy_score": 6.0},
-        ),
-        _trade(
-            "s2",
-            2.0,
-            gross_pnl=60.0,
-            net_pnl=40.0,
-            signal_quality={"alpha_score": 6.8, "strategy_score": 6.5},
-        ),
-        _trade(
-            "s3",
-            3.0,
-            gross_pnl=-20.0,
-            net_pnl=-40.0,
-            signal_quality={"alpha_score": 7.2, "strategy_score": 7.0},
-        ),
-        _trade(
-            "s4",
-            4.0,
-            gross_pnl=120.0,
-            net_pnl=100.0,
-            signal_quality={"alpha_score": 7.8, "strategy_score": 7.5},
-        ),
-    ]
-    for row, r_multiple in zip(rows, (0.8, 0.4, -0.4, 1.0)):
-        row["outcome"]["r_multiple"] = r_multiple
-
-    report = calibrate_signal_scores(
-        canonicalize_completed_trades(rows),
-        score_key="alpha_score",
-        bin_width=1.0,
-        minimum_trades_per_bin=2,
-        bootstrap_samples=300,
-        seed=9,
-    )
-
-    assert report.scored_trades == 4
-    assert report.r_scored_trades == 4
-    assert len(report.bins) == 2
-    assert report.bins[0].lower == 6.0
-    assert report.bins[0].net_expectancy == 60.0
-    assert report.bins[0].mean_r == 0.6
-    assert report.bins[0].evidence_ready is True
-    assert report.bins[0].net_expectancy_ci_lower <= 60.0
-    assert report.bins[0].net_expectancy_ci_upper >= 60.0
-    assert report.blockers == ()
-
-
-def test_score_calibration_marks_underpowered_bins() -> None:
-    row = _trade(
-        "s1",
-        1.0,
-        signal_quality={"alpha_score": 8.1, "strategy_score": 8.0},
-    )
-
-    report = calibrate_signal_scores(
-        canonicalize_completed_trades([row]),
-        minimum_trades_per_bin=10,
-        bootstrap_samples=20,
-    )
-
-    assert report.bins[0].evidence_ready is False
-    assert report.blockers == ("underpowered_bins:1",)
-
-
-def test_candidate_decision_funnel_preserves_reasons_and_quality() -> None:
+def test_candidate_decision_funnel_preserves_reasons_and_structural_provenance() -> None:
     rows = [
         {
             "event_name": "candidate.blocked",
-            "reason_code": "alpha_below_threshold",
+            "reason_code": "setup_contract_not_passed",
             "meta": {
                 "research_context": {
-                    "signal_quality": {"alpha_score": 6.8, "final_score": 7.6}
+                    "direction_contract": {"passed": True},
+                    "setup_contract": {"passed": False},
+                    "confirmation_contract": {"passed": True},
                 }
             },
         },
@@ -495,31 +395,28 @@ def test_candidate_decision_funnel_preserves_reasons_and_quality() -> None:
             "meta": {},
         },
     ]
-
     summary = summarize_candidate_decisions(rows)
-
     assert summary.total_decisions == 3
     assert summary.approved == 1
     assert summary.blocked == 2
     assert summary.approval_fraction == 0.3333
     assert summary.with_research_context == 1
-    assert summary.with_signal_quality == 1
+    assert summary.with_structural_provenance == 1
     assert summary.blocked_by_reason == {
-        "alpha_below_threshold": 1,
         "risk_capacity_unavailable": 1,
+        "setup_contract_not_passed": 1,
     }
 
 
 def test_post_cost_outcome_evidence_reports_strategy_setup_and_r_excursions() -> None:
-    quality = {"alpha_score": 8.0, "strategy_score": 7.5}
-    rows = [
+        rows = [
         _trade(
             "a",
             1.0,
             strategy="VWAPPro",
             gross_pnl=120.0,
             net_pnl=100.0,
-            signal_quality=quality,
+            structural_evidence=True,
         ),
         _trade(
             "b",
@@ -527,7 +424,7 @@ def test_post_cost_outcome_evidence_reports_strategy_setup_and_r_excursions() ->
             strategy="VWAPPro",
             gross_pnl=-20.0,
             net_pnl=-40.0,
-            signal_quality=quality,
+            structural_evidence=True,
         ),
     ]
     for row, r_value, mfe, mae in zip(rows, (1.0, -0.4), (1.4, 0.3), (0.2, 0.8)):
