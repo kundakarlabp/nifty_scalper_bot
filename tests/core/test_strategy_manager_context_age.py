@@ -210,7 +210,7 @@ def test_ltp_close_delta_alone_does_not_claim_direction_fallback() -> None:
 
     snapshot = manager._latest_context_snapshots["spot_context"]
     assert snapshot["direction_bias"] is None
-    assert "direction_unavailable" in snapshot["direction_context_reasons"]
+    assert "direction_requires_location_and_trend" in snapshot["direction_context_reasons"]
     assert "ltp_above_close_fallback" not in snapshot["direction_context_reasons"]
 
 
