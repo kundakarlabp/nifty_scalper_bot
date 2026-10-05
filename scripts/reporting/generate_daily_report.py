@@ -200,94 +200,6 @@ def _max_drawdown(trades: list[dict[str, Any]]) -> float:
     return round(drawdown, 2)
 
 
-def _score_summary(
-    measured: list[dict[str, Any]],
-) -> tuple[list[dict[str, Any]], dict[str, int]]:
-    grouped: dict[int, list[dict[str, Any]]] = defaultdict(list)
-    for trade in measured:
-        score = _number(trade.get("final_score"))
-        if score is not None:
-            grouped[math.floor(score)].append(trade)
-
-    buckets = []
-    for lower, trades in sorted(grouped.items()):
-        net_values = [_number(trade.get("net_pnl")) or 0.0 for trade in trades]
-        buckets.append(
-            {
-                "score_bucket": f"{lower:.1f}–<{lower + 1:.1f}",
-                "measured_trades": len(trades),
-                "wins": sum(value > 0 for value in net_values),
-                "win_rate_pct": round(
-                    sum(value > 0 for value in net_values) / len(trades) * 100.0,
-                    1,
-                ),
-                "average_net_pnl": round(sum(net_values) / len(trades), 2),
-                "profit_factor": _profit_factor(net_values),
-                "max_drawdown": _max_drawdown(trades),
-            }
-        )
-    trades_with_score = sum(len(trades) for trades in grouped.values())
-    return buckets, {
-        "measured_trades": len(measured),
-        "trades_with_score": trades_with_score,
-        "trades_without_score": len(measured) - trades_with_score,
-    }
-
-
-def _quality_component_summary(
-    measured: list[dict[str, Any]],
-) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    components = ("alpha_score", "direction_score", "strategy_score")
-    grouped: dict[tuple[str, str, str, int], list[dict[str, Any]]] = defaultdict(list)
-    component_values = {component: 0 for component in components}
-    trades_with_signal_quality = 0
-
-    for trade in measured:
-        quality = trade.get("signal_quality")
-        if not isinstance(quality, Mapping):
-            continue
-        quality_values = {
-            component: _number(quality.get(component)) for component in components
-        }
-        if not any(score is not None for score in quality_values.values()):
-            continue
-        trades_with_signal_quality += 1
-        strategy = str(trade.get("strategy_name") or "UNKNOWN").strip() or "UNKNOWN"
-        regime = str(trade.get("regime") or "UNKNOWN").strip() or "UNKNOWN"
-        for component, score in quality_values.items():
-            if score is None:
-                continue
-            component_values[component] += 1
-            grouped[(strategy, regime, component, math.floor(score))].append(trade)
-
-    rows: list[dict[str, Any]] = []
-    for (strategy, regime, component, lower), trades in sorted(grouped.items()):
-        net_values = [_number(trade.get("net_pnl")) or 0.0 for trade in trades]
-        rows.append(
-            {
-                "strategy": strategy,
-                "regime": regime,
-                "component": component,
-                "score_bucket": f"{lower:.1f}–<{lower + 1:.1f}",
-                "measured_trades": len(trades),
-                "wins": sum(value > 0 for value in net_values),
-                "win_rate_pct": round(
-                    sum(value > 0 for value in net_values) / len(trades) * 100.0,
-                    1,
-                ),
-                "average_net_pnl": round(sum(net_values) / len(trades), 2),
-                "profit_factor": _profit_factor(net_values),
-                "max_drawdown": _max_drawdown(trades),
-            }
-        )
-
-    return rows, {
-        "measured_trades": len(measured),
-        "trades_with_signal_quality": trades_with_signal_quality,
-        "component_values": component_values,
-    }
-
-
 def _microstructure_confirmation_summary(
     measured: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
@@ -581,10 +493,6 @@ def summarise_completed_trades(
         total_net += net_pnl
 
     measured = _measured_trades(trades)
-    score_buckets, score_coverage = _score_summary(measured)
-    quality_component_buckets, quality_component_coverage = _quality_component_summary(
-        measured
-    )
     (
         microstructure_confirmation_outcomes,
         microstructure_confirmation_coverage,
@@ -599,10 +507,6 @@ def summarise_completed_trades(
             "estimated_costs": round(total_costs, 2),
             "net_pnl": round(total_net, 2),
         },
-        "score_buckets": score_buckets,
-        "score_coverage": score_coverage,
-        "quality_component_buckets": quality_component_buckets,
-        "quality_component_coverage": quality_component_coverage,
         "microstructure_confirmation_outcomes": microstructure_confirmation_outcomes,
         "microstructure_confirmation_coverage": microstructure_confirmation_coverage,
         "execution_quality": _execution_summary(measured),
@@ -621,76 +525,6 @@ def _append_observational_sections(
     lines: list[str],
     summary: Mapping[str, Any],
 ) -> None:
-    score_coverage = summary.get("score_coverage", {})
-    lines.extend(
-        [
-            "",
-            "## Score Calibration (observational)",
-            "",
-            f"Score coverage: **{int(score_coverage.get('trades_with_score', 0))}/"
-            f"{int(score_coverage.get('measured_trades', 0))}** measured trades",
-            "",
-            "| Score bucket | Trades | Win rate | Avg net P&L | Profit factor | "
-            "Max drawdown |",
-            "|---|---:|---:|---:|---:|---:|",
-        ]
-    )
-    score_buckets = summary.get("score_buckets", [])
-    if not score_buckets:
-        lines.append("| N/A | 0 | N/A | N/A | N/A | N/A |")
-    for bucket in score_buckets:
-        lines.append(
-            "| "
-            + " | ".join(
-                [
-                    str(bucket.get("score_bucket", "N/A")),
-                    str(bucket.get("measured_trades", 0)),
-                    _display(bucket.get("win_rate_pct"), suffix="%"),
-                    _display(bucket.get("average_net_pnl")),
-                    _display(bucket.get("profit_factor")),
-                    _display(bucket.get("max_drawdown")),
-                ]
-            )
-            + " |"
-        )
-
-    component_coverage = summary.get("quality_component_coverage", {})
-    component_rows = summary.get("quality_component_buckets", [])
-    lines.extend(
-        [
-            "",
-            "## Alpha Component Calibration (observational)",
-            "",
-            f"Approved-quality coverage: **"
-            f"{int(component_coverage.get('trades_with_signal_quality', 0))}/"
-            f"{int(component_coverage.get('measured_trades', 0))}** measured trades",
-            "",
-            "| Strategy | Regime | Component | Score bucket | Trades | Win rate | "
-            "Avg net P&L | Profit factor | Max drawdown |",
-            "|---|---|---|---|---:|---:|---:|---:|---:|",
-        ]
-    )
-    if not component_rows:
-        lines.append("| N/A | N/A | N/A | N/A | 0 | N/A | N/A | N/A | N/A |")
-    for row in component_rows:
-        lines.append(
-            "| "
-            + " | ".join(
-                [
-                    str(row.get("strategy", "UNKNOWN")).replace("|", "/"),
-                    str(row.get("regime", "UNKNOWN")).replace("|", "/"),
-                    str(row.get("component", "N/A")),
-                    str(row.get("score_bucket", "N/A")),
-                    str(row.get("measured_trades", 0)),
-                    _display(row.get("win_rate_pct"), suffix="%"),
-                    _display(row.get("average_net_pnl")),
-                    _display(row.get("profit_factor")),
-                    _display(row.get("max_drawdown")),
-                ]
-            )
-            + " |"
-        )
-
     confirmation_coverage = summary.get("microstructure_confirmation_coverage", {})
     confirmation_rows = summary.get("microstructure_confirmation_outcomes", [])
     lines.extend(
