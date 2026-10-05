@@ -153,8 +153,12 @@ def test_opposite_trigger_does_not_receive_quality_confirmation(monkeypatch) -> 
     manager._last_no_signal_decision_by_symbol = {}
 
     vwap = _signal_vote("VWAPPro", raw_score=8.5, weighted_score=6.8, confidence=0.85)
-    opposite_orb = _signal_vote(
-        "ORBPro", side="PE", raw_score=7.0, weighted_score=5.6, confidence=0.70
+    opposite_independent = _signal_vote(
+        "PremiumMomentum",
+        side="PE",
+        raw_score=7.0,
+        weighted_score=5.6,
+        confidence=0.70,
     )
     orderflow = _signal_vote(
         "OrderFlow",
@@ -166,7 +170,7 @@ def test_opposite_trigger_does_not_receive_quality_confirmation(monkeypatch) -> 
 
     result = manager._combine_strategy_votes(
         symbol=_SYMBOL,
-        signals=[vwap, opposite_orb, orderflow],
+        signals=[vwap, opposite_independent, orderflow],
         indicators=_live_indicators(),
     )
 
