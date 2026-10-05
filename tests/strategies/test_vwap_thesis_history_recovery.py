@@ -60,6 +60,8 @@ def _indicators(*, session_date: str, latest_bar_ts: str):
         "underlying_direction_bias": "CE",
         "underlying_direction_confidence": 0.95,
         "context_age_seconds": 0.0,
+        "futures_vwap_slope": 0.01,
+        "futures_volume_ratio": 1.1,
         "stale_data_used": False,
         "session_date": session_date,
         "latest_bar_ts": latest_bar_ts,
