@@ -8942,10 +8942,7 @@ def _best_fresh_option(
     """Pick best fresh quote CE/PE option. Args: ctx/symbols/side/max_age_s. Returns: symbol|None. Raises: none."""
     side = side.upper()
     candidates = [s for s in symbols if str(s).upper().endswith(side)]
-    best_symbol: str | None = None
-    best_score = -1
     for sym in candidates:
-        quote_fresh = False
         try:
             snap = (
                 ctx.market_data_manager.get_symbol_snapshot(sym)
@@ -8954,14 +8951,11 @@ def _best_fresh_option(
             )
             ltp = float(getattr(snap, "ltp", 0.0) or 0.0)
             age = resolve_tick_age_seconds(snap)
-            quote_fresh = ltp > 0 and age is not None and age <= max_age_s
+            if ltp > 0 and age is not None and age <= max_age_s:
+                return sym
         except Exception:
-            quote_fresh = False
-        score = 3 if quote_fresh else 0
-        if score > best_score:
-            best_score = score
-            best_symbol = sym
-    return best_symbol if best_score >= 3 else None
+            continue
+    return None
 
 
 def _best_hydrated_option(
