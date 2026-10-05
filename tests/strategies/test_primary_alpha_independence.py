@@ -17,8 +17,8 @@ from .test_strategy_quality_contract_v2 import (
 )
 
 
-def test_orb_direction_and_setup_alpha_are_independent(monkeypatch) -> None:
-    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+def test_orb_direction_and_setup_alpha_are_independent_in_research(monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
     strategy = ORBProStrategy(ORBProStrategyConfig(), indicator_engine=None)
     event_time = datetime(2026, 9, 11, 4, 29, tzinfo=timezone.utc)
 
