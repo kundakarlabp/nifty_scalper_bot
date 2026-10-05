@@ -1,4 +1,4 @@
-"""Option trade candidate selection and quality gates."""
+"""Option trade candidate selection using explicit execution/economic gates."""
 
 from __future__ import annotations
 
@@ -13,7 +13,6 @@ from nifty_scalper_bot.execution.quote_readiness import resolve_real_tick_count,
 from nifty_scalper_bot.risk.cost_model import evaluate_net_reward_risk
 from nifty_scalper_bot.risk.expiry_gate import expiry_theta_block, midday_pause_block
 from nifty_scalper_bot.risk.net_rr_gate import minimum_risk_distance_for_net_rr
-from nifty_scalper_bot.strategies.option_signal import score_option_candidate
 from nifty_scalper_bot.utils.logging import get_logger, log_once_or_throttled
 
 LOGGER = get_logger(__name__)
@@ -42,7 +41,6 @@ def _float_env(name: str, default: float, *, minimum: float = 0.0) -> float:
 @dataclass(slots=True)
 class DataQualityResult:
     allowed: bool
-    score: float
     reasons: list[str]
 
 
@@ -50,21 +48,16 @@ class DataQualityResult:
 class TradeCandidate:
     symbol: str
     side: str
-    score: float
     reasons: list[str]
     spread_pct: float | None
     tick_age_s: float | None
     premium: float | None
     atm_distance: int | None
-    data_quality_score: float | None
     entry_price: float | None = None
     stop_loss: float | None = None
     target: float | None = None
     rr: float | None = None
     net_rr: float | None = None
-    liquidity_score: float | None = None
-    microstructure_score: float | None = None
-    final_score: float | None = None
 
 
 class TradeCandidateSelector:
@@ -189,7 +182,6 @@ class TradeCandidateSelector:
                     self._log_reject('spread_too_wide', symbol, throttle_key_parts=('spread_too_wide', symbol, int(max_spread * 100)), bid=bid, ask=ask, spread_pct=spread_pct, max_spread_pct=max_spread)
                     continue
                 entry = ask if (ask or 0.0) > 0 else ltp
-                score_penalty = 0.0
             else:
                 ltp_only_flag = bool(s.get('ltp_only_fallback')) or str(s.get('quote_quality') or '').lower() == 'ltp_only'
                 if not (allow_ltp_only and ltp_only_flag):
@@ -197,7 +189,6 @@ class TradeCandidateSelector:
                     self._log_reject('missing_bid_ask', symbol, throttle_key_parts=('missing_bid_ask', symbol, 'no_bidask'), ltp=ltp, bid=bid, ask=ask, quote_quality=s.get('quote_quality'), ltp_only_fallback=ltp_only_flag, allow_ltp_only=allow_ltp_only)
                     continue
                 entry = ltp * 1.003
-                score_penalty = 1.5
                 ltp_only_used += 1
                 reasons.append('ltp_only_fallback')
 
@@ -230,44 +221,45 @@ class TradeCandidateSelector:
                 continue
             reasons.append(f'net_rr_{economics.net_rr:.1f}x')
 
-            liquidity = 5.0 if spread_pct is None else max(0.0, 10.0 - spread_pct)
-            micro = min(10.0, real_ticks * 3.0)
-            score = 6.0 + liquidity * 0.2 + micro * 0.2 - atm_distance * 0.5 - score_penalty
-            dq = self.evaluate_data_quality(s, tick_age_ms=tick_age_ms, real_ticks=real_ticks, max_spread=max_spread, max_age=max_age, min_ticks=min_ticks)
-            final = max(0.0, min(10.0, 0.7 * score + 0.3 * dq.score))
-            if self.option_metrics_getter is not None:
-                try:
-                    opt_delta, opt_reasons = score_option_candidate(symbol, self.option_metrics_getter(symbol))
-                except Exception:
-                    opt_delta, opt_reasons = 0.0, ['option_metrics_error']
-                if opt_delta:
-                    final = max(0.0, min(10.0, final + opt_delta))
-                reasons.extend(opt_reasons)
+            dq = self.evaluate_data_quality(
+                s,
+                tick_age_ms=tick_age_ms,
+                real_ticks=real_ticks,
+                max_spread=max_spread,
+                max_age=max_age,
+                min_ticks=min_ticks,
+            )
+            if not dq.allowed:
+                rejects["data_quality_rejected"] = rejects.get(
+                    "data_quality_rejected", 0
+                ) + 1
+                self._log_reject(
+                    "data_quality_rejected",
+                    symbol,
+                    throttle_key_parts=("data_quality_rejected", symbol),
+                    reasons=dq.reasons,
+                )
+                continue
             ranked.append(
                 TradeCandidate(
                     symbol=symbol,
                     side=side,
-                    score=final,
                     reasons=reasons,
                     spread_pct=spread_pct,
                     tick_age_s=tick_age_s,
                     premium=premium,
                     atm_distance=atm_distance,
-                    data_quality_score=dq.score,
                     entry_price=entry,
                     stop_loss=sl,
                     target=target,
                     rr=rr,
                     net_rr=economics.net_rr,
-                    liquidity_score=liquidity,
-                    microstructure_score=micro,
-                    final_score=final,
                 )
             )
 
         # Rank only candidates that already passed the hard execution/economic
-        # gates. Prefer measured post-cost economics, then tighter/fresher/nearer
-        # contracts. The legacy 0-10 score remains telemetry for calibration.
+        # gates. Lexicographic ordering keeps heterogeneous evidence separate:
+        # post-cost economics first, then tighter/fresher/nearer contracts.
         sorted_ranked = sorted(
             ranked,
             key=lambda c: (
@@ -289,40 +281,56 @@ class TradeCandidateSelector:
         ranked = self.select_ranked_candidates(direction_bias=direction_bias, atm_strike=atm_strike, snapshots=snapshots)
         return ranked[0] if ranked else None
 
-    def evaluate_data_quality(self, snapshot: dict[str, Any], *, tick_age_ms: float | None = None, real_ticks: int | None = None, max_spread: float | None = None, max_age: float | None = None, min_ticks: int | None = None) -> DataQualityResult:
-        """Evaluate the same canonical quote evidence used by candidate readiness."""
+    def evaluate_data_quality(
+        self,
+        snapshot: dict[str, Any],
+        *,
+        tick_age_ms: float | None = None,
+        real_ticks: int | None = None,
+        max_spread: float | None = None,
+        max_age: float | None = None,
+        min_ticks: int | None = None,
+    ) -> DataQualityResult:
+        """Evaluate canonical quote evidence as independent boolean gates."""
         default_spread, default_age, default_ticks, _ = self._effective_limits()
         max_spread = default_spread if max_spread is None else float(max_spread)
         max_age = default_age if max_age is None else float(max_age)
         min_ticks = default_ticks if min_ticks is None else int(min_ticks)
         reasons: list[str] = []
-        score = 10.0
 
         if tick_age_ms is None:
             tick_age_ms = resolve_tick_age_ms(snapshot)
         tick_age = None if tick_age_ms is None else tick_age_ms / 1000.0
         if tick_age is None or tick_age > max_age:
-            reasons.append('tick_stale')
-            score -= 4.0
+            reasons.append("tick_stale")
 
-        bid, ask = self._f(snapshot.get('bid')), self._f(snapshot.get('ask'))
+        bid, ask = self._f(snapshot.get("bid")), self._f(snapshot.get("ask"))
         has_bid_ask = bool((bid or 0) > 0 and (ask or 0) > 0)
         if not has_bid_ask:
-            reasons.append('missing_bid_ask')
-            score -= 3.0
+            reasons.append("missing_bid_ask")
         else:
             mid = ((bid or 0.0) + (ask or 0.0)) / 2.0
-            spread_pct = (((ask or 0.0) - (bid or 0.0)) / mid * 100.0) if mid > 0 else 100.0
+            spread_pct = (
+                (((ask or 0.0) - (bid or 0.0)) / mid * 100.0)
+                if mid > 0
+                else 100.0
+            )
             if spread_pct > max_spread:
-                reasons.append('spread_too_wide')
-                score -= 3.0
+                reasons.append("spread_too_wide")
 
         if real_ticks is None:
-            real_ticks, _ = resolve_real_tick_count(snapshot, tick_age_ms=tick_age_ms, max_age_ms=max_age * 1000.0, has_bid_ask=has_bid_ask)
+            real_ticks, _ = resolve_real_tick_count(
+                snapshot,
+                tick_age_ms=tick_age_ms,
+                max_age_ms=max_age * 1000.0,
+                has_bid_ask=has_bid_ask,
+            )
         if real_ticks < min_ticks:
-            reasons.append('insufficient_ticks')
-            score -= 2.0
-        return DataQualityResult(allowed=not reasons, score=max(0.0, score), reasons=reasons or ['data_quality_ok'])
+            reasons.append("insufficient_ticks")
+        return DataQualityResult(
+            allowed=not reasons,
+            reasons=reasons or ["data_quality_ok"],
+        )
 
     @staticmethod
     def _f(v: Any) -> float | None:
