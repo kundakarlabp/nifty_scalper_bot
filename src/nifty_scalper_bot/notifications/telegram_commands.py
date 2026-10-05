@@ -239,7 +239,8 @@ def _format_chain_summary(
             "Condition met: formatted chain summary for %s%s", underlying, expiry_suffix
         )
         return (
-            f"{underlying}{expiry_suffix} chain | total_oi={int(total_oi)} total_trades={int(total_trades)}\n"
+            f"{underlying}{expiry_suffix} chain | total_oi={int(total_oi)} "
+            f"total_trades={int(total_trades)}\n"
             f"Volume heatmap: {hot_text}\n"
             f"Liquidity focus: {liquid_text}\n"
             f"IV% CE={ce_iv:.2f} PE={pe_iv:.2f}"
@@ -365,7 +366,9 @@ def cmd_dryrun(
 
 
 def cmd_diag(
-    update: Update, context: ContextTypes.DEFAULT_TYPE, services: Services
+    update: TelegramUpdate,
+    context: TelegramContextTypes.DEFAULT_TYPE,
+    services: Services,
 ) -> str:
     """Return consolidated diagnostic snapshot."""
     broker_status = cmd_brk(update, context, services)
