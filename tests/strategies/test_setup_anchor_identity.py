@@ -40,7 +40,7 @@ class _RepeatingStrategy(EliteStrategy):
     def __init__(self, role: str = "trigger") -> None:
         self._role = role
         super().__init__(
-            config=EliteStrategyConfig(min_confidence=0.0),
+            config=EliteStrategyConfig(),
             indicator_engine=SimpleNamespace(),
         )
 
