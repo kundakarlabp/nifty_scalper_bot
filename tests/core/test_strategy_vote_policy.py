@@ -27,7 +27,11 @@ def test_setup_gate_requires_explicit_structural_pass() -> None:
         _evidence(role="trigger", setup_pass=True, required_data_present=True)
     )
     failed = setup_gate_decision(
-        _evidence(role="trigger", setup_pass=False, trigger_block_reason="not_confirmed")
+        _evidence(
+            role="trigger",
+            setup_pass=False,
+            trigger_block_reason="not_confirmed",
+        )
     )
     assert passed.passed is True
     assert failed.passed is False
@@ -80,18 +84,33 @@ def test_close_signal_bypasses_entry_setup_gate() -> None:
 
 
 def test_independent_confirmation_requires_distinct_signal_families() -> None:
-    smc = (_signal(), _evidence(strategy="SMC", side="CE", role="trigger", setup_pass=True))
-    vwap = (_signal(), _evidence(strategy="VWAPPro", side="CE", role="trigger", setup_pass=True))
-    ok, names = independent_same_side_confirmation([smc, vwap])
+    smc = (
+        _signal(),
+        _evidence(strategy="SMC", side="CE", role="trigger", setup_pass=True),
+    )
+    orb = (
+        _signal(),
+        _evidence(strategy="ORBPro", side="CE", role="trigger", setup_pass=True),
+    )
+    ok, names = independent_same_side_confirmation([smc, orb])
     assert ok is True
-    assert names == ["VWAPPro"]
+    assert names == ["ORBPro"]
 
 
 def test_same_family_or_opposite_side_does_not_confirm() -> None:
-    smc = (_signal(), _evidence(strategy="SMC", side="CE", role="trigger", setup_pass=True))
-    orb = (_signal(), _evidence(strategy="ORBPro", side="CE", role="trigger", setup_pass=True))
-    pe = (_signal(), _evidence(strategy="VWAPPro", side="PE", role="trigger", setup_pass=True))
-    same_family_ok, _ = independent_same_side_confirmation([smc, orb])
+    smc = (
+        _signal(),
+        _evidence(strategy="SMC", side="CE", role="trigger", setup_pass=True),
+    )
+    vwap = (
+        _signal(),
+        _evidence(strategy="VWAPPro", side="CE", role="trigger", setup_pass=True),
+    )
+    pe = (
+        _signal(),
+        _evidence(strategy="ORBPro", side="PE", role="trigger", setup_pass=True),
+    )
+    same_family_ok, _ = independent_same_side_confirmation([smc, vwap])
     opposite_ok, _ = independent_same_side_confirmation([smc, pe])
     assert same_family_ok is False
     assert opposite_ok is False
