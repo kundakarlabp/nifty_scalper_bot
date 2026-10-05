@@ -26,7 +26,6 @@ def test_five_runs_change_exactly_one_orb_setting_from_lifecycle_reference():
         assert len(extra) == 1
 
 
-
 def test_quality_score_8_candidate_is_focused_and_preserves_canonical_five():
     canonical_names = [row["name"] for row in candidates()]
     assert "quality_score_8" not in canonical_names
