@@ -22,32 +22,16 @@ def _selected_option_allowed(
     selected_option=True,
     allow_selected_option=True,
 ) -> bool:
-    # Mirrors the gate in strategy_manager: base allow AND score >= floor.
-    allowed = bool(threshold_passed and selected_option and allow_selected_option)
-    floor = float(
-        os.getenv("STRATEGY_SELECTED_OPTION_SINGLE_VOTE_MIN_SCORE", "9.0") or "9.0"
-    )
-    if allowed and raw_trigger_score < floor:
-        allowed = False
-    return allowed
+    # Legacy score is intentionally ignored for admission.
+    _ = raw_trigger_score
+    return bool(threshold_passed and selected_option and allow_selected_option)
 
 
-async def test_single_vote_blocked_below_nine(monkeypatch) -> None:
-    monkeypatch.delenv("STRATEGY_SELECTED_OPTION_SINGLE_VOTE_MIN_SCORE", raising=False)
-    assert _selected_option_allowed(8.0) is False  # was allowed before; now blocked
-    assert _selected_option_allowed(8.9) is False
-
-
-async def test_single_vote_allowed_at_or_above_nine(monkeypatch) -> None:
-    monkeypatch.delenv("STRATEGY_SELECTED_OPTION_SINGLE_VOTE_MIN_SCORE", raising=False)
-    assert _selected_option_allowed(9.0) is True
-    assert _selected_option_allowed(9.5) is True
-
-
-async def test_single_vote_floor_is_configurable(monkeypatch) -> None:
-    monkeypatch.setenv("STRATEGY_SELECTED_OPTION_SINGLE_VOTE_MIN_SCORE", "8.5")
-    assert _selected_option_allowed(8.6) is True
-    assert _selected_option_allowed(8.4) is False
+async def test_selected_option_score_floor_is_diagnostic_only(monkeypatch) -> None:
+    monkeypatch.setenv("STRATEGY_SELECTED_OPTION_SINGLE_VOTE_MIN_SCORE", "9.9")
+    assert _selected_option_allowed(2.0) is True
+    assert _selected_option_allowed(9.9) is True
+    assert _selected_option_allowed(9.9, selected_option=False) is False
 
 
 async def test_smc_option_context_fetch_allowed_at_open() -> None:
@@ -198,13 +182,13 @@ async def test_regime_weighted_score_selects_trigger_winner(monkeypatch) -> None
     assert result.metadata["final_trade_score"] == 8.4
 
 
-async def test_regime_downweighted_single_vote_cannot_pass_weighted_score_gate(
+async def test_regime_downweighted_single_vote_score_is_diagnostic(
     monkeypatch,
 ) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
     monkeypatch.setenv("STRATEGY_ALLOW_SINGLE_VOTE_SCALP", "true")
     manager = _manager_probe()
-    vote = _signal_vote(strategy="SMC", raw_score=9.0, weighted_score=1.8)
+    vote = _signal_vote(strategy="VWAPPro", raw_score=9.0, weighted_score=1.8)
 
     result = manager._combine_strategy_votes(
         symbol="NFO:NIFTY2670724050CE",
@@ -212,9 +196,9 @@ async def test_regime_downweighted_single_vote_cannot_pass_weighted_score_gate(
         indicators=_valid_entry_context(),
     )
 
-    assert result is None
-    decision = manager._last_no_signal_decision_by_symbol["NFO:NIFTY2670724050CE"]
-    assert decision.reason == "regime_weighted_score_below_min"
+    assert result is not None
+    assert result.metadata["regime_weighted_score"] == 1.8
+    assert result.metadata["manager_final_score_reference_only"] is True
 
 
 async def test_option_entry_fails_closed_without_underlying_direction() -> None:
