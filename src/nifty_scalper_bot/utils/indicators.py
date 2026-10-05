@@ -336,35 +336,7 @@ def compute_vwap(
     return _cached(key, round(vwap, 4))
 
 
-# ---------------------------------------------------------------------------
-# Legacy weighted score (unchanged — backward compat)
-# ---------------------------------------------------------------------------
-
-@dataclass(frozen=True, slots=True)
-class WeightedSignalInputs:
-    """Indicator inputs for weighted scoring."""
-
-    ema: float
-    rsi: float
-    macd: float
-    vwap: float
-    adx: float
-
-
-def weighted_score(inputs: WeightedSignalInputs) -> float:
-    """Compute configured weighted score."""
-    return (
-        1.2 * inputs.ema
-        + 1.0 * inputs.rsi
-        + 0.8 * inputs.macd
-        + 1.5 * inputs.vwap
-        + 1.3 * inputs.adx
-    )
-
-
 __all__ = [
-    "WeightedSignalInputs",
-    "weighted_score",
     "compute_rsi",
     "compute_ema",
     "compute_macd",
