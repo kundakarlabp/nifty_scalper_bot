@@ -40,7 +40,16 @@ def test_partition_never_promotes_context_to_trigger():
 
 
 def test_failed_setup_cannot_be_rescued_by_context():
-    weak = (_signal(), _vote(strategy="VWAPPro", role="trigger", raw_setup_score=4.0, setup_min=5.0, setup_pass=False))
+    weak = (
+        _signal(),
+        _vote(
+            strategy="VWAPPro",
+            role="trigger",
+            raw_setup_score=4.0,
+            setup_min=5.0,
+            setup_pass=False,
+        ),
+    )
     context = (_signal(), _vote(strategy="OrderFlow", role="context", score=10.0))
     triggers, contexts, rejected = partition_votes([weak, context])
     assert triggers == []
