@@ -270,7 +270,8 @@ def test_summary_uses_post_cost_net_pnl() -> None:
     assert summary.profit_factor == 2.0
 
 
-def test_attribution_readiness_fails_closed_for_missing_component_or_structural_evidence() -> None:
+def test_attribution_readiness_fails_closed_for_missing_component_or_structural_evidence(
+) -> None:
     trades = canonicalize_completed_trades(
         [
             _trade("vwap", 1.0, strategy="VWAPPro"),
@@ -304,7 +305,8 @@ def test_attribution_readiness_accepts_complete_component_evidence() -> None:
     assert readiness.blockers == ()
 
 
-def test_attribution_readiness_fails_closed_when_structural_contract_is_missing() -> None:
+def test_attribution_readiness_fails_closed_when_structural_contract_is_missing(
+) -> None:
     rows = [_trade("vwap", 1.0, strategy="VWAPPro", structural_evidence=True)]
     rows[0]["outcome"].pop("setup_contract")
     readiness = attribution_readiness(
@@ -371,7 +373,8 @@ def test_execution_data_quality_flags_explicit_stale_quote_exits() -> None:
     assert quality.blockers == ("known_stale_quote_exit_trades:1",)
 
 
-def test_candidate_decision_funnel_preserves_reasons_and_structural_provenance() -> None:
+def test_candidate_decision_funnel_preserves_reasons_and_structural_provenance(
+) -> None:
     rows = [
         {
             "event_name": "candidate.blocked",
