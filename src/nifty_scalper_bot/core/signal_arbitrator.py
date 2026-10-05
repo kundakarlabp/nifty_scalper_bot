@@ -23,7 +23,6 @@ class TradeDecision:
     direction: str
     symbol: str | None
     underlying: str
-    score: float
     confidence: float
     entry_price: float | None
     stop_loss: float | None
