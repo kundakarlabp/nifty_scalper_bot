@@ -132,8 +132,6 @@ def _format_orderbook_snapshot(symbol: str, snapshot: Mapping[str, Any]) -> str:
         best_bid = float(snapshot.get('best_bid', 0.0))
         best_ask = float(snapshot.get('best_ask', 0.0))
         spread = float(snapshot.get('spread', best_ask - best_bid))
-        liquidity_score = float(snapshot.get('liquidity_score', 0.0))
-
         buy_levels = cast(Sequence[Mapping[str, Any]], snapshot.get('buy', []))
         sell_levels = cast(Sequence[Mapping[str, Any]], snapshot.get('sell', []))
 
@@ -145,10 +143,14 @@ def _format_orderbook_snapshot(symbol: str, snapshot: Mapping[str, Any]) -> str:
             f"{idx + 1}:{float(level.get('price', 0.0)):.2f}@{int(float(level.get('quantity', 0.0)))}"
             for idx, level in enumerate(sell_levels[:3])
         )
+        top3_depth = sum(
+            int(float(level.get('quantity', 0.0)))
+            for level in (*buy_levels[:3], *sell_levels[:3])
+        )
         LOG.info('Condition met: formatted orderbook snapshot for %s', symbol)
         return (
             f"{symbol} order book | bid={best_bid:.2f} ask={best_ask:.2f} spread={spread:.2f} "
-            f"liq={liquidity_score:.1f}\n"
+            f"top3_depth={top3_depth}\n"
             f"buy: {buy_repr or 'n/a'}\n"
             f"sell: {sell_repr or 'n/a'}"
         )
