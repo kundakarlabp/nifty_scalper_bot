@@ -32,9 +32,8 @@ def test_reconcile_started_is_debug_only() -> None:
     assert record.levelno == logging.DEBUG
 
 
-def test_reconcile_success_is_state_throttled_and_failure_forces_recovery_visibility() -> (
-    None
-):
+def test_reconcile_success_is_state_throttled_and_failure_forces_recovery_visibility(
+) -> None:
     control = BootLogRateControl(interval_seconds=300.0)
     first = _record("POSITION_RECONCILE_SUCCESS")
     duplicate = _record("POSITION_RECONCILE_SUCCESS")
