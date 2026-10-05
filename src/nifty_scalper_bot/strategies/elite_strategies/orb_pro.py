@@ -408,7 +408,7 @@ class ORBProStrategy(EliteStrategy):
         if slope_aligned:
             reasons.append("futures_vwap_slope_alignment")
         balanced_min = max(0.05, _env_float("ORB_BALANCED_RANGE_MIN_ATR", 0.25))
-        balanced_max = max(balanced_min, _env_float("ORB_BALANCED_RANGE_MAX_ATR", 1.75))
+        balanced_max = max(balanced_min, _env_float("ORB_BALANCED_RANGE_MAX_ATR", 2.0))
         balanced_range = balanced_min <= opening_range_atr <= balanced_max
         if balanced_range:
             reasons.append("balanced_opening_range")
