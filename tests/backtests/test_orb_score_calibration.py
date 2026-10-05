@@ -3,7 +3,6 @@ import datetime
 
 from nifty_scalper_bot.backtesting import strategy_research
 
-
 IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
 
 
