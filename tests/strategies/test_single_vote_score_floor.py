@@ -162,7 +162,7 @@ def _valid_entry_context() -> dict:
     }
 
 
-async def test_regime_weighted_score_selects_trigger_winner(monkeypatch) -> None:
+async def test_regime_weighted_score_does_not_select_trigger_winner(monkeypatch) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
     manager = _manager_probe()
     high_raw = _signal_vote(strategy="SMC", raw_score=9.0, weighted_score=1.8)
@@ -175,10 +175,10 @@ async def test_regime_weighted_score_selects_trigger_winner(monkeypatch) -> None
     )
 
     assert result is not None
-    assert result.reason == "VWAPPro"
-    assert result.metadata["raw_setup_score"] == 7.0
-    assert result.metadata["regime_weighted_score"] == 8.4
-    assert result.metadata["final_trade_score"] == 8.4
+    assert result.reason == "SMC"
+    assert result.metadata["raw_setup_score"] == 9.0
+    assert result.metadata["regime_weighted_score"] == 1.8
+    assert result.metadata["final_trade_score"] == 1.8
 
 
 async def test_regime_downweighted_single_vote_score_is_diagnostic(
@@ -513,17 +513,16 @@ async def test_unapproved_context_strategy_cannot_unlock_single_trigger(
     assert decision.reason == "single_trigger_context_confirmation_invalid"
 
 
-async def test_opposite_side_context_remains_a_veto_not_confirmation(
+async def test_opposite_side_numeric_context_cannot_veto_without_direction_conflict(
     monkeypatch,
 ) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     monkeypatch.setenv("ENABLE_LIVE", "true")
-    monkeypatch.delenv("STRATEGY_ALLOW_SINGLE_VOTE_SCALP", raising=False)
+    monkeypatch.setenv("STRATEGY_ALLOW_SINGLE_VOTE_SCALP", "true")
     monkeypatch.delenv("STRATEGY_ALLOW_SELECTED_OPTION_SINGLE_VOTE", raising=False)
     manager = _manager_probe()
-    trigger = _signal_vote(strategy="SMC", raw_score=8.0, weighted_score=8.0)
-    trigger[0].metadata.update({"strategy": "SMC", "is_selected_option": True})
-    opposite_context = _context_vote(side="PE", score=10.0, confidence=0.85)
+    trigger = _signal_vote(strategy="VWAPPro", raw_score=2.0, weighted_score=1.0)
+    opposite_context = _context_vote(side="PE", score=10.0, confidence=0.99)
 
     result = manager._combine_strategy_votes(
         symbol="NFO:NIFTY2670724050CE",
@@ -531,9 +530,9 @@ async def test_opposite_side_context_remains_a_veto_not_confirmation(
         indicators=_valid_entry_context(),
     )
 
-    assert result is None
-    decision = manager._last_no_signal_decision_by_symbol["NFO:NIFTY2670724050CE"]
-    assert decision.reason == "hard_context_veto"
+    assert result is not None
+    assert result.metadata["context_penalty"] == 1.5
+    assert result.metadata["approval_path"] == "single_vote_fallback"
 
 
 async def test_regime_downweighted_context_reaches_runner_quality_owner(
@@ -633,10 +632,10 @@ async def test_range_smc_setup_reaches_strong_context_before_runner_quality(
     assert result.metadata["quality_reference_role"] == "diagnostic_only"
 
 
-async def test_range_smc_setup_still_rejects_weak_orderflow_context(
+async def test_range_smc_setup_accepts_low_numeric_orderflow_when_structurally_eligible(
     monkeypatch,
 ) -> None:
-    """Removing the duplicate score gate must not weaken confirmation quality."""
+    """Legacy OrderFlow score/confidence cannot veto valid structural context."""
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     monkeypatch.setenv("ENABLE_LIVE", "true")
     monkeypatch.delenv("STRATEGY_ALLOW_SINGLE_VOTE_SCALP", raising=False)
@@ -661,11 +660,10 @@ async def test_range_smc_setup_still_rejects_weak_orderflow_context(
         indicators=_valid_entry_context(),
     )
 
-    assert result is None
-    decision = manager._last_no_signal_decision_by_symbol[
-        "NFO:NIFTY2670724050CE"
-    ]
-    assert decision.reason == "single_trigger_context_confirmation_invalid"
+    assert result is not None
+    assert result.metadata["approval_path"] == "single_trigger_context_confirmed"
+    assert result.metadata["context_confirmation_evidence"][0]["raw_score"] == 6.0
+    assert result.metadata["context_confirmation_evidence"][0]["confidence"] == 0.60
 
 
 async def test_weak_underlying_disagreement_cannot_promote_single_trigger(monkeypatch) -> None:
@@ -826,7 +824,7 @@ async def test_hard_veto_uses_canonical_vote_timestamp(monkeypatch, legacy_times
     assert result.metadata["context_penalty"] == 1.5
 
 
-async def test_fresh_canonical_timestamp_keeps_hard_veto(monkeypatch):
+async def test_fresh_numeric_context_score_is_diagnostic_not_hard_veto(monkeypatch):
     monkeypatch.setattr(time, "time", lambda: 1000.0)
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     monkeypatch.setenv("STRATEGY_ALLOW_SINGLE_VOTE_SCALP", "true")
@@ -842,5 +840,5 @@ async def test_fresh_canonical_timestamp_keeps_hard_veto(monkeypatch):
         indicators=_valid_entry_context(),
     )
 
-    assert result is None
-    assert manager._last_no_signal_decision_by_symbol["NFO:NIFTY2670724050CE"].reason == "hard_context_veto"
+    assert result is not None
+    assert result.metadata["context_penalty"] == 1.5
