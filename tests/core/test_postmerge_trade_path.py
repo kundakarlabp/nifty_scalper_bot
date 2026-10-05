@@ -143,7 +143,7 @@ def test_aligned_independent_trigger_can_clear_unchanged_live_quality_floor(
     lineage = result.metadata["score_lineage"]
     assert lineage["raw_setup_score"] == 8.5
     assert lineage["regime_adjusted_setup_score"] == 6.8
-    assert lineage["final_numeric_gate_owner"] == "runner_final_execution_score"
+    assert lineage["score_admission_role"] == "diagnostic_only"
 
 
 def test_opposite_trigger_does_not_receive_quality_confirmation(monkeypatch) -> None:
@@ -267,7 +267,7 @@ def test_range_vwap_context_keeps_weak_alpha_as_diagnostic_only(
     quality = score_signal_metadata(candidate.metadata, strategy_name="VWAPPro")
 
     assert candidate.metadata["regime_weight"] == 0.8
-    assert candidate.metadata["quality_gate_owner"] == "runner_final_execution_score"
+    assert candidate.metadata["quality_reference_role"] == "diagnostic_only"
     assert quality.components["alpha_score"] < quality.components["threshold"]
     assert quality.allowed is True
     assert "alpha_below_threshold" in quality.reasons
@@ -416,7 +416,7 @@ def test_manager_quality_reference_is_diagnostic_runner_owns_final_score(
     assert result is not None
     assert result.metadata["quality_pass"] is False
     assert result.metadata["manager_quality_reference_only"] is True
-    assert result.metadata["quality_gate_owner"] == "runner_final_execution_score"
+    assert result.metadata["quality_reference_role"] == "diagnostic_only"
 
 
 def test_structural_strategy_invalid_state_remains_a_hard_block(monkeypatch) -> None:
@@ -490,7 +490,7 @@ def test_manager_final_trade_score_is_reference_only_runner_owns_numeric_quality
     assert result.metadata["final_trade_score"] < 4.5
     assert result.metadata["manager_final_score_reference_only"] is True
     assert result.metadata["manager_final_score_reference_pass"] is False
-    assert result.metadata["quality_gate_owner"] == "runner_final_execution_score"
+    assert result.metadata["quality_reference_role"] == "diagnostic_only"
 
 
 def test_no_signal_preserves_underlying_transition_root_cause() -> None:
