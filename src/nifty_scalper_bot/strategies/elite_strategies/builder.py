@@ -60,6 +60,7 @@ _EXPERIMENTAL_CONTEXT_FLAGS = {
     "rsi_div": "ENABLE_RSI_DIVERGENCE_EXPERIMENTAL",
 }
 _EXPIRY_ONLY = {"gamma_scalping", "tuesday_gamma_buyer"}
+_DIRECTIONAL_TRIGGER_FIELDS = frozenset({"smc", "vwap", "orb"})
 _TRUE_VALUES = {"1", "true", "yes", "on"}
 _POLICY_ENV_PREFIXES = (
     "ORB_",
@@ -156,7 +157,9 @@ def _strategy_runtime_role(
 
     if strategy_mode == "directional_scalp":
         role = canonical_strategy_role(field_name, default="inactive")
-        return role if role in {"trigger", "context"} else None
+        if role == "trigger":
+            return "trigger" if field_name in _DIRECTIONAL_TRIGGER_FIELDS else None
+        return "context" if role == "context" else None
 
     if strategy_mode == "expiry_gamma":
         role = canonical_strategy_role(field_name, default="inactive")
