@@ -19,6 +19,13 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from nifty_scalper_bot.config.settings import get_settings
+from nifty_scalper_bot.core.strategy_manager import (
+    StrategyManager as RuntimeStrategyManager,
+)
+from nifty_scalper_bot.core.underlying_direction import (
+    UnderlyingDirectionObservation,
+    arbitrate_underlying_direction,
+)
 from nifty_scalper_bot.risk.cost_model import (
     estimate_round_trip_cost,
     evaluate_net_reward_risk,
@@ -131,6 +138,12 @@ def summarize(trades: list[dict[str, Any]]) -> dict[str, Any]:
         drawdown = max(drawdown, peak - equity)
     return {
         "trade_count": len(values),
+        "gross_pnl": sum(float(trade["gross_pnl"]) for trade in ordered),
+        "gross_expectancy": (
+            sum(float(trade["gross_pnl"]) for trade in ordered) / len(values)
+            if values
+            else None
+        ),
         "net_pnl": sum(values),
         "expectancy": sum(values) / len(values) if values else None,
         "profit_factor": sum(wins) / abs(sum(losses)) if losses else None,
@@ -145,6 +158,112 @@ def summarize(trades: list[dict[str, Any]]) -> dict[str, Any]:
             for trade in trades
         ),
         "exposure_minutes": sum(trade["duration_minutes"] for trade in trades),
+    }
+
+
+def _research_direction_payload(
+    engine: IndicatorEngine,
+    symbol: str,
+    *,
+    role: str,
+) -> tuple[dict[str, Any], UnderlyingDirectionObservation | None]:
+    """Build the production direction inputs from completed historical bars."""
+    bars = list(engine.get_history(symbol, count=100, field="bars") or [])
+    if not bars:
+        return {}, None
+    current = bars[-1]
+    previous = bars[-2] if len(bars) >= 2 else None
+    current_ts = current.get("timestamp")
+    session_bars = [
+        bar
+        for bar in bars
+        if current_ts is not None
+        and bar.get("timestamp") is not None
+        and bar["timestamp"].date() == current_ts.date()
+    ]
+    day_open = (
+        float(session_bars[0]["open"])
+        if session_bars
+        else float(current.get("open") or current.get("close") or 0.0)
+    )
+    volumes = [
+        float(bar.get("volume") or 0.0)
+        for bar in bars[-20:]
+        if float(bar.get("volume") or 0.0) > 0
+    ]
+    avg_volume = sum(volumes) / len(volumes) if volumes else None
+    current_volume = float(current.get("volume") or 0.0)
+    payload: dict[str, Any] = {
+        "close": float(current["close"]),
+        "ltp": float(current["close"]),
+        "open": day_open,
+        "day_open": day_open,
+        "volume": current_volume,
+        "avg_volume": avg_volume,
+        "session_vwap": engine.get_session_vwap(symbol),
+        "vwap": engine.get_vwap(symbol),
+        "vwap_slope": engine.get_session_vwap_slope(symbol, lookback=3),
+        "ema_fast": engine.get_ema(symbol, period=9),
+        "ema_slow": engine.get_ema(symbol, period=21),
+        "ema_50": engine.get_ema(symbol, period=50),
+    }
+    if previous is not None:
+        previous_close = float(previous["close"])
+        payload["previous_close"] = previous_close
+        payload["recent_ltp_delta"] = float(current["close"]) - previous_close
+    if role == "futures_context" and avg_volume and avg_volume > 0:
+        payload["futures_volume_ratio"] = current_volume / avg_volume
+
+    direction, confidence, _reasons = RuntimeStrategyManager._derive_context_direction(  # noqa: SLF001
+        None,
+        payload,
+        role=role,
+    )
+    if direction not in {"CE", "PE"}:
+        return payload, None
+    return payload, UnderlyingDirectionObservation(
+        bias=direction,
+        confidence=confidence,
+        age_seconds=0.0,
+        source=role,
+    )
+
+
+def _research_orb_quality_context(
+    engine: IndicatorEngine,
+    *,
+    spot_symbol: str,
+    futures_symbol: str,
+) -> dict[str, Any]:
+    """Return exactly the external context fields consumed by ORB quality scoring."""
+    spot_payload, spot_observation = _research_direction_payload(
+        engine, spot_symbol, role="spot_context"
+    )
+    futures_payload, futures_observation = _research_direction_payload(
+        engine, futures_symbol, role="futures_context"
+    )
+    resolution = arbitrate_underlying_direction(
+        spot_observation,
+        futures_observation,
+    )
+    observation = resolution.observation
+    return {
+        "underlying_direction_bias": observation.bias if observation else None,
+        "direction_bias": observation.bias if observation else None,
+        "underlying_direction_confidence": (
+            observation.confidence if observation else 0.0
+        ),
+        "context_fresh": bool(spot_observation or futures_observation),
+        "futures_vwap_slope": futures_payload.get("vwap_slope"),
+        "research_direction_resolution": resolution.reason,
+        "research_spot_direction": (
+            spot_observation.bias if spot_observation else None
+        ),
+        "research_futures_direction": (
+            futures_observation.bias if futures_observation else None
+        ),
+        "research_spot_vwap_slope": spot_payload.get("vwap_slope"),
+        "research_futures_vwap_slope": futures_payload.get("vwap_slope"),
     }
 
 
@@ -407,6 +526,7 @@ def _scenario(
                 "quantity": quantity,
                 "high_water": entry,
                 "trail_updates": 0,
+                **intent.get("research_signal_metadata", {}),
             }
             intent["strategy"].notify_entry_accepted(
                 instruments[key[1]]["instrument_type"],
@@ -483,6 +603,14 @@ def _scenario(
                 if compact_orb_context
                 else dict(engine.get_indicators(symbol))
             )
+            if compact_orb_context:
+                indicators.update(
+                    _research_orb_quality_context(
+                        engine,
+                        spot_symbol="NSE:NIFTY 50",
+                        futures_symbol=future,
+                    )
+                )
             indicators.update(
                 history_count=engine.history_count(symbol),
                 bar_timestamp=timestamp,
@@ -526,12 +654,32 @@ def _scenario(
                             )
                         ] += 1
                         continue
+                metadata = dict(signal.metadata or {})
                 pending[key] = {
                     "available_at": timestamp + timedelta(minutes=1),
                     "stop_loss": signal.stop_loss,
                     "take_profit": signal.take_profit,
                     "strategy": strategy,
-                    "setup_id": signal.metadata.get("setup_id"),
+                    "setup_id": metadata.get("setup_id"),
+                    "research_signal_metadata": {
+                        field: metadata.get(field)
+                        for field in (
+                            "raw_setup_score",
+                            "setup_score",
+                            "strategy_score",
+                            "independent_setup_score",
+                            "score_reasons",
+                            "independent_setup_reasons",
+                            "entry_branch",
+                            "retest_confirmed",
+                            "underlying_volume_ratio",
+                            "underlying_penetration_atr",
+                            "opening_range_width_atr",
+                            "opening_range_balanced",
+                            "underlying_breakout_body_pct",
+                            "underlying_direction_confidence",
+                        )
+                    },
                 }
     for key in list(positions):
         observed = last_bars.get(key[1])
