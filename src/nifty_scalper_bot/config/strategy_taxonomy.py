@@ -28,9 +28,6 @@ _ALIASES: dict[str, str] = {
     "orbpro": "orb_pro",
     "orb_pro": "orb_pro",
     "orb": "orb_pro",
-    "premium_momentum": "premium_squeeze",
-    "premium_momentum_squeeze": "premium_squeeze",
-    "premium_squeeze": "premium_squeeze",
     "orderflow": "order_flow",
     "order_flow": "order_flow",
     "oimaxpain": "oi_max_pain",
@@ -53,9 +50,6 @@ _TAXONOMY: dict[str, StrategyTaxon] = {
     "smc_lite": StrategyTaxon("smc_lite", "trigger", "reclaim_structure"),
     "vwap_pro": StrategyTaxon("vwap_pro", "trigger", "reclaim_structure"),
     "orb_pro": StrategyTaxon("orb_pro", "trigger", "opening_breakout"),
-    "premium_squeeze": StrategyTaxon(
-        "premium_squeeze", "trigger", "volatility_momentum"
-    ),
     "gamma_scalping": StrategyTaxon("gamma_scalping", "trigger", "expiry_trigger"),
     "tuesday_gamma_buyer": StrategyTaxon(
         "tuesday_gamma_buyer", "trigger", "expiry_trigger"
