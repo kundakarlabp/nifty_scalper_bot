@@ -454,7 +454,8 @@ async def test_weak_range_vwap_with_strong_context_reaches_runner_quality_owner(
     assert result is not None
     assert result.metadata["approval_path"] == "single_trigger_context_confirmed"
     quality = score_signal_metadata(result.metadata, strategy_name="VWAPPro")
-    assert quality.allowed is False
+    assert quality.allowed is True
+    assert quality.reasons == []
 
 
 async def test_stale_orderflow_context_cannot_unlock_single_trigger(
