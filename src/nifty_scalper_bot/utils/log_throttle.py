@@ -255,7 +255,14 @@ class LogThrottle:
         logger.log(level, message, extra=payload)
         return True
 
-    def record_strategy_evaluation(self, *, strategy: str, symbol: str, accepted: bool, reason: str | None = None) -> None:
+    def record_strategy_evaluation(
+        self,
+        *,
+        strategy: str,
+        symbol: str,
+        accepted: bool,
+        reason: str | None = None,
+    ) -> None:
         with self._lock:
             self._strategy_stats.evaluation_count += 1
             if accepted:
@@ -339,9 +346,21 @@ def log_on_change(logger: logging.Logger, *, key: str, state: Any, message: str,
         return False
 
 
-def record_strategy_evaluation(*, strategy: str, symbol: str, accepted: bool, reason: str | None = None, throttle: LogThrottle = DEFAULT_LOG_THROTTLE) -> None:
+def record_strategy_evaluation(
+    *,
+    strategy: str,
+    symbol: str,
+    accepted: bool,
+    reason: str | None = None,
+    throttle: LogThrottle = DEFAULT_LOG_THROTTLE,
+) -> None:
     try:
-        throttle.record_strategy_evaluation(strategy=strategy, symbol=symbol, accepted=accepted, reason=reason)
+        throttle.record_strategy_evaluation(
+            strategy=strategy,
+            symbol=symbol,
+            accepted=accepted,
+            reason=reason,
+        )
     except Exception:
         return
 
