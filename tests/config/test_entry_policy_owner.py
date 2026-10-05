@@ -107,7 +107,7 @@ def test_invalid_values_fall_back_to_defaults_without_raising(
 def test_quality_spread_limit_follows_execution_policy_not_a_ten_percent_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from nifty_scalper_bot.strategies.signal_quality import canonical_max_spread_pct
+    from nifty_scalper_bot.strategies.entry_evidence import canonical_max_spread_pct
 
     assert canonical_max_spread_pct() == resolve_entry_policy().execution_max_spread_pct
 
