@@ -19,7 +19,7 @@ from nifty_scalper_bot.strategies.elite_strategies.gamma_scalping import GammaSc
 from nifty_scalper_bot.strategies.elite_strategies.rsi_divergence import (
     RSIDivergenceStrategy,
 )
-from nifty_scalper_bot.strategies.signal_quality import build_trade_quality_evidence
+from nifty_scalper_bot.strategies.entry_evidence import build_execution_evidence
 
 
 def test_module_compatibility_list_is_derived_from_canonical_catalog() -> None:
@@ -74,7 +74,7 @@ def test_expiry_gamma_requires_observed_atr(monkeypatch) -> None:
 
 def test_unknown_spread_is_non_blocking_but_not_passed_evidence(monkeypatch) -> None:
     monkeypatch.setenv("ORDER_MAX_SPREAD_PCT", "1.0")
-    evidence = build_trade_quality_evidence(
+    evidence = build_execution_evidence(
         {
             "direction_bias": "CE",
             "quote_depth_valid": True,
@@ -84,8 +84,7 @@ def test_unknown_spread_is_non_blocking_but_not_passed_evidence(monkeypatch) -> 
         side="CE",
     )
 
-    assert evidence["quality_spread_observed"] is False
-    assert evidence["quality_spread_pass"] is None
-    assert evidence["quality_spread_status"] == "unknown"
-    assert evidence["quality_spread_pct"] is None
-    assert evidence["liquidity_score"] == 0.5
+    assert evidence["spread_observed"] is False
+    assert evidence["spread_ok"] is None
+    assert evidence["spread_pct"] is None
+    assert evidence["execution_evidence_pass"] is True
