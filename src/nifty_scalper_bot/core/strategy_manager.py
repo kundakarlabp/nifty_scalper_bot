@@ -5539,7 +5539,8 @@ class StrategyManager(_BaseStrategyManager):
         min_score = self._env_float("STRATEGY_CONTEXT_PROMOTION_MIN_SCORE", 5.0)
         min_conf = self._env_float("STRATEGY_CONTEXT_PROMOTION_MIN_CONFIDENCE", 0.45)
         min_direction_conf = self._env_float("STRATEGY_CONTEXT_PROMOTION_MIN_DIRECTION_CONF", 0.05)
-        best_signal, best_vote = max(context_votes, key=lambda pair: self._extract_raw_score(pair[1]))
+        # Context promotion never ranks candidates by legacy score.
+        best_signal, best_vote = context_votes[0]
         raw_score = self._extract_raw_score(best_vote)
         md0 = dict(best_signal.metadata or {})
         selected_ok, selected_meta = self._is_selected_or_near_atm(symbol, md0, indicators)
@@ -5647,7 +5648,7 @@ class StrategyManager(_BaseStrategyManager):
             direction_conf = float(conf_raw) if conf_raw is not None else 0.0
         except (TypeError, ValueError):
             direction_conf = 0.0
-        if best_vote.strategy not in allowed_strategies or best_vote.side not in {"CE", "PE"} or not selected_ok or not direction_aligned or not context_fresh or direction_conf < min_direction_conf:
+        if best_vote.strategy not in allowed_strategies or best_vote.side not in {"CE", "PE"} or not selected_ok or not direction_aligned or not context_fresh:
             return None
         md = dict(best_signal.metadata or {})
         md.update(selected_meta)
