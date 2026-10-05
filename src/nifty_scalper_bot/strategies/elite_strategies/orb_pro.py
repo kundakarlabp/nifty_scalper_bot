@@ -659,7 +659,7 @@ class ORBProStrategy(EliteStrategy):
         if event is not None and event.get("status") in {
             "INVALIDATED",
             "EXPIRED",
-            "QUALITY_REJECTED",
+            "CONTRACT_REJECTED",
         }:
             back_inside = (
                 current_close <= orb_high if side == "CE" else current_close >= orb_low
@@ -757,14 +757,14 @@ class ORBProStrategy(EliteStrategy):
                     retest_timestamp=None,
                 )
                 if signal is None:
-                    event["status"] = "QUALITY_REJECTED"
+                    event["status"] = "CONTRACT_REJECTED"
                     transition_setup(
-                        SetupStage.QUALITY_REJECTED,
+                        SetupStage.CONTRACT_REJECTED,
                         strategy="ORBPro",
                         setup_id=setup_id,
                         symbol=symbol,
                         side=side,
-                        reason="orb_quality_below_minimum",
+                        reason="orb_structural_contract_rejected",
                     )
                     return None
                 event["status"] = "EMITTED"
@@ -844,9 +844,9 @@ class ORBProStrategy(EliteStrategy):
             retest_timestamp=current_ts,
         )
         if signal is None:
-            event["status"] = "QUALITY_REJECTED"
+            event["status"] = "CONTRACT_REJECTED"
             transition_setup(
-                SetupStage.QUALITY_REJECTED,
+                SetupStage.CONTRACT_REJECTED,
                 strategy="ORBPro",
                 setup_id=(
                     f"orbv2:{snapshot['session_date']}:{snapshot['symbol']}:{side}:"
@@ -854,7 +854,7 @@ class ORBProStrategy(EliteStrategy):
                 ),
                 symbol=symbol,
                 side=side,
-                reason="orb_quality_below_minimum",
+                reason="orb_structural_contract_rejected",
             )
             return None
         event["status"] = "EMITTED"
