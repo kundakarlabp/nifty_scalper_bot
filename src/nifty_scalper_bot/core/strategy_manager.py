@@ -404,7 +404,7 @@ class StrategyInterface(ABC):
             raise
 
     @abstractmethod
-    def score_performance(
+    def performance_metrics(
         self, trade_history: t.Sequence[t.Mapping[str, t.Any]]
     ) -> dict[str, float]:
         """Score the strategy using *trade_history* derived metrics.
@@ -421,11 +421,11 @@ class StrategyInterface(ABC):
 
         try:
             raise NotImplementedError(
-                "Concrete strategies must implement score_performance"
+                "Concrete strategies must implement performance_metrics"
             )
         except Exception as exc:  # noqa: BLE001 - intentional propagation
             log.error(
-                "Failure in StrategyInterface.score_performance: %s",
+                "Failure in StrategyInterface.performance_metrics: %s",
                 exc,
                 exc_info=exc,
             )
@@ -537,7 +537,7 @@ class StrategyAdapter(StrategyInterface):
             )
             return []
 
-    def score_performance(
+    def performance_metrics(
         self, trade_history: t.Sequence[t.Mapping[str, t.Any]]
     ) -> dict[str, float]:
         """Return standardised performance metrics for *trade_history*.
@@ -552,9 +552,9 @@ class StrategyAdapter(StrategyInterface):
             None.
         """
 
-        log.debug("Entered StrategyAdapter.score_performance")
+        log.debug("Entered StrategyAdapter.performance_metrics")
         try:
-            hook = getattr(self._strategy, "score_performance", None)
+            hook = getattr(self._strategy, "performance_metrics", None)
             if callable(hook):
                 result = hook(trade_history)
                 if isinstance(result, dict):
@@ -573,7 +573,7 @@ class StrategyAdapter(StrategyInterface):
                 performance.record(pnl)
         except Exception as exc:  # noqa: BLE001 - defensive
             log.error(
-                "Failure in StrategyAdapter.score_performance: %s", exc, exc_info=exc
+                "Failure in StrategyAdapter.performance_metrics: %s", exc, exc_info=exc
             )
         return {
             "pnl": performance.total_pnl,
@@ -826,54 +826,6 @@ def instantiate_strategy(name: str, **kwargs: t.Any) -> StrategyInterface:
     except Exception as exc:  # noqa: BLE001 - defensive
         log.error("Failure in instantiate_strategy: %s", exc, exc_info=exc)
         raise
-
-
-@dataclass(slots=True)
-class StrategyScoreWeights:
-    """Weight configuration used when computing composite scores."""
-
-    pnl: float = 0.55
-    sharpe: float = 0.25
-    win_rate: float = 0.1
-    drawdown: float = 0.1
-
-    def as_tuple(self) -> tuple[float, float, float, float]:
-        """Return the weight quadruple for normalisation.
-
-        Args:
-            None.
-
-        Returns:
-            tuple[float, float, float, float]: Tuple containing the raw weights.
-
-        Raises:
-            None.
-        """
-
-        return self.pnl, self.sharpe, self.win_rate, self.drawdown
-
-    def normalised(self) -> "StrategyScoreWeights":
-        """Return a copy with weights normalised to sum to one.
-
-        Args:
-            None.
-
-        Returns:
-            StrategyScoreWeights: Normalised weights summing to one.
-
-        Raises:
-            None.
-        """
-
-        total = self.pnl + self.sharpe + self.win_rate + self.drawdown
-        if total <= 0:
-            return StrategyScoreWeights(1.0, 0.0, 0.0, 0.0)
-        return StrategyScoreWeights(
-            pnl=self.pnl / total,
-            sharpe=self.sharpe / total,
-            win_rate=self.win_rate / total,
-            drawdown=self.drawdown / total,
-        )
 
 
 @dataclass(slots=True)
@@ -1247,30 +1199,7 @@ class RegimeState:
     updated_at: datetime | None = None
 
 
-@dataclass(slots=True)
-class StrategyScore:
-    """Composite score snapshot for a single strategy."""
-
-    strategy: str
-    weight: float
-    allocation: float
-    score: float
-    regime_score: float
-    pnl: float
-    sharpe: float
-    win_rate: float
-    drawdown: float
-    rolling_pnl: float
-    win_loss_ratio: float
-    manual_allocation: float | None
-    regime_bias: float
-    enabled: bool
-    active_regime_stats: dict[str, t.Any]
-    regime_breakdown: dict[str, dict[str, float]]
-    dynamic_disabled: bool
-
-
-class StrategyManager(_BaseStrategyManager):
+class StrategyManager(_BaseStrategyManager):class StrategyManager(_BaseStrategyManager):
     """Augment the base manager with performance scoring and allocations."""
 
     _context_only_fast_path_native = True
@@ -2698,14 +2627,14 @@ class StrategyManager(_BaseStrategyManager):
         *,
         trace_id: str | None = None,
     ) -> Signal | None:
-        """Generate signal with confidence adjusted by strategy scores.
+        """Generate a structurally qualified strategy signal.
 
         Args:
             symbol: Symbol evaluated for trading opportunities.
             current_price: Latest trade price for the symbol.
 
         Returns:
-            Signal | None: Weighted trading signal or ``None`` when absent.
+            Signal | None: Structurally qualified signal or ``None`` when absent.
 
         Raises:
             None.
@@ -2719,7 +2648,7 @@ class StrategyManager(_BaseStrategyManager):
         self._last_no_signal_decision_by_symbol.pop(symbol_norm, None)
         log.debug(
             "Entered StrategyManager.generate_signal",
-            extra={"event": "scored_strategy_generate", "symbol": symbol},
+            extra={"event": "strategy_generate", "symbol": symbol},
         )
         log.debug(
             "strategy_evaluation_start",
@@ -2735,8 +2664,6 @@ class StrategyManager(_BaseStrategyManager):
         errors: list[str] = []
         disabled_strategies_snapshot: list[str] = []
         signal_action: str | None = None
-        signal_score: float | None = None
-        signal_confidence: float | None = None
         exit_result = "no_signal"
         policy = HistoryReadinessPolicy.from_env()
         required_bars = int(getattr(self, "_required_candles", policy.option_eval_min_bars) or policy.option_eval_min_bars)
@@ -2841,8 +2768,7 @@ class StrategyManager(_BaseStrategyManager):
                     "trace_id": trace_id,
                     "result": exit_result,
                     "signal_action": signal_action,
-                    "signal_score": signal_score,
-                    "signal_confidence": signal_confidence,
+                    "approval_path": None,
                     "no_signal_reasons": no_signal_reasons,
                     "disabled_strategies": disabled_strategies_snapshot,
                     "error_strategies": error_strategies,
@@ -3017,7 +2943,6 @@ class StrategyManager(_BaseStrategyManager):
                 "use_regime_adaptive": self._use_regime_adaptive,
             },
         )
-        score_map = self._recompute_scores()
         indicators = dict(indicators)
         indicators.setdefault("ltp", current_price)
         indicators.setdefault("price", current_price)
@@ -3709,8 +3634,7 @@ class StrategyManager(_BaseStrategyManager):
                 no_vote_reason_counts[reason] = no_vote_reason_counts.get(reason, 0) + 1
                 strategy_reasons[strategy.name] = reason
                 continue
-            entry = score_map.get(strategy.name)
-            adjusted = self._apply_weighted_confidence(base_signal, strategy.name, entry)
+            adjusted = base_signal
             signals.append(adjusted)
             vote = signal_to_evidence(adjusted, strategy.name)
             if vote.metadata.get("side_conflict"):
@@ -3736,7 +3660,8 @@ class StrategyManager(_BaseStrategyManager):
                     },
                 )
                 continue
-            vote = self._apply_regime_vote_weight(vote=vote, regime_name=regime_name)
+            vote.metadata["regime_name"] = str(regime_name or "UNKNOWN")
+            vote.metadata["regime_routing_mode"] = "observe_only"
             signal_votes.append((adjusted, vote))
 
         # Preserve every structurally valid vote. MAX_STRATEGY_VOTES is kept
@@ -3852,12 +3777,6 @@ class StrategyManager(_BaseStrategyManager):
             elif no_vote_reason_counts.get("negative_premium_flow"):
                 primary_reason = "negative_premium_flow"
                 category = "premium_flow_negative"
-            elif no_vote_reason_counts.get("raw_score_below_min"):
-                primary_reason = "raw_score_below_min"
-                category = "strategy_score_below_threshold"
-            elif no_vote_reason_counts.get("weak_score"):
-                primary_reason = "weak_score"
-                category = "strategy_score_below_threshold"
             elif no_vote_reason_counts.get("single_vote_scalp_disabled"):
                 primary_reason = "single_vote_scalp_disabled"
                 category = "strategy_single_vote_disabled"
@@ -3941,8 +3860,6 @@ class StrategyManager(_BaseStrategyManager):
         if combined and bool(getattr(combined, "metadata", {}).get("is_approved")):
             exit_result = "signal"
             signal_action = combined.action
-            signal_score = _signal_score_for_diagnostics(combined)
-            signal_confidence = float(combined.confidence)
             _emit_strategy_exit()
             return combined
         if combined and self._filter_signal(combined):
@@ -3981,9 +3898,9 @@ class StrategyManager(_BaseStrategyManager):
                     },
                 )
                 log.info(
-                    "Condition met: scored_signal_ready",
+                    "Condition met: structural_signal_ready",
                     extra={
-                        "event": "scored_signal_ready",
+                        "event": "structural_signal_ready",
                         "symbol": symbol,
                         "action": combined.action,
                         "confidence": combined.confidence,
@@ -3991,7 +3908,6 @@ class StrategyManager(_BaseStrategyManager):
                     },
                 )
                 self._observability_counters["signals_generated"] += 1
-                self._avg_confidence_window.append(float(combined.confidence))
                 self._avg_kelly_window.append(
                     float(dict(combined.metadata).get("kelly_fraction", 0.0))
                 )
@@ -4143,61 +4059,13 @@ class StrategyManager(_BaseStrategyManager):
             return max(0.1, default_age)
         return max(0.1, self._env_float("STRATEGY_CONTEXT_MAX_AGE_SECONDS", 120.0))
 
-    def _extract_raw_score(self, vote: StrategyEvidence) -> float:
-        """Args: vote. Returns: raw score. Raises: none."""
-        payload = dict(vote.metadata or {})
-        for key in ("raw_vote_score", "raw_setup_score", "vote_score"):
-            try:
-                if payload.get(key) is not None:
-                    return float(payload.get(key))
-            except (TypeError, ValueError):
-                continue
-        try:
-            return float(vote.score or 0.0)
-        except (TypeError, ValueError):
-            return 0.0
-
-    def _extract_raw_context_score(self, vote: StrategyEvidence) -> float:
-        """Return context evidence before regime weighting."""
-        payload = dict(vote.metadata or {})
-        for key in (
-            "context_bonus_score",
-            "context_score",
-            "raw_setup_score",
-            "raw_vote_score",
-            "vote_score",
-        ):
-            try:
-                if payload.get(key) is not None:
-                    return max(0.0, float(payload.get(key)))
-            except (TypeError, ValueError):
-                continue
-        return max(0.0, self._extract_raw_score(vote))
-
-    def _extract_context_score(self, vote: StrategyEvidence) -> float:
-        """Return positive context evidence after exactly one regime weighting."""
-        payload = dict(vote.metadata or {})
-        explicit_weighted = payload.get("regime_weighted_context_score")
-        try:
-            if explicit_weighted is not None:
-                return max(0.0, float(explicit_weighted))
-        except (TypeError, ValueError):
-            pass
-        raw_context_score = self._extract_raw_context_score(vote)
-        try:
-            regime_weight = float(payload.get("regime_weight", 1.0) or 1.0)
-        except (TypeError, ValueError):
-            regime_weight = 1.0
-        return max(0.0, raw_context_score * max(0.0, regime_weight))
-
-    def _context_vote_is_timestamped(self, vote: StrategyEvidence, *, max_age_s: float | None = None) -> bool:
-        """Return whether a context vote proves it is current.
-
-        A hard veto blocks an otherwise valid trade, so it requires an
-        authoritative, fresh timestamp. Missing or stale provenance downgrades
-        the vote to a soft penalty instead of silently defaulting its age to
-        "now" and letting an undated vote veto at full strength.
-        """
+    def _context_vote_is_timestamped(
+        self,
+        vote: StrategyEvidence,
+        *,
+        max_age_s: float | None = None,
+    ) -> bool:
+        """Return whether context evidence proves it is current."""
         raw = (vote.metadata or {}).get("vote_timestamp")
         try:
             stamped = float(raw)
@@ -4209,19 +4077,6 @@ class StrategyManager(_BaseStrategyManager):
         if max_age_s is not None:
             max_age = min(max_age, max(0.0, max_age_s))
         return 0.0 <= (time.time() - stamped) <= max_age
-
-    def _extract_context_veto_score(self, vote: StrategyEvidence) -> float:
-        """Args: vote. Returns: context veto score. Raises: none."""
-        if not self._context_vote_is_timestamped(vote):
-            return 0.0
-        payload = dict(vote.metadata or {})
-        for key in ("context_veto_score", "context_score", "raw_setup_score", "raw_vote_score", "vote_score"):
-            try:
-                if payload.get(key) is not None:
-                    return max(0.0, float(payload.get(key)))
-            except (TypeError, ValueError):
-                continue
-        return max(0.0, self._extract_raw_score(vote))
 
     def _is_selected_or_near_atm(self, symbol: str, metadata: dict[str, t.Any], indicators: t.Mapping[str, t.Any]) -> tuple[bool, dict[str, t.Any]]:
         """Args: symbol/metadata/indicators. Returns: selected bool + audit metadata. Raises: none."""
@@ -4253,69 +4108,43 @@ class StrategyManager(_BaseStrategyManager):
         blocked_reason: str | None,
         no_vote_reason_counts: t.Mapping[str, int] | None = None,
     ) -> None:
-        """Log exact strategy combiner blocker details without changing vote outcomes."""
+        """Log structural strategy-arbitration blockers."""
         indicator_map = dict(indicators or {})
-        trigger_votes: list[StrategyEvidence] = []
-        context_votes: list[StrategyEvidence] = []
-        for _signal, vote in signal_votes:
-            role = str((vote.metadata or {}).get("role") or "trigger").lower()
-            if role == "context":
-                context_votes.append(vote)
-            else:
-                trigger_votes.append(vote)
-        all_votes = trigger_votes + context_votes
-        best_vote = max(all_votes, key=self._extract_raw_score) if all_votes else None
-        combined_md = dict(getattr(combined, "metadata", {}) or {}) if combined is not None else {}
-        final_trade_score = combined_md.get("final_trade_score")
-        if final_trade_score is None and best_vote is not None:
-            final_trade_score = self._extract_raw_score(best_vote)
-        try:
-            final_trade_threshold = float(os.getenv("STRATEGY_TRIGGER_MIN_SCORE", "4.5") or "4.5")
-        except (TypeError, ValueError):
-            final_trade_threshold = 4.5
-        mode_profile = self.get_strategy_mode_profile()
-        selected_ok = bool(
-            indicator_map.get("is_selected_option")
-            or str(symbol or "").strip().upper()
-            in {
-                str(indicator_map.get("selected_ce") or "").strip().upper(),
-                str(indicator_map.get("selected_pe") or "").strip().upper(),
-            }
+        trigger_votes, context_votes, rejected = partition_votes(signal_votes)
+        combined_md = (
+            dict(getattr(combined, "metadata", {}) or {})
+            if combined is not None
+            else {}
         )
-        selected_ok_reason = "selected_option" if selected_ok else "not_selected_or_near_atm"
-        if combined_md.get("selected_ok_reason"):
-            selected_ok_reason = str(combined_md.get("selected_ok_reason"))
-            selected_ok = selected_ok_reason != "not_selected_or_near_atm"
+        selected_ok, selected_meta = self._is_selected_or_near_atm(
+            symbol, combined_md, indicator_map
+        )
         log.debug(
-            "STRATEGY_COMBINER_BLOCKER symbol=%s strategy_vote_count=%s trigger_vote_count=%s context_vote_count=%s best_strategy=%s best_score=%s best_confidence=%s single_vote_allowed=%s selected_ok=%s selected_ok_reason=%s final_trade_score=%s final_trade_threshold=%s blocked_reason=%s",
+            "STRATEGY_COMBINER_BLOCKER symbol=%s trigger_count=%s context_count=%s "
+            "rejected_setups=%s selected_ok=%s selected_reason=%s blocked_reason=%s",
             symbol,
-            len(signal_votes),
             len(trigger_votes),
             len(context_votes),
-            best_vote.strategy if best_vote else None,
-            self._extract_raw_score(best_vote) if best_vote else None,
-            float(best_vote.confidence) if best_vote else None,
-            bool(mode_profile.get("allow_single_vote", True)) and str(os.getenv("STRATEGY_ALLOW_SINGLE_VOTE_SCALP", "false")).lower() in {"1", "true", "yes", "on"},
+            rejected,
             selected_ok,
-            selected_ok_reason,
-            final_trade_score,
-            final_trade_threshold,
-            blocked_reason or combined_md.get("blocked_reason") or "combined_not_approved",
+            selected_meta.get("selected_ok_reason"),
+            blocked_reason
+            or combined_md.get("blocked_reason")
+            or "combined_not_approved",
             extra={
                 "event": "STRATEGY_COMBINER_BLOCKER",
                 "symbol": symbol,
-                "strategy_vote_count": len(signal_votes),
-                "trigger_vote_count": len(trigger_votes),
-                "context_vote_count": len(context_votes),
-                "best_strategy": best_vote.strategy if best_vote else None,
-                "best_score": self._extract_raw_score(best_vote) if best_vote else None,
-                "best_confidence": float(best_vote.confidence) if best_vote else None,
-                "single_vote_allowed": bool(mode_profile.get("allow_single_vote", True)) and str(os.getenv("STRATEGY_ALLOW_SINGLE_VOTE_SCALP", "false")).lower() in {"1", "true", "yes", "on"},
+                "trigger_count": len(trigger_votes),
+                "context_count": len(context_votes),
+                "rejected_setups": rejected,
                 "selected_ok": selected_ok,
-                "selected_ok_reason": selected_ok_reason,
-                "final_trade_score": final_trade_score,
-                "final_trade_threshold": final_trade_threshold,
-                "blocked_reason": blocked_reason or combined_md.get("blocked_reason") or "combined_not_approved",
+                "selected_ok_reason": selected_meta.get("selected_ok_reason"),
+                "direction_bias": indicator_map.get("underlying_direction_bias")
+                or indicator_map.get("direction_bias"),
+                "direction_state": indicator_map.get("underlying_direction_state"),
+                "blocked_reason": blocked_reason
+                or combined_md.get("blocked_reason")
+                or "combined_not_approved",
                 "no_vote_reason_counts": dict(no_vote_reason_counts or {}),
                 "combined_present": combined is not None,
                 "combined_is_approved": bool(combined_md.get("is_approved")),
@@ -4330,1414 +4159,290 @@ class StrategyManager(_BaseStrategyManager):
         indicators: t.Mapping[str, t.Any],
         no_vote_reason_counts: t.Mapping[str, int] | None = None,
     ) -> Signal | None:
-        """Args: symbol/signals/indicators. Returns: consensus signal or None. Raises: none."""
+        """Approve only structurally valid, direction-aligned entry evidence."""
         symbol_norm = str(symbol or "").strip().upper()
-        def _record_no_signal(category: str, reason_text: str, blocked_at: str, *, no_vote_reason_counts: dict[str, int] | None = None, strategy_reasons: dict[str, str] | None = None, trigger_vote_count: int = 0, context_vote_count: int = 0, final_block_reason: str | None = None) -> None:
+        indicator_map = dict(indicators or {})
+
+        def _record_no_signal(
+            category: str,
+            reason_text: str,
+            blocked_at: str,
+            *,
+            trigger_vote_count: int = 0,
+            context_vote_count: int = 0,
+        ) -> None:
             self._last_no_signal_decision_by_symbol[symbol_norm] = StrategyNoSignalDecision(
                 symbol=symbol_norm,
-                eval_id=str(indicator_map.get("eval_id") or indicator_map.get("trace_id") or "") or None,
-                final_block_reason=final_block_reason,
+                eval_id=str(
+                    indicator_map.get("eval_id") or indicator_map.get("trace_id") or ""
+                )
+                or None,
+                final_block_reason=reason_text,
                 category=category,
                 reason=reason_text,
                 blocked_at=blocked_at,
                 no_vote_reason_counts=dict(no_vote_reason_counts or {}),
-                strategy_reasons=dict(strategy_reasons or {}),
-                direction_bias=str(indicator_map.get("direction_bias") or "").upper() or None,
-                underlying_direction_bias=str(indicator_map.get("underlying_direction_bias") or "").upper() or None,
-                context_age_seconds=float(indicator_map.get("context_age_seconds")) if indicator_map.get("context_age_seconds") is not None else None,
+                strategy_reasons={},
+                direction_bias=str(indicator_map.get("direction_bias") or "").upper()
+                or None,
+                underlying_direction_bias=str(
+                    indicator_map.get("underlying_direction_bias") or ""
+                ).upper()
+                or None,
+                context_age_seconds=(
+                    float(indicator_map.get("context_age_seconds"))
+                    if indicator_map.get("context_age_seconds") is not None
+                    else None
+                ),
                 trigger_vote_count=trigger_vote_count,
                 context_vote_count=context_vote_count,
                 selected_ce=str(indicator_map.get("selected_ce") or "") or None,
                 selected_pe=str(indicator_map.get("selected_pe") or "") or None,
                 trace_id=str(indicator_map.get("trace_id") or "") or None,
             )
-        indicator_map = dict(indicators or {})
-        selected_symbols = {
-            str(indicator_map.get("selected_ce") or "").strip().upper(),
-            str(indicator_map.get("selected_pe") or "").strip().upper(),
-        }
-        selected_symbols.discard("")
-        indicator_selected_option = bool(
-            indicator_map.get("is_selected_option")
-            or symbol_norm in selected_symbols
-        )
-        indicator_near_atm = False
-        try:
-            if indicator_map.get("strike_distance_from_atm") is not None:
-                indicator_near_atm = float(indicator_map.get("strike_distance_from_atm")) <= 50.0
-        except (TypeError, ValueError):
-            indicator_near_atm = False
+
         if not signals:
             return None
-        def _weighted_score(vote: StrategyEvidence) -> float:
-            try:
-                return float(vote.score or 0.0)
-            except (TypeError, ValueError):
-                return 0.0
-        def _regime_weight(vote: StrategyEvidence) -> float:
-            try:
-                return float((vote.metadata or {}).get("regime_weight", 1.0) or 1.0)
-            except (TypeError, ValueError):
-                return 1.0
-        mode_profile = self.get_strategy_mode_profile()
-        entry_signals: list[tuple[Signal, StrategyEvidence]] = []
-        for signal, vote in signals:
-            if signal.action in {"CLOSE_LONG", "CLOSE_SHORT"}:
-                signal.metadata = dict(signal.metadata or {})
-                signal.metadata["approval_path"] = "close_signal"
-                log.info("TRADE_DECISION_TRACE approval_path=%s symbol=%s", "close_signal", symbol_norm)
-                return signal
-            entry_signals.append((signal, vote))
 
-        trigger_votes, context_votes, rejected_setups = partition_votes(entry_signals)
-        execution_mode = str(
-            os.getenv("EXECUTION_MODE", "SHADOW") or "SHADOW"
-        ).strip().upper()
-        if execution_mode == "LIVE":
-            live_orb = [
-                (signal, vote)
-                for signal, vote in trigger_votes
-                if normalize_strategy_name(vote.strategy) == "orb_pro"
-            ]
-            if live_orb:
-                trigger_votes = [
-                    (signal, vote)
-                    for signal, vote in trigger_votes
-                    if normalize_strategy_name(vote.strategy) != "orb_pro"
-                ]
-                rejected_setups.extend(
-                    {
-                        "strategy": vote.strategy,
-                        "score": self._extract_raw_score(vote),
-                        "minimum": None,
-                        "reason": "orb_live_research_only",
-                    }
-                    for _signal, vote in live_orb
+        for signal, _evidence in signals:
+            if signal.action in {"CLOSE_LONG", "CLOSE_SHORT"}:
+                metadata = dict(signal.metadata or {})
+                metadata["approval_path"] = "close_signal"
+                metadata["is_approved"] = True
+                return Signal(
+                    action=signal.action,
+                    symbol=signal.symbol,
+                    quantity=signal.quantity,
+                    confidence=signal.confidence,
+                    reason=signal.reason,
+                    stop_loss=signal.stop_loss,
+                    take_profit=signal.take_profit,
+                    metadata=metadata,
                 )
-        if rejected_setups and not trigger_votes:
-            log_throttled(
-                log,
-                f"strategy_setup_contract_failed:{symbol_norm}",
-                "STRATEGY_SETUP_CONTRACT_FAILED symbol=%s rejected=%s",
+
+        trigger_votes, context_votes, rejected_setups = partition_votes(signals)
+        if rejected_setups:
+            log.info(
+                "STRUCTURAL_SETUP_REJECTED symbol=%s rejected=%s",
                 symbol_norm,
                 rejected_setups,
-                interval_sec=30.0,
-                level=logging.INFO,
                 extra={
-                    "event": "STRATEGY_SETUP_CONTRACT_FAILED",
+                    "event": "STRUCTURAL_SETUP_REJECTED",
                     "symbol": symbol_norm,
                     "rejected": rejected_setups,
                 },
             )
+        if not trigger_votes:
             _record_no_signal(
-                "strategy_setup_rejected",
-                "setup_contract_failed",
-                "strategy_setup_gate",
-                trigger_vote_count=0,
+                "strategy_no_trigger",
+                "no_setup_valid_trigger",
+                "strategy_structural_contract",
                 context_vote_count=len(context_votes),
-                final_block_reason="setup_contract_failed",
             )
             return None
 
         trigger_sides = {
-            str(vote.side or "").upper()
-            for _signal, vote in trigger_votes
-            if str(vote.side or "").upper() in {"CE", "PE"}
+            str(evidence.side or "").upper()
+            for _signal, evidence in trigger_votes
+            if str(evidence.side or "").upper() in {"CE", "PE"}
         }
-        if len(trigger_sides) > 1:
+        if len(trigger_sides) != 1:
             _record_no_signal(
-                "strategy_conflict",
-                "conflicting_trigger_direction",
-                "trigger_direction_gate",
+                "strategy_direction_conflict",
+                "trigger_side_conflict",
+                "strategy_structural_contract",
                 trigger_vote_count=len(trigger_votes),
                 context_vote_count=len(context_votes),
-                final_block_reason="conflicting_trigger_direction",
             )
-            log_throttled(
-                log,
-                f"conflicting_trigger_direction:{symbol_norm}",
-                "CONFLICTING_TRIGGER_DIRECTION_BLOCKED symbol=%s sides=%s strategies=%s",
-                symbol_norm,
-                sorted(trigger_sides),
-                [vote.strategy for _signal, vote in trigger_votes],
-                interval_sec=30.0,
-                level=logging.INFO,
-                extra={
-                    "event": "CONFLICTING_TRIGGER_DIRECTION_BLOCKED",
-                    "symbol": symbol_norm,
-                    "sides": sorted(trigger_sides),
-                    "strategies": [vote.strategy for _signal, vote in trigger_votes],
-                },
+            return None
+        side = next(iter(trigger_sides))
+
+        direction = str(
+            indicator_map.get("underlying_direction_bias")
+            or indicator_map.get("direction_bias")
+            or ""
+        ).upper()
+        direction_state = str(
+            indicator_map.get("underlying_direction_state") or ""
+        ).upper()
+        if direction not in {"CE", "PE"}:
+            _record_no_signal(
+                "context_direction_unavailable",
+                "underlying_direction_unavailable",
+                "direction_contract",
+                trigger_vote_count=len(trigger_votes),
+                context_vote_count=len(context_votes),
+            )
+            return None
+        if direction_state == UnderlyingDirectionState.TRANSITION.value:
+            _record_no_signal(
+                "context_direction_transition",
+                "underlying_direction_transition",
+                "direction_contract",
+                trigger_vote_count=len(trigger_votes),
+                context_vote_count=len(context_votes),
             )
             return None
 
-        confirmation, confirmation_strategies = independent_same_side_confirmation(
-            entry_signals
-        )
-        if confirmation:
-            indicator_map["independent_trigger_confirmation"] = True
-            indicator_map["independent_trigger_confirmation_strategies"] = (
-                confirmation_strategies
+        # Continuation-only live admission. Counter-trend entries require a future,
+        # separately modeled reversal contract based on underlying structure; option
+        # premium behaviour or OrderFlow may never override underlying direction.
+        if side != direction:
+            _record_no_signal(
+                "countertrend_block",
+                "countertrend_requires_structural_reversal_contract",
+                "direction_contract",
+                trigger_vote_count=len(trigger_votes),
+                context_vote_count=len(context_votes),
             )
-        # ── Underlying-direction authority gate (fail closed) ──
-        # An option ENTRY may only be approved with a fresh, valid underlying
-        # (spot/futures) direction that matches the option side. Missing or
-        # stale underlying context must skip the entry, never fail open.
-        # Close signals returned above are never gated.
-        if symbol_norm.endswith(("CE", "PE")):
-            _bias = str(
-                indicator_map.get("direction_bias")
-                or indicator_map.get("underlying_direction_bias")
-                or ""
-            ).upper()
-            _ctx_fresh = bool(indicator_map.get("context_fresh"))
-            _side_expected = "CE" if symbol_norm.endswith("CE") else "PE"
-            _gate_block: str | None = None
-            if _bias not in {"CE", "PE"} or not _ctx_fresh:
-                _gate_block = "underlying_direction_unresolved"
-            elif _bias != _side_expected:
-                _gate_block = "underlying_direction_conflict"
-            if _gate_block is not None:
-                _record_no_signal(
-                    "context",
-                    f"{_gate_block}_fail_closed",
-                    "underlying_direction_gate",
-                    trigger_vote_count=len(trigger_votes),
-                    context_vote_count=len(context_votes),
-                    final_block_reason=_gate_block,
-                )
-                log_throttled(
-                    log,
-                    f"underlying_direction_gate:{symbol_norm}",
-                    "UNDERLYING_DIRECTION_GATE_BLOCKED symbol=%s bias=%s context_fresh=%s reason=%s",
-                    symbol_norm,
-                    _bias or None,
-                    _ctx_fresh,
-                    _gate_block,
-                    interval_sec=30.0,
-                    level=logging.INFO,
-                )
-                return None
-        approval_path = "multi_trigger"
-        if not trigger_votes:
-            promoted_candidate = self._try_context_promotion(symbol_norm, context_votes, indicator_map, mode_profile)
-            if promoted_candidate:
-                best_signal, best_vote = promoted_candidate
-                approval_path = "context_promotion"
-            else:
-                approval_path = "no_trade"
-                context_vote_names = [v.strategy for _, v in context_votes]
-                context_sides = [v.side for _, v in context_votes]
-                context_scores = [self._extract_raw_score(v) for _, v in context_votes]
-                context_confidences = [float(v.confidence) for _, v in context_votes]
-                context_trigger_details = []
-                for signal, vote in context_votes:
-                    md = dict(getattr(signal, "metadata", {}) or {})
-                    vote_md = dict(getattr(vote, "metadata", {}) or {})
-                    merged_md = {**md, **vote_md}
-                    context_trigger_details.append(
-                        {
-                            "strategy": vote.strategy,
-                            "side": vote.side,
-                            "score": self._extract_raw_score(vote),
-                            "confidence": float(vote.confidence),
-                            "role": merged_md.get("role"),
-                            "can_trigger": merged_md.get("can_trigger"),
-                            "trigger_conditions_met": merged_md.get("trigger_conditions_met"),
-                            "trigger_block_reason": merged_md.get("trigger_block_reason"),
-                            "quote_depth_valid": merged_md.get("quote_depth_valid"),
-                            "tradable_quote": merged_md.get("tradable_quote"),
-                            "spread_pct": merged_md.get("spread_pct"),
-                            "tick_age_ms": merged_md.get("tick_age_ms") or indicator_map.get("tick_age_ms") or merged_md.get("context", {}).get("tick_age_ms"),
-                            "quote_update_version": merged_md.get("quote_update_version") or indicator_map.get("quote_update_version") or merged_md.get("context", {}).get("quote_update_version"),
-                            "depth_available": merged_md.get("depth_available"),
-                            "tick_direction": merged_md.get("tick_direction"),
-                        }
-                    )
-                log_throttled_live(
-                    log,
-                    logging.INFO,
-                    "TRADE_DECISION_TRACE",
-                    f"TRADE_DECISION_TRACE:{symbol_norm}:no_trigger_vote:{indicator_map.get('direction_bias')}",
-                    float(os.getenv("LOG_THROTTLE_NO_TRADE_TRACE_SECONDS", "30") or "30"),
-                    "TRADE_DECISION_TRACE approval_path=%s blocked_at=%s blocked_reason=%s "
-                    "symbol=%s context_votes=%s context_sides=%s context_scores=%s "
-                    "direction_bias=%s underlying_direction_bias=%s context_age_seconds=%s context_trigger_details=%s",
-                    approval_path,
-                    "no_trigger_vote",
-                    "no_trigger_vote",
-                    symbol_norm,
-                    context_vote_names,
-                    context_sides,
-                    context_scores,
-                    indicator_map.get("direction_bias"),
-                    indicator_map.get("underlying_direction_bias"),
-                    indicator_map.get("context_age_seconds"),
-                    context_trigger_details,
-                    extra={
-                        "event": "TRADE_DECISION_TRACE",
-                        "symbol": symbol_norm,
-                        "approval_path": approval_path,
-                        "blocked_at": "no_trigger_vote",
-                        "blocked_reason": "no_trigger_vote",
-                        "context_vote_count": len(context_votes),
-                        "context_votes": context_vote_names,
-                        "context_sides": context_sides,
-                        "context_scores": context_scores,
-                        "context_confidences": context_confidences,
-                        "context_trigger_details": context_trigger_details,
-                        "allow_context_promotion": bool(mode_profile.get("allow_context_promotion", False)),
-                        "execution_mode": mode_profile.get("mode"),
-                        "direction_bias": indicator_map.get("direction_bias"),
-                        "underlying_direction_bias": indicator_map.get("underlying_direction_bias"),
-                        "context_age_seconds": indicator_map.get("context_age_seconds"),
-                        "direction_context_source": indicator_map.get("direction_context_source"),
-                        "direction_context_age_s": indicator_map.get("context_age_seconds"),
-                        "direction_context_confidence": indicator_map.get("underlying_direction_confidence"),
-                        "spot_tick_age_ms": (indicator_map.get("spot_context") or {}).get("tick_age_ms") if isinstance(indicator_map.get("spot_context"), dict) else None,
-                        "futures_tick_age_ms": (indicator_map.get("futures_context") or {}).get("tick_age_ms") if isinstance(indicator_map.get("futures_context"), dict) else None,
-                        "direction_missing_reason": "direction_bias_none" if str(indicator_map.get("direction_bias") or "").upper() not in {"CE", "PE"} else None,
-                    },
-                )
-                log_throttled(
-                    log,
-                    f"strategy_no_trigger_vote:{symbol_norm}",
-                    "STRATEGY_NO_TRIGGER_VOTE symbol=%s context_votes=%s context_sides=%s live_context_promotion_allowed=%s context_trigger_details=%s",
-                    symbol_norm,
-                    context_vote_names,
-                    context_sides,
-                    bool(mode_profile.get("allow_context_promotion", False)),
-                    context_trigger_details,
-                    interval_sec=30.0,
-                    level=logging.INFO,
-                    extra={
-                        "event": "STRATEGY_NO_TRIGGER_VOTE",
-                        "symbol": symbol_norm,
-                        "context_vote_count": len(context_votes),
-                        "context_votes": context_vote_names,
-                        "context_sides": context_sides,
-                        "context_scores": context_scores,
-                        "context_confidences": context_confidences,
-                        "context_trigger_details": context_trigger_details,
-                        "allow_context_promotion": bool(mode_profile.get("allow_context_promotion", False)),
-                        "execution_mode": mode_profile.get("mode"),
-                        "direction_bias": indicator_map.get("direction_bias"),
-                        "underlying_direction_bias": indicator_map.get("underlying_direction_bias"),
-                        "context_age_seconds": indicator_map.get("context_age_seconds"),
-                    },
-                )
-                _record_no_signal("strategy_partial_no_consensus", "no_trigger_vote", "no_trigger_vote", trigger_vote_count=0, context_vote_count=len(context_votes), final_block_reason="partial")
-                return None
-        else:
-            # Legacy score/regime weights are research telemetry only. Multiple
-            # structurally valid triggers keep deterministic strategy order.
-            best_signal, best_vote = trigger_votes[0]
-        metadata = dict(best_signal.metadata or {})
-        threshold = float(os.getenv("STRATEGY_TRIGGER_MIN_SCORE", "4.5") or "4.5")
-        allow_scalp_single = bool(mode_profile.get("allow_single_vote", True)) and str(os.getenv("STRATEGY_ALLOW_SINGLE_VOTE_SCALP", "false")).lower() in {"1", "true", "yes", "on"}
-        raw_trigger_score = self._extract_raw_score(best_vote)
-        weighted_trigger_score = _weighted_score(best_vote)
-        vetoed = False
-        same_side_context = [v for _, v in context_votes if v.side == best_vote.side]
-        opposite_context = [v for _, v in context_votes if v.side in {"CE", "PE"} and v.side != best_vote.side]
-        # Correlated context is one evidence family, not multiple independent votes.
-        # Keep the strongest observation per canonical family so repeated/overlapping
-        # context cannot manufacture conviction while distinct families still add.
-        def _independent_context_total(votes: t.Sequence[StrategyEvidence], extractor: t.Callable[[StrategyEvidence], float]) -> float:
-            strongest: dict[str, float] = {}
-            for vote in votes:
-                family = canonical_signal_family(vote.strategy)
-                strongest[family] = max(strongest.get(family, 0.0), extractor(vote))
-            return sum(strongest.values())
-
-        positive_context = _independent_context_total(same_side_context, self._extract_context_score)
-        negative_context = _independent_context_total(opposite_context, self._extract_context_veto_score)
-        context_bonus = min(1.5, 0.45 * positive_context)
-        context_penalty = min(1.5, 0.60 * negative_context)
-        final_score = weighted_trigger_score + context_bonus - context_penalty
-        final_score = max(0.0, min(10.0, final_score))
-        # Opposing context scores/confidences are attribution only. Authoritative
-        # direction conflict is enforced by the spot/futures direction contract.
-        hard_veto_candidates: list[StrategyEvidence] = []
-        vetoed = False
-        selected_ok = True
-        near_atm = indicator_near_atm
-        if trigger_votes and len(trigger_votes) == 1:
-            approval_path = "single_trigger"
-            selected_ce = str(
-                metadata.get("selected_ce")
-                or indicator_map.get("selected_ce")
-                or ""
-            )
-            selected_pe = str(
-                metadata.get("selected_pe")
-                or indicator_map.get("selected_pe")
-                or ""
-            )
-            selected_symbol_set = {
-                str(selected_ce).strip().upper(),
-                str(selected_pe).strip().upper(),
-            }
-            selected_symbol_set.discard("")
-            selected_option = bool(
-                metadata.get("is_selected_option")
-                or indicator_selected_option
-                or symbol_norm in selected_symbol_set
-            )
-            near_atm_threshold = float(os.getenv("STRATEGY_NEAR_ATM_THRESHOLD_POINTS", "50") or "50")
-            try:
-                strike_distance_from_atm = float(metadata.get("strike_distance_from_atm"))
-                near_atm = strike_distance_from_atm <= near_atm_threshold
-            except (TypeError, ValueError):
-                strike_distance_from_atm = None
-                near_atm = indicator_near_atm
-            def _extract_option_strike(sym: str) -> int | None:
-                match = re.search(r"(\d{5})(CE|PE)$", str(sym).upper())
-                return int(match.group(1)) if match else None
-            symbol_strike = _extract_option_strike(symbol_norm)
-            same_side_selected = selected_ce if symbol_norm.endswith("CE") else selected_pe if symbol_norm.endswith("PE") else ""
-            selected_strike = _extract_option_strike(same_side_selected)
-            if strike_distance_from_atm is None and symbol_strike is not None and selected_strike is not None:
-                strike_distance_from_atm = abs(float(symbol_strike) - float(selected_strike))
-                near_atm = strike_distance_from_atm <= near_atm_threshold
-            score_min, conf_min = self._single_vote_thresholds(best_vote.strategy)
-            regime_weight = _regime_weight(best_vote)
-            selected_ok = selected_option or near_atm
-            selected_ok_reason = "selected_option" if selected_option else "near_atm" if near_atm else "not_selected_or_near_atm"
-            metadata["selected_ce"] = selected_ce
-            metadata["selected_pe"] = selected_pe
-            metadata["strike_distance_from_atm"] = strike_distance_from_atm
-            metadata["is_selected_option"] = selected_option
-            metadata["selected_ok_reason"] = selected_ok_reason
-            # Legacy numeric score/confidence are attribution telemetry only.
-            # Admission here is structural: selected/near-ATM eligibility plus
-            # authoritative context safety. Execution/economics/risk gate later.
-            threshold_passed = bool(selected_ok and not vetoed)
-            setup_min = _safe_float_value(metadata.get("setup_min"))
-            requires_orderflow_confirmation = (
-                metadata.get("requires_orderflow_confirmation") is True
-            )
-            canonical_smc_setup_pass = bool(
-                str(best_vote.strategy or "").strip().lower() == "smc"
-                and metadata.get("setup_pass") is True
-                and metadata.get("preliminary_only") is True
-                and requires_orderflow_confirmation
-                and metadata.get("requires_runner_execution_validation") is True
-                and setup_min is not None
-            )
-            # STRATEGY_ALLOW_SINGLE_VOTE_SCALP=false is the master default block
-            # for an unconfirmed lone trigger. High-conviction/selected-option
-            # overrides remain explicit; context-confirmed triggers use the
-            # separate, evidence-bound path below.
-            allow_high_conviction = self._env_bool(
-                "STRATEGY_ALLOW_HIGH_CONVICTION_SINGLE_VOTE",
-                self._env_bool("STRATEGY_ALLOW_SINGLE_VOTE_HIGH_CONVICTION", False),
-            )
-            allow_selected_option = self._env_bool(
-                "STRATEGY_ALLOW_SELECTED_OPTION_SINGLE_VOTE",
-                self._env_bool("STRATEGY_ALLOW_SINGLE_VOTE_SELECTED_OPTION", False),
-            )
-            high_conviction_allowed = bool(
-                not requires_orderflow_confirmation
-                and selected_ok
-                and not vetoed
-                and allow_high_conviction
-            )
-            # A single trigger on the actually-SELECTED ATM option that already
-            # cleared score/confidence/veto gates is the core scalp this platform
-            # exists to take. Allow it without the global scalp flag, since
-            # selected_option is a stronger guarantee than mere near_atm.
-            selected_option_scalp_allowed = bool(
-                not requires_orderflow_confirmation
-                and threshold_passed
-                and selected_option
-                and allow_selected_option
-            )
-            # A trigger plus a fresh, same-side context vote is not an unconfirmed
-            # single vote. OrderFlow remains permanently context-only, but its
-            # validated market-microstructure evidence may confirm an SMC/VWAP
-            # trigger through the existing context-bonus path. Require the actual
-            # selected option, the normal trigger thresholds, a current timestamped
-            # context vote, usable depth/tradable quote, and the same conservative
-            # final-score floor. This is deliberately separate from the 9.0
-            # unconfirmed selected-option floor: confirmed triggers already
-            # require fresh, strong, same-side microstructure evidence and
-            # still pass the downstream mode-specific trade-quality gate.
-            context_confirmed_final_min = self._env_float(
-                "STRATEGY_SINGLE_TRIGGER_CONTEXT_FINAL_MIN",
-                float(mode_profile.get("min_trade_quality", 5.0)),
-            )
-            context_confirm_min_score = self._env_float(
-                "STRATEGY_SINGLE_TRIGGER_CONTEXT_MIN_SCORE", 8.0
-            )
-            context_confirm_min_confidence = self._env_float(
-                "STRATEGY_SINGLE_TRIGGER_CONTEXT_MIN_CONFIDENCE", 0.80
-            )
-            context_confirm_allowed_strategies = {
-                name.strip().lower()
-                for name in str(
-                    os.getenv(
-                        "STRATEGY_SINGLE_TRIGGER_CONTEXT_ALLOWED_STRATEGIES",
-                        "OrderFlow",
-                    )
-                    or "OrderFlow"
-                ).split(",")
-                if name.strip()
-            }
-            qualifying_context_votes: list[StrategyEvidence] = []
-            for context_vote in same_side_context:
-                context_metadata = dict(context_vote.metadata or {})
-                context_quote_ready = bool(
-                    context_metadata.get("quote_depth_valid")
-                    or context_metadata.get("tradable_quote")
-                )
-                # The context producer owns quote/freshness eligibility.
-                # Do not reconstruct a weaker subset here: a fresh vote timestamp
-                # does not make stale or otherwise non-executable market
-                # microstructure valid confirmation evidence.
-                context_quality_eligible = (
-                    context_metadata.get("context_quality_eligible") is True
-                )
-                if (
-                    context_vote.strategy.strip().lower()
-                    in context_confirm_allowed_strategies
-                    and self._context_vote_is_timestamped(context_vote)
-                    and context_quote_ready
-                    and context_quality_eligible
-                ):
-                    qualifying_context_votes.append(context_vote)
-            # A weakly disagreeing underlying source is useful provenance,
-            # not positive confirmation. Preserve the canonical arbitration
-            # result, but do not let microstructure context add conviction
-            # while spot/futures are in transition.
-            confirming_source = str(
-                indicator_map.get("direction_context_confirming_source") or ""
-            ).lower()
-            ambiguous_underlying = (
-                "weak_disagreement" in confirming_source
-                or "weak_transition" in confirming_source
-            )
-            if ambiguous_underlying:
-                qualifying_context_votes = []
-
-            # StrategyManager owns structural/context qualification only. Fresh,
-            # same-side OrderFlow evidence may confirm a structurally valid trigger.
-            # Legacy score/regime arithmetic below is retained for attribution only;
-            # Runner owns objective candidate/quote execution validation, not a
-            # synthetic numeric admission score.
-            confirmed_raw_context_score = _independent_context_total(
-                qualifying_context_votes, self._extract_raw_context_score
-            )
-            confirmed_positive_context = _independent_context_total(
-                qualifying_context_votes, self._extract_context_score
-            )
-            confirmed_context_bonus = min(
-                1.5, 0.45 * confirmed_positive_context
-            )
-            context_confirmed_final_score = max(
-                0.0,
-                min(
-                    10.0,
-                    weighted_trigger_score
-                    + confirmed_context_bonus
-                    - context_penalty,
-                ),
-            )
-            # This score is telemetry only. StrategyManager owns structural/context
-            # qualification; Runner owns candidate/quote execution validation.
-            manager_context_score_reference_above_min = bool(
-                context_confirmed_final_score >= context_confirmed_final_min
-            )
-            context_confirmed_single_allowed = bool(
-                mode_profile.get("allow_single_vote", True)
-                and selected_option
-                and not vetoed
-                and qualifying_context_votes
-            )
-            if qualifying_context_votes:
-                log.info(
-                    "SINGLE_TRIGGER_CONTEXT_SCORE symbol=%s trigger_strategy=%s "
-                    "weighted_trigger_score=%.3f raw_context_score=%.3f "
-                    "regime_weighted_context_score=%.3f context_bonus=%.3f "
-                    "context_penalty=%.3f final_score=%.3f final_min=%.3f allowed=%s",
-                    symbol_norm,
-                    best_vote.strategy,
-                    weighted_trigger_score,
-                    confirmed_raw_context_score,
-                    confirmed_positive_context,
-                    confirmed_context_bonus,
-                    context_penalty,
-                    context_confirmed_final_score,
-                    context_confirmed_final_min,
-                    context_confirmed_single_allowed,
-                    extra={
-                        "event": "SINGLE_TRIGGER_CONTEXT_SCORE",
-                        "symbol": symbol_norm,
-                        "trigger_strategy": best_vote.strategy,
-                        "weighted_trigger_score": weighted_trigger_score,
-                        "raw_context_score": confirmed_raw_context_score,
-                        "regime_weighted_context_score": confirmed_positive_context,
-                        "context_bonus": confirmed_context_bonus,
-                        "context_penalty": context_penalty,
-                        "final_score": context_confirmed_final_score,
-                        "final_min": context_confirmed_final_min,
-                        "allowed": context_confirmed_single_allowed,
-                        "qualifying_context_strategies": [
-                            vote.strategy for vote in qualifying_context_votes
-                        ],
-                        "qualifying_context_regime_weights": [
-                            float((vote.metadata or {}).get("regime_weight", 1.0) or 1.0)
-                            for vote in qualifying_context_votes
-                        ],
-                    },
-                )
-
-            scalp_fallback_allowed = bool(
-                not requires_orderflow_confirmation
-                and (
-                    (allow_scalp_single and threshold_passed)
-                    or selected_option_scalp_allowed
-                )
-            )
-            final_allowed = bool(
-                high_conviction_allowed
-                or scalp_fallback_allowed
-                or context_confirmed_single_allowed
-            )
-            approval_path_single = (
-                "single_vote_high_conviction" if high_conviction_allowed
-                else "single_trigger_context_confirmed"
-                if context_confirmed_single_allowed
-                else "single_vote_selected_option" if selected_option_scalp_allowed
-                else "single_vote_fallback" if scalp_fallback_allowed
-                else None
-            )
-            blocked_reason = None
-            if not final_allowed:
-                if not selected_ok:
-                    blocked_reason = "not_selected_or_near_atm"
-                elif vetoed:
-                    blocked_reason = "hard_context_veto"
-                elif (
-                    requires_orderflow_confirmation
-                    and not qualifying_context_votes
-                ):
-                    blocked_reason = "single_trigger_context_confirmation_invalid"
-                elif same_side_context and not qualifying_context_votes:
-                    blocked_reason = "single_trigger_context_confirmation_invalid"
-                elif threshold_passed and not allow_scalp_single:
-                    blocked_reason = "single_vote_scalp_disabled"
-                else:
-                    blocked_reason = "single_vote_gate_failed_unknown"
             log.info(
-                "SINGLE_VOTE_DECISION threshold_passed=%s high_conviction_allowed=%s scalp_fallback_allowed=%s context_confirmed_single_allowed=%s final_allowed=%s allow_scalp_single=%s approval_path=%s reason=%s strategy=%s raw_score=%.2f weighted_score=%.2f regime_weight=%.2f score_min=%.2f confidence=%.2f conf_min=%.2f selected_ok=%s vetoed=%s",
-                threshold_passed,
-                high_conviction_allowed,
-                scalp_fallback_allowed,
-                context_confirmed_single_allowed,
-                final_allowed,
-                allow_scalp_single,
-                approval_path_single,
-                blocked_reason or "ok",
-                best_vote.strategy,
-                raw_trigger_score,
-                weighted_trigger_score,
-                regime_weight,
-                score_min,
-                best_vote.confidence,
-                conf_min,
-                selected_ok,
-                vetoed,
-                extra={
-                    "event": "SINGLE_VOTE_DECISION",
-                    "allowed": final_allowed,
-                    "threshold_passed": threshold_passed,
-                    "high_conviction_allowed": high_conviction_allowed,
-                    "scalp_fallback_allowed": scalp_fallback_allowed,
-                    "context_confirmed_single_allowed": context_confirmed_single_allowed,
-                    "qualifying_context_strategies": [
-                        vote.strategy for vote in qualifying_context_votes
-                    ],
-                    "context_confirm_min_score": context_confirm_min_score,
-                    "context_confirm_min_confidence": context_confirm_min_confidence,
-                    "context_confirm_allowed_strategies": sorted(
-                        context_confirm_allowed_strategies
-                    ),
-                    "confirmed_context_bonus": confirmed_context_bonus,
-                    "context_confirmed_final_score": context_confirmed_final_score,
-                    "final_allowed": final_allowed,
-                    "allow_scalp_single": allow_scalp_single,
-                    "approval_path": approval_path_single,
-                    "blocked_reason": blocked_reason,
-                    "symbol": symbol_norm,
-                    "strategy": best_vote.strategy,
-                    "raw_score": raw_trigger_score,
-                    "weighted_score": weighted_trigger_score,
-                    "regime_weight": regime_weight,
-                    "score_min": score_min,
-                    "confidence": best_vote.confidence,
-                    "conf_min": conf_min,
-                    "selected_ok": selected_ok,
-                    "selected_ok_reason": selected_ok_reason,
-                    "vetoed": vetoed,
-                },
-            )
-            if high_conviction_allowed:
-                metadata_stage = "preliminary_single_high_conviction"
-                approval_path = "single_vote_high_conviction"
-            elif context_confirmed_single_allowed:
-                metadata_stage = "single_trigger_context_confirmed"
-                approval_path = "single_trigger_context_confirmed"
-                context_bonus = confirmed_context_bonus
-                final_score = context_confirmed_final_score
-                metadata["context_confirmation_strategies"] = [
-                    vote.strategy for vote in qualifying_context_votes
-                ]
-                context_confirmation_evidence = []
-                for vote in qualifying_context_votes:
-                    vote_metadata = dict(vote.metadata or {})
-                    evidence = {
-                        "strategy": vote.strategy,
-                        "raw_score": round(self._extract_raw_score(vote), 3),
-                        "confidence": round(float(vote.confidence), 3),
-                    }
-                    for key in (
-                        "flow_confirmation_source",
-                        "ofi_1s_normalized",
-                        "ofi_3s_normalized",
-                        "depth_imbalance",
-                        "spread_pct",
-                        "tick_age_ms",
-                    ):
-                        value = vote_metadata.get(key)
-                        if value is not None:
-                            evidence[key] = value
-                    context_confirmation_evidence.append(evidence)
-                metadata["context_confirmation_evidence"] = (
-                    context_confirmation_evidence
-                )
-                metadata["context_confirmation_final_score"] = round(
-                    context_confirmed_final_score, 3
-                )
-                metadata["context_confirmation_raw_score"] = round(
-                    confirmed_raw_context_score, 3
-                )
-                metadata["context_confirmation_regime_weighted_score"] = round(
-                    confirmed_positive_context, 3
-                )
-                metadata["context_confirmation_score_min"] = round(
-                    context_confirmed_final_min, 3
-                )
-                metadata["manager_context_score_reference_above_min"] = (
-                    manager_context_score_reference_above_min
-                )
-                metadata["canonical_smc_setup_pass"] = canonical_smc_setup_pass
-            elif scalp_fallback_allowed:
-                metadata_stage = "single_vote_scalp_controlled"
-                approval_path = approval_path_single or "single_vote_fallback"
-            else:
-                allow_candidate_switch = str(
-                    os.getenv(
-                        "STRATEGY_ALLOW_CANDIDATE_SWITCH",
-                        os.getenv("STRATEGY_ALLOW_CANDIDATE_SWITCH_ON_HIGH_SCORE", "false"),
-                    )
-                ).lower() in {"1", "true", "yes", "on"}
-                max_candidate_switch_distance = float(os.getenv("CANDIDATE_SWITCH_MAX_DISTANCE_POINTS", "100") or "100")
-                raw_qdv = metadata.get("quote_depth_valid")
-                if raw_qdv is None:
-                    raw_qdv = indicator_map.get("quote_depth_valid")
-                quote_depth_valid = bool(raw_qdv)
-                raw_spread = metadata.get("spread_pct")
-                if raw_spread is None:
-                    raw_spread = indicator_map.get("spread_pct")
-                try:
-                    switch_spread_pct = float(raw_spread) if raw_spread is not None else 999.0
-                except (TypeError, ValueError):
-                    switch_spread_pct = 999.0
-                switch_allowed = (
-                    not requires_orderflow_confirmation
-                    and allow_candidate_switch
-                    and (strike_distance_from_atm is not None)
-                    and quote_depth_valid
-                    and switch_spread_pct <= resolve_entry_policy().execution_max_spread_pct
-                    and strike_distance_from_atm <= max_candidate_switch_distance
-                )
-                if switch_allowed:
-                    metadata_stage = "single_vote_candidate_switch"
-                    metadata["candidate_switch_requested"] = True
-                    metadata["candidate_switch_reason"] = "executable_nearby_option_candidate"
-                else:
-                    if not selected_ok:
-                        blocked_reason = "not_selected_or_near_atm"
-                    elif not bool(metadata.get("quote_depth_valid", True)):
-                        blocked_reason = "quote_depth_invalid"
-                    elif vetoed:
-                        blocked_reason = "hard_context_veto"
-                    elif (
-                        requires_orderflow_confirmation
-                        and not qualifying_context_votes
-                    ):
-                        blocked_reason = "single_trigger_context_confirmation_invalid"
-                    elif same_side_context and not qualifying_context_votes:
-                        blocked_reason = "single_trigger_context_confirmation_invalid"
-                    elif not allow_scalp_single:
-                        blocked_reason = "single_vote_scalp_disabled"
-                    else:
-                        blocked_reason = "single_vote_gate_failed_unknown"
-                    log_throttled_live(
-                        log,
-                        logging.INFO,
-                        "TRADE_DECISION_TRACE",
-                        f"TRADE_DECISION_TRACE:{best_vote.strategy}:{symbol_norm}:{blocked_reason}",
-                        float(os.getenv("LOG_THROTTLE_STRATEGY_REJECT_SECONDS", "120") or "120"),
-                        "TRADE_DECISION_TRACE symbol=%s strategy=%s side=%s allowed=%s blocked_at=%s blocked_reason=%s selected_ce=%s selected_pe=%s strike_distance_from_atm=%s near_atm_threshold=%s selected_ok_reason=%s raw_score=%.2f confidence=%.2f",
-                        symbol_norm,
-                        best_vote.strategy,
-                        best_vote.side,
-                        False,
-                        "single_vote_gate",
-                        blocked_reason,
-                        selected_ce,
-                        selected_pe,
-                        strike_distance_from_atm,
-                        near_atm_threshold,
-                        selected_ok_reason,
-                        raw_trigger_score,
-                        best_vote.confidence,
-                        extra={"event": "TRADE_DECISION_TRACE", "symbol": symbol_norm, "strategy": best_vote.strategy, "side": best_vote.side, "allowed": False, "blocked_at": "single_vote_gate", "blocked_reason": blocked_reason, "selected_ce": selected_ce, "selected_pe": selected_pe, "strike_distance_from_atm": strike_distance_from_atm, "near_atm_threshold": near_atm_threshold, "selected_ok_reason": selected_ok_reason, "raw_score": raw_trigger_score, "confidence": best_vote.confidence},
-                    )
-                    record_strategy_evaluation(strategy=str(best_vote.strategy), symbol=symbol_norm, accepted=False, reason=str(blocked_reason), score=raw_trigger_score)
-                    maybe_emit_strategy_rejection_summary(log, interval_seconds=300.0)
-                    category = "strategy_single_vote_disabled" if blocked_reason == "single_vote_scalp_disabled" else ("context_direction_conflict" if blocked_reason == "underlying_direction_conflict" else "strategy_no_trigger")
-                    _record_no_signal(category, blocked_reason, "single_vote_gate", trigger_vote_count=len(trigger_votes), context_vote_count=len(context_votes))
-                    return None
-        elif trigger_votes:
-            metadata_stage = "multi_vote_confirmed"
-            approval_path = "multi_trigger"
-        metadata["is_selected_option"] = bool(metadata.get("is_selected_option") or indicator_selected_option)
-        metadata["indicator_near_atm"] = bool(indicator_near_atm)
-        metadata["selected_ok_reason"] = metadata.get("selected_ok_reason", "selected_or_near_atm")
-        metadata["near_atm_threshold"] = float(os.getenv("STRATEGY_NEAR_ATM_THRESHOLD_POINTS", "50") or "50")
-        metadata["raw_setup_score"] = round(raw_trigger_score, 3)
-        metadata["setup_score"] = round(raw_trigger_score, 3)
-        metadata["regime_weighted_score"] = round(weighted_trigger_score, 3)
-        metadata["regime_weight"] = round(_regime_weight(best_vote), 3)
-        metadata["context_bonus"] = round(context_bonus, 3)
-        metadata["context_penalty"] = round(context_penalty, 3)
-        metadata["final_trade_score"] = round(final_score, 3)
-        metadata["final_trade_threshold_reference"] = round(threshold, 3)
-        metadata["manager_final_score_reference_only"] = True
-        metadata["manager_final_score_reference_above_min"] = final_score >= threshold
-        # Canonical score lineage is diagnostic only. It names each transformation
-        # explicitly so research can attribute setup, regime and context effects
-        # without treating correlated representations as independent evidence.
-        metadata["score_contract_version"] = 1
-        metadata["score_lineage"] = {
-            "raw_setup_score": round(raw_trigger_score, 3),
-            "regime_weight": round(_regime_weight(best_vote), 3),
-            "regime_adjusted_setup_score": round(weighted_trigger_score, 3),
-            "context_confirmation_bonus": round(context_bonus, 3),
-            "context_veto_penalty": round(context_penalty, 3),
-            "manager_reference_score": round(final_score, 3),
-            "manager_reference_threshold": round(threshold, 3),
-            "manager_reference_above_min": final_score >= threshold,
-            "score_admission_role": "diagnostic_only",
-        }
-        if final_score < threshold:
-            log_throttled_live(
-                log,
-                logging.INFO,
-                "STRATEGY_MANAGER_SCORE_REFERENCE_BELOW_MIN",
-                f"STRATEGY_MANAGER_SCORE_REFERENCE_BELOW_MIN:{best_vote.strategy}:{symbol_norm}",
-                float(
-                    os.getenv("LOG_THROTTLE_STRATEGY_REJECT_SECONDS", "120")
-                    or "120"
-                ),
-                "STRATEGY_MANAGER_SCORE_REFERENCE_BELOW_MIN symbol=%s "
-                "strategy=%s side=%s score=%.2f reference_min=%.2f "
-                "final_owner=execution_validation",
+                "COUNTERTREND_ENTRY_BLOCKED symbol=%s trigger_side=%s underlying=%s",
                 symbol_norm,
-                best_vote.strategy,
-                best_vote.side,
-                final_score,
-                threshold,
+                side,
+                direction,
                 extra={
-                    "event": "STRATEGY_MANAGER_SCORE_REFERENCE_BELOW_MIN",
+                    "event": "COUNTERTREND_ENTRY_BLOCKED",
                     "symbol": symbol_norm,
-                    "strategy": best_vote.strategy,
-                    "side": best_vote.side,
-                    "score": final_score,
-                    "reference_min": threshold,
-                    "final_owner": "runner_execution_validation",
+                    "trigger_side": side,
+                    "underlying_direction": direction,
+                    "direction_state": direction_state,
                 },
-            )
-        quality_score, quality_meta = self._compute_trade_quality_score(
-            best_vote,
-            indicator_map,
-            symbol=symbol_norm,
-            selected_ok=selected_ok,
-            near_atm_ok=near_atm,
-            context_votes=[v for _, v in context_votes],
-        )
-        quality_min_required = float(mode_profile.get("min_trade_quality", 5.0))
-        quality_reference_above_min = quality_score >= quality_min_required
-        metadata.update(quality_meta)
-        metadata["quality_min_required"] = quality_min_required
-        metadata["quality_reference_above_min"] = quality_reference_above_min
-        metadata["quality_reference_role"] = "diagnostic_only"
-        metadata["manager_quality_reference_only"] = True
-
-        explicit_strategy_block = bool(quality_meta.get("already_blocked_by_strategy"))
-        if explicit_strategy_block:
-            blocked_reason = str(
-                quality_meta.get("strategy_block_reason")
-                or quality_meta.get("quality_block_reason")
-                or "strategy_evidence_invalid"
-            )
-            log_throttled_live(
-                log,
-                logging.INFO,
-                "STRATEGY_EXPLICIT_BLOCK",
-                f"STRATEGY_EXPLICIT_BLOCK:{best_vote.strategy}:{symbol_norm}:{blocked_reason}",
-                float(os.getenv("LOG_THROTTLE_STRATEGY_REJECT_SECONDS", "120") or "120"),
-                "STRATEGY_EXPLICIT_BLOCK symbol=%s strategy=%s side=%s reason=%s",
-                symbol_norm,
-                best_vote.strategy,
-                best_vote.side,
-                blocked_reason,
-                extra={
-                    "event": "STRATEGY_EXPLICIT_BLOCK",
-                    "symbol": symbol_norm,
-                    "strategy": best_vote.strategy,
-                    "side": best_vote.side,
-                    "reason": blocked_reason,
-                },
-            )
-            record_strategy_evaluation(
-                strategy=str(best_vote.strategy),
-                symbol=symbol_norm,
-                accepted=False,
-                reason=blocked_reason,
-                score=quality_score,
-            )
-            maybe_emit_strategy_rejection_summary(log, interval_seconds=300.0)
-            _record_no_signal(
-                "strategy_no_trigger",
-                blocked_reason,
-                "strategy_explicit_block",
-                trigger_vote_count=len(trigger_votes),
-                context_vote_count=len(context_votes),
-                final_block_reason=blocked_reason,
             )
             return None
 
-        if not quality_reference_above_min:
-            log_throttled_live(
-                log,
-                logging.INFO,
-                "STRATEGY_QUALITY_REFERENCE_BELOW_MIN",
-                f"STRATEGY_QUALITY_REFERENCE_BELOW_MIN:{best_vote.strategy}:{symbol_norm}",
-                float(os.getenv("LOG_THROTTLE_STRATEGY_REJECT_SECONDS", "120") or "120"),
-                "STRATEGY_QUALITY_REFERENCE_BELOW_MIN symbol=%s strategy=%s side=%s score=%.2f reference_min=%.2f final_owner=execution_validation",
-                symbol_norm,
-                best_vote.strategy,
-                best_vote.side,
-                quality_score,
-                quality_min_required,
-                extra={
-                    "event": "STRATEGY_QUALITY_REFERENCE_BELOW_MIN",
-                    "symbol": symbol_norm,
-                    "strategy": best_vote.strategy,
-                    "side": best_vote.side,
-                    "score": quality_score,
-                    "reference_min": quality_min_required,
-                    "final_owner": "runner_execution_validation",
+        selected_ok, selected_meta = self._is_selected_or_near_atm(
+            symbol_norm, dict(trigger_votes[0][0].metadata or {}), indicator_map
+        )
+        if not selected_ok:
+            _record_no_signal(
+                "candidate_not_selected_or_near_atm",
+                "not_selected_or_near_atm",
+                "candidate_contract",
+                trigger_vote_count=len(trigger_votes),
+                context_vote_count=len(context_votes),
+            )
+            return None
+
+        opposite_context = [
+            evidence
+            for _signal, evidence in context_votes
+            if str(evidence.side or "").upper() in {"CE", "PE"}
+            and str(evidence.side or "").upper() != side
+            and self._context_vote_is_timestamped(evidence)
+            and bool((evidence.metadata or {}).get("context_quality_eligible"))
+            and bool((evidence.metadata or {}).get("effective_context_conflict"))
+        ]
+        if opposite_context:
+            _record_no_signal(
+                "context_conflict",
+                "fresh_opposing_context",
+                "context_contract",
+                trigger_vote_count=len(trigger_votes),
+                context_vote_count=len(context_votes),
+            )
+            return None
+
+        same_side_context = [
+            evidence
+            for _signal, evidence in context_votes
+            if str(evidence.side or "").upper() == side
+            and self._context_vote_is_timestamped(evidence)
+            and bool((evidence.metadata or {}).get("context_quality_eligible"))
+            and bool((evidence.metadata or {}).get("effective_context_alignment"))
+        ]
+
+        independent_trigger_confirmation, confirming_trigger_strategies = (
+            independent_same_side_confirmation(trigger_votes)
+        )
+        if not independent_trigger_confirmation and not same_side_context:
+            _record_no_signal(
+                "strategy_confirmation_missing",
+                "independent_confirmation_missing",
+                "context_contract",
+                trigger_vote_count=len(trigger_votes),
+                context_vote_count=len(context_votes),
+            )
+            return None
+
+        primary_signal, primary_evidence = trigger_votes[0]
+        metadata = dict(primary_signal.metadata or {})
+        approval_path = (
+            "aligned_trigger_consensus"
+            if independent_trigger_confirmation
+            else "single_trigger_context_confirmed"
+        )
+        context_strategies = sorted(
+            {str(evidence.strategy) for evidence in same_side_context}
+        )
+        metadata.update(selected_meta)
+        metadata.update(
+            {
+                "is_approved": True,
+                "approval_path": approval_path,
+                "strategy": primary_evidence.strategy,
+                "strategy_name": primary_evidence.strategy,
+                "strategy_role": canonical_strategy_role(primary_evidence.strategy),
+                "signal_family": canonical_signal_family(primary_evidence.strategy),
+                "requires_runner_execution_validation": True,
+                "direction_contract": {
+                    "passed": True,
+                    "side": side,
+                    "underlying_direction": direction,
+                    "underlying_state": direction_state or None,
+                    "source": indicator_map.get("direction_context_source"),
+                    "age_seconds": indicator_map.get("context_age_seconds"),
                 },
-            )
-
-        direction_bias = str(indicator_map.get("direction_bias") or indicator_map.get("underlying_direction_bias") or "").upper()
-        max_context_age = self._live_context_max_age_seconds()
-        context_age_seconds = resolve_context_age_seconds(indicator_map)
-        spread_pct = float(metadata.get("spread_pct") or indicator_map.get("spread_pct") or 999.0)
-        selected_ok_combined = bool(selected_ok or near_atm)
-        quote_depth_ok = bool(metadata.get("quote_depth_valid") or indicator_map.get("quote_depth_valid") or metadata.get("tradable_quote") or indicator_map.get("tradable_quote"))
-        no_vote_counts = dict(no_vote_reason_counts or indicator_map.get("no_vote_reason_counts") or {})
-        neutral_no_votes = {"smc_insufficient_history", "strategy_feature_unavailable"}
-        two_trigger_aligned = bool(
-            confirmation
-            and len(trigger_votes) >= 2
-            and best_vote.side in {"CE", "PE"}
-            and direction_bias == str(best_vote.side).upper()
-            and context_age_seconds <= max_context_age
-            and selected_ok_combined
-            and quote_depth_ok
-            and spread_pct <= resolve_entry_policy().execution_max_spread_pct
-         )
-        if two_trigger_aligned:
-            approval_path = "aligned_two_trigger_consensus"
-            log.info("CONSENSUS_CANDIDATE_QUALIFIED symbol=%s side=%s approval_path=%s trigger_vote_count=%s context_vote_count=%s", symbol_norm, best_vote.side, approval_path, len(trigger_votes), len(context_votes), extra={"event":"CONSENSUS_CANDIDATE_QUALIFIED","symbol":symbol_norm,"side":best_vote.side,"approval_path":"aligned_two_trigger_consensus","trigger_vote_count":len(trigger_votes),"context_vote_count":len(context_votes),"ignored_neutral_no_votes":[r for r in neutral_no_votes if no_vote_counts.get(r)],"trade_quality_score":quality_score,"direction_bias":direction_bias,"context_age_seconds":context_age_seconds,"spread_pct":spread_pct,"selected_ok":bool(selected_ok),"near_atm_ok":bool(near_atm)})
-
-        metadata.setdefault("trigger_strategy_score", metadata.get("strategy_score"))
-        metadata["setup_score"] = round(raw_trigger_score, 3)
-        metadata["raw_setup_score"] = round(raw_trigger_score, 3)
-        metadata.setdefault("strategy_score", round(raw_trigger_score, 3))
-        metadata["consensus_score"] = round(final_score, 3)
-        metadata["final_trade_score"] = round(final_score, 3)
-        metadata["trade_side"] = best_vote.side
-        metadata["contract_side"] = best_vote.side
-        metadata["side"] = best_vote.side
-        same_side_trigger_strategies = list(
-            dict.fromkeys(
-                vote.strategy
-                for _, vote in trigger_votes
-                if vote.side == best_vote.side
-            )
+                "setup_contract": {
+                    "passed": True,
+                    "strategy": primary_evidence.strategy,
+                    "setup_id": metadata.get("setup_id"),
+                    "reasons": list(primary_evidence.reasons),
+                },
+                "confirmation_contract": {
+                    "passed": True,
+                    "trigger_consensus": independent_trigger_confirmation,
+                    "confirming_trigger_strategies": confirming_trigger_strategies,
+                    "context_strategies": context_strategies,
+                },
+                "confirming_trigger_strategies": confirming_trigger_strategies,
+                "context_confirmation_strategies": context_strategies,
+            }
         )
-        context_confirmation_strategies = list(
-            dict.fromkeys(vote.strategy for vote in same_side_context)
-        )
-        # Keep the legacy field for downstream compatibility, but make its
-        # semantics explicit: trigger consensus and context confirmation are
-        # separate evidence classes.
-        metadata["confirming_votes"] = same_side_trigger_strategies
-        metadata["confirming_trigger_strategies"] = same_side_trigger_strategies
-        metadata["context_confirmation_strategies"] = context_confirmation_strategies
-        existing_direction_bias = str(metadata.get("direction_bias") or "").upper()
-        if existing_direction_bias not in {"CE", "PE"}:
-            metadata.pop("direction_bias", None)
-        metadata["confidence"] = float(best_vote.confidence)
-        metadata["consensus_stage"] = metadata_stage
-        metadata["manager_score_source"] = (
-            "regime_weighted_strategy_score_plus_context_arbitration"
-        )
-        metadata["approval_path"] = approval_path
-        metadata["is_approved"] = True
-        log.info("TRADE_DECISION_TRACE approval_path=%s symbol=%s strategy=%s", approval_path, symbol_norm, best_vote.strategy)
         transition_setup(
             SetupStage.MANAGER_QUALIFIED,
             metadata,
-            strategy=best_vote.strategy,
-            symbol=symbol_norm,
-            side=best_vote.side,
+            strategy=primary_evidence.strategy,
+            symbol=primary_signal.symbol,
+            side=side,
             reason=approval_path,
         )
         log.info(
-            "STRATEGY_CANDIDATE_QUALIFIED symbol=%s strategy=%s side=%s approval_path=%s "
-            "final_score=%.2f trade_quality_score=%.2f",
+            "STRUCTURAL_CANDIDATE_QUALIFIED symbol=%s strategy=%s side=%s approval_path=%s",
             symbol_norm,
-            best_vote.strategy,
-            best_vote.side,
+            primary_evidence.strategy,
+            side,
             approval_path,
-            final_score,
-            quality_score,
             extra={
-                "event": "STRATEGY_CANDIDATE_QUALIFIED",
+                "event": "STRUCTURAL_CANDIDATE_QUALIFIED",
                 "symbol": symbol_norm,
-                "strategy": best_vote.strategy,
-                "side": best_vote.side,
+                "strategy": primary_evidence.strategy,
+                "side": side,
                 "approval_path": approval_path,
-                "final_score": final_score,
-                "trade_quality_score": quality_score,
-                "trigger_vote_count": len(trigger_votes),
-                "context_vote_count": len(context_votes),
+                "direction_contract": metadata["direction_contract"],
+                "setup_contract": metadata["setup_contract"],
+                "confirmation_contract": metadata["confirmation_contract"],
             },
         )
-        record_strategy_evaluation(strategy=str(best_vote.strategy), symbol=symbol_norm, accepted=True, reason=str(approval_path), score=final_score)
-        maybe_emit_strategy_rejection_summary(log, interval_seconds=300.0)
-        self._last_no_signal_decision_by_symbol.pop(symbol_norm, None)
         return Signal(
-            action="BUY",
-            symbol=best_signal.symbol,
-            quantity=best_signal.quantity,
-            confidence=best_signal.confidence,
-            reason=best_signal.reason,
-            stop_loss=best_signal.stop_loss,
-            take_profit=best_signal.take_profit,
+            action=primary_signal.action,
+            symbol=primary_signal.symbol,
+            quantity=primary_signal.quantity,
+            confidence=1.0,
+            reason=primary_signal.reason,
+            stop_loss=primary_signal.stop_loss,
+            take_profit=primary_signal.take_profit,
             metadata=metadata,
         )
-
-    def get_last_no_signal_decision(self, symbol: str) -> StrategyNoSignalDecision | None:
-        return self._last_no_signal_decision_by_symbol.get(str(symbol or "").strip().upper())
-
-    @staticmethod
-    def _canonical_no_signal_root_cause(
-        indicators: t.Mapping[str, t.Any],
-    ) -> tuple[str, str] | None:
-        """Return a canonical upstream no-trade cause when one is explicit."""
-        if (
-            bool(indicators.get("direction_transition"))
-            and str(indicators.get("direction_resolution_reason") or "")
-            == "fresh_spot_futures_disagreement"
-        ):
-            return ("context_direction_transition", "underlying_direction_transition")
-        return None
-
-    def _record_no_signal_decision(
-        self,
-        *,
-        symbol: str,
-        category: str,
-        reason: str,
-        blocked_at: str,
-        indicators: t.Mapping[str, t.Any],
-        no_vote_reason_counts: t.Mapping[str, int] | None = None,
-        strategy_reasons: t.Mapping[str, str] | None = None,
-        trigger_vote_count: int = 0,
-        context_vote_count: int = 0,
-        trace_id: str | None = None,
-        eval_id: str | None = None,
-        final_block_reason: str | None = None,
-    ) -> None:
-        symbol_norm = str(symbol or "").strip().upper()
-        self._last_no_signal_decision_by_symbol[symbol_norm] = StrategyNoSignalDecision(
-            symbol=symbol_norm,
-            eval_id=eval_id,
-            final_block_reason=final_block_reason,
-            category=category,
-            reason=reason,
-            blocked_at=blocked_at,
-            no_vote_reason_counts=dict(no_vote_reason_counts or {}),
-            strategy_reasons=dict(strategy_reasons or {}),
-            direction_bias=str(indicators.get("direction_bias") or "").upper() or None,
-            underlying_direction_bias=str(indicators.get("underlying_direction_bias") or "").upper() or None,
-            context_age_seconds=float(indicators.get("context_age_seconds")) if indicators.get("context_age_seconds") is not None else None,
-            trigger_vote_count=trigger_vote_count,
-            context_vote_count=context_vote_count,
-            selected_ce=str(indicators.get("selected_ce") or "") or None,
-            selected_pe=str(indicators.get("selected_pe") or "") or None,
-            trace_id=trace_id,
-        )
-
-    def get_strategy_mode_profile(self) -> dict[str, t.Any]:
-        """Return strategy gating profile based on effective execution mode."""
-        raw_mode = str(os.getenv("EXECUTION_MODE", "SHADOW") or "SHADOW").strip().upper()
-        live_effective = self._is_live_mode()
-        execution_mode = "LIVE" if live_effective else raw_mode
-        if execution_mode not in {"LIVE", "PAPER", "SHADOW", "SIMULATION"}:
-            execution_mode = "SHADOW"
-
-        if execution_mode == "LIVE":
-            defaults = {
-                "allow_context_promotion": False,
-                "allow_single_vote": True,
-                "min_trade_quality": 7.0,
-            }
-        elif execution_mode == "PAPER":
-            defaults = {
-                "allow_context_promotion": True,
-                "allow_single_vote": True,
-                "min_trade_quality": 5.8,
-            }
-        else:
-            defaults = {
-                "allow_context_promotion": True,
-                "allow_single_vote": True,
-                "min_trade_quality": 5.0,
-            }
-
-        allow_context_key = (
-            "STRATEGY_CONTEXT_PROMOTION_LIVE_ALLOWED"
-            if execution_mode == "LIVE"
-            else "STRATEGY_ALLOW_CONTEXT_PROMOTION"
-        )
-        allow_single_key = (
-            "STRATEGY_ALLOW_SINGLE_VOTE_LIVE"
-            if execution_mode == "LIVE"
-            else "STRATEGY_ALLOW_SINGLE_VOTE_BY_MODE"
-        )
-
-        try:
-            min_quality = float(
-                os.getenv(
-                    f"STRATEGY_MIN_TRADE_QUALITY_{execution_mode}",
-                    str(defaults["min_trade_quality"]),
-                )
-                or defaults["min_trade_quality"]
-            )
-        except (TypeError, ValueError):
-            min_quality = float(defaults["min_trade_quality"])
-
-        return {
-            "mode": execution_mode,
-            "raw_mode": raw_mode,
-            "live_effective": live_effective,
-            "allow_context_promotion": self._env_bool(
-                allow_context_key,
-                bool(defaults["allow_context_promotion"]),
-            ),
-            "allow_single_vote": self._env_bool(
-                allow_single_key,
-                bool(defaults["allow_single_vote"]),
-            ),
-            "min_trade_quality": min_quality,
-        }
-
-    def _try_context_promotion(
-        self,
-        symbol: str,
-        context_votes: list[tuple[Signal, StrategyEvidence]],
-        indicators: t.Mapping[str, t.Any],
-        mode_profile: dict[str, t.Any],
-    ) -> tuple[Signal, StrategyEvidence] | None:
-        """Args: symbol/context votes/indicators/profile. Returns: promoted candidate or None. Raises: none."""
-        if not context_votes:
-            return None
-        context_votes = [
-            pair for pair in context_votes if not is_permanent_context_only(pair[1])
-        ]
-        if not context_votes:
-            return None
-        if not bool(mode_profile.get("allow_context_promotion", True)):
-            return None
-        allowed_strategies = {s.strip() for s in str(os.getenv("STRATEGY_CONTEXT_PROMOTION_ALLOWED_STRATEGIES", "OrderFlow,VWAPPro")).split(",") if s.strip()}
-        min_score = self._env_float("STRATEGY_CONTEXT_PROMOTION_MIN_SCORE", 5.0)
-        min_conf = self._env_float("STRATEGY_CONTEXT_PROMOTION_MIN_CONFIDENCE", 0.45)
-        # Context promotion never ranks candidates by legacy score.
-        best_signal, best_vote = context_votes[0]
-        raw_score = self._extract_raw_score(best_vote)
-        md0 = dict(best_signal.metadata or {})
-        selected_ok, selected_meta = self._is_selected_or_near_atm(symbol, md0, indicators)
-        if self._is_live_mode():
-            if not self._env_bool("STRATEGY_CONTEXT_PROMOTION_LIVE_ALLOWED", False):
-                return None
-            live_min_score = self._env_float("STRATEGY_CONTEXT_PROMOTION_LIVE_MIN_SCORE", 8.5)
-            live_min_conf = self._env_float("STRATEGY_CONTEXT_PROMOTION_LIVE_MIN_CONFIDENCE", 0.75)
-            max_spread = self._env_float("STRATEGY_MAX_SPREAD_PCT", 12.0)
-            max_context_age = self._live_context_max_age_seconds()
-            try:
-                spread_pct = float(md0.get("spread_pct") or indicators.get("spread_pct") or 999.0)
-            except (TypeError, ValueError):
-                spread_pct = 999.0
-            context_age = resolve_context_age_seconds(
-                md0 if md0.get("context_age_seconds") is not None else indicators
-            )
-            try:
-                bid = float(md0.get("bid") or indicators.get("bid") or 0.0)
-            except (TypeError, ValueError):
-                bid = 0.0
-            try:
-                ask = float(md0.get("ask") or indicators.get("ask") or 0.0)
-            except (TypeError, ValueError):
-                ask = 0.0
-            bid_ask_valid = bid > 0.0 and ask > 0.0 and ask >= bid
-            depth_or_tradable = bool(
-                md0.get("quote_depth_valid")
-                or indicators.get("quote_depth_valid")
-                or md0.get("tradable_quote")
-                or indicators.get("tradable_quote")
-            )
-            quote_depth_valid = bool(bid_ask_valid and depth_or_tradable)
-            if spread_pct >= 999.0 and bid_ask_valid:
-                midpoint = (bid + ask) / 2.0
-                if midpoint > 0.0:
-                    spread_pct = ((ask - bid) / midpoint) * 100.0
-            live_reject_reason = None
-            if best_vote.side not in {"CE", "PE"}:
-                live_reject_reason = "live_context_invalid_side"
-            elif not selected_ok:
-                live_reject_reason = "live_context_not_selected_or_near_atm"
-            elif not quote_depth_valid:
-                live_reject_reason = "live_context_quote_depth_missing"
-            elif spread_pct > max_spread:
-                live_reject_reason = "live_context_spread_too_wide"
-            elif context_age > max_context_age:
-                live_reject_reason = "live_context_stale"
-            if live_reject_reason:
-                log.info(
-                    "CONTEXT_PROMOTION_REJECTED_LIVE symbol=%s strategy=%s reason=%s "
-                    "raw_score=%.2f confidence=%.2f selected_ok=%s quote_depth_valid=%s "
-                    "spread_pct=%.2f context_age_seconds=%.2f",
-                    symbol,
-                    best_vote.strategy,
-                    live_reject_reason,
-                    raw_score,
-                    best_vote.confidence,
-                    selected_ok,
-                    quote_depth_valid,
-                    spread_pct,
-                    context_age,
-                    extra={
-                        "event": "CONTEXT_PROMOTION_REJECTED_LIVE",
-                        "symbol": symbol,
-                        "strategy": best_vote.strategy,
-                        "reason": live_reject_reason,
-                        "raw_score": raw_score,
-                        "min_score": live_min_score,
-                        "confidence": best_vote.confidence,
-                        "min_confidence": live_min_conf,
-                        "selected_ok": selected_ok,
-                        "quote_depth_valid": quote_depth_valid,
-                        "spread_pct": spread_pct,
-                        "max_spread": max_spread,
-                        "context_age_seconds": context_age,
-                        "max_context_age": max_context_age,
-                    },
-                )
-                return None
-        opposite = [v for _, v in context_votes if v.side in {"CE", "PE"} and v.side != best_vote.side]
-        # Opposing context-score magnitude is telemetry only; authoritative
-        # direction alignment below owns the promotion safety decision.
-        vetoed = False
-        direction_bias = str(
-            md0.get("direction_bias")
-            or md0.get("underlying_direction_bias")
-            or indicators.get("direction_bias")
-            or indicators.get("underlying_direction_bias")
-            or ""
-        ).upper()
-        direction_aligned = direction_bias in {"CE", "PE"} and direction_bias == str(best_vote.side).upper()
-        context_age_seconds = resolve_context_age_seconds(
-            md0 if md0.get("context_age_seconds") is not None else indicators
-        )
-        context_fresh = bool(
-            md0.get("context_fresh")
-            if md0.get("context_fresh") is not None
-            else indicators.get("context_fresh")
-        ) and context_age_seconds <= self._live_context_max_age_seconds()
-        conf_raw = md0.get("underlying_direction_confidence")
-        if conf_raw is None:
-            conf_raw = indicators.get("underlying_direction_confidence")
-        try:
-            direction_conf = float(conf_raw) if conf_raw is not None else 0.0
-        except (TypeError, ValueError):
-            direction_conf = 0.0
-        if best_vote.strategy not in allowed_strategies or best_vote.side not in {"CE", "PE"} or not selected_ok or not direction_aligned or not context_fresh:
-            return None
-        md = dict(best_signal.metadata or {})
-        md.update(selected_meta)
-        md.update({
-            "role": "trigger",
-            "promoted_from_context": True,
-            "consensus_stage": "context_promoted_controlled",
-            "promotion_reason": "direction_context_aligned",
-        })
-        for key in (
-            "direction_bias",
-            "underlying_direction_bias",
-            "underlying_direction_confidence",
-            "context_age_seconds",
-            "context_fresh",
-            "direction_context_source",
-            "direction_context_reasons",
-        ):
-            value = indicators.get(key)
-            if value is not None:
-                md[key] = value
-        promoted = Signal(action="BUY", symbol=best_signal.symbol, quantity=best_signal.quantity, confidence=best_signal.confidence, reason=best_signal.reason, stop_loss=best_signal.stop_loss, take_profit=best_signal.take_profit, metadata=md)
-        promoted_vote = StrategyEvidence(strategy=best_vote.strategy, side=best_vote.side, score=best_vote.score, confidence=best_vote.confidence, reasons=list(best_vote.reasons), metadata=md)
-        record_strategy_evaluation(strategy=str(best_vote.strategy), symbol=str(symbol), accepted=True, reason="direction_context_aligned", score=raw_score)
-        maybe_emit_strategy_rejection_summary(log, interval_seconds=300.0)
-        log.info(
-            "ORDERFLOW_TRIGGER_PROMOTED side=%s score=%.2f reason=direction_context_aligned symbol=%s direction_context_source=%s context_age_seconds=%.2f underlying_direction_confidence=%.2f",
-            best_vote.side,
-            raw_score,
-            symbol,
-            md.get("direction_context_source"),
-            context_age_seconds,
-            direction_conf,
-            extra={
-                "event": "ORDERFLOW_TRIGGER_PROMOTED",
-                "symbol": symbol,
-                "side": best_vote.side,
-                "score": raw_score,
-                "reason": "direction_context_aligned",
-            },
-        )
-        return promoted, promoted_vote
-
-    def _compute_trade_quality_score(
-        self,
-        vote: StrategyEvidence,
-        indicators: t.Mapping[str, t.Any],
-        *,
-        symbol: str,
-        selected_ok: bool,
-        near_atm_ok: bool,
-        context_votes: list[StrategyEvidence],
-    ) -> tuple[float, dict[str, t.Any]]:
-        """Args: vote+indicators. Returns: trade quality score and metadata. Raises: none."""
-        payload = dict(vote.metadata or {})
-        # Missing evidence must score zero. The previous positive defaults let a
-        # setup accumulate quality points for facts never demonstrated, and
-        # "strategy_score" could carry the adaptive historical performance score
-        # injected by _apply_weighted_confidence rather than this trade's setup.
-        raw_setup = float(payload.get("raw_setup_score", vote.score or 0.0))
-        has_direction = payload.get("direction_alignment_score") is not None
-        has_liquidity = payload.get("liquidity_score") is not None
-        has_freshness = indicators.get("stale_data_used") is not None
-        components = {
-            "strategy_score": min(3.0, max(0.0, raw_setup / 3.0)),
-            "direction_alignment": (
-                float(payload.get("direction_alignment_score")) if has_direction else 0.0
-            ),
-            "liquidity_spread_quality": (
-                min(2.0, max(0.0, float(payload.get("liquidity_score"))))
-                if has_liquidity
-                else 0.0
-            ),
-            "freshness_tick_quality": (
-                1.0 if has_freshness and not bool(indicators.get("stale_data_used")) else 0.0
-            ),
-            "same_side_context_confirmation": 1.0 if any(v.side == vote.side for v in context_votes) else 0.0,
-            "market_regime_time_suitability": float(
-                payload.get("regime_time_suitability_score") or 0.0
-            ),
-        }
-        evidence_complete = bool(has_direction and has_liquidity and has_freshness)
-        penalties: dict[str, float] = {}
-        score_reasons = {str(r) for r in (payload.get("score_reasons") or [])}
-        already_blocked_by_strategy = False
-        strategy_block_reason = str(payload.get("trigger_block_reason") or "")
-        if not bool(payload.get("trigger_conditions_met", True)) or not bool(payload.get("quote_depth_valid", True)):
-            already_blocked_by_strategy = True
-        if "direction_conflict" in score_reasons:
-            already_blocked_by_strategy = True
-        if bool(payload.get("stale_data_used")):
-            already_blocked_by_strategy = True
-        if bool(indicators.get("stale_data_used")) and not already_blocked_by_strategy:
-            penalties["stale_data"] = -3.0
-        spread_pct = float(payload.get("spread_pct") or indicators.get("spread_pct") or 0.0)
-        if spread_pct > float(os.getenv("STRATEGY_MAX_SPREAD_PCT", "28.0")) and not already_blocked_by_strategy:
-            penalties["spread_above_max"] = -3.0
-        if any(
-            v.side in {"CE", "PE"}
-            and v.side != vote.side
-            and self._extract_context_veto_score(v) >= 8.0
-            for v in context_votes
-        ):
-            penalties["opposite_context_veto"] = -4.0
-        if not selected_ok and not near_atm_ok:
-            penalties["non_selected_far_otm"] = -3.0
-        if str(vote.strategy).lower() == "orderflow" and str(payload.get("role", "")).lower() == "trigger":
-            if not bool(payload.get("quote_depth_valid")):
-                penalties["orderflow_missing_depth"] = -2.0
-        confirmation_bonus = (
-            0.5
-            if bool(indicators.get("independent_trigger_confirmation"))
-            and not already_blocked_by_strategy
-            else 0.0
-        )
-        components["independent_trigger_confirmation"] = confirmation_bonus
-        score = max(0.0, min(10.0, sum(components.values()) + sum(penalties.values())))
-        block_reason = "ok" if score >= 0 else "invalid"
-        if penalties:
-            block_reason = ",".join(penalties.keys())
-        if already_blocked_by_strategy and strategy_block_reason:
-            block_reason = strategy_block_reason
-        return score, {
-            "trade_quality_score": round(score, 3),
-            "trade_quality_components": components,
-            "trade_quality_penalties": penalties,
-            "quality_block_reason": block_reason,
-            "quality_evidence_complete": evidence_complete,
-            "already_blocked_by_strategy": already_blocked_by_strategy,
-            "strategy_block_reason": strategy_block_reason or None,
-            "independent_trigger_confirmation": bool(confirmation_bonus),
-            "independent_trigger_confirmation_strategies": list(
-                indicators.get("independent_trigger_confirmation_strategies") or []
-            ),
-            "trade_quality_symbol": symbol,
-        }
 
     def increment_observability_counter(self, key: str) -> None:
         """Args: key. Returns: None. Raises: None."""
@@ -5762,72 +4467,6 @@ class StrategyManager(_BaseStrategyManager):
         except Exception as exc:  # noqa: BLE001
             log.error("Failure in StrategyManager._extract_regime_scale: %s", exc)
             return 1.0
-
-    def _single_vote_thresholds(self, strategy_name: str) -> tuple[float, float]:
-        """Args: strategy_name. Returns: score/conf thresholds. Raises: none."""
-        # Keep live defaults conservative:
-        # STRATEGY_ALLOW_SINGLE_VOTE_SCALP=false
-        # STRATEGY_SINGLE_VOTE_VWAP_MIN_SCORE=5.8
-        # STRATEGY_SINGLE_VOTE_VWAP_MIN_CONFIDENCE=0.45
-        # Paper/shadow only (opt-in):
-        # STRATEGY_ALLOW_SINGLE_VOTE_SCALP=true
-        # STRATEGY_SINGLE_VOTE_VWAP_MIN_SCORE=5.5
-        # STRATEGY_SINGLE_VOTE_VWAP_MIN_CONFIDENCE=0.45
-        execution_mode = str(os.getenv("EXECUTION_MODE", "SHADOW") or "SHADOW").strip().upper()
-        is_live = execution_mode == "LIVE"
-        key = str(strategy_name or "").strip().lower().replace(" ", "_")
-        if key in {"vwappro", "vwap_pro"}:
-            return (
-                float(os.getenv("STRATEGY_SINGLE_VOTE_VWAP_MIN_SCORE", "5.8" if is_live else "4.8") or ("5.8" if is_live else "4.8")),
-                float(os.getenv("STRATEGY_SINGLE_VOTE_VWAP_MIN_CONFIDENCE", "0.45" if is_live else "0.40") or ("0.45" if is_live else "0.40")),
-            )
-        return (
-            float(os.getenv("STRATEGY_SINGLE_VOTE_SCALP_MIN", "6.6" if is_live else "4.5") or ("6.6" if is_live else "4.5")),
-            float(os.getenv("STRATEGY_SINGLE_VOTE_MIN_CONFIDENCE", "0.60" if is_live else "0.45") or ("0.60" if is_live else "0.45")),
-        )
-
-    def _apply_regime_vote_weight(
-        self, *, vote: StrategyEvidence, regime_name: str | None
-    ) -> StrategyEvidence:
-        """Args: vote + regime_name. Returns: weighted StrategyEvidence. Raises: none."""
-        try:
-            regime_key = normalize_regime(regime_name).value
-            weight = regime_strategy_weight(regime_key, vote.strategy)
-            weighted_score = max(0.0, min(10.0, vote.score * weight))
-            log.debug(
-                "STRATEGY_REGIME_WEIGHT strategy=%s regime=%s weight=%.3f",
-                vote.strategy,
-                regime_key or "UNKNOWN",
-                weight,
-                extra={
-                    "event": "STRATEGY_REGIME_WEIGHT",
-                    "strategy": vote.strategy,
-                    "regime": regime_key or "UNKNOWN",
-                    "weight": weight,
-                },
-            )
-            metadata = dict(vote.metadata or {})
-            raw_score = float((vote.metadata or {}).get("raw_setup_score", vote.score))
-            metadata["raw_vote_score"] = raw_score
-            metadata["raw_setup_score"] = raw_score
-            metadata["regime_weight"] = weight
-            metadata["regime_weighted_vote_score"] = weighted_score
-            metadata["regime_name"] = regime_key or "UNKNOWN"
-            metadata["regime_compatibility"] = regime_strategy_compatibility(
-                regime_key, vote.strategy
-            )
-            metadata["regime_routing_mode"] = "observe_only"
-            return StrategyEvidence(
-                strategy=vote.strategy,
-                side=vote.side,
-                score=weighted_score,
-                confidence=vote.confidence,
-                reasons=list(vote.reasons),
-                metadata=metadata,
-            )
-        except Exception as exc:  # noqa: BLE001
-            log.error("Failure in StrategyManager._apply_regime_vote_weight: %s", exc)
-            return vote
 
     def _bounded_confidence(self, candidate: float | None) -> float:
         """Clamp candidate confidence to an acceptable range.
@@ -5936,538 +4575,7 @@ class StrategyManager(_BaseStrategyManager):
         else:
             log.info("Condition met: strategy_regime_gate_block", extra=extras)
 
-    def _apply_weighted_confidence(
-        self,
-        signal: Signal,
-        strategy_name: str,
-        score_entry: StrategyScore | None,
-    ) -> Signal:
-        """Return signal with confidence adjusted by *score_entry*.
-
-        Args:
-            signal: Raw signal generated by the strategy.
-            strategy_name: Strategy name associated with the signal.
-            score_entry: Score snapshot used for weighting.
-
-        Returns:
-            Signal: Weighted signal containing additional metadata.
-
-        Raises:
-            None.
-        """
-
-        base_metadata: dict[str, t.Any] = {}
-        if isinstance(signal.metadata, dict):
-            base_metadata = dict(signal.metadata)
-        base_metadata.update({"strategy": strategy_name})
-        if score_entry is None:
-            return Signal(
-                action=signal.action,
-                symbol=signal.symbol,
-                quantity=signal.quantity,
-                confidence=signal.confidence,
-                reason=signal.reason,
-                stop_loss=signal.stop_loss,
-                take_profit=signal.take_profit,
-                metadata={**base_metadata, "strategy_weight": 1.0},
-            )
-        weight = max(self._score_floor, min(score_entry.weight, self._score_ceiling))
-        weighted_confidence_hint = self._bounded_confidence(signal.confidence * weight)
-        base_metadata.update(
-            {
-                "strategy_weight": weight,
-                "strategy_allocation": score_entry.allocation,
-                "adaptive_strategy_score": score_entry.score,
-                "strategy_manual_allocation": score_entry.manual_allocation,
-                "strategy_regime_bias": score_entry.regime_bias,
-                "weighted_confidence_hint": weighted_confidence_hint,
-            }
-        )
-        base_metadata.setdefault("strategy_score", score_entry.score)
-        return Signal(
-            action=signal.action,
-            symbol=signal.symbol,
-            quantity=signal.quantity,
-            confidence=signal.confidence,
-            reason=signal.reason,
-            stop_loss=signal.stop_loss,
-            take_profit=signal.take_profit,
-            metadata=base_metadata,
-        )
-
-    def _recompute_scores(self) -> dict[str, StrategyScore]:
-        """Compute and cache per-strategy score snapshots.
-
-        Args:
-            None.
-
-        Returns:
-            dict[str, StrategyScore]: Mapping of strategy name to scores.
-
-        Raises:
-            None.
-        """
-        self.refresh_regime_state()
-        scores: dict[str, StrategyScore] = {}
-        pnl_values: dict[str, float] = {}
-        total_pnl_values: dict[str, float] = {}
-        sharpe_values: dict[str, float] = {}
-        win_values: dict[str, float] = {}
-        drawdown_values: dict[str, float] = {}
-        rolling_values: dict[str, float] = {}
-        ratio_values: dict[str, float] = {}
-        aggregate_snapshots: dict[str, dict[str, float]] = {}
-        regime_pnl_values: dict[str, float] = {}
-        regime_win_values: dict[str, float] = {}
-        regime_sharpe_values: dict[str, float] = {}
-        regime_drawdown_values: dict[str, float] = {}
-        active_regime_snapshots: dict[str, dict[str, t.Any]] = {}
-        aggregate_evidence: dict[str, bool] = {}
-        regime_evidence: dict[str, bool] = {}
-        performances: dict[str, StrategyPerformance] = {}
-        regime_key = (self._regime_state.regime or "").strip().lower()
-        evidence_floor = max(1, self._dynamic_trade_threshold)
-        for strategy in self._strategies:
-            name = strategy.name
-            perf = self._performance.setdefault(name, StrategyPerformance())
-            performances[name] = perf
-            aggregate_snapshot = perf.snapshot()
-            aggregate_snapshots[name] = aggregate_snapshot
-            rolling_pnl_value = float(aggregate_snapshot.get("rolling_pnl", 0.0))
-            pnl_values[name] = rolling_pnl_value
-            total_pnl_values[name] = float(
-                aggregate_snapshot.get("pnl", perf.total_pnl)
-            )
-            sharpe_values[name] = float(
-                aggregate_snapshot.get("sharpe", perf.sharpe_ratio())
-            )
-            win_values[name] = float(
-                aggregate_snapshot.get("win_rate", perf.win_rate())
-            )
-            drawdown_values[name] = -float(
-                aggregate_snapshot.get("drawdown", perf.max_drawdown())
-            )
-            rolling_values[name] = rolling_pnl_value
-            ratio_values[name] = perf.win_loss_ratio()
-            aggregate_evidence[name] = perf.trades >= evidence_floor
-            bucket = None
-            try:
-                if regime_key:
-                    bucket = perf.regime_buckets.get(regime_key)
-                else:
-                    bucket = perf.regime_buckets.get("unknown")
-            except Exception as exc:  # noqa: BLE001
-                log.error(
-                    "Failure in StrategyManager regime bucket fetch: %s",
-                    exc,
-                    exc_info=exc,
-                )
-                bucket = None
-            regime_stats_raw: dict[str, float] = {}
-            if bucket is not None:
-                regime_stats_raw = bucket.snapshot()
-            active_snapshot: dict[str, t.Any] = {
-                "pnl": float(regime_stats_raw.get("pnl", 0.0)),
-                "win_rate": float(regime_stats_raw.get("win_rate", 0.0)),
-                "hit_rate": float(regime_stats_raw.get("win_rate", 0.0)),
-                "sharpe": float(regime_stats_raw.get("sharpe", 0.0)),
-                "drawdown": float(regime_stats_raw.get("drawdown", 0.0)),
-                "trades": float(regime_stats_raw.get("trades", 0.0)),
-            }
-            regime_evidence[name] = bool(
-                regime_key and active_snapshot["trades"] >= evidence_floor
-            )
-            active_snapshot["evidence_sufficient"] = regime_evidence[name]
-            active_snapshot["evidence_floor"] = evidence_floor
-            active_regime_snapshots[name] = active_snapshot
-            regime_pnl_values[name] = active_snapshot["pnl"]
-            regime_win_values[name] = active_snapshot["win_rate"]
-            regime_sharpe_values[name] = active_snapshot["sharpe"]
-            regime_drawdown_values[name] = -active_snapshot["drawdown"]
-
-        pnl_norm = self._normalise_metric(
-            {
-                name: value
-                for name, value in pnl_values.items()
-                if aggregate_evidence[name]
-            }
-        )
-        sharpe_norm = self._normalise_metric(
-            {
-                name: value
-                for name, value in sharpe_values.items()
-                if aggregate_evidence[name]
-            }
-        )
-        win_norm = self._normalise_metric(
-            {
-                name: value
-                for name, value in win_values.items()
-                if aggregate_evidence[name]
-            }
-        )
-        drawdown_norm = self._normalise_metric(
-            {
-                name: value
-                for name, value in drawdown_values.items()
-                if aggregate_evidence[name]
-            }
-        )
-        regime_pnl_norm = self._normalise_metric(
-            {
-                name: value
-                for name, value in regime_pnl_values.items()
-                if regime_evidence[name]
-            }
-        )
-        regime_sharpe_norm = self._normalise_metric(
-            {
-                name: value
-                for name, value in regime_sharpe_values.items()
-                if regime_evidence[name]
-            }
-        )
-        regime_win_norm = self._normalise_metric(
-            {
-                name: value
-                for name, value in regime_win_values.items()
-                if regime_evidence[name]
-            }
-        )
-        regime_drawdown_norm = self._normalise_metric(
-            {
-                name: value
-                for name, value in regime_drawdown_values.items()
-                if regime_evidence[name]
-            }
-        )
-
-        regime_bias = self._regime_bias_map.get(regime_key, {})
-        # Small-sample composite performance scores are research/adaptation
-        # telemetry in LIVE; they must not silently disable an entry strategy.
-        dynamic_auto_toggle_allowed = not self._is_live_mode()
-        if not dynamic_auto_toggle_allowed:
-            self._dynamic_disabled.clear()
-        regime_changed = regime_key != self._regime_last_key
-        self._regime_last_key = regime_key
-        confidence = self._regime_state.confidence
-        base_smoothing = 0.55 if regime_changed else 0.35
-        smoothing = max(0.2, min(0.9, base_smoothing + confidence * 0.3))
-        for strategy in self._strategies:
-            name = strategy.name
-            manual = self._manual_allocations.get(name)
-            base_score = (
-                pnl_norm.get(name, 0.5) * self._score_weights.pnl
-                + sharpe_norm.get(name, 0.5) * self._score_weights.sharpe
-                + win_norm.get(name, 0.5) * self._score_weights.win_rate
-                + drawdown_norm.get(name, 0.5) * self._score_weights.drawdown
-            )
-            regime_score = (
-                regime_pnl_norm.get(name, 0.5) * self._score_weights.pnl
-                + regime_sharpe_norm.get(name, 0.5) * self._score_weights.sharpe
-                + regime_win_norm.get(name, 0.5) * self._score_weights.win_rate
-                + regime_drawdown_norm.get(name, 0.5) * self._score_weights.drawdown
-            )
-            blend_weight = 0.0
-            if regime_key and regime_evidence.get(name, False):
-                blend_weight = min(0.6, 0.25 + confidence * 0.35)
-            composite_score = (
-                base_score * (1.0 - blend_weight) + regime_score * blend_weight
-            )
-            composite_score = max(self._score_floor, float(composite_score))
-            base_weight = manual if manual is not None else composite_score
-            bias = float(regime_bias.get(name, 1.0) or 1.0)
-            dynamic_bias = 1.0 + (bias - 1.0) * confidence
-            performance = performances[name]
-            trade_count = performance.trades
-            rolling_pnl_value = rolling_values.get(name, 0.0)
-            stability_factor = 1.0
-            apply_penalties = manual is None and trade_count >= max(
-                1, self._dynamic_trade_threshold
-            )
-            if rolling_pnl_value < 0 and apply_penalties:
-                try:
-                    penalty = min(
-                        0.35,
-                        abs(rolling_pnl_value) / (abs(performance.total_pnl) + 1.0),
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    log.error(
-                        "Failure in stability penalty calculation: %s",
-                        exc,
-                        exc_info=exc,
-                    )
-                    penalty = 0.0
-                stability_factor -= penalty * 0.5
-            ratio_value = ratio_values.get(name, 0.0)
-            if ratio_value < 1.0 and apply_penalties:
-                stability_factor -= min(0.2, (1.0 - ratio_value) * 0.3)
-            drawdown_value = abs(drawdown_values.get(name, 0.0))
-            if drawdown_value > 0 and apply_penalties:
-                try:
-                    stability_factor -= min(
-                        0.25,
-                        drawdown_value / (abs(performance.total_pnl) + 1.0) * 0.3,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    log.error(
-                        "Failure in drawdown adjustment: %s",
-                        exc,
-                        exc_info=exc,
-                    )
-            stability_factor = max(0.25, stability_factor)
-            weight = max(base_weight * dynamic_bias * stability_factor, 0.0)
-            enabled = name not in self._disabled_strategies
-            dynamic_flag = name in self._dynamic_disabled
-            should_disable = (
-                dynamic_auto_toggle_allowed
-                and enabled
-                and not dynamic_flag
-                and manual is None
-                and trade_count >= max(1, self._dynamic_trade_threshold)
-                and confidence >= self._dynamic_confidence_floor
-                and composite_score < self._dynamic_disable_threshold
-                and rolling_pnl_value <= 0
-                and drawdown_value > 0
-            )
-            should_enable = dynamic_auto_toggle_allowed and dynamic_flag and (
-                composite_score >= self._dynamic_enable_threshold
-                or rolling_pnl_value > 0
-                or ratio_value >= 1.1
-            )
-            if should_disable:
-                self._dynamic_disabled.add(name)
-                enabled = False
-                weight = 0.0
-                log.info(
-                    "Condition met: strategy_dynamic_disabled",
-                    extra={
-                        "event": "strategy_dynamic_disabled",
-                        "strategy": name,
-                        "regime": regime_key,
-                        "score": round(composite_score, 4),
-                        "threshold": self._dynamic_disable_threshold,
-                        "rolling_pnl": round(rolling_pnl_value, 4),
-                        "drawdown": round(drawdown_value, 4),
-                    },
-                )
-                try:
-                    METRICS.increment_strategy_allocation_change(
-                        strategy=name,
-                        direction="suspend",
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    log.error(
-                        "Failure in dynamic disable metric: %s",
-                        exc,
-                        exc_info=exc,
-                    )
-            elif should_enable:
-                self._dynamic_disabled.discard(name)
-                enabled = name not in self._disabled_strategies
-                log.info(
-                    "Condition met: strategy_dynamic_restored",
-                    extra={
-                        "event": "strategy_dynamic_restored",
-                        "strategy": name,
-                        "regime": regime_key,
-                        "score": round(composite_score, 4),
-                        "threshold": self._dynamic_enable_threshold,
-                    },
-                )
-                try:
-                    METRICS.increment_strategy_allocation_change(
-                        strategy=name,
-                        direction="restore",
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    log.error(
-                        "Failure in dynamic restore metric: %s",
-                        exc,
-                        exc_info=exc,
-                    )
-            elif dynamic_flag:
-                enabled = False
-                weight = 0.0
-            if not enabled:
-                weight = 0.0
-            previous_allocation = self._allocation_state.get(name, weight)
-            if manual is not None:
-                allocation = max(manual, 0.0)
-            else:
-                allocation = max(
-                    0.0, smoothing * weight + (1.0 - smoothing) * previous_allocation
-                )
-            self._allocation_state[name] = allocation
-            if allocation <= 0.0 and previous_allocation > 0.0:
-                log.info(
-                    "Condition met: strategy_allocation_zero",
-                    extra={
-                        "event": "strategy_allocation_zero",
-                        "strategy": name,
-                        "previous": round(previous_allocation, 4),
-                        "manual": manual is not None,
-                        "dynamic_disabled": name in self._dynamic_disabled,
-                    },
-                )
-            elif allocation > 0.0 and previous_allocation <= 0.0:
-                log.info(
-                    "Condition met: strategy_allocation_restored",
-                    extra={
-                        "event": "strategy_allocation_restored",
-                        "strategy": name,
-                        "allocation": round(allocation, 4),
-                        "manual": manual is not None,
-                        "dynamic_disabled": name in self._dynamic_disabled,
-                    },
-                )
-            if abs(allocation - previous_allocation) > 0.05 or regime_changed:
-                log.info(
-                    "Condition met: strategy_allocation_updated",
-                    extra={
-                        "event": "strategy_allocation_updated",
-                        "strategy": name,
-                        "allocation": round(allocation, 4),
-                        "previous": round(previous_allocation, 4),
-                        "regime": regime_key,
-                        "score": round(composite_score, 4),
-                        "regime_score": round(regime_score, 4),
-                        "confidence": round(confidence, 4),
-                    },
-                )
-                try:
-                    direction = "increase"
-                    if allocation < previous_allocation:
-                        direction = "decrease"
-                    elif abs(allocation - previous_allocation) <= 1e-6:
-                        direction = "hold"
-                    METRICS.increment_strategy_allocation_change(
-                        strategy=name,
-                        direction=direction,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    log.error(
-                        "Failure in strategy allocation change metric: %s",
-                        exc,
-                        exc_info=exc,
-                    )
-            try:
-                METRICS.record_strategy_allocation(
-                    strategy=name,
-                    weight=allocation,
-                    score=composite_score,
-                    regime=regime_key or None,
-                )
-            except Exception as exc:  # noqa: BLE001
-                log.error(
-                    "Failure in StrategyManager allocation metrics: %s",
-                    exc,
-                    extra={
-                        "event": "strategy_allocation_metric_error",
-                        "strategy": name,
-                    },
-                )
-            aggregate_snapshot = aggregate_snapshots.get(name, {})
-            active_snapshot = active_regime_snapshots.get(name, {})
-            scores[name] = StrategyScore(
-                strategy=name,
-                weight=weight,
-                allocation=allocation,
-                score=composite_score,
-                regime_score=regime_score,
-                pnl=total_pnl_values.get(name, 0.0),
-                sharpe=sharpe_values.get(name, 0.0),
-                win_rate=win_values.get(name, 0.0),
-                drawdown=abs(drawdown_values.get(name, 0.0)),
-                rolling_pnl=rolling_values.get(name, 0.0),
-                win_loss_ratio=ratio_values.get(name, 0.0),
-                manual_allocation=manual,
-                regime_bias=dynamic_bias,
-                enabled=enabled,
-                active_regime_stats=active_snapshot,
-                regime_breakdown=_regime_breakdown(performances[name]),
-                dynamic_disabled=name in self._dynamic_disabled,
-            )
-            try:
-                scores[name].active_regime_stats.setdefault(
-                    "confidence", float(confidence)
-                )
-                scores[name].active_regime_stats.setdefault(
-                    "regime", regime_key or "unknown"
-                )
-                scores[name].active_regime_stats.setdefault(
-                    "hit_rate", scores[name].active_regime_stats.get("win_rate", 0.0)
-                )
-                scores[name].active_regime_stats.setdefault(
-                    "score", round(composite_score, 4)
-                )
-                aggregate_snapshot.setdefault(
-                    "hit_rate", aggregate_snapshot.get("win_rate", 0.0)
-                )
-            except Exception as exc:  # noqa: BLE001
-                log.error(
-                    "Failure in StrategyManager score enrichment: %s",
-                    exc,
-                    exc_info=exc,
-                )
-        self._score_cache = scores
-        return scores
-
-    @staticmethod
-    def _normalise_metric(
-        values: dict[str, float],
-        zero_is_neutral: bool = True,
-    ) -> dict[str, float]:
-        """Return normalised mapping with optional zero-neutral treatment.
-
-        Args:
-            values: Mapping of identifiers to metric values.
-            zero_is_neutral: When ``True`` map zero to 0.5 with symmetric scaling.
-
-        Returns:
-            dict[str, float]: Normalised mapping with entries in [0, 1].
-
-        Raises:
-            None.
-        """
-
-        if not values:
-            return {}
-        try:
-            all_values = list(values.values())
-            if zero_is_neutral:
-                positives = [value for value in all_values if value > 0]
-                negatives = [value for value in all_values if value < 0]
-                if positives and negatives:
-                    max_pos = max(positives) or 1.0
-                    min_neg = min(negatives) or -1.0
-
-                    def _scale(value: float) -> float:
-                        if value > 0 and max_pos > 0:
-                            return 0.5 + (value / max_pos) * 0.5
-                        if value < 0 and min_neg < 0:
-                            return 0.5 + (value / abs(min_neg)) * 0.5
-                        return 0.5
-
-                    return {name: _scale(value) for name, value in values.items()}
-            min_value = min(all_values)
-            max_value = max(all_values)
-            if max_value == min_value:
-                return {name: 0.5 for name in values}
-            span = max_value - min_value
-            return {name: (value - min_value) / span for name, value in values.items()}
-        except Exception as exc:  # noqa: BLE001
-            log.error(
-                "Failure in StrategyManager._normalise_metric: %s",
-                exc,
-                exc_info=exc,
-                extra={"event": "strategy_metric_normalise_error"},
-            )
-            return {}
-
-
-    @staticmethod
-    def _extract_strike_from_symbol(symbol: str) -> int | None:
+    def _extract_strike_from_symbol(    def _extract_strike_from_symbol(symbol: str) -> int | None:
         """Extract option strike from symbol. Args: symbol. Returns: strike/None. Raises: none."""
         raw = str(symbol or "").strip().upper()
         if ":" in raw:
