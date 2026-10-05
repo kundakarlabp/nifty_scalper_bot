@@ -1,5 +1,7 @@
 from scripts.analyze_orb_score_calibration import analyze
 
+from nifty_scalper_bot.backtesting.strategy_research import _orb_research_score_v2
+
 
 def test_score_calibration_reports_gross_and_net_expectancy_by_bucket():
     trades = [
@@ -45,3 +47,30 @@ def test_score_calibration_reports_gross_and_net_expectancy_by_bucket():
     assert ten["overall"]["net_pnl"] == 0.0
     assert ten["score_buckets"]["7.0-7.9"]["expectancy"] == 1.5
     assert ten["entry_branches"]["retest"]["gross_expectancy"] == 2.0
+
+
+def test_frozen_score_v2_requires_retest_penetration_direction_without_volume():
+    score, passed = _orb_research_score_v2(
+        {
+            "score_reasons": [
+                "retest_hold",
+                "normalized_breakout_penetration",
+                "underlying_direction_alignment",
+            ]
+        }
+    )
+    assert score == 8.0
+    assert passed is True
+
+    penalized, penalized_pass = _orb_research_score_v2(
+        {
+            "score_reasons": [
+                "retest_hold",
+                "normalized_breakout_penetration",
+                "underlying_direction_alignment",
+                "underlying_volume_confirmation",
+            ]
+        }
+    )
+    assert penalized == 7.0
+    assert penalized_pass is False
