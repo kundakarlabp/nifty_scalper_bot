@@ -31,7 +31,7 @@ BASE_OVERRIDES = {
 
 
 def candidates() -> list[dict[str, Any]]:
-    """Return the static comparator, lifecycle reference and five canonical one-change runs."""
+    """Return reference rows and the five canonical one-change runs."""
     return [
         {
             "name": "static_reference_075_25",
@@ -72,7 +72,7 @@ def candidates() -> list[dict[str, Any]]:
 
 
 def quality_score_8_candidate() -> dict[str, Any]:
-    """Return the focused score-8 experiment without changing the canonical five-run set."""
+    """Return the focused score-8 experiment outside the canonical five-run set."""
     return {
         "name": "quality_score_8",
         "overrides": {**BASE_OVERRIDES, "ORB_QUALITY_MIN_SCORE_SHADOW": "8.0"},
