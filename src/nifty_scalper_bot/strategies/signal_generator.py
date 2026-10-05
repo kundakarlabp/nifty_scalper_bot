@@ -328,7 +328,16 @@ class RSIMeanReversionStrategy(Strategy):
                 reason=reason,
                 stop_loss=stop_loss,
                 take_profit=take_profit,
-                metadata=metadata,
+                metadata={
+                    **metadata,
+                    "role": "trigger",
+                    "setup_name": "rsi_mean_reversion_oversold",
+                    "setup_pass": True,
+                    "trigger_conditions_met": True,
+                    "required_data_present": True,
+                    "stale_data_used": False,
+                    "setup_reasons": ["rsi_oversold", "risk_geometry_valid"],
+                },
             )
 
         if rsi > overbought and (position is None or position.side != "SHORT"):
@@ -355,7 +364,16 @@ class RSIMeanReversionStrategy(Strategy):
                 reason=reason,
                 stop_loss=stop_loss,
                 take_profit=take_profit,
-                metadata=metadata,
+                metadata={
+                    **metadata,
+                    "role": "trigger",
+                    "setup_name": "rsi_mean_reversion_overbought",
+                    "setup_pass": True,
+                    "trigger_conditions_met": True,
+                    "required_data_present": True,
+                    "stale_data_used": False,
+                    "setup_reasons": ["rsi_overbought", "risk_geometry_valid"],
+                },
             )
 
         logger.debug(f"SKIP {self.name}: neutral (rsi={rsi:.2f}) | {symbol}")
