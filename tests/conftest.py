@@ -6,7 +6,7 @@ import os
 import shutil
 import tempfile
 from contextlib import suppress
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Generator
 
@@ -56,29 +56,6 @@ def _default_path_read_text_encoding(monkeypatch: pytest.MonkeyPatch) -> None:
         return _ORIGINAL_PATH_READ_TEXT(self, *args, **kwargs)
 
     monkeypatch.setattr(Path, "read_text", _read_text_utf8_default)
-
-
-@pytest.fixture(autouse=True)
-def _stabilize_live_runtime_entry_exit_contract(
-    request: pytest.FixtureRequest,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Keep the runtime contract test independent of score calibration."""
-    if (
-        request.node.name
-        != "test_live_runtime_bullish_spot_future_selects_ce_and_exits_target"
-    ):
-        return
-
-    import nifty_scalper_bot.strategies.runner as runner_mod
-
-    real_score_signal_metadata = runner_mod.score_signal_metadata
-
-    def _allow_contract_signal(*args: Any, **kwargs: Any):
-        score = real_score_signal_metadata(*args, **kwargs)
-        return replace(score, allowed=True, reasons=[])
-
-    monkeypatch.setattr(runner_mod, "score_signal_metadata", _allow_contract_signal)
 
 
 @pytest.fixture(autouse=True)
