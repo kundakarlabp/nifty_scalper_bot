@@ -3944,16 +3944,27 @@ class StrategyManager(_BaseStrategyManager):
         max_age_s: float | None = None,
     ) -> bool:
         """Return whether context evidence proves it is current."""
-        raw = (vote.metadata or {}).get("vote_timestamp")
+        metadata = dict(vote.metadata or {})
+        max_age = max(0.0, self._env_float("CONTEXT_VOTE_MAX_AGE_SEC", 30.0))
+        if max_age_s is not None:
+            max_age = min(max_age, max(0.0, max_age_s))
+
+        raw_monotonic = metadata.get("vote_monotonic")
+        try:
+            stamped_monotonic = float(raw_monotonic)
+        except (TypeError, ValueError):
+            stamped_monotonic = 0.0
+        if isfinite(stamped_monotonic) and stamped_monotonic > 0:
+            age = time.monotonic() - stamped_monotonic
+            return 0.0 <= age <= max_age
+
+        raw = metadata.get("vote_timestamp")
         try:
             stamped = float(raw)
         except (TypeError, ValueError):
             return False
         if not isfinite(stamped) or stamped <= 0:
             return False
-        max_age = max(0.0, self._env_float("CONTEXT_VOTE_MAX_AGE_SEC", 30.0))
-        if max_age_s is not None:
-            max_age = min(max_age, max(0.0, max_age_s))
         return 0.0 <= (time.time() - stamped) <= max_age
 
     def _is_selected_or_near_atm(self, symbol: str, metadata: dict[str, t.Any], indicators: t.Mapping[str, t.Any]) -> tuple[bool, dict[str, t.Any]]:
