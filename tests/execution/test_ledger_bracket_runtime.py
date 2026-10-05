@@ -201,16 +201,22 @@ def test_completed_trade_outcome_preserves_provenance_and_net_costs(
             "signal_id": "sig-1",
             "trace_id": "trace-1",
             "strategy_profile_version": "2026-07-30",
-            "signal_quality": {
-                "threshold": 7.5,
-                "final_score": 8.4,
-                "alpha_score": 8.1,
-                "direction_score": 8.5,
-                "strategy_score": 7.6,
-                "option_score": 9.0,
-                "data_score": 9.0,
-                "rr_score": 8.0,
-                "normalized_strategy_name": "vwap_pro",
+            "approval_path": "single_trigger_context_confirmed",
+            "direction_contract": {
+                "passed": True,
+                "side": "CE",
+                "underlying_direction": "CE",
+                "underlying_state": "CONFIRMED_BULL",
+            },
+            "setup_contract": {
+                "passed": True,
+                "strategy": "VWAPPro",
+                "setup_id": "vwap:CE:1",
+            },
+            "confirmation_contract": {
+                "passed": True,
+                "trigger_consensus": False,
+                "context_strategies": ["OrderFlow"],
             },
         },
     )
@@ -237,9 +243,11 @@ def test_completed_trade_outcome_preserves_provenance_and_net_costs(
     assert outcome["strategy_name"] == "VWAPPro"
     assert outcome["setup_name"] == "continuation_pullback"
     assert outcome["regime"] == "TREND"
-    assert outcome["signal_quality"]["alpha_score"] == 8.1
-    assert outcome["signal_quality"]["strategy_score"] == 7.6
-    assert outcome["signal_quality"]["normalized_strategy_name"] == "vwap_pro"
+    assert outcome["approval_path"] == "single_trigger_context_confirmed"
+    assert outcome["direction_contract"]["passed"] is True
+    assert outcome["direction_contract"]["underlying_direction"] == "CE"
+    assert outcome["setup_contract"]["strategy"] == "VWAPPro"
+    assert outcome["confirmation_contract"]["context_strategies"] == ["OrderFlow"]
     assert outcome["gross_pnl"] == 1300.0
     assert outcome["estimated_costs"]["total"] > 0
     assert outcome["net_pnl"] < outcome["gross_pnl"]
