@@ -65,8 +65,6 @@ def test_persistent_microstructure_cannot_override_underlying_direction(
     monkeypatch, strat
 ):
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
-    monkeypatch.setenv("ORDERFLOW_REVERSAL_MIN_UPDATES", "3")
-    monkeypatch.setenv("ORDERFLOW_REVERSAL_MIN_PERSISTENCE_MS", "0")
 
     results = [
         _eval(
