@@ -134,7 +134,10 @@ def test_aligned_independent_trigger_can_clear_unchanged_live_quality_floor(
     assert result.metadata["trade_quality_score"] >= 7.0
     assert result.metadata["approval_path"] == "aligned_two_trigger_consensus"
     assert result.metadata["score_contract_version"] == 1
-    assert result.metadata["confirming_trigger_strategies"] == ["VWAPPro", "ORBPro"]
+    assert result.metadata["confirming_trigger_strategies"] == [
+        "VWAPPro",
+        "PremiumMomentum",
+    ]
     assert result.metadata["context_confirmation_strategies"] == ["OrderFlow"]
     assert result.metadata["confirming_votes"] == ["VWAPPro", "ORBPro"]
     lineage = result.metadata["score_lineage"]
