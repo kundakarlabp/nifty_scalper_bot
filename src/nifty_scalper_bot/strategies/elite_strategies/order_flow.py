@@ -126,7 +126,6 @@ class OrderFlowStrategy(EliteStrategy):
         """Args: config, indicator_engine. Returns: None. Raises: Exception."""
         super().__init__(config=config, indicator_engine=indicator_engine)
         self._cfg = config
-        self._reversal_confirmation: dict[str, dict[str, Any]] = {}
 
     def get_required_indicators(self) -> set[str]:
         """Args: none. Returns: indicator keys. Raises: Exception."""
@@ -141,47 +140,6 @@ class OrderFlowStrategy(EliteStrategy):
             "spread_pct",
             "atr",
         }
-
-    def _reversal_persistence_confirmed(
-        self,
-        *,
-        symbol: str,
-        side: str,
-        update_version: object | None,
-        fingerprint: tuple[object, ...],
-    ) -> bool:
-        """Require distinct persistent updates before overriding direction bias."""
-        version = update_version if update_version is not None else fingerprint
-        now = time.monotonic()
-        state = self._reversal_confirmation.get(symbol)
-        if state is None or state.get("side") != side:
-            state = {"side": side, "count": 1, "started": now, "version": version}
-            self._reversal_confirmation[symbol] = state
-        elif state.get("version") != version:
-            state["count"] = int(state.get("count") or 0) + 1
-            state["version"] = version
-        try:
-            min_updates = max(
-                2, int(os.getenv("ORDERFLOW_REVERSAL_MIN_UPDATES", "3") or 3)
-            )
-        except (TypeError, ValueError):
-            min_updates = 3
-        min_persistence_ms = max(
-            0.0,
-            safe_float_env("ORDERFLOW_REVERSAL_MIN_PERSISTENCE_MS", 500.0),
-        )
-        elapsed_ms = max(0.0, now - float(state.get("started") or now)) * 1000.0
-        max_window_ms = max(
-            min_persistence_ms,
-            safe_float_env("ORDERFLOW_REVERSAL_MAX_WINDOW_MS", 3000.0),
-        )
-        if elapsed_ms > max_window_ms:
-            state.update({"count": 1, "started": now, "version": version})
-            return False
-        return (
-            int(state.get("count") or 0) >= min_updates
-            and elapsed_ms >= min_persistence_ms
-        )
 
     def _evaluate_signal(
         self,
