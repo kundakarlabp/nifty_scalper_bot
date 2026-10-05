@@ -5591,11 +5591,7 @@ class StrategyManager(_BaseStrategyManager):
                 if midpoint > 0.0:
                     spread_pct = ((ask - bid) / midpoint) * 100.0
             live_reject_reason = None
-            if raw_score < live_min_score:
-                live_reject_reason = "live_context_score_below_min"
-            elif float(best_vote.confidence) < live_min_conf:
-                live_reject_reason = "live_context_confidence_below_min"
-            elif best_vote.side not in {"CE", "PE"}:
+            if best_vote.side not in {"CE", "PE"}:
                 live_reject_reason = "live_context_invalid_side"
             elif not selected_ok:
                 live_reject_reason = "live_context_not_selected_or_near_atm"
@@ -5638,7 +5634,9 @@ class StrategyManager(_BaseStrategyManager):
                 )
                 return None
         opposite = [v for _, v in context_votes if v.side in {"CE", "PE"} and v.side != best_vote.side]
-        vetoed = bool(opposite and max(self._extract_context_veto_score(v) for v in opposite) >= 8.0)
+        # Opposing context-score magnitude is telemetry only; authoritative
+        # direction alignment below owns the promotion safety decision.
+        vetoed = False
         direction_bias = str(
             md0.get("direction_bias")
             or md0.get("underlying_direction_bias")
@@ -5662,7 +5660,7 @@ class StrategyManager(_BaseStrategyManager):
             direction_conf = float(conf_raw) if conf_raw is not None else 0.0
         except (TypeError, ValueError):
             direction_conf = 0.0
-        if best_vote.strategy not in allowed_strategies or raw_score < min_score or best_vote.confidence < min_conf or best_vote.side not in {"CE", "PE"} or not selected_ok or vetoed or not direction_aligned or not context_fresh or direction_conf < min_direction_conf:
+        if best_vote.strategy not in allowed_strategies or best_vote.side not in {"CE", "PE"} or not selected_ok or not direction_aligned or not context_fresh or direction_conf < min_direction_conf:
             return None
         md = dict(best_signal.metadata or {})
         md.update(selected_meta)
