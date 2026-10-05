@@ -92,7 +92,7 @@ def test_expiry_gate_applies_even_without_injected_clock(monkeypatch) -> None:
     assert strategy._evaluate_signal(SYMBOL_CE, indicators, 120.0) is None
 
 
-def test_pe_setup_has_positive_quality_and_runner_final_score_contract(monkeypatch) -> None:
+def test_pe_setup_keeps_quality_telemetry_and_runner_execution_contract(monkeypatch) -> None:
     monkeypatch.setenv("STRATEGY_MODE", "expiry_gamma")
     monkeypatch.setenv("ALLOW_EXPIRY_GAMMA_STRATEGIES", "true")
     strategy = _strategy(datetime(2026, 9, 15, 10, 0, tzinfo=IST))
