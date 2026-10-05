@@ -226,7 +226,10 @@ def test_production_profile_is_stable_and_changes_with_material_settings(
     assert {"SMC", "VWAPPro", "ORBPro"}.issubset(
         first["strategies"]["trigger_capable"]
     )
-    assert first["structural_entry_policy"]["setup"] == "strategy_owned_boolean_contract"
+    assert (
+        first["structural_entry_policy"]["setup"]
+        == "strategy_owned_boolean_contract"
+    )
     assert first["strategy_configs"]["ORBPro"]["orb_minutes"] == 15
 
     changed_runtime = SimpleNamespace(
