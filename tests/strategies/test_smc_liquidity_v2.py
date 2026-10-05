@@ -233,13 +233,9 @@ def test_opposite_side_option_structure_does_not_confirm_ce_sweep(
 
     assert opposite_vote is not None and aligned_vote is not None
     assert opposite_vote.metadata["structure_confirmed"] is False
-    assert "structure_confirmation" not in opposite_vote.metadata["score_reasons"]
+    assert "structure_confirmation" not in opposite_vote.metadata["setup_reasons"]
     assert aligned_vote.metadata["structure_confirmed"] is True
-    assert (
-        aligned_vote.metadata["strategy_score"]
-        - opposite_vote.metadata["strategy_score"]
-        == 1.0
-    )
+    assert "structure_confirmation" in aligned_vote.metadata["setup_reasons"]
 
 
 def test_tiny_one_tick_breach_is_not_accepted_as_liquidity_sweep(monkeypatch) -> None:
@@ -320,7 +316,7 @@ def test_configured_sweep_distance_is_used_as_normalized_threshold_cap(monkeypat
     assert strategy.last_sweep_diagnostics["effective_min_sweep_points"] == 0.5
 
 
-def test_volume_spike_config_is_consumed_as_quality_confirmation(monkeypatch) -> None:
+def test_volume_spike_config_is_consumed_as_structural_confirmation(monkeypatch) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
     rows = _base_rows()
     engine = FakeIndicatorEngine({FUTURES: rows})
@@ -351,7 +347,7 @@ def test_volume_spike_config_is_consumed_as_quality_confirmation(monkeypatch) ->
     assert signal is not None
     assert signal.metadata["volume_confirmation"] is True
     assert signal.metadata["volume_spike_threshold"] == 1.5
-    assert "volume_confirmation" in signal.metadata["score_reasons"]
+    assert "volume_confirmation" in signal.metadata["setup_reasons"]
 
 
 def test_bearish_underlying_sweep_confirms_long_pe(monkeypatch) -> None:
