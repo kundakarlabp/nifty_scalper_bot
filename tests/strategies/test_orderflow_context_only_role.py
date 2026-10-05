@@ -80,11 +80,13 @@ def test_context_role_is_reported_as_the_block_reason() -> None:
     assert "trigger_role_disabled" not in src
 
 
-def test_confirmation_scoring_path_is_retained() -> None:
-    """OrderFlow still computes and publishes confirmation for the setups."""
+def test_structural_confirmation_path_is_retained_without_scores() -> None:
+    """OrderFlow publishes structural context evidence without numeric scoring."""
     src = inspect.getsource(order_flow)
-    assert "ORDERFLOW_CONTEXT_MIN_SCORE" in src
-    assert "context_min_score" in src
+    assert "context_quality_eligible" in src
+    assert "effective_context_alignment" in src
+    assert "ORDERFLOW_CONTEXT_MIN_SCORE" not in src
+    assert "context_min_score" not in src
 
 
 def test_three_setup_modules_exist_and_are_distinct() -> None:
