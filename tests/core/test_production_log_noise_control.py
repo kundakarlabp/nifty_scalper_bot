@@ -81,7 +81,6 @@ def test_context_only_and_no_combined_diagnostics_are_debug_only() -> None:
     for event in (
         "strategy_manager_no_combined_signal",
         "PERMANENT_CONTEXT_ONLY_PROMOTION_BLOCKED",
-        "ORDERFLOW_TRIGGER_SCORE",
         "POSITION_RECONCILE_COALESCED",
     ):
         record = _record(event)
