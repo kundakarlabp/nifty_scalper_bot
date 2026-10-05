@@ -277,7 +277,15 @@ def score_signal_quality(
     # authorize or veto capital. Structural context-only strategies remain
     # non-tradable; strategy validity, execution readiness and cost-aware risk
     # keep their existing canonical owners.
-    reasons = ["context_only_strategy"] if context_only else []
+    reasons: list[str] = []
+    if context_only:
+        reasons.append("context_only_strategy")
+    if final < threshold:
+        reasons.append("score_below_threshold")
+    if alpha_floor_required and alpha_score < threshold:
+        reasons.append("alpha_below_threshold")
+    if direction < 6.0:
+        reasons.append("direction_below_minimum")
     return SignalQualityScore(
         final_score=round(final, 3),
         direction_score=direction,
