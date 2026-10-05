@@ -4630,9 +4630,9 @@ class StrategyManager(_BaseStrategyManager):
                 _record_no_signal("strategy_partial_no_consensus", "no_trigger_vote", "no_trigger_vote", trigger_vote_count=0, context_vote_count=len(context_votes), final_block_reason="partial")
                 return None
         else:
-            best_signal, best_vote = max(
-                trigger_votes, key=lambda pair: _weighted_score(pair[1])
-            )
+            # Legacy score/regime weights are research telemetry only. Multiple
+            # structurally valid triggers keep deterministic strategy order.
+            best_signal, best_vote = trigger_votes[0]
         metadata = dict(best_signal.metadata or {})
         threshold = float(os.getenv("STRATEGY_TRIGGER_MIN_SCORE", "4.5") or "4.5")
         single_high = float(os.getenv("STRATEGY_SINGLE_VOTE_HIGH_CONVICTION", "8.8") or "8.8")
