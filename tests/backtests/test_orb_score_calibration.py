@@ -60,4 +60,3 @@ def test_research_orb_quality_context_supplies_production_score_inputs():
     assert context["context_fresh"] is True
     assert context["futures_vwap_slope"] == 0.25
     assert context["research_direction_resolution"] == "spot_futures_agree"
-
