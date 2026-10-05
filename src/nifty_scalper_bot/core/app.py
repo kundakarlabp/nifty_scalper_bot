@@ -6441,7 +6441,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         tag_lookup = {}
 
     def _regime_signal_snapshot() -> dict[str, object] | None:
-        """Return lightweight market regime snapshot for scoring.
+        """Return lightweight market regime snapshot for structural routing.
 
         Args:
             None.
@@ -6463,20 +6463,13 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
             "updated_at": snapshot.updated_at,
         }
 
-    # ✅ FIX #1: min_confidence was missing → defaulted to 0.60 in parent class.
-    # After _apply_weighted_confidence multiplies by score weight (~0.5 cold start),
-    # VWAPPro's 0.85 confidence becomes 0.425 < 0.60 → ALL signals silently filtered.
-    # Correct threshold is post-weighting aware: 0.35 allows signals to pass.
-    _global_min_conf = float(os.getenv("GLOBAL_MIN_SIGNAL_CONFIDENCE", "0.35"))
     strategy_manager = StrategyManager(
         strategies=strategy_instances,
         indicator_engine=indicator_engine,
         position_manager=position_manager,
-        min_confidence=_global_min_conf,
         data_hub=data_hub,
         orchestrator=orchestrator,
         futures_symbol=futures_symbol,
-        score_weights=None,
         regime_signal_getter=_regime_signal_snapshot,
         regime_bias_map=regime_bias_map,
         market_regime_manager=market_regime_manager,
@@ -6501,7 +6494,6 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
         settings=settings,
         strategies=elite_strategies,
         mode_profile=strategy_manager.get_strategy_mode_profile(),
-        global_min_confidence=_global_min_conf,
     )
     LOGGER.info(
         "PRODUCTION_STRATEGY_PROFILE version=%s profile=%s",
