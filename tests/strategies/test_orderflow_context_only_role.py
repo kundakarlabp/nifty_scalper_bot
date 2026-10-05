@@ -64,17 +64,13 @@ def test_three_setup_families_remain_the_trigger_strategies(mode: str) -> None:
         assert setup in triggers
 
 
-def test_trigger_permission_is_no_longer_environment_controlled() -> None:
-    """order_flow.py must not read a trigger-permission env var."""
+def test_orderflow_source_has_no_trigger_permission_switch() -> None:
+    """OrderFlow remains context-only with no trigger permission toggle."""
     src = inspect.getsource(order_flow)
-    # The permission must be a constant, not an env lookup.
-    assert "allow_orderflow_trigger = False" in src
-    assigns = [
-        ln.strip() for ln in src.splitlines()
-        if ln.strip().startswith("allow_orderflow_trigger =")
-    ]
-    assert assigns == ["allow_orderflow_trigger = False"], assigns
-    assert not any("getenv" in ln for ln in assigns)
+    assert "ORDERFLOW_ALLOW_TRIGGER_ROLE" not in src
+    assert "ORDERFLOW_ALLOW_LIVE_TRIGGER" not in src
+    assert '"can_trigger": False' in src
+    assert '"trigger_conditions_met": False' in src
 
 
 def test_context_role_is_reported_as_the_block_reason() -> None:
