@@ -15,9 +15,9 @@ from typing import Any, Dict, Mapping
 from nifty_scalper_bot.strategies.elite_strategies.config_models import (
     EliteStrategyConfig,
 )
+from nifty_scalper_bot.strategies.entry_evidence import build_execution_evidence
 from nifty_scalper_bot.strategies.signal_generator import Signal, Strategy
 from nifty_scalper_bot.strategies.signal_identity import finalize_signal_observability
-from nifty_scalper_bot.strategies.entry_evidence import build_execution_evidence
 from nifty_scalper_bot.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
