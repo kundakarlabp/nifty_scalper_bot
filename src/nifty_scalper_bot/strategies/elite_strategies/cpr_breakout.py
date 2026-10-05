@@ -10,7 +10,7 @@ LOGGER = get_logger(__name__)
 
 
 class CPRBreakoutStrategy(EliteStrategy):
-    """Narrow-CPR breakout context provider with independent evidence scoring."""
+    """Narrow-CPR breakout context provider with independent structural evidence."""
 
     MIN_BARS_REQUIRED = 2
 
