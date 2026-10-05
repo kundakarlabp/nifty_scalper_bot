@@ -25,6 +25,7 @@ def _new_strategy(rows):
 def test_restart_recovers_unconfirmed_breakout_for_current_retest(monkeypatch) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
     monkeypatch.setenv("ORB_MOMENTUM_BRANCH_ENABLED", "false")
+    monkeypatch.setenv("ORB_BALANCED_RANGE_MAX_ATR", "2.0")
     rows = _opening_rows()
     breakout = _bar(
         15,
