@@ -74,7 +74,7 @@ def test_futures_context_neutral_values_do_not_create_direction() -> None:
     assert snapshot["direction_bias"] is None
 
 
-def test_futures_context_uses_same_evaluation_slope_only() -> None:
+def test_futures_context_slope_without_location_evidence_stays_unresolved() -> None:
     from nifty_scalper_bot.core.strategy_manager import StrategyManager
 
     manager = object.__new__(StrategyManager)
@@ -86,7 +86,7 @@ def test_futures_context_uses_same_evaluation_slope_only() -> None:
     )
     snapshot = manager._latest_context_snapshots["futures_context"]
     assert snapshot["vwap_slope"] == 0.001
-    assert snapshot["direction_bias"] == "CE"
+    assert snapshot["direction_bias"] is None
     manager._update_context_snapshot(
         symbol="NFO:NIFTY26JULFUT",
         indicators={"close": 102.0, "vwap": 102.0},
