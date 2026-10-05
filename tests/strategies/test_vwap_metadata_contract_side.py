@@ -94,6 +94,7 @@ def test_live_vwap_accepts_meaningful_atr_penetration(monkeypatch):
             low=99.50,
             volume=0.0,
             avg_volume=0.0,
+            futures_volume_ratio=1.2,
         ),
         100.80,
     )
