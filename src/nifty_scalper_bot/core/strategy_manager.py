@@ -4865,12 +4865,11 @@ class StrategyManager(_BaseStrategyManager):
             if ambiguous_underlying:
                 qualifying_context_votes = []
 
-            # StrategyManager owns structural/context qualification only. A fresh,
-            # strong, same-side OrderFlow vote may confirm a threshold-passing VWAP
-            # trigger in any regime; Runner remains the sole final numeric alpha/
-            # execution-quality owner. Regime fit is already represented exactly once
-            # in weighted_trigger_score, so a second regime hard block here would
-            # duplicate the same evidence and can strand otherwise valid candidates.
+            # StrategyManager owns structural/context qualification only. Fresh,
+            # same-side OrderFlow evidence may confirm a structurally valid trigger.
+            # Legacy score/regime arithmetic below is retained for attribution only;
+            # Runner owns objective candidate/quote execution validation, not a
+            # synthetic numeric admission score.
             confirmed_raw_context_score = _independent_context_total(
                 qualifying_context_votes, self._extract_raw_context_score
             )
