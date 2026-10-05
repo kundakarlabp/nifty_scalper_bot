@@ -163,11 +163,7 @@ from nifty_scalper_bot.strategies.quote_update_identity import (
     resolve_quote_update_identity,
 )
 from nifty_scalper_bot.strategies.signal_generator import Signal
-from nifty_scalper_bot.strategies.signal_quality import (
-    infer_option_side,
-    missing_score_components,
-    score_signal_metadata,
-)
+from nifty_scalper_bot.strategies.entry_evidence import infer_option_side
 from nifty_scalper_bot.strategies.trade_selector import TradeCandidateSelector
 from nifty_scalper_bot.strategies.setup_lifecycle import SETUP_LIFECYCLE, SetupStage, transition_setup
 from nifty_scalper_bot.utils import metrics
@@ -5204,24 +5200,18 @@ class StrategyRunner:
     def _decision_research_context(
         *,
         metadata: Mapping[str, Any],
-        quality: Any | None,
         stage: str,
         rejection_reasons: Sequence[str] | None = None,
     ) -> dict[str, Any]:
         """Build provenance only from facts known at the current decision stage."""
-        components = getattr(quality, "components", None)
         context: dict[str, Any] = {
             "strategy": str(
-                (components or {}).get("strategy_name")
-                if isinstance(components, Mapping)
-                else metadata.get("strategy_name") or metadata.get("strategy") or ""
+                metadata.get("strategy_name") or metadata.get("strategy") or ""
             ),
             "regime": str(metadata.get("regime") or ""),
             "approval_path": str(metadata.get("approval_path") or ""),
             "decision_stage": str(stage),
         }
-        if isinstance(components, Mapping):
-            context["signal_quality"] = dict(components)
 
         # Preserve decision-time facts that already exist on the strategy signal.
         # This is an observability allow-list only: it must never calculate a
@@ -5235,10 +5225,9 @@ class StrategyRunner:
             "signal_family",
             "contract_side",
             "trade_side",
-            "raw_setup_score",
-            "setup_score",
-            "score_contract_version",
-            "score_lineage",
+            "direction_contract",
+            "setup_contract",
+            "confirmation_contract",
             "confirming_trigger_strategies",
             "context_confirmation_strategies",
             "underlying_direction_bias",
@@ -18973,7 +18962,7 @@ class StrategyRunner:
             )
             setup_id = str((getattr(signal, "metadata", {}) or {}).get("setup_id") or "").strip()
             reject_scope = setup_id or f"{base_symbol}:{reason_key}"
-            reject_cooldown_key = f"{reject_scope}:score_below_threshold"
+            reject_cooldown_key = f"{reject_scope}:structural_contract_rejected"
             # A hard quality rejection belongs to the structural setup. Merely
             # waiting 15 seconds must not let the identical setup repeatedly
             # sample noisy context until one snapshot passes. A genuinely new
@@ -18996,11 +18985,11 @@ class StrategyRunner:
                 self._logger.info(
                     "SIGNAL_REJECT_COOLDOWN_ACTIVE symbol=%s reason=%s trace_id=%s",
                     base_symbol,
-                    "score_below_threshold",
+                    "structural_contract_rejected",
                     trace_id,
                 )
                 self._logger.info(
-                    "SCORE_REJECT_COOLDOWN_BLOCKED symbol=%s trace_id=%s cooldown_key=%s age_seconds=%.2f required_seconds=%.2f remaining_seconds=%.2f reason_key=%s underlying=%s strategy=%s last_ts=%.3f now_epoch=%.3f",
+                    "STRUCTURAL_REJECT_COOLDOWN_BLOCKED symbol=%s trace_id=%s cooldown_key=%s age_seconds=%.2f required_seconds=%.2f remaining_seconds=%.2f reason_key=%s underlying=%s strategy=%s last_ts=%.3f now_epoch=%.3f",
                     base_symbol,
                     trace_id,
                     reject_cooldown_key,
@@ -19013,7 +19002,7 @@ class StrategyRunner:
                     float(reject_last_ts),
                     now_epoch,
                     extra={
-                        "event": "SCORE_REJECT_COOLDOWN_BLOCKED",
+                        "event": "STRUCTURAL_REJECT_COOLDOWN_BLOCKED",
                         "symbol": base_symbol,
                         "trace_id": trace_id,
                         "cooldown_key": reject_cooldown_key,
@@ -19029,7 +19018,7 @@ class StrategyRunner:
                 )
                 self._reset_execution_state(base_symbol)
                 return SignalExecutionResult(
-                    False, "score_below_threshold_reject_cooldown"
+                    False, "structural_reject_cooldown"
                 )
             if reason_key == "premium_momentum_squeeze":
                 upper_symbol = (trade_symbol or base_symbol).upper()
@@ -19326,7 +19315,6 @@ class StrategyRunner:
             # Signal metadata is external to the runner; only this invocation may
             # stamp a replacement after every strict replacement guard passes.
             metadata.pop("_runner_approved_replacement_symbol", None)
-            quality = None
             reject_cooldown_result = self._execution_reject_cooldown_result(
                 base_symbol, reason_key, now_epoch, trace_id
             )
@@ -19343,7 +19331,7 @@ class StrategyRunner:
                 risk_allowed: bool = False,
             ) -> None:
                 self._logger.info(
-                    "TRADING_PATH_TRACE symbol=%s strategy_name=%s live_orders_armed=%s selected_or_near_atm=%s history_bars_effective=%s signal_generated=%s consensus_side=%s quality_final=%s quality_threshold=%s quality_allowed=%s candidate_selected=%s candidate_snapshots_present=%s selected_candidate=%s candidate_ready_before=%s candidate_ready_after=%s risk_allowed=%s executor_called=%s stop_reason=%s",
+                    "TRADING_PATH_TRACE symbol=%s strategy_name=%s live_orders_armed=%s selected_or_near_atm=%s history_bars_effective=%s signal_generated=%s consensus_side=%s direction_contract=%s setup_contract=%s confirmation_contract=%s candidate_selected=%s candidate_snapshots_present=%s selected_candidate=%s candidate_ready_before=%s candidate_ready_after=%s risk_allowed=%s executor_called=%s stop_reason=%s",
                     signal.symbol,
                     metadata.get("strategy_name")
                     or metadata.get("strategy")
@@ -19356,13 +19344,9 @@ class StrategyRunner:
                     metadata.get("history_bars_effective"),
                     True,
                     infer_option_side(signal.symbol, metadata),
-                    getattr(quality, "final_score", None),
-                    (
-                        quality.components.get("threshold")
-                        if quality is not None
-                        else None
-                    ),
-                    (quality.allowed if quality is not None else None),
+                    metadata.get("direction_contract"),
+                    metadata.get("setup_contract"),
+                    metadata.get("confirmation_contract"),
                     bool(
                         metadata.get("candidate_selected")
                         or metadata.get("is_selected_option")
@@ -19434,8 +19418,6 @@ class StrategyRunner:
                             "rejection_stage": "execution",
                         },
                     )
-                    if quality is not None:
-                        rejection_details.setdefault("signal_score", quality.final_score)
                 return self._reject_signal_execution(
                     symbol=base_symbol,
                     trace_id=trace_id,
@@ -20409,34 +20391,8 @@ class StrategyRunner:
                             reason="runtime_symbol_execution_not_ready",
                             details=readiness_details,
                         )
-            requires_execution_validation = bool(metadata.get("preliminary_only")) or bool(
+            requires_execution_validation = bool(
                 metadata.get("requires_runner_execution_validation")
-            )
-            quality_hint = max(
-                0.0,
-                min(
-                    10.0,
-                    float(metadata.get("confidence", 0.0) or 0.0) * 10.0,
-                ),
-            )
-            if (
-                metadata.get("direction_score") is None
-                and metadata.get("direction_quality") is not None
-            ):
-                metadata["direction_score"] = float(
-                    metadata.get("direction_quality") or 0.0
-                )
-            metadata.setdefault(
-                "strategy_score",
-                float(metadata.get("setup_quality", quality_hint) or quality_hint),
-            )
-            # option_score has exactly one production owner:
-            # TradeCandidateSelector. It is promoted from the selected candidate
-            # after materialisation below. With no selected-candidate evidence it
-            # stays absent and the final-score precheck fails closed.
-            metadata.setdefault(
-                "data_score",
-                float(metadata.get("data_quality", quality_hint) or quality_hint),
             )
             atr_for_plan = max(float(metadata.get("atr", 0.0) or 0.0), 1.0)
             try:
@@ -20459,10 +20415,6 @@ class StrategyRunner:
                     metadata["candidate_symbol"] = candidate.symbol
                 if "candidate_selected" not in metadata and candidate is not None:
                     metadata["candidate_selected"] = True
-                if "option_score" not in metadata and candidate is not None:
-                    metadata["option_score"] = float(candidate.score or 0.0)
-                if "data_score" not in metadata and candidate is not None:
-                    metadata["data_score"] = float(candidate.data_quality_score or 0.0)
                 if "candidate_rr" not in metadata and candidate is not None:
                     metadata["candidate_rr"] = candidate.rr
                 if "candidate_spread_pct" not in metadata and candidate is not None:
@@ -20527,20 +20479,6 @@ class StrategyRunner:
                     reason="trade_plan_materialization_failed",
                     details={"error": str(materialize_exc)},
                 )
-            if metadata.get("rr_score") is None:
-                rr_score = quality_hint
-                try:
-                    entry_price = float(metadata.get("entry_price", 0.0) or 0.0)
-                    stop_price = float(metadata.get("stop_loss", 0.0) or 0.0)
-                    target_price = float(metadata.get("take_profit", 0.0) or 0.0)
-                    risk = abs(entry_price - stop_price)
-                    reward = abs(target_price - entry_price)
-                    if risk > 0 and reward > 0:
-                        rr_ratio = reward / risk
-                        rr_score = max(0.0, min(10.0, rr_ratio * 5.0))
-                except (TypeError, ValueError):
-                    rr_score = quality_hint
-                metadata["rr_score"] = rr_score
             signal_strategy = str(
                 metadata.get("strategy")
                 or metadata.get("strategy_name")
@@ -20557,274 +20495,164 @@ class StrategyRunner:
             # diagnostics, then owns final signal quality and execution readiness.
             metadata["regime_decision"] = "observe_only"
             metadata["regime_reason"] = "manager_weighted_observe_only"
-            missing_components = missing_score_components(metadata)
+            has_candidate = bool(metadata.get("candidate_selected"))
+            has_quote_usable = bool(metadata.get("quote_usable_for_order_plan"))
+            direction_contract = (
+                dict(metadata.get("direction_contract") or {})
+                if isinstance(metadata.get("direction_contract"), Mapping)
+                else {}
+            )
+            setup_contract = (
+                dict(metadata.get("setup_contract") or {})
+                if isinstance(metadata.get("setup_contract"), Mapping)
+                else {}
+            )
+            confirmation_contract = (
+                dict(metadata.get("confirmation_contract") or {})
+                if isinstance(metadata.get("confirmation_contract"), Mapping)
+                else {}
+            )
+            current_side = infer_option_side(signal.symbol, metadata)
+            contract_failures: list[str] = []
             if requires_execution_validation:
-                has_candidate = bool(metadata.get("candidate_selected"))
-                has_quote_usable = bool(metadata.get("quote_usable_for_order_plan"))
+                if not has_candidate:
+                    contract_failures.append("candidate_not_selected")
+                if not has_quote_usable:
+                    contract_failures.append("quote_not_usable_for_order_plan")
+            if direction_contract.get("passed") is not True:
+                contract_failures.append("direction_contract_not_passed")
+            if setup_contract.get("passed") is not True:
+                contract_failures.append("setup_contract_not_passed")
+            if confirmation_contract.get("passed") is not True:
+                contract_failures.append("confirmation_contract_not_passed")
+            contract_direction = str(
+                direction_contract.get("underlying_direction") or ""
+            ).upper()
+            contract_side = str(direction_contract.get("side") or current_side).upper()
+            if contract_side not in {"CE", "PE"} or contract_direction not in {"CE", "PE"}:
+                contract_failures.append("direction_contract_incomplete")
+            elif contract_side != contract_direction or current_side != contract_direction:
+                contract_failures.append("countertrend_direction_mismatch")
+            if str(direction_contract.get("underlying_state") or "").upper() == "TRANSITION":
+                contract_failures.append("underlying_direction_transition")
 
-                if not (has_candidate and has_quote_usable):
-                    if not has_candidate:
-                        final_score_block_reason = "candidate_not_selected"
-                    elif not has_quote_usable:
-                        final_score_block_reason = "quote_not_usable_for_order_plan"
-                    else:
-                        final_score_block_reason = "execution_precheck_failed_unknown"
-                    strategy_name = (
-                        metadata.get("strategy_name")
-                        or metadata.get("strategy")
-                        or signal.reason
-                    )
-                    self._logger.info(
-                        "TRADE_DECISION_TRACE symbol=%s strategy=%s side=%s allowed=%s blocked_at=%s blocked_reason=%s missing_components=%s has_candidate=%s has_quote_usable=%s candidate_symbol=%s selected_snapshot_symbol=%s latest_bid=%s latest_ask=%s latest_quote_tradable=%s",
-                        base_symbol,
-                        strategy_name,
-                        infer_option_side(signal.symbol, metadata),
-                        False,
-                        "runner_execution_precheck",
-                        final_score_block_reason,
-                        missing_components,
-                        has_candidate,
-                        has_quote_usable,
-                        metadata.get("candidate_symbol"),
-                        metadata.get("selected_snapshot_symbol"),
-                        metadata.get("latest_quote_bid"),
-                        metadata.get("latest_quote_ask"),
-                        metadata.get("latest_quote_tradable"),
-                        extra={
-                            "event": "TRADE_DECISION_TRACE",
-                            "symbol": base_symbol,
-                            "strategy": strategy_name,
-                            "side": infer_option_side(signal.symbol, metadata),
-                            "allowed": False,
-                            "blocked_at": "runner_execution_precheck",
-                            "blocked_reason": final_score_block_reason,
-                            "trace_id": trace_id,
-                            "missing_components": missing_components,
-                            "has_candidate": has_candidate,
-                            "has_quote_usable": has_quote_usable,
-                            "candidate_symbol": metadata.get("candidate_symbol"),
-                            "selected_snapshot_symbol": metadata.get(
-                                "selected_snapshot_symbol"
-                            ),
-                            "latest_bid": metadata.get("latest_quote_bid"),
-                            "latest_ask": metadata.get("latest_quote_ask"),
-                            "latest_quote_tradable": metadata.get(
-                                "latest_quote_tradable"
-                            ),
-                        },
-                    )
-                    _trace(final_score_block_reason)
-                    return _reject_after_dedup(reason=final_score_block_reason)
-            if missing_components and reason_key == "premium_momentum_squeeze":
-                metadata["shadow_only"] = True
-                metadata["missing_reason"] = (
-                    "premium_squeeze_score_components_not_implemented"
-                )
-            # Missing legacy score components are diagnostic only. Objective
-            # candidate/quote readiness and downstream cost-aware risk remain
-            # fail-closed at their existing owners.
-            resolved_strategy_name = (
-                metadata.get("strategy_name")
-                or metadata.get("strategy")
-                or getattr(signal, "reason", None)
-                or reason_key
-            )
-            quality = score_signal_metadata(
-                metadata,
-                strategy_name=str(resolved_strategy_name or ""),
-            )
-            alpha_score = float(
-                quality.components.get("alpha_score", quality.final_score)
-                or quality.final_score
-            )
-            confidence_score = (
-                alpha_score
-                if bool(quality.components.get("alpha_floor_required"))
-                else quality.final_score
-            )
-            final_confidence = max(0.0, min(1.0, confidence_score / 10.0))
             decision_research_context = self._decision_research_context(
                 metadata=metadata,
-                quality=quality,
-                stage="runner_quality_diagnostic",
+                stage="runner_structural_execution_validation",
+                rejection_reasons=contract_failures or None,
             )
-            self._logger.info(
-                "SIGNAL_SCORE strategy_name=%s threshold=%.2f final=%.2f alpha=%.2f direction=%.2f strategy=%.2f option=%.2f data=%.2f rr=%.2f confidence=%.2f allowed=%s reasons=%s trace_id=%s",
-                str(quality.components.get("strategy_name", "")),
-                float(quality.components.get("threshold", 0.0) or 0.0),
-                quality.final_score,
-                alpha_score,
-                quality.direction_score,
-                quality.strategy_score,
-                quality.option_score,
-                quality.data_score,
-                quality.rr_score,
-                final_confidence,
-                quality.allowed,
-                quality.reasons,
-                trace_id,
-                extra={
-                    "event": "SIGNAL_SCORE",
-                    "symbol": base_symbol,
-                    "trace_id": trace_id,
-                    "allowed": quality.allowed,
-                    "final_score": quality.final_score,
-                    "alpha_score": alpha_score,
-                    "confidence_score": confidence_score,
-                },
-            )
-            if not quality.allowed:
-                rejection_reasons = list(quality.reasons or [])
-                if "context_only_strategy" in rejection_reasons:
-                    quality_reject_reason = "context_only_strategy"
-                elif (
-                    "alpha_below_threshold" in rejection_reasons
-                    and "score_below_threshold" not in rejection_reasons
-                ):
-                    quality_reject_reason = "alpha_below_threshold"
-                elif (
-                    requires_execution_validation
-                    and "score_below_threshold" in rejection_reasons
-                ):
-                    quality_reject_reason = "final_score_below_live_threshold"
-                elif "direction_below_minimum" in rejection_reasons:
-                    quality_reject_reason = "direction_below_minimum"
-                elif "score_below_threshold" in rejection_reasons:
-                    quality_reject_reason = "score_below_threshold"
-                else:
-                    quality_reject_reason = "signal_quality_rejected"
-                threshold = float(quality.components.get("threshold", 0.0) or 0.0)
-                delta = quality.final_score - threshold
+            if contract_failures:
+                rejection_reason = contract_failures[0]
                 self._logger.info(
-                    "SIGNAL_SCORE_REJECTED symbol=%s strategy_name=%s final=%.2f threshold=%.2f delta=%.2f reason=%s reasons=%s components=%s",
+                    "STRUCTURAL_ENTRY_REJECTED symbol=%s strategy=%s side=%s "
+                    "reason=%s failures=%s trace_id=%s",
                     base_symbol,
-                    quality.components.get("strategy_name", ""),
-                    quality.final_score,
-                    threshold,
-                    delta,
-                    quality_reject_reason,
-                    rejection_reasons,
-                    quality.components,
+                    signal_strategy,
+                    current_side,
+                    rejection_reason,
+                    contract_failures,
+                    trace_id,
+                    extra={
+                        "event": "STRUCTURAL_ENTRY_REJECTED",
+                        "symbol": base_symbol,
+                        "strategy": signal_strategy,
+                        "side": current_side,
+                        "reason": rejection_reason,
+                        "failures": contract_failures,
+                        "trace_id": trace_id,
+                        "direction_contract": direction_contract,
+                        "setup_contract": setup_contract,
+                        "confirmation_contract": confirmation_contract,
+                    },
                 )
-                if requires_execution_validation:
-                    self._logger.info(
-                        "TRADE_DECISION_TRACE symbol=%s strategy=%s side=%s allowed=%s blocked_at=%s blocked_reason=%s final_score=%.2f alpha_score=%.2f threshold=%.2f reasons=%s trace_id=%s",
-                        base_symbol,
-                        str(quality.components.get("strategy_name", "")),
-                        infer_option_side(signal.symbol, metadata),
-                        False,
-                        "runner_strategy_role",
-                        quality_reject_reason,
-                        quality.final_score,
-                        alpha_score,
-                        threshold,
-                        rejection_reasons,
-                        trace_id,
-                        extra={
-                            "event": "TRADE_DECISION_TRACE",
-                            "symbol": base_symbol,
-                            "trace_id": trace_id,
-                            "final_score": quality.final_score,
-                            "alpha_score": alpha_score,
-                            "threshold": threshold,
-                            "allowed": False,
-                            "blocked_at": "runner_strategy_role",
-                            "blocked_reason": quality_reject_reason,
-                            "reasons": rejection_reasons,
-                        },
-                    )
                 transition_setup(
-                    SetupStage.QUALITY_REJECTED,
+                    SetupStage.CONTRACT_REJECTED,
                     metadata,
                     strategy=metadata.get("strategy"),
                     symbol=signal.symbol,
-                    side=infer_option_side(signal.symbol, metadata),
-                    reason=quality_reject_reason,
+                    side=current_side,
+                    reason=rejection_reason,
                 )
                 self._signal_reject_cooldown_ts[reject_cooldown_key] = now_epoch
                 self._record_trade_decision_snapshot(
                     symbol=signal.symbol,
-                    direction=infer_option_side(signal.symbol, metadata),
-                    final_reason=quality_reject_reason,
+                    direction=current_side,
+                    final_reason=rejection_reason,
                     selected_candidate=signal.symbol,
                     strategy_allowed=False,
                     risk_allowed=None,
                     order_submitted=False,
                     trace_id=trace_id,
-                    signal_score=quality.final_score,
                     research_context={
                         **(decision_research_context or {}),
-                        "rejection_stage": "runner_strategy_role",
-                        "rejection_reasons": rejection_reasons,
+                        "rejection_stage": "runner_structural_contract",
                     },
                 )
                 return _reject_after_dedup(
-                    reason=quality_reject_reason,
-                    details={
-                        "score": quality.final_score,
-                        "reasons": rejection_reasons,
-                    },
+                    reason=rejection_reason,
+                    details={"failures": contract_failures},
                 )
+
             transition_setup(
                 SetupStage.RUNNER_APPROVED,
                 metadata,
                 strategy=metadata.get("strategy"),
                 symbol=signal.symbol,
-                side=infer_option_side(signal.symbol, metadata),
-                reason="runner_execution_validation",
+                side=current_side,
+                reason="runner_structural_execution_validation",
             )
             self._final_quality_approved_counter = (
                 getattr(self, "_final_quality_approved_counter", 0) + 1
             )
             self._logger.info(
-                "SIGNAL_APPROVED symbol=%s strategy=%s side=%s final_score=%.2f "
-                "alpha_score=%.2f threshold=%.2f approval_path=%s trace_id=%s",
+                "SIGNAL_APPROVED symbol=%s strategy=%s side=%s "
+                "approval_path=%s trace_id=%s",
                 base_symbol,
-                str(quality.components.get("strategy_name", "")),
-                infer_option_side(signal.symbol, metadata),
-                quality.final_score,
-                alpha_score,
-                float(quality.components.get("threshold", 0.0) or 0.0),
+                signal_strategy,
+                current_side,
                 metadata.get("approval_path"),
                 trace_id,
                 extra={
                     "event": "SIGNAL_APPROVED",
                     "symbol": base_symbol,
-                    "strategy": str(quality.components.get("strategy_name", "")),
-                    "side": infer_option_side(signal.symbol, metadata),
-                    "final_score": quality.final_score,
-                    "alpha_score": alpha_score,
-                    "threshold": float(
-                        quality.components.get("threshold", 0.0) or 0.0
-                    ),
+                    "strategy": signal_strategy,
+                    "side": current_side,
                     "approval_path": metadata.get("approval_path"),
+                    "direction_contract": metadata.get("direction_contract"),
+                    "setup_contract": metadata.get("setup_contract"),
+                    "confirmation_contract": metadata.get("confirmation_contract"),
                     "trace_id": trace_id,
-                    "approval_stage": "runner_execution_validation",
+                    "approval_stage": "runner_structural_execution_validation",
                 },
             )
-            # Legacy quality confidence is research telemetry only. Preserve the
-            # strategy's native confidence field; do not let the diagnostic
-            # weighted score silently become an execution/risk input.
-            signal = dataclasses.replace(
-                signal,
-                metadata={
-                    **metadata,
-                    "final_score": quality.final_score,
-                    "signal_quality": quality.components,
-                    "diagnostic_quality_confidence": final_confidence,
-                    "score_admission_role": "diagnostic_only",
-                },
-            )
+            for obsolete_key in (
+                "final_score",
+                "alpha_score",
+                "signal_quality",
+                "strategy_score",
+                "setup_score",
+                "raw_setup_score",
+                "independent_setup_score",
+                "direction_score",
+                "option_score",
+                "data_score",
+                "rr_score",
+                "score_lineage",
+                "score_contract_version",
+                "diagnostic_quality_confidence",
+                "score_admission_role",
+            ):
+                metadata.pop(obsolete_key, None)
+            signal = dataclasses.replace(signal, metadata=dict(metadata))
 
             self._logger.info(
-                "SIGNAL_RECEIVED symbol=%s action=%s qty_lots=%s price=%s sl=%s tp=%s confidence=%.2f reason=%s trace_id=%s",
+                "SIGNAL_RECEIVED symbol=%s action=%s qty_lots=%s price=%s sl=%s tp=%s reason=%s trace_id=%s",
                 signal.symbol,
                 signal.action,
                 signal.quantity,
                 trade_price,
                 signal.stop_loss,
                 signal.take_profit,
-                signal.confidence,
                 signal.reason,
                 trace_id,
             )
@@ -21338,19 +21166,7 @@ class StrategyRunner:
                     "strategy_profile_version": getattr(self, "_build_info", {}).get(
                         "strategy_profile_version", "unknown"
                     ),
-                    "final_score": metadata.get("final_score"),
-                    "signal_quality": (
-                        dict(metadata.get("signal_quality") or {})
-                        if isinstance(metadata.get("signal_quality"), Mapping)
-                        else {}
-                    ),
                     "approval_path": metadata.get("approval_path"),
-                    "score_contract_version": metadata.get("score_contract_version"),
-                    "score_lineage": (
-                        dict(metadata.get("score_lineage") or {})
-                        if isinstance(metadata.get("score_lineage"), Mapping)
-                        else {}
-                    ),
                     "confirming_trigger_strategies": list(
                         metadata.get("confirming_trigger_strategies") or []
                     ),
@@ -21594,11 +21410,6 @@ class StrategyRunner:
                     order_submitted=True,
                     trace_id=trace_id,
                     signal_id=signal.deterministic_id,
-                    signal_score=(
-                        quality.final_score
-                        if quality is not None
-                        else metadata.get("final_score")
-                    ),
                     research_context=(
                         {
                             **decision_research_context,
@@ -21722,7 +21533,6 @@ class StrategyRunner:
                     risk_allowed=False,
                     order_submitted=False,
                     trace_id=trace_id,
-                    signal_score=(quality.final_score if quality is not None else None),
                     research_context=(
                         {
                             **decision_research_context,
