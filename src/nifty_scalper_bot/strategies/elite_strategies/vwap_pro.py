@@ -10,7 +10,7 @@ from typing import Any, Mapping
 from nifty_scalper_bot.strategies.elite_strategies.base_elite import EliteSignal, EliteStrategy
 from nifty_scalper_bot.strategies.elite_strategies.config_models import VWAPProStrategyConfig
 from nifty_scalper_bot.strategies.setup_lifecycle import SetupStage, transition_setup
-from nifty_scalper_bot.strategies.signal_quality import (
+from nifty_scalper_bot.strategies.entry_evidence import (
     canonical_max_spread_pct,
     resolve_signal_domain,
 )
