@@ -4391,6 +4391,27 @@ class StrategyManager(_BaseStrategyManager):
             entry_signals.append((signal, vote))
 
         trigger_votes, context_votes, rejected_setups = partition_votes(entry_signals)
+        if self._is_live_mode():
+            live_orb = [
+                (signal, vote)
+                for signal, vote in trigger_votes
+                if normalize_strategy_name(vote.strategy) == "orb_pro"
+            ]
+            if live_orb:
+                trigger_votes = [
+                    (signal, vote)
+                    for signal, vote in trigger_votes
+                    if normalize_strategy_name(vote.strategy) != "orb_pro"
+                ]
+                rejected_setups.extend(
+                    {
+                        "strategy": vote.strategy,
+                        "score": self._extract_raw_score(vote),
+                        "minimum": None,
+                        "reason": "orb_live_research_only",
+                    }
+                    for _signal, vote in live_orb
+                )
         if rejected_setups and not trigger_votes:
             log_throttled(
                 log,
