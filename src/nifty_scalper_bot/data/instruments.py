@@ -39,7 +39,7 @@ def strike_for_delta(
     atm = atm_strike_for_spot(spot, step)
     candidates = range(atm - 20 * step, atm + 20 * step + step, step)
 
-    def score(strike: int) -> float:
+    def delta_distance(strike: int) -> float:
         greeks = black_scholes_greeks(
             float(spot),
             float(strike),
@@ -52,7 +52,7 @@ def strike_for_delta(
         value = delta if call else abs(delta)
         return abs(value - float(target_delta))
 
-    return int(min(candidates, key=score))
+    return int(min(candidates, key=delta_distance))
 
 
 __all__ = [
