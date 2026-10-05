@@ -4696,9 +4696,11 @@ class StrategyManager(_BaseStrategyManager):
             metadata["strike_distance_from_atm"] = strike_distance_from_atm
             metadata["is_selected_option"] = selected_option
             metadata["selected_ok_reason"] = selected_ok_reason
+            # Score floors are legacy diagnostics only. Admission here is
+            # structural: sufficient producer confidence, correct selected/near-ATM
+            # contract and no authoritative opposite-context veto.
             threshold_passed = bool(
-                weighted_trigger_score >= score_min
-                and best_vote.confidence >= conf_min
+                best_vote.confidence >= conf_min
                 and selected_ok
                 and not vetoed
             )
@@ -4729,7 +4731,7 @@ class StrategyManager(_BaseStrategyManager):
             )
             high_conviction_allowed = bool(
                 not requires_orderflow_confirmation
-                and weighted_trigger_score >= single_high
+                and best_vote.confidence >= conf_min
                 and selected_ok
                 and not vetoed
                 and allow_high_conviction
@@ -4747,160 +4749,9 @@ class StrategyManager(_BaseStrategyManager):
             # Single-vote (no consensus) is riskier, so a lone selected-option scalp
             # must clear a high score floor (default 9.0) on top of the normal gates.
             # This keeps unconfirmed single-vote trades to only the strongest signals.
-            selected_single_min = self._env_float("STRATEGY_SELECTED_OPTION_SINGLE_VOTE_MIN_SCORE", 9.0)
-            if (
-                selected_option_scalp_allowed
-                and weighted_trigger_score < selected_single_min
-            ):
-                selected_option_scalp_allowed = False
-
-            # A trigger plus a fresh, same-side context vote is not an unconfirmed
-            # single vote. OrderFlow remains permanently context-only, but its
-            # validated market-microstructure evidence may confirm an SMC/VWAP
-            # trigger through the existing context-bonus path. Require the actual
-            # selected option, the normal trigger thresholds, a current timestamped
-            # context vote, usable depth/tradable quote, and the same conservative
-            # final-score floor. This is deliberately separate from the 9.0
-            # unconfirmed selected-option floor: confirmed triggers already
-            # require fresh, strong, same-side microstructure evidence and
-            # still pass the downstream mode-specific trade-quality gate.
-            context_confirmed_final_min = self._env_float(
-                "STRATEGY_SINGLE_TRIGGER_CONTEXT_FINAL_MIN",
-                float(mode_profile.get("min_trade_quality", 5.0)),
-            )
-            context_confirm_min_score = self._env_float(
-                "STRATEGY_SINGLE_TRIGGER_CONTEXT_MIN_SCORE", 8.0
-            )
-            context_confirm_min_confidence = self._env_float(
-                "STRATEGY_SINGLE_TRIGGER_CONTEXT_MIN_CONFIDENCE", 0.80
-            )
-            context_confirm_allowed_strategies = {
-                name.strip().lower()
-                for name in str(
-                    os.getenv(
-                        "STRATEGY_SINGLE_TRIGGER_CONTEXT_ALLOWED_STRATEGIES",
-                        "OrderFlow",
-                    )
-                    or "OrderFlow"
-                ).split(",")
-                if name.strip()
-            }
-            qualifying_context_votes: list[StrategyVote] = []
-            for context_vote in same_side_context:
-                context_metadata = dict(context_vote.metadata or {})
-                context_quote_ready = bool(
-                    context_metadata.get("quote_depth_valid")
-                    or context_metadata.get("tradable_quote")
-                )
-                # The context producer owns quote/freshness eligibility.
-                # Do not reconstruct a weaker subset here: a fresh vote timestamp
-                # does not make stale or otherwise non-executable market
-                # microstructure valid confirmation evidence.
-                context_quality_eligible = (
-                    context_metadata.get("context_quality_eligible") is True
-                )
-                if (
-                    context_vote.strategy.strip().lower()
-                    in context_confirm_allowed_strategies
-                    and self._context_vote_is_timestamped(context_vote)
-                    and self._extract_raw_score(context_vote)
-                    >= context_confirm_min_score
-                    and float(context_vote.confidence)
-                    >= context_confirm_min_confidence
-                    and context_quote_ready
-                    and context_quality_eligible
-                ):
-                    qualifying_context_votes.append(context_vote)
-            # A weakly disagreeing underlying source is useful provenance,
-            # not positive confirmation. Preserve the canonical arbitration
-            # result, but do not let microstructure context add conviction
-            # while spot/futures are in transition.
-            confirming_source = str(
-                indicator_map.get("direction_context_confirming_source") or ""
-            ).lower()
-            ambiguous_underlying = (
-                "weak_disagreement" in confirming_source
-                or "weak_transition" in confirming_source
-            )
-            if ambiguous_underlying:
-                qualifying_context_votes = []
-
-            # StrategyManager owns structural/context qualification only. A fresh,
-            # strong, same-side OrderFlow vote may confirm a threshold-passing VWAP
-            # trigger in any regime; Runner remains the sole final numeric alpha/
-            # execution-quality owner. Regime fit is already represented exactly once
-            # in weighted_trigger_score, so a second regime hard block here would
-            # duplicate the same evidence and can strand otherwise valid candidates.
-            confirmed_raw_context_score = _independent_context_total(
-                qualifying_context_votes, self._extract_raw_context_score
-            )
-            confirmed_positive_context = _independent_context_total(
-                qualifying_context_votes, self._extract_context_score
-            )
-            confirmed_context_bonus = min(
-                1.5, 0.45 * confirmed_positive_context
-            )
-            context_confirmed_final_score = max(
-                0.0,
-                min(
-                    10.0,
-                    weighted_trigger_score
-                    + confirmed_context_bonus
-                    - context_penalty,
-                ),
-            )
-            # This score is telemetry only. StrategyManager owns structural/context
-            # qualification; Runner is the sole final numeric quality owner.
-            # Re-applying a final score floor here strands confirmed candidates
-            # before Runner can evaluate the canonical independent-alpha contract.
-            manager_context_score_reference_pass = bool(
-                context_confirmed_final_score >= context_confirmed_final_min
-            )
-            context_confirmed_single_allowed = bool(
-                mode_profile.get("allow_single_vote", True)
-                and best_vote.confidence >= conf_min
-                and selected_option
-                and not vetoed
-                and qualifying_context_votes
-            )
-            if qualifying_context_votes:
-                log.info(
-                    "SINGLE_TRIGGER_CONTEXT_SCORE symbol=%s trigger_strategy=%s "
-                    "weighted_trigger_score=%.3f raw_context_score=%.3f "
-                    "regime_weighted_context_score=%.3f context_bonus=%.3f "
-                    "context_penalty=%.3f final_score=%.3f final_min=%.3f allowed=%s",
-                    symbol_norm,
-                    best_vote.strategy,
-                    weighted_trigger_score,
-                    confirmed_raw_context_score,
-                    confirmed_positive_context,
-                    confirmed_context_bonus,
-                    context_penalty,
-                    context_confirmed_final_score,
-                    context_confirmed_final_min,
-                    context_confirmed_single_allowed,
-                    extra={
-                        "event": "SINGLE_TRIGGER_CONTEXT_SCORE",
-                        "symbol": symbol_norm,
-                        "trigger_strategy": best_vote.strategy,
-                        "weighted_trigger_score": weighted_trigger_score,
-                        "raw_context_score": confirmed_raw_context_score,
-                        "regime_weighted_context_score": confirmed_positive_context,
-                        "context_bonus": confirmed_context_bonus,
-                        "context_penalty": context_penalty,
-                        "final_score": context_confirmed_final_score,
-                        "final_min": context_confirmed_final_min,
-                        "allowed": context_confirmed_single_allowed,
-                        "qualifying_context_strategies": [
-                            vote.strategy for vote in qualifying_context_votes
-                        ],
-                        "qualifying_context_regime_weights": [
-                            float((vote.metadata or {}).get("regime_weight", 1.0) or 1.0)
-                            for vote in qualifying_context_votes
-                        ],
-                    },
-                )
-
+            selected_single_min = self._env_float(
+                "STRATEGY_SELECTED_OPTION_SINGLE_VOTE_MIN_SCORE", 9.0
+            )  # diagnostic only
             scalp_fallback_allowed = bool(
                 not requires_orderflow_confirmation
                 and (
