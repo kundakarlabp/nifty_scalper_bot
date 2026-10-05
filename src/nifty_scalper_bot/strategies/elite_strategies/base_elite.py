@@ -17,7 +17,7 @@ from nifty_scalper_bot.strategies.elite_strategies.config_models import (
 )
 from nifty_scalper_bot.strategies.signal_generator import Signal, Strategy
 from nifty_scalper_bot.strategies.signal_identity import finalize_signal_observability
-from nifty_scalper_bot.strategies.signal_quality import build_trade_quality_evidence
+from nifty_scalper_bot.strategies.entry_evidence import build_execution_evidence
 from nifty_scalper_bot.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
@@ -67,26 +67,6 @@ class EliteSignal:
             "metadata": self.metadata,
             "timestamp": self.timestamp.isoformat(),
         }
-
-
-def _as_confidence_fraction(value: Any) -> float:
-    """Normalise a configured confidence threshold to a 0..1 fraction.
-
-    EliteStrategyConfig.min_confidence is expressed in percent while
-    EliteSignal.confidence is a 0..1 fraction. The previous unconditional
-    ``/ 100.0`` silently disabled the gate for any config already written as a
-    fraction (0.6 became 0.006). Values at or below 1.0 are treated as
-    fractions; anything larger is treated as a percentage.
-    """
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return 0.0
-    if number <= 0.0:
-        return 0.0
-    if number > 1.0:
-        number /= 100.0
-    return min(number, 1.0)
 
 
 class EliteStrategy(Strategy):
@@ -232,25 +212,16 @@ class EliteStrategy(Strategy):
             if elite_signal:
                 self._stamp_setup_anchor(elite_signal, indicators_payload)
                 self._stamp_structural_setup_id(elite_signal, indicators_payload)
-                quality = self._stamp_quality_evidence(elite_signal, indicators_payload)
+                execution_evidence = self._stamp_execution_evidence(
+                    elite_signal, indicators_payload
+                )
                 if (
                     str(os.getenv("EXECUTION_MODE", "SHADOW")).strip().upper()
                     == "LIVE"
-                    and bool(quality.get("quality_spread_observed"))
-                    and not bool(quality.get("quality_spread_pass"))
+                    and bool(execution_evidence.get("spread_observed"))
+                    and execution_evidence.get("spread_ok") is False
                 ):
                     self._no_vote("wide_spread")
-                    return None
-                min_conf = _as_confidence_fraction(self._config.min_confidence)
-                if float(elite_signal.confidence) < min_conf:
-                    self._no_vote("below_strategy_min_confidence")
-                    LOGGER.info(
-                        "Condition met: below strategy min confidence",
-                        extra={
-                            "event": "elite_strategy_below_min_conf",
-                            "strategy": self.name,
-                        },
-                    )
                     return None
                 LOGGER.info(
                     "Condition met: elite signal generated",
@@ -488,10 +459,10 @@ class EliteStrategy(Strategy):
                 metadata["setup_id"] = f"smc:{side}:{reference}"
 
     @staticmethod
-    def _stamp_quality_evidence(
+    def _stamp_execution_evidence(
         elite_signal: EliteSignal, indicators: Mapping[str, Any]
     ) -> dict[str, object]:
-        """Attach the canonical quality contract to every elite trigger vote."""
+        """Attach objective execution evidence to every elite strategy output."""
         metadata = elite_signal.metadata
         side = str(
             metadata.get("contract_side")
@@ -499,7 +470,7 @@ class EliteStrategy(Strategy):
             or metadata.get("side")
             or ""
         ).upper()
-        evidence = build_trade_quality_evidence(indicators, side=side)
+        evidence = build_execution_evidence(indicators, side=side)
         for key, value in evidence.items():
             metadata.setdefault(key, value)
         for key in (
