@@ -270,7 +270,7 @@ def test_summary_uses_post_cost_net_pnl() -> None:
     assert summary.profit_factor == 2.0
 
 
-def test_attribution_readiness_fails_closed_for_missing_component_or_structural_evidence(
+def test_attribution_readiness_fails_closed_for_missing_evidence(
 ) -> None:
     trades = canonicalize_completed_trades(
         [
