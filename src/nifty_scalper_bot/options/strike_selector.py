@@ -679,7 +679,8 @@ class StrikeSelector:
                 return locked
             if move < min_move and age < force_reselect_after:
                 LOGGER.info(
-                    "OPTION_RESELECTION_SKIPPED_SMALL_MOVE move=%.2f age_s=%.1f threshold=%.2f",
+                    "OPTION_RESELECTION_SKIPPED_SMALL_MOVE "
+                    "move=%.2f age_s=%.1f threshold=%.2f",
                     move,
                     age,
                     min_move,
