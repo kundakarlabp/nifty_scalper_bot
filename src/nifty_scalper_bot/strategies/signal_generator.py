@@ -1469,24 +1469,14 @@ class StrategyManager:
                 raw_conf = float(getattr(signal, "confidence", 0.0) or 0.0)
                 normalized_conf = raw_conf / 100.0 if raw_conf > 1.0 else raw_conf
                 preliminary_score = max(0.0, min(10.0, normalized_conf * 10.0))
-                if preliminary_score < 8.5:
-                    self._logger.info(
-                        "STRATEGY_CONSENSUS side=NO_TRADE score=%.2f votes=1 reason=single_vote_low_score",
-                        preliminary_score,
-                        extra={
-                            "event": "STRATEGY_CONSENSUS",
-                            "side": "NO_TRADE",
-                            "score": preliminary_score,
-                            "votes": 1,
-                            "reason": "single_vote_low_score",
-                        },
-                    )
-                    return None
+                # Legacy confidence-derived score is telemetry only. Structural
+                # strategy validity, execution feasibility, economics and risk own
+                # admission; an arbitrary 8.5/10 boundary must not erase a setup.
                 return dataclasses.replace(
                     signal,
                     metadata={
                         **(signal.metadata or {}),
-                        "single_vote_high_conviction": True,
+                        "legacy_preliminary_score": preliminary_score,
                         "preliminary_only": True,
                         "requires_runner_final_score": True,
                     },
