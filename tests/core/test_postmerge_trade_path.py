@@ -400,11 +400,16 @@ def test_manager_quality_reference_is_diagnostic_runner_owns_final_score(
         },
     )
     vwap = _signal_vote("VWAPPro", raw_score=8.5, weighted_score=8.5, confidence=0.90)
-    orb = _signal_vote("ORBPro", raw_score=8.0, weighted_score=8.0, confidence=0.85)
+    independent = _signal_vote(
+        "PremiumMomentum",
+        raw_score=8.0,
+        weighted_score=8.0,
+        confidence=0.85,
+    )
 
     result = manager._combine_strategy_votes(
         symbol=_SYMBOL,
-        signals=[vwap, orb],
+        signals=[vwap, independent],
         indicators=_live_indicators(),
     )
 
