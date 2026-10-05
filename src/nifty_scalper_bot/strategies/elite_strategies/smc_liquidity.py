@@ -948,7 +948,7 @@ class SMCStrategy(EliteStrategy):
                         event["sweep_ts"],
                     ),
                     "preliminary_only": True,
-                    "requires_runner_final_score": True,
+                    "requires_runner_execution_validation": True,
                     "requires_orderflow_confirmation": True,
                     "orderflow_confirmation_owner": "StrategyManager",
                     "raw_setup_score": strategy_score,
