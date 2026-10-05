@@ -154,18 +154,20 @@ def test_two_independent_same_side_triggers_can_confirm(monkeypatch) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     manager = _manager()
     vwap = _signal_evidence("VWAPPro")
-    smc = _signal_evidence("SMC")
+    momentum = _signal_evidence("premium_momentum_squeeze")
 
     result = manager._combine_strategy_votes(
         symbol=_CE,
-        signals=[vwap, smc],
+        signals=[vwap, momentum],
         indicators=_live_indicators("CE"),
     )
 
     assert result is not None
     assert result.metadata["approval_path"] == "aligned_trigger_consensus"
     assert result.metadata["confirmation_contract"]["trigger_consensus"] is True
-    assert result.metadata["confirming_trigger_strategies"] == ["SMC"]
+    assert result.metadata["confirming_trigger_strategies"] == [
+        "premium_momentum_squeeze"
+    ]
 
 
 def test_opposite_trigger_sides_fail_closed(monkeypatch) -> None:
