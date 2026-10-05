@@ -214,10 +214,12 @@ def _research_direction_payload(
     if role == "futures_context" and avg_volume and avg_volume > 0:
         payload["futures_volume_ratio"] = current_volume / avg_volume
 
-    direction, confidence, _reasons = RuntimeStrategyManager._derive_context_direction(  # noqa: SLF001
-        None,
-        payload,
-        role=role,
+    direction, confidence, _reasons = (
+        RuntimeStrategyManager._derive_context_direction(  # noqa: SLF001
+            None,
+            payload,
+            role=role,
+        )
     )
     if direction not in {"CE", "PE"}:
         return payload, None
