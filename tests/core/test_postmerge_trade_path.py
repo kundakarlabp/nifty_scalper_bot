@@ -4,89 +4,86 @@ import time
 
 from nifty_scalper_bot.core.strategy_manager import (
     Signal,
+    StrategyEvidence,
     StrategyManager,
-    StrategyVote,
 )
 from nifty_scalper_bot.data.market_data_manager import MarketDataManager
-from nifty_scalper_bot.strategies.signal_quality import score_signal_metadata
 
-_SYMBOL = "NFO:NIFTY2670724050CE"
+_CE = "NFO:NIFTY2670724050CE"
+_PE = "NFO:NIFTY2670724050PE"
 
 
-def _signal_vote(
+def _signal_evidence(
     strategy: str,
     *,
+    symbol: str = _CE,
     side: str = "CE",
-    raw_score: float,
-    weighted_score: float,
-    confidence: float,
     role: str = "trigger",
-    regime_name: str | None = None,
-) -> tuple[Signal, StrategyVote]:
+    aligned_context: bool = True,
+) -> tuple[Signal, StrategyEvidence]:
     signal = Signal(
         action="BUY",
-        symbol=_SYMBOL,
+        symbol=symbol,
         quantity=65,
-        confidence=confidence,
+        confidence=1.0,
         reason=strategy,
         stop_loss=100.0,
         take_profit=130.0,
         metadata={
             "strategy": strategy,
+            "strategy_name": strategy,
+            "role": role,
+            "side": side,
+            "trade_side": side,
+            "contract_side": side,
+            "setup_pass": role == "trigger",
+            "trigger_conditions_met": role == "trigger",
             "is_selected_option": True,
             "quote_depth_valid": True,
             "tradable_quote": True,
             "spread_pct": 0.2,
+            "required_data_present": True,
+            "stale_data_used": False,
         },
     )
-    metadata = {
-        "role": role,
-        "raw_setup_score": raw_score,
-        "raw_vote_score": raw_score,
-        "regime_weight": weighted_score / raw_score,
-        "regime_weighted_vote_score": weighted_score,
-        "quote_depth_valid": True,
-        "tradable_quote": True,
-        "spread_pct": 0.2,
-    }
-    if regime_name is not None:
-        metadata["regime_name"] = regime_name
-    if role == "trigger" and strategy == "VWAPPro":
-        # Reproduce the 14:20 live-quality shape: 6.83 before independent
-        # trigger confirmation (2.833 setup + 2 direction + 1 freshness +
-        # 1 same-side context).
-        metadata["direction_alignment_score"] = 2.0
+    metadata = dict(signal.metadata)
     if role == "context":
         metadata.update(
             {
-                "context_bonus_score": 2.0,
-                "vote_timestamp": time.time(),
-                # This helper models valid live OrderFlow context.  The
-                # producer-owned eligibility bit is part of that contract.
-                "context_quality_eligible": True,
+                "setup_pass": True,
                 "trigger_conditions_met": False,
                 "trigger_block_reason": "context_only_role",
+                "context_quality_eligible": True,
+                "effective_context_alignment": aligned_context,
+                "effective_context_conflict": not aligned_context,
+                "vote_timestamp": time.time(),
             }
         )
-    vote = StrategyVote(
+    evidence = StrategyEvidence(
         strategy=strategy,
         side=side,
-        score=weighted_score,
-        confidence=confidence,
-        reasons=[],
+        reasons=["fixture"],
         metadata=metadata,
     )
-    return signal, vote
+    return signal, evidence
 
 
-def _live_indicators() -> dict[str, object]:
+def _live_indicators(
+    direction: str = "CE", *, transition: bool = False
+) -> dict[str, object]:
     return {
-        "direction_bias": "CE",
-        "underlying_direction_bias": "CE",
-        "underlying_direction_confidence": 0.70,
+        "direction_bias": direction,
+        "underlying_direction_bias": direction,
+        "underlying_direction_state": (
+            "TRANSITION"
+            if transition
+            else ("CONFIRMED_BULL" if direction == "CE" else "CONFIRMED_BEAR")
+        ),
         "context_fresh": True,
         "context_age_seconds": 0.1,
-        "selected_ce": _SYMBOL,
+        "direction_context_source": "spot_futures_agree",
+        "selected_ce": _CE,
+        "selected_pe": _PE,
         "is_selected_option": True,
         "quote_depth_valid": True,
         "tradable_quote": True,
@@ -95,206 +92,101 @@ def _live_indicators() -> dict[str, object]:
     }
 
 
-def test_aligned_independent_trigger_can_clear_unchanged_live_quality_floor(
-    monkeypatch,
-) -> None:
-    """A second independent trigger is bounded evidence, not a lower floor."""
-    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
-    monkeypatch.setenv("ENABLE_LIVE", "true")
+def _manager() -> StrategyManager:
     manager = StrategyManager.__new__(StrategyManager)
     manager._last_no_signal_decision_by_symbol = {}
-
-    vwap = _signal_vote("VWAPPro", raw_score=8.5, weighted_score=6.8, confidence=0.85)
-    independent = _signal_vote(
-        "PremiumMomentum",
-        raw_score=7.0,
-        weighted_score=5.6,
-        confidence=0.70,
-    )
-    orderflow = _signal_vote(
-        "OrderFlow",
-        raw_score=8.0,
-        weighted_score=8.0,
-        confidence=0.80,
-        role="context",
-    )
-
-    result = manager._combine_strategy_votes(
-        symbol=_SYMBOL,
-        signals=[vwap, independent, orderflow],
-        indicators=_live_indicators(),
-    )
-
-    assert result is not None
-    assert result.metadata["quality_min_required"] == 7.0
-    assert (
-        result.metadata["trade_quality_components"]["independent_trigger_confirmation"]
-        == 0.5
-    )
-    assert result.metadata["trade_quality_score"] >= 7.0
-    assert result.metadata["approval_path"] == "aligned_two_trigger_consensus"
-    assert result.metadata["score_contract_version"] == 1
-    assert result.metadata["confirming_trigger_strategies"] == [
-        "VWAPPro",
-        "PremiumMomentum",
-    ]
-    assert result.metadata["context_confirmation_strategies"] == ["OrderFlow"]
-    assert result.metadata["confirming_votes"] == ["VWAPPro", "PremiumMomentum"]
-    lineage = result.metadata["score_lineage"]
-    assert lineage["raw_setup_score"] == 8.5
-    assert lineage["regime_adjusted_setup_score"] == 6.8
-    assert lineage["score_admission_role"] == "diagnostic_only"
+    return manager
 
 
-def test_opposite_trigger_does_not_receive_quality_confirmation(monkeypatch) -> None:
+def test_countertrend_pe_is_blocked_during_confirmed_bull(monkeypatch) -> None:
+    """Regression for the 2026-10-05 losing PE-in-uptrend failure mode."""
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
-    monkeypatch.setenv("ENABLE_LIVE", "true")
-    manager = StrategyManager.__new__(StrategyManager)
-    manager._last_no_signal_decision_by_symbol = {}
-
-    vwap = _signal_vote("VWAPPro", raw_score=8.5, weighted_score=6.8, confidence=0.85)
-    opposite_independent = _signal_vote(
-        "PremiumMomentum",
-        side="PE",
-        raw_score=7.0,
-        weighted_score=5.6,
-        confidence=0.70,
-    )
-    orderflow = _signal_vote(
-        "OrderFlow",
-        raw_score=8.0,
-        weighted_score=8.0,
-        confidence=0.80,
-        role="context",
-    )
+    manager = _manager()
+    pe_trigger = _signal_evidence("VWAPPro", symbol=_PE, side="PE")
 
     result = manager._combine_strategy_votes(
-        symbol=_SYMBOL,
-        signals=[vwap, opposite_independent, orderflow],
-        indicators=_live_indicators(),
+        symbol=_PE,
+        signals=[pe_trigger],
+        indicators=_live_indicators("CE"),
     )
 
     assert result is None
-    decision = manager._last_no_signal_decision_by_symbol[_SYMBOL]
-    assert decision.blocked_at == "trigger_direction_gate"
-    assert decision.reason == "conflicting_trigger_direction"
+    decision = manager._last_no_signal_decision_by_symbol[_PE]
+    assert decision.reason == "countertrend_requires_structural_reversal_contract"
+    assert decision.blocked_at == "direction_contract"
 
 
-def _trend_vwap_context_candidate(
-    manager: StrategyManager,
-    *,
-    direction_score: float,
-    independent_setup_score: float,
-    regime_name: str = "TREND",
-) -> Signal:
-    vwap = _signal_vote(
-        "VWAPPro",
-        raw_score=8.0,
-        weighted_score=6.4,
-        confidence=0.80,
-        regime_name=regime_name,
-    )
-    vwap[0].metadata.update(
-        {
-            "strategy_name": "VWAPPro",
-            "direction_score": direction_score,
-            "strategy_score": 8.0,
-            "independent_setup_score": independent_setup_score,
-            "option_score": 9.0,
-            "data_score": 9.0,
-            "rr_score": 9.0,
-        }
-    )
-    orderflow = _signal_vote(
-        "OrderFlow",
-        raw_score=8.0,
-        weighted_score=8.0,
-        confidence=0.80,
-        role="context",
-    )
+def test_direction_transition_blocks_new_entry(monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    manager = _manager()
+    ce_trigger = _signal_evidence("VWAPPro")
+
     result = manager._combine_strategy_votes(
-        symbol=_SYMBOL,
-        signals=[vwap, orderflow],
-        indicators=_live_indicators(),
+        symbol=_CE,
+        signals=[ce_trigger],
+        indicators=_live_indicators("CE", transition=True),
     )
+
+    assert result is None
+    decision = manager._last_no_signal_decision_by_symbol[_CE]
+    assert decision.reason == "underlying_direction_transition"
+
+
+def test_single_trigger_requires_fresh_independent_context(monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    manager = _manager()
+    trigger = _signal_evidence("VWAPPro")
+    context = _signal_evidence("OrderFlow", role="context")
+
+    result = manager._combine_strategy_votes(
+        symbol=_CE,
+        signals=[trigger, context],
+        indicators=_live_indicators("CE"),
+    )
+
     assert result is not None
     assert result.metadata["approval_path"] == "single_trigger_context_confirmed"
-    return result
+    assert result.metadata["direction_contract"]["passed"] is True
+    assert result.metadata["setup_contract"]["passed"] is True
+    assert result.metadata["confirmation_contract"]["passed"] is True
+    assert result.metadata["context_confirmation_strategies"] == ["OrderFlow"]
 
 
-def test_context_confirmed_trend_vwap_keeps_weak_alpha_as_diagnostic_only(
-    monkeypatch,
-) -> None:
-    """Legacy VWAP alpha floor remains observable but no longer vetoes capital."""
+def test_two_independent_same_side_triggers_can_confirm(monkeypatch) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
-    monkeypatch.setenv("ENABLE_LIVE", "true")
-    manager = StrategyManager.__new__(StrategyManager)
-    manager._last_no_signal_decision_by_symbol = {}
-    manager._compute_trade_quality_score = lambda *args, **kwargs: (10.0, {})
+    manager = _manager()
+    vwap = _signal_evidence("VWAPPro")
+    momentum = _signal_evidence("premium_momentum_squeeze")
 
-    candidate = _trend_vwap_context_candidate(
-        manager,
-        direction_score=8.0,
-        independent_setup_score=6.0,
-    )
-    quality = score_signal_metadata(
-        candidate.metadata,
-        strategy_name="VWAPPro",
+    result = manager._combine_strategy_votes(
+        symbol=_CE,
+        signals=[vwap, momentum],
+        indicators=_live_indicators("CE"),
     )
 
-    assert quality.final_score >= quality.components["threshold"]
-    assert quality.components["alpha_score"] < quality.components["threshold"]
-    assert quality.allowed is True
-    assert "alpha_below_threshold" in quality.reasons
+    assert result is not None
+    assert result.metadata["approval_path"] == "aligned_trigger_consensus"
+    assert result.metadata["confirmation_contract"]["trigger_consensus"] is True
+    assert result.metadata["confirming_trigger_strategies"] == [
+        "premium_momentum_squeeze"
+    ]
 
 
-def test_range_vwap_context_keeps_weak_alpha_as_diagnostic_only(
-    monkeypatch,
-) -> None:
-    """RANGE context routes normally; the legacy alpha threshold is diagnostic only."""
+def test_opposite_trigger_sides_fail_closed(monkeypatch) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
-    monkeypatch.setenv("ENABLE_LIVE", "true")
-    manager = StrategyManager.__new__(StrategyManager)
-    manager._last_no_signal_decision_by_symbol = {}
-    manager._compute_trade_quality_score = lambda *args, **kwargs: (10.0, {})
+    manager = _manager()
+    ce = _signal_evidence("VWAPPro")
+    pe = _signal_evidence("SMC", symbol=_PE, side="PE")
 
-    candidate = _trend_vwap_context_candidate(
-        manager,
-        direction_score=8.0,
-        independent_setup_score=6.0,
-        regime_name="RANGE",
-    )
-    quality = score_signal_metadata(candidate.metadata, strategy_name="VWAPPro")
-
-    assert candidate.metadata["regime_weight"] == 0.8
-    assert candidate.metadata["quality_reference_role"] == "diagnostic_only"
-    assert quality.components["alpha_score"] < quality.components["threshold"]
-    assert quality.allowed is True
-    assert "alpha_below_threshold" in quality.reasons
-
-
-def test_context_confirmed_trend_vwap_can_clear_runner_with_strong_independent_alpha(
-    monkeypatch,
-) -> None:
-    """The permitted TREND path reaches Runner without weakening quality."""
-    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
-    monkeypatch.setenv("ENABLE_LIVE", "true")
-    manager = StrategyManager.__new__(StrategyManager)
-    manager._last_no_signal_decision_by_symbol = {}
-    manager._compute_trade_quality_score = lambda *args, **kwargs: (10.0, {})
-
-    candidate = _trend_vwap_context_candidate(
-        manager,
-        direction_score=9.5,
-        independent_setup_score=6.0,
-    )
-    quality = score_signal_metadata(
-        candidate.metadata,
-        strategy_name="VWAPPro",
+    result = manager._combine_strategy_votes(
+        symbol=_CE,
+        signals=[ce, pe],
+        indicators=_live_indicators("CE"),
     )
 
-    assert quality.components["alpha_score"] >= quality.components["threshold"]
-    assert quality.allowed is True
+    assert result is None
+    decision = manager._last_no_signal_decision_by_symbol[_CE]
+    assert decision.reason == "trigger_side_conflict"
 
 
 def _wired_mdm() -> tuple[MarketDataManager, str, str]:
@@ -340,7 +232,6 @@ def _stale_pending(symbol: str, bucket: str) -> dict[str, object]:
 
 
 def test_stale_nonselected_near_atm_context_does_not_disarm_entry() -> None:
-    """Optional context keeps full ticks/OHLC but its age alone cannot block entry."""
     mdm, _selected, near_context = _wired_mdm()
     tick = _stale_pending(near_context, "near_atm")
     with mdm._pending_tick_lock:
@@ -348,7 +239,6 @@ def test_stale_nonselected_near_atm_context_does_not_disarm_entry() -> None:
         mdm._pending_tick_count = 1
         mdm._pending_heap_push_locked(tick, near_context)
         mdm._update_pipeline_overload_locked()
-
     assert mdm.pipeline_overloaded is False
 
 
@@ -360,7 +250,6 @@ def test_stale_selected_option_remains_age_critical() -> None:
         mdm._pending_tick_count = 1
         mdm._pending_heap_push_locked(tick, selected)
         mdm._update_pipeline_overload_locked()
-
     assert mdm.pipeline_overloaded is True
 
 
@@ -377,143 +266,4 @@ def test_unknown_normal_queue_remains_fail_closed() -> None:
         mdm._pending_tick_count = 1
         mdm._pending_heap_push_locked(tick, unknown)
         mdm._update_pipeline_overload_locked()
-
     assert mdm.pipeline_overloaded is True
-
-
-def test_manager_quality_reference_is_diagnostic_runner_owns_final_score(
-    monkeypatch,
-) -> None:
-    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
-    monkeypatch.setenv("ENABLE_LIVE", "true")
-    manager = StrategyManager.__new__(StrategyManager)
-    manager._last_no_signal_decision_by_symbol = {}
-    manager._compute_trade_quality_score = lambda *args, **kwargs: (
-        3.0,
-        {
-            "trade_quality_score": 3.0,
-            "trade_quality_components": {},
-            "trade_quality_penalties": {},
-            "quality_block_reason": "ok",
-            "already_blocked_by_strategy": False,
-            "strategy_block_reason": None,
-        },
-    )
-    vwap = _signal_vote("VWAPPro", raw_score=8.5, weighted_score=8.5, confidence=0.90)
-    independent = _signal_vote(
-        "PremiumMomentum",
-        raw_score=8.0,
-        weighted_score=8.0,
-        confidence=0.85,
-    )
-
-    result = manager._combine_strategy_votes(
-        symbol=_SYMBOL,
-        signals=[vwap, independent],
-        indicators=_live_indicators(),
-    )
-
-    assert result is not None
-    assert result.metadata["quality_reference_above_min"] is False
-    assert result.metadata["manager_quality_reference_only"] is True
-    assert result.metadata["quality_reference_role"] == "diagnostic_only"
-
-
-def test_structural_strategy_invalid_state_remains_a_hard_block(monkeypatch) -> None:
-    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
-    monkeypatch.setenv("ENABLE_LIVE", "true")
-    manager = StrategyManager.__new__(StrategyManager)
-    manager._last_no_signal_decision_by_symbol = {}
-    manager._compute_trade_quality_score = lambda *args, **kwargs: (
-        9.0,
-        {
-            "trade_quality_score": 9.0,
-            "trade_quality_components": {},
-            "trade_quality_penalties": {},
-            "quality_block_reason": "quote_depth_invalid",
-            "already_blocked_by_strategy": True,
-            "strategy_block_reason": None,
-        },
-    )
-    vwap = _signal_vote("VWAPPro", raw_score=8.5, weighted_score=8.5, confidence=0.90)
-    independent = _signal_vote(
-        "PremiumMomentum",
-        raw_score=8.0,
-        weighted_score=8.0,
-        confidence=0.85,
-    )
-
-    result = manager._combine_strategy_votes(
-        symbol=_SYMBOL,
-        signals=[vwap, independent],
-        indicators=_live_indicators(),
-    )
-
-    assert result is None
-    decision = manager._last_no_signal_decision_by_symbol[_SYMBOL]
-    assert decision.blocked_at == "strategy_explicit_block"
-
-
-def test_manager_final_trade_score_is_reference_only_runner_owns_numeric_quality(
-    monkeypatch,
-) -> None:
-    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
-    monkeypatch.setenv("ENABLE_LIVE", "true")
-    monkeypatch.setenv("STRATEGY_TRIGGER_MIN_SCORE", "4.5")
-    manager = StrategyManager.__new__(StrategyManager)
-    manager._last_no_signal_decision_by_symbol = {}
-
-    vwap = _signal_vote("VWAPPro", raw_score=8.5, weighted_score=5.5, confidence=0.90)
-    independent = _signal_vote(
-        "PremiumMomentum",
-        raw_score=8.0,
-        weighted_score=5.0,
-        confidence=0.85,
-    )
-    opposing_context = _signal_vote(
-        "OrderFlow",
-        side="PE",
-        raw_score=3.0,
-        weighted_score=3.0,
-        confidence=0.70,
-        role="context",
-    )
-    opposing_context[1].metadata["context_veto_score"] = 3.0
-
-    result = manager._combine_strategy_votes(
-        symbol=_SYMBOL,
-        signals=[vwap, independent, opposing_context],
-        indicators=_live_indicators(),
-    )
-
-    assert result is not None
-    assert result.metadata["final_trade_score"] < 4.5
-    assert result.metadata["manager_final_score_reference_only"] is True
-    assert result.metadata["manager_final_score_reference_above_min"] is False
-    assert result.metadata["quality_reference_role"] == "diagnostic_only"
-
-
-def test_no_signal_preserves_underlying_transition_root_cause() -> None:
-    """Fresh spot/futures disagreement is context transition, not alpha failure."""
-    cause = StrategyManager._canonical_no_signal_root_cause(
-        {
-            "direction_transition": True,
-            "direction_resolution_reason": "fresh_spot_futures_disagreement",
-        }
-    )
-    assert cause == (
-        "context_direction_transition",
-        "underlying_direction_transition",
-    )
-
-
-def test_no_signal_root_cause_does_not_relabel_ordinary_no_trigger() -> None:
-    assert (
-        StrategyManager._canonical_no_signal_root_cause(
-            {
-                "direction_transition": False,
-                "direction_resolution_reason": "spot_futures_agree",
-            }
-        )
-        is None
-    )

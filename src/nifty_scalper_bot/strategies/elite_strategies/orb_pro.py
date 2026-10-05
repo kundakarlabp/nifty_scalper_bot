@@ -373,7 +373,7 @@ class ORBProStrategy(EliteStrategy):
             return "PE"
         return ""
 
-    def _quality_score(
+    def _structural_evidence(
         self,
         *,
         side: str,
@@ -382,54 +382,44 @@ class ORBProStrategy(EliteStrategy):
         volume_ratio: float,
         opening_range_atr: float,
         indicators: Mapping[str, Any],
-    ) -> tuple[float, list[str], float, list[str], bool, float, float]:
-        """Score ORB trigger quality and native setup quality independently."""
-        score = 5.0
-        independent_setup_score = 5.0
+    ) -> tuple[bool, list[str], bool, float, float]:
+        """Return explicit ORB structural setup evidence."""
         reasons = [
             "underlying_opening_range_complete",
             "fresh_underlying_breakout",
             "breakout_event_confirmed",
         ]
-        independent_setup_reasons = list(reasons)
-        if direction == side:
-            score += 1.0
+        direction_aligned = direction == side
+        if direction_aligned:
             reasons.append("underlying_direction_alignment")
-        if volume_ratio >= _env_float("ORB_VOLUME_CONFIRM_RATIO", 1.2):
-            score += 1.0
-            independent_setup_score += 1.0
+        volume_confirmed = volume_ratio >= _env_float("ORB_VOLUME_CONFIRM_RATIO", 1.2)
+        if volume_confirmed:
             reasons.append("underlying_volume_confirmation")
-            independent_setup_reasons.append("underlying_volume_confirmation")
-        if penetration_atr >= _env_float("ORB_PENETRATION_CONFIRM_ATR", 0.2):
-            score += 1.0
-            independent_setup_score += 1.0
+        penetration_confirmed = penetration_atr >= _env_float(
+            "ORB_PENETRATION_CONFIRM_ATR", 0.2
+        )
+        if penetration_confirmed:
             reasons.append("normalized_breakout_penetration")
-            independent_setup_reasons.append("normalized_breakout_penetration")
         slope = _safe_float(indicators.get("futures_vwap_slope"))
-        if slope is not None and (
-            (side == "CE" and slope > 0) or (side == "PE" and slope < 0)
-        ):
-            score += 1.0
+        slope_aligned = bool(
+            slope is not None
+            and ((side == "CE" and slope > 0) or (side == "PE" and slope < 0))
+        )
+        if slope_aligned:
             reasons.append("futures_vwap_slope_alignment")
         balanced_min = max(0.05, _env_float("ORB_BALANCED_RANGE_MIN_ATR", 0.25))
-        balanced_max = max(
-            balanced_min, _env_float("ORB_BALANCED_RANGE_MAX_ATR", 1.75)
-        )
+        balanced_max = max(balanced_min, _env_float("ORB_BALANCED_RANGE_MAX_ATR", 2.0))
         balanced_range = balanced_min <= opening_range_atr <= balanced_max
         if balanced_range:
-            score += 1.0
-            independent_setup_score += 1.0
             reasons.append("balanced_opening_range")
-            independent_setup_reasons.append("balanced_opening_range")
-        return (
-            max(0.0, min(10.0, score)),
-            reasons,
-            max(0.0, min(10.0, independent_setup_score)),
-            independent_setup_reasons,
-            balanced_range,
-            balanced_min,
-            balanced_max,
+        passed = bool(
+            direction_aligned
+            and volume_confirmed
+            and penetration_confirmed
+            and balanced_range
+            and slope_aligned
         )
+        return passed, reasons, balanced_range, balanced_min, balanced_max
 
     def _build_signal(
         self,
@@ -484,14 +474,12 @@ class ORBProStrategy(EliteStrategy):
             or ""
         ).upper()
         (
-            strategy_score,
+            setup_pass,
             reasons,
-            independent_setup_score,
-            independent_setup_reasons,
             balanced_range,
             balanced_min,
             balanced_max,
-        ) = self._quality_score(
+        ) = self._structural_evidence(
             side=side,
             direction=direction,
             penetration_atr=penetration_atr,
@@ -500,22 +488,13 @@ class ORBProStrategy(EliteStrategy):
             indicators=indicators,
         )
         reasons.append("retest_hold" if branch == "retest" else "momentum_acceptance")
-        underlying_direction_confidence = max(
-            0.0,
-            min(
-                1.0,
-                _safe_float(indicators.get("underlying_direction_confidence")) or 0.0,
-            ),
-        )
         context_fresh = indicators.get("context_fresh") is not False
-        direction_score = (
-            round(10.0 * underlying_direction_confidence, 3)
-            if direction == side and context_fresh
-            else 0.0
-        )
-        min_score = _env_float("ORB_QUALITY_MIN_SCORE_SHADOW", 5.0)
-        if strategy_score < min_score:
-            self._no_vote("orb_quality_below_minimum")
+        if not setup_pass or not context_fresh:
+            self._no_vote(
+                "orb_structural_contract_not_passed"
+                if not setup_pass
+                else "underlying_context_stale"
+            )
             return None
 
         breakout_ts = event["breakout_timestamp"]
@@ -570,19 +549,9 @@ class ORBProStrategy(EliteStrategy):
             "underlying_invalidation": underlying_invalidation,
             "premium_stop_distance": premium_stop_distance,
             "premium_target_rr": target_rr,
-            "raw_setup_score": strategy_score,
-            "setup_score": strategy_score,
-            "setup_min": min_score,
             "setup_pass": True,
-            "direction_score": direction_score,
-            "strategy_score": strategy_score,
-            "independent_setup_score": round(independent_setup_score, 3),
-            "independent_setup_reasons": independent_setup_reasons,
-            "underlying_direction_confidence": underlying_direction_confidence,
+            "setup_reasons": reasons,
             "context_fresh": context_fresh,
-            "setup_quality": strategy_score,
-            "confidence_semantics": "setup_quality_fraction_not_probability",
-            "score_reasons": reasons,
             "required_data_present": True,
             "stale_data_used": bool(indicators.get("stale_data_used")),
             "direction_bias": side,
@@ -595,11 +564,10 @@ class ORBProStrategy(EliteStrategy):
             "rejection_reasons": [],
         }
         LOGGER.info(
-            "STRATEGY_VOTE strategy=ORBProV2 side=%s branch=%s score=%.2f "
+            "STRATEGY_EVIDENCE strategy=ORBProV2 side=%s branch=%s "
             "source=%s underlying=%s opening_range_atr=%.3f",
             side,
             branch,
-            strategy_score,
             source,
             snapshot["symbol"],
             opening_range_atr,
@@ -607,7 +575,7 @@ class ORBProStrategy(EliteStrategy):
         return EliteSignal(
             symbol=symbol,
             signal="BUY",
-            confidence=max(0.1, min(0.9, strategy_score / 10.0)),
+            confidence=1.0,
             entry_price=current_price,
             stop_loss=stop_loss,
             target=target,
@@ -687,7 +655,7 @@ class ORBProStrategy(EliteStrategy):
         if event is not None and event.get("status") in {
             "INVALIDATED",
             "EXPIRED",
-            "QUALITY_REJECTED",
+            "CONTRACT_REJECTED",
         }:
             back_inside = (
                 current_close <= orb_high if side == "CE" else current_close >= orb_low
@@ -785,14 +753,14 @@ class ORBProStrategy(EliteStrategy):
                     retest_timestamp=None,
                 )
                 if signal is None:
-                    event["status"] = "QUALITY_REJECTED"
+                    event["status"] = "CONTRACT_REJECTED"
                     transition_setup(
-                        SetupStage.QUALITY_REJECTED,
+                        SetupStage.CONTRACT_REJECTED,
                         strategy="ORBPro",
                         setup_id=setup_id,
                         symbol=symbol,
                         side=side,
-                        reason="orb_quality_below_minimum",
+                        reason="orb_structural_contract_rejected",
                     )
                     return None
                 event["status"] = "EMITTED"
@@ -872,9 +840,9 @@ class ORBProStrategy(EliteStrategy):
             retest_timestamp=current_ts,
         )
         if signal is None:
-            event["status"] = "QUALITY_REJECTED"
+            event["status"] = "CONTRACT_REJECTED"
             transition_setup(
-                SetupStage.QUALITY_REJECTED,
+                SetupStage.CONTRACT_REJECTED,
                 strategy="ORBPro",
                 setup_id=(
                     f"orbv2:{snapshot['session_date']}:{snapshot['symbol']}:{side}:"
@@ -882,7 +850,7 @@ class ORBProStrategy(EliteStrategy):
                 ),
                 symbol=symbol,
                 side=side,
-                reason="orb_quality_below_minimum",
+                reason="orb_structural_contract_rejected",
             )
             return None
         event["status"] = "EMITTED"

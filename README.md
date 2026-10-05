@@ -636,16 +636,12 @@ StrategyRunner → OrderManager → BracketManager
 - OrderManager owns entry order placement to broker/paper execution.
 - BracketManager owns SL/TP/trailing/EOD virtual bracket exits.
 
-## Paper/Shadow single-vote tuning (optional)
-For paper or shadow validation only (keep live defaults conservative):
+## Structural entry contract
 
-```env
-STRATEGY_ALLOW_SINGLE_VOTE_SCALP=true
-STRATEGY_SINGLE_VOTE_VWAP_MIN_SCORE=5.5
-STRATEGY_SINGLE_VOTE_VWAP_MIN_CONFIDENCE=0.45
-```
-
-Live defaults remain stricter (`STRATEGY_ALLOW_SINGLE_VOTE_SCALP=false`, `STRATEGY_SINGLE_VOTE_VWAP_MIN_SCORE=5.8`).
+New long-option entries are admitted only when direction, strategy setup,
+independent confirmation, executable quote/economics, and risk checks all pass.
+Context-only strategies may confirm a trigger but cannot create one, and a
+counter-trend contract fails closed unless an explicit reversal contract exists.
 
 ## Startup Hydration Sequence
 

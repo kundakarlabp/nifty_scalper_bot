@@ -7,7 +7,9 @@ from nifty_scalper_bot.core.boot_log_safety import BootLogRateControl
 from nifty_scalper_bot.utils.log_throttle import event_is_never_throttled
 
 
-def _record(event: str, *, level: int = logging.INFO, **extra: object) -> logging.LogRecord:
+def _record(
+    event: str, *, level: int = logging.INFO, **extra: object
+) -> logging.LogRecord:
     record = logging.LogRecord(
         name="nifty_scalper_bot.core.app",
         level=level,
@@ -81,7 +83,6 @@ def test_context_only_and_no_combined_diagnostics_are_debug_only() -> None:
     for event in (
         "strategy_manager_no_combined_signal",
         "PERMANENT_CONTEXT_ONLY_PROMOTION_BLOCKED",
-        "ORDERFLOW_TRIGGER_SCORE",
         "POSITION_RECONCILE_COALESCED",
     ):
         record = _record(event)
@@ -104,12 +105,16 @@ def test_trade_and_safety_events_remain_unthrottled() -> None:
 
 
 def test_context_direction_logging_is_state_based() -> None:
-    source = Path("src/nifty_scalper_bot/core/strategy_manager.py").read_text(encoding="utf-8")
+    source = Path("src/nifty_scalper_bot/core/strategy_manager.py").read_text(
+        encoding="utf-8"
+    )
     assert "CONTEXT_DIRECTION_STATE" in source
     assert "context_direction_state:{role}:{symbol}" in source
     assert "CONTEXT_DIRECTION_UNAVAILABLE role=%s symbol=%s" not in source
 
 
 def test_throttle_summary_default_is_five_minutes() -> None:
-    source = Path("src/nifty_scalper_bot/utils/log_throttle.py").read_text(encoding="utf-8")
+    source = Path("src/nifty_scalper_bot/utils/log_throttle.py").read_text(
+        encoding="utf-8"
+    )
     assert 'LOG_THROTTLE_SUMMARY_SECONDS", "300"' in source

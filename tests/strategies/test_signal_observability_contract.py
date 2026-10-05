@@ -22,7 +22,7 @@ from nifty_scalper_bot.strategies.signal_identity import (
 
 class _ObservableStrategy(EliteStrategy):
     def __init__(self) -> None:
-        super().__init__(EliteStrategyConfig(min_confidence=0.0), SimpleNamespace())
+        super().__init__(EliteStrategyConfig(), SimpleNamespace())
 
     def get_required_indicators(self) -> list[str]:
         return []
@@ -48,7 +48,7 @@ class _ObservableStrategy(EliteStrategy):
                 "strategy_name": "Observable",
                 "role": "trigger",
                 "contract_side": "CE",
-                "raw_setup_score": 8.0,
+                "setup_pass": True,
                 "setup_id": "observable:ce:1",
                 "latest_bar_ts": indicators["latest_bar_ts"],
             },
@@ -98,7 +98,6 @@ def test_elite_signal_log_contains_structural_identity(caplog) -> None:
     assert record.strategy == "Observable"
     assert record.symbol == "NFO:NIFTY2680724500CE"
     assert record.side == "CE"
-    assert record.raw_setup_score == 8.0
     assert record.setup_id == "observable:ce:1"
     assert record.quote_update_version == 7
     assert (
@@ -274,6 +273,6 @@ def test_manager_qualification_and_runner_approval_events_are_not_conflated() ->
 
     manager_source = inspect.getsource(StrategyManager)
     runner_source = inspect.getsource(StrategyRunner)
-    assert "STRATEGY_CANDIDATE_QUALIFIED" in manager_source
+    assert "STRUCTURAL_CANDIDATE_QUALIFIED" in manager_source
     assert '"event": "SIGNAL_APPROVED"' not in manager_source
     assert '"event": "SIGNAL_APPROVED"' in runner_source

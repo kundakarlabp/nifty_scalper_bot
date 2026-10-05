@@ -10,7 +10,7 @@ from typing import Any, Mapping
 from nifty_scalper_bot.strategies.elite_strategies.base_elite import EliteSignal, EliteStrategy
 from nifty_scalper_bot.strategies.elite_strategies.config_models import VWAPProStrategyConfig
 from nifty_scalper_bot.strategies.setup_lifecycle import SetupStage, transition_setup
-from nifty_scalper_bot.strategies.signal_quality import (
+from nifty_scalper_bot.strategies.entry_evidence import (
     canonical_max_spread_pct,
     resolve_signal_domain,
 )
@@ -75,7 +75,7 @@ def _resolve_session_token(indicators: dict[str, Any], bar_anchor: Any) -> str:
 
 
 class VWAPProStrategy(EliteStrategy):
-    """VWAP continuation/pullback strategy emitting scored strategy votes."""
+    """VWAP continuation/pullback strategy emitting structural entry evidence."""
 
     MIN_BARS_REQUIRED = 10
     ROLE = "trigger"
@@ -167,7 +167,7 @@ class VWAPProStrategy(EliteStrategy):
         Only completed bars belonging to the executable option contract and the
         current trading session are considered. This restores state that was
         already observable before process restart; it does not create a new
-        trigger, lower a score threshold, or borrow state from another strike.
+        trigger, relax a structural prerequisite, or borrow state from another strike.
         """
         if session_scope == "unknown" or vwap <= 0:
             return None
@@ -430,7 +430,6 @@ class VWAPProStrategy(EliteStrategy):
                 return None
 
             reasons: list[str] = []
-            conflict_penalty_applied = 0.0
             contract_side, option_premium_domain, _ = resolve_signal_domain(
                 symbol, indicators
             )
@@ -525,18 +524,8 @@ class VWAPProStrategy(EliteStrategy):
             require_alignment_shadow = str(
                 os.getenv("VWAP_PRO_REQUIRE_UNDERLYING_ALIGNMENT_SHADOW", "false")
             ).lower() in {"1", "true", "yes", "on"}
-            min_score_default = "5.8" if is_live else "5.0"
-            min_trend_score_default = "5.5" if is_live else "4.5"
-            min_score = float(
-                os.getenv("VWAP_PRO_MIN_TREND_ALIGNED_SCORE", min_trend_score_default)
-                if trend_alignment
-                else os.getenv("VWAP_PRO_MIN_SCORE", min_score_default)
-            )
             context_fresh = context_age_seconds <= float(
                 os.getenv("VWAP_CONTEXT_MAX_AGE_SECONDS", "120") or "120"
-            )
-            context_strong = underlying_direction_confidence >= float(
-                os.getenv("VWAP_CONTEXT_MIN_CONFIDENCE", "0.75") or "0.75"
             )
             hard_conflict = bool(
                 (
@@ -545,11 +534,11 @@ class VWAPProStrategy(EliteStrategy):
                 )
                 and not trend_alignment
                 and context_fresh
-                and context_strong
             )
             if hard_conflict:
                 self._no_vote("underlying_direction_conflict")
                 return None
+
             event_confirmed = bool(
                 continuation_confirmed or pullback_flag or penetration_confirmed
             )
@@ -565,121 +554,72 @@ class VWAPProStrategy(EliteStrategy):
                     side=contract_side,
                     reason="vwap_thesis_armed",
                 )
-            if is_live and not event_confirmed:
+            if not event_confirmed:
+                if is_live:
+                    transition_setup(
+                        SetupStage.CONFIRMING,
+                        strategy="VWAPPro",
+                        setup_id=setup_lifecycle_id,
+                        symbol=symbol,
+                        side=contract_side,
+                        reason="vwap_event_unconfirmed",
+                    )
+                self._no_vote("vwap_event_unconfirmed")
+                return None
+
+            # Structural contract: a VWAP continuation/pullback entry must have
+            # a premium event, fresh underlying alignment, futures slope support
+            # and observed activity.  No downstream component may compensate for a
+            # missing prerequisite.
+            structural_failures: list[str] = []
+            if not premium_above_vwap:
+                structural_failures.append("premium_below_vwap")
+            if not trend_alignment:
+                structural_failures.append("underlying_direction_conflict")
+            if not context_fresh:
+                structural_failures.append("underlying_context_stale")
+            if not slope_support:
+                structural_failures.append("futures_slope_not_aligned")
+            if not (vol_support or fut_vol_support):
+                structural_failures.append("volume_confirmation_missing")
+            if structural_failures:
+                self._no_vote(structural_failures[0])
                 transition_setup(
-                    SetupStage.CONFIRMING,
+                    SetupStage.CONTRACT_REJECTED,
                     strategy="VWAPPro",
                     setup_id=setup_lifecycle_id,
                     symbol=symbol,
                     side=contract_side,
-                    reason="vwap_event_unconfirmed",
+                    reason=structural_failures[0],
                 )
-                self._no_vote("vwap_event_unconfirmed")
                 LOGGER.info(
-                    "STRATEGY_NO_VOTE strategy=VWAPPro symbol=%s reason=vwap_event_unconfirmed close=%.2f vwap=%.2f penetration_atr=%.3f",
+                    "VWAP_STRUCTURAL_SETUP_REJECTED symbol=%s side=%s failures=%s",
                     symbol,
-                    close,
-                    vwap,
-                    penetration_atr,
+                    contract_side,
+                    structural_failures,
                     extra={
-                        "event": "STRATEGY_NO_VOTE",
-                        "strategy": "VWAPPro",
+                        "event": "VWAP_STRUCTURAL_SETUP_REJECTED",
                         "symbol": symbol,
-                        "reason": "vwap_event_unconfirmed",
-                        "close": close,
-                        "vwap": vwap,
-                        "penetration_atr": penetration_atr,
+                        "side": contract_side,
+                        "failures": structural_failures,
                     },
                 )
                 return None
 
-            # Keep the existing trigger score for StrategyManager compatibility,
-            # but also publish a premium-native setup score for the runner's alpha
-            # decision. Underlying direction, futures slope/context and futures
-            # volume are deliberately excluded from the native score so the same
-            # directional evidence cannot be rewarded twice.
-            score = 0.0
-            independent_setup_score = 0.0
-            independent_setup_reasons: list[str] = []
-            premium_event_confirmed = bool(
-                continuation_confirmed or pullback_flag or penetration_confirmed
+            if pullback_flag:
+                reasons.append("premium_reclaim_vwap")
+            elif continuation_confirmed:
+                reasons.append("premium_continuation")
+            else:
+                reasons.append("premium_vwap_penetration")
+            reasons.extend(
+                [
+                    "premium_above_vwap",
+                    "underlying_direction_alignment",
+                    "futures_slope_alignment",
+                    "volume_confirmation",
+                ]
             )
-            if premium_above_vwap:
-                score += 1.5
-                independent_setup_score += 1.5
-                independent_setup_reasons.append("premium_above_vwap")
-                reasons.append("premium_above_vwap")
-            if event_confirmed:
-                score += 2.0
-                if premium_event_confirmed:
-                    independent_setup_score += 2.0
-                    independent_setup_reasons.append("premium_event_confirmed")
-                if pullback_flag:
-                    reasons.append("premium_reclaim_vwap")
-                elif continuation_confirmed:
-                    reasons.append("premium_continuation")
-                else:
-                    reasons.append("premium_vwap_penetration")
-            if distance_atr <= 1.0:
-                score += 1.0
-                independent_setup_score += 1.0
-                independent_setup_reasons.append("vwap_distance_within_1atr")
-                reasons.append("vwap_distance_within_1atr")
-            elif distance_atr <= 1.5:
-                score += 0.5
-                independent_setup_score += 0.5
-                independent_setup_reasons.append("vwap_distance_within_1_5atr")
-                reasons.append("vwap_distance_within_1_5atr")
-            if near_configured_vwap:
-                score += 0.5
-                independent_setup_score += 0.5
-                independent_setup_reasons.append("configured_vwap_proximity")
-                reasons.append("configured_vwap_proximity")
-            if vol_support or fut_vol_support:
-                score += 1.0
-                reasons.append("volume_confirmation")
-            if vol_support:
-                independent_setup_score += 1.0
-                independent_setup_reasons.append("option_volume_confirmation")
-            if trend_alignment:
-                score += 2.0
-                reasons.append("trend_alignment")
-            elif bias in {"CE", "PE"}:
-                conflict_penalty_applied = float(
-                    os.getenv("VWAP_PRO_CONFLICT_PENALTY", "2.0") or "2.0"
-                )
-                score -= conflict_penalty_applied
-            if slope_support:
-                score += 1.0
-                reasons.append("futures_slope_alignment")
-            if (
-                trend_alignment
-                and context_fresh
-                and underlying_direction_confidence
-                >= float(
-                    os.getenv("VWAP_CONTEXT_BOOST_MIN_CONFIDENCE", "0.90") or "0.90"
-                )
-                and spread_pct
-                <= min(
-                    canonical_max_spread_pct(),
-                    float(
-                        os.getenv("VWAP_CONTEXT_BOOST_MAX_SPREAD_PCT", "0.75") or "0.75"
-                    ),
-                )
-                and premium_above_vwap
-            ):
-                boost = float(
-                    os.getenv("VWAP_PRO_TREND_CONTEXT_BOOST", "0.5") or "0.5"
-                )
-                score = min(10.0, score + boost)
-                reasons.append("trend_context_boost")
-
-            threshold_source = "trend_aligned" if trend_alignment else "base"
-            if score < min_score:
-                reasons.append("score_below_legacy_minimum")
-
-            strategy_score = max(0.0, min(10.0, score))
-            confidence = max(0.10, min(0.85, strategy_score / 10.0))
             metadata = {
                 "strategy": "VWAPPro",
                 "strategy_name": "VWAPPro",
@@ -704,33 +644,17 @@ class VWAPProStrategy(EliteStrategy):
                 "underlying_direction_confidence": underlying_direction_confidence,
                 "context_age_seconds": context_age_seconds,
                 "context_fresh": context_fresh,
+                "futures_slope_alignment": slope_support,
+                "volume_confirmation": bool(vol_support or fut_vol_support),
                 "context_direction_used": bias if bias in {"CE", "PE"} else None,
-                "preliminary_only": True,
                 "requires_runner_execution_validation": True,
-                "raw_setup_score": strategy_score,
-                "setup_score": strategy_score,
-                "setup_min": min_score,
                 "setup_pass": True,
                 "execution_required": True,
                 "regime_required": True,
                 "strategy_family": "vwap_continuation_pullback",
                 "context_required": False,
-                # Direction quality comes only from the canonical underlying
-                # context. Premium VWAP quality remains the strategy score.
-                "direction_score": (
-                    round(10.0 * underlying_direction_confidence, 3)
-                    if trend_alignment and context_fresh
-                    else 0.0
-                ),
-                "strategy_score": strategy_score,
-                "independent_setup_score": round(
-                    max(0.0, min(10.0, independent_setup_score)), 3
-                ),
-                "independent_setup_reasons": independent_setup_reasons,
-                "data_score": 8.0 if not stale_data else 3.0,
-                "score_reasons": reasons,
+                "setup_reasons": reasons,
                 "setup_type": "continuation_pullback",
-                "setup_quality": strategy_score,
                 "required_data_present": required_data_present,
                 "stale_data_used": stale_data,
                 "candidate_symbol": symbol,
@@ -748,7 +672,6 @@ class VWAPProStrategy(EliteStrategy):
                 "atr": atr_safe,
                 "pullback_flag": pullback_flag,
                 "trend_alignment": trend_alignment,
-                "threshold_source": threshold_source,
                 "underlying_context_used": bool(
                     indicators.get("spot_context")
                     or indicators.get("underlying_direction_bias")
@@ -761,8 +684,6 @@ class VWAPProStrategy(EliteStrategy):
                 "vwap_domain": "option_premium",
                 "underlying_alignment": trend_alignment,
                 "futures_alignment": slope_support,
-                "conflict_penalty_applied": conflict_penalty_applied,
-                "final_vwap_score": strategy_score,
                 "futures_volume_ratio": futures_volume_ratio,
                 "trigger_block_reason": "",
                 "continuation_confirmed": continuation_confirmed,
@@ -776,17 +697,17 @@ class VWAPProStrategy(EliteStrategy):
                 "invalidation_level_domain": "option_premium",
                 "premium_stop_distance": atr_safe,
                 "premium_target_rr": 2.0,
-                "no_vote_conflict_mode": "hard" if hard_conflict else "soft",
+                "direction_conflict_mode": "hard" if hard_conflict else "none",
             }
             LOGGER.info(
-                "STRATEGY_VOTE strategy=VWAPPro side=%s score=%.2f",
+                "STRATEGY_EVIDENCE strategy=VWAPPro side=%s setup=%s",
                 contract_side,
-                strategy_score,
+                metadata.get("setup_type"),
             )
             return EliteSignal(
                 symbol=symbol,
                 signal="BUY",
-                confidence=confidence,
+                confidence=1.0,
                 entry_price=current_price,
                 stop_loss=None,
                 target=None,

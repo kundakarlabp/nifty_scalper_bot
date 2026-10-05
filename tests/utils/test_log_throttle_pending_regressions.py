@@ -39,8 +39,7 @@ def test_empty_strategy_summary_does_not_start_cooldown(caplog) -> None:
         strategy="OrderFlow",
         symbol="NFO:NIFTY1CE",
         accepted=False,
-        reason="final_trade_score_below_threshold",
-        score=4.5,
+        reason="structural_contract_rejected",
     )
     with caplog.at_level(logging.INFO):
         assert throttle.maybe_emit_strategy_rejection_summary(

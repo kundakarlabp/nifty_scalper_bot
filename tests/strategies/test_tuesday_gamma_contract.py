@@ -10,7 +10,6 @@ from nifty_scalper_bot.strategies.elite_tuesday_gamma_buyer import (
     EliteTuesdayGammaBuyer,
 )
 
-
 IST = ZoneInfo("Asia/Kolkata")
 SYMBOL_CE = "NFO:NIFTY2691523400CE"
 SYMBOL_PE = "NFO:NIFTY2691523400PE"
@@ -26,7 +25,7 @@ class _Clock:
 
 def _strategy(now: datetime, *, quantity: int = 1) -> EliteTuesdayGammaBuyer:
     strategy = EliteTuesdayGammaBuyer(
-        TuesdayGammaBuyerStrategyConfig(min_confidence=0.0, quantity=quantity),
+        TuesdayGammaBuyerStrategyConfig(quantity=quantity),
         indicator_engine=None,
     )
     strategy.clock = _Clock(now)
@@ -83,7 +82,7 @@ def test_expiry_gate_applies_even_without_injected_clock(monkeypatch) -> None:
     monkeypatch.setenv("STRATEGY_MODE", "expiry_gamma")
     monkeypatch.setenv("ALLOW_EXPIRY_GAMMA_STRATEGIES", "true")
     strategy = EliteTuesdayGammaBuyer(
-        TuesdayGammaBuyerStrategyConfig(min_confidence=0.0),
+        TuesdayGammaBuyerStrategyConfig(),
         indicator_engine=None,
     )
     indicators = _context("CE")
@@ -92,7 +91,7 @@ def test_expiry_gate_applies_even_without_injected_clock(monkeypatch) -> None:
     assert strategy._evaluate_signal(SYMBOL_CE, indicators, 120.0) is None
 
 
-def test_pe_setup_keeps_quality_telemetry_and_runner_execution_contract(
+def test_pe_setup_keeps_structural_runner_execution_contract(
     monkeypatch,
 ) -> None:
     monkeypatch.setenv("STRATEGY_MODE", "expiry_gamma")
@@ -103,10 +102,8 @@ def test_pe_setup_keeps_quality_telemetry_and_runner_execution_contract(
 
     assert signal is not None
     assert signal.metadata["side"] == "PE"
-    assert signal.metadata["strategy_score"] > 0.0
-    assert signal.metadata["raw_setup_score"] == signal.metadata["strategy_score"]
     assert signal.metadata["setup_pass"] is True
-    assert signal.metadata["preliminary_only"] is True
+    assert "underlying_vwap_alignment" in signal.metadata["setup_reasons"]
     assert signal.metadata["requires_runner_execution_validation"] is True
 
 

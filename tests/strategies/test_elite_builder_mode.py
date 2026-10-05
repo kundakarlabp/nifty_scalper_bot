@@ -20,7 +20,6 @@ from nifty_scalper_bot.strategies.elite_strategies.config_models import (
 )
 from nifty_scalper_bot.strategies.elite_strategies.orb_pro import ORBProStrategy
 
-
 _FUTURE = "NFO:NIFTY26SEPFUT"
 _OPEN = datetime(2026, 9, 1, 3, 45, tzinfo=timezone.utc)
 
@@ -131,9 +130,10 @@ def test_directional_mode_disables_gamma_theta_and_context(monkeypatch) -> None:
 def test_orb_enabled_config_is_not_overridden_by_legacy_env(monkeypatch) -> None:
     monkeypatch.setenv("ENABLE_ORB_STRATEGY", "false")
     monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    monkeypatch.setenv("ORB_BALANCED_RANGE_MAX_ATR", "2.0")
     rows = _orb_rows(side="CE")
     strategy = ORBProStrategy(
-        ORBProStrategyConfig(min_confidence=0.0, orb_minutes=15),
+        ORBProStrategyConfig(orb_minutes=15),
         indicator_engine=_OrbIndicatorEngine(rows),
     )
     indicators = _orb_indicators("CE", rows[-1]["timestamp"])
@@ -150,7 +150,7 @@ def test_orb_pe_underlying_breakout_uses_contract_side(monkeypatch) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
     rows = _orb_rows(side="PE")
     strategy = ORBProStrategy(
-        ORBProStrategyConfig(min_confidence=0.0, orb_minutes=15),
+        ORBProStrategyConfig(orb_minutes=15),
         indicator_engine=_OrbIndicatorEngine(rows),
     )
     indicators = _orb_indicators("PE", rows[-1]["timestamp"])
@@ -165,9 +165,7 @@ def test_orb_pe_underlying_breakout_uses_contract_side(monkeypatch) -> None:
 
 
 def test_orb_option_premium_breakdown_does_not_create_buy_vote() -> None:
-    strategy = ORBProStrategy(
-        ORBProStrategyConfig(min_confidence=0.0), indicator_engine=None
-    )
+    strategy = ORBProStrategy(ORBProStrategyConfig(), indicator_engine=None)
     indicators = {
         "orb_ready": True,
         "orb_high": 105.0,
@@ -206,30 +204,27 @@ def test_production_profile_is_stable_and_changes_with_material_settings(
         "mode": "LIVE",
         "allow_context_promotion": False,
         "allow_single_vote": True,
-        "min_trade_quality": 7.0,
     }
 
     first = build_production_strategy_profile(
         settings=runtime,
         strategies=strategies,
         mode_profile=mode_profile,
-        global_min_confidence=0.35,
     )
     repeated = build_production_strategy_profile(
         settings=runtime,
         strategies=strategies,
         mode_profile=mode_profile,
-        global_min_confidence=0.35,
     )
 
     assert first == repeated
-    assert first["version"].startswith("production-v2-")
+    assert first["version"].startswith("production-v3-")
     assert first["execution_mode"] == "LIVE"
     assert "OrderFlow" in first["strategies"]["context_only"]
-    assert {"SMC", "VWAPPro", "ORBPro"}.issubset(
-        first["strategies"]["trigger_capable"]
+    assert {"SMC", "VWAPPro", "ORBPro"}.issubset(first["strategies"]["trigger_capable"])
+    assert (
+        first["structural_entry_policy"]["setup"] == "strategy_owned_boolean_contract"
     )
-    assert first["score_thresholds"]["global_min_confidence"] == 0.35
     assert first["strategy_configs"]["ORBPro"]["orb_minutes"] == 15
 
     changed_runtime = SimpleNamespace(
@@ -242,7 +237,6 @@ def test_production_profile_is_stable_and_changes_with_material_settings(
         settings=changed_runtime,
         strategies=strategies,
         mode_profile=mode_profile,
-        global_min_confidence=0.35,
     )
 
     assert changed["risk"]["per_trade_risk_pct"] == 4.0
@@ -269,14 +263,12 @@ def test_production_profile_changes_when_material_strategy_environment_changes(
         settings=runtime,
         strategies=strategies,
         mode_profile=mode_profile,
-        global_min_confidence=0.35,
     )
     monkeypatch.setenv("ORB_TARGET_RR", "2.0")
     changed = build_production_strategy_profile(
         settings=runtime,
         strategies=strategies,
         mode_profile=mode_profile,
-        global_min_confidence=0.35,
     )
 
     assert first["decision_environment"]["ORB_TARGET_RR"] == "1.8"
@@ -303,7 +295,6 @@ def test_production_profile_does_not_capture_unrelated_or_secret_environment(
         settings=runtime,
         strategies=strategies,
         mode_profile={"mode": "LIVE"},
-        global_min_confidence=0.35,
     )
 
     assert "BROKER_ACCESS_TOKEN" not in profile["decision_environment"]

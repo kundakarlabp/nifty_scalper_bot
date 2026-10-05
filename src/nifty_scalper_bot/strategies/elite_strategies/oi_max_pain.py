@@ -92,21 +92,17 @@ class OIMaxPainStrategy(EliteStrategy):
                 else None
             )
 
-            score = 2.0
             reasons = ["oi_context_bias_only"]
-            if side == context_bias:
-                score += 1.0
+            aligned_with_max_pain = side == context_bias
+            if aligned_with_max_pain:
                 reasons.append("max_pain_alignment")
-            if (
+            near_adverse_wall = bool(
                 distance_to_oi_wall_pct is not None
                 and distance_to_oi_wall_pct < min_deviation_pct
-            ):
-                score -= 1.5
+            )
+            if near_adverse_wall:
                 reasons.append("near_oi_wall_against_trade")
-
-            strategy_score = max(0.0, min(4.0, score))
-            if strategy_score <= 0:
-                self._no_vote("no_max_pain_edge")
+                self._no_vote("near_oi_wall_against_trade")
                 return None
 
             metadata = {
@@ -118,14 +114,12 @@ class OIMaxPainStrategy(EliteStrategy):
                 "side": side,
                 "trade_side": side,
                 "direction_bias": side,
-                "strategy_score": strategy_score,
-                "context_score": strategy_score,
-                "setup_quality": strategy_score,
+                "setup_pass": aligned_with_max_pain,
                 "setup_type": "oi_context",
                 "required_data_present": True,
                 "stale_data_used": bool(indicators.get("stale_data_used")),
                 "candidate_symbol": symbol,
-                "score_reasons": reasons,
+                "setup_reasons": reasons,
                 "rejection_reasons": [],
                 "underlying_reference_price": spot_price,
                 "underlying_reference_source": "spot_price",
@@ -148,14 +142,13 @@ class OIMaxPainStrategy(EliteStrategy):
                 "invalidation_level": None,
             }
             LOGGER.info(
-                "STRATEGY_VOTE strategy=OIMaxPain side=%s score=%.2f",
+                "STRATEGY_CONTEXT strategy=OIMaxPain side=%s",
                 side,
-                strategy_score,
             )
             return EliteSignal(
                 symbol=symbol,
                 signal="BUY",
-                confidence=max(0.05, min(0.45, strategy_score / 10.0)),
+                confidence=1.0,
                 entry_price=current_price,
                 stop_loss=None,
                 target=None,

@@ -35,12 +35,12 @@ def test_rejected_signal_cooldown_prevents_spam() -> None:
     assert "_signal_reject_cooldown_ts" in source
 
 
-def test_candidate_enrichment_raises_rr_and_option_score() -> None:
+def test_candidate_enrichment_is_score_free() -> None:
     source = Path("src/nifty_scalper_bot/strategies/runner.py").read_text(
         encoding="utf-8"
     )
-    assert 'metadata["rr_score"] = max(' in source
-    assert 'metadata["option_score"] = max(' in source
+    assert 'metadata["rr_score"]' not in source
+    assert 'metadata["option_score"]' not in source
 
 
 @pytest.mark.parametrize(

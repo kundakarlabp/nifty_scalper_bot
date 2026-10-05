@@ -2,8 +2,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from nifty_scalper_bot.strategies.elite_strategies.base_elite import EliteSignal, EliteStrategy
-from nifty_scalper_bot.strategies.elite_strategies.config_models import BBSqueezeStrategyConfig
+from nifty_scalper_bot.strategies.elite_strategies.base_elite import (
+    EliteSignal,
+    EliteStrategy,
+)
+from nifty_scalper_bot.strategies.elite_strategies.config_models import (
+    BBSqueezeStrategyConfig,
+)
 from nifty_scalper_bot.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
@@ -44,7 +49,9 @@ class BBSqueezeStrategy(EliteStrategy):
         del position
         try:
             self._no_vote("stale_or_invalid_data")
-            if symbol.upper().endswith(("CE", "PE")) and not indicators.get("source_symbol"):
+            if symbol.upper().endswith(("CE", "PE")) and not indicators.get(
+                "source_symbol"
+            ):
                 self._no_vote("domain_skip_option_symbol")
                 return None
 
@@ -75,7 +82,9 @@ class BBSqueezeStrategy(EliteStrategy):
                 self._no_vote("no_squeeze")
                 return None
 
-            breakout_side = "CE" if close > upper else "PE" if close < lower else "UNKNOWN"
+            breakout_side = (
+                "CE" if close > upper else "PE" if close < lower else "UNKNOWN"
+            )
             if breakout_side == "UNKNOWN":
                 self._no_vote("no_breakout")
                 return None
@@ -85,23 +94,21 @@ class BBSqueezeStrategy(EliteStrategy):
                 self._no_vote("weak_expansion")
                 return None
 
-            score = 5.0
             reasons = ["configured_squeeze", "expansion_confirmed", "breakout_candle"]
-            if direction in {"CE", "PE"} and direction == breakout_side:
-                score += 2.0
+            direction_aligned = direction in {"CE", "PE"} and direction == breakout_side
+            if direction_aligned:
                 reasons.append("direction_alignment")
 
             momentum_confirmed = avg_volume > 0 and volume >= avg_volume
             if momentum_confirmed:
-                score += 1.0
                 reasons.append("volume_confirmation")
 
             tightness = bb_width / squeeze_threshold
-            if tightness <= 0.6:
-                score += 2.0
+            very_tight = tightness <= 0.6
+            tight = tightness <= 0.85
+            if very_tight:
                 reasons.append("squeeze_very_tight")
-            elif tightness <= 0.85:
-                score += 1.0
+            elif tight:
                 reasons.append("squeeze_tight")
             else:
                 reasons.append("squeeze_marginal")
@@ -113,11 +120,12 @@ class BBSqueezeStrategy(EliteStrategy):
                 percentile_value = None
             if percentile_value is not None and 0.0 <= percentile_value <= 1.0:
                 percentile_value *= 100.0
-            if percentile_value is not None and 0.0 <= percentile_value <= 20.0:
-                score += 0.5
+            historical_tightness = bool(
+                percentile_value is not None and 0.0 <= percentile_value <= 20.0
+            )
+            if historical_tightness:
                 reasons.append("historically_tight_bandwidth")
 
-            strategy_score = max(0.0, min(10.0, score))
             metadata = {
                 "strategy": "BBSqueeze",
                 "strategy_name": "BBSqueeze",
@@ -127,18 +135,13 @@ class BBSqueezeStrategy(EliteStrategy):
                 "trade_side": breakout_side,
                 "side": breakout_side,
                 "direction_bias": breakout_side,
-                "preliminary_only": True,
                 "requires_runner_execution_validation": True,
-                "direction_score": strategy_score,
-                "strategy_score": strategy_score,
-                "context_score": strategy_score,
-                "data_score": 8.0,
-                "setup_quality": strategy_score,
+                "setup_pass": True,
                 "setup_type": "squeeze_expansion_context",
                 "required_data_present": True,
                 "stale_data_used": bool(indicators.get("stale_data_used")),
                 "candidate_symbol": symbol,
-                "score_reasons": reasons,
+                "setup_reasons": reasons,
                 "rejection_reasons": [],
                 "bb_width": round(bb_width, 6),
                 "bb_width_percentile": percentile_value,
@@ -149,14 +152,13 @@ class BBSqueezeStrategy(EliteStrategy):
                 "momentum_confirmed": momentum_confirmed,
             }
             LOGGER.info(
-                "STRATEGY_CONTEXT strategy=BBSqueeze side=%s score=%.2f",
+                "STRATEGY_CONTEXT strategy=BBSqueeze side=%s",
                 breakout_side,
-                strategy_score,
             )
             return EliteSignal(
                 symbol=symbol,
                 signal="BUY",
-                confidence=max(0.1, min(0.9, strategy_score / 10.0)),
+                confidence=1.0,
                 entry_price=current_price,
                 stop_loss=None,
                 target=None,

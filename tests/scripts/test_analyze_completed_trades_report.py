@@ -28,29 +28,18 @@ def test_build_analysis_emits_research_cohorts_without_fabricated_facts() -> Non
 
 
 def test_build_analysis_emits_post_cost_attribution_groups() -> None:
-    quality = {"alpha_score": 8.0, "final_score": 8.1, "strategy_score": 7.5}
     outcome = {
         "cost_source": "broker_virtual_contract_note",
         "effective_costs": {"total": 20.0},
-        "signal_quality": quality,
         "strategy_key": "vwap_pro",
         "strategy_role": "trigger",
         "signal_family": "directional_trigger",
         "setup_name": "continuation_pullback",
         "regime": "TREND",
         "approval_path": "single_trigger_context_confirmed",
-        "score_contract_version": 1,
-        "score_lineage": {
-            "raw_setup_score": 7.5,
-            "regime_weight": 1.0,
-            "regime_adjusted_setup_score": 7.5,
-            "context_confirmation_bonus": 0.0,
-            "context_veto_penalty": 0.0,
-            "manager_reference_score": 7.5,
-            "manager_reference_threshold": 7.0,
-            "manager_reference_above_min": True,
-            "score_admission_role": "diagnostic_only",
-        },
+        "direction_contract": {"passed": True},
+        "setup_contract": {"passed": True},
+        "confirmation_contract": {"passed": True},
         "confirming_trigger_strategies": ["VWAPPro"],
         "context_confirmation_strategies": ["OrderFlow"],
     }

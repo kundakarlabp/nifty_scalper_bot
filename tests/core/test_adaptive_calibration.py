@@ -271,7 +271,7 @@ def test_optimizer_evaluates_unique_candidates_after_boundary_clamping() -> None
     assert seen.count((0.1, 5.0, 0.01)) == 1
 
 
-def test_optimizer_does_not_drift_on_equal_candidate_scores() -> None:
+def test_optimizer_does_not_drift_on_equal_candidate_objectives() -> None:
     stats = AdaptiveParameterStore(window_trades=10).record_trade("s1", 10.0)
     current = {
         "momentum_z_threshold": 1.0,
@@ -443,7 +443,7 @@ def test_adaptive_store_rejects_nonfinite_pnl(bad_pnl: float) -> None:
     assert store.get_stats("s1") == TradeStats()
 
 
-def test_optimizer_fails_closed_on_nonfinite_candidate_score() -> None:
+def test_optimizer_fails_closed_on_nonfinite_candidate_objective() -> None:
     stats = TradeStats(
         win_rate=0.6,
         rolling_sharpe=1.0,

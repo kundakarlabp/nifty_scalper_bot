@@ -9,7 +9,11 @@ from nifty_scalper_bot.core.app import _reconciliation_sleep_seconds
 from nifty_scalper_bot.core.runtime_reliability_hardening import (
     _is_canonical_runtime_tick,
 )
-from nifty_scalper_bot.core.strategy_manager import Signal, StrategyManager, StrategyVote
+from nifty_scalper_bot.core.strategy_manager import (
+    Signal,
+    StrategyEvidence,
+    StrategyManager,
+)
 from nifty_scalper_bot.data.data_hub import DataHub
 from nifty_scalper_bot.data.market_data_manager import MarketDataManager
 from nifty_scalper_bot.strategies.runner import StrategyRunner
@@ -118,67 +122,74 @@ def test_reconciliation_freshness_cap_remains_fail_closed(monkeypatch) -> None:
 def _manager_probe() -> StrategyManager:
     manager = StrategyManager.__new__(StrategyManager)
     manager._last_no_signal_decision_by_symbol = {}
-    manager._compute_trade_quality_score = lambda *args, **kwargs: (10.0, {})
     return manager
 
 
-def _downweighted_trigger() -> tuple[Signal, StrategyVote]:
+def _invalid_orb_trigger() -> tuple[Signal, StrategyEvidence]:
+    metadata = {
+        "strategy": "ORBPro",
+        "strategy_name": "ORBPro",
+        "role": "trigger",
+        "side": "CE",
+        "trade_side": "CE",
+        "contract_side": "CE",
+        "setup_pass": False,
+        "trigger_conditions_met": False,
+        "trigger_block_reason": "orb_structural_contract_not_passed",
+        "required_data_present": True,
+        "stale_data_used": False,
+        "is_selected_option": True,
+        "quote_depth_valid": True,
+        "tradable_quote": True,
+        "spread_pct": 0.2,
+    }
     signal = Signal(
         action="BUY",
         symbol="NFO:NIFTY26AUG24550CE",
         quantity=65,
-        confidence=0.9,
+        confidence=1.0,
         reason="ORBPro",
         stop_loss=140.0,
         take_profit=150.0,
-        metadata={
-            "strategy": "ORBPro",
-            "is_selected_option": True,
-            "quote_depth_valid": True,
-            "spread_pct": 0.2,
-        },
+        metadata=metadata,
     )
-    vote = StrategyVote(
+    evidence = StrategyEvidence(
         strategy="ORBPro",
         side="CE",
-        score=5.6,
-        confidence=0.8,
-        reasons=[],
-        metadata={
-            "role": "trigger",
-            "raw_setup_score": 8.0,
-            "raw_vote_score": 8.0,
-            "regime_weight": 0.7,
-            "regime_weighted_vote_score": 5.6,
-        },
+        reasons=["orb_structural_contract_not_passed"],
+        metadata=dict(metadata),
     )
-    return signal, vote
+    return signal, evidence
 
 
-def test_orb_trigger_is_quarantined_from_live_manager(monkeypatch) -> None:
+def test_orb_invalid_structural_setup_is_quarantined_from_live_manager(
+    monkeypatch,
+) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     monkeypatch.setenv("ENABLE_LIVE", "true")
-    monkeypatch.setenv("STRATEGY_ALLOW_SINGLE_VOTE_SCALP", "true")
     manager = _manager_probe()
 
     result = manager._combine_strategy_votes(
         symbol="NFO:NIFTY26AUG24550CE",
-        signals=[_downweighted_trigger()],
+        signals=[_invalid_orb_trigger()],
         indicators={
             "direction_bias": "CE",
             "underlying_direction_bias": "CE",
+            "underlying_direction_state": "CONFIRMED_BULL",
             "context_fresh": True,
             "context_age_seconds": 0.1,
             "selected_ce": "NFO:NIFTY26AUG24550CE",
             "is_selected_option": True,
             "quote_depth_valid": True,
+            "tradable_quote": True,
             "spread_pct": 0.2,
         },
     )
 
     assert result is None
     decision = manager._last_no_signal_decision_by_symbol["NFO:NIFTY26AUG24550CE"]
-    assert decision.reason == "setup_contract_failed"
+    assert decision.reason == "no_setup_valid_trigger"
+    assert decision.blocked_at == "strategy_structural_contract"
 
 
 def test_cpu_summary_counts_dynamic_active_options_when_whitelist_is_empty() -> None:
@@ -231,7 +242,9 @@ def test_actual_mdm_subscriber_payload_matches_datahub_fastpath_contract() -> No
     assert _is_canonical_runtime_tick(payload) is True
 
 
-def test_datahub_mdm_canonical_tick_skips_expensive_recanonicalization(monkeypatch) -> None:
+def test_datahub_mdm_canonical_tick_skips_expensive_recanonicalization(
+    monkeypatch,
+) -> None:
     """MDM's real normalized WS shape must not be rebuilt inside DataHub."""
     mdm = types.SimpleNamespace(attach_tick_bus=lambda _bus: None)
     hub = DataHub(mdm)

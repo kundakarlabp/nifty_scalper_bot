@@ -30,7 +30,7 @@ def _confirmed_signal(
     for row in rows:
         row["timestamp"] += shift
     engine = _Engine(rows)
-    strategy = SMCStrategy(SMCStrategyConfig(min_confidence=0.0), engine)
+    strategy = SMCStrategy(SMCStrategyConfig(), engine)
 
     def context(timestamp):
         payload = _indicators(timestamp)
@@ -93,7 +93,7 @@ def test_confirmed_setup_remains_reusable_until_exact_entry_is_accepted(
     sweep = _bar(30, open_=23988, high=23991, low=23974, close=23984, volume=2500)
     confirm = _bar(31, open_=23984, high=24000, low=23982, close=23998, volume=2200)
     rows.extend([sweep, confirm])
-    strategy = SMCStrategy(SMCStrategyConfig(min_confidence=0.0), _Engine(rows))
+    strategy = SMCStrategy(SMCStrategyConfig(), _Engine(rows))
     indicators = _indicators(confirm["timestamp"])
 
     first = strategy.generate_signal(CE, indicators, 103.0)
@@ -121,7 +121,7 @@ def test_accepting_stale_setup_id_cannot_consume_current_smc_setup(
     sweep = _bar(30, open_=23988, high=23991, low=23974, close=23984, volume=2500)
     confirm = _bar(31, open_=23984, high=24000, low=23982, close=23998, volume=2200)
     rows.extend([sweep, confirm])
-    strategy = SMCStrategy(SMCStrategyConfig(min_confidence=0.0), _Engine(rows))
+    strategy = SMCStrategy(SMCStrategyConfig(), _Engine(rows))
     indicators = _indicators(confirm["timestamp"])
     first = strategy.generate_signal(CE, indicators, 103.0)
     assert first is not None

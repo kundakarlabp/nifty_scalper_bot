@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import logging
 
-import pytest
-
 from nifty_scalper_bot.strategies.elite_strategies.base_elite import (
     EliteSignal,
     EliteStrategy,
@@ -18,17 +16,23 @@ SYMBOL = "NFO:NIFTY2680424400CE"
 
 
 class _Boom(EliteStrategy):
-    def _evaluate_signal(self, symbol="", indicators=None, current_price=0.0, position=None):
+    def _evaluate_signal(
+        self, symbol="", indicators=None, current_price=0.0, position=None
+    ):
         raise TypeError("must be real number, not NoneType")
 
 
 class _Quiet(EliteStrategy):
-    def _evaluate_signal(self, symbol="", indicators=None, current_price=0.0, position=None):
+    def _evaluate_signal(
+        self, symbol="", indicators=None, current_price=0.0, position=None
+    ):
         return None
 
 
 class _Good(EliteStrategy):
-    def _evaluate_signal(self, symbol="", indicators=None, current_price=0.0, position=None):
+    def _evaluate_signal(
+        self, symbol="", indicators=None, current_price=0.0, position=None
+    ):
         return EliteSignal(
             symbol=symbol,
             signal="BUY",
@@ -92,39 +96,3 @@ def test_health_is_exposed_in_stats() -> None:
     _run(strategy)
 
     assert strategy.get_stats()["healthy"] is False
-
-
-def test_percentage_confidence_threshold_is_normalised() -> None:
-    from nifty_scalper_bot.strategies.elite_strategies.base_elite import (
-        _as_confidence_fraction,
-    )
-
-    assert _as_confidence_fraction(70.0) == pytest.approx(0.70)
-    assert _as_confidence_fraction(100.0) == pytest.approx(1.0)
-
-
-def test_fractional_confidence_threshold_is_not_divided_again() -> None:
-    from nifty_scalper_bot.strategies.elite_strategies.base_elite import (
-        _as_confidence_fraction,
-    )
-
-    # 0.6 previously became 0.006, silently disabling the gate.
-    assert _as_confidence_fraction(0.6) == pytest.approx(0.6)
-    assert _as_confidence_fraction(1.0) == pytest.approx(1.0)
-
-
-def test_invalid_confidence_threshold_does_not_block() -> None:
-    from nifty_scalper_bot.strategies.elite_strategies.base_elite import (
-        _as_confidence_fraction,
-    )
-
-    assert _as_confidence_fraction(None) == 0.0
-    assert _as_confidence_fraction(-5.0) == 0.0
-
-
-def test_signal_below_configured_confidence_is_rejected() -> None:
-    strategy = _build(_Good)
-    strategy._config.min_confidence = 95.0
-
-    assert _run(strategy) is None
-    assert strategy.last_no_vote_reason == "below_strategy_min_confidence"

@@ -16,7 +16,6 @@ from nifty_scalper_bot.execution.market_aware_profit_extension import (
 from nifty_scalper_bot.execution.ownership import BoundBracketManager
 from nifty_scalper_bot.execution.runtime_bracket_manager import RuntimeBracketManager
 
-
 SYMBOL = "NFO:NIFTY2681124500CE"
 FUTURE = "NFO:NIFTY26AUGFUT"
 
@@ -123,9 +122,11 @@ class FakeManager:
         self._market_data = FakeMarketData(strong=strong)
         self._indicator_engine = FakeIndicatorEngine(strong=strong)
         self._recent_ticks = {
-            SYMBOL: [112.0, 114.0, 116.0, 118.0, 120.0]
-            if strong
-            else [122.0, 121.5, 121.0, 120.5, 120.0]
+            SYMBOL: (
+                [112.0, 114.0, 116.0, 118.0, 120.0]
+                if strong
+                else [122.0, 121.5, 121.0, 120.5, 120.0]
+            )
         }
         self.saved = 0
 
@@ -135,7 +136,6 @@ class FakeManager:
 
     def save_state(self):
         self.saved += 1
-
 
 
 def _bracket(*, protected: bool = True, quantity: int = 65):
@@ -176,29 +176,26 @@ def _final_tp_action():
     }
 
 
-def test_strong_continuation_scores_as_extension_candidate(monkeypatch):
-    monkeypatch.setenv("MARKET_AWARE_PROFIT_EXTENSION_SCORE", "5")
+def test_strong_continuation_meets_structural_extension_contract(monkeypatch):
     decision = assess_continuation(FakeManager(strong=True), _bracket(), 120.0)
 
     assert isinstance(decision, ContinuationDecision)
     assert decision.extend is True
-    assert decision.score >= 5.0
+    assert decision.critical_block is False
     assert decision.evidence_count >= 4
     assert "premium_momentum" in decision.positive
     assert "underlying_vwap_alignment" in decision.positive
 
 
 def test_weak_continuation_does_not_extend(monkeypatch):
-    monkeypatch.setenv("MARKET_AWARE_PROFIT_EXTENSION_SCORE", "5")
     decision = assess_continuation(FakeManager(strong=False), _bracket(), 120.0)
 
     assert decision.extend is False
-    assert decision.score < 5.0
+    assert decision.extend is False
     assert decision.negative
 
 
 def test_extension_requires_already_protected_profit_floor(monkeypatch):
-    monkeypatch.setenv("MARKET_AWARE_PROFIT_EXTENSION_SCORE", "5")
     manager = FakeManager(strong=True)
     bracket = _bracket(protected=False)
 
@@ -216,7 +213,6 @@ def test_extension_requires_already_protected_profit_floor(monkeypatch):
 
 
 def test_strong_continuation_extends_target_and_never_weakens_stop(monkeypatch):
-    monkeypatch.setenv("MARKET_AWARE_PROFIT_EXTENSION_SCORE", "5")
     monkeypatch.setenv("PROFIT_EXTENSION_STEP_R", "0.75")
     monkeypatch.setenv("PROFIT_EXTENSION_MAX_R", "4.0")
     monkeypatch.setenv("PROFIT_EXTENSION_LOCK_FRACTION", "0.50")
@@ -241,7 +237,6 @@ def test_strong_continuation_extends_target_and_never_weakens_stop(monkeypatch):
 
 
 def test_one_lot_winner_can_extend_without_fractional_tp1(monkeypatch):
-    monkeypatch.setenv("MARKET_AWARE_PROFIT_EXTENSION_SCORE", "5")
     manager = FakeManager(strong=True)
     bracket = _bracket(quantity=65)
 
@@ -259,7 +254,6 @@ def test_one_lot_winner_can_extend_without_fractional_tp1(monkeypatch):
 
 
 def test_extension_is_bounded_by_max_r(monkeypatch):
-    monkeypatch.setenv("MARKET_AWARE_PROFIT_EXTENSION_SCORE", "5")
     monkeypatch.setenv("PROFIT_EXTENSION_STEP_R", "1.0")
     monkeypatch.setenv("PROFIT_EXTENSION_MAX_R", "2.25")
     manager = FakeManager(strong=True)
@@ -288,7 +282,6 @@ def test_extension_is_bounded_by_max_r(monkeypatch):
 
 
 def test_weak_market_can_only_tighten_existing_profit_floor(monkeypatch):
-    monkeypatch.setenv("MARKET_AWARE_PROFIT_TIGHTEN_SCORE", "-2")
     monkeypatch.setenv("PROFIT_WEAK_LOCK_FRACTION", "0.65")
     manager = FakeManager(strong=False)
     bracket = _bracket(protected=True)
@@ -303,7 +296,6 @@ def test_weak_market_can_only_tighten_existing_profit_floor(monkeypatch):
 
 
 def test_market_aware_tightening_never_acts_before_one_r(monkeypatch):
-    monkeypatch.setenv("MARKET_AWARE_PROFIT_TIGHTEN_SCORE", "-2")
     manager = FakeManager(strong=False)
     bracket = _bracket(protected=True)
     bracket.highest_ltp = 108.0

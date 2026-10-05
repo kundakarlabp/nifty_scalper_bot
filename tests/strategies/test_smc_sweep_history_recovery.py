@@ -3,7 +3,9 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from nifty_scalper_bot.strategies.elite_strategies.config_models import SMCStrategyConfig
+from nifty_scalper_bot.strategies.elite_strategies.config_models import (
+    SMCStrategyConfig,
+)
 from nifty_scalper_bot.strategies.elite_strategies.smc_liquidity import SMCStrategy
 
 FUTURES = "NFO:NIFTY26SEPFUT"
@@ -16,7 +18,9 @@ class _Engine:
     def __init__(self, rows: list[dict[str, Any]]) -> None:
         self.rows = rows
 
-    def get_history(self, symbol: str, count: int | None = None, *, field: str = "close"):
+    def get_history(
+        self, symbol: str, count: int | None = None, *, field: str = "close"
+    ):
         assert symbol in {FUTURES, SPOT}
         rows = list(self.rows)
         if count is not None:
@@ -24,7 +28,15 @@ class _Engine:
         return rows if field == "bars" else [row["close"] for row in rows]
 
 
-def _bar(minute: int, *, open_: float, high: float, low: float, close: float, volume: float = 1000.0):
+def _bar(
+    minute: int,
+    *,
+    open_: float,
+    high: float,
+    low: float,
+    close: float,
+    volume: float = 1000.0,
+):
     return {
         "timestamp": START + timedelta(minutes=minute),
         "open": open_,
@@ -93,7 +105,7 @@ def test_restart_recovers_unconfirmed_recent_underlying_sweep(monkeypatch) -> No
     confirm = _bar(31, open_=23984, high=24000, low=23982, close=23998, volume=2200)
     rows.extend([sweep, confirm])
 
-    strategy = SMCStrategy(SMCStrategyConfig(min_confidence=0.0), _Engine(rows))
+    strategy = SMCStrategy(SMCStrategyConfig(), _Engine(rows))
     signal = strategy.generate_signal(CE, _indicators(confirm["timestamp"]), 103.0)
 
     assert signal is not None
@@ -106,11 +118,13 @@ def test_recovery_does_not_late_enter_after_prior_confirmation(monkeypatch) -> N
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     rows = _base_rows()
     sweep = _bar(30, open_=23988, high=23991, low=23974, close=23984, volume=2500)
-    prior_confirm = _bar(31, open_=23984, high=24000, low=23982, close=23998, volume=2200)
+    prior_confirm = _bar(
+        31, open_=23984, high=24000, low=23982, close=23998, volume=2200
+    )
     current = _bar(32, open_=23998, high=24002, low=23995, close=24000, volume=1500)
     rows.extend([sweep, prior_confirm, current])
 
-    strategy = SMCStrategy(SMCStrategyConfig(min_confidence=0.0), _Engine(rows))
+    strategy = SMCStrategy(SMCStrategyConfig(), _Engine(rows))
     signal = strategy.generate_signal(CE, _indicators(current["timestamp"]), 103.0)
 
     assert signal is None
@@ -119,7 +133,7 @@ def test_recovery_does_not_late_enter_after_prior_confirmation(monkeypatch) -> N
 
 def test_recovery_remains_underlying_only_in_live(monkeypatch) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
-    strategy = SMCStrategy(SMCStrategyConfig(min_confidence=0.0), _Engine([]))
+    strategy = SMCStrategy(SMCStrategyConfig(), _Engine([]))
     indicators = _indicators(START + timedelta(minutes=31))
     indicators.update(
         {

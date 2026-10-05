@@ -46,41 +46,26 @@ def _eval(strat, sym, ind):
     return strat._evaluate_signal(sym, ind, current_price=100.1)
 
 
-# A. Stale PE bias + CE candidate WITHOUT confirming microstructure -> blocked
-def test_stale_pe_weak_micro_ce_blocked(monkeypatch, strat, caplog):
+# OrderFlow is context-only: microstructure may corroborate the canonical
+# underlying side, but it can never reverse that direction or authorize entry.
+
+
+def test_opposing_underlying_direction_remains_conflict(monkeypatch, strat):
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
-    caplog.set_level("INFO")
-    sig = _eval(
-        strat, "NFO:NIFTY26MAY24000CE", _ind("PE", "UP", buy=150, sell=140)
-    )
+    sig = _eval(strat, "NFO:NIFTY26MAY24000CE", _ind("PE", "UP", buy=400, sell=80))
+
     assert sig.metadata["trigger_conditions_met"] is False
     assert sig.metadata["trigger_block_reason"] == "context_only_role"
-    assert sig.metadata["bias_invalidated_by_microstructure"] is False
-    assert sig.metadata["context_bonus_score"] == 0.0
-    assert sig.metadata["context_veto_score"] > 0.0
+    assert sig.metadata["context_quality_eligible"] is True
+    assert sig.metadata["effective_context_conflict"] is True
+    assert sig.metadata["effective_context_alignment"] is False
 
 
-# B. One strong snapshot cannot invalidate directional context
-def test_stale_pe_single_strong_micro_ce_blocked(monkeypatch, strat):
+def test_persistent_microstructure_cannot_override_underlying_direction(
+    monkeypatch, strat
+):
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
-    monkeypatch.setenv("ORDERFLOW_REVERSAL_MIN_UPDATES", "3")
-    monkeypatch.setenv("ORDERFLOW_REVERSAL_MIN_PERSISTENCE_MS", "0")
-    sig = _eval(
-        strat,
-        "NFO:NIFTY26MAY24000CE",
-        _ind("PE", "UP", buy=400, sell=80, quote_update_version=1),
-    )
-    assert sig.metadata["trigger_conditions_met"] is False
-    assert sig.metadata["bias_invalidated_by_microstructure"] is False
-    assert sig.metadata["context_bonus_score"] == 0.0
-    assert sig.metadata["context_veto_score"] > 0.0
 
-
-# C. Reversal becomes eligible only after distinct persistent updates
-def test_stale_ce_strong_micro_pe_requires_persistence(monkeypatch, strat):
-    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
-    monkeypatch.setenv("ORDERFLOW_REVERSAL_MIN_UPDATES", "3")
-    monkeypatch.setenv("ORDERFLOW_REVERSAL_MIN_PERSISTENCE_MS", "0")
     results = [
         _eval(
             strat,
@@ -94,107 +79,37 @@ def test_stale_ce_strong_micro_pe_requires_persistence(monkeypatch, strat):
     assert all(
         r.metadata["trigger_block_reason"] == "context_only_role" for r in results
     )
-    assert results[0].metadata["context_veto_score"] > 0.0
-    assert results[1].metadata["context_veto_score"] > 0.0
-    assert results[0].metadata["context_bonus_score"] == 0.0
-    assert results[1].metadata["context_bonus_score"] == 0.0
-
-    assert results[2].metadata["bias_invalidated_by_microstructure"] is True
-    assert results[2].metadata["reversal_persistence_confirmed"] is True
-    assert results[2].metadata["context_quality_eligible"] is True
-    assert results[2].metadata["context_veto_score"] == 0.0
-    assert results[2].metadata["context_bonus_score"] > 0.0
+    assert all(r.metadata["effective_context_conflict"] is True for r in results)
+    assert all(r.metadata["effective_context_alignment"] is False for r in results)
 
 
-# D. Tick contradicts candidate side -> not invalidated -> blocked
-def test_tick_contradicts_blocked(monkeypatch, strat):
+def test_aligned_direction_and_microstructure_publish_confirmation(monkeypatch, strat):
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
-    sig = _eval(
-        strat, "NFO:NIFTY26MAY24000CE", _ind("PE", "DOWN", buy=400, sell=80)
-    )
-    assert sig.metadata["trigger_conditions_met"] is False
-    assert sig.metadata["bias_invalidated_by_microstructure"] is False
+    sig = _eval(strat, "NFO:NIFTY26MAY24000CE", _ind("CE", "UP", buy=400, sell=80))
 
-
-# E. Aligned bias remains context only
-def test_aligned_bias_allowed_normally(monkeypatch, strat):
-    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
-    sig = _eval(
-        strat, "NFO:NIFTY26MAY24000CE", _ind("CE", "UP", buy=400, sell=80)
-    )
     assert sig.metadata["trigger_conditions_met"] is False
-    assert sig.metadata["bias_invalidated_by_microstructure"] is False
+    assert sig.metadata["trigger_block_reason"] == "context_only_role"
     assert sig.metadata["context_quality_eligible"] is True
-    assert sig.metadata["context_bonus_score"] > 0.0
-    assert sig.metadata["context_veto_score"] == 0.0
+    assert sig.metadata["effective_context_alignment"] is True
+    assert sig.metadata["effective_context_conflict"] is False
 
 
-# F. Below default imbalance threshold -> not confirmed -> blocked
-def test_below_imbalance_threshold_blocked(monkeypatch, strat):
+def test_weak_microstructure_does_not_create_alignment(monkeypatch, strat):
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
-    sig = _eval(
-        strat, "NFO:NIFTY26MAY24000CE", _ind("PE", "UP", buy=210, sell=180)
-    )
-    assert sig.metadata["bias_invalidated_by_microstructure"] is False
+    sig = _eval(strat, "NFO:NIFTY26MAY24000CE", _ind("CE", "UP", buy=210, sell=180))
+
     assert sig.metadata["trigger_conditions_met"] is False
+    assert sig.metadata["context_quality_eligible"] is True
+    assert sig.metadata["effective_context_alignment"] is False
+    assert sig.metadata["effective_context_conflict"] is False
 
 
-# G. No directional bias at all -> not gated by conflict
-def test_no_bias_not_conflict_gated(monkeypatch, strat):
+def test_missing_underlying_direction_makes_context_ineligible(monkeypatch, strat):
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
-    sig = _eval(
-        strat, "NFO:NIFTY26MAY24000CE", _ind("", "UP", buy=400, sell=80)
-    )
-    assert sig.metadata["trigger_block_reason"] != "direction_bias_conflict"
-
-
-def test_no_bias_without_spot_or_futures_live_proof_still_blocks(monkeypatch, strat):
-    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
-    sig = _eval(
-        strat, "NFO:NIFTY26MAY24000CE", _ind("", "UP", buy=400, sell=80)
-    )
+    sig = _eval(strat, "NFO:NIFTY26MAY24000CE", _ind("", "UP", buy=400, sell=80))
 
     assert sig.metadata["trigger_conditions_met"] is False
     assert sig.metadata["trigger_block_reason"] == "context_only_role"
-    assert sig.metadata.get("direction_context_live_proof") is not True
-
-
-def test_no_bias_with_fresh_spot_live_proof_stays_context(monkeypatch, strat):
-    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
-    sig = _eval(
-        strat,
-        "NFO:NIFTY26MAY24000CE",
-        _ind(
-            "",
-            "UP",
-            buy=400,
-            sell=80,
-            spot_fresh=True,
-            spot_tick_age_s=0.25,
-        ),
-    )
-
-    assert sig.metadata["trigger_conditions_met"] is False
-    assert sig.metadata["trigger_block_reason"] == "context_only_role"
-    assert sig.metadata["direction_context_ok"] is False
-
-
-def test_no_bias_with_stale_spot_and_futures_proof_still_blocks(monkeypatch, strat):
-    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
-    sig = _eval(
-        strat,
-        "NFO:NIFTY26MAY24000CE",
-        _ind(
-            "",
-            "UP",
-            buy=400,
-            sell=80,
-            spot_fresh=False,
-            fut_fresh=False,
-            spot_tick_age_s=30.0,
-            futures_tick_age_s=30.0,
-        ),
-    )
-
-    assert sig.metadata["trigger_conditions_met"] is False
-    assert sig.metadata["trigger_block_reason"] == "context_only_role"
+    assert sig.metadata["context_quality_eligible"] is False
+    assert sig.metadata["effective_context_alignment"] is False
+    assert sig.metadata["effective_context_conflict"] is False

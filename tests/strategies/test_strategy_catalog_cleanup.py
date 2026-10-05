@@ -14,12 +14,16 @@ from nifty_scalper_bot.strategies.elite_strategies.config_models import (
     GammaScalpingStrategyConfig,
     RSIDivergenceStrategyConfig,
 )
-from nifty_scalper_bot.strategies.elite_strategies.cpr_breakout import CPRBreakoutStrategy
-from nifty_scalper_bot.strategies.elite_strategies.gamma_scalping import GammaScalpingStrategy
+from nifty_scalper_bot.strategies.elite_strategies.cpr_breakout import (
+    CPRBreakoutStrategy,
+)
+from nifty_scalper_bot.strategies.elite_strategies.gamma_scalping import (
+    GammaScalpingStrategy,
+)
 from nifty_scalper_bot.strategies.elite_strategies.rsi_divergence import (
     RSIDivergenceStrategy,
 )
-from nifty_scalper_bot.strategies.signal_quality import build_trade_quality_evidence
+from nifty_scalper_bot.strategies.entry_evidence import build_execution_evidence
 
 
 def test_module_compatibility_list_is_derived_from_canonical_catalog() -> None:
@@ -42,9 +46,9 @@ def test_theta_mode_does_not_restore_retired_single_leg_straddle(monkeypatch) ->
 
 
 def test_secondary_context_strategies_require_observed_atr() -> None:
-    bb = BBSqueezeStrategy(BBSqueezeStrategyConfig(min_confidence=0.0), None)
-    cpr = CPRBreakoutStrategy(CPRBreakoutStrategyConfig(min_confidence=0.0), None)
-    rsi = RSIDivergenceStrategy(RSIDivergenceStrategyConfig(min_confidence=0.0), None)
+    bb = BBSqueezeStrategy(BBSqueezeStrategyConfig(), None)
+    cpr = CPRBreakoutStrategy(CPRBreakoutStrategyConfig(), None)
+    rsi = RSIDivergenceStrategy(RSIDivergenceStrategyConfig(), None)
 
     assert bb._evaluate_signal("NSE:NIFTY", {"atr": 0.0}, 24000.0) is None
     assert cpr._evaluate_signal("NSE:NIFTY", {"atr": 0.0}, 24000.0) is None
@@ -55,7 +59,7 @@ def test_expiry_gamma_requires_observed_atr(monkeypatch) -> None:
     monkeypatch.setenv("STRATEGY_MODE", "expiry_gamma")
     monkeypatch.setenv("ALLOW_EXPIRY_GAMMA_STRATEGIES", "true")
     strategy = GammaScalpingStrategy(
-        GammaScalpingStrategyConfig(min_confidence=0.0),
+        GammaScalpingStrategyConfig(),
         indicator_engine=None,
     )
     signal = strategy._evaluate_signal(
@@ -74,7 +78,7 @@ def test_expiry_gamma_requires_observed_atr(monkeypatch) -> None:
 
 def test_unknown_spread_is_non_blocking_but_not_passed_evidence(monkeypatch) -> None:
     monkeypatch.setenv("ORDER_MAX_SPREAD_PCT", "1.0")
-    evidence = build_trade_quality_evidence(
+    evidence = build_execution_evidence(
         {
             "direction_bias": "CE",
             "quote_depth_valid": True,
@@ -84,8 +88,7 @@ def test_unknown_spread_is_non_blocking_but_not_passed_evidence(monkeypatch) -> 
         side="CE",
     )
 
-    assert evidence["quality_spread_observed"] is False
-    assert evidence["quality_spread_pass"] is None
-    assert evidence["quality_spread_status"] == "unknown"
-    assert evidence["quality_spread_pct"] is None
-    assert evidence["liquidity_score"] == 0.5
+    assert evidence["spread_observed"] is False
+    assert evidence["spread_ok"] is None
+    assert evidence["spread_pct"] is None
+    assert evidence["execution_evidence_pass"] is True

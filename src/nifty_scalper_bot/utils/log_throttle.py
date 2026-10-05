@@ -75,21 +75,6 @@ class StrategyRejectionStats:
     by_reason: Counter[str] = field(default_factory=Counter)
     by_strategy: Counter[str] = field(default_factory=Counter)
     by_symbol: Counter[str] = field(default_factory=Counter)
-    first_score: float | None = None
-    latest_score: float | None = None
-    min_score: float | None = None
-    max_score: float | None = None
-
-    def record_score(self, score: Any) -> None:
-        try:
-            value = float(score)
-        except (TypeError, ValueError):
-            return
-        if self.first_score is None:
-            self.first_score = value
-        self.latest_score = value
-        self.min_score = value if self.min_score is None else min(self.min_score, value)
-        self.max_score = value if self.max_score is None else max(self.max_score, value)
 
 
 class LogThrottle:
@@ -109,18 +94,29 @@ class LogThrottle:
 
     def should_log(self, key: str, interval_seconds: float | None = None) -> bool:
         """Return True when the key's monotonic interval has elapsed."""
-        interval = self.default_interval_seconds if interval_seconds is None else float(interval_seconds)
+        interval = (
+            self.default_interval_seconds
+            if interval_seconds is None
+            else float(interval_seconds)
+        )
         now = time.monotonic()
         wall = _utc_iso()
         with self._lock:
             state = self._states.get(key)
             if state is None:
-                state = ThrottleState(first_seen=wall, last_seen=wall, interval_seconds=max(0.0, interval))
+                state = ThrottleState(
+                    first_seen=wall,
+                    last_seen=wall,
+                    interval_seconds=max(0.0, interval),
+                )
                 self._states[key] = state
             else:
                 state.last_seen = wall
                 state.interval_seconds = max(0.0, interval)
-            if state.last_emit_mono > 0.0 and (now - state.last_emit_mono) < state.interval_seconds:
+            if (
+                state.last_emit_mono > 0.0
+                and (now - state.last_emit_mono) < state.interval_seconds
+            ):
                 return False
             state.last_emit_mono = now
             self._last_emit_mono[key] = now
@@ -131,7 +127,11 @@ class LogThrottle:
         with self._lock:
             state = self._states.get(key)
             if state is None:
-                state = ThrottleState(first_seen=wall, last_seen=wall, interval_seconds=0.0)
+                state = ThrottleState(
+                    first_seen=wall,
+                    last_seen=wall,
+                    interval_seconds=0.0,
+                )
                 self._states[key] = state
             state.last_seen = wall
             state.suppressed_count += 1
@@ -140,7 +140,9 @@ class LogThrottle:
     def pop_suppressed(self, key: str) -> int:
         with self._lock:
             state = self._states.get(key)
-            value = int(state.suppressed_count if state else self._suppressed.get(key, 0) or 0)
+            value = int(
+                state.suppressed_count if state else self._suppressed.get(key, 0) or 0
+            )
             if state:
                 state.suppressed_count = 0
             self._suppressed[key] = 0
@@ -158,20 +160,34 @@ class LogThrottle:
                 "suppressed_count": state.suppressed_count,
             }
 
-    def maybe_emit_summary(self, logger: logging.Logger, *, interval_seconds: float = 60.0, top_n: int = 10) -> None:
+    def maybe_emit_summary(
+        self,
+        logger: logging.Logger,
+        *,
+        interval_seconds: float = 60.0,
+        top_n: int = 10,
+    ) -> None:
         """Emit a compact aggregate suppression summary periodically."""
         now = time.monotonic()
         with self._lock:
-            if self._summary_last_emit_mono > 0 and (now - self._summary_last_emit_mono) < float(interval_seconds):
+            if self._summary_last_emit_mono > 0 and (
+                now - self._summary_last_emit_mono
+            ) < float(interval_seconds):
                 return
-            pending = {k: s.suppressed_count for k, s in self._states.items() if s.suppressed_count > 0}
+            pending = {
+                key: state.suppressed_count
+                for key, state in self._states.items()
+                if state.suppressed_count > 0
+            }
             if not pending:
                 return
             self._summary_last_emit_mono = now
             for key in pending:
                 self._states[key].suppressed_count = 0
                 self._suppressed[key] = 0
-        top = sorted(pending.items(), key=lambda item: item[1], reverse=True)[: max(1, int(top_n))]
+        top = sorted(pending.items(), key=lambda item: item[1], reverse=True)[
+            : max(1, int(top_n))
+        ]
         total_suppressed = sum(int(v) for v in pending.values())
         keys = ",".join(f"{k}:{v}" for k, v in top)
         logger.info(
@@ -187,26 +203,61 @@ class LogThrottle:
             },
         )
 
-    def log_on_change(self, logger: logging.Logger, *, key: str, state: Any, message: str, reminder_seconds: float = 600, level: int = logging.INFO, extra: dict[str, Any] | None = None) -> bool:
+    def log_on_change(
+        self,
+        logger: logging.Logger,
+        *,
+        key: str,
+        state: Any,
+        message: str,
+        reminder_seconds: float = 600,
+        level: int = logging.INFO,
+        extra: dict[str, Any] | None = None,
+    ) -> bool:
         now = time.monotonic()
         wall = _utc_iso()
         payload = dict(extra or {})
         with self._lock:
             previous = self._change_states.get(key)
             changed = previous is None or previous.state != state
-            reminder_due = previous is not None and (now - previous.last_emit_mono) >= max(0.0, float(reminder_seconds))
+            reminder_due = previous is not None and (
+                now - previous.last_emit_mono
+            ) >= max(0.0, float(reminder_seconds))
             if not changed and not reminder_due:
                 previous.suppressed_count += 1
                 previous.last_seen = wall
                 return False
             suppressed = int(previous.suppressed_count) if previous else 0
             first_seen = previous.first_seen if previous else wall
-            self._change_states[key] = ChangeState(state=state, first_seen=first_seen, last_seen=wall, last_emit_mono=now, suppressed_count=0)
-        payload.update({"log_key": key, "state": state, "previous_state": None if previous is None else previous.state, "suppressed_count": suppressed, "first_seen": first_seen, "last_seen": wall, "reminder_seconds": float(reminder_seconds)})
+            self._change_states[key] = ChangeState(
+                state=state,
+                first_seen=first_seen,
+                last_seen=wall,
+                last_emit_mono=now,
+                suppressed_count=0,
+            )
+        payload.update(
+            {
+                "log_key": key,
+                "state": state,
+                "previous_state": None if previous is None else previous.state,
+                "suppressed_count": suppressed,
+                "first_seen": first_seen,
+                "last_seen": wall,
+                "reminder_seconds": float(reminder_seconds),
+            }
+        )
         logger.log(level, message, extra=payload)
         return True
 
-    def record_strategy_evaluation(self, *, strategy: str, symbol: str, accepted: bool, reason: str | None = None, score: Any = None) -> None:
+    def record_strategy_evaluation(
+        self,
+        *,
+        strategy: str,
+        symbol: str,
+        accepted: bool,
+        reason: str | None = None,
+    ) -> None:
         with self._lock:
             self._strategy_stats.evaluation_count += 1
             if accepted:
@@ -216,12 +267,15 @@ class LogThrottle:
                 self._strategy_stats.by_reason[str(reason or "unknown")] += 1
                 self._strategy_stats.by_strategy[str(strategy or "unknown")] += 1
                 self._strategy_stats.by_symbol[str(symbol or "unknown")] += 1
-                self._strategy_stats.record_score(score)
 
-    def maybe_emit_strategy_rejection_summary(self, logger: logging.Logger, *, interval_seconds: float = 300.0, top_n: int = 5) -> bool:
+    def maybe_emit_strategy_rejection_summary(
+        self, logger: logging.Logger, *, interval_seconds: float = 300.0, top_n: int = 5
+    ) -> bool:
         now = time.monotonic()
         with self._lock:
-            if self._strategy_summary_last_emit_mono > 0 and (now - self._strategy_summary_last_emit_mono) < float(interval_seconds):
+            if self._strategy_summary_last_emit_mono > 0 and (
+                now - self._strategy_summary_last_emit_mono
+            ) < float(interval_seconds):
                 return False
             stats = self._strategy_stats
             if stats.rejected_count <= 0:
@@ -235,15 +289,14 @@ class LogThrottle:
                 "top_reasons": dict(stats.by_reason.most_common(top_n)),
                 "top_strategies": dict(stats.by_strategy.most_common(top_n)),
                 "top_symbols": dict(stats.by_symbol.most_common(top_n)),
-                "first_score": stats.first_score,
-                "latest_score": stats.latest_score,
-                "min_score": stats.min_score,
-                "max_score": stats.max_score,
             }
             self._strategy_stats = StrategyRejectionStats()
         logger.info(
             "STRATEGY_REJECTION_SUMMARY evaluations=%s accepted=%s rejected=%s top_reasons=%s",
-            payload["evaluation_count"], payload["accepted_count"], payload["rejected_count"], payload["top_reasons"],
+            payload["evaluation_count"],
+            payload["accepted_count"],
+            payload["rejected_count"],
+            payload["top_reasons"],
             extra=payload,
         )
         return True
@@ -257,7 +310,16 @@ def event_is_never_throttled(event: str | None) -> bool:
     return str(event or "").upper() in NEVER_THROTTLE_EVENTS
 
 
-def log_throttled(logger: logging.Logger, level: int, event: str, key: str, interval_seconds: float, message: str, *args: Any, **kwargs: Any) -> bool:
+def log_throttled(
+    logger: logging.Logger,
+    level: int,
+    event: str,
+    key: str,
+    interval_seconds: float,
+    message: str,
+    *args: Any,
+    **kwargs: Any,
+) -> bool:
     """Emit a throttled log with shared state and ``suppressed_count`` metadata.
 
     Logging must never break trading paths; any logger/format/extra failure is
@@ -275,11 +337,25 @@ def log_throttled(logger: logging.Logger, level: int, event: str, key: str, inte
         if throttle.should_log(key, interval_seconds):
             suppressed = throttle.pop_suppressed(key)
             extra["suppressed_count"] = suppressed
-            extra.update({k: v for k, v in throttle.state_metadata(key).items() if k != "suppressed_count"})
+            extra.update(
+                {
+                    k: v
+                    for k, v in throttle.state_metadata(key).items()
+                    if k != "suppressed_count"
+                }
+            )
             logger.log(level, message, *args, extra=extra, **kwargs)
-            enabled = os.getenv("LOG_THROTTLE_SUMMARY_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+            enabled = os.getenv(
+                "LOG_THROTTLE_SUMMARY_ENABLED", "true"
+            ).strip().lower() in {"1", "true", "yes", "on"}
             if enabled:
-                throttle.maybe_emit_summary(logger, interval_seconds=float(os.getenv("LOG_THROTTLE_SUMMARY_SECONDS", "300") or "300"), top_n=int(os.getenv("LOG_THROTTLE_SUMMARY_TOP_N", "10") or "10"))
+                throttle.maybe_emit_summary(
+                    logger,
+                    interval_seconds=float(
+                        os.getenv("LOG_THROTTLE_SUMMARY_SECONDS", "300") or "300"
+                    ),
+                    top_n=int(os.getenv("LOG_THROTTLE_SUMMARY_TOP_N", "10") or "10"),
+                )
             return True
         throttle.record_suppressed(key)
         return False
@@ -287,23 +363,61 @@ def log_throttled(logger: logging.Logger, level: int, event: str, key: str, inte
         return False
 
 
-def log_on_change(logger: logging.Logger, *, key: str, state: Any, message: str, reminder_seconds: float = 600, level: int = logging.INFO, extra: dict[str, Any] | None = None, throttle: LogThrottle = DEFAULT_LOG_THROTTLE) -> bool:
+def log_on_change(
+    logger: logging.Logger,
+    *,
+    key: str,
+    state: Any,
+    message: str,
+    reminder_seconds: float = 600,
+    level: int = logging.INFO,
+    extra: dict[str, Any] | None = None,
+    throttle: LogThrottle = DEFAULT_LOG_THROTTLE,
+) -> bool:
     """Emit a state-change log without allowing logging failures to propagate."""
     try:
-        return throttle.log_on_change(logger, key=key, state=state, message=message, reminder_seconds=reminder_seconds, level=level, extra=extra)
+        return throttle.log_on_change(
+            logger,
+            key=key,
+            state=state,
+            message=message,
+            reminder_seconds=reminder_seconds,
+            level=level,
+            extra=extra,
+        )
     except Exception:
         return False
 
 
-def record_strategy_evaluation(*, strategy: str, symbol: str, accepted: bool, reason: str | None = None, score: Any = None, throttle: LogThrottle = DEFAULT_LOG_THROTTLE) -> None:
+def record_strategy_evaluation(
+    *,
+    strategy: str,
+    symbol: str,
+    accepted: bool,
+    reason: str | None = None,
+    throttle: LogThrottle = DEFAULT_LOG_THROTTLE,
+) -> None:
     try:
-        throttle.record_strategy_evaluation(strategy=strategy, symbol=symbol, accepted=accepted, reason=reason, score=score)
+        throttle.record_strategy_evaluation(
+            strategy=strategy,
+            symbol=symbol,
+            accepted=accepted,
+            reason=reason,
+        )
     except Exception:
         return
 
 
-def maybe_emit_strategy_rejection_summary(logger: logging.Logger, *, interval_seconds: float = 300.0, top_n: int = 5, throttle: LogThrottle = DEFAULT_LOG_THROTTLE) -> bool:
+def maybe_emit_strategy_rejection_summary(
+    logger: logging.Logger,
+    *,
+    interval_seconds: float = 300.0,
+    top_n: int = 5,
+    throttle: LogThrottle = DEFAULT_LOG_THROTTLE,
+) -> bool:
     try:
-        return throttle.maybe_emit_strategy_rejection_summary(logger, interval_seconds=interval_seconds, top_n=top_n)
+        return throttle.maybe_emit_strategy_rejection_summary(
+            logger, interval_seconds=interval_seconds, top_n=top_n
+        )
     except Exception:
         return False

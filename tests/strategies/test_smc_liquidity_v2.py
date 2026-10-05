@@ -5,9 +5,10 @@ from typing import Any
 
 import pytest
 
-from nifty_scalper_bot.strategies.elite_strategies.config_models import SMCStrategyConfig
+from nifty_scalper_bot.strategies.elite_strategies.config_models import (
+    SMCStrategyConfig,
+)
 from nifty_scalper_bot.strategies.elite_strategies.smc_liquidity import SMCStrategy
-
 
 FUTURES = "NFO:NIFTY26SEPFUT"
 SPOT = "NSE:NIFTY"
@@ -20,7 +21,9 @@ class FakeIndicatorEngine:
     def __init__(self, histories: dict[str, list[dict[str, Any]]]) -> None:
         self.histories = histories
 
-    def get_history(self, symbol: str, count: int | None = None, *, field: str = "close"):
+    def get_history(
+        self, symbol: str, count: int | None = None, *, field: str = "close"
+    ):
         rows = list(self.histories.get(symbol, []))
         if count is not None:
             rows = rows[-count:]
@@ -107,7 +110,7 @@ def _indicators(side: str = "CE", **overrides: Any) -> dict[str, Any]:
 
 
 def _strategy(rows: list[dict[str, Any]], **config_overrides: Any) -> SMCStrategy:
-    config = SMCStrategyConfig(min_confidence=0.0, **config_overrides)
+    config = SMCStrategyConfig(**config_overrides)
     return SMCStrategy(config, FakeIndicatorEngine({FUTURES: rows, SPOT: rows}))
 
 
@@ -139,7 +142,7 @@ def test_bullish_underlying_sweep_requires_later_confirmation_bar(monkeypatch) -
     monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
     rows = _base_rows()
     engine = FakeIndicatorEngine({FUTURES: rows, SPOT: rows})
-    strategy = SMCStrategy(SMCStrategyConfig(min_confidence=0.0), engine)
+    strategy = SMCStrategy(SMCStrategyConfig(), engine)
 
     sweep = _bar(
         30,
@@ -233,13 +236,9 @@ def test_opposite_side_option_structure_does_not_confirm_ce_sweep(
 
     assert opposite_vote is not None and aligned_vote is not None
     assert opposite_vote.metadata["structure_confirmed"] is False
-    assert "structure_confirmation" not in opposite_vote.metadata["score_reasons"]
+    assert "structure_confirmation" not in opposite_vote.metadata["setup_reasons"]
     assert aligned_vote.metadata["structure_confirmed"] is True
-    assert (
-        aligned_vote.metadata["strategy_score"]
-        - opposite_vote.metadata["strategy_score"]
-        == 1.0
-    )
+    assert "structure_confirmation" in aligned_vote.metadata["setup_reasons"]
 
 
 def test_tiny_one_tick_breach_is_not_accepted_as_liquidity_sweep(monkeypatch) -> None:
@@ -267,7 +266,9 @@ def test_tiny_one_tick_breach_is_not_accepted_as_liquidity_sweep(monkeypatch) ->
     assert strategy.last_no_vote_reason == "smc_sweep_too_shallow"
 
 
-def test_sweep_that_is_too_deep_is_treated_as_break_not_liquidity_grab(monkeypatch) -> None:
+def test_sweep_that_is_too_deep_is_treated_as_break_not_liquidity_grab(
+    monkeypatch,
+) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
     rows = _base_rows()
     strategy = _strategy(rows)
@@ -292,7 +293,9 @@ def test_sweep_that_is_too_deep_is_treated_as_break_not_liquidity_grab(monkeypat
     assert strategy.last_no_vote_reason == "smc_sweep_too_deep"
 
 
-def test_configured_sweep_distance_is_used_as_normalized_threshold_cap(monkeypatch) -> None:
+def test_configured_sweep_distance_is_used_as_normalized_threshold_cap(
+    monkeypatch,
+) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
     rows = _base_rows()
     # A deliberately small cap proves the config is not dead: effective minimum
@@ -320,13 +323,14 @@ def test_configured_sweep_distance_is_used_as_normalized_threshold_cap(monkeypat
     assert strategy.last_sweep_diagnostics["effective_min_sweep_points"] == 0.5
 
 
-def test_volume_spike_config_is_consumed_as_quality_confirmation(monkeypatch) -> None:
+def test_volume_spike_config_is_consumed_as_structural_confirmation(
+    monkeypatch,
+) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
     rows = _base_rows()
     engine = FakeIndicatorEngine({FUTURES: rows})
     strategy = SMCStrategy(
         SMCStrategyConfig(
-            min_confidence=0.0,
             volume_spike_mult=1.5,
         ),
         engine,
@@ -340,7 +344,12 @@ def test_volume_spike_config_is_consumed_as_quality_confirmation(monkeypatch) ->
         volume=2500.0,
     )
     rows.append(sweep)
-    assert strategy.generate_signal(CE, _indicators(latest_bar_ts=sweep["timestamp"]), 102.0) is None
+    assert (
+        strategy.generate_signal(
+            CE, _indicators(latest_bar_ts=sweep["timestamp"]), 102.0
+        )
+        is None
+    )
     confirm = _bar(31, open_=23984, high=24000, low=23982, close=23998, volume=2200)
     rows.append(confirm)
 
@@ -352,14 +361,14 @@ def test_volume_spike_config_is_consumed_as_quality_confirmation(monkeypatch) ->
     assert signal is not None
     assert signal.metadata["volume_confirmation"] is True
     assert signal.metadata["volume_spike_threshold"] == 1.5
-    assert "volume_confirmation" in signal.metadata["score_reasons"]
+    assert "volume_confirmation" in signal.metadata["setup_reasons"]
 
 
 def test_bearish_underlying_sweep_confirms_long_pe(monkeypatch) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
     rows = _base_rows()
     engine = FakeIndicatorEngine({FUTURES: rows})
-    strategy = SMCStrategy(SMCStrategyConfig(min_confidence=0.0), engine)
+    strategy = SMCStrategy(SMCStrategyConfig(), engine)
     sweep = _bar(
         30,
         open_=24012.0,
@@ -369,7 +378,12 @@ def test_bearish_underlying_sweep_confirms_long_pe(monkeypatch) -> None:
         volume=2400.0,
     )
     rows.append(sweep)
-    assert strategy.generate_signal(PE, _indicators("PE", latest_bar_ts=sweep["timestamp"]), 98.0) is None
+    assert (
+        strategy.generate_signal(
+            PE, _indicators("PE", latest_bar_ts=sweep["timestamp"]), 98.0
+        )
+        is None
+    )
     confirm = _bar(
         31,
         open_=24017.0,
@@ -392,14 +406,21 @@ def test_bearish_underlying_sweep_confirms_long_pe(monkeypatch) -> None:
     assert signal.metadata["underlying_invalidation_level"] > 24027.0
 
 
-def test_same_confirmation_bar_reuses_identity_until_entry_is_accepted(monkeypatch) -> None:
+def test_same_confirmation_bar_reuses_identity_until_entry_is_accepted(
+    monkeypatch,
+) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
     rows = _base_rows()
     engine = FakeIndicatorEngine({FUTURES: rows})
-    strategy = SMCStrategy(SMCStrategyConfig(min_confidence=0.0), engine)
+    strategy = SMCStrategy(SMCStrategyConfig(), engine)
     sweep = _bar(30, open_=23988, high=23991, low=23974, close=23984, volume=2500)
     rows.append(sweep)
-    assert strategy.generate_signal(CE, _indicators(latest_bar_ts=sweep["timestamp"]), 102.0) is None
+    assert (
+        strategy.generate_signal(
+            CE, _indicators(latest_bar_ts=sweep["timestamp"]), 102.0
+        )
+        is None
+    )
     confirm = _bar(31, open_=23984, high=24000, low=23982, close=23998, volume=2200)
     rows.append(confirm)
     indicators = _indicators(latest_bar_ts=confirm["timestamp"])

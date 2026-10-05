@@ -26,6 +26,7 @@ from nifty_scalper_bot.utils.smart_symbol import (
 
 LOGGER = get_logger(__name__)
 
+
 def _positive_float(value: Any) -> float | None:
     try:
         parsed = float(value)
@@ -89,8 +90,7 @@ class EliteTuesdayGammaBuyer(EliteStrategy):
             except (TypeError, ValueError):
                 return False
         return (
-            get_actual_expiry_date(trading_date, WEEKLY_EXPIRY_WEEKDAY)
-            == trading_date
+            get_actual_expiry_date(trading_date, WEEKLY_EXPIRY_WEEKDAY) == trading_date
         )
 
     def _evaluate_signal(
@@ -102,9 +102,9 @@ class EliteTuesdayGammaBuyer(EliteStrategy):
     ) -> EliteSignal | None:
         del position
         try:
-            strategy_mode = str(
-                os.getenv("STRATEGY_MODE", "directional_scalp")
-            ).strip().lower()
+            strategy_mode = (
+                str(os.getenv("STRATEGY_MODE", "directional_scalp")).strip().lower()
+            )
             gamma_enabled = str(
                 os.getenv("ALLOW_EXPIRY_GAMMA_STRATEGIES", "false")
             ).strip().lower() in {"1", "true", "yes", "on"}
@@ -181,13 +181,10 @@ class EliteTuesdayGammaBuyer(EliteStrategy):
                 except (TypeError, ValueError):
                     pass
 
-            score = 4.0
             reasons = ["expiry_session", "underlying_direction_context"]
             if price_alignment is True:
-                score += 2.0
                 reasons.append("underlying_vwap_alignment")
             if ema_alignment is True:
-                score += 2.0
                 reasons.append("underlying_ema_alignment")
 
             futures = _mapping(indicators.get("futures_context"))
@@ -199,7 +196,6 @@ class EliteTuesdayGammaBuyer(EliteStrategy):
                 and futures_volume >= 1.2 * futures_avg_volume
             )
             if volume_expansion:
-                score += 1.0
                 reasons.append("futures_volume_expansion")
 
             underlying_atr = _positive_float(context.get("atr"))
@@ -210,13 +206,10 @@ class EliteTuesdayGammaBuyer(EliteStrategy):
                 and underlying_atr > underlying_atr_ma
             )
             if volatility_expansion:
-                score += 1.0
                 reasons.append("underlying_volatility_expansion")
-
-            strategy_score = max(0.0, min(10.0, score))
-            setup_min = 6.0
-            if strategy_score < setup_min:
-                reasons.append("score_below_legacy_minimum")
+            if not (volume_expansion or volatility_expansion):
+                self._no_vote("expiry_gamma_expansion_unconfirmed")
+                return None
 
             atr_multiplier = max(float(self._config.atr_multiplier), 0.1)
             target_multiplier = max(float(self._config.target_multiplier), 0.1)
@@ -237,19 +230,13 @@ class EliteTuesdayGammaBuyer(EliteStrategy):
                 "underlying_context_source": context_source,
                 "underlying_reference_symbol": context.get("symbol"),
                 "underlying_reference_price": underlying_price,
-                "strategy_score": strategy_score,
-                "raw_setup_score": strategy_score,
-                "setup_score": strategy_score,
-                "setup_min": setup_min,
                 "setup_pass": True,
-                "setup_quality": strategy_score,
                 "setup_type": "expiry_gamma",
-                "preliminary_only": True,
                 "requires_runner_execution_validation": True,
                 "required_data_present": True,
                 "stale_data_used": bool(indicators.get("stale_data_used")),
                 "candidate_symbol": symbol,
-                "score_reasons": reasons,
+                "setup_reasons": reasons,
                 "rejection_reasons": [],
                 "expiry_day": True,
                 "days_to_expiry": indicators.get("days_to_expiry"),
@@ -272,15 +259,14 @@ class EliteTuesdayGammaBuyer(EliteStrategy):
                 "target_multiplier": target_multiplier,
             }
             LOGGER.info(
-                "STRATEGY_VOTE strategy=EliteTuesdayGammaBuyer side=%s score=%.2f source=%s",
+                "STRATEGY_EVIDENCE strategy=EliteTuesdayGammaBuyer side=%s source=%s",
                 side,
-                strategy_score,
                 context_source,
             )
             return EliteSignal(
                 symbol=symbol,
                 signal="BUY",
-                confidence=max(0.1, min(0.9, strategy_score / 10.0)),
+                confidence=1.0,
                 entry_price=current_price,
                 stop_loss=stop_loss,
                 target=target,

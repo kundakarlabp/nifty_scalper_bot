@@ -20,7 +20,7 @@ from nifty_scalper_bot.strategies.elite_validator import (
 
 def test_oi_max_pain_uses_spot_not_option_premium() -> None:
     strategy = OIMaxPainStrategy(
-        OIMaxPainStrategyConfig(min_confidence=0.0, min_deviation_pct=0.5),
+        OIMaxPainStrategyConfig(min_deviation_pct=0.5),
         indicator_engine=None,
     )
 
@@ -44,9 +44,7 @@ def test_oi_max_pain_uses_spot_not_option_premium() -> None:
 
 
 def test_oi_max_pain_option_requires_underlying_spot() -> None:
-    strategy = OIMaxPainStrategy(
-        OIMaxPainStrategyConfig(min_confidence=0.0), indicator_engine=None
-    )
+    strategy = OIMaxPainStrategy(OIMaxPainStrategyConfig(), indicator_engine=None)
 
     signal = strategy.generate_signal(
         "NFO:NIFTY2691524000CE",
@@ -61,7 +59,7 @@ def test_gamma_pe_buy_keeps_premium_stop_below_entry(monkeypatch) -> None:
     monkeypatch.setenv("STRATEGY_MODE", "expiry_gamma")
     monkeypatch.setenv("ALLOW_EXPIRY_GAMMA_STRATEGIES", "true")
     strategy = GammaScalpingStrategy(
-        GammaScalpingStrategyConfig(min_confidence=0.0, min_gamma=0.0005),
+        GammaScalpingStrategyConfig(min_gamma=0.0005),
         indicator_engine=None,
     )
 
@@ -89,7 +87,7 @@ def test_gamma_rejects_non_expiry_session(monkeypatch) -> None:
     monkeypatch.setenv("STRATEGY_MODE", "expiry_gamma")
     monkeypatch.setenv("ALLOW_EXPIRY_GAMMA_STRATEGIES", "true")
     strategy = GammaScalpingStrategy(
-        GammaScalpingStrategyConfig(min_confidence=0.0), indicator_engine=None
+        GammaScalpingStrategyConfig(), indicator_engine=None
     )
 
     signal = strategy.generate_signal(

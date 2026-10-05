@@ -103,7 +103,7 @@ def _strategy(
     rows_by_symbol: dict[str, list[dict[str, object]]], *, orb_minutes: int = 15
 ) -> ORBProStrategy:
     return ORBProStrategy(
-        ORBProStrategyConfig(min_confidence=0.0, orb_minutes=orb_minutes),
+        ORBProStrategyConfig(orb_minutes=orb_minutes),
         indicator_engine=_IndicatorEngine(rows_by_symbol),
     )
 
@@ -112,6 +112,7 @@ def test_orb_uses_configured_futures_opening_range_not_option_premium(
     monkeypatch,
 ) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    monkeypatch.setenv("ORB_BALANCED_RANGE_MAX_ATR", "2.0")
     rows = _opening_rows()
     rows.append(
         _bar(
@@ -143,6 +144,7 @@ def test_orb_uses_configured_futures_opening_range_not_option_premium(
 
 def test_same_completed_breakout_bar_cannot_vote_twice(monkeypatch) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    monkeypatch.setenv("ORB_BALANCED_RANGE_MAX_ATR", "2.0")
     rows = _opening_rows()
     rows.append(
         _bar(
@@ -166,6 +168,7 @@ def test_same_completed_breakout_bar_cannot_vote_twice(monkeypatch) -> None:
 def test_retest_must_follow_breakout_before_retest_branch_votes(monkeypatch) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
     monkeypatch.setenv("ORB_MOMENTUM_BRANCH_ENABLED", "false")
+    monkeypatch.setenv("ORB_BALANCED_RANGE_MAX_ATR", "2.0")
     rows = _opening_rows()
     rows.append(
         _bar(
@@ -179,7 +182,7 @@ def test_retest_must_follow_breakout_before_retest_branch_votes(monkeypatch) -> 
     )
     engine = _IndicatorEngine({FUTURE: rows})
     strategy = ORBProStrategy(
-        ORBProStrategyConfig(min_confidence=0.0, orb_minutes=15),
+        ORBProStrategyConfig(orb_minutes=15),
         indicator_engine=engine,
     )
     first = _base_indicators("CE", rows[-1]["timestamp"])
@@ -261,6 +264,7 @@ def test_futures_unavailable_uses_spot_context_but_never_executes_spot(
     monkeypatch,
 ) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    monkeypatch.setenv("ORB_BALANCED_RANGE_MAX_ATR", "2.0")
     rows = _opening_rows()
     rows.append(
         _bar(

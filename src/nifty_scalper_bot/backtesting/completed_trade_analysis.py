@@ -15,7 +15,6 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
-from nifty_scalper_bot.backtesting.research_validation import bootstrap_mean_interval
 from nifty_scalper_bot.utils.market_hours import IST
 
 
@@ -95,8 +94,7 @@ class ComponentCoverage:
     """Observed completed-trade coverage for one trigger strategy."""
 
     completed_trades: int
-    with_signal_quality: int
-    with_attribution_provenance: int
+    with_structural_provenance: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,38 +117,6 @@ class AttributionGroup:
 
 
 @dataclass(frozen=True, slots=True)
-class ScoreCalibrationBin:
-    """Observed post-cost outcomes for one canonical score interval."""
-
-    lower: float
-    upper: float
-    trade_count: int
-    r_trade_count: int
-    mean_score: float
-    net_expectancy: float
-    net_expectancy_ci_lower: float
-    net_expectancy_ci_upper: float
-    mean_r: float | None
-    mean_r_ci_lower: float | None
-    mean_r_ci_upper: float | None
-    win_rate: float
-    evidence_ready: bool
-
-
-@dataclass(frozen=True, slots=True)
-class ScoreCalibrationReport:
-    """Descriptive score-to-outcome calibration without threshold selection."""
-
-    score_key: str
-    total_trades: int
-    scored_trades: int
-    r_scored_trades: int
-    minimum_trades_per_bin: int
-    bins: tuple[ScoreCalibrationBin, ...]
-    blockers: tuple[str, ...]
-
-
-@dataclass(frozen=True, slots=True)
 class CandidateDecisionSummary:
     """Selection-funnel coverage from persisted runner decisions."""
 
@@ -159,7 +125,7 @@ class CandidateDecisionSummary:
     blocked: int
     approval_fraction: float
     with_research_context: int
-    with_signal_quality: int
+    with_structural_provenance: int
     blocked_by_reason: Mapping[str, int]
 
 
@@ -171,7 +137,7 @@ def summarize_candidate_decisions(
     approved = 0
     blocked = 0
     with_context = 0
-    with_quality = 0
+    with_structural = 0
     reasons: dict[str, int] = {}
     for row in rows:
         event_name = str(row.get("event_name") or "").strip()
@@ -190,9 +156,13 @@ def summarize_candidate_decisions(
         if not isinstance(research, Mapping):
             continue
         with_context += 1
-        quality = research.get("signal_quality")
-        if isinstance(quality, Mapping) and quality:
-            with_quality += 1
+        contracts = (
+            research.get("direction_contract"),
+            research.get("setup_contract"),
+            research.get("confirmation_contract"),
+        )
+        if all(isinstance(item, Mapping) and item for item in contracts):
+            with_structural += 1
 
     total = approved + blocked
     return CandidateDecisionSummary(
@@ -201,7 +171,7 @@ def summarize_candidate_decisions(
         blocked=blocked,
         approval_fraction=round(approved / total, 4) if total else 0.0,
         with_research_context=with_context,
-        with_signal_quality=with_quality,
+        with_structural_provenance=with_structural,
         blocked_by_reason=dict(sorted(reasons.items())),
     )
 
@@ -450,25 +420,8 @@ def _canonical_strategy(value: Any) -> str:
     return _STRATEGY_ALIASES.get(key, text or "UNKNOWN")
 
 
-def _has_signal_quality(outcome: Mapping[str, Any]) -> bool:
-    quality = outcome.get("signal_quality")
-    if not isinstance(quality, Mapping):
-        return False
-    for field in ("alpha_score", "strategy_score"):
-        value = quality.get(field)
-        if value is None or isinstance(value, bool):
-            return False
-        try:
-            resolved = float(value)
-        except (TypeError, ValueError):
-            return False
-        if not math.isfinite(resolved):
-            return False
-    return True
-
-
 def _has_attribution_provenance(outcome: Mapping[str, Any]) -> bool:
-    """Return whether a trade can support regime/setup/score attribution."""
+    """Return whether a trade can support structural decision attribution."""
 
     for field in ("strategy_key", "strategy_role", "signal_family"):
         if not str(outcome.get(field) or "").strip():
@@ -479,24 +432,10 @@ def _has_attribution_provenance(outcome: Mapping[str, Any]) -> bool:
         return False
     if not str(outcome.get("approval_path") or "").strip():
         return False
-    if outcome.get("score_contract_version") != 1:
-        return False
-    lineage = outcome.get("score_lineage")
-    if not isinstance(lineage, Mapping):
-        return False
-    required_lineage = {
-        "raw_setup_score",
-        "regime_weight",
-        "regime_adjusted_setup_score",
-        "context_confirmation_bonus",
-        "context_veto_penalty",
-        "manager_reference_score",
-        "manager_reference_threshold",
-        "manager_reference_above_min",
-        "score_admission_role",
-    }
-    if not required_lineage.issubset(lineage):
-        return False
+    for field in ("direction_contract", "setup_contract", "confirmation_contract"):
+        contract = outcome.get(field)
+        if not isinstance(contract, Mapping) or contract.get("passed") is not True:
+            return False
     if not isinstance(outcome.get("confirming_trigger_strategies"), list):
         return False
     if not isinstance(outcome.get("context_confirmation_strategies"), list):
@@ -516,117 +455,6 @@ def _confirmation_type(outcome: Mapping[str, Any]) -> str:
     if trigger_count == 1:
         return "single_trigger_unconfirmed"
     return "unknown"
-
-
-def calibrate_signal_scores(
-    trades: Sequence[CanonicalCompletedTrade],
-    *,
-    score_key: str = "alpha_score",
-    bin_width: float = 1.0,
-    minimum_trades_per_bin: int = 10,
-    bootstrap_samples: int = 2000,
-    seed: int = 0,
-) -> ScoreCalibrationReport:
-    """Map canonical score bins to post-cost expectancy and R uncertainty."""
-
-    width = float(bin_width)
-    minimum = int(minimum_trades_per_bin)
-    if not math.isfinite(width) or width <= 0 or width > 10:
-        raise ValueError("bin_width must be within (0, 10]")
-    if minimum <= 0:
-        raise ValueError("minimum_trades_per_bin must be positive")
-
-    grouped: dict[int, list[tuple[float, CanonicalCompletedTrade, float | None]]] = {}
-    scored = 0
-    r_scored = 0
-    invalid_scores = 0
-    for trade in trades:
-        quality = trade.outcome.get("signal_quality")
-        if not isinstance(quality, Mapping):
-            continue
-        raw_score = quality.get(score_key)
-        if raw_score is None:
-            continue
-        try:
-            score = float(raw_score)
-        except (TypeError, ValueError):
-            invalid_scores += 1
-            continue
-        if not math.isfinite(score) or not 0.0 <= score <= 10.0:
-            invalid_scores += 1
-            continue
-        r_multiple = trade.outcome.get("r_multiple")
-        try:
-            r_value = float(r_multiple) if r_multiple is not None else None
-        except (TypeError, ValueError):
-            r_value = None
-        if r_value is not None and not math.isfinite(r_value):
-            r_value = None
-        if r_value is not None:
-            r_scored += 1
-        scored += 1
-        bin_index = min(int(score / width), max(0, math.ceil(10.0 / width) - 1))
-        grouped.setdefault(bin_index, []).append((score, trade, r_value))
-
-    bins: list[ScoreCalibrationBin] = []
-    for bin_index, sample in sorted(grouped.items()):
-        scores = [item[0] for item in sample]
-        net_values = [item[1].net_pnl for item in sample]
-        r_values = [item[2] for item in sample if item[2] is not None]
-        net_interval = bootstrap_mean_interval(
-            net_values,
-            samples=bootstrap_samples,
-            seed=seed + bin_index,
-        )
-        r_interval = (
-            bootstrap_mean_interval(
-                r_values,
-                samples=bootstrap_samples,
-                seed=seed + 10_000 + bin_index,
-            )
-            if r_values
-            else None
-        )
-        lower = bin_index * width
-        upper = min(10.0, lower + width)
-        bins.append(
-            ScoreCalibrationBin(
-                lower=round(lower, 4),
-                upper=round(upper, 4),
-                trade_count=len(sample),
-                r_trade_count=len(r_values),
-                mean_score=round(sum(scores) / len(scores), 4),
-                net_expectancy=round(net_interval.estimate, 4),
-                net_expectancy_ci_lower=round(net_interval.lower, 4),
-                net_expectancy_ci_upper=round(net_interval.upper, 4),
-                mean_r=round(r_interval.estimate, 4) if r_interval else None,
-                mean_r_ci_lower=round(r_interval.lower, 4) if r_interval else None,
-                mean_r_ci_upper=round(r_interval.upper, 4) if r_interval else None,
-                win_rate=round(
-                    sum(value > 0 for value in net_values) / len(net_values),
-                    4,
-                ),
-                evidence_ready=len(sample) >= minimum,
-            )
-        )
-
-    blockers: list[str] = []
-    if scored == 0:
-        blockers.append(f"missing_score:{score_key}")
-    if invalid_scores:
-        blockers.append(f"invalid_score:{score_key}:{invalid_scores}")
-    underpowered = sum(not item.evidence_ready for item in bins)
-    if underpowered:
-        blockers.append(f"underpowered_bins:{underpowered}")
-    return ScoreCalibrationReport(
-        score_key=score_key,
-        total_trades=len(trades),
-        scored_trades=scored,
-        r_scored_trades=r_scored,
-        minimum_trades_per_bin=minimum,
-        bins=tuple(bins),
-        blockers=tuple(blockers),
-    )
 
 
 def post_cost_attribution_groups(
@@ -932,31 +760,25 @@ def attribution_readiness(
     *,
     required_components: Sequence[str] = ("ORBPro", "SMC", "VWAPPro"),
 ) -> AttributionReadiness:
-    """Fail closed unless every requested trigger has decision-time score evidence."""
+    """Fail closed unless every requested trigger has structural decision evidence."""
 
     coverage: dict[str, ComponentCoverage] = {}
     blockers: list[str] = []
     for raw_component in required_components:
         component = _canonical_strategy(raw_component)
         component_trades = [trade for trade in trades if trade.strategy == component]
-        with_quality = sum(
-            _has_signal_quality(trade.outcome) for trade in component_trades
-        )
-        with_attribution = sum(
+        with_structural = sum(
             _has_attribution_provenance(trade.outcome) for trade in component_trades
         )
         coverage[component] = ComponentCoverage(
             completed_trades=len(component_trades),
-            with_signal_quality=with_quality,
-            with_attribution_provenance=with_attribution,
+            with_structural_provenance=with_structural,
         )
         if not component_trades:
             blockers.append(f"missing_completed_trades:{component}")
         else:
-            if with_quality != len(component_trades):
-                blockers.append(f"missing_signal_quality:{component}")
-            if with_attribution != len(component_trades):
-                blockers.append(f"missing_attribution_provenance:{component}")
+            if with_structural != len(component_trades):
+                blockers.append(f"missing_structural_provenance:{component}")
 
     return AttributionReadiness(
         ready=not blockers,
@@ -993,10 +815,7 @@ __all__ = [
     "WalkForwardFold",
     "WalkForwardStability",
     "ExecutionDataQuality",
-    "ScoreCalibrationBin",
-    "ScoreCalibrationReport",
     "attribution_readiness",
-    "calibrate_signal_scores",
     "execution_data_quality",
     "canonicalize_completed_trades",
     "chronological_post_cost_blocks",

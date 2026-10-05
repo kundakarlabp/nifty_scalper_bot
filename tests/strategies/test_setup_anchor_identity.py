@@ -18,7 +18,7 @@ from nifty_scalper_bot.strategies.signal_identity import (
     deterministic_signal_id,
     has_setup_anchor,
 )
-from nifty_scalper_bot.strategies.signal_quality import build_trade_quality_evidence
+from nifty_scalper_bot.strategies.entry_evidence import build_execution_evidence
 
 BAR_TS = 1_785_000_000.0
 
@@ -40,7 +40,7 @@ class _RepeatingStrategy(EliteStrategy):
     def __init__(self, role: str = "trigger") -> None:
         self._role = role
         super().__init__(
-            config=EliteStrategyConfig(min_confidence=0.0),
+            config=EliteStrategyConfig(),
             indicator_engine=SimpleNamespace(),
         )
 
@@ -61,7 +61,7 @@ class _RepeatingStrategy(EliteStrategy):
             {
                 "role": self._role,
                 "contract_side": "CE",
-                "raw_setup_score": 9.0,
+                "setup_pass": True,
             }
         )
         return signal
@@ -229,9 +229,9 @@ def test_orb_and_smc_structural_ids_ignore_new_bar_noise() -> None:
     assert smc_first.metadata["setup_id"] == smc_second.metadata["setup_id"]
 
 
-def test_quality_evidence_uses_order_spread_policy(monkeypatch) -> None:
+def test_execution_evidence_uses_order_spread_policy(monkeypatch) -> None:
     monkeypatch.setenv("ORDER_MAX_SPREAD_PCT", "1.0")
-    good = build_trade_quality_evidence(
+    good = build_execution_evidence(
         {
             "direction_bias": "CE",
             "bid": 99.5,
@@ -243,7 +243,7 @@ def test_quality_evidence_uses_order_spread_policy(monkeypatch) -> None:
         },
         side="CE",
     )
-    wide = build_trade_quality_evidence(
+    wide = build_execution_evidence(
         {
             "direction_bias": "CE",
             "bid": 98.0,
@@ -256,11 +256,12 @@ def test_quality_evidence_uses_order_spread_policy(monkeypatch) -> None:
         side="CE",
     )
 
-    assert good["direction_alignment_score"] == 2.0
-    assert good["liquidity_score"] == 2.0
-    assert good["regime_time_suitability_score"] == 1.0
-    assert good["quality_spread_pass"] is True
-    assert wide["liquidity_score"] == 0.0
-    assert wide["quality_spread_pass"] is False
+    assert good["direction_aligned"] is True
+    assert good["spread_observed"] is True
+    assert good["spread_ok"] is True
+    assert good["execution_evidence_pass"] is True
+    assert wide["spread_observed"] is True
+    assert wide["spread_ok"] is False
+    assert wide["execution_evidence_pass"] is False
 
 # fmt: on

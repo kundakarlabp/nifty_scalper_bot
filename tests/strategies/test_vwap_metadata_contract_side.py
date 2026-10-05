@@ -1,9 +1,6 @@
 import inspect
 
-from nifty_scalper_bot.core.strategy_manager import (
-    StrategyManager,
-    signal_to_vote,
-)
+from nifty_scalper_bot.core.strategy_manager import signal_to_evidence
 from nifty_scalper_bot.strategies.elite_strategies.config_models import (
     VWAPProStrategyConfig,
 )
@@ -19,54 +16,55 @@ BAR_TS = 1_785_000_000.0
 
 def _indicators(**updates):
     payload = {
-        'vwap': 100.0,
-        'atr': 5.0,
-        'close': 103.0,
-        'open': 100.0,
-        'high': 104.0,
-        'low': 99.0,
-        'volume': 1000.0,
-        'avg_volume': 900.0,
-        'spread_pct': 0.5,
-        'bid': 102.5,
-        'ask': 103.0,
-        'quote_depth_valid': True,
-        'tradable_quote': True,
-        'direction_bias': 'CE',
-        'underlying_direction_bias': 'CE',
-        'underlying_direction_confidence': 0.95,
-        'context_age_seconds': 0.0,
-        'context_fresh': True,
-        'regime': 'TREND_UP',
-        'stale_data_used': False,
-        'latest_bar_ts': BAR_TS,
+        "vwap": 100.0,
+        "atr": 5.0,
+        "close": 103.0,
+        "open": 100.0,
+        "high": 104.0,
+        "low": 99.0,
+        "volume": 1000.0,
+        "avg_volume": 900.0,
+        "spread_pct": 0.5,
+        "bid": 102.5,
+        "ask": 103.0,
+        "quote_depth_valid": True,
+        "tradable_quote": True,
+        "direction_bias": "CE",
+        "underlying_direction_bias": "CE",
+        "underlying_direction_confidence": 0.95,
+        "context_age_seconds": 0.0,
+        "context_fresh": True,
+        "regime": "TREND_UP",
+        "stale_data_used": False,
+        "futures_vwap_slope": 1.0,
+        "latest_bar_ts": BAR_TS,
     }
     payload.update(updates)
     return payload
 
 
-def test_vwap_metadata_contract_side_and_setup_scores_present():
+def test_vwap_metadata_contract_side_and_structural_setup_present():
     strategy = VWAPProStrategy(VWAPProStrategyConfig(), _DummyEngine())
     signal = strategy._evaluate_signal(
-        'NFO:NIFTY26FEB22500CE',
-        _indicators(direction_bias='UNKNOWN', underlying_direction_bias='UNKNOWN'),
+        "NFO:NIFTY26FEB22500CE",
+        _indicators(),
         101.0,
     )
     assert signal is not None
     metadata = signal.metadata
-    assert metadata['contract_side'] == 'CE'
-    assert metadata['direction_bias'] is None
-    assert metadata['raw_setup_score'] is not None
-    assert metadata['setup_score'] is not None
-    assert metadata['setup_id'].startswith('vwap:CE:')
+    assert metadata["contract_side"] == "CE"
+    assert metadata["direction_bias"] == "CE"
+    assert metadata["setup_pass"] is True
+    assert "underlying_direction_alignment" in metadata["setup_reasons"]
+    assert metadata["setup_id"].startswith("vwap:CE:")
 
 
 def test_live_vwap_rejects_threshold_pass_from_small_noise(monkeypatch):
-    monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     strategy = VWAPProStrategy(VWAPProStrategyConfig(), _DummyEngine())
 
     signal = strategy._evaluate_signal(
-        'NFO:NIFTY26FEB22500CE',
+        "NFO:NIFTY26FEB22500CE",
         _indicators(
             close=100.05,
             open=100.04,
@@ -74,20 +72,21 @@ def test_live_vwap_rejects_threshold_pass_from_small_noise(monkeypatch):
             low=99.90,
             volume=0.0,
             avg_volume=0.0,
+            futures_volume_ratio=1.2,
         ),
         100.05,
     )
 
     assert signal is None
-    assert strategy.last_no_vote_reason == 'vwap_event_unconfirmed'
+    assert strategy.last_no_vote_reason == "vwap_event_unconfirmed"
 
 
 def test_live_vwap_accepts_meaningful_atr_penetration(monkeypatch):
-    monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     strategy = VWAPProStrategy(VWAPProStrategyConfig(), _DummyEngine())
 
     signal = strategy._evaluate_signal(
-        'NFO:NIFTY26FEB22500CE',
+        "NFO:NIFTY26FEB22500CE",
         _indicators(
             close=100.80,
             open=99.80,
@@ -95,23 +94,24 @@ def test_live_vwap_accepts_meaningful_atr_penetration(monkeypatch):
             low=99.50,
             volume=0.0,
             avg_volume=0.0,
+            futures_volume_ratio=1.2,
         ),
         100.80,
     )
 
     assert signal is not None
-    assert signal.metadata['penetration_confirmed'] is True
-    assert signal.metadata['vwap_event_confirmed'] is True
+    assert signal.metadata["penetration_confirmed"] is True
+    assert signal.metadata["vwap_event_confirmed"] is True
 
 
 def test_vwap_thesis_uses_stable_structural_id_until_closed_candle_reset(monkeypatch):
-    monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     strategy = VWAPProStrategy(VWAPProStrategyConfig(), _DummyEngine())
-    symbol = 'NFO:NIFTY26FEB22500CE'
+    symbol = "NFO:NIFTY26FEB22500CE"
 
     first = strategy._evaluate_signal(symbol, _indicators(), 103.0)
     assert first is not None
-    strategy.notify_entry_accepted('CE')
+    strategy.notify_entry_accepted("CE")
 
     same_thesis = strategy._evaluate_signal(
         symbol,
@@ -125,20 +125,23 @@ def test_vwap_thesis_uses_stable_structural_id_until_closed_candle_reset(monkeyp
         104.0,
     )
     assert same_thesis is not None
-    assert same_thesis.metadata['setup_id'] == first.metadata['setup_id']
+    assert same_thesis.metadata["setup_id"] == first.metadata["setup_id"]
 
-    assert strategy._evaluate_signal(
-        symbol,
-        _indicators(
-            latest_bar_ts=BAR_TS + 120.0,
-            close=99.5,
-            open=100.0,
-            high=100.2,
-            low=99.2,
-        ),
-        99.5,
-    ) is None
-    assert strategy.last_no_vote_reason == 'vwap_thesis_reset'
+    assert (
+        strategy._evaluate_signal(
+            symbol,
+            _indicators(
+                latest_bar_ts=BAR_TS + 120.0,
+                close=99.5,
+                open=100.0,
+                high=100.2,
+                low=99.2,
+            ),
+            99.5,
+        )
+        is None
+    )
+    assert strategy.last_no_vote_reason == "vwap_thesis_reset"
 
     next_thesis = strategy._evaluate_signal(
         symbol,
@@ -152,30 +155,33 @@ def test_vwap_thesis_uses_stable_structural_id_until_closed_candle_reset(monkeyp
         103.0,
     )
     assert next_thesis is not None
-    assert next_thesis.metadata['setup_id'] != first.metadata['setup_id']
+    assert next_thesis.metadata["setup_id"] != first.metadata["setup_id"]
 
 
 def test_vwap_thesis_does_not_leak_across_same_side_contracts(monkeypatch):
-    monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     strategy = VWAPProStrategy(VWAPProStrategyConfig(), _DummyEngine())
 
-    assert strategy._evaluate_signal(
-        'NFO:NIFTY2690124100CE',
-        _indicators(
-            session_date='2026-09-01',
-            close=99.5,
-            open=100.2,
-            high=100.4,
-            low=99.2,
-        ),
-        99.5,
-    ) is None
-    assert strategy.last_no_vote_reason == 'vwap_thesis_reset'
+    assert (
+        strategy._evaluate_signal(
+            "NFO:NIFTY2690124100CE",
+            _indicators(
+                session_date="2026-09-01",
+                close=99.5,
+                open=100.2,
+                high=100.4,
+                low=99.2,
+            ),
+            99.5,
+        )
+        is None
+    )
+    assert strategy.last_no_vote_reason == "vwap_thesis_reset"
 
     rotated = strategy._evaluate_signal(
-        'NFO:NIFTY2690124050CE',
+        "NFO:NIFTY2690124050CE",
         _indicators(
-            session_date='2026-09-01',
+            session_date="2026-09-01",
             latest_bar_ts=BAR_TS + 60.0,
             close=103.0,
             open=102.0,
@@ -186,30 +192,33 @@ def test_vwap_thesis_does_not_leak_across_same_side_contracts(monkeypatch):
     )
 
     assert rotated is None
-    assert strategy.last_no_vote_reason == 'vwap_thesis_not_armed'
+    assert strategy.last_no_vote_reason == "vwap_thesis_not_armed"
 
 
 def test_vwap_thesis_does_not_leak_across_sessions(monkeypatch):
-    monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     strategy = VWAPProStrategy(VWAPProStrategyConfig(), _DummyEngine())
-    symbol = 'NFO:NIFTY2690124100CE'
+    symbol = "NFO:NIFTY2690124100CE"
 
-    assert strategy._evaluate_signal(
-        symbol,
-        _indicators(
-            session_date='2026-09-01',
-            close=99.5,
-            open=100.2,
-            high=100.4,
-            low=99.2,
-        ),
-        99.5,
-    ) is None
+    assert (
+        strategy._evaluate_signal(
+            symbol,
+            _indicators(
+                session_date="2026-09-01",
+                close=99.5,
+                open=100.2,
+                high=100.4,
+                low=99.2,
+            ),
+            99.5,
+        )
+        is None
+    )
 
     next_session = strategy._evaluate_signal(
         symbol,
         _indicators(
-            session_date='2026-09-02',
+            session_date="2026-09-02",
             latest_bar_ts=BAR_TS + 86_400.0,
             close=103.0,
             open=102.0,
@@ -220,42 +229,29 @@ def test_vwap_thesis_does_not_leak_across_sessions(monkeypatch):
     )
 
     assert next_session is None
-    assert strategy.last_no_vote_reason == 'vwap_thesis_not_armed'
+    assert strategy.last_no_vote_reason == "vwap_thesis_not_armed"
 
 
-def test_real_vwap_vote_clears_default_live_quality_gate(monkeypatch):
-    monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
-    monkeypatch.setenv('ENABLE_LIVE', 'true')
-    monkeypatch.setenv('ORDER_MAX_SPREAD_PCT', '1.0')
-    strategy = VWAPProStrategy(
-        VWAPProStrategyConfig(min_confidence=0.0),
-        _DummyEngine(),
-    )
+def test_real_vwap_emits_structural_evidence(monkeypatch):
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    strategy = VWAPProStrategy(VWAPProStrategyConfig(), _DummyEngine())
     indicators = _indicators()
 
     signal = strategy.generate_signal(
-        'NFO:NIFTY26FEB22500CE',
+        "NFO:NIFTY26FEB22500CE",
         indicators,
         103.0,
     )
 
     assert signal is not None
-    vote = signal_to_vote(signal, 'VWAPPro')
-    manager = object.__new__(StrategyManager)
-    quality_score, quality_meta = manager._compute_trade_quality_score(
-        vote,
-        indicators,
-        symbol=signal.symbol,
-        selected_ok=True,
-        near_atm_ok=True,
-        context_votes=[],
-    )
-
-    assert quality_score >= 7.0
-    assert quality_meta['quality_evidence_complete'] is True
-    assert signal.metadata['direction_alignment_score'] == 2.0
-    assert signal.metadata['liquidity_score'] == 2.0
-    assert signal.metadata['regime_time_suitability_score'] == 1.0
+    evidence = signal_to_evidence(signal, "VWAPPro")
+    assert evidence.side == "CE"
+    assert evidence.metadata["setup_pass"] is True
+    assert evidence.metadata["requires_runner_execution_validation"] is True
+    assert evidence.metadata["direction_bias"] == "CE"
+    assert evidence.metadata["futures_slope_alignment"] is True
+    assert evidence.metadata["volume_confirmation"] is True
 
 
 def test_vwap_has_no_unreachable_early_trend_pullback_branch():

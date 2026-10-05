@@ -237,7 +237,9 @@ def _env_float(*names: str, default: float, minimum: float | None = None) -> flo
                 # AttributeErrors elsewhere and bricks startup - 2026-07-09).
                 LOGGER.error(
                     "SETTINGS_ENV_INVALID name=%s raw=%r using_default=%r",
-                    name, raw_value, default,
+                    name,
+                    raw_value,
+                    default,
                     extra={"event": "SETTINGS_ENV_INVALID", "env_name": name},
                 )
                 value = float(default)
@@ -246,7 +248,10 @@ def _env_float(*names: str, default: float, minimum: float | None = None) -> flo
         if minimum is not None and value < minimum:
             LOGGER.error(
                 "SETTINGS_ENV_BELOW_MINIMUM name=%s value=%r minimum=%r using_default=%r",
-                source_name, value, minimum, default,
+                source_name,
+                value,
+                minimum,
+                default,
                 extra={"event": "SETTINGS_ENV_INVALID", "env_name": source_name},
             )
             value = float(default) if float(default) >= minimum else float(minimum)
@@ -317,7 +322,9 @@ def _env_int(*names: str, default: int, minimum: int | None = None) -> int:
                 # over a malformed tuning variable.
                 LOGGER.error(
                     "SETTINGS_ENV_INVALID name=%s raw=%r using_default=%r",
-                    name, raw_value, default,
+                    name,
+                    raw_value,
+                    default,
                     extra={"event": "SETTINGS_ENV_INVALID", "env_name": name},
                 )
                 value = int(default)
@@ -326,7 +333,10 @@ def _env_int(*names: str, default: int, minimum: int | None = None) -> int:
         if minimum is not None and value < minimum:
             LOGGER.error(
                 "SETTINGS_ENV_BELOW_MINIMUM name=%s value=%r minimum=%r using_default=%r",
-                source_name, value, minimum, default,
+                source_name,
+                value,
+                minimum,
+                default,
                 extra={"event": "SETTINGS_ENV_INVALID", "env_name": source_name},
             )
             value = int(default) if int(default) >= minimum else int(minimum)
@@ -1009,7 +1019,6 @@ def _build_elite_settings() -> EliteStrategiesSettings:
         # 1. SMC Strategy
         smc_cfg = SMCStrategyConfig(
             enabled=_env_bool("SMC_ENABLED", default=True),
-            min_confidence=_env_float("SMC_MIN_CONFIDENCE", default=45.0),
             cooldown_seconds=_env_float("SMC_COOLDOWN", default=60.0),
             sweep_distance_points=_env_float("SMC_SWEEP_DISTANCE", default=15.0),
             volume_spike_mult=_env_float("SMC_VOLUME_SPIKE", default=2.0),
@@ -1019,7 +1028,6 @@ def _build_elite_settings() -> EliteStrategiesSettings:
         # ✅ FIX: Use int(_env_float(...)) to safely handle "50.0" from .env
         vwap_cfg = VWAPProStrategyConfig(
             enabled=_env_bool("VWAP_PRO_ENABLED", "VWAP_ENABLED", default=True),
-            min_confidence=_env_float("VWAP_MIN_CONFIDENCE", default=40.0),
             ema_period=int(_env_float("VWAP_EMA_PERIOD", default=50.0)),
             proximity_pct=_env_float("VWAP_PROXIMITY_PCT", default=0.15),
         )
@@ -1028,9 +1036,6 @@ def _build_elite_settings() -> EliteStrategiesSettings:
         # ✅ FIX: Use int(_env_float(...)) for period and lookback
         rsi_cfg = RSIDivergenceStrategyConfig(
             enabled=_env_bool("RSI_DIV_ENABLED", default=True),
-            min_confidence=_env_float(
-                "RSI_MIN_CONFIDENCE", "RSI_DIV_MIN_CONFIDENCE", default=48.0
-            ),
             rsi_period=int(_env_float("RSI_PERIOD", default=14.0)),
         )
 
@@ -1039,7 +1044,6 @@ def _build_elite_settings() -> EliteStrategiesSettings:
         # We parse "15.0" as float first, then cast to int.
         orb_cfg = ORBProStrategyConfig(
             enabled=_env_bool("ORB_ENABLED", default=True),
-            min_confidence=_env_float("ORB_MIN_CONFIDENCE", default=55.0),
             orb_minutes=int(
                 _env_float("ORB_DURATION_MIN", "ORB_MINUTES", default=15.0)
             ),
@@ -1048,7 +1052,6 @@ def _build_elite_settings() -> EliteStrategiesSettings:
         # 5. Straddle / Theta
         straddle_cfg = StraddleThetaStrategyConfig(
             enabled=_env_bool("STRADDLE_ENABLED", default=False),
-            min_confidence=_env_float("STRADDLE_MIN_CONFIDENCE", default=73.0),
             adx_threshold=_env_float("STRADDLE_ADX_LIMIT", default=25.0),
             min_iv=_env_float("STRADDLE_MIN_IV", default=12.0),
         )
@@ -1056,14 +1059,12 @@ def _build_elite_settings() -> EliteStrategiesSettings:
         # 6. Gamma Scalping
         gamma_cfg = GammaScalpingStrategyConfig(
             enabled=_env_bool("GAMMA_ENABLED", default=False),
-            min_confidence=_env_float("GAMMA_MIN_CONFIDENCE", default=65.0),
             min_gamma=_env_float("GAMMA_THRESHOLD", default=0.0005),
         )
 
         # 6b. Tuesday Gamma Buyer — default ON (Tuesdays are NIFTY expiry day; highest gamma)
         tuesday_gamma_cfg = TuesdayGammaBuyerStrategyConfig(
             enabled=_env_bool("ENABLE_TUESDAY_GAMMA_BUYER", default=True),
-            min_confidence=_env_float("TUESDAY_GAMMA_MIN_CONFIDENCE", default=65.0),
             atr_multiplier=_env_float("TUESDAY_GAMMA_ATR_MULTIPLIER", default=1.2),
             target_multiplier=_env_float(
                 "TUESDAY_GAMMA_TARGET_MULTIPLIER", default=1.8
@@ -1073,7 +1074,6 @@ def _build_elite_settings() -> EliteStrategiesSettings:
         # 7. OI Max Pain (Unlocked)
         oi_cfg = OIMaxPainStrategyConfig(
             enabled=_env_bool("OI_MAX_PAIN_ENABLED", default=True),
-            min_confidence=_env_float("OI_MIN_CONFIDENCE", default=40.0),
             min_deviation_pct=_env_float(
                 "OI_MIN_DISTANCE_PCT", default=0.5
             ),  # % distance from max pain (was 50.0 pts — wrong scale; never fired)
@@ -1082,14 +1082,12 @@ def _build_elite_settings() -> EliteStrategiesSettings:
         # 8. CPR Breakout (Unlocked)
         cpr_cfg = CPRBreakoutStrategyConfig(
             enabled=_env_bool("CPR_ENABLED", default=True),
-            min_confidence=_env_float("CPR_MIN_CONFIDENCE", default=55.0),
             narrow_cpr_threshold=_env_float("CPR_NARROW_THRESHOLD_PCT", default=0.25),
         )
 
         # 9. Order Flow (Unlocked)
         of_cfg = OrderFlowStrategyConfig(
             enabled=_env_bool("ORDER_FLOW_ENABLED", default=True),
-            min_confidence=_env_float("ORDER_FLOW_MIN_CONFIDENCE", default=60.0),
             imbalance_ratio_min=_env_float(
                 "ORDER_FLOW_IMBALANCE_RATIO_BUY", default=2.8
             ),
@@ -1101,7 +1099,6 @@ def _build_elite_settings() -> EliteStrategiesSettings:
         # 10. BB Squeeze (Unlocked)
         bb_cfg = BBSqueezeStrategyConfig(
             enabled=_env_bool("BB_SQUEEZE_ENABLED", default=True),
-            min_confidence=_env_float("BB_MIN_CONFIDENCE", default=55.0),
             squeeze_threshold_pct=_env_float("BB_SQUEEZE_BANDWIDTH", default=0.4),
         )
 

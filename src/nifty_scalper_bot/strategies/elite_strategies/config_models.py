@@ -14,7 +14,6 @@ class EliteStrategyConfig:
     """Base configuration shared by all elite strategies."""
 
     enabled: bool = True
-    min_confidence: float = 70.0
     cooldown_seconds: float = 60.0
 
     # Context Injection Fields: Populated at runtime by the Strategy Engine
@@ -23,11 +22,6 @@ class EliteStrategyConfig:
 
     def __post_init__(self) -> None:
         """Validate and self-heal configuration values."""
-        if self.min_confidence < 0:
-            self.min_confidence = 0.0
-        elif self.min_confidence > 100:
-            self.min_confidence = 100.0
-
         if self.cooldown_seconds < 0:
             self.cooldown_seconds = 0.0
 
@@ -36,6 +30,7 @@ class EliteStrategyConfig:
 
 
 # --- Strategy Specific Configurations ---
+
 
 @dataclass(slots=True)
 class SMCStrategyConfig(EliteStrategyConfig):
@@ -47,12 +42,12 @@ class SMCStrategyConfig(EliteStrategyConfig):
 
 @dataclass(slots=True)
 class VWAPProStrategyConfig(EliteStrategyConfig):
-    """VWAP Pro native scoring and warm-up configuration.
+    """VWAP Pro structural and warm-up configuration.
 
     ``proximity_pct`` is expressed in percentage points (0.15 == 0.15%) and is
     consumed directly by :class:`VWAPProStrategy`. ``ema_period`` is the native
     history warm-up floor for the existing EMA-aware context contract; it does
-    not create another scoring layer or a second direction authority.
+    not create another admission layer or a second direction authority.
     """
 
     ema_period: int = 50
@@ -90,7 +85,7 @@ class CPRBreakoutStrategyConfig(EliteStrategyConfig):
 
 @dataclass(slots=True)
 class OrderFlowStrategyConfig(EliteStrategyConfig):
-    """OrderFlow native context-scoring thresholds.
+    """OrderFlow native microstructure context thresholds.
 
     ``large_order_threshold_pct`` becomes the normalized depth-imbalance support
     floor. ``imbalance_ratio_min`` is converted to normalized imbalance for
@@ -139,7 +134,9 @@ class EliteStrategiesSettings:
 
     smc: SMCStrategyConfig = field(default_factory=SMCStrategyConfig)
     vwap: VWAPProStrategyConfig = field(default_factory=VWAPProStrategyConfig)
-    oi_max_pain: OIMaxPainStrategyConfig = field(default_factory=OIMaxPainStrategyConfig)
+    oi_max_pain: OIMaxPainStrategyConfig = field(
+        default_factory=OIMaxPainStrategyConfig
+    )
     gamma_scalping: GammaScalpingStrategyConfig = field(
         default_factory=GammaScalpingStrategyConfig
     )
@@ -149,7 +146,9 @@ class EliteStrategiesSettings:
     cpr: CPRBreakoutStrategyConfig = field(default_factory=CPRBreakoutStrategyConfig)
     order_flow: OrderFlowStrategyConfig = field(default_factory=OrderFlowStrategyConfig)
     bb_squeeze: BBSqueezeStrategyConfig = field(default_factory=BBSqueezeStrategyConfig)
-    rsi_div: RSIDivergenceStrategyConfig = field(default_factory=RSIDivergenceStrategyConfig)
+    rsi_div: RSIDivergenceStrategyConfig = field(
+        default_factory=RSIDivergenceStrategyConfig
+    )
     orb: ORBProStrategyConfig = field(default_factory=ORBProStrategyConfig)
     # Parse compatibility only; the single-leg placeholder runtime was retired.
     straddle: StraddleThetaStrategyConfig = field(

@@ -16,7 +16,10 @@ def test_approved_decision_is_linked_and_keeps_decision_time() -> None:
         "signal_id": "executed-signal",
         "trace_id": "runner-trace",
         "symbol": "NFO:NIFTY26SEP23250CE",
-        "meta": {"signal_score": 7.8},
+        "meta": {
+            "approval_path": "single_trigger_context_confirmed",
+            "setup_pass": True,
+        },
     }
 
     row = _build_trade_row(event)
@@ -29,7 +32,9 @@ def test_approved_decision_is_linked_and_keeps_decision_time() -> None:
     assert _build_trade_row({**event, "trade_id": None}) is None
 
 
-def test_approved_decision_after_fill_preserves_fill_and_score(tmp_path) -> None:
+def test_approved_decision_after_fill_preserves_structural_provenance(
+    tmp_path,
+) -> None:
     journal = TradeJournal(str(tmp_path / "trades.db"))
     filled = journal._normalize_event(
         {
@@ -51,7 +56,8 @@ def test_approved_decision_after_fill_preserves_fill_and_score(tmp_path) -> None
                 "signal_id": "executed-signal",
                 "trade_id": "TRD_executed-signal",
                 "trace_id": "runner-trace",
-                "signal_score": 7.8,
+                "approval_path": "single_trigger_context_confirmed",
+                "setup_pass": True,
             },
         }
     )
@@ -65,4 +71,5 @@ def test_approved_decision_after_fill_preserves_fill_and_score(tmp_path) -> None
         ).fetchone()
 
     assert row == ("ENTRY_FILLED", "executed-signal", 1_790_232_002.0, 1_790_232_001.0)
-    assert approved["meta"]["signal_score"] == 7.8
+    assert approved["meta"]["approval_path"] == "single_trigger_context_confirmed"
+    assert approved["meta"]["setup_pass"] is True

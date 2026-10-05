@@ -74,7 +74,7 @@ def test_futures_context_neutral_values_do_not_create_direction() -> None:
     assert snapshot["direction_bias"] is None
 
 
-def test_futures_context_uses_same_evaluation_slope_only() -> None:
+def test_futures_context_slope_without_location_evidence_stays_unresolved() -> None:
     from nifty_scalper_bot.core.strategy_manager import StrategyManager
 
     manager = object.__new__(StrategyManager)
@@ -86,7 +86,7 @@ def test_futures_context_uses_same_evaluation_slope_only() -> None:
     )
     snapshot = manager._latest_context_snapshots["futures_context"]
     assert snapshot["vwap_slope"] == 0.001
-    assert snapshot["direction_bias"] == "CE"
+    assert snapshot["direction_bias"] is None
     manager._update_context_snapshot(
         symbol="NFO:NIFTY26JULFUT",
         indicators={"close": 102.0, "vwap": 102.0},
@@ -210,7 +210,8 @@ def test_ltp_close_delta_alone_does_not_claim_direction_fallback() -> None:
 
     snapshot = manager._latest_context_snapshots["spot_context"]
     assert snapshot["direction_bias"] is None
-    assert "direction_unavailable" in snapshot["direction_context_reasons"]
+    reasons = snapshot["direction_context_reasons"]
+    assert "direction_requires_location_and_trend" in reasons
     assert "ltp_above_close_fallback" not in snapshot["direction_context_reasons"]
 
 

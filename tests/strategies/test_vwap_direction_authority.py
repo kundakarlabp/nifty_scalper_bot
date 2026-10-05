@@ -27,6 +27,8 @@ def _evaluate(monkeypatch, side, underlying, generic, **updates):
         "underlying_direction_confidence": 0.95,
         "context_age_seconds": 1.0,
         "latest_bar_ts": "2026-09-10T10:00:00+05:30",
+        "futures_vwap_slope": 0.01 if side == "CE" else -0.01,
+        "futures_volume_ratio": 1.1,
     }
     indicators.update(updates)
     signal = strategy._evaluate_signal(f"NFO:NIFTY2691523400{side}", indicators, 103.0)
@@ -52,8 +54,8 @@ def test_underlying_alignment_survives_conflicting_generic_bias(
     assert signal is not None
     assert signal.metadata["trend_alignment"] is True
     assert signal.metadata["context_direction_used"] == side
-    assert "trend_alignment" in signal.metadata["score_reasons"]
-    assert "direction_conflict" not in signal.metadata["score_reasons"]
+    assert signal.metadata["setup_pass"] is True
+    assert signal.metadata["futures_slope_alignment"] is True
 
 
 @pytest.mark.parametrize("underlying", [None, "UNKNOWN"])
@@ -72,8 +74,10 @@ def test_generic_fallback_remains_available_without_underlying_direction(
     "updates",
     [{"context_age_seconds": 121.0}, {"underlying_direction_confidence": 0.5}],
 )
-def test_weak_or_stale_conflict_keeps_score_as_diagnostic(monkeypatch, updates):
-    _strategy, signal = _evaluate(monkeypatch, "CE", "PE", "CE", **updates)
+def test_weak_or_stale_underlying_conflict_remains_structural_rejection(
+    monkeypatch, updates
+):
+    strategy, signal = _evaluate(monkeypatch, "CE", "PE", "CE", **updates)
 
-    assert signal is not None
-    assert "score_below_legacy_minimum" in signal.metadata["score_reasons"]
+    assert signal is None
+    assert strategy.last_no_vote_reason == "underlying_direction_conflict"

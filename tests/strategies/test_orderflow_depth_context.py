@@ -1,10 +1,7 @@
 from nifty_scalper_bot.strategies.elite_strategies.config_models import (
     OrderFlowStrategyConfig,
 )
-from nifty_scalper_bot.strategies.elite_strategies.order_flow import (
-    OrderFlowStrategy,
-    _context_confirmation_score,
-)
+from nifty_scalper_bot.strategies.elite_strategies.order_flow import OrderFlowStrategy
 
 
 def _strategy() -> OrderFlowStrategy:
@@ -30,9 +27,6 @@ def test_orderflow_no_missing_depth_when_bid_ask_and_depth_exist() -> None:
     )
     assert signal is not None
     assert getattr(strategy, "last_no_vote_reason", None) != "missing_depth"
-    assert signal.metadata["strategy_score"] == 8.0
-    assert signal.metadata["context_evidence_score"] == 4.0
-    assert signal.metadata["context_bonus_score"] == 2.0
     assert signal.metadata["depth_supports_side"] is True
 
 
@@ -56,12 +50,9 @@ def test_option_book_ask_pressure_does_not_earn_depth_confirmation() -> None:
     assert signal is not None
     assert signal.metadata["depth_imbalance"] < 0
     assert signal.metadata["depth_supports_side"] is False
-    assert signal.metadata["depth_score"] == 0.0
-    assert "depth_imbalance_support" not in signal.metadata["score_reasons"]
-    assert "strong_depth_imbalance_support" not in signal.metadata["score_reasons"]
-    assert signal.metadata["strategy_score"] == 6.0
-    assert signal.metadata["context_evidence_score"] == 2.0
-    assert signal.metadata["context_bonus_score"] == 1.0
+    assert "depth_imbalance_support" not in signal.metadata["setup_reasons"]
+    assert "strong_depth_imbalance_support" not in signal.metadata["setup_reasons"]
+    assert signal.metadata["effective_context_alignment"] is False
 
 
 def test_live_unready_quote_cannot_contribute_orderflow_context(monkeypatch) -> None:
@@ -93,16 +84,8 @@ def test_live_unready_quote_cannot_contribute_orderflow_context(monkeypatch) -> 
     assert signal.metadata["quote_readiness_allowed"] is False
     assert signal.metadata["quote_readiness_reason"] == "spread_too_wide"
     assert signal.metadata["context_quality_eligible"] is False
-    assert signal.metadata["context_bonus_score"] == 0.0
-    assert signal.metadata["context_veto_score"] == 0.0
     assert signal.metadata["trigger_conditions_met"] is False
     assert signal.metadata["trigger_block_reason"] == "context_only_role"
-
-
-def test_orderflow_context_floor_does_not_reinforce_a_trigger() -> None:
-    assert _context_confirmation_score(4.0, 4.0) == (0.0, 0.0)
-    assert _context_confirmation_score(6.0, 4.0) == (2.0, 1.0)
-    assert _context_confirmation_score(10.0, 4.0) == (6.0, 3.0)
 
 
 from nifty_scalper_bot.strategies.indicators import IndicatorEngine

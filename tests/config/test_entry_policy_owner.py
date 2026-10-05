@@ -107,7 +107,7 @@ def test_invalid_values_fall_back_to_defaults_without_raising(
 def test_quality_spread_limit_follows_execution_policy_not_a_ten_percent_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from nifty_scalper_bot.strategies.signal_quality import canonical_max_spread_pct
+    from nifty_scalper_bot.strategies.entry_evidence import canonical_max_spread_pct
 
     assert canonical_max_spread_pct() == resolve_entry_policy().execution_max_spread_pct
 
@@ -147,19 +147,28 @@ def test_candidate_selector_takes_its_floor_from_the_execution_policy(
 def test_runner_final_spread_guard_uses_execution_policy() -> None:
     from pathlib import Path
 
-    source = Path("src/nifty_scalper_bot/strategies/runner.py").read_text(encoding="utf-8")
+    source = Path("src/nifty_scalper_bot/strategies/runner.py").read_text(
+        encoding="utf-8"
+    )
     assert "spread_pct > resolve_entry_policy().execution_max_spread_pct" in source
     assert "spread_pct > resolve_entry_policy().evaluation_max_spread_pct" not in source
 
 
-def test_strategy_manager_spread_gates_use_canonical_entry_policy() -> None:
+def test_strategy_manager_does_not_duplicate_execution_spread_ownership() -> None:
     from pathlib import Path
 
-    source = Path("src/nifty_scalper_bot/core/strategy_manager.py").read_text(
+    manager_source = Path("src/nifty_scalper_bot/core/strategy_manager.py").read_text(
         encoding="utf-8"
     )
-    assert 'self._env_float("LIVE_MAX_SPREAD_PCT", 0.75)' not in source
-    assert source.count("resolve_entry_policy().execution_max_spread_pct") >= 2
+    evidence_source = Path(
+        "src/nifty_scalper_bot/strategies/entry_evidence.py"
+    ).read_text(encoding="utf-8")
+    selector_source = Path(
+        "src/nifty_scalper_bot/strategies/trade_selector.py"
+    ).read_text(encoding="utf-8")
+    assert 'self._env_float("LIVE_MAX_SPREAD_PCT", 0.75)' not in manager_source
+    assert "resolve_entry_policy().execution_max_spread_pct" in evidence_source
+    assert "resolve_entry_policy()" in selector_source
 
 
 def test_env_template_prefers_canonical_spread_keys() -> None:

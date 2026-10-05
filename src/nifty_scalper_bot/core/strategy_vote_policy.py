@@ -1,7 +1,8 @@
-"""Canonical strategy-vote policy used by StrategyManager.
+"""Canonical strategy-evidence policy used by StrategyManager.
 
-Pure policy decisions live here. Runtime adapters may call these helpers, but
-must not redefine strategy roles, setup contracts, or confirmation semantics.
+There is deliberately no synthetic numeric admission model here. Strategies
+either prove their structural setup or produce no trigger. Context strategies can
+corroborate a valid trigger but can never manufacture one.
 """
 
 from __future__ import annotations
@@ -14,41 +15,25 @@ from nifty_scalper_bot.config.strategy_taxonomy import (
     is_context_only_strategy,
 )
 
-_SCORE_KEYS = ("raw_setup_score", "setup_score", "strategy_score")
-_MIN_KEYS = ("setup_min", "setup_min_score", "trigger_min_score", "min_score")
 _CLOSE_ACTIONS = frozenset({"CLOSE_LONG", "CLOSE_SHORT"})
 
 
 @dataclass(frozen=True, slots=True)
 class SetupGateDecision:
     passed: bool
-    score: float | None = None
-    minimum: float | None = None
     reason: str | None = None
 
 
-def _float_from(metadata: Mapping[str, Any], keys: tuple[str, ...]) -> float | None:
-    for key in keys:
-        value = metadata.get(key)
-        if value is None:
-            continue
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            continue
-    return None
-
-
-def is_permanent_context_only(vote: Any) -> bool:
+def is_permanent_context_only(evidence: Any) -> bool:
     """Return whether a strategy is structurally context-only."""
-    return is_context_only_strategy(getattr(vote, "strategy", None))
+    return is_context_only_strategy(getattr(evidence, "strategy", None))
 
 
-def vote_role(vote: Any) -> str:
-    """Return the effective immutable role for a vote."""
-    if is_permanent_context_only(vote):
+def vote_role(evidence: Any) -> str:
+    """Return the immutable role for one strategy evidence record."""
+    if is_permanent_context_only(evidence):
         return "context"
-    metadata = dict(getattr(vote, "metadata", {}) or {})
+    metadata = dict(getattr(evidence, "metadata", {}) or {})
     return str(metadata.get("role") or "trigger").strip().lower()
 
 
@@ -56,100 +41,87 @@ def is_close_signal(signal: Any) -> bool:
     return str(getattr(signal, "action", "") or "").upper() in _CLOSE_ACTIONS
 
 
-def setup_gate_decision(vote: Any) -> SetupGateDecision:
-    """Evaluate the strategy's own setup contract without changing thresholds."""
-    if vote_role(vote) == "context":
+def setup_gate_decision(evidence: Any) -> SetupGateDecision:
+    """Evaluate a strategy's own structural setup contract."""
+    if vote_role(evidence) == "context":
         return SetupGateDecision(True)
 
-    metadata = dict(getattr(vote, "metadata", {}) or {})
-    score = _float_from(metadata, _SCORE_KEYS)
-    minimum = _float_from(metadata, _MIN_KEYS)
-    explicit_pass = metadata.get("setup_pass")
-    block_reason = str(metadata.get("trigger_block_reason") or "").strip() or None
-    has_contract = score is not None or minimum is not None or explicit_pass is not None
-
-    if not has_contract:
-        return SetupGateDecision(True, score, minimum)
-    if explicit_pass is False:
-        return SetupGateDecision(False, score, minimum, block_reason or "setup_pass_false")
-    # Numeric setup scores/minima are retained for attribution and calibration,
-    # not authorization. Only an explicit structural failure may reject a trigger.
-    if block_reason == "setup_failed":
-        return SetupGateDecision(False, score, minimum, block_reason)
-    return SetupGateDecision(True, score, minimum)
+    metadata: Mapping[str, Any] = dict(getattr(evidence, "metadata", {}) or {})
+    if metadata.get("side_conflict") is True:
+        return SetupGateDecision(False, "strategy_contract_side_conflict")
+    if metadata.get("required_data_present") is False:
+        return SetupGateDecision(False, "required_data_missing")
+    if metadata.get("stale_data_used") is True:
+        return SetupGateDecision(False, "stale_data")
+    if metadata.get("setup_pass") is not True:
+        return SetupGateDecision(
+            False,
+            str(metadata.get("trigger_block_reason") or "setup_contract_not_passed"),
+        )
+    if metadata.get("trigger_conditions_met") is False:
+        return SetupGateDecision(
+            False,
+            str(metadata.get("trigger_block_reason") or "trigger_conditions_not_met"),
+        )
+    return SetupGateDecision(True)
 
 
 def partition_votes(
     signals: Sequence[tuple[Any, Any]],
 ) -> tuple[list[tuple[Any, Any]], list[tuple[Any, Any]], list[dict[str, Any]]]:
-    """Partition valid triggers/context and reject failed entry setup contracts."""
+    """Partition setup-valid triggers, context evidence and rejected setups."""
     triggers: list[tuple[Any, Any]] = []
     context: list[tuple[Any, Any]] = []
     rejected: list[dict[str, Any]] = []
-    for signal, vote in signals:
-        role = vote_role(vote)
+    for signal, evidence in signals:
+        role = vote_role(evidence)
         if role == "context":
-            context.append((signal, vote))
+            context.append((signal, evidence))
             continue
         if not is_close_signal(signal):
-            decision = setup_gate_decision(vote)
+            decision = setup_gate_decision(evidence)
             if not decision.passed:
                 rejected.append(
                     {
-                        "strategy": getattr(vote, "strategy", None),
-                        "score": decision.score,
-                        "minimum": decision.minimum,
+                        "strategy": getattr(evidence, "strategy", None),
                         "reason": decision.reason,
                     }
                 )
                 continue
-        triggers.append((signal, vote))
+        triggers.append((signal, evidence))
     return triggers, context, rejected
 
 
 def independent_same_side_confirmation(
     signals: Sequence[tuple[Any, Any]],
 ) -> tuple[bool, list[str]]:
-    """Return confirmation only from distinct, setup-valid trigger strategies.
-
-    Context-only strategies (notably OrderFlow), close signals, and triggers
-    that failed their own setup contract can never manufacture consensus.
-    """
-    trigger_votes = []
-    for signal, vote in signals:
-        if vote_role(vote) == "context" or is_close_signal(signal):
+    """Return confirmation from a distinct setup-valid trigger evidence family."""
+    valid = []
+    for signal, evidence in signals:
+        if vote_role(evidence) == "context" or is_close_signal(signal):
             continue
-        if not setup_gate_decision(vote).passed:
+        if not setup_gate_decision(evidence).passed:
             continue
-        trigger_votes.append(vote)
+        valid.append(evidence)
 
-    if len(trigger_votes) < 2:
-        return False, []
-    try:
-        best = max(
-            trigger_votes,
-            key=lambda vote: float(getattr(vote, "score", 0.0) or 0.0),
-        )
-    except (TypeError, ValueError):
+    if len(valid) < 2:
         return False, []
 
-    best_side = str(getattr(best, "side", "") or "").upper()
-    best_strategy = str(getattr(best, "strategy", "") or "").strip().lower()
-    if best_side not in {"CE", "PE"} or not best_strategy:
+    primary = valid[0]
+    side = str(getattr(primary, "side", "") or "").upper()
+    strategy = str(getattr(primary, "strategy", "") or "").strip().lower()
+    if side not in {"CE", "PE"} or not strategy:
         return False, []
-    best_family = canonical_signal_family(best_strategy)
+    family = canonical_signal_family(strategy)
 
-    # Consensus is evidence diversification, not object-count diversification.
-    # Two strategies derived from the same canonical evidence family may agree
-    # because of one price move and therefore cannot confirm each other.
     confirming = sorted(
         {
-            str(getattr(vote, "strategy", "") or "").strip()
-            for vote in trigger_votes
-            if str(getattr(vote, "side", "") or "").upper() == best_side
-            and str(getattr(vote, "strategy", "") or "").strip().lower()
-            not in {"", best_strategy}
-            and canonical_signal_family(getattr(vote, "strategy", None)) != best_family
+            str(getattr(item, "strategy", "") or "").strip()
+            for item in valid[1:]
+            if str(getattr(item, "side", "") or "").upper() == side
+            and str(getattr(item, "strategy", "") or "").strip().lower()
+            not in {"", strategy}
+            and canonical_signal_family(getattr(item, "strategy", None)) != family
         }
     )
     return bool(confirming), confirming

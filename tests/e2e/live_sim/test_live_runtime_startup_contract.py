@@ -15,6 +15,10 @@ from nifty_scalper_bot.core import app as core_app
 from nifty_scalper_bot.core.app import BotContext, initialize_components
 from nifty_scalper_bot.core.instrument_manager import InstrumentManager
 from nifty_scalper_bot.strategies.signal_generator import RSIMeanReversionStrategy
+from nifty_scalper_bot.strategies.elite_strategies.config_models import (
+    OrderFlowStrategyConfig,
+)
+from nifty_scalper_bot.strategies.elite_strategies.order_flow import OrderFlowStrategy
 from nifty_scalper_bot.utils.market_hours import MarketState
 from nifty_scalper_bot.data.data_hub import DataHub
 from nifty_scalper_bot.data.market_data_manager import MarketDataManager
@@ -175,6 +179,7 @@ class _NoNetworkBroker:
 
 class _NoNetworkWebSocketManager:
     is_simulated_adapter = True
+
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         self._callbacks: dict[str, Any] = {}
         self._subscribed_tokens: set[int] = set()
@@ -200,7 +205,9 @@ class _NoNetworkWebSocketManager:
             # Production WebSocketManager routes through its injected MDM reference.
             mdm = getattr(self, "_market_data_manager", None)
             if mdm is None:
-                raise RuntimeError("production websocket tick callback was not registered")
+                raise RuntimeError(
+                    "production websocket tick callback was not registered"
+                )
             mdm.process_ticks([tick])
             drain = getattr(mdm, "_drain_tick_queue_sync", None)
             if callable(drain):
@@ -233,6 +240,7 @@ class _NoNetworkWebSocketManager:
 
 class _NoNetworkRobustProvider:
     is_simulated_adapter = True
+
     def __init__(self, broker_client: Any, *args: Any, **kwargs: Any) -> None:
         self.client = broker_client
         self._broker = broker_client
@@ -286,7 +294,9 @@ _FIXED_RUNTIME_NOW_IST = (_RUNTIME_NOW_IST - pd.Timedelta(days=1)).to_pydatetime
 
 def _patch_runtime_clock(
     monkeypatch: pytest.MonkeyPatch,
-    now_ist: datetime = _FIXED_RUNTIME_NOW_IST.replace(hour=10, minute=30, second=0, microsecond=0),
+    now_ist: datetime = _FIXED_RUNTIME_NOW_IST.replace(
+        hour=10, minute=30, second=0, microsecond=0
+    ),
 ) -> None:
     import nifty_scalper_bot.strategies.runner as runner_mod
     from nifty_scalper_bot.risk import expiry_gate
@@ -325,19 +335,9 @@ def _runtime_env(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     monkeypatch.setenv("READINESS_CONTEXT_MIN_BARS", "20")
     monkeypatch.setenv("READINESS_OPTION_EXEC_MIN_BARS", "20")
     monkeypatch.setenv("READINESS_OPTION_EVAL_MIN_BARS", "5")
-    monkeypatch.setenv("GLOBAL_MIN_SIGNAL_CONFIDENCE", "0.1")
     monkeypatch.setenv("REGIME_GATE_ENABLED", "false")
     monkeypatch.setenv("ALLOW_MARKET_ENTRY", "false")
     monkeypatch.setenv("MAX_ACTIVE_OPTION_SYMBOLS", "2")
-    monkeypatch.setenv("STRATEGY_ALLOW_SINGLE_VOTE_SCALP", "true")
-    monkeypatch.setenv("STRATEGY_SINGLE_VOTE_SCALP_MIN", "0")
-    monkeypatch.setenv("STRATEGY_SINGLE_VOTE_MIN_CONFIDENCE", "0")
-    monkeypatch.setenv("STRATEGY_TRIGGER_MIN_SCORE", "0")
-    monkeypatch.setenv("STRATEGY_ALLOW_SELECTED_OPTION_SINGLE_VOTE", "true")
-    monkeypatch.setenv("STRATEGY_SELECTED_OPTION_SINGLE_VOTE_MIN_SCORE", "0")
-    monkeypatch.setenv("STRATEGY_MIN_TRADE_QUALITY_LIVE", "0")
-    monkeypatch.setenv("STRATEGY_MIN_TRADE_QUALITY_LIVE_SIMULATION", "0")
-    monkeypatch.setenv("STRATEGY_MIN_TRADE_QUALITY_SHADOW", "0")
     get_settings.cache_clear()
 
 
@@ -358,12 +358,16 @@ def _patch_no_network_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(om_core, "get_time_status", lambda: (True, "open"))
 
     def _build_test_strategies(settings, indicator_engine):
-        del settings, indicator_engine
+        del settings
         strategy = RSIMeanReversionStrategy(
             oversold_threshold=95, overbought_threshold=99, default_quantity=1
         )
         strategy.get_required_indicators = lambda: ["rsi", "atr"]  # type: ignore[method-assign]
-        return [strategy]
+        order_flow = OrderFlowStrategy(
+            OrderFlowStrategyConfig(enabled=True, quantity=1),
+            indicator_engine=indicator_engine,
+        )
+        return [strategy, order_flow]
 
     monkeypatch.setattr(core_app, "build_elite_strategies", _build_test_strategies)
 
@@ -399,6 +403,9 @@ def _publish_tick(
     price: float,
     *,
     timestamp: pd.Timestamp,
+    buy_qty: int = 1000,
+    sell_qty: int = 1000,
+    tick_direction: str | None = None,
 ) -> None:
     tick = {
         "instrument_token": int(token),
@@ -408,9 +415,10 @@ def _publish_tick(
         "bid": float(price) - 0.05,
         "ask": float(price) + 0.05,
         "depth": {
-            "buy": [{"price": float(price) - 0.05, "quantity": 1000}],
-            "sell": [{"price": float(price) + 0.05, "quantity": 1000}],
+            "buy": [{"price": float(price) - 0.05, "quantity": int(buy_qty)}],
+            "sell": [{"price": float(price) + 0.05, "quantity": int(sell_qty)}],
         },
+        "tick_direction": tick_direction,
         "volume": 10000,
         "timestamp": timestamp.to_pydatetime(),
         "exchange_timestamp": timestamp.to_pydatetime(),
@@ -506,6 +514,7 @@ def test_live_simulation_blocks_real_websocket_adapter(monkeypatch):
 @pytest.mark.simulation_component
 def test_live_simulation_accepts_marked_broker(monkeypatch):
     monkeypatch.setenv("EXECUTION_MODE", "LIVE_SIMULATION")
+
     class Broker:
         is_simulated_adapter = True
 
@@ -779,6 +788,9 @@ def test_live_runtime_bullish_spot_future_selects_ce_and_exits_target(
             basket.selected_ce_token,
             116.0,
             timestamp=base_tick_time + pd.Timedelta(seconds=15),
+            buy_qty=1800,
+            sell_qty=500,
+            tick_direction="UP",
         )
         _wait_until(
             loop,

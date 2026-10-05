@@ -65,8 +65,6 @@ _POLICY_ENV_PREFIXES = (
     "ORB_",
     "VWAP_",
     "SMC_",
-    "TRIGGER_",
-    "SIGNAL_MIN_SCORE_",
     "ORDERFLOW_",
     "ENABLE_OI_",
     "ENABLE_BB_",
@@ -76,13 +74,6 @@ _POLICY_ENV_PREFIXES = (
 _POLICY_ENV_KEYS = frozenset(
     {
         "ALLOW_EXPIRY_GAMMA_STRATEGIES",
-        "GLOBAL_MIN_SIGNAL_CONFIDENCE",
-        "GLOBAL_MIN_SIGNAL_SCORE",
-        "TRIGGER_DEFAULT_LIVE_MIN_SCORE",
-        "TRIGGER_ORB_PRO_LIVE_MIN_SCORE",
-        "TRIGGER_PREMIUM_SQUEEZE_LIVE_MIN_SCORE",
-        "TRIGGER_SMC_LIVE_MIN_SCORE",
-        "TRIGGER_VWAP_PRO_LIVE_MIN_SCORE",
         "EXECUTION_MAX_OPTION_SPREAD_PCT",
         "LIVE_CANDIDATE_MAX_SPREAD_PCT",
         "MAX_OPTION_SPREAD_PCT_FOR_EVAL",
@@ -196,7 +187,6 @@ def build_production_strategy_profile(
     settings: Any,
     strategies: Sequence[EliteStrategy],
     mode_profile: Mapping[str, Any],
-    global_min_confidence: float,
 ) -> dict[str, Any]:
     """Build a deterministic, observational snapshot of material live settings."""
     strategy_mode = str(os.getenv("STRATEGY_MODE", "directional_scalp")).strip().lower()
@@ -205,21 +195,7 @@ def build_production_strategy_profile(
         active_names,
         strategy_mode=strategy_mode,
     )
-    confidence_thresholds: dict[str, float] = {}
-    for strategy in strategies:
-        config = getattr(strategy, "config", None)
-        if config is None:
-            continue
-        raw_threshold = (
-            config.get("min_confidence")
-            if isinstance(config, Mapping)
-            else getattr(config, "min_confidence", None)
-        )
-        if raw_threshold is not None:
-            confidence_thresholds[str(strategy.name)] = float(raw_threshold)
-
     from nifty_scalper_bot.config import settings as app_settings
-    from nifty_scalper_bot.config.regime_strategy_policy import REGIME_STRATEGY_WEIGHTS
 
     entry_policy = resolve_entry_policy()
     profile: dict[str, Any] = {
@@ -231,10 +207,12 @@ def build_production_strategy_profile(
             "trigger_capable": trigger_names,
             "context_only": context_names,
         },
-        "score_thresholds": {
-            "global_min_confidence": float(global_min_confidence),
-            "per_strategy_min_confidence": confidence_thresholds,
+        "structural_entry_policy": {
             "mode_gate": dict(mode_profile),
+            "direction": "spot_futures_structural_agreement",
+            "setup": "strategy_owned_boolean_contract",
+            "confirmation": "independent_trigger_or_fresh_context",
+            "execution": "hard_quote_and_post_cost_economics",
         },
         "strategy_configs": _strategy_config_snapshots(strategies),
         "decision_environment": _material_policy_environment(),
@@ -263,12 +241,11 @@ def build_production_strategy_profile(
                 "volatile": float(app_settings.REGIME_VOLATILE_SIZING_MULT),
                 "event": float(app_settings.REGIME_EVENT_SIZING_MULT),
             },
-            "strategy_weights": REGIME_STRATEGY_WEIGHTS,
         },
     }
     canonical = json.dumps(profile, sort_keys=True, separators=(",", ":"))
     digest = hashlib.sha256(canonical.encode()).hexdigest()[:12]
-    profile["version"] = f"production-v2-{digest}"
+    profile["version"] = f"production-v3-{digest}"
     return profile
 
 
@@ -288,7 +265,9 @@ def build_elite_strategies(
     for field_name, (_module, strategy_cls, _label) in STRATEGY_CATALOG.items():
         try:
             if not hasattr(settings, field_name):
-                LOGGER.warning("⚠️  Builder: No config found for '%s'. Skipping.", field_name)
+                LOGGER.warning(
+                    "⚠️  Builder: No config found for '%s'. Skipping.", field_name
+                )
                 continue
 
             strat_config = getattr(settings, field_name)

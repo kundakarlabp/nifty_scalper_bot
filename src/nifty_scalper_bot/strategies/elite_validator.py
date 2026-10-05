@@ -22,10 +22,6 @@ def _require(condition: bool, message: str) -> None:
 
 def _validate_base(name: str, cfg: EliteStrategyConfig) -> None:
     _require(
-        0.0 <= float(cfg.min_confidence) <= 100.0,
-        f"{name}.min_confidence must be 0..100",
-    )
-    _require(
         float(cfg.cooldown_seconds) >= 0.0,
         f"{name}.cooldown_seconds must be >= 0",
     )

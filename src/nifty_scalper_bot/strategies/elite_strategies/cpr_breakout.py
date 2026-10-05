@@ -2,19 +2,26 @@ from __future__ import annotations
 
 from typing import Any
 
-from nifty_scalper_bot.strategies.elite_strategies.base_elite import EliteSignal, EliteStrategy
-from nifty_scalper_bot.strategies.elite_strategies.config_models import CPRBreakoutStrategyConfig
+from nifty_scalper_bot.strategies.elite_strategies.base_elite import (
+    EliteSignal,
+    EliteStrategy,
+)
+from nifty_scalper_bot.strategies.elite_strategies.config_models import (
+    CPRBreakoutStrategyConfig,
+)
 from nifty_scalper_bot.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
 
 
 class CPRBreakoutStrategy(EliteStrategy):
-    """Narrow-CPR breakout context provider with independent evidence scoring."""
+    """Narrow-CPR breakout context provider with independent structural evidence."""
 
     MIN_BARS_REQUIRED = 2
 
-    def __init__(self, config: CPRBreakoutStrategyConfig, indicator_engine: Any) -> None:
+    def __init__(
+        self, config: CPRBreakoutStrategyConfig, indicator_engine: Any
+    ) -> None:
         """Args: config, indicator_engine. Returns: None. Raises: Exception."""
         super().__init__(config=config, indicator_engine=indicator_engine)
         self._cfg = config
@@ -44,7 +51,9 @@ class CPRBreakoutStrategy(EliteStrategy):
         del position
         try:
             self._no_vote("stale_or_invalid_data")
-            if symbol.upper().endswith(("CE", "PE")) and not indicators.get("source_symbol"):
+            if symbol.upper().endswith(("CE", "PE")) and not indicators.get(
+                "source_symbol"
+            ):
                 self._no_vote("invalid_price_domain")
                 return None
 
@@ -85,33 +94,33 @@ class CPRBreakoutStrategy(EliteStrategy):
                 nearest_level_distance = r1 - current_price
             elif side == "PE" and 0 < s1 < current_price:
                 nearest_level_distance = current_price - s1
-            if nearest_level_distance is not None and nearest_level_distance < 0.5 * atr:
+            if (
+                nearest_level_distance is not None
+                and nearest_level_distance < 0.5 * atr
+            ):
                 self._no_vote("nearby_level")
                 return None
 
             retest_confirmed = bool(indicators.get("retest_confirmed"))
-            score = 3.0
             reasons = ["narrow_cpr", "clean_break_beyond_cpr"]
-
-            if direction in {"CE", "PE"} and direction == side:
-                score += 2.0
+            direction_aligned = direction in {"CE", "PE"} and direction == side
+            if direction_aligned:
                 reasons.append("direction_alignment")
             if retest_confirmed:
-                score += 2.0
                 reasons.append("retest_confirmed")
-            if nearest_level_distance is not None and nearest_level_distance >= atr:
-                score += 1.0
+            adequate_room = bool(
+                nearest_level_distance is None or nearest_level_distance >= atr
+            )
+            if adequate_room:
                 reasons.append("adequate_distance_to_next_level")
+            momentum_confirmed = breakout_quality >= 0.6
             if breakout_quality >= 1.0:
-                score += 2.0
-                reasons.append(f"momentum_strong_{breakout_quality:.1f}")
-            elif breakout_quality >= 0.6:
-                score += 1.0
-                reasons.append(f"momentum_moderate_{breakout_quality:.1f}")
+                reasons.append("momentum_strong")
+            elif momentum_confirmed:
+                reasons.append("momentum_moderate")
             else:
-                reasons.append(f"momentum_weak_{breakout_quality:.1f}")
+                reasons.append("momentum_weak")
 
-            strategy_score = max(0.0, min(10.0, score))
             metadata = {
                 "strategy": "CPRBreakout",
                 "strategy_name": "CPRBreakout",
@@ -122,18 +131,18 @@ class CPRBreakoutStrategy(EliteStrategy):
                 "trade_side": side,
                 "side": side,
                 "direction_bias": side,
-                "preliminary_only": True,
                 "requires_runner_execution_validation": True,
-                "direction_score": strategy_score,
-                "strategy_score": strategy_score,
-                "context_score": strategy_score,
-                "data_score": 8.0,
-                "setup_quality": strategy_score,
+                "setup_pass": bool(
+                    direction_aligned
+                    and retest_confirmed
+                    and adequate_room
+                    and momentum_confirmed
+                ),
                 "setup_type": "cpr_breakout_context",
                 "required_data_present": True,
                 "stale_data_used": bool(indicators.get("stale_data_used")),
                 "candidate_symbol": symbol,
-                "score_reasons": reasons,
+                "setup_reasons": reasons,
                 "rejection_reasons": [],
                 "cpr_top": cpr_top,
                 "cpr_bottom": cpr_bottom,
@@ -141,7 +150,7 @@ class CPRBreakoutStrategy(EliteStrategy):
                 "cpr_width_pct": round(cpr_width_pct, 4),
                 "narrow_cpr_threshold_pct": width_threshold_pct,
                 "relation_to_cpr": "above" if side == "CE" else "below",
-                "breakout_quality": round(breakout_quality, 3),
+                "breakout_distance_atr": round(breakout_quality, 3),
                 "nearest_level_distance": (
                     round(nearest_level_distance, 3)
                     if nearest_level_distance is not None
@@ -153,14 +162,13 @@ class CPRBreakoutStrategy(EliteStrategy):
                 ),
             }
             LOGGER.info(
-                "STRATEGY_CONTEXT strategy=CPRBreakout side=%s score=%.2f",
+                "STRATEGY_CONTEXT strategy=CPRBreakout side=%s",
                 side,
-                strategy_score,
             )
             return EliteSignal(
                 symbol=symbol,
                 signal="BUY",
-                confidence=max(0.1, min(0.88, strategy_score / 10.0)),
+                confidence=1.0,
                 entry_price=current_price,
                 stop_loss=None,
                 target=None,

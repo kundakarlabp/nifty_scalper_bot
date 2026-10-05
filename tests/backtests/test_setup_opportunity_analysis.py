@@ -5,7 +5,6 @@ import pytest
 from nifty_scalper_bot.backtesting.setup_opportunity_analysis import (
     ExperimentRecord,
     canonicalize_setup_opportunities,
-    compare_score_policy,
     label_forward_option_buy_path,
     validate_experiment_record,
 )
@@ -17,7 +16,7 @@ def _decision(
     event_name: str = "candidate.blocked",
     setup_id: str = "vwap:CE:anchor",
     symbol: str = "NFO:NIFTYCE",
-    reason: str = "alpha_below_threshold",
+    reason: str = "structural_contract_rejected",
 ) -> dict[str, object]:
     return {
         "timestamp": timestamp,
@@ -32,7 +31,7 @@ def _decision(
                 "setup_name": "premium_vwap_reclaim",
                 "contract_side": "CE",
                 "regime": "TREND",
-                "raw_setup_score": 6.4,
+                "setup_contract": {"passed": False},
             }
         },
     }
@@ -176,24 +175,6 @@ def test_forward_path_does_not_invent_barrier_order_for_same_timestamp() -> None
     )
     assert label is not None
     assert label.first_barrier == "ambiguous"
-
-
-def test_score_policy_compares_regime_weight_with_neutral() -> None:
-    samples = [
-        {"raw_setup_score": 6.0, "regime_weight": 1.2, "outcome_r": 1.0},
-        {"raw_setup_score": 6.5, "regime_weight": 0.8, "outcome_r": -0.5},
-        {"raw_setup_score": 7.0, "regime_weight": 1.0, "outcome_r": 0.2},
-    ]
-
-    weighted = compare_score_policy(samples, threshold=6.5, use_regime_weight=True)
-    neutral = compare_score_policy(samples, threshold=6.5, use_regime_weight=False)
-
-    assert weighted.policy == "regime_weighted"
-    assert weighted.selected == 2
-    assert weighted.mean_r == 0.6
-    assert neutral.policy == "neutral_weight"
-    assert neutral.selected == 2
-    assert neutral.mean_r == -0.15
 
 
 def test_experiment_record_requires_strictly_later_oos_window_and_unique_id() -> None:

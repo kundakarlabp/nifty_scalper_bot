@@ -3,9 +3,14 @@ from __future__ import annotations
 from typing import Any
 
 from nifty_scalper_bot.config.regime_ontology import MarketRegime, normalize_regime
-from nifty_scalper_bot.strategies.elite_strategies.base_elite import EliteSignal, EliteStrategy
-from nifty_scalper_bot.strategies.elite_strategies.config_models import RSIDivergenceStrategyConfig
-from nifty_scalper_bot.strategies.signal_quality import resolve_signal_domain
+from nifty_scalper_bot.strategies.elite_strategies.base_elite import (
+    EliteSignal,
+    EliteStrategy,
+)
+from nifty_scalper_bot.strategies.elite_strategies.config_models import (
+    RSIDivergenceStrategyConfig,
+)
+from nifty_scalper_bot.strategies.entry_evidence import resolve_signal_domain
 from nifty_scalper_bot.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
@@ -46,7 +51,9 @@ class RSIDivergenceStrategy(EliteStrategy):
 
     MIN_BARS_REQUIRED = 20
 
-    def __init__(self, config: RSIDivergenceStrategyConfig, indicator_engine: Any) -> None:
+    def __init__(
+        self, config: RSIDivergenceStrategyConfig, indicator_engine: Any
+    ) -> None:
         """Args: config, indicator_engine. Returns: None. Raises: Exception."""
         super().__init__(config=config, indicator_engine=indicator_engine)
         self._cfg = config
@@ -100,7 +107,9 @@ class RSIDivergenceStrategy(EliteStrategy):
                 self._no_vote("no_confirmed_swing_divergence")
                 return None
 
-            contract_side, option_premium_domain, _ = resolve_signal_domain(symbol, indicators)
+            contract_side, option_premium_domain, _ = resolve_signal_domain(
+                symbol, indicators
+            )
             if option_premium_domain:
                 if not bullish_div:
                     self._no_vote("premium_no_bullish_divergence")
@@ -127,31 +136,25 @@ class RSIDivergenceStrategy(EliteStrategy):
                 return None
 
             (p1, r1), (p2, r2) = selected_pair
-            score = 4.0
             reasons = ["confirmed_swing_divergence", "structure_confirmation"]
-            if regime in {MarketRegime.RANGE, MarketRegime.LOW_ACTIVITY}:
-                score += 2.0
+            regime_support = regime in {MarketRegime.RANGE, MarketRegime.LOW_ACTIVITY}
+            if regime_support:
                 reasons.append("regime_support")
             elif regime is MarketRegime.TREND:
-                score -= 1.5
-                reasons.append("strong_trend_penalty")
-            if direction in {"CE", "PE"} and direction == side:
-                score += 1.0
+                reasons.append("strong_trend_context")
+
+            direction_aligned = direction in {"CE", "PE"} and direction == side
+            if direction_aligned:
                 reasons.append("direction_context")
 
             rsi_delta = abs(r2 - r1)
+            divergence_strength_confirmed = rsi_delta >= 2.5
             if rsi_delta >= 5.0:
-                score += 2.0
-                reasons.append(f"divergence_strong_{rsi_delta:.1f}")
-            elif rsi_delta >= 2.5:
-                score += 1.0
-                reasons.append(f"divergence_moderate_{rsi_delta:.1f}")
+                reasons.append("divergence_strong")
+            elif divergence_strength_confirmed:
+                reasons.append("divergence_moderate")
             else:
-                reasons.append(f"divergence_weak_{rsi_delta:.1f}")
-
-            strategy_score = max(0.0, min(10.0, score))
-            if strategy_score < 3.5:
-                self._no_vote("low_score")
+                self._no_vote("divergence_too_weak")
                 return None
 
             source_symbol = str(indicators.get("source_symbol") or "").strip()
@@ -161,41 +164,41 @@ class RSIDivergenceStrategy(EliteStrategy):
                 "strategy_name": "RSIDivergence",
                 "role": "context",
                 "can_trigger": False,
-                "source_domain": "option_premium" if option_premium_domain else source_domain,
+                "source_domain": (
+                    "option_premium" if option_premium_domain else source_domain
+                ),
                 "signal_family": "directional_context",
                 "trade_side": side,
                 "side": side,
                 "direction_bias": side,
-                "preliminary_only": True,
                 "requires_runner_execution_validation": True,
-                "direction_score": strategy_score,
-                "strategy_score": strategy_score,
-                "context_score": strategy_score,
-                "data_score": 8.0,
-                "setup_quality": strategy_score,
+                "setup_pass": bool(
+                    regime_support
+                    and direction_aligned
+                    and divergence_strength_confirmed
+                ),
                 "setup_type": "rsi_confirmed_swing_reversal",
                 "required_data_present": True,
                 "stale_data_used": bool(indicators.get("stale_data_used")),
                 "candidate_symbol": symbol,
-                "score_reasons": reasons,
+                "setup_reasons": reasons,
                 "rejection_reasons": [],
                 "divergence_type": divergence_type,
                 "swing_points": selected_pair,
                 "confirmation_candle": True,
                 "trend_regime": regime.value,
-                "reversal_quality": round(strategy_score / 10.0, 3),
+                "rsi_divergence_delta": round(rsi_delta, 3),
                 "atr": atr,
                 "close": close,
             }
             LOGGER.info(
-                "STRATEGY_CONTEXT strategy=RSIDivergence side=%s score=%.2f",
+                "STRATEGY_CONTEXT strategy=RSIDivergence side=%s",
                 side,
-                strategy_score,
             )
             return EliteSignal(
                 symbol=symbol,
                 signal="BUY",
-                confidence=max(0.1, min(0.82, strategy_score / 10.0)),
+                confidence=1.0,
                 entry_price=current_price,
                 stop_loss=None,
                 target=None,

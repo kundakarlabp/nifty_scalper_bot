@@ -95,7 +95,7 @@ def test_trade_decision_snapshot_is_persisted_to_existing_journal() -> None:
     assert captured[0][1] == "trace-1"
 
 
-def test_approved_decision_uses_executed_signal_identity_and_score() -> None:
+def test_approved_decision_uses_executed_signal_identity() -> None:
     captured: list[dict[str, object]] = []
     runner = SimpleNamespace(
         _runtime_live_orders_armed=True,
@@ -116,12 +116,10 @@ def test_approved_decision_uses_executed_signal_identity_and_score() -> None:
         order_submitted=True,
         trace_id="runner-trace",
         signal_id="executed-signal",
-        signal_score=7.8,
     )
 
     assert captured[0]["signal_id"] == "executed-signal"
     assert captured[0]["trade_id"] == "TRD_executed-signal"
-    assert captured[0]["signal_score"] == 7.8
 
 
 def test_decision_snapshot_persists_research_context() -> None:
@@ -136,30 +134,27 @@ def test_decision_snapshot_persists_research_context() -> None:
         ),
         _logger=SimpleNamespace(debug=lambda *_args, **_kwargs: None),
     )
+    research_context = {
+        "strategy": "vwap_pro",
+        "regime": "TREND",
+        "direction_contract": {"passed": True},
+        "setup_contract": {"passed": False},
+        "confirmation_contract": {"passed": True},
+        "rejection_stage": "runner_structural_contract",
+    }
 
     StrategyRunner._record_trade_decision_snapshot(
         runner,
         symbol="NFO:NIFTYCE",
         direction="CE",
-        final_reason="alpha_below_threshold",
+        final_reason="setup_contract_not_passed",
         order_submitted=False,
         trace_id="blocked-trace",
-        signal_score=7.2,
-        research_context={
-            "strategy": "vwap_pro",
-            "regime": "TREND",
-            "signal_quality": {"final_score": 7.2, "alpha_score": 6.4},
-            "rejection_stage": "runner_final_score",
-        },
+        research_context=research_context,
     )
 
     assert captured[0]["order_submitted"] is False
-    assert captured[0]["research_context"] == {
-        "strategy": "vwap_pro",
-        "regime": "TREND",
-        "signal_quality": {"final_score": 7.2, "alpha_score": 6.4},
-        "rejection_stage": "runner_final_score",
-    }
+    assert captured[0]["research_context"] == research_context
 
 
 def test_margin_needed_rejection_is_deterministic_risk_capacity() -> None:
@@ -176,36 +171,24 @@ def test_margin_no_qty_rejection_is_deterministic_risk_capacity() -> None:
     )
 
 
-def test_decision_research_context_does_not_fabricate_quality() -> None:
+def test_decision_research_context_preserves_only_known_structural_facts() -> None:
     context = StrategyRunner._decision_research_context(
-        metadata={"strategy": "VWAPPro", "regime": "RANGE"},
-        quality=None,
-        stage="pre_score",
+        metadata={
+            "strategy": "VWAPPro",
+            "regime": "RANGE",
+            "direction_contract": {"passed": True},
+            "setup_contract": {"passed": True},
+            "confirmation_contract": {"passed": True},
+        },
+        stage="runner_structural_execution_validation",
     )
 
     assert context["strategy"] == "VWAPPro"
     assert context["regime"] == "RANGE"
-    assert context["decision_stage"] == "pre_score"
-    assert "signal_quality" not in context
-
-
-def test_decision_research_context_carries_known_quality() -> None:
-    quality = SimpleNamespace(
-        components={
-            "strategy_name": "VWAPPro",
-            "final_score": 7.4,
-            "alpha_score": 6.9,
-        }
-    )
-    context = StrategyRunner._decision_research_context(
-        metadata={"strategy": "VWAPPro", "regime": "TREND", "approval_path": "x"},
-        quality=quality,
-        stage="execution",
-    )
-
-    assert context["signal_quality"]["final_score"] == 7.4
-    assert context["decision_stage"] == "execution"
-    assert context["approval_path"] == "x"
+    assert context["decision_stage"] == "runner_structural_execution_validation"
+    assert context["direction_contract"] == {"passed": True}
+    assert context["setup_contract"] == {"passed": True}
+    assert context["confirmation_contract"] == {"passed": True}
 
 
 def test_reject_signal_execution_forwards_existing_research_context() -> None:
@@ -217,11 +200,12 @@ def test_reject_signal_execution_forwards_existing_research_context() -> None:
     )
     details = {
         "direction": "PE",
-        "signal_score": 7.3,
         "research_context": {
             "strategy": "VWAPPro",
             "decision_stage": "execution",
-            "signal_quality": {"final_score": 7.3},
+            "direction_contract": {"passed": True},
+            "setup_contract": {"passed": True},
+            "confirmation_contract": {"passed": True},
         },
     }
 
@@ -233,7 +217,6 @@ def test_reject_signal_execution_forwards_existing_research_context() -> None:
         details=details,
     )
 
-    assert captured[0]["signal_score"] == 7.3
     assert captured[0]["research_context"] == details["research_context"]
 
 
@@ -247,9 +230,9 @@ def test_decision_research_context_preserves_existing_setup_provenance_only() ->
         "strategy_role": "trigger",
         "signal_family": "vwap",
         "contract_side": "CE",
-        "raw_setup_score": 6.5,
-        "score_contract_version": 1,
-        "score_lineage": {"raw_setup_score": 6.5},
+        "direction_contract": {"passed": True},
+        "setup_contract": {"passed": True},
+        "confirmation_contract": {"passed": True},
         "underlying_direction_bias": "CE",
         "underlying_direction_confidence": 0.91,
         "context_age_seconds": 0.8,
@@ -260,12 +243,11 @@ def test_decision_research_context_preserves_existing_setup_provenance_only() ->
 
     context = StrategyRunner._decision_research_context(
         metadata=metadata,
-        quality=None,
-        stage="runner_final_score",
+        stage="runner_structural_execution_validation",
     )
 
     assert context["setup_id"] == metadata["setup_id"]
-    assert context["raw_setup_score"] == 6.5
+    assert context["setup_contract"] == {"passed": True}
     assert context["underlying_direction_bias"] == "CE"
     assert context["spread_pct"] == 0.32
     assert "unrelated_runtime_object" not in context
@@ -274,7 +256,6 @@ def test_decision_research_context_preserves_existing_setup_provenance_only() ->
 def test_decision_research_context_does_not_invent_setup_identity() -> None:
     context = StrategyRunner._decision_research_context(
         metadata={"strategy": "ORBPro", "regime": "TREND"},
-        quality=None,
         stage="manager",
     )
 
