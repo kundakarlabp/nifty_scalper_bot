@@ -2790,6 +2790,24 @@ class StrategyManager(_BaseStrategyManager):
             try:
                 opt_quote = _get_cached_quote_for_eval(self._data_hub, symbol)
                 if opt_quote:
+                    if isinstance(opt_quote, t.Mapping):
+                        for microstructure_key in (
+                            "depth",
+                            "tick_direction",
+                            "quote_update_version",
+                            "update_version",
+                            "tick_version",
+                            "timestamp_ms",
+                            "last_tick_timestamp",
+                        ):
+                            current_value = indicators.get(microstructure_key)
+                            quote_value = opt_quote.get(microstructure_key)
+                            if (
+                                (current_value is None or current_value == "")
+                                and quote_value is not None
+                                and quote_value != ""
+                            ):
+                                indicators[microstructure_key] = quote_value
                     _exch_vwap = self._extract_float(
                         opt_quote, ("vwap", "average_price")
                     )
