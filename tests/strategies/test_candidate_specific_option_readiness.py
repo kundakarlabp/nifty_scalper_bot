@@ -188,7 +188,6 @@ def _execution_runner(monkeypatch, *, ce_ok=True, pe_ok=False):
     runner._max_order_attempts_per_minute = 999
     runner._signal_reject_cooldown_ts = {}
     runner._execution_reject_cooldown_ts = {}
-    runner._premium_squeeze_last_signal_ts = {}
     runner._underlying_last_signal_ts = {}
     runner._reason_last_signal_ts = {}
     runner._order_failure_cooldown_until = {}
