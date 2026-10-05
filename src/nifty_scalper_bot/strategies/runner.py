@@ -13388,13 +13388,6 @@ class StrategyRunner:
             trigger_evidence = bool(
                 metadata.get("trigger_conditions_met")
                 or metadata.get("trigger_eligible")
-                or (
-                    str(
-                        metadata.get("strategy") or getattr(signal, "reason", "")
-                    ).upper()
-                    == "ORDERFLOW"
-                    and float(metadata.get("strategy_score") or 0.0) >= 5.0
-                )
             )
             if (
                 trigger_evidence
