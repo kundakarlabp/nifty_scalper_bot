@@ -31,7 +31,7 @@ BASE_OVERRIDES = {
 
 
 def candidates() -> list[dict[str, Any]]:
-    """Return the static comparator, lifecycle reference and five one-change runs."""
+    """Return reference rows and the five canonical one-change runs."""
     return [
         {
             "name": "static_reference_075_25",
@@ -69,6 +69,25 @@ def candidates() -> list[dict[str, Any]]:
             "lifecycle_proxy": True,
         },
     ]
+
+
+def quality_score_8_candidate() -> dict[str, Any]:
+    """Return the focused score-8 experiment outside the canonical five-run set."""
+    return {
+        "name": "quality_score_8",
+        "overrides": {**BASE_OVERRIDES, "ORB_QUALITY_MIN_SCORE_SHADOW": "8.0"},
+        "lifecycle_proxy": True,
+    }
+
+
+def _selected_candidates(names: list[str]) -> list[dict[str, Any]]:
+    pool = {row["name"]: row for row in [*candidates(), quality_score_8_candidate()]}
+    if not names:
+        return candidates()
+    missing = [name for name in names if name not in pool]
+    if missing:
+        raise ValueError(f"unknown research candidate(s): {', '.join(missing)}")
+    return [pool[name] for name in names]
 
 
 def _write_json(path: Path, payload: Any) -> None:
@@ -141,11 +160,18 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--study-dir", type=Path, required=True)
     parser.add_argument("--workers", type=int, default=2)
+    parser.add_argument(
+        "--candidate",
+        action="append",
+        default=[],
+        help="Run only the named candidate; may be supplied more than once.",
+    )
     args = parser.parse_args()
     if not 1 <= args.workers <= 8:
         parser.error("workers must be between 1 and 8")
 
     manifest = json.loads((args.study_dir / "data_manifest.json").read_text())
+    selected_candidates = _selected_candidates(args.candidate)
     phases = {
         "development": {"2017", "2018"},
         "validation": {"2019"},
@@ -171,7 +197,7 @@ def main() -> None:
             "bar_causality": "trail raised from completed bar is effective next bar",
             "live_parity": False,
         },
-        "candidates": candidates(),
+        "candidates": selected_candidates,
         "selection": "none; all five changes predeclared and reported",
         "promotion_eligible": False,
     }
@@ -182,7 +208,7 @@ def main() -> None:
         days = [row["day"] for row in manifest["sessions"] if row["day"][:4] in years]
         tasks = [
             (str(args.study_dir), candidate, slip, days)
-            for candidate in candidates()
+            for candidate in selected_candidates
             for slip in SLIPPAGE
         ]
         results: list[dict[str, Any]] = []
@@ -201,7 +227,7 @@ def main() -> None:
         _write_json(args.study_dir / f"iterative_{phase}.json", results)
 
     summary: list[dict[str, Any]] = []
-    for candidate in candidates():
+    for candidate in selected_candidates:
         name = candidate["name"]
         row: dict[str, Any] = {
             "candidate": name,
