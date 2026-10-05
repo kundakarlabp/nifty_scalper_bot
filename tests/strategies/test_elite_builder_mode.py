@@ -146,6 +146,24 @@ def test_orb_enabled_config_is_not_overridden_by_legacy_env(monkeypatch) -> None
     assert signal.metadata["orb_window_minutes"] == 15
 
 
+def test_orb_structural_setup_is_active_in_live(monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ORB_BALANCED_RANGE_MAX_ATR", "2.0")
+    rows = _orb_rows(side="CE")
+    strategy = ORBProStrategy(
+        ORBProStrategyConfig(orb_minutes=15),
+        indicator_engine=_OrbIndicatorEngine(rows),
+    )
+    indicators = _orb_indicators("CE", rows[-1]["timestamp"])
+
+    signal = strategy.generate_signal("NFO:NIFTY26SEP24050CE", indicators, 50.0)
+
+    assert signal is not None
+    assert signal.metadata["setup_pass"] is True
+    assert signal.metadata["contract_side"] == "CE"
+    assert signal.metadata["opening_range_source"] == "futures"
+
+
 def test_orb_pe_underlying_breakout_uses_contract_side(monkeypatch) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
     rows = _orb_rows(side="PE")
