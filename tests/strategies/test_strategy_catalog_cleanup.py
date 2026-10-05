@@ -42,9 +42,9 @@ def test_theta_mode_does_not_restore_retired_single_leg_straddle(monkeypatch) ->
 
 
 def test_secondary_context_strategies_require_observed_atr() -> None:
-    bb = BBSqueezeStrategy(BBSqueezeStrategyConfig(min_confidence=0.0), None)
-    cpr = CPRBreakoutStrategy(CPRBreakoutStrategyConfig(min_confidence=0.0), None)
-    rsi = RSIDivergenceStrategy(RSIDivergenceStrategyConfig(min_confidence=0.0), None)
+    bb = BBSqueezeStrategy(BBSqueezeStrategyConfig(), None)
+    cpr = CPRBreakoutStrategy(CPRBreakoutStrategyConfig(), None)
+    rsi = RSIDivergenceStrategy(RSIDivergenceStrategyConfig(), None)
 
     assert bb._evaluate_signal("NSE:NIFTY", {"atr": 0.0}, 24000.0) is None
     assert cpr._evaluate_signal("NSE:NIFTY", {"atr": 0.0}, 24000.0) is None
@@ -55,7 +55,7 @@ def test_expiry_gamma_requires_observed_atr(monkeypatch) -> None:
     monkeypatch.setenv("STRATEGY_MODE", "expiry_gamma")
     monkeypatch.setenv("ALLOW_EXPIRY_GAMMA_STRATEGIES", "true")
     strategy = GammaScalpingStrategy(
-        GammaScalpingStrategyConfig(min_confidence=0.0),
+        GammaScalpingStrategyConfig(),
         indicator_engine=None,
     )
     signal = strategy._evaluate_signal(
