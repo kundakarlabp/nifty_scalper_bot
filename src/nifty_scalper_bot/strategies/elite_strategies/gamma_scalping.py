@@ -97,15 +97,15 @@ class GammaScalpingStrategy(EliteStrategy):
                 indicators.get("volatility_expansion_confirmed") or gamma > 0.0015
             )
 
-            score = 4.0
             reasons = ["expiry_gamma_core", "direction_context"]
             if vol_exp:
-                score += 2.0
                 reasons.append("volatility_expansion_confirmed")
-            if gamma >= max(0.0015, 2.0 * min_gamma):
-                score += 1.0
+            gamma_strong = gamma >= max(0.0015, 2.0 * min_gamma)
+            if gamma_strong:
                 reasons.append("gamma_strong")
-            strategy_score = max(0.0, min(10.0, score))
+            if not vol_exp:
+                self._no_vote("volatility_expansion_unconfirmed")
+                return None
 
             # CE and PE are both long-premium positions. Premium risk is always
             # below entry; underlying direction must not invert premium SL/TP.
@@ -118,13 +118,12 @@ class GammaScalpingStrategy(EliteStrategy):
                 "side": side,
                 "trade_side": side,
                 "direction_bias": side,
-                "strategy_score": strategy_score,
-                "setup_quality": strategy_score,
+                "setup_pass": True,
                 "setup_type": "expiry_gamma",
                 "required_data_present": True,
                 "stale_data_used": bool(indicators.get("stale_data_used")),
                 "candidate_symbol": symbol,
-                "score_reasons": reasons,
+                "setup_reasons": reasons,
                 "rejection_reasons": [],
                 "expiry_day": True,
                 "days_to_expiry": indicators.get("days_to_expiry"),
@@ -136,14 +135,13 @@ class GammaScalpingStrategy(EliteStrategy):
                 "premium_target_rr": 1.8,
             }
             LOGGER.info(
-                "STRATEGY_VOTE strategy=GammaScalping side=%s score=%.2f",
+                "STRATEGY_EVIDENCE strategy=GammaScalping side=%s",
                 side,
-                strategy_score,
             )
             return EliteSignal(
                 symbol=symbol,
                 signal="BUY",
-                confidence=max(0.1, min(0.85, strategy_score / 10.0)),
+                confidence=1.0,
                 entry_price=current_price,
                 stop_loss=stop_loss,
                 target=target,
