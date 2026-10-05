@@ -828,7 +828,7 @@ def test_entry_plan_preserves_context_confirmation_provenance(monkeypatch) -> No
                 "manager_reference_score": 9.76,
                 "manager_reference_threshold": 7.5,
                 "manager_reference_pass": True,
-                "final_numeric_gate_owner": "runner_final_execution_score",
+                "score_admission_role": "diagnostic_only",
             },
             "confirming_trigger_strategies": ["VWAPPro"],
             "context_confirmation_strategies": ["OrderFlow"],
