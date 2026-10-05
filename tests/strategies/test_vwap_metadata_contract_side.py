@@ -228,7 +228,7 @@ def test_real_vwap_vote_clears_default_live_quality_gate(monkeypatch):
     monkeypatch.setenv('ENABLE_LIVE', 'true')
     monkeypatch.setenv('ORDER_MAX_SPREAD_PCT', '1.0')
     strategy = VWAPProStrategy(
-        VWAPProStrategyConfig(min_confidence=0.0),
+        VWAPProStrategyConfig(),
         _DummyEngine(),
     )
     indicators = _indicators()
