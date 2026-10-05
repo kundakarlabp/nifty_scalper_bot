@@ -1026,8 +1026,6 @@ def _build_elite_settings() -> EliteStrategiesSettings:
         # ✅ FIX: Use int(_env_float(...)) for period and lookback
         rsi_cfg = RSIDivergenceStrategyConfig(
             enabled=_env_bool("RSI_DIV_ENABLED", default=True),
-                "RSI_MIN_CONFIDENCE", "RSI_DIV_MIN_CONFIDENCE", default=48.0
-            ),
             rsi_period=int(_env_float("RSI_PERIOD", default=14.0)),
         )
 
