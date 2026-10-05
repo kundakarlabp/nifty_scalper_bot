@@ -1,7 +1,8 @@
 """Canonical structural setup lifecycle observability.
 
-Strategies own setup semantics; StrategyManager owns arbitration; Runner owns structural execution validation; execution owners remain unchanged.  This module owns only the shared,
-bounded lifecycle record keyed by structural setup identity.
+Strategies own setup semantics; StrategyManager owns arbitration; Runner owns
+structural execution validation; execution owners remain unchanged. This module
+owns only the shared, bounded lifecycle record keyed by structural setup identity.
 """
 
 from __future__ import annotations
