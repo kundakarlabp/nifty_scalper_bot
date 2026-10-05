@@ -1,7 +1,6 @@
 """Canonical structural setup lifecycle observability.
 
-Strategies own setup semantics; StrategyManager owns arbitration; Runner owns final
-quality; execution owners remain unchanged.  This module owns only the shared,
+Strategies own setup semantics; StrategyManager owns arbitration; Runner owns structural execution validation; execution owners remain unchanged.  This module owns only the shared,
 bounded lifecycle record keyed by structural setup identity.
 """
 
@@ -30,7 +29,7 @@ class SetupStage(StrEnum):
     INVALIDATED = "INVALIDATED"
     EXPIRED = "EXPIRED"
     CONTEXT_VETOED = "CONTEXT_VETOED"
-    QUALITY_REJECTED = "QUALITY_REJECTED"
+    CONTRACT_REJECTED = "CONTRACT_REJECTED"
     RISK_REJECTED = "RISK_REJECTED"
     EXECUTION_REJECTED = "EXECUTION_REJECTED"
 
@@ -40,7 +39,7 @@ _TERMINAL = {
     SetupStage.INVALIDATED,
     SetupStage.EXPIRED,
     SetupStage.CONTEXT_VETOED,
-    SetupStage.QUALITY_REJECTED,
+    SetupStage.CONTRACT_REJECTED,
     SetupStage.RISK_REJECTED,
     SetupStage.EXECUTION_REJECTED,
 }
