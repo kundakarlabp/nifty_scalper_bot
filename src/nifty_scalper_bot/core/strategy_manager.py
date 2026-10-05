@@ -1,7 +1,7 @@
 # fmt: off
 # ruff: noqa: E501,I001,F841,E701,E702
 # mypy: ignore-errors
-"""Strategy arbitration and dynamic allocation manager.
+"""Strategy arbitration and performance telemetry manager.
 
 Runtime role:
 - Evaluates strategies using prepared DataHub/ActiveContractBasket context.
@@ -11,7 +11,7 @@ Runtime role:
 Direction-authority invariant:
 - OPTION PREMIUM DATA MUST NEVER AUTHORIZE UNDERLYING DIRECTION.
 - Only fresh NIFTY spot/futures context may authorize CE/PE direction.
-- Direction, confidence, freshness age and source are one atomic observation.
+- Direction, freshness age and source are one atomic observation.
 - Fresh spot/futures disagreement fails closed; source order never breaks ties.
 - The final option combiner gate independently revalidates direction alignment."""
 
@@ -1226,7 +1226,6 @@ class StrategyManager(_BaseStrategyManager):
             strategies: Strategy instances producing signals.
             indicator_engine: Indicator engine shared across strategies.
             position_manager: Position manager used for exposure checks.
-            min_confidence: Compatibility input for the base manager; not an entry gate.
             data_hub: Optional data hub providing futures context.
             orchestrator: Optional orchestrator enforcing allocations.
             futures_symbol: Futures symbol used for futures metrics.
@@ -3463,7 +3462,7 @@ class StrategyManager(_BaseStrategyManager):
             signal_votes.append((adjusted, vote))
 
         # Preserve every structurally valid vote. MAX_STRATEGY_VOTES is kept
-        # as observability only: score/confidence must not decide which strategy
+        # as observability only: numeric ranking must not decide which strategy
         # evidence is discarded before consensus.
         if len(signal_votes) > max_votes:
             log.info(
@@ -3685,7 +3684,7 @@ class StrategyManager(_BaseStrategyManager):
                     action=combined.action,
                     symbol=combined.symbol,
                     quantity=combined.quantity,
-                    confidence=combined.confidence,  # ✅ FIX #6: Was metadata.get("probability", combined.confidence); that bypassed score weighting
+                    confidence=combined.confidence
                     reason=combined.reason,
                     stop_loss=combined.stop_loss,
                     take_profit=combined.take_profit,
