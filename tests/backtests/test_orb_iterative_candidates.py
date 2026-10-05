@@ -1,6 +1,11 @@
 """Five ORB research runs must remain one-change experiments."""
 
-from scripts.research_orb_iterative import BASE_OVERRIDES, candidates
+from scripts.research_orb_iterative import (
+    BASE_OVERRIDES,
+    _selected_candidates,
+    candidates,
+    quality_score_8_candidate,
+)
 
 
 def test_five_runs_change_exactly_one_orb_setting_from_lifecycle_reference():
@@ -19,3 +24,12 @@ def test_five_runs_change_exactly_one_orb_setting_from_lifecycle_reference():
             if BASE_OVERRIDES.get(key) != value
         }
         assert len(extra) == 1
+
+
+
+def test_quality_score_8_candidate_is_focused_and_preserves_canonical_five():
+    canonical_names = [row["name"] for row in candidates()]
+    assert "quality_score_8" not in canonical_names
+    row = quality_score_8_candidate()
+    assert row["overrides"]["ORB_QUALITY_MIN_SCORE_SHADOW"] == "8.0"
+    assert _selected_candidates(["quality_score_8"]) == [row]
