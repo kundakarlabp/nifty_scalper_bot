@@ -209,12 +209,11 @@ def test_compact_context_preserves_actual_orb_trades(monkeypatch, tmp_path):
         {field: trade[field] for field in economic_fields}
         for trade in baseline["trades"]
     ]
-    assert (
-        compact["trades"][0]["raw_setup_score"]
-        >= baseline["trades"][0]["raw_setup_score"]
-    )
-    assert "underlying_direction_alignment" in compact["trades"][0]["score_reasons"]
-    assert "futures_vwap_slope_alignment" in compact["trades"][0]["score_reasons"]
+    compact_reasons = set(compact["trades"][0]["setup_reasons"])
+    baseline_reasons = set(baseline["trades"][0]["setup_reasons"])
+    assert "underlying_direction_alignment" in compact_reasons
+    assert "futures_vwap_slope_alignment" in compact_reasons
+    assert baseline_reasons <= compact_reasons
 
     first = baseline["trades"][0]
     entry_time = datetime.fromisoformat(first["entry_time"])
