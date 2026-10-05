@@ -425,6 +425,7 @@ class OrderFlowStrategy(EliteStrategy):
                 "effective_context_conflict": effective_context_conflict,
                 "context_role": "confirmation",
                 "vote_timestamp": time.time(),
+                "vote_monotonic": time.monotonic(),
                 "trigger_conditions_met": False,
                 "trigger_block_reason": "context_only_role",
                 "can_trigger": False,
