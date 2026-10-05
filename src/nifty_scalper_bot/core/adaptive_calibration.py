@@ -383,21 +383,21 @@ class WalkForwardOptimizer:
                         continue
                     seen_candidates.add(key)
                     candidates.append(candidate)
-        current_score: float | None = None
-        best_score: float | None = None
+        current_objective: float | None = None
+        best_objective: float | None = None
         best: dict[str, float] | None = None
         for candidate in candidates:
-            score = float(candidate_evaluator(candidate))
-            if not isfinite(score):
+            objective = float(candidate_evaluator(candidate))
+            if not isfinite(objective):
                 return current
             if candidate == current_candidate:
-                current_score = score
-            if best_score is None or score > best_score:
-                best_score = score
+                current_objective = objective
+            if best_objective is None or objective > best_objective:
+                best_objective = objective
                 best = candidate
-        if best is None or best_score is None:
+        if best is None or best_objective is None:
             return current
-        if current_score is not None and best_score <= current_score:
+        if current_objective is not None and best_objective <= current_objective:
             return current
         if self.drawdown_threshold > 0 and stats.max_drawdown > self.drawdown_threshold:
             self.risk_scale = min(self.risk_scale, 0.5)
