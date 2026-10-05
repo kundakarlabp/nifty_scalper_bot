@@ -352,7 +352,6 @@ class VWAPProStrategy(EliteStrategy):
             strong_fresh_trend_context = bool(
                 preliminary_side in {"CE", "PE"}
                 and underlying_direction == preliminary_side
-                and underlying_direction_confidence >= self._early_trend_min_context_conf
                 and context_age_seconds <= self._early_trend_max_context_age
             )
             effective_quality_max_distance_atr = (
@@ -536,9 +535,6 @@ class VWAPProStrategy(EliteStrategy):
             context_fresh = context_age_seconds <= float(
                 os.getenv("VWAP_CONTEXT_MAX_AGE_SECONDS", "120") or "120"
             )
-            context_strong = underlying_direction_confidence >= float(
-                os.getenv("VWAP_CONTEXT_MIN_CONFIDENCE", "0.75") or "0.75"
-            )
             hard_conflict = bool(
                 (
                     (is_live and require_alignment_live)
@@ -546,7 +542,6 @@ class VWAPProStrategy(EliteStrategy):
                 )
                 and not trend_alignment
                 and context_fresh
-                and context_strong
             )
             if hard_conflict:
                 self._no_vote("underlying_direction_conflict")
