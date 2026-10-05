@@ -20946,6 +20946,9 @@ class StrategyRunner:
                         "strategy_profile_version", "unknown"
                     ),
                     "approval_path": metadata.get("approval_path"),
+                    "direction_contract": metadata.get("direction_contract"),
+                    "setup_contract": metadata.get("setup_contract"),
+                    "confirmation_contract": metadata.get("confirmation_contract"),
                     "confirming_trigger_strategies": list(
                         metadata.get("confirming_trigger_strategies") or []
                     ),
