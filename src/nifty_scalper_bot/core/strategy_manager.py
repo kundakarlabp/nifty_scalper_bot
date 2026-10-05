@@ -4720,13 +4720,10 @@ class StrategyManager(_BaseStrategyManager):
             metadata["strike_distance_from_atm"] = strike_distance_from_atm
             metadata["is_selected_option"] = selected_option
             metadata["selected_ok_reason"] = selected_ok_reason
-            # Numeric strategy scores are diagnostic. Structural/context
-            # validity, selected-contract eligibility and confidence own this gate.
-            threshold_passed = bool(
-                best_vote.confidence >= conf_min
-                and selected_ok
-                and not vetoed
-            )
+            # Legacy numeric score/confidence are attribution telemetry only.
+            # Admission here is structural: selected/near-ATM eligibility plus
+            # authoritative context safety. Execution/economics/risk gate later.
+            threshold_passed = bool(selected_ok and not vetoed)
             setup_min = _safe_float_value(metadata.get("setup_min"))
             requires_orderflow_confirmation = (
                 metadata.get("requires_orderflow_confirmation") is True
@@ -4738,7 +4735,6 @@ class StrategyManager(_BaseStrategyManager):
                 and requires_orderflow_confirmation
                 and metadata.get("requires_runner_final_score") is True
                 and setup_min is not None
-                and raw_trigger_score >= setup_min
             )
             # STRATEGY_ALLOW_SINGLE_VOTE_SCALP=false is the master default block
             # for an unconfirmed lone trigger. High-conviction/selected-option
@@ -4754,7 +4750,6 @@ class StrategyManager(_BaseStrategyManager):
             )
             high_conviction_allowed = bool(
                 not requires_orderflow_confirmation
-                and best_vote.confidence >= conf_min
                 and selected_ok
                 and not vetoed
                 and allow_high_conviction
@@ -4823,10 +4818,6 @@ class StrategyManager(_BaseStrategyManager):
                     context_vote.strategy.strip().lower()
                     in context_confirm_allowed_strategies
                     and self._context_vote_is_timestamped(context_vote)
-                    and self._extract_raw_score(context_vote)
-                    >= context_confirm_min_score
-                    and float(context_vote.confidence)
-                    >= context_confirm_min_confidence
                     and context_quote_ready
                     and context_quality_eligible
                 ):
@@ -4878,7 +4869,6 @@ class StrategyManager(_BaseStrategyManager):
             )
             context_confirmed_single_allowed = bool(
                 mode_profile.get("allow_single_vote", True)
-                and best_vote.confidence >= conf_min
                 and selected_option
                 and not vetoed
                 and qualifying_context_votes
@@ -4943,9 +4933,7 @@ class StrategyManager(_BaseStrategyManager):
             )
             blocked_reason = None
             if not final_allowed:
-                if not conf_ok:
-                    blocked_reason = "confidence_below_min"
-                elif not selected_ok:
+                if not selected_ok:
                     blocked_reason = "not_selected_or_near_atm"
                 elif vetoed:
                     blocked_reason = "hard_context_veto"
@@ -5085,7 +5073,6 @@ class StrategyManager(_BaseStrategyManager):
                     not requires_orderflow_confirmation
                     and allow_candidate_switch
                     and (strike_distance_from_atm is not None)
-                    and weighted_trigger_score >= switch_min_score
                     and quote_depth_valid
                     and switch_spread_pct <= resolve_entry_policy().execution_max_spread_pct
                     and strike_distance_from_atm <= max_candidate_switch_distance
@@ -5095,9 +5082,7 @@ class StrategyManager(_BaseStrategyManager):
                     metadata["candidate_switch_requested"] = True
                     metadata["candidate_switch_reason"] = "high_score_nearby_option_candidate"
                 else:
-                    if not conf_ok:
-                        blocked_reason = "confidence_below_min"
-                    elif not selected_ok:
+                    if not selected_ok:
                         blocked_reason = "not_selected_or_near_atm"
                     elif not bool(metadata.get("quote_depth_valid", True)):
                         blocked_reason = "quote_depth_invalid"
