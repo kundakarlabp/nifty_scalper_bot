@@ -911,7 +911,11 @@ class BollingerBandStrategy(Strategy):
                 self._structural_entry_metadata(
                     metadata,
                     setup_name="bollinger_upper_band_reversion",
-                    reasons=("upper_band_touch", "rsi_overbought", "risk_geometry_valid"),
+                    reasons=(
+                        "upper_band_touch",
+                        "rsi_overbought",
+                        "risk_geometry_valid",
+                    ),
                 ),
             )
 
