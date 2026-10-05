@@ -64,7 +64,7 @@ def test_data_quality_respects_effective_candidate_limits():
     selector = TradeCandidateSelector(max_tick_age_s=1.0, require_real_ticks_last_60s=3)
     quality = selector.evaluate_data_quality(base(tick_age_ms=900), max_age=1.0, min_ticks=3, max_spread=5.0)
     assert quality.allowed is True
-    assert quality.score == 10.0
+    assert quality.reasons == ["data_quality_ok"]
 
 
 def test_execution_premium_floor_cannot_be_bypassed_by_dynamic_filter(monkeypatch):
