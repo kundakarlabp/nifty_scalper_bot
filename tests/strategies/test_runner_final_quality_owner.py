@@ -55,7 +55,7 @@ def test_signal_quality_threshold_and_direction_are_diagnostic(monkeypatch) -> N
         rr_score=10.0,
         strategy_name="VWAPPro",
     )
-    assert low_direction.allowed is False
+    assert low_direction.allowed is True
     assert "direction_below_minimum" in low_direction.reasons
 
     context_only = score_signal_quality(
