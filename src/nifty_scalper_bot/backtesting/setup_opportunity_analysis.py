@@ -56,17 +56,6 @@ class ForwardPathLabel:
 
 
 @dataclass(frozen=True, slots=True)
-class PolicyCounterfactual:
-    """Descriptive threshold result; never a live parameter-selection verdict."""
-
-    policy: str
-    eligible: int
-    selected: int
-    mean_r: float | None
-    positive_fraction: float | None
-
-
-@dataclass(frozen=True, slots=True)
 class ExperimentRecord:
     """Immutable research provenance for one pre-declared comparison."""
 
@@ -292,45 +281,6 @@ def label_forward_option_buy_path(
     )
 
 
-def compare_score_policy(
-    samples: Sequence[Mapping[str, Any]],
-    *,
-    threshold: float,
-    use_regime_weight: bool,
-) -> PolicyCounterfactual:
-    """Describe score-threshold selection using already-labelled opportunity rows."""
-
-    cutoff = float(threshold)
-    if not math.isfinite(cutoff):
-        raise ValueError("threshold must be finite")
-    selected_r: list[float] = []
-    eligible = 0
-    for row in samples:
-        try:
-            raw = float(row["raw_setup_score"])
-            outcome_r = float(row["outcome_r"])
-            weight = float(row.get("regime_weight", 1.0))
-        except (KeyError, TypeError, ValueError):
-            continue
-        if not all(math.isfinite(value) for value in (raw, outcome_r, weight)):
-            continue
-        eligible += 1
-        score = raw * weight if use_regime_weight else raw
-        if score >= cutoff:
-            selected_r.append(outcome_r)
-    return PolicyCounterfactual(
-        policy="regime_weighted" if use_regime_weight else "neutral_weight",
-        eligible=eligible,
-        selected=len(selected_r),
-        mean_r=(round(sum(selected_r) / len(selected_r), 6) if selected_r else None),
-        positive_fraction=(
-            round(sum(value > 0 for value in selected_r) / len(selected_r), 6)
-            if selected_r
-            else None
-        ),
-    )
-
-
 def validate_experiment_record(
     record: ExperimentRecord,
     *,
@@ -363,9 +313,7 @@ __all__ = [
     "CanonicalSetupOpportunity",
     "ExperimentRecord",
     "ForwardPathLabel",
-    "PolicyCounterfactual",
     "canonicalize_setup_opportunities",
-    "compare_score_policy",
     "label_forward_option_buy_path",
     "validate_experiment_record",
 ]
