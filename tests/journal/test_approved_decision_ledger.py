@@ -16,7 +16,10 @@ def test_approved_decision_is_linked_and_keeps_decision_time() -> None:
         "signal_id": "executed-signal",
         "trace_id": "runner-trace",
         "symbol": "NFO:NIFTY26SEP23250CE",
-        "meta": {\n            "approval_path": "single_trigger_context_confirmed",\n            "setup_pass": True,\n        },
+        "meta": {
+            "approval_path": "single_trigger_context_confirmed",
+            "setup_pass": True,
+        },
     }
 
     row = _build_trade_row(event)
@@ -29,7 +32,9 @@ def test_approved_decision_is_linked_and_keeps_decision_time() -> None:
     assert _build_trade_row({**event, "trade_id": None}) is None
 
 
-def test_approved_decision_after_fill_preserves_structural_provenance(\n    tmp_path,\n) -> None:
+def test_approved_decision_after_fill_preserves_structural_provenance(
+    tmp_path,
+) -> None:
     journal = TradeJournal(str(tmp_path / "trades.db"))
     filled = journal._normalize_event(
         {
