@@ -15,6 +15,10 @@ from nifty_scalper_bot.core import app as core_app
 from nifty_scalper_bot.core.app import BotContext, initialize_components
 from nifty_scalper_bot.core.instrument_manager import InstrumentManager
 from nifty_scalper_bot.strategies.signal_generator import RSIMeanReversionStrategy
+from nifty_scalper_bot.strategies.elite_strategies.config_models import (
+    OrderFlowStrategyConfig,
+)
+from nifty_scalper_bot.strategies.elite_strategies.order_flow import OrderFlowStrategy
 from nifty_scalper_bot.utils.market_hours import MarketState
 from nifty_scalper_bot.data.data_hub import DataHub
 from nifty_scalper_bot.data.market_data_manager import MarketDataManager
@@ -356,7 +360,11 @@ def _patch_no_network_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
             oversold_threshold=95, overbought_threshold=99, default_quantity=1
         )
         strategy.get_required_indicators = lambda: ["rsi", "atr"]  # type: ignore[method-assign]
-        return [strategy]
+        order_flow = OrderFlowStrategy(
+            OrderFlowStrategyConfig(enabled=True, quantity=1),
+            indicator_engine=indicator_engine,
+        )
+        return [strategy, order_flow]
 
     monkeypatch.setattr(core_app, "build_elite_strategies", _build_test_strategies)
 
@@ -392,6 +400,9 @@ def _publish_tick(
     price: float,
     *,
     timestamp: pd.Timestamp,
+    buy_qty: int = 1000,
+    sell_qty: int = 1000,
+    tick_direction: str | None = None,
 ) -> None:
     tick = {
         "instrument_token": int(token),
@@ -401,9 +412,10 @@ def _publish_tick(
         "bid": float(price) - 0.05,
         "ask": float(price) + 0.05,
         "depth": {
-            "buy": [{"price": float(price) - 0.05, "quantity": 1000}],
-            "sell": [{"price": float(price) + 0.05, "quantity": 1000}],
+            "buy": [{"price": float(price) - 0.05, "quantity": int(buy_qty)}],
+            "sell": [{"price": float(price) + 0.05, "quantity": int(sell_qty)}],
         },
+        "tick_direction": tick_direction,
         "volume": 10000,
         "timestamp": timestamp.to_pydatetime(),
         "exchange_timestamp": timestamp.to_pydatetime(),
@@ -772,6 +784,9 @@ def test_live_runtime_bullish_spot_future_selects_ce_and_exits_target(
             basket.selected_ce_token,
             116.0,
             timestamp=base_tick_time + pd.Timedelta(seconds=15),
+            buy_qty=1800,
+            sell_qty=500,
+            tick_direction="UP",
         )
         _wait_until(
             loop,
