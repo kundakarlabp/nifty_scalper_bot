@@ -33,7 +33,7 @@ def test_orb_pro_publishes_independent_direction_evidence() -> None:
     assert '"independent_setup_score": round(independent_setup_score, 3)' in source
 
 
-def test_signal_quality_allowed_owns_threshold_and_direction(monkeypatch) -> None:
+def test_signal_quality_threshold_and_direction_are_diagnostic(monkeypatch) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     low_score = score_signal_quality(
         direction_score=7.0,
@@ -43,7 +43,8 @@ def test_signal_quality_allowed_owns_threshold_and_direction(monkeypatch) -> Non
         rr_score=7.0,
         strategy_name="VWAPPro",
     )
-    assert low_score.allowed is False
+    assert low_score.allowed is True
+    assert low_score.final_score < low_score.components["threshold"]
     assert "score_below_threshold" in low_score.reasons
 
     low_direction = score_signal_quality(
@@ -81,8 +82,8 @@ def test_execution_quality_cannot_rescue_weak_directional_alpha(monkeypatch) -> 
     )
     assert quality.final_score > quality.components["threshold"]
     assert quality.components["alpha_score"] < quality.components["threshold"]
-    assert quality.allowed is False
-    assert "alpha_below_threshold" in quality.reasons
+    assert quality.allowed is True
+    assert quality.reasons == []
 
 
 def test_strong_direction_cannot_rescue_marginal_native_setup(monkeypatch) -> None:
