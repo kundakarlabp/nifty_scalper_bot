@@ -1,8 +1,8 @@
 """Canonical strategy-evidence policy used by StrategyManager.
 
 There is deliberately no synthetic numeric admission model here. Strategies
-either prove their structural setup or produce no trigger. Context strategies can corroborate a valid trigger but can
-never manufacture one.
+either prove their structural setup or produce no trigger. Context strategies can
+corroborate a valid trigger but can never manufacture one.
 """
 
 from __future__ import annotations
