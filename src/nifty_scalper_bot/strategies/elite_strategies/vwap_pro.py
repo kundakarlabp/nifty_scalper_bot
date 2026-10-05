@@ -75,7 +75,7 @@ def _resolve_session_token(indicators: dict[str, Any], bar_anchor: Any) -> str:
 
 
 class VWAPProStrategy(EliteStrategy):
-    """VWAP continuation/pullback strategy emitting scored strategy votes."""
+    """VWAP continuation/pullback strategy emitting structural entry evidence."""
 
     MIN_BARS_REQUIRED = 10
     ROLE = "trigger"
