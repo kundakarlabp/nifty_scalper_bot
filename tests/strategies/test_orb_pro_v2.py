@@ -112,6 +112,7 @@ def test_orb_uses_configured_futures_opening_range_not_option_premium(
     monkeypatch,
 ) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    monkeypatch.setenv("ORB_BALANCED_RANGE_MAX_ATR", "2.0")
     rows = _opening_rows()
     rows.append(
         _bar(
