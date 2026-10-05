@@ -1542,7 +1542,8 @@ class StrategyManager:
 
             if buy_signals and sell_signals:
                 self._logger.info(
-                    "STRATEGY_CONSENSUS side=NO_TRADE votes=%s reason=buy_sell_conflict",
+                    "STRATEGY_CONSENSUS side=NO_TRADE votes=%s "
+                    "reason=buy_sell_conflict",
                     len(signals),
                     extra={
                         "event": "STRATEGY_CONSENSUS",
