@@ -26,9 +26,6 @@ from nifty_scalper_bot.utils.smart_symbol import (
 
 LOGGER = get_logger(__name__)
 
-BaseEliteStrategy = EliteStrategy
-
-
 def _positive_float(value: Any) -> float | None:
     try:
         parsed = float(value)
@@ -47,7 +44,7 @@ def _aligned(side: str, bullish: bool) -> bool:
     return bullish if side == "CE" else not bullish
 
 
-class EliteTuesdayGammaBuyer(BaseEliteStrategy):
+class EliteTuesdayGammaBuyer(EliteStrategy):
     """Expiry-day long-premium trigger using canonical underlying context."""
 
     def __init__(
