@@ -229,9 +229,6 @@ class OrderFlowStrategy(EliteStrategy):
             # Setup families own entries; OrderFlow supplies measured confirmation.
             # This permission must not be restored through an environment flag.
             allow_orderflow_trigger = False
-            allow_ltp_trigger = str(
-                os.getenv("ORDERFLOW_ALLOW_LTP_FALLBACK_TRIGGER", "false")
-            ).strip().lower() in {"1", "true", "yes", "on"}
             trigger_min_score = (
                 safe_float_env("ORDERFLOW_MIN_SCORE_LIVE", 8.0)
                 if is_live_mode
