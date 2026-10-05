@@ -493,7 +493,7 @@ def _has_attribution_provenance(outcome: Mapping[str, Any]) -> bool:
         "manager_reference_score",
         "manager_reference_threshold",
         "manager_reference_pass",
-        "final_numeric_gate_owner",
+        "score_admission_role",
     }
     if not required_lineage.issubset(lineage):
         return False
