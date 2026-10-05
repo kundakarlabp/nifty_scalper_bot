@@ -605,14 +605,13 @@ def _scenario(
                 if compact_orb_context
                 else dict(engine.get_indicators(symbol))
             )
+            orb_context = _research_orb_quality_context(
+                engine,
+                spot_symbol="NSE:NIFTY 50",
+                futures_symbol=future,
+            )
             if compact_orb_context:
-                indicators.update(
-                    _research_orb_quality_context(
-                        engine,
-                        spot_symbol="NSE:NIFTY 50",
-                        futures_symbol=future,
-                    )
-                )
+                indicators.update(orb_context)
             indicators.update(
                 history_count=engine.history_count(symbol),
                 bar_timestamp=timestamp,
@@ -627,7 +626,14 @@ def _scenario(
                 if key in positions:
                     continue
                 evaluated[strategy.name] += 1
-                signal = strategy.generate_signal(symbol, indicators, bar["close"])
+                strategy_indicators = dict(indicators)
+                if strategy.name == "ORBPro":
+                    strategy_indicators.update(orb_context)
+                signal = strategy.generate_signal(
+                    symbol,
+                    strategy_indicators,
+                    bar["close"],
+                )
                 if not strategy.evaluation_health["healthy"]:
                     raise ValueError("research_strategy_evaluation_failed")
                 if signal is None:
