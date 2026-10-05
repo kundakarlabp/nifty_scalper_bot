@@ -17,7 +17,7 @@ from .test_orb_pro_v2 import (
 
 def _new_strategy(rows):
     return ORBProStrategy(
-        ORBProStrategyConfig(min_confidence=0.0, orb_minutes=15),
+        ORBProStrategyConfig(orb_minutes=15),
         _IndicatorEngine({FUTURE: rows}),
     )
 
