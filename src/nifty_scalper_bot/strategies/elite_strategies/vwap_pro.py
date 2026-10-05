@@ -707,7 +707,7 @@ class VWAPProStrategy(EliteStrategy):
                 "context_fresh": context_fresh,
                 "context_direction_used": bias if bias in {"CE", "PE"} else None,
                 "preliminary_only": True,
-                "requires_runner_final_score": True,
+                "requires_runner_execution_validation": True,
                 "raw_setup_score": strategy_score,
                 "setup_score": strategy_score,
                 "setup_min": min_score,
