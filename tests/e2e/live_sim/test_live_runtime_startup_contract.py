@@ -338,9 +338,6 @@ def _runtime_env(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     monkeypatch.setenv("REGIME_GATE_ENABLED", "false")
     monkeypatch.setenv("ALLOW_MARKET_ENTRY", "false")
     monkeypatch.setenv("MAX_ACTIVE_OPTION_SYMBOLS", "2")
-    monkeypatch.setenv("STRATEGY_ALLOW_SINGLE_VOTE_SCALP", "true")
-    monkeypatch.setenv("STRATEGY_SINGLE_VOTE_SCALP_MIN", "0")
-    monkeypatch.setenv("STRATEGY_ALLOW_SELECTED_OPTION_SINGLE_VOTE", "true")
     get_settings.cache_clear()
 
 
