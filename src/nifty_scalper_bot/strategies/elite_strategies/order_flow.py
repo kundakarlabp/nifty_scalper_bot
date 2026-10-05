@@ -210,10 +210,10 @@ class OrderFlowStrategy(EliteStrategy):
                 max_spread_pct=max_spread_pct,
                 require_depth=True,
             )
-            if not quote_readiness.allowed:
-                self._no_vote(str(quote_readiness.reason or "quote_not_ready"))
-                return None
-
+            # OrderFlow is context-only. Preserve observable evidence even when
+            # execution quote readiness fails; the producer-owned
+            # context_quality_eligible flag below prevents unusable context from
+            # confirming an entry.
             contract_side, option_premium_domain, _ = resolve_signal_domain(
                 symbol, indicators
             )
