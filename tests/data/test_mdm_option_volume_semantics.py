@@ -163,6 +163,11 @@ def test_normalize_tick_preserves_explicit_live_tick_direction() -> None:
     assert out["tick_direction"] == "UP"
     assert out["tick_direction_source"] == "market_tick"
 
+    live = mdm.normalize_live_tick(out, source="ws")
+    assert live is not None
+    assert live["tick_direction"] == "UP"
+    assert live["tick_direction_source"] == "market_tick"
+
 
 def test_rest_cumulative_volume_is_not_published_as_interval_volume() -> None:
     """A REST quote must be labelled cumulative, never interval."""
