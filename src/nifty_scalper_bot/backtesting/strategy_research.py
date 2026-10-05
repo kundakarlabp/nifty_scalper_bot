@@ -231,7 +231,7 @@ def _research_direction_payload(
     )
 
 
-def _research_orb_quality_context(
+def _research_orb_structural_context(
     engine: IndicatorEngine,
     *,
     spot_symbol: str,
@@ -605,7 +605,7 @@ def _scenario(
                 if compact_orb_context
                 else dict(engine.get_indicators(symbol))
             )
-            orb_context = _research_orb_quality_context(
+            orb_context = _research_orb_structural_context(
                 engine,
                 spot_symbol="NSE:NIFTY 50",
                 futures_symbol=future,
