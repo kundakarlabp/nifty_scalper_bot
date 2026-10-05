@@ -451,11 +451,12 @@ Each strategy has these overridable parameters (replace `{NAME}` with strategy n
 | Env Variable | Type | Default | Description |
 |---|---|---|---|
 | `{NAME}__ENABLED` | bool | `true` | Enable/disable strategy |
-| `{NAME}__MIN_CONFIDENCE` | float | `0.6` | Minimum signal confidence (0–1) |
 | `{NAME}__COOLDOWN_SEC` | int | `300` | Seconds between signals from this strategy |
 | `{NAME}__MAX_DAILY_SIGNALS` | int | `5` | Max signals per day from this strategy |
 
 Strategy name keys: `SMC_LIQUIDITY`, `VWAP_PRO`, `RSI_DIVERGENCE`, `GAMMA_SCALPING`, `OI_MAX_PAIN`, `ORB_PRO`, `BB_SQUEEZE`, `CPR_BREAKOUT`, `ORDER_FLOW`, `STRADDLE_THETA`, `TREND_MOMENTUM`, `TUESDAY_GAMMA`
+
+Entry admission does **not** use a per-strategy numeric score or confidence threshold. A trigger strategy must satisfy its explicit structural setup contract; the manager then requires canonical direction, independent confirmation where applicable, executable quote/economics, and risk checks.
 
 #### 4.3.8 Telegram Settings (`TELEGRAM__*`)
 
