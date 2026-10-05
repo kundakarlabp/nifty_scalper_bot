@@ -231,7 +231,6 @@ class EliteTuesdayGammaBuyer(EliteStrategy):
                 "underlying_reference_symbol": context.get("symbol"),
                 "underlying_reference_price": underlying_price,
                 "setup_pass": True,
-                "setup_pass": True,
                 "setup_type": "expiry_gamma",
                 "requires_runner_execution_validation": True,
                 "required_data_present": True,
