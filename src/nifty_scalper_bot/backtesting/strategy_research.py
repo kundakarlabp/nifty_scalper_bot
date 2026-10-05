@@ -279,9 +279,7 @@ def _orb_research_score_v2(metadata: dict[str, Any]) -> tuple[float, bool]:
     requires all three positive features with no volume penalty.
     """
     reasons = {
-        str(reason)
-        for reason in (metadata.get("score_reasons") or [])
-        if reason
+        str(reason) for reason in (metadata.get("score_reasons") or []) if reason
     }
     score = 5.0
     if "retest_hold" in reasons:
