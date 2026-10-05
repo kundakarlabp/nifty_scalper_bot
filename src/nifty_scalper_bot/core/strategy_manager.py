@@ -3784,18 +3784,22 @@ class StrategyManager(_BaseStrategyManager):
             vote = self._apply_regime_vote_weight(vote=vote, regime_name=regime_name)
             signal_votes.append((adjusted, vote))
 
-        # Rank after evaluating every eligible strategy. Capping inside the loop
-        # made the outcome depend on registration order rather than on the market.
+        # Preserve every structurally valid vote. MAX_STRATEGY_VOTES is kept
+        # as observability only: score/confidence must not decide which strategy
+        # evidence is discarded before consensus.
         if len(signal_votes) > max_votes:
-            signal_votes.sort(
-                key=lambda pair: (
-                    -float(pair[1].score or 0.0),
-                    -float(pair[1].confidence or 0.0),
-                    str(pair[1].strategy),
-                )
+            log.info(
+                "STRATEGY_VOTE_COUNT_ABOVE_REFERENCE symbol=%s votes=%s reference_max=%s",
+                symbol,
+                len(signal_votes),
+                max_votes,
+                extra={
+                    "event": "STRATEGY_VOTE_COUNT_ABOVE_REFERENCE",
+                    "symbol": symbol,
+                    "votes": len(signal_votes),
+                    "reference_max": max_votes,
+                },
             )
-            del signal_votes[max_votes:]
-            signals = [item for item, _vote in signal_votes]
 
         elapsed = time.monotonic() - evaluation_start
         if elapsed > 3.0:
