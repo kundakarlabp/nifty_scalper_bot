@@ -4746,9 +4746,8 @@ class StrategyManager(_BaseStrategyManager):
                 and selected_option
                 and allow_selected_option
             )
-            # Single-vote (no consensus) is riskier, so a lone selected-option scalp
-            # must clear a high score floor (default 9.0) on top of the normal gates.
-            # This keeps unconfirmed single-vote trades to only the strongest signals.
+            # Retain the former single-vote floor only as telemetry so historical
+            # reports/configuration remain comparable during the migration.
             selected_single_min = self._env_float(
                 "STRATEGY_SELECTED_OPTION_SINGLE_VOTE_MIN_SCORE", 9.0
             )  # diagnostic only
@@ -4774,9 +4773,7 @@ class StrategyManager(_BaseStrategyManager):
             )
             blocked_reason = None
             if not final_allowed:
-                if not score_ok and not canonical_smc_setup_pass:
-                    blocked_reason = "regime_weighted_score_below_min"
-                elif not conf_ok:
+                if not conf_ok:
                     blocked_reason = "confidence_below_min"
                 elif not selected_ok:
                     blocked_reason = "not_selected_or_near_atm"
