@@ -16123,7 +16123,9 @@ async def _reconcile_state(ctx: BotContext, *, source: str = "unknown") -> None:
             ).total_seconds() * 1000.0
             run_record.update(
                 {
-                    "completed_at": ctx.position_reconciliation_completed_at.isoformat(),
+                    "completed_at": (
+                        ctx.position_reconciliation_completed_at.isoformat()
+                    ),
                     "duration_ms": duration_ms,
                     "active_run_count": len(active_run_ids),
                 }
