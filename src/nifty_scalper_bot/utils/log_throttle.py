@@ -75,22 +75,6 @@ class StrategyRejectionStats:
     by_reason: Counter[str] = field(default_factory=Counter)
     by_strategy: Counter[str] = field(default_factory=Counter)
     by_symbol: Counter[str] = field(default_factory=Counter)
-    first_score: float | None = None
-    latest_score: float | None = None
-    min_score: float | None = None
-    max_score: float | None = None
-
-    def record_score(self, score: Any) -> None:
-        try:
-            value = float(score)
-        except (TypeError, ValueError):
-            return
-        if self.first_score is None:
-            self.first_score = value
-        self.latest_score = value
-        self.min_score = value if self.min_score is None else min(self.min_score, value)
-        self.max_score = value if self.max_score is None else max(self.max_score, value)
-
 
 class LogThrottle:
     """Thread-safe per-key log throttle with monotonic timing and summaries."""
@@ -206,7 +190,7 @@ class LogThrottle:
         logger.log(level, message, extra=payload)
         return True
 
-    def record_strategy_evaluation(self, *, strategy: str, symbol: str, accepted: bool, reason: str | None = None, score: Any = None) -> None:
+    def record_strategy_evaluation(self, *, strategy: str, symbol: str, accepted: bool, reason: str | None = None) -> None:
         with self._lock:
             self._strategy_stats.evaluation_count += 1
             if accepted:
@@ -216,7 +200,6 @@ class LogThrottle:
                 self._strategy_stats.by_reason[str(reason or "unknown")] += 1
                 self._strategy_stats.by_strategy[str(strategy or "unknown")] += 1
                 self._strategy_stats.by_symbol[str(symbol or "unknown")] += 1
-                self._strategy_stats.record_score(score)
 
     def maybe_emit_strategy_rejection_summary(self, logger: logging.Logger, *, interval_seconds: float = 300.0, top_n: int = 5) -> bool:
         now = time.monotonic()
@@ -235,10 +218,6 @@ class LogThrottle:
                 "top_reasons": dict(stats.by_reason.most_common(top_n)),
                 "top_strategies": dict(stats.by_strategy.most_common(top_n)),
                 "top_symbols": dict(stats.by_symbol.most_common(top_n)),
-                "first_score": stats.first_score,
-                "latest_score": stats.latest_score,
-                "min_score": stats.min_score,
-                "max_score": stats.max_score,
             }
             self._strategy_stats = StrategyRejectionStats()
         logger.info(
@@ -295,9 +274,9 @@ def log_on_change(logger: logging.Logger, *, key: str, state: Any, message: str,
         return False
 
 
-def record_strategy_evaluation(*, strategy: str, symbol: str, accepted: bool, reason: str | None = None, score: Any = None, throttle: LogThrottle = DEFAULT_LOG_THROTTLE) -> None:
+def record_strategy_evaluation(*, strategy: str, symbol: str, accepted: bool, reason: str | None = None, throttle: LogThrottle = DEFAULT_LOG_THROTTLE) -> None:
     try:
-        throttle.record_strategy_evaluation(strategy=strategy, symbol=symbol, accepted=accepted, reason=reason, score=score)
+        throttle.record_strategy_evaluation(strategy=strategy, symbol=symbol, accepted=accepted, reason=reason)
     except Exception:
         return
 
