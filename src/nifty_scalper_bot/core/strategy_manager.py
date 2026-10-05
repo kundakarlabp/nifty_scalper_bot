@@ -4391,7 +4391,10 @@ class StrategyManager(_BaseStrategyManager):
             entry_signals.append((signal, vote))
 
         trigger_votes, context_votes, rejected_setups = partition_votes(entry_signals)
-        if self._is_live_mode():
+        execution_mode = str(
+            os.getenv("EXECUTION_MODE", "SHADOW") or "SHADOW"
+        ).strip().upper()
+        if execution_mode == "LIVE":
             live_orb = [
                 (signal, vote)
                 for signal, vote in trigger_votes
