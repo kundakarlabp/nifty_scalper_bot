@@ -1,9 +1,6 @@
 import inspect
 
-from nifty_scalper_bot.core.strategy_manager import (
-    StrategyManager,
-    signal_to_vote,
-)
+from nifty_scalper_bot.core.strategy_manager import signal_to_evidence
 from nifty_scalper_bot.strategies.elite_strategies.config_models import (
     VWAPProStrategyConfig,
 )
@@ -39,25 +36,26 @@ def _indicators(**updates):
         'context_fresh': True,
         'regime': 'TREND_UP',
         'stale_data_used': False,
+        'futures_vwap_slope': 1.0,
         'latest_bar_ts': BAR_TS,
     }
     payload.update(updates)
     return payload
 
 
-def test_vwap_metadata_contract_side_and_setup_scores_present():
+def test_vwap_metadata_contract_side_and_structural_setup_present():
     strategy = VWAPProStrategy(VWAPProStrategyConfig(), _DummyEngine())
     signal = strategy._evaluate_signal(
         'NFO:NIFTY26FEB22500CE',
-        _indicators(direction_bias='UNKNOWN', underlying_direction_bias='UNKNOWN'),
+        _indicators(),
         101.0,
     )
     assert signal is not None
     metadata = signal.metadata
     assert metadata['contract_side'] == 'CE'
-    assert metadata['direction_bias'] is None
-    assert metadata['raw_setup_score'] is not None
-    assert metadata['setup_score'] is not None
+    assert metadata['direction_bias'] == 'CE'
+    assert metadata['setup_pass'] is True
+    assert 'underlying_direction_alignment' in metadata['setup_reasons']
     assert metadata['setup_id'].startswith('vwap:CE:')
 
 
@@ -74,6 +72,7 @@ def test_live_vwap_rejects_threshold_pass_from_small_noise(monkeypatch):
             low=99.90,
             volume=0.0,
             avg_volume=0.0,
+            futures_volume_ratio=1.2,
         ),
         100.05,
     )
@@ -223,14 +222,10 @@ def test_vwap_thesis_does_not_leak_across_sessions(monkeypatch):
     assert strategy.last_no_vote_reason == 'vwap_thesis_not_armed'
 
 
-def test_real_vwap_vote_clears_default_live_quality_gate(monkeypatch):
+def test_real_vwap_emits_score_free_structural_evidence(monkeypatch):
     monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
     monkeypatch.setenv('ENABLE_LIVE', 'true')
-    monkeypatch.setenv('ORDER_MAX_SPREAD_PCT', '1.0')
-    strategy = VWAPProStrategy(
-        VWAPProStrategyConfig(),
-        _DummyEngine(),
-    )
+    strategy = VWAPProStrategy(VWAPProStrategyConfig(), _DummyEngine())
     indicators = _indicators()
 
     signal = strategy.generate_signal(
@@ -240,22 +235,21 @@ def test_real_vwap_vote_clears_default_live_quality_gate(monkeypatch):
     )
 
     assert signal is not None
-    vote = signal_to_vote(signal, 'VWAPPro')
-    manager = object.__new__(StrategyManager)
-    quality_score, quality_meta = manager._compute_trade_quality_score(
-        vote,
-        indicators,
-        symbol=signal.symbol,
-        selected_ok=True,
-        near_atm_ok=True,
-        context_votes=[],
-    )
-
-    assert quality_score >= 7.0
-    assert quality_meta['quality_evidence_complete'] is True
-    assert signal.metadata['direction_alignment_score'] == 2.0
-    assert signal.metadata['liquidity_score'] == 2.0
-    assert signal.metadata['regime_time_suitability_score'] == 1.0
+    evidence = signal_to_evidence(signal, 'VWAPPro')
+    assert evidence.side == 'CE'
+    assert evidence.metadata['setup_pass'] is True
+    assert evidence.metadata['requires_runner_execution_validation'] is True
+    forbidden = {
+        'raw_setup_score',
+        'setup_score',
+        'strategy_score',
+        'direction_score',
+        'final_score',
+        'alpha_score',
+        'score_lineage',
+        'signal_quality',
+    }
+    assert forbidden.isdisjoint(evidence.metadata)
 
 
 def test_vwap_has_no_unreachable_early_trend_pullback_branch():
