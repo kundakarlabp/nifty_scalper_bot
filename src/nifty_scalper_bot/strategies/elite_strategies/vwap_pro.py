@@ -644,6 +644,8 @@ class VWAPProStrategy(EliteStrategy):
                 "underlying_direction_confidence": underlying_direction_confidence,
                 "context_age_seconds": context_age_seconds,
                 "context_fresh": context_fresh,
+                "futures_slope_alignment": slope_support,
+                "volume_confirmation": bool(vol_support or fut_vol_support),
                 "context_direction_used": bias if bias in {"CE", "PE"} else None,
                 "requires_runner_execution_validation": True,
                 "setup_pass": True,
