@@ -49,7 +49,7 @@ def test_build_analysis_emits_post_cost_attribution_groups() -> None:
             "manager_reference_score": 7.5,
             "manager_reference_threshold": 7.0,
             "manager_reference_pass": True,
-            "final_numeric_gate_owner": "runner_final_execution_score",
+            "score_admission_role": "diagnostic_only",
         },
         "confirming_trigger_strategies": ["VWAPPro"],
         "context_confirmation_strategies": ["OrderFlow"],
