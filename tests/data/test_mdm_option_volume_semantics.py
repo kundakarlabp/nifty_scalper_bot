@@ -141,6 +141,29 @@ def test_counter_reset_requires_explicit_or_session_evidence() -> None:
 _SYM = "NFO:NIFTY26JUN24000CE"
 
 
+def test_normalize_tick_preserves_explicit_live_tick_direction() -> None:
+    mdm = _mdm()
+    out = mdm._normalize_tick(
+        _SYM,
+        {
+            "last_price": 116.0,
+            "bid": 115.95,
+            "ask": 116.05,
+            "depth": {
+                "buy": [{"price": 115.95, "quantity": 1800}],
+                "sell": [{"price": 116.05, "quantity": 500}],
+            },
+            "tick_direction": "up",
+            "instrument_token": 1,
+            "source": "websocket",
+        },
+    )
+
+    assert out is not None
+    assert out["tick_direction"] == "UP"
+    assert out["tick_direction_source"] == "market_tick"
+
+
 def test_rest_cumulative_volume_is_not_published_as_interval_volume() -> None:
     """A REST quote must be labelled cumulative, never interval."""
     mdm = _mdm()
