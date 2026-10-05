@@ -88,7 +88,7 @@ def _gate_probe(symbol: str, indicators: dict):
         strategy="VWAPPro",
         side="CE",
         score=9.9,
-        confidence=confidence,
+        confidence=0.9,
         reasons=[],
         metadata={"role": "trigger"},
     )
@@ -137,7 +137,7 @@ def _signal_vote(
         strategy=strategy,
         side="CE",
         score=weighted_score,
-        confidence=0.9,
+        confidence=confidence,
         reasons=[],
         metadata={
             "role": "trigger",
