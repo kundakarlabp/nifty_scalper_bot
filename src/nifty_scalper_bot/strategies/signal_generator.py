@@ -12,7 +12,7 @@ import datetime as dt
 import math
 import os
 from abc import ABC, abstractmethod
-from collections import defaultdict, deque
+from collections import deque
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime, time
