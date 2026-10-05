@@ -249,7 +249,7 @@ class EliteTuesdayGammaBuyer(BaseEliteStrategy):
                 "setup_quality": strategy_score,
                 "setup_type": "expiry_gamma",
                 "preliminary_only": True,
-                "requires_runner_final_score": True,
+                "requires_runner_execution_validation": True,
                 "required_data_present": True,
                 "stale_data_used": bool(indicators.get("stale_data_used")),
                 "candidate_symbol": symbol,
