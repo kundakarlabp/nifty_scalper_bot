@@ -54,7 +54,7 @@ def _trade(
                     "context_veto_penalty": 0.0,
                     "manager_reference_score": 7.5,
                     "manager_reference_threshold": 7.0,
-                    "manager_reference_pass": True,
+                    "manager_reference_above_min": True,
                     "score_admission_role": "diagnostic_only",
                 },
                 "confirming_trigger_strategies": [strategy],
