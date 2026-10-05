@@ -206,7 +206,7 @@ def _format_chain_summary(
         liquid_strikes = sorted(liquidity.items(), key=lambda item: item[1], reverse=True)[:3]
         hot_text = ', '.join(f'{int(strike)}:{int(volume)}' for strike, volume in hot_strikes) or 'n/a'
         liquid_text = ', '.join(
-            f'{int(strike)}:{score:.1f}' for strike, score in liquid_strikes
+            f'{int(strike)}:{liquidity:.1f}' for strike, liquidity in liquid_strikes
         ) or 'n/a'
 
         ce_iv = (sum(ce_ivs) / len(ce_ivs)) if ce_ivs else 0.0
@@ -508,13 +508,6 @@ def cmd_state(_u: TelegramUpdate, _c: TelegramContextTypes.DEFAULT_TYPE, service
     if services.strategy_runner and hasattr(services.strategy_runner, "state_snapshot"):
         return str(services.strategy_runner.state_snapshot())
     return "State unavailable"
-
-
-def cmd_score(_u: TelegramUpdate, _c: TelegramContextTypes.DEFAULT_TYPE, services: Services) -> str:
-    if services.strategy_runner and hasattr(services.strategy_runner, "composite_score"):
-        val = services.strategy_runner.composite_score()
-        return f"score={val}" if val is not None else "score: n/a"
-    return "Score unavailable"
 
 
 def cmd_regime(_u: TelegramUpdate, _c: TelegramContextTypes.DEFAULT_TYPE, services: Services) -> str:
