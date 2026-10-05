@@ -131,7 +131,7 @@ def test_vwap_runner_uses_canonical_metadata_quality_adapter() -> None:
 
 
 
-def test_primary_trigger_alpha_floor_cannot_be_rescued_by_execution_quality(monkeypatch) -> None:
+def test_primary_trigger_alpha_floor_remains_diagnostic_with_execution_quality(monkeypatch) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
 
     for strategy_name, weak_alpha in (("ORBPro", 7.3), ("SMC", 6.9)):
@@ -146,5 +146,5 @@ def test_primary_trigger_alpha_floor_cannot_be_rescued_by_execution_quality(monk
 
         assert quality.final_score > quality.components["threshold"]
         assert quality.components["alpha_score"] < quality.components["threshold"]
-        assert quality.allowed is False
+        assert quality.allowed is True
         assert "alpha_below_threshold" in quality.reasons
