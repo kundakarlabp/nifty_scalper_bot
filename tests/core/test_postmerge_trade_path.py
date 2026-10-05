@@ -68,7 +68,9 @@ def _signal_evidence(
     return signal, evidence
 
 
-def _live_indicators(direction: str = "CE", *, transition: bool = False) -> dict[str, object]:
+def _live_indicators(
+    direction: str = "CE", *, transition: bool = False
+) -> dict[str, object]:
     return {
         "direction_bias": direction,
         "underlying_direction_bias": direction,
