@@ -1,7 +1,7 @@
 """Rate controls for unchanged boot and live-readiness diagnostics.
 
 This module is observational only. It does not alter contracts, orders,
-strategy scores, or readiness decisions.
+strategy admission, or readiness decisions.
 """
 
 from __future__ import annotations
@@ -48,7 +48,6 @@ ROUTINE_DEBUG_EVENTS = {
     "POSITION_RECONCILE_COALESCED",
     "strategy_manager_no_combined_signal",
     "PERMANENT_CONTEXT_ONLY_PROMOTION_BLOCKED",
-    "ORDERFLOW_TRIGGER_SCORE",
 }
 
 
