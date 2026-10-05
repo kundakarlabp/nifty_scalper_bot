@@ -863,10 +863,8 @@ def test_entry_plan_preserves_context_confirmation_provenance(monkeypatch) -> No
     assert provenance["setup_name"] == "continuation_pullback"
     assert provenance["score_contract_version"] == 1
     assert provenance["score_lineage"]["raw_setup_score"] == 7.8
-    assert (
-        provenance["score_lineage"]["final_numeric_gate_owner"]
-        == "runner_final_execution_score"
-    )
+    assert provenance["score_lineage"]["score_admission_role"] == "diagnostic_only"
+    assert provenance["score_lineage"]["manager_reference_above_min"] is True
     assert provenance["confirming_trigger_strategies"] == ["VWAPPro"]
     assert provenance["context_confirmation_strategies"] == ["OrderFlow"]
     assert provenance["context_confirmation_evidence"] == [
