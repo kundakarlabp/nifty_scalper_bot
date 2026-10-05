@@ -4748,8 +4748,6 @@ class StrategyManager(_BaseStrategyManager):
                 near_atm = strike_distance_from_atm <= near_atm_threshold
             score_min, conf_min = self._single_vote_thresholds(best_vote.strategy)
             regime_weight = _regime_weight(best_vote)
-            score_ok = weighted_trigger_score >= score_min
-            conf_ok = best_vote.confidence >= conf_min
             selected_ok = selected_option or near_atm
             selected_ok_reason = "selected_option" if selected_option else "near_atm" if near_atm else "not_selected_or_near_atm"
             metadata["selected_ce"] = selected_ce
@@ -5090,7 +5088,12 @@ class StrategyManager(_BaseStrategyManager):
                 metadata_stage = "single_vote_scalp_controlled"
                 approval_path = approval_path_single or "single_vote_fallback"
             else:
-                allow_candidate_switch = str(os.getenv("STRATEGY_ALLOW_CANDIDATE_SWITCH_ON_HIGH_SCORE", "false")).lower() in {"1", "true", "yes", "on"}
+                allow_candidate_switch = str(
+                    os.getenv(
+                        "STRATEGY_ALLOW_CANDIDATE_SWITCH",
+                        os.getenv("STRATEGY_ALLOW_CANDIDATE_SWITCH_ON_HIGH_SCORE", "false"),
+                    )
+                ).lower() in {"1", "true", "yes", "on"}
                 max_candidate_switch_distance = float(os.getenv("CANDIDATE_SWITCH_MAX_DISTANCE_POINTS", "100") or "100")
                 raw_qdv = metadata.get("quote_depth_valid")
                 if raw_qdv is None:
@@ -5103,7 +5106,6 @@ class StrategyManager(_BaseStrategyManager):
                     switch_spread_pct = float(raw_spread) if raw_spread is not None else 999.0
                 except (TypeError, ValueError):
                     switch_spread_pct = 999.0
-                switch_min_score = 8.0 if best_vote.strategy == "OrderFlow" else 8.5
                 switch_allowed = (
                     not requires_orderflow_confirmation
                     and allow_candidate_switch
@@ -5115,7 +5117,7 @@ class StrategyManager(_BaseStrategyManager):
                 if switch_allowed:
                     metadata_stage = "single_vote_candidate_switch"
                     metadata["candidate_switch_requested"] = True
-                    metadata["candidate_switch_reason"] = "high_score_nearby_option_candidate"
+                    metadata["candidate_switch_reason"] = "executable_nearby_option_candidate"
                 else:
                     if not selected_ok:
                         blocked_reason = "not_selected_or_near_atm"
@@ -5542,7 +5544,6 @@ class StrategyManager(_BaseStrategyManager):
         allowed_strategies = {s.strip() for s in str(os.getenv("STRATEGY_CONTEXT_PROMOTION_ALLOWED_STRATEGIES", "OrderFlow,VWAPPro")).split(",") if s.strip()}
         min_score = self._env_float("STRATEGY_CONTEXT_PROMOTION_MIN_SCORE", 5.0)
         min_conf = self._env_float("STRATEGY_CONTEXT_PROMOTION_MIN_CONFIDENCE", 0.45)
-        min_direction_conf = self._env_float("STRATEGY_CONTEXT_PROMOTION_MIN_DIRECTION_CONF", 0.05)
         # Context promotion never ranks candidates by legacy score.
         best_signal, best_vote = context_votes[0]
         raw_score = self._extract_raw_score(best_vote)
