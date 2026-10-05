@@ -238,9 +238,6 @@ def finalize_signal_observability(
     _, side = option_thesis(getattr(signal, "symbol", symbol), metadata)
     setup_anchor = anchor_value(metadata)
     setup_id = metadata.get("setup_id") or metadata.get("setup_structure_id")
-    raw_score = metadata.get("raw_setup_score")
-    if raw_score is None:
-        raw_score = metadata.get("strategy_score") or metadata.get("context_score")
     role = str(metadata.get("role") or "trigger").lower()
     vote_event = (
         "STRATEGY_CONTEXT_VOTE" if role == "context" else "STRATEGY_TRIGGER_VOTE"
@@ -257,14 +254,12 @@ def finalize_signal_observability(
         logging.DEBUG if role == "context" else logging.INFO,
         (
             f"{vote_event} strategy=%s symbol=%s side=%s "
-            "raw_setup_score=%s confidence=%s setup_id=%s setup_anchor=%s "
-            "quote_update_version=%s evaluation_snapshot_id=%s"
+            "setup_id=%s setup_anchor=%s quote_update_version=%s "
+            "evaluation_snapshot_id=%s"
         ),
         strategy,
         getattr(signal, "symbol", symbol),
         side or None,
-        raw_score,
-        getattr(signal, "confidence", None),
         setup_id,
         setup_anchor,
         metadata.get("quote_update_version"),
@@ -274,8 +269,6 @@ def finalize_signal_observability(
             "strategy": strategy,
             "symbol": getattr(signal, "symbol", symbol),
             "side": side or None,
-            "raw_setup_score": raw_score,
-            "confidence": getattr(signal, "confidence", None),
             "setup_id": setup_id,
             "setup_anchor": setup_anchor,
             "quote_update_version": metadata.get("quote_update_version"),
