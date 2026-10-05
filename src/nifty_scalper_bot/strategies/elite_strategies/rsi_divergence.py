@@ -51,7 +51,9 @@ class RSIDivergenceStrategy(EliteStrategy):
 
     MIN_BARS_REQUIRED = 20
 
-    def __init__(self, config: RSIDivergenceStrategyConfig, indicator_engine: Any) -> None:
+    def __init__(
+        self, config: RSIDivergenceStrategyConfig, indicator_engine: Any
+    ) -> None:
         """Args: config, indicator_engine. Returns: None. Raises: Exception."""
         super().__init__(config=config, indicator_engine=indicator_engine)
         self._cfg = config
@@ -105,7 +107,9 @@ class RSIDivergenceStrategy(EliteStrategy):
                 self._no_vote("no_confirmed_swing_divergence")
                 return None
 
-            contract_side, option_premium_domain, _ = resolve_signal_domain(symbol, indicators)
+            contract_side, option_premium_domain, _ = resolve_signal_domain(
+                symbol, indicators
+            )
             if option_premium_domain:
                 if not bullish_div:
                     self._no_vote("premium_no_bullish_divergence")

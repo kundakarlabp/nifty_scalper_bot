@@ -195,13 +195,15 @@ class PremiumDecayStrategy:
         """
 
         self._logger.debug(
-            'Entered PremiumDecayStrategy.evaluate_entry',
+            "Entered PremiumDecayStrategy.evaluate_entry",
             extra={
-                'event': 'premium_decay_entry_enter',
-                'underlying': underlying,
+                "event": "premium_decay_entry_enter",
+                "underlying": underlying,
             },
         )
-        execution_mode = str(os.getenv("EXECUTION_MODE", "SHADOW") or "SHADOW").strip().upper()
+        execution_mode = (
+            str(os.getenv("EXECUTION_MODE", "SHADOW") or "SHADOW").strip().upper()
+        )
         live_enabled = execution_mode == "LIVE" or str(
             os.getenv("ENABLE_LIVE", os.getenv("ENABLE_LIVE_TRADING", "false"))
         ).strip().lower() in {"1", "true", "yes", "on"}
@@ -218,55 +220,55 @@ class PremiumDecayStrategy:
         try:
             if self._active is not None:
                 self._logger.info(
-                    'Condition met: premium_decay_active_position',
+                    "Condition met: premium_decay_active_position",
                     extra={
-                        'event': 'premium_decay_active_position',
-                        'underlying': underlying,
+                        "event": "premium_decay_active_position",
+                        "underlying": underlying,
                     },
                 )
                 return False
-            atr_value = self._extract_float(indicators, ('atr', 'atr_14'))
-            adx_value = self._extract_float(indicators, ('adx', 'adx_14'))
+            atr_value = self._extract_float(indicators, ("atr", "atr_14"))
+            adx_value = self._extract_float(indicators, ("adx", "adx_14"))
             if atr_value is None or adx_value is None:
                 self._logger.info(
-                    'Condition met: premium_decay_missing_indicators',
+                    "Condition met: premium_decay_missing_indicators",
                     extra={
-                        'event': 'premium_decay_missing_indicators',
-                        'underlying': underlying,
+                        "event": "premium_decay_missing_indicators",
+                        "underlying": underlying,
                     },
                 )
                 return False
             if atr_value > self._atr_threshold or adx_value > self._adx_threshold:
                 self._logger.info(
-                    'Condition met: premium_decay_trend_filter',
+                    "Condition met: premium_decay_trend_filter",
                     extra={
-                        'event': 'premium_decay_trend_filter',
-                        'underlying': underlying,
-                        'atr': atr_value,
-                        'adx': adx_value,
+                        "event": "premium_decay_trend_filter",
+                        "underlying": underlying,
+                        "atr": atr_value,
+                        "adx": adx_value,
                     },
                 )
                 return False
             iv_floor = min(0.12, self._iv_exit_threshold * 0.6)
             if iv <= 0.0 or iv < iv_floor or iv > self._iv_exit_threshold:
                 self._logger.info(
-                    'Condition met: premium_decay_iv_filter',
+                    "Condition met: premium_decay_iv_filter",
                     extra={
-                        'event': 'premium_decay_iv_filter',
-                        'underlying': underlying,
-                        'iv': iv,
-                        'iv_floor': iv_floor,
-                        'iv_ceiling': self._iv_exit_threshold,
+                        "event": "premium_decay_iv_filter",
+                        "underlying": underlying,
+                        "iv": iv,
+                        "iv_floor": iv_floor,
+                        "iv_ceiling": self._iv_exit_threshold,
                     },
                 )
                 return False
             pair = self._select_contracts(option_chain)
             if pair is None:
                 self._logger.info(
-                    'Condition met: premium_decay_no_contracts',
+                    "Condition met: premium_decay_no_contracts",
                     extra={
-                        'event': 'premium_decay_no_contracts',
-                        'underlying': underlying,
+                        "event": "premium_decay_no_contracts",
+                        "underlying": underlying,
                     },
                 )
                 return False
@@ -278,31 +280,31 @@ class PremiumDecayStrategy:
             ce_sl, ce_tp = ce_contract.ltp * 2.0, ce_contract.ltp * 0.5
             pe_sl, pe_tp = pe_contract.ltp * 2.0, pe_contract.ltp * 0.5
             ce_signal = Signal(
-                action='SELL',
+                action="SELL",
                 symbol=ce_contract.symbol,
                 quantity=quantity,
                 confidence=0.55,
-                reason='Premium decay short call',
+                reason="Premium decay short call",
                 stop_loss=ce_sl,
                 take_profit=ce_tp,
-                metadata={'strategy': self._name, 'underlying': underlying},
+                metadata={"strategy": self._name, "underlying": underlying},
             )
             pe_signal = Signal(
-                action='SELL',
+                action="SELL",
                 symbol=pe_contract.symbol,
                 quantity=quantity,
                 confidence=0.55,
-                reason='Premium decay short put',
+                reason="Premium decay short put",
                 stop_loss=pe_sl,
                 take_profit=pe_tp,
-                metadata={'strategy': self._name, 'underlying': underlying},
+                metadata={"strategy": self._name, "underlying": underlying},
             )
             if not self._risk_allows(
-                ce_contract.symbol, 'SELL', quantity, ce_contract.ltp, ce_sl, ce_tp
+                ce_contract.symbol, "SELL", quantity, ce_contract.ltp, ce_sl, ce_tp
             ):
                 return False
             if not self._risk_allows(
-                pe_contract.symbol, 'SELL', quantity, pe_contract.ltp, pe_sl, pe_tp
+                pe_contract.symbol, "SELL", quantity, pe_contract.ltp, pe_sl, pe_tp
             ):
                 return False
             ce_filtered = self._orchestrator.filter_signal(
@@ -310,11 +312,11 @@ class PremiumDecayStrategy:
             )
             if ce_filtered is None:
                 self._logger.info(
-                    'Condition met: premium_decay_orchestrator_block',
+                    "Condition met: premium_decay_orchestrator_block",
                     extra={
-                        'event': 'premium_decay_orchestrator_block',
-                        'underlying': underlying,
-                        'leg': 'CE',
+                        "event": "premium_decay_orchestrator_block",
+                        "underlying": underlying,
+                        "leg": "CE",
                     },
                 )
                 return False
@@ -323,11 +325,11 @@ class PremiumDecayStrategy:
             )
             if pe_filtered is None:
                 self._logger.info(
-                    'Condition met: premium_decay_orchestrator_block',
+                    "Condition met: premium_decay_orchestrator_block",
                     extra={
-                        'event': 'premium_decay_orchestrator_block',
-                        'underlying': underlying,
-                        'leg': 'PE',
+                        "event": "premium_decay_orchestrator_block",
+                        "underlying": underlying,
+                        "leg": "PE",
                     },
                 )
                 return False
@@ -345,10 +347,10 @@ class PremiumDecayStrategy:
             )
             if not pe_order_id:
                 self._logger.error(
-                    'Failure in PremiumDecayStrategy.evaluate_entry: second leg rejected',
+                    "Failure in PremiumDecayStrategy.evaluate_entry: second leg rejected",
                     extra={
-                        'event': 'premium_decay_second_leg_failed',
-                        'underlying': underlying,
+                        "event": "premium_decay_second_leg_failed",
+                        "underlying": underlying,
                     },
                 )
                 self._attempt_recover_leg(ce_contract.symbol, quantity)
@@ -378,22 +380,22 @@ class PremiumDecayStrategy:
             self._orchestrator.notify_submission(ce_filtered, underlying)
             self._orchestrator.notify_submission(pe_filtered, underlying)
             self._logger.info(
-                'Condition met: premium_decay_position_opened',
+                "Condition met: premium_decay_position_opened",
                 extra={
-                    'event': 'premium_decay_position_opened',
-                    'underlying': underlying,
-                    'ce': ce_contract.symbol,
-                    'pe': pe_contract.symbol,
-                    'quantity': quantity,
-                    'iv_entry': iv,
+                    "event": "premium_decay_position_opened",
+                    "underlying": underlying,
+                    "ce": ce_contract.symbol,
+                    "pe": pe_contract.symbol,
+                    "quantity": quantity,
+                    "iv_entry": iv,
                 },
             )
             return True
         except Exception as exc:  # noqa: BLE001
             self._logger.error(
-                'Failure in PremiumDecayStrategy.evaluate_entry: %s',
+                "Failure in PremiumDecayStrategy.evaluate_entry: %s",
                 exc,
-                extra={'event': 'premium_decay_entry_error', 'underlying': underlying},
+                extra={"event": "premium_decay_entry_error", "underlying": underlying},
                 exc_info=exc,
             )
             return False

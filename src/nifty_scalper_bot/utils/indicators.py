@@ -49,6 +49,7 @@ def _from_cache(key: str) -> tuple[bool, Any]:
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _closes(bars: Sequence[dict[str, Any]]) -> list[float]:
     """Extract close prices from bar list, skipping invalid entries."""
     result: list[float] = []
@@ -114,6 +115,7 @@ def _ema_series(values: list[float], period: int) -> list[float]:
 # ---------------------------------------------------------------------------
 # Phase 6 Public Compute Functions
 # ---------------------------------------------------------------------------
+
 
 def compute_rsi(
     bars: Sequence[dict[str, Any]],

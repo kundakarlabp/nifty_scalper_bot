@@ -19,7 +19,9 @@ class CPRBreakoutStrategy(EliteStrategy):
 
     MIN_BARS_REQUIRED = 2
 
-    def __init__(self, config: CPRBreakoutStrategyConfig, indicator_engine: Any) -> None:
+    def __init__(
+        self, config: CPRBreakoutStrategyConfig, indicator_engine: Any
+    ) -> None:
         """Args: config, indicator_engine. Returns: None. Raises: Exception."""
         super().__init__(config=config, indicator_engine=indicator_engine)
         self._cfg = config
@@ -49,7 +51,9 @@ class CPRBreakoutStrategy(EliteStrategy):
         del position
         try:
             self._no_vote("stale_or_invalid_data")
-            if symbol.upper().endswith(("CE", "PE")) and not indicators.get("source_symbol"):
+            if symbol.upper().endswith(("CE", "PE")) and not indicators.get(
+                "source_symbol"
+            ):
                 self._no_vote("invalid_price_domain")
                 return None
 
@@ -90,7 +94,10 @@ class CPRBreakoutStrategy(EliteStrategy):
                 nearest_level_distance = r1 - current_price
             elif side == "PE" and 0 < s1 < current_price:
                 nearest_level_distance = current_price - s1
-            if nearest_level_distance is not None and nearest_level_distance < 0.5 * atr:
+            if (
+                nearest_level_distance is not None
+                and nearest_level_distance < 0.5 * atr
+            ):
                 self._no_vote("nearby_level")
                 return None
 

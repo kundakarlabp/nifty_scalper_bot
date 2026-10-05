@@ -7,12 +7,18 @@ from nifty_scalper_bot.strategies.elite_strategies.config_models import (
     CPRBreakoutStrategyConfig,
     RSIDivergenceStrategyConfig,
 )
-from nifty_scalper_bot.strategies.elite_strategies.cpr_breakout import CPRBreakoutStrategy
-from nifty_scalper_bot.strategies.elite_strategies.rsi_divergence import RSIDivergenceStrategy
+from nifty_scalper_bot.strategies.elite_strategies.cpr_breakout import (
+    CPRBreakoutStrategy,
+)
+from nifty_scalper_bot.strategies.elite_strategies.rsi_divergence import (
+    RSIDivergenceStrategy,
+)
 
 
 def test_bb_squeeze_respects_configured_threshold_without_hidden_floor() -> None:
-    strategy = BBSqueezeStrategy(BBSqueezeStrategyConfig(squeeze_threshold_pct=0.5), object())
+    strategy = BBSqueezeStrategy(
+        BBSqueezeStrategyConfig(squeeze_threshold_pct=0.5), object()
+    )
     signal = strategy._evaluate_signal(
         "NSE:NIFTY",
         {
@@ -32,7 +38,9 @@ def test_bb_squeeze_respects_configured_threshold_without_hidden_floor() -> None
 
 
 def test_bb_squeeze_emits_context_only_evidence() -> None:
-    strategy = BBSqueezeStrategy(BBSqueezeStrategyConfig(squeeze_threshold_pct=0.5), object())
+    strategy = BBSqueezeStrategy(
+        BBSqueezeStrategyConfig(squeeze_threshold_pct=0.5), object()
+    )
     signal = strategy._evaluate_signal(
         "NSE:NIFTY",
         {
@@ -56,7 +64,9 @@ def test_bb_squeeze_emits_context_only_evidence() -> None:
 
 
 def test_cpr_requires_configured_narrow_width() -> None:
-    strategy = CPRBreakoutStrategy(CPRBreakoutStrategyConfig(narrow_cpr_threshold=0.25), object())
+    strategy = CPRBreakoutStrategy(
+        CPRBreakoutStrategyConfig(narrow_cpr_threshold=0.25), object()
+    )
     signal = strategy._evaluate_signal(
         "NSE:NIFTY",
         {
@@ -75,7 +85,9 @@ def test_cpr_requires_configured_narrow_width() -> None:
 
 
 def test_cpr_does_not_invent_retest_from_breakout_penetration() -> None:
-    strategy = CPRBreakoutStrategy(CPRBreakoutStrategyConfig(narrow_cpr_threshold=0.25), object())
+    strategy = CPRBreakoutStrategy(
+        CPRBreakoutStrategyConfig(narrow_cpr_threshold=0.25), object()
+    )
     signal = strategy._evaluate_signal(
         "NSE:NIFTY",
         {
@@ -164,18 +176,27 @@ def test_experimental_context_flags_are_reachable(monkeypatch) -> None:
     monkeypatch.setenv("ENABLE_BB_SQUEEZE_CONTEXT", "true")
     monkeypatch.setenv("ENABLE_CPR_EXPERIMENTAL", "true")
     monkeypatch.setenv("ENABLE_RSI_DIVERGENCE_EXPERIMENTAL", "true")
-    assert _strategy_runtime_role(
-        "bb_squeeze",
-        strategy_mode="directional_scalp",
-        allow_expiry_gamma=False,
-    ) == "context"
-    assert _strategy_runtime_role(
-        "cpr",
-        strategy_mode="directional_scalp",
-        allow_expiry_gamma=False,
-    ) == "context"
-    assert _strategy_runtime_role(
-        "rsi_div",
-        strategy_mode="directional_scalp",
-        allow_expiry_gamma=False,
-    ) == "context"
+    assert (
+        _strategy_runtime_role(
+            "bb_squeeze",
+            strategy_mode="directional_scalp",
+            allow_expiry_gamma=False,
+        )
+        == "context"
+    )
+    assert (
+        _strategy_runtime_role(
+            "cpr",
+            strategy_mode="directional_scalp",
+            allow_expiry_gamma=False,
+        )
+        == "context"
+    )
+    assert (
+        _strategy_runtime_role(
+            "rsi_div",
+            strategy_mode="directional_scalp",
+            allow_expiry_gamma=False,
+        )
+        == "context"
+    )

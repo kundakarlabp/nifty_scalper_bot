@@ -128,8 +128,7 @@ def _entity(record: logging.LogRecord) -> tuple[Any, ...]:
     selected_pe = getattr(record, "selected_pe", None)
     futures_symbol = getattr(record, "futures_symbol", None)
     if any(
-        value not in (None, "")
-        for value in (selected_ce, selected_pe, futures_symbol)
+        value not in (None, "") for value in (selected_ce, selected_pe, futures_symbol)
     ):
         return ("basket", selected_ce, selected_pe, futures_symbol)
 
@@ -198,9 +197,9 @@ class BootLogRateControl(logging.Filter):
     def __init__(self, interval_seconds: float = 300.0) -> None:
         super().__init__()
         self.interval_seconds = max(30.0, float(interval_seconds))
-        self._last: dict[
-            tuple[str, tuple[Any, ...]], tuple[tuple[Any, ...], float]
-        ] = {}
+        self._last: dict[tuple[str, tuple[Any, ...]], tuple[tuple[Any, ...], float]] = (
+            {}
+        )
 
     def filter(self, record: logging.LogRecord) -> bool:
         _normalize_role_telemetry(record)

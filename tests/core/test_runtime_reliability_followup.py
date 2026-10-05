@@ -242,7 +242,9 @@ def test_actual_mdm_subscriber_payload_matches_datahub_fastpath_contract() -> No
     assert _is_canonical_runtime_tick(payload) is True
 
 
-def test_datahub_mdm_canonical_tick_skips_expensive_recanonicalization(monkeypatch) -> None:
+def test_datahub_mdm_canonical_tick_skips_expensive_recanonicalization(
+    monkeypatch,
+) -> None:
     """MDM's real normalized WS shape must not be rebuilt inside DataHub."""
     mdm = types.SimpleNamespace(attach_tick_bus=lambda _bus: None)
     hub = DataHub(mdm)

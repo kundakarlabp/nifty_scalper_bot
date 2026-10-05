@@ -366,7 +366,6 @@ class StrikeSelector:
         self._locked_spot: float | None = None
         self._locked_at: datetime | None = None
 
-
     @staticmethod
     def _basket_get(basket: Any, key: str, default: Any = None) -> Any:
         if isinstance(basket, Mapping):
@@ -404,7 +403,11 @@ class StrikeSelector:
                 "STRIKE_SELECTOR_TOKEN_MISSING symbol=%s option_type=%s",
                 symbol,
                 option_type,
-                extra={"event": "STRIKE_SELECTOR_TOKEN_MISSING", "symbol": symbol, "option_type": option_type},
+                extra={
+                    "event": "STRIKE_SELECTOR_TOKEN_MISSING",
+                    "symbol": symbol,
+                    "option_type": option_type,
+                },
             )
             return None
         quote = None
@@ -424,18 +427,29 @@ class StrikeSelector:
                     ltp = float(value)
                     break
             if ltp <= 0:
-                ltp = float(_mid_price(_coerce_float(quote.get("bid")), _coerce_float(quote.get("ask"))) or 0.0)
+                ltp = float(
+                    _mid_price(
+                        _coerce_float(quote.get("bid")), _coerce_float(quote.get("ask"))
+                    )
+                    or 0.0
+                )
         if ltp <= 0:
             LOGGER.warning(
                 "STRIKE_SELECTOR_QUOTE_MISSING symbol=%s option_type=%s",
                 symbol,
                 option_type,
-                extra={"event": "STRIKE_SELECTOR_QUOTE_MISSING", "symbol": symbol, "option_type": option_type},
+                extra={
+                    "event": "STRIKE_SELECTOR_QUOTE_MISSING",
+                    "symbol": symbol,
+                    "option_type": option_type,
+                },
             )
             return None
         expiry_raw = self._basket_get(basket, "option_expiry", None)
         expiry = _parse_expiry(expiry_raw) or datetime.now(timezone.utc)
-        strike = float(self._basket_get(basket, "atm_strike", 0) or 0) or self._symbol_strike(symbol)
+        strike = float(
+            self._basket_get(basket, "atm_strike", 0) or 0
+        ) or self._symbol_strike(symbol)
         return SelectedContract(
             symbol=symbol,
             option_type=option_type,
@@ -501,7 +515,9 @@ class StrikeSelector:
             symbol=f"NFO:{instrument.tradingsymbol}",
             option_type=instrument.option_type,
             strike=float(instrument.strike),
-            expiry=datetime.combine(instrument.expiry, datetime.min.time(), tzinfo=timezone.utc),
+            expiry=datetime.combine(
+                instrument.expiry, datetime.min.time(), tzinfo=timezone.utc
+            ),
             ltp=0.0,
             delta=None,
             metadata={"instrument_token": int(instrument.instrument_token)},
@@ -522,9 +538,11 @@ class StrikeSelector:
 
         # --- START CRITICAL FIX: CACHE CHECK (Latency Optimization) ---
         step = int(getattr(self._selector_settings, "strike_step", 50) or 50)
-        cache_price = round(underlying_price / step) * step 
-        
-        cache_key = f"{underlying}_{option_type}_{cache_price}_{self._selector_settings.expiry}"
+        cache_price = round(underlying_price / step) * step
+
+        cache_key = (
+            f"{underlying}_{option_type}_{cache_price}_{self._selector_settings.expiry}"
+        )
         current_time = self._clock().timestamp()
 
         if cache_key in self._contract_cache:
@@ -568,7 +586,9 @@ class StrikeSelector:
             LOGGER.info("Condition met: selector_missing_option_type")
             return None
 
-        live_mode = os.getenv("EXECUTION_MODE", os.getenv("MODE", "")).strip().upper() == "LIVE"
+        live_mode = (
+            os.getenv("EXECUTION_MODE", os.getenv("MODE", "")).strip().upper() == "LIVE"
+        )
         basket = None
         get_basket = getattr(self._data_hub, "get_active_contract_basket", None)
         if callable(get_basket):
@@ -578,7 +598,9 @@ class StrikeSelector:
                 basket = None
         if basket is not None:
             selected = self._contract_from_active_basket(
-                basket, option_type=requested_option_type, underlying_price=underlying_price
+                basket,
+                option_type=requested_option_type,
+                underlying_price=underlying_price,
             )
             LOGGER.info(
                 "DEPRECATED_STRIKE_SELECTOR_WRAPPER_USED source=active_contract_basket live_mode=%s symbol=%s",
@@ -596,37 +618,72 @@ class StrikeSelector:
             LOGGER.warning(
                 "STRIKE_SELECTOR_ACTIVE_BASKET_MISSING option_type=%s",
                 requested_option_type,
-                extra={"event": "STRIKE_SELECTOR_ACTIVE_BASKET_MISSING", "option_type": requested_option_type},
+                extra={
+                    "event": "STRIKE_SELECTOR_ACTIVE_BASKET_MISSING",
+                    "option_type": requested_option_type,
+                },
             )
             return None
 
-        fallback_enabled = os.getenv("OPTION_CHAIN_SELECTOR_FALLBACK_ENABLED", "").strip().lower() in {"1", "true", "yes", "on"}
+        fallback_enabled = os.getenv(
+            "OPTION_CHAIN_SELECTOR_FALLBACK_ENABLED", ""
+        ).strip().lower() in {"1", "true", "yes", "on"}
         if not fallback_enabled:
             LOGGER.warning(
                 "DEPRECATED_STRIKE_SELECTOR_WRAPPER_USED source=fallback_disabled live_mode=%s",
                 live_mode,
-                extra={"event": "DEPRECATED_STRIKE_SELECTOR_WRAPPER_USED", "source": "fallback_disabled", "live_mode": live_mode},
+                extra={
+                    "event": "DEPRECATED_STRIKE_SELECTOR_WRAPPER_USED",
+                    "source": "fallback_disabled",
+                    "live_mode": live_mode,
+                },
             )
             return None
         LOGGER.warning(
             "DEPRECATED_STRIKE_SELECTOR_WRAPPER_USED source=legacy_option_chain live_mode=%s",
             live_mode,
-            extra={"event": "DEPRECATED_STRIKE_SELECTOR_WRAPPER_USED", "source": "legacy_option_chain", "live_mode": live_mode},
+            extra={
+                "event": "DEPRECATED_STRIKE_SELECTOR_WRAPPER_USED",
+                "source": "legacy_option_chain",
+                "live_mode": live_mode,
+            },
         )
 
-        sticky_seconds = int(getattr(self._selector_settings, "option_sticky_seconds", 120) or 120)
-        min_move = float(getattr(self._selector_settings, "option_reselection_min_move", 80.0) or 80.0)
-        force_reselect_after = int(getattr(self._selector_settings, "option_force_reselect_after_seconds", 300) or 300)
+        sticky_seconds = int(
+            getattr(self._selector_settings, "option_sticky_seconds", 120) or 120
+        )
+        min_move = float(
+            getattr(self._selector_settings, "option_reselection_min_move", 80.0)
+            or 80.0
+        )
+        force_reselect_after = int(
+            getattr(self._selector_settings, "option_force_reselect_after_seconds", 300)
+            or 300
+        )
         now = self._clock()
         locked = self._locked_ce if requested_option_type == "CE" else self._locked_pe
-        if locked is not None and self._locked_spot is not None and self._locked_at is not None:
+        if (
+            locked is not None
+            and self._locked_spot is not None
+            and self._locked_at is not None
+        ):
             move = abs(float(underlying_price) - float(self._locked_spot))
             age = (now - self._locked_at).total_seconds()
             if move < min_move and age < sticky_seconds:
-                LOGGER.info("OPTION_STICKY_LOCK_ACTIVE symbol=%s move=%.2f age_s=%.1f", locked.symbol, move, age)
+                LOGGER.info(
+                    "OPTION_STICKY_LOCK_ACTIVE symbol=%s move=%.2f age_s=%.1f",
+                    locked.symbol,
+                    move,
+                    age,
+                )
                 return locked
             if move < min_move and age < force_reselect_after:
-                LOGGER.info("OPTION_RESELECTION_SKIPPED_SMALL_MOVE move=%.2f age_s=%.1f threshold=%.2f", move, age, min_move)
+                LOGGER.info(
+                    "OPTION_RESELECTION_SKIPPED_SMALL_MOVE move=%.2f age_s=%.1f threshold=%.2f",
+                    move,
+                    age,
+                    min_move,
+                )
                 return locked
             LOGGER.info("OPTION_RESELECTION_TRIGGERED move=%.2f age_s=%.1f", move, age)
 
@@ -913,7 +970,11 @@ class StrikeSelector:
 
         now_aware = _to_utc_aware(now)
         expiry_dates = sorted(
-            {_to_utc_aware(contract.expiry) for contract in contracts if contract.expiry is not None}
+            {
+                _to_utc_aware(contract.expiry)
+                for contract in contracts
+                if contract.expiry is not None
+            }
         )
         if not expiry_dates:
             return None

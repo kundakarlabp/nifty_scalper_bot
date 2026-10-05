@@ -16,7 +16,6 @@ from nifty_scalper_bot.execution.market_aware_profit_extension import (
 from nifty_scalper_bot.execution.ownership import BoundBracketManager
 from nifty_scalper_bot.execution.runtime_bracket_manager import RuntimeBracketManager
 
-
 SYMBOL = "NFO:NIFTY2681124500CE"
 FUTURE = "NFO:NIFTY26AUGFUT"
 
@@ -123,9 +122,11 @@ class FakeManager:
         self._market_data = FakeMarketData(strong=strong)
         self._indicator_engine = FakeIndicatorEngine(strong=strong)
         self._recent_ticks = {
-            SYMBOL: [112.0, 114.0, 116.0, 118.0, 120.0]
-            if strong
-            else [122.0, 121.5, 121.0, 120.5, 120.0]
+            SYMBOL: (
+                [112.0, 114.0, 116.0, 118.0, 120.0]
+                if strong
+                else [122.0, 121.5, 121.0, 120.5, 120.0]
+            )
         }
         self.saved = 0
 
@@ -135,7 +136,6 @@ class FakeManager:
 
     def save_state(self):
         self.saved += 1
-
 
 
 def _bracket(*, protected: bool = True, quantity: int = 65):

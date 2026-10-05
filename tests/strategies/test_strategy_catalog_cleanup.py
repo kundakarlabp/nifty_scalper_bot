@@ -14,8 +14,12 @@ from nifty_scalper_bot.strategies.elite_strategies.config_models import (
     GammaScalpingStrategyConfig,
     RSIDivergenceStrategyConfig,
 )
-from nifty_scalper_bot.strategies.elite_strategies.cpr_breakout import CPRBreakoutStrategy
-from nifty_scalper_bot.strategies.elite_strategies.gamma_scalping import GammaScalpingStrategy
+from nifty_scalper_bot.strategies.elite_strategies.cpr_breakout import (
+    CPRBreakoutStrategy,
+)
+from nifty_scalper_bot.strategies.elite_strategies.gamma_scalping import (
+    GammaScalpingStrategy,
+)
 from nifty_scalper_bot.strategies.elite_strategies.rsi_divergence import (
     RSIDivergenceStrategy,
 )

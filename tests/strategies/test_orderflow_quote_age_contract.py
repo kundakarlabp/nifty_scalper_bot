@@ -1,12 +1,16 @@
 from __future__ import annotations
 
-from nifty_scalper_bot.strategies.elite_strategies.config_models import OrderFlowStrategyConfig
+from nifty_scalper_bot.strategies.elite_strategies.config_models import (
+    OrderFlowStrategyConfig,
+)
 from nifty_scalper_bot.strategies.elite_strategies.order_flow import OrderFlowStrategy
 
 
 def test_orderflow_accepts_quote_age_seconds_schema_in_live_mode(monkeypatch):
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
-    strategy = OrderFlowStrategy(OrderFlowStrategyConfig(enabled=True, quantity=1), indicator_engine=None)
+    strategy = OrderFlowStrategy(
+        OrderFlowStrategyConfig(enabled=True, quantity=1), indicator_engine=None
+    )
     indicators = {
         "bid": 100.0,
         "ask": 100.25,
@@ -24,7 +28,9 @@ def test_orderflow_accepts_quote_age_seconds_schema_in_live_mode(monkeypatch):
         "quote_update_version": 1,
     }
 
-    signal = strategy._evaluate_signal("NFO:NIFTY26MAY24000CE", indicators, current_price=100.1)
+    signal = strategy._evaluate_signal(
+        "NFO:NIFTY26MAY24000CE", indicators, current_price=100.1
+    )
 
     assert signal is not None
     assert signal.metadata["quote_readiness_reason"] == "ready"
@@ -35,7 +41,9 @@ def test_orderflow_accepts_quote_age_seconds_schema_in_live_mode(monkeypatch):
 
 def test_orderflow_rejects_missing_depth_before_context_use(monkeypatch):
     monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
-    strategy = OrderFlowStrategy(OrderFlowStrategyConfig(enabled=True, quantity=1), indicator_engine=None)
+    strategy = OrderFlowStrategy(
+        OrderFlowStrategyConfig(enabled=True, quantity=1), indicator_engine=None
+    )
     indicators = {
         "bid": 100.0,
         "ask": 100.25,
@@ -46,7 +54,9 @@ def test_orderflow_rejects_missing_depth_before_context_use(monkeypatch):
         "atr": 2.0,
     }
 
-    signal = strategy._evaluate_signal("NFO:NIFTY26MAY24000CE", indicators, current_price=100.1)
+    signal = strategy._evaluate_signal(
+        "NFO:NIFTY26MAY24000CE", indicators, current_price=100.1
+    )
 
     assert signal is None
     assert strategy.last_no_vote_reason == "missing_depth"

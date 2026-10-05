@@ -2648,7 +2648,6 @@ def _telegram_requires_http_controller(settings: Settings) -> bool:
     return _telegram_transport_mode(settings) == "webhook"
 
 
-
 def _log_reconciliation_task_exit(task: "asyncio.Task[Any]") -> None:
     """Report an unexpected end of the periodic reconciliation loop.
 
@@ -2961,8 +2960,8 @@ def get_http_app() -> FastAPI:
                 strategy_block["entry_eval_completed_count"] = lifecycle.get(
                     "entry_eval_completed_count"
                 )
-                strategy_block["selected_candidate_eval_completed_count"] = lifecycle.get(
-                    "selected_candidate_eval_completed_count"
+                strategy_block["selected_candidate_eval_completed_count"] = (
+                    lifecycle.get("selected_candidate_eval_completed_count")
                 )
             if lifecycle.get("strategy_evaluation_stalled"):
                 blockers.append("strategy_evaluation_stalled")
@@ -8527,9 +8526,7 @@ def _wire_and_start_message_bus(ctx: BotContext) -> bool:
             # continues for independent observers; DataHub simply no longer
             # re-injects from it. DataHub is the single owner of normalized
             # tick state.
-            LOGGER.info(
-                "MESSAGE_BUS_TICK_OWNER owner=data_hub ingress=direct_mdm_only"
-            )
+            LOGGER.info("MESSAGE_BUS_TICK_OWNER owner=data_hub ingress=direct_mdm_only")
         elif runner is not None:
             bus.subscribe_once(
                 MessageType.TICK,
@@ -8783,9 +8780,7 @@ async def _live_readiness_rearm_loop(ctx: BotContext) -> None:
             )
             freshness_check = getattr(mdm, "has_fresh_ws_ltp", None)
             bracket_manager = getattr(ctx, "bracket_manager", None)
-            has_unresolved_exit = getattr(
-                bracket_manager, "has_unresolved_exit", None
-            )
+            has_unresolved_exit = getattr(bracket_manager, "has_unresolved_exit", None)
             try:
                 unresolved_exit = bool(
                     callable(has_unresolved_exit) and has_unresolved_exit()
@@ -8798,9 +8793,7 @@ async def _live_readiness_rearm_loop(ctx: BotContext) -> None:
             if selected_feeds_fresh:
                 for symbol in current_fingerprint:
                     try:
-                        fresh = bool(
-                            freshness_check([symbol], max_age_seconds=60.0)
-                        )
+                        fresh = bool(freshness_check([symbol], max_age_seconds=60.0))
                     except TypeError:
                         fresh = bool(freshness_check([symbol]))
                     except Exception:
@@ -8824,12 +8817,8 @@ async def _live_readiness_rearm_loop(ctx: BotContext) -> None:
                 and not bool(getattr(ctx, "risk_halt", False))
                 and not bool(getattr(ctx, "daily_loss_limit_hit", False))
                 and not bool(getattr(ctx, "unprotected_broker_position", False))
-                and not bool(
-                    getattr(ctx, "unprotected_broker_positions", set())
-                )
-                and not bool(
-                    getattr(ctx, "unresolved_reconciliation_symbols", set())
-                )
+                and not bool(getattr(ctx, "unprotected_broker_positions", set()))
+                and not bool(getattr(ctx, "unresolved_reconciliation_symbols", set()))
                 and not unresolved_exit
                 and (
                     not hasattr(ctx, "position_reconciliation_completed")
@@ -10093,15 +10082,9 @@ async def _recompute_and_push_runtime_readiness(
     missing = []
     if pipeline_overloaded:
         missing.append("data_pipeline_overloaded")
-    if (
-        live_mode
-        and selected_options_data_exec_ready
-        and not execution_capacity_ready
-    ):
+    if live_mode and selected_options_data_exec_ready and not execution_capacity_ready:
         capacity_decisions = [
-            item
-            for item in (ce_affordability, pe_affordability)
-            if item is not None
+            item for item in (ce_affordability, pe_affordability) if item is not None
         ]
         if capacity_decisions and all(item.determinate for item in capacity_decisions):
             missing.append("minimum_lot_unaffordable")
@@ -10558,9 +10541,8 @@ def _commit_active_dynamic_basket(
         from nifty_scalper_bot.core.active_basket import extract_symbol_strike
 
         selected_strike = extract_symbol_strike(symbol)
-        return (
-            selected_strike is not None
-            and float(selected_strike) == float(atm_strike)
+        return selected_strike is not None and float(selected_strike) == float(
+            atm_strike
         )
 
     if not _selected_matches_atm(selected_ce, "CE"):
@@ -14452,7 +14434,9 @@ async def startup_sequence(ctx: BotContext) -> None:
                                         "startup_pipeline_incomplete missing_live_tick=%s",
                                         (
                                             ",".join(
-                                                _readiness_missing_diagnostics(missing_hard)
+                                                _readiness_missing_diagnostics(
+                                                    missing_hard
+                                                )
                                             )
                                             if missing_hard
                                             else "unknown"
@@ -15844,8 +15828,12 @@ async def _reconcile_state(ctx: BotContext, *, source: str = "unknown") -> None:
                                 average_price=avg_price,
                                 position_side=pos.side,
                             )
-                        except Exception as guard_exc:  # noqa: BLE001 - keep other symbols blocked independently
-                            guard_failed_reason = f"{type(guard_exc).__name__}: {guard_exc}"
+                        except (
+                            Exception
+                        ) as guard_exc:  # noqa: BLE001 - keep other symbols blocked independently
+                            guard_failed_reason = (
+                                f"{type(guard_exc).__name__}: {guard_exc}"
+                            )
                             LOGGER.exception(
                                 "POSITION_ORPHAN_GUARD_FAILED symbol=%s quantity=%s position_side=%s guard_result=%r bracket_managed=%s reason=%s",
                                 norm_symbol,
@@ -15860,14 +15848,20 @@ async def _reconcile_state(ctx: BotContext, *, source: str = "unknown") -> None:
                                     "quantity": pos.quantity,
                                     "position_side": pos.side,
                                     "guard_result": guard_result,
-                                    "bracket_managed": bm.is_symbol_managed(norm_symbol),
+                                    "bracket_managed": bm.is_symbol_managed(
+                                        norm_symbol
+                                    ),
                                     "reason": guard_failed_reason,
                                 },
                             )
                             continue
 
-                        bracket_id = guard_result if isinstance(guard_result, str) else None
-                        lifecycle_getter = getattr(bm, "get_symbol_lifecycle_snapshot", None)
+                        bracket_id = (
+                            guard_result if isinstance(guard_result, str) else None
+                        )
+                        lifecycle_getter = getattr(
+                            bm, "get_symbol_lifecycle_snapshot", None
+                        )
                         lifecycle_snapshot = (
                             lifecycle_getter(norm_symbol)
                             if callable(lifecycle_getter)
@@ -15875,47 +15869,77 @@ async def _reconcile_state(ctx: BotContext, *, source: str = "unknown") -> None:
                         )
                         bracket_managed = bool(
                             lifecycle_snapshot.get("managed")
-                            if isinstance(lifecycle_snapshot, Mapping) and lifecycle_snapshot
+                            if isinstance(lifecycle_snapshot, Mapping)
+                            and lifecycle_snapshot
                             else bm.is_symbol_managed(norm_symbol)
                         )
                         verification_reason = None
                         if not bracket_managed:
                             verification_reason = "symbol_not_managed"
-                        elif isinstance(lifecycle_snapshot, Mapping) and lifecycle_snapshot:
-                            active_ids = set(lifecycle_snapshot.get("active_bracket_ids") or ())
+                        elif (
+                            isinstance(lifecycle_snapshot, Mapping)
+                            and lifecycle_snapshot
+                        ):
+                            active_ids = set(
+                                lifecycle_snapshot.get("active_bracket_ids") or ()
+                            )
                             if not active_ids:
                                 verification_reason = "no_active_bracket"
                             elif bracket_id and bracket_id not in active_ids:
                                 verification_reason = "returned_bracket_not_active"
-                            elif int(lifecycle_snapshot.get("protected_quantity") or 0) <= 0:
+                            elif (
+                                int(lifecycle_snapshot.get("protected_quantity") or 0)
+                                <= 0
+                            ):
                                 verification_reason = "bracket_quantity_not_positive"
                             elif not bool(lifecycle_snapshot.get("has_valid_stop")):
                                 verification_reason = "bracket_stop_missing"
-                            elif bool(lifecycle_snapshot.get("pending_entry")) and not bool(
-                                lifecycle_snapshot.get("orphan_origin")
-                            ):
-                                verification_reason = "pending_entry_not_orphan_protection"
+                            elif bool(
+                                lifecycle_snapshot.get("pending_entry")
+                            ) and not bool(lifecycle_snapshot.get("orphan_origin")):
+                                verification_reason = (
+                                    "pending_entry_not_orphan_protection"
+                                )
                         elif bracket_id:
-                            bracket = bm.get_bracket(bracket_id) if hasattr(bm, "get_bracket") else None
+                            bracket = (
+                                bm.get_bracket(bracket_id)
+                                if hasattr(bm, "get_bracket")
+                                else None
+                            )
                             if bracket is None:
                                 verification_reason = "returned_bracket_missing"
                             else:
-                                bracket_symbol = normalize_symbol(getattr(bracket, "symbol", "")) or getattr(bracket, "symbol", "")
-                                bracket_status = str(getattr(bracket, "status", "") or "").upper()
-                                bracket_qty = int(getattr(bracket, "quantity", getattr(bracket, "qty", 0)) or 0)
-                                stop_value = getattr(bracket, "stop_loss", getattr(bracket, "sl", None))
+                                bracket_symbol = normalize_symbol(
+                                    getattr(bracket, "symbol", "")
+                                ) or getattr(bracket, "symbol", "")
+                                bracket_status = str(
+                                    getattr(bracket, "status", "") or ""
+                                ).upper()
+                                bracket_qty = int(
+                                    getattr(
+                                        bracket, "quantity", getattr(bracket, "qty", 0)
+                                    )
+                                    or 0
+                                )
+                                stop_value = getattr(
+                                    bracket, "stop_loss", getattr(bracket, "sl", None)
+                                )
                                 if bracket_symbol != norm_symbol:
                                     verification_reason = "bracket_symbol_mismatch"
                                 elif bracket_status == "CLOSED":
                                     verification_reason = "bracket_closed"
                                 elif bracket_qty <= 0:
-                                    verification_reason = "bracket_quantity_not_positive"
+                                    verification_reason = (
+                                        "bracket_quantity_not_positive"
+                                    )
                                 elif stop_value is None:
                                     verification_reason = "bracket_stop_missing"
 
                         if verification_reason is None:
                             if hasattr(ctx, "unprotected_broker_positions"):
-                                ctx.unprotected_broker_positions.discard(str(norm_symbol))
+                                ctx.unprotected_broker_positions.discard(
+                                    str(norm_symbol)
+                                )
                             LOGGER.info(
                                 "POSITION_ADOPTED_TO_BRACKET symbol=%s quantity=%s",
                                 norm_symbol,
@@ -15948,7 +15972,9 @@ async def _reconcile_state(ctx: BotContext, *, source: str = "unknown") -> None:
                             )
 
                 if hasattr(ctx, "unprotected_broker_positions"):
-                    ctx.unprotected_broker_position = bool(ctx.unprotected_broker_positions)
+                    ctx.unprotected_broker_position = bool(
+                        ctx.unprotected_broker_positions
+                    )
 
             # =================================================================
             # ✅ D. CLEANUP GHOST BRACKETS (Safety Cleanup)
@@ -15991,11 +16017,13 @@ async def _reconcile_state(ctx: BotContext, *, source: str = "unknown") -> None:
                                 _b = (getattr(bm, "_brackets", {}) or {}).get(_bid)
                                 if _b is None:
                                     continue
-                                _is_orphan_origin = str(
-                                    getattr(_b, "entry_order_id", "") or ""
-                                ).startswith("orphan_") or str(
-                                    getattr(_b, "tag", "") or ""
-                                ) == "orphan_recovery"
+                                _is_orphan_origin = (
+                                    str(
+                                        getattr(_b, "entry_order_id", "") or ""
+                                    ).startswith("orphan_")
+                                    or str(getattr(_b, "tag", "") or "")
+                                    == "orphan_recovery"
+                                )
                                 if not getattr(_b, "entry_confirmed", False):
                                     if not _is_orphan_origin:
                                         _in_fill_window = True
@@ -16015,7 +16043,9 @@ async def _reconcile_state(ctx: BotContext, *, source: str = "unknown") -> None:
                                     },
                                 )
                                 continue
-                            exposure_getter = getattr(ctx.position_manager, "broker_exposure_state", None)
+                            exposure_getter = getattr(
+                                ctx.position_manager, "broker_exposure_state", None
+                            )
                             exposure = (
                                 exposure_getter(ghost_sym)
                                 if callable(exposure_getter)
@@ -16034,7 +16064,11 @@ async def _reconcile_state(ctx: BotContext, *, source: str = "unknown") -> None:
                                 broker_exposure_state=exposure,
                             )
                             if (
-                                exposure not in (BrokerExposureState.FLAT, BrokerExposureState.ABSENT)
+                                exposure
+                                not in (
+                                    BrokerExposureState.FLAT,
+                                    BrokerExposureState.ABSENT,
+                                )
                                 or lifecycle != SymbolLifecycleClassification.GHOST_FLAT
                                 or not bool(exposure_snapshot.get("fresh", False))
                             ):
@@ -16048,10 +16082,18 @@ async def _reconcile_state(ctx: BotContext, *, source: str = "unknown") -> None:
                                     extra={
                                         "event": "GHOST_SWEEP_DEFERRED_BROKER_UNKNOWN",
                                         "symbol": ghost_sym,
-                                        "exposure_state": getattr(exposure, "value", str(exposure)),
-                                        "snapshot_age_seconds": exposure_snapshot.get("age_seconds"),
-                                        "snapshot_fresh": exposure_snapshot.get("fresh"),
-                                        "lifecycle": getattr(lifecycle, "value", str(lifecycle)),
+                                        "exposure_state": getattr(
+                                            exposure, "value", str(exposure)
+                                        ),
+                                        "snapshot_age_seconds": exposure_snapshot.get(
+                                            "age_seconds"
+                                        ),
+                                        "snapshot_fresh": exposure_snapshot.get(
+                                            "fresh"
+                                        ),
+                                        "lifecycle": getattr(
+                                            lifecycle, "value", str(lifecycle)
+                                        ),
                                     },
                                 )
                                 continue
@@ -16076,12 +16118,16 @@ async def _reconcile_state(ctx: BotContext, *, source: str = "unknown") -> None:
             ctx.position_reconciliation_completed = True
             ctx.position_reconciliation_in_progress = False
             ctx.position_reconciliation_completed_at = datetime.now(timezone.utc)
-            duration_ms = (ctx.position_reconciliation_completed_at - started_at).total_seconds() * 1000.0
-            run_record.update({
-                "completed_at": ctx.position_reconciliation_completed_at.isoformat(),
-                "duration_ms": duration_ms,
-                "active_run_count": len(active_run_ids),
-            })
+            duration_ms = (
+                ctx.position_reconciliation_completed_at - started_at
+            ).total_seconds() * 1000.0
+            run_record.update(
+                {
+                    "completed_at": ctx.position_reconciliation_completed_at.isoformat(),
+                    "duration_ms": duration_ms,
+                    "active_run_count": len(active_run_ids),
+                }
+            )
             LOGGER.info(
                 "POSITION_RECONCILE_SUCCESS run_id=%s source=%s duration_ms=%.3f",
                 reconcile_run_id,

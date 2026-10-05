@@ -120,7 +120,11 @@ def _quote(manager: Any, symbol: str) -> dict[str, Any]:
         if not callable(getter):
             continue
         try:
-            value = getter(symbol, allow_pull=False) if name == "get_quote" else getter(symbol)
+            value = (
+                getter(symbol, allow_pull=False)
+                if name == "get_quote"
+                else getter(symbol)
+            )
         except TypeError:
             with suppress(Exception):
                 value = getter(symbol)
@@ -136,7 +140,9 @@ def _quote(manager: Any, symbol: str) -> dict[str, Any]:
     return {}
 
 
-def _indicator_snapshot(manager: Any, symbol: str, names: Sequence[str]) -> dict[str, Any]:
+def _indicator_snapshot(
+    manager: Any, symbol: str, names: Sequence[str]
+) -> dict[str, Any]:
     engine = getattr(manager, "_indicator_engine", None)
     getter = getattr(engine, "get_indicators", None)
     if not callable(getter):
@@ -144,7 +150,9 @@ def _indicator_snapshot(manager: Any, symbol: str, names: Sequence[str]) -> dict
     try:
         return _mapping(getter(symbol, list(names)))
     except Exception as exc:  # noqa: BLE001 - missing context must fail closed
-        LOGGER.debug("PROFIT_CONTEXT_INDICATORS_UNAVAILABLE symbol=%s error=%s", symbol, exc)
+        LOGGER.debug(
+            "PROFIT_CONTEXT_INDICATORS_UNAVAILABLE symbol=%s error=%s", symbol, exc
+        )
         return {}
 
 
@@ -166,7 +174,11 @@ def _raw_float(payload: Mapping[str, Any], *names: str) -> float | None:
 
 def _active_basket(manager: Any) -> Any | None:
     source = getattr(manager, "_market_data", None)
-    candidates = [source, getattr(source, "market_data_manager", None), getattr(source, "_mdm", None)]
+    candidates = [
+        source,
+        getattr(source, "market_data_manager", None),
+        getattr(source, "_mdm", None),
+    ]
     for candidate in candidates:
         if candidate is None:
             continue
@@ -187,7 +199,9 @@ def _selection(manager: Any):
     return active_contract_selection_from_basket(_active_basket(manager))
 
 
-def _market_metric(manager: Any, symbol: str, kind: str, quote: Mapping[str, Any]) -> float | None:
+def _market_metric(
+    manager: Any, symbol: str, kind: str, quote: Mapping[str, Any]
+) -> float | None:
     source = getattr(manager, "_market_data", None)
     method_names = {
         "oi": ("get_oi",),
@@ -243,20 +257,34 @@ def _chain_pcr(manager: Any) -> float | None:
 
 
 def _quote_age_seconds(quote: Mapping[str, Any]) -> float | None:
-    raw = quote.get("exchange_timestamp") or quote.get("timestamp") or quote.get("received_at")
+    raw = (
+        quote.get("exchange_timestamp")
+        or quote.get("timestamp")
+        or quote.get("received_at")
+    )
     if raw is None:
         return None
     try:
         if isinstance(raw, datetime):
             stamp = raw if raw.tzinfo else raw.replace(tzinfo=timezone.utc)
-            return max(0.0, (datetime.now(timezone.utc) - stamp.astimezone(timezone.utc)).total_seconds())
+            return max(
+                0.0,
+                (
+                    datetime.now(timezone.utc) - stamp.astimezone(timezone.utc)
+                ).total_seconds(),
+            )
         if isinstance(raw, (int, float)):
             seconds = float(raw) / 1000.0 if float(raw) > 1e12 else float(raw)
             return max(0.0, time.time() - seconds)
         stamp = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
         if stamp.tzinfo is None:
             stamp = stamp.replace(tzinfo=timezone.utc)
-        return max(0.0, (datetime.now(timezone.utc) - stamp.astimezone(timezone.utc)).total_seconds())
+        return max(
+            0.0,
+            (
+                datetime.now(timezone.utc) - stamp.astimezone(timezone.utc)
+            ).total_seconds(),
+        )
     except (TypeError, ValueError, OSError):
         return None
 
@@ -284,7 +312,9 @@ def _option_momentum(manager: Any, symbol: str) -> float | None:
     return ((last - first) / first) * 100.0
 
 
-def _side_alignment(option_symbol: str, price: float | None, reference: float | None) -> int:
+def _side_alignment(
+    option_symbol: str, price: float | None, reference: float | None
+) -> int:
     if price is None or reference is None:
         return 0
     bullish = str(option_symbol).upper().endswith("CE")
@@ -350,8 +380,10 @@ def capture_entry_market_baseline(manager: Any, bracket: Any) -> bool:
 
 def assess_continuation(manager: Any, bracket: Any, ltp: float) -> ContinuationDecision:
     """Assess continuation using explicit evidence contracts, not weighted values."""
+
     def empty(reason: str) -> ContinuationDecision:
         return ContinuationDecision(False, 0, (), (), False, {"reason": reason})
+
     if not _env_bool("MARKET_AWARE_PROFIT_EXTENSION_ENABLED", True):
         return empty("disabled")
     if str(getattr(bracket, "side", "BUY") or "BUY").upper() != "BUY":
@@ -384,27 +416,17 @@ def assess_continuation(manager: Any, bracket: Any, ltp: float) -> ContinuationD
         evidence_count += 1
         if momentum >= 0.20:
             _record_evidence(
-
                 "premium_momentum",
-
                 True,
-
                 positive=positive,
-
                 negative=negative,
-
             )
         elif momentum <= -0.15:
             _record_evidence(
-
                 "premium_momentum_reversal",
-
                 False,
-
                 positive=positive,
-
                 negative=negative,
-
             )
 
     premium_vwap = _field(option, "exchange_vwap", "session_vwap", "vwap")
@@ -433,27 +455,17 @@ def assess_continuation(manager: Any, bracket: Any, ltp: float) -> ContinuationD
         evidence_count += 1
         if adx >= 20.0:
             _record_evidence(
-
                 "premium_adx",
-
                 True,
-
                 positive=positive,
-
                 negative=negative,
-
             )
         elif adx < 15.0:
             _record_evidence(
-
                 "premium_adx_weak",
-
                 False,
-
                 positive=positive,
-
                 negative=negative,
-
             )
 
     volume = _field(quote, "volume", "volume_traded") or _field(option, "volume")
@@ -470,27 +482,17 @@ def assess_continuation(manager: Any, bracket: Any, ltp: float) -> ContinuationD
         evidence_count += 1
         if volume_ratio >= 1.20:
             _record_evidence(
-
                 "premium_volume_expansion",
-
                 True,
-
                 positive=positive,
-
                 negative=negative,
-
             )
         elif volume_ratio <= 0.70:
             _record_evidence(
-
                 "premium_volume_fade",
-
                 False,
-
                 positive=positive,
-
                 negative=negative,
-
             )
 
     current_oi = _market_metric(manager, symbol, "oi", quote)
@@ -501,15 +503,10 @@ def assess_continuation(manager: Any, bracket: Any, ltp: float) -> ContinuationD
         oi_change_pct = ((current_oi - entry_oi) / entry_oi) * 100.0
         if oi_change_pct >= 5.0 and (momentum is None or momentum >= 0):
             _record_evidence(
-
                 "option_oi_build_with_price",
-
                 True,
-
                 positive=positive,
-
                 negative=negative,
-
             )
 
     current_iv = _market_metric(manager, symbol, "iv", quote)
@@ -520,27 +517,17 @@ def assess_continuation(manager: Any, bracket: Any, ltp: float) -> ContinuationD
         iv_change_pct = ((current_iv - entry_iv) / entry_iv) * 100.0
         if iv_change_pct >= 3.0:
             _record_evidence(
-
                 "iv_support",
-
                 True,
-
                 positive=positive,
-
                 negative=negative,
-
             )
         elif iv_change_pct <= -5.0:
             _record_evidence(
-
                 "iv_crush",
-
                 False,
-
                 positive=positive,
-
                 negative=negative,
-
             )
 
     greeks = _greeks(manager, symbol)
@@ -549,15 +536,10 @@ def assess_continuation(manager: Any, bracket: Any, ltp: float) -> ContinuationD
         evidence_count += 1
         if 0.35 <= abs(delta) <= 0.85:
             _record_evidence(
-
                 "responsive_delta",
-
                 True,
-
                 positive=positive,
-
                 negative=negative,
-
             )
 
     spread_pct = _spread_pct(quote)
@@ -565,27 +547,17 @@ def assess_continuation(manager: Any, bracket: Any, ltp: float) -> ContinuationD
         evidence_count += 1
         if spread_pct <= 1.0:
             _record_evidence(
-
                 "executable_spread",
-
                 True,
-
                 positive=positive,
-
                 negative=negative,
-
             )
         elif spread_pct > _env_float("PROFIT_EXTENSION_MAX_SPREAD_PCT", 1.5):
             _record_evidence(
-
                 "wide_spread",
-
                 False,
-
                 positive=positive,
-
                 negative=negative,
-
             )
             critical_block = True
 
@@ -594,15 +566,10 @@ def assess_continuation(manager: Any, bracket: Any, ltp: float) -> ContinuationD
         evidence_count += 1
         if quote_age > _env_float("PROFIT_EXTENSION_QUOTE_MAX_AGE_SEC", 3.0):
             _record_evidence(
-
                 "held_quote_stale",
-
                 False,
-
                 positive=positive,
-
                 negative=negative,
-
             )
             critical_block = True
 
@@ -623,60 +590,38 @@ def assess_continuation(manager: Any, bracket: Any, ltp: float) -> ContinuationD
         evidence_count += 1
         if context_votes == context_available:
             _record_evidence(
-
                 "underlying_vwap_alignment",
-
                 True,
-
                 positive=positive,
-
                 negative=negative,
-
             )
         elif context_votes <= -context_available:
             _record_evidence(
-
                 "underlying_vwap_conflict",
-
                 False,
-
                 positive=positive,
-
                 negative=negative,
-
             )
 
     ema_votes = [
-        _ema_alignment(symbol, payload)
-        for payload in (spot, future)
-        if payload
+        _ema_alignment(symbol, payload) for payload in (spot, future) if payload
     ]
     ema_votes = [vote for vote in ema_votes if vote != 0]
     if ema_votes:
         evidence_count += 1
         if all(vote > 0 for vote in ema_votes):
             _record_evidence(
-
                 "underlying_ema_alignment",
-
                 True,
-
                 positive=positive,
-
                 negative=negative,
-
             )
         elif all(vote < 0 for vote in ema_votes):
             _record_evidence(
-
                 "underlying_ema_conflict",
-
                 False,
-
                 positive=positive,
-
                 negative=negative,
-
             )
 
     futures_volume_ratio = _raw_float(future, "futures_volume_ratio", "volume_ratio")
@@ -689,27 +634,17 @@ def assess_continuation(manager: Any, bracket: Any, ltp: float) -> ContinuationD
         evidence_count += 1
         if futures_volume_ratio >= 1.10:
             _record_evidence(
-
                 "futures_volume_confirmation",
-
                 True,
-
                 positive=positive,
-
                 negative=negative,
-
             )
         elif futures_volume_ratio <= 0.80:
             _record_evidence(
-
                 "futures_volume_fade",
-
                 False,
-
                 positive=positive,
-
                 negative=negative,
-
             )
 
     direction_bias = str(
@@ -754,27 +689,17 @@ def assess_continuation(manager: Any, bracket: Any, ltp: float) -> ContinuationD
         evidence_count += 1
         if regime is MarketRegime.TREND and direction_bias == symbol[-2:]:
             _record_evidence(
-
                 "trend_regime",
-
                 True,
-
                 positive=positive,
-
                 negative=negative,
-
             )
         elif regime in {MarketRegime.RANGE, MarketRegime.LOW_ACTIVITY}:
             _record_evidence(
-
                 "nontrend_regime",
-
                 False,
-
                 positive=positive,
-
                 negative=negative,
-
             )
 
     current_pcr = _chain_pcr(manager)
@@ -789,30 +714,20 @@ def assess_continuation(manager: Any, bracket: Any, ltp: float) -> ContinuationD
             or (pcr_change_pct is not None and pcr_change_pct >= 3.0)
         ):
             _record_evidence(
-
                 "chain_put_support",
-
                 True,
-
                 positive=positive,
-
                 negative=negative,
-
             )
         elif symbol.endswith("PE") and (
             current_pcr <= 0.95
             or (pcr_change_pct is not None and pcr_change_pct <= -3.0)
         ):
             _record_evidence(
-
                 "chain_call_pressure",
-
                 True,
-
                 positive=positive,
-
                 negative=negative,
-
             )
 
     min_evidence = max(1, int(_env_float("MARKET_AWARE_PROFIT_MIN_EVIDENCE", 4.0)))
@@ -908,8 +823,13 @@ def _initial_risk(bracket: Any) -> float:
 def _mfe_points(bracket: Any, ltp: float) -> float:
     entry = float(getattr(bracket, "entry_price", 0.0) or 0.0)
     if str(getattr(bracket, "side", "BUY")).upper() == "BUY":
-        return max(0.0, max(float(getattr(bracket, "highest_ltp", entry) or entry), ltp) - entry)
-    return max(0.0, entry - min(float(getattr(bracket, "lowest_ltp", entry) or entry), ltp))
+        return max(
+            0.0,
+            max(float(getattr(bracket, "highest_ltp", entry) or entry), ltp) - entry,
+        )
+    return max(
+        0.0, entry - min(float(getattr(bracket, "lowest_ltp", entry) or entry), ltp)
+    )
 
 
 def _cost_floor(manager: Any, bracket: Any) -> float:
@@ -931,7 +851,9 @@ def _protected_profit_floor(manager: Any, bracket: Any) -> bool:
     return current_sl <= entry - max(cost, _TICK_SIZE) + 1e-9
 
 
-def _ratchet_stop(manager: Any, bracket: Any, candidate: float, ltp: float, *, reason: str) -> bool:
+def _ratchet_stop(
+    manager: Any, bracket: Any, candidate: float, ltp: float, *, reason: str
+) -> bool:
     current = float(getattr(bracket, "sl_trigger_price", 0.0) or 0.0)
     side = str(getattr(bracket, "side", "BUY") or "BUY").upper()
     candidate = _round_tick(candidate)

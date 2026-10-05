@@ -20,7 +20,6 @@ from nifty_scalper_bot.strategies.elite_strategies.config_models import (
 )
 from nifty_scalper_bot.strategies.elite_strategies.orb_pro import ORBProStrategy
 
-
 _FUTURE = "NFO:NIFTY26SEPFUT"
 _OPEN = datetime(2026, 9, 1, 3, 45, tzinfo=timezone.utc)
 
@@ -166,9 +165,7 @@ def test_orb_pe_underlying_breakout_uses_contract_side(monkeypatch) -> None:
 
 
 def test_orb_option_premium_breakdown_does_not_create_buy_vote() -> None:
-    strategy = ORBProStrategy(
-        ORBProStrategyConfig(), indicator_engine=None
-    )
+    strategy = ORBProStrategy(ORBProStrategyConfig(), indicator_engine=None)
     indicators = {
         "orb_ready": True,
         "orb_high": 105.0,
@@ -224,12 +221,9 @@ def test_production_profile_is_stable_and_changes_with_material_settings(
     assert first["version"].startswith("production-v3-")
     assert first["execution_mode"] == "LIVE"
     assert "OrderFlow" in first["strategies"]["context_only"]
-    assert {"SMC", "VWAPPro", "ORBPro"}.issubset(
-        first["strategies"]["trigger_capable"]
-    )
+    assert {"SMC", "VWAPPro", "ORBPro"}.issubset(first["strategies"]["trigger_capable"])
     assert (
-        first["structural_entry_policy"]["setup"]
-        == "strategy_owned_boolean_contract"
+        first["structural_entry_policy"]["setup"] == "strategy_owned_boolean_contract"
     )
     assert first["strategy_configs"]["ORBPro"]["orb_minutes"] == 15
 

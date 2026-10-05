@@ -392,9 +392,7 @@ class ORBProStrategy(EliteStrategy):
         direction_aligned = direction == side
         if direction_aligned:
             reasons.append("underlying_direction_alignment")
-        volume_confirmed = volume_ratio >= _env_float(
-            "ORB_VOLUME_CONFIRM_RATIO", 1.2
-        )
+        volume_confirmed = volume_ratio >= _env_float("ORB_VOLUME_CONFIRM_RATIO", 1.2)
         if volume_confirmed:
             reasons.append("underlying_volume_confirmation")
         penetration_confirmed = penetration_atr >= _env_float(
@@ -410,9 +408,7 @@ class ORBProStrategy(EliteStrategy):
         if slope_aligned:
             reasons.append("futures_vwap_slope_alignment")
         balanced_min = max(0.05, _env_float("ORB_BALANCED_RANGE_MIN_ATR", 0.25))
-        balanced_max = max(
-            balanced_min, _env_float("ORB_BALANCED_RANGE_MAX_ATR", 1.75)
-        )
+        balanced_max = max(balanced_min, _env_float("ORB_BALANCED_RANGE_MAX_ATR", 1.75))
         balanced_range = balanced_min <= opening_range_atr <= balanced_max
         if balanced_range:
             reasons.append("balanced_opening_range")

@@ -179,6 +179,7 @@ class _NoNetworkBroker:
 
 class _NoNetworkWebSocketManager:
     is_simulated_adapter = True
+
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         self._callbacks: dict[str, Any] = {}
         self._subscribed_tokens: set[int] = set()
@@ -204,7 +205,9 @@ class _NoNetworkWebSocketManager:
             # Production WebSocketManager routes through its injected MDM reference.
             mdm = getattr(self, "_market_data_manager", None)
             if mdm is None:
-                raise RuntimeError("production websocket tick callback was not registered")
+                raise RuntimeError(
+                    "production websocket tick callback was not registered"
+                )
             mdm.process_ticks([tick])
             drain = getattr(mdm, "_drain_tick_queue_sync", None)
             if callable(drain):
@@ -237,6 +240,7 @@ class _NoNetworkWebSocketManager:
 
 class _NoNetworkRobustProvider:
     is_simulated_adapter = True
+
     def __init__(self, broker_client: Any, *args: Any, **kwargs: Any) -> None:
         self.client = broker_client
         self._broker = broker_client
@@ -290,7 +294,9 @@ _FIXED_RUNTIME_NOW_IST = (_RUNTIME_NOW_IST - pd.Timedelta(days=1)).to_pydatetime
 
 def _patch_runtime_clock(
     monkeypatch: pytest.MonkeyPatch,
-    now_ist: datetime = _FIXED_RUNTIME_NOW_IST.replace(hour=10, minute=30, second=0, microsecond=0),
+    now_ist: datetime = _FIXED_RUNTIME_NOW_IST.replace(
+        hour=10, minute=30, second=0, microsecond=0
+    ),
 ) -> None:
     import nifty_scalper_bot.strategies.runner as runner_mod
     from nifty_scalper_bot.risk import expiry_gate
@@ -511,6 +517,7 @@ def test_live_simulation_blocks_real_websocket_adapter(monkeypatch):
 @pytest.mark.simulation_component
 def test_live_simulation_accepts_marked_broker(monkeypatch):
     monkeypatch.setenv("EXECUTION_MODE", "LIVE_SIMULATION")
+
     class Broker:
         is_simulated_adapter = True
 

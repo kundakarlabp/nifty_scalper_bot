@@ -2,8 +2,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from nifty_scalper_bot.strategies.elite_strategies.base_elite import EliteSignal, EliteStrategy
-from nifty_scalper_bot.strategies.elite_strategies.config_models import BBSqueezeStrategyConfig
+from nifty_scalper_bot.strategies.elite_strategies.base_elite import (
+    EliteSignal,
+    EliteStrategy,
+)
+from nifty_scalper_bot.strategies.elite_strategies.config_models import (
+    BBSqueezeStrategyConfig,
+)
 from nifty_scalper_bot.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
@@ -44,7 +49,9 @@ class BBSqueezeStrategy(EliteStrategy):
         del position
         try:
             self._no_vote("stale_or_invalid_data")
-            if symbol.upper().endswith(("CE", "PE")) and not indicators.get("source_symbol"):
+            if symbol.upper().endswith(("CE", "PE")) and not indicators.get(
+                "source_symbol"
+            ):
                 self._no_vote("domain_skip_option_symbol")
                 return None
 
@@ -75,7 +82,9 @@ class BBSqueezeStrategy(EliteStrategy):
                 self._no_vote("no_squeeze")
                 return None
 
-            breakout_side = "CE" if close > upper else "PE" if close < lower else "UNKNOWN"
+            breakout_side = (
+                "CE" if close > upper else "PE" if close < lower else "UNKNOWN"
+            )
             if breakout_side == "UNKNOWN":
                 self._no_vote("no_breakout")
                 return None

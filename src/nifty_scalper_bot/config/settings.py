@@ -237,7 +237,9 @@ def _env_float(*names: str, default: float, minimum: float | None = None) -> flo
                 # AttributeErrors elsewhere and bricks startup - 2026-07-09).
                 LOGGER.error(
                     "SETTINGS_ENV_INVALID name=%s raw=%r using_default=%r",
-                    name, raw_value, default,
+                    name,
+                    raw_value,
+                    default,
                     extra={"event": "SETTINGS_ENV_INVALID", "env_name": name},
                 )
                 value = float(default)
@@ -246,7 +248,10 @@ def _env_float(*names: str, default: float, minimum: float | None = None) -> flo
         if minimum is not None and value < minimum:
             LOGGER.error(
                 "SETTINGS_ENV_BELOW_MINIMUM name=%s value=%r minimum=%r using_default=%r",
-                source_name, value, minimum, default,
+                source_name,
+                value,
+                minimum,
+                default,
                 extra={"event": "SETTINGS_ENV_INVALID", "env_name": source_name},
             )
             value = float(default) if float(default) >= minimum else float(minimum)
@@ -317,7 +322,9 @@ def _env_int(*names: str, default: int, minimum: int | None = None) -> int:
                 # over a malformed tuning variable.
                 LOGGER.error(
                     "SETTINGS_ENV_INVALID name=%s raw=%r using_default=%r",
-                    name, raw_value, default,
+                    name,
+                    raw_value,
+                    default,
                     extra={"event": "SETTINGS_ENV_INVALID", "env_name": name},
                 )
                 value = int(default)
@@ -326,7 +333,10 @@ def _env_int(*names: str, default: int, minimum: int | None = None) -> int:
         if minimum is not None and value < minimum:
             LOGGER.error(
                 "SETTINGS_ENV_BELOW_MINIMUM name=%s value=%r minimum=%r using_default=%r",
-                source_name, value, minimum, default,
+                source_name,
+                value,
+                minimum,
+                default,
                 extra={"event": "SETTINGS_ENV_INVALID", "env_name": source_name},
             )
             value = int(default) if int(default) >= minimum else int(minimum)

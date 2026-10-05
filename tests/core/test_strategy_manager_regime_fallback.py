@@ -117,9 +117,12 @@ def test_undated_or_stale_context_cannot_confirm_entry() -> None:
 
 
 def test_canonical_vwap_prefers_session_over_rolling_and_never_invents_one() -> None:
-    assert resolve_canonical_vwap(
-        {"vwap": 102.94, "session_vwap": 103.31, "exchange_vwap": 103.45}
-    ) == 103.45
+    assert (
+        resolve_canonical_vwap(
+            {"vwap": 102.94, "session_vwap": 103.31, "exchange_vwap": 103.45}
+        )
+        == 103.45
+    )
     assert resolve_canonical_vwap({"vwap": 102.94, "session_vwap": 103.31}) == 103.31
     assert resolve_canonical_vwap({"vwap": 102.94}) == 102.94
     assert resolve_canonical_vwap({"current_price": 103.0, "ltp": 103.0}) is None

@@ -10,7 +10,6 @@ from nifty_scalper_bot.strategies.elite_tuesday_gamma_buyer import (
     EliteTuesdayGammaBuyer,
 )
 
-
 IST = ZoneInfo("Asia/Kolkata")
 SYMBOL_CE = "NFO:NIFTY2691523400CE"
 SYMBOL_PE = "NFO:NIFTY2691523400PE"

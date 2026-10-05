@@ -77,7 +77,12 @@ def _env_int(name: str, default: int, minimum: int = 1) -> int:
 
 def _bar_ts(bar: Any) -> Any:
     if isinstance(bar, Mapping):
-        return bar.get("timestamp") or bar.get("ts") or bar.get("datetime") or bar.get("time")
+        return (
+            bar.get("timestamp")
+            or bar.get("ts")
+            or bar.get("datetime")
+            or bar.get("time")
+        )
     return (
         getattr(bar, "timestamp", None)
         or getattr(bar, "ts", None)
@@ -125,7 +130,9 @@ def _resolve_underlying_symbols(
     """
     context = runner_context or {}
     basket = _active_basket(data_hub)
-    raw_spot = context.get("spot_symbol") or _basket_get(basket, "spot_symbol") or "NSE:NIFTY"
+    raw_spot = (
+        context.get("spot_symbol") or _basket_get(basket, "spot_symbol") or "NSE:NIFTY"
+    )
     raw_future = (
         context.get("futures_symbol")
         or _basket_get(basket, "futures_symbol")
@@ -172,7 +179,9 @@ def build_strategy_history_context(
     indicator_bars = collect_history_bars(indicator_engine, symbol)
     bars = data_hub_bars or indicator_bars
     history_source = (
-        "data_hub" if data_hub_bars else "indicator_engine" if indicator_bars else "unavailable"
+        "data_hub"
+        if data_hub_bars
+        else "indicator_engine" if indicator_bars else "unavailable"
     )
 
     history_domain_used = classify_history_domain(symbol)
@@ -182,8 +191,12 @@ def build_strategy_history_context(
     underlying_count = raw_count if history_domain_used == "underlying" else 0
 
     if runner_context:
-        option_count = max(option_count, _safe_int(runner_context.get("option_history_count"), 0))
-        spot_count = max(spot_count, _safe_int(runner_context.get("spot_history_count"), 0))
+        option_count = max(
+            option_count, _safe_int(runner_context.get("option_history_count"), 0)
+        )
+        spot_count = max(
+            spot_count, _safe_int(runner_context.get("spot_history_count"), 0)
+        )
         underlying_count = max(
             underlying_count,
             _safe_int(runner_context.get("underlying_history_count"), 0),
@@ -217,7 +230,9 @@ def build_strategy_history_context(
         history_resolved_count=resolved_history_count,
         oldest_bar_ts=oldest_bar_ts,
         latest_bar_ts=latest_bar_ts,
-        history_quality="warm" if resolved_history_count >= domain_min_required else "cold",
+        history_quality=(
+            "warm" if resolved_history_count >= domain_min_required else "cold"
+        ),
         history_required_min=domain_min_required,
         history_ready=resolved_history_count >= domain_min_required,
         smc_history_required_min=smc_min_bars,
@@ -225,7 +240,9 @@ def build_strategy_history_context(
     ).to_dict()
 
     if history_domain_used == "options":
-        spot_symbol, futures_symbol = _resolve_underlying_symbols(data_hub, runner_context)
+        spot_symbol, futures_symbol = _resolve_underlying_symbols(
+            data_hub, runner_context
+        )
         result["spot_symbol"] = spot_symbol
         result["futures_symbol"] = futures_symbol
 

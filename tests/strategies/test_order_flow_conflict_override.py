@@ -52,9 +52,7 @@ def _eval(strat, sym, ind):
 
 def test_opposing_underlying_direction_remains_conflict(monkeypatch, strat):
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
-    sig = _eval(
-        strat, "NFO:NIFTY26MAY24000CE", _ind("PE", "UP", buy=400, sell=80)
-    )
+    sig = _eval(strat, "NFO:NIFTY26MAY24000CE", _ind("PE", "UP", buy=400, sell=80))
 
     assert sig.metadata["trigger_conditions_met"] is False
     assert sig.metadata["trigger_block_reason"] == "context_only_role"
@@ -89,9 +87,7 @@ def test_persistent_microstructure_cannot_override_underlying_direction(
 
 def test_aligned_direction_and_microstructure_publish_confirmation(monkeypatch, strat):
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
-    sig = _eval(
-        strat, "NFO:NIFTY26MAY24000CE", _ind("CE", "UP", buy=400, sell=80)
-    )
+    sig = _eval(strat, "NFO:NIFTY26MAY24000CE", _ind("CE", "UP", buy=400, sell=80))
 
     assert sig.metadata["trigger_conditions_met"] is False
     assert sig.metadata["trigger_block_reason"] == "context_only_role"
@@ -102,9 +98,7 @@ def test_aligned_direction_and_microstructure_publish_confirmation(monkeypatch, 
 
 def test_weak_microstructure_does_not_create_alignment(monkeypatch, strat):
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
-    sig = _eval(
-        strat, "NFO:NIFTY26MAY24000CE", _ind("CE", "UP", buy=210, sell=180)
-    )
+    sig = _eval(strat, "NFO:NIFTY26MAY24000CE", _ind("CE", "UP", buy=210, sell=180))
 
     assert sig.metadata["trigger_conditions_met"] is False
     assert sig.metadata["context_quality_eligible"] is True
@@ -114,9 +108,7 @@ def test_weak_microstructure_does_not_create_alignment(monkeypatch, strat):
 
 def test_missing_underlying_direction_makes_context_ineligible(monkeypatch, strat):
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
-    sig = _eval(
-        strat, "NFO:NIFTY26MAY24000CE", _ind("", "UP", buy=400, sell=80)
-    )
+    sig = _eval(strat, "NFO:NIFTY26MAY24000CE", _ind("", "UP", buy=400, sell=80))
 
     assert sig.metadata["trigger_conditions_met"] is False
     assert sig.metadata["trigger_block_reason"] == "context_only_role"

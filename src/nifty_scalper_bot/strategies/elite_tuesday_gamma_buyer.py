@@ -26,6 +26,7 @@ from nifty_scalper_bot.utils.smart_symbol import (
 
 LOGGER = get_logger(__name__)
 
+
 def _positive_float(value: Any) -> float | None:
     try:
         parsed = float(value)
@@ -89,8 +90,7 @@ class EliteTuesdayGammaBuyer(EliteStrategy):
             except (TypeError, ValueError):
                 return False
         return (
-            get_actual_expiry_date(trading_date, WEEKLY_EXPIRY_WEEKDAY)
-            == trading_date
+            get_actual_expiry_date(trading_date, WEEKLY_EXPIRY_WEEKDAY) == trading_date
         )
 
     def _evaluate_signal(
@@ -102,9 +102,9 @@ class EliteTuesdayGammaBuyer(EliteStrategy):
     ) -> EliteSignal | None:
         del position
         try:
-            strategy_mode = str(
-                os.getenv("STRATEGY_MODE", "directional_scalp")
-            ).strip().lower()
+            strategy_mode = (
+                str(os.getenv("STRATEGY_MODE", "directional_scalp")).strip().lower()
+            )
             gamma_enabled = str(
                 os.getenv("ALLOW_EXPIRY_GAMMA_STRATEGIES", "false")
             ).strip().lower() in {"1", "true", "yes", "on"}

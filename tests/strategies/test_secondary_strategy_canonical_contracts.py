@@ -44,9 +44,7 @@ def test_oi_max_pain_uses_spot_not_option_premium() -> None:
 
 
 def test_oi_max_pain_option_requires_underlying_spot() -> None:
-    strategy = OIMaxPainStrategy(
-        OIMaxPainStrategyConfig(), indicator_engine=None
-    )
+    strategy = OIMaxPainStrategy(OIMaxPainStrategyConfig(), indicator_engine=None)
 
     signal = strategy.generate_signal(
         "NFO:NIFTY2691524000CE",

@@ -265,7 +265,9 @@ def build_elite_strategies(
     for field_name, (_module, strategy_cls, _label) in STRATEGY_CATALOG.items():
         try:
             if not hasattr(settings, field_name):
-                LOGGER.warning("⚠️  Builder: No config found for '%s'. Skipping.", field_name)
+                LOGGER.warning(
+                    "⚠️  Builder: No config found for '%s'. Skipping.", field_name
+                )
                 continue
 
             strat_config = getattr(settings, field_name)

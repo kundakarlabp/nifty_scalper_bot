@@ -67,9 +67,7 @@ def test_partition_separates_valid_triggers_context_and_rejections() -> None:
     triggers, contexts, rejected_setups = partition_votes([valid, context, rejected])
     assert triggers == [valid]
     assert contexts == [context]
-    assert rejected_setups == [
-        {"strategy": "VWAPPro", "reason": "event_unconfirmed"}
-    ]
+    assert rejected_setups == [{"strategy": "VWAPPro", "reason": "event_unconfirmed"}]
 
 
 def test_close_signal_bypasses_entry_setup_gate() -> None:

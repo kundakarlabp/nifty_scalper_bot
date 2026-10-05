@@ -1540,8 +1540,7 @@ class StrategyManager:
         else:
             # ✅ NEW: Log when filter rejects signal
             self._logger.info(
-                f"⛔ FILTER REJECT: {symbol} | "
-                f"Action={combined.action}",
+                f"⛔ FILTER REJECT: {symbol} | " f"Action={combined.action}",
                 extra={"event": "signal_filter_reject", "symbol": symbol},
             )
 
@@ -1585,8 +1584,11 @@ class StrategyManager:
         if not selected:
             return None
         option_sides = {
-            "CE" if str(signal.symbol).upper().endswith("CE") else
-            "PE" if str(signal.symbol).upper().endswith("PE") else ""
+            (
+                "CE"
+                if str(signal.symbol).upper().endswith("CE")
+                else "PE" if str(signal.symbol).upper().endswith("PE") else ""
+            )
             for signal in selected
         }
         option_sides.discard("")

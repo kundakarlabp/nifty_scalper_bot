@@ -421,7 +421,9 @@ def test_release_block_survives_manager_restart(monkeypatch, tmp_path) -> None:
     assert second.has_unresolved_exit() is True
 
 
-def test_duplicate_final_close_does_not_latch_ledger_block(monkeypatch, tmp_path) -> None:
+def test_duplicate_final_close_does_not_latch_ledger_block(
+    monkeypatch, tmp_path
+) -> None:
     """P0: closing an already-accounted bracket twice must be a no-op.
 
     Production symptom: a second _close_bracket() on a successfully accounted

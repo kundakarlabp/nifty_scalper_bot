@@ -216,8 +216,7 @@ class EliteStrategy(Strategy):
                     elite_signal, indicators_payload
                 )
                 if (
-                    str(os.getenv("EXECUTION_MODE", "SHADOW")).strip().upper()
-                    == "LIVE"
+                    str(os.getenv("EXECUTION_MODE", "SHADOW")).strip().upper() == "LIVE"
                     and bool(execution_evidence.get("spread_observed"))
                     and execution_evidence.get("spread_ok") is False
                 ):
@@ -449,9 +448,7 @@ class EliteStrategy(Strategy):
             reference = (
                 indicators.get("prior_swing_low")
                 if side == "CE"
-                else indicators.get("prior_swing_high")
-                if side == "PE"
-                else None
+                else indicators.get("prior_swing_high") if side == "PE" else None
             )
             if reference is None:
                 reference = metadata.get("sweep_level")
@@ -500,12 +497,16 @@ class EliteStrategy(Strategy):
         if anchor is None:
             return None
         symbol_key = str(elite_signal.symbol or "").strip().upper()
-        side = str(
-            metadata.get("contract_side")
-            or metadata.get("trade_side")
-            or metadata.get("side")
-            or ""
-        ).strip().upper()
+        side = (
+            str(
+                metadata.get("contract_side")
+                or metadata.get("trade_side")
+                or metadata.get("side")
+                or ""
+            )
+            .strip()
+            .upper()
+        )
         return symbol_key, (str(anchor), str(elite_signal.signal), side)
 
     def _is_duplicate_setup_vote(self, elite_signal: EliteSignal) -> bool:
@@ -513,9 +514,7 @@ class EliteStrategy(Strategy):
         del elite_signal
         return False
 
-    def notify_entry_accepted(
-        self, side: str, *, setup_id: str | None = None
-    ) -> None:
+    def notify_entry_accepted(self, side: str, *, setup_id: str | None = None) -> None:
         """Compatibility hook; order lifecycle is owned by the runner."""
         del side, setup_id
 

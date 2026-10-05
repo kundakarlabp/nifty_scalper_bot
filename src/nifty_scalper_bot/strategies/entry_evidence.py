@@ -53,12 +53,16 @@ def infer_option_side(symbol: str, metadata: Mapping[str, object] | None = None)
     if upper.endswith("PE"):
         return "PE"
     payload = dict(metadata or {})
-    side = str(
-        payload.get("contract_side")
-        or payload.get("trade_side")
-        or payload.get("side")
-        or ""
-    ).strip().upper()
+    side = (
+        str(
+            payload.get("contract_side")
+            or payload.get("trade_side")
+            or payload.get("side")
+            or ""
+        )
+        .strip()
+        .upper()
+    )
     return side if side in {"CE", "PE"} else "UNKNOWN"
 
 
@@ -89,11 +93,15 @@ def build_execution_evidence(
     """Build objective execution evidence from the current market snapshot."""
     payload = dict(indicators or {})
     resolved_side = str(side or "").strip().upper()
-    direction = str(
-        payload.get("underlying_direction_bias")
-        or payload.get("direction_bias")
-        or ""
-    ).strip().upper()
+    direction = (
+        str(
+            payload.get("underlying_direction_bias")
+            or payload.get("direction_bias")
+            or ""
+        )
+        .strip()
+        .upper()
+    )
 
     try:
         bid = float(cast(Any, payload.get("bid") or 0.0))
@@ -105,9 +113,7 @@ def build_execution_evidence(
     spread_observed = payload.get("spread_pct") is not None
     try:
         spread_pct = (
-            float(cast(Any, payload.get("spread_pct")))
-            if spread_observed
-            else None
+            float(cast(Any, payload.get("spread_pct"))) if spread_observed else None
         )
     except (TypeError, ValueError):
         spread_pct = None

@@ -225,9 +225,9 @@ class OrderFlowStrategy(EliteStrategy):
                 self._no_vote("missing_depth")
                 return None
 
-            execution_mode = str(
-                os.getenv("EXECUTION_MODE", "SHADOW") or "SHADOW"
-            ).strip().upper()
+            execution_mode = (
+                str(os.getenv("EXECUTION_MODE", "SHADOW") or "SHADOW").strip().upper()
+            )
             is_live = execution_mode == "LIVE"
             max_spread_pct = safe_float_env(
                 "ORDERFLOW_CONTEXT_MAX_SPREAD_PCT",
@@ -268,16 +268,14 @@ class OrderFlowStrategy(EliteStrategy):
                 self._no_vote("unknown_contract_side")
                 return None
 
-            depth_imbalance = (total_bid - total_ask) / max(
-                total_bid + total_ask, 1.0
-            )
+            depth_imbalance = (total_bid - total_ask) / max(total_bid + total_ask, 1.0)
             side = (
                 contract_side
                 if option_premium_domain
                 else ("CE" if depth_imbalance > 0 else "PE")
             )
-            support_threshold, strong_support_threshold = (
-                _normalised_depth_thresholds(self._cfg)
+            support_threshold, strong_support_threshold = _normalised_depth_thresholds(
+                self._cfg
             )
             depth_supports_side = _depth_supports_side(
                 depth_imbalance,
@@ -307,9 +305,7 @@ class OrderFlowStrategy(EliteStrategy):
                 0.01, safe_float_env("ORDERFLOW_OFI_NORMALIZED_MIN", 0.10)
             )
             ofi_directional = bool(
-                ofi_ready
-                and ofi_value is not None
-                and abs(ofi_value) >= ofi_threshold
+                ofi_ready and ofi_value is not None and abs(ofi_value) >= ofi_threshold
             )
             ofi_supports_side = bool(
                 ofi_directional
@@ -320,9 +316,7 @@ class OrderFlowStrategy(EliteStrategy):
                     threshold=ofi_threshold,
                 )
             )
-            ofi_conflicts_side = bool(
-                ofi_directional and not ofi_supports_side
-            )
+            ofi_conflicts_side = bool(ofi_directional and not ofi_supports_side)
             flow_supports_side = (
                 ofi_supports_side if ofi_directional else tick_supports_side
             )
@@ -331,12 +325,9 @@ class OrderFlowStrategy(EliteStrategy):
             )
 
             context_age_seconds = resolve_context_age_seconds(indicators)
-            max_context_age = safe_float_env(
-                "ORDERFLOW_MAX_CONTEXT_AGE_SECONDS", 5.0
-            )
-            context_fresh = (
-                context_age_seconds <= max_context_age
-                and not bool(indicators.get("stale_data_used"))
+            max_context_age = safe_float_env("ORDERFLOW_MAX_CONTEXT_AGE_SECONDS", 5.0)
+            context_fresh = context_age_seconds <= max_context_age and not bool(
+                indicators.get("stale_data_used")
             )
             direction_available = direction in {"CE", "PE"}
             side_aligns = bool(direction_available and direction == side)
@@ -358,9 +349,7 @@ class OrderFlowStrategy(EliteStrategy):
                 and not ofi_conflicts_side
             )
             effective_context_conflict = bool(
-                context_quality_eligible
-                and direction_available
-                and direction != side
+                context_quality_eligible and direction_available and direction != side
             )
 
             reasons: list[str] = []
@@ -405,9 +394,7 @@ class OrderFlowStrategy(EliteStrategy):
                 "depth_supports_side": depth_supports_side,
                 "strong_depth_supports_side": strong_depth_supports_side,
                 "depth_support_threshold": round(support_threshold, 4),
-                "strong_depth_support_threshold": round(
-                    strong_support_threshold, 4
-                ),
+                "strong_depth_support_threshold": round(strong_support_threshold, 4),
                 "tick_direction": tick_direction,
                 "tick_supports_side": tick_supports_side,
                 "ofi_ready": ofi_ready,
@@ -430,7 +417,8 @@ class OrderFlowStrategy(EliteStrategy):
                 "trigger_block_reason": "context_only_role",
                 "can_trigger": False,
                 "premium_stop_distance": max(
-                    0.8 * max(
+                    0.8
+                    * max(
                         float(indicators.get("atr") or 0.0),
                         current_price * 0.01,
                         1.0,

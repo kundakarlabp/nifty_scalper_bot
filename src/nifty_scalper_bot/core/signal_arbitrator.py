@@ -70,7 +70,10 @@ class SignalArbitrator:
         with self._lock:
             prev = self._state.get(key)
             if key in self._active_symbols:
-                if prev is not None and now - prev.last_ts >= self._stale_active_seconds:
+                if (
+                    prev is not None
+                    and now - prev.last_ts >= self._stale_active_seconds
+                ):
                     self._active_symbols.discard(key)
                 else:
                     return False

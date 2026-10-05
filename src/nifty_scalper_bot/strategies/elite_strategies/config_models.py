@@ -31,6 +31,7 @@ class EliteStrategyConfig:
 
 # --- Strategy Specific Configurations ---
 
+
 @dataclass(slots=True)
 class SMCStrategyConfig(EliteStrategyConfig):
     """SMC Liquidity sweep and participation thresholds."""
@@ -133,7 +134,9 @@ class EliteStrategiesSettings:
 
     smc: SMCStrategyConfig = field(default_factory=SMCStrategyConfig)
     vwap: VWAPProStrategyConfig = field(default_factory=VWAPProStrategyConfig)
-    oi_max_pain: OIMaxPainStrategyConfig = field(default_factory=OIMaxPainStrategyConfig)
+    oi_max_pain: OIMaxPainStrategyConfig = field(
+        default_factory=OIMaxPainStrategyConfig
+    )
     gamma_scalping: GammaScalpingStrategyConfig = field(
         default_factory=GammaScalpingStrategyConfig
     )
@@ -143,7 +146,9 @@ class EliteStrategiesSettings:
     cpr: CPRBreakoutStrategyConfig = field(default_factory=CPRBreakoutStrategyConfig)
     order_flow: OrderFlowStrategyConfig = field(default_factory=OrderFlowStrategyConfig)
     bb_squeeze: BBSqueezeStrategyConfig = field(default_factory=BBSqueezeStrategyConfig)
-    rsi_div: RSIDivergenceStrategyConfig = field(default_factory=RSIDivergenceStrategyConfig)
+    rsi_div: RSIDivergenceStrategyConfig = field(
+        default_factory=RSIDivergenceStrategyConfig
+    )
     orb: ORBProStrategyConfig = field(default_factory=ORBProStrategyConfig)
     # Parse compatibility only; the single-leg placeholder runtime was retired.
     straddle: StraddleThetaStrategyConfig = field(
