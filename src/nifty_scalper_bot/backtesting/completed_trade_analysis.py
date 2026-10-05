@@ -15,7 +15,6 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
-from nifty_scalper_bot.backtesting.research_validation import bootstrap_mean_interval
 from nifty_scalper_bot.utils.market_hours import IST
 
 
