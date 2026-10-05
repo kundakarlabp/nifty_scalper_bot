@@ -4726,7 +4726,7 @@ class StrategyManager(_BaseStrategyManager):
                 and metadata.get("setup_pass") is True
                 and metadata.get("preliminary_only") is True
                 and requires_orderflow_confirmation
-                and metadata.get("requires_runner_final_score") is True
+                and metadata.get("requires_runner_execution_validation") is True
                 and setup_min is not None
             )
             # STRATEGY_ALLOW_SINGLE_VOTE_SCALP=false is the master default block
@@ -4854,9 +4854,7 @@ class StrategyManager(_BaseStrategyManager):
                 ),
             )
             # This score is telemetry only. StrategyManager owns structural/context
-            # qualification; Runner is the sole final numeric quality owner.
-            # Re-applying a final score floor here strands confirmed candidates
-            # before Runner can evaluate the canonical independent-alpha contract.
+            # qualification; Runner owns candidate/quote execution validation.
             manager_context_score_reference_pass = bool(
                 context_confirmed_final_score >= context_confirmed_final_min
             )
@@ -5149,7 +5147,7 @@ class StrategyManager(_BaseStrategyManager):
             "manager_reference_score": round(final_score, 3),
             "manager_reference_threshold": round(threshold, 3),
             "manager_reference_pass": final_score >= threshold,
-            "final_numeric_gate_owner": "runner_final_execution_score",
+            "score_admission_role": "diagnostic_only",
         }
         if vetoed:
             blocked_reason = "hard_context_veto"
@@ -5214,7 +5212,7 @@ class StrategyManager(_BaseStrategyManager):
                 ),
                 "STRATEGY_MANAGER_SCORE_REFERENCE_BELOW_MIN symbol=%s "
                 "strategy=%s side=%s score=%.2f reference_min=%.2f "
-                "final_owner=runner",
+                "final_owner=execution_validation",
                 symbol_norm,
                 best_vote.strategy,
                 best_vote.side,
@@ -5227,7 +5225,7 @@ class StrategyManager(_BaseStrategyManager):
                     "side": best_vote.side,
                     "score": final_score,
                     "reference_min": threshold,
-                    "final_owner": "runner_final_execution_score",
+                    "final_owner": "runner_execution_validation",
                 },
             )
         quality_score, quality_meta = self._compute_trade_quality_score(
@@ -5243,7 +5241,7 @@ class StrategyManager(_BaseStrategyManager):
         metadata.update(quality_meta)
         metadata["quality_min_required"] = quality_min_required
         metadata["quality_pass"] = quality_pass
-        metadata["quality_gate_owner"] = "runner_final_execution_score"
+        metadata["quality_reference_role"] = "diagnostic_only"
         metadata["manager_quality_reference_only"] = True
 
         explicit_strategy_block = bool(quality_meta.get("already_blocked_by_strategy"))
@@ -5297,7 +5295,7 @@ class StrategyManager(_BaseStrategyManager):
                 "STRATEGY_QUALITY_REFERENCE_BELOW_MIN",
                 f"STRATEGY_QUALITY_REFERENCE_BELOW_MIN:{best_vote.strategy}:{symbol_norm}",
                 float(os.getenv("LOG_THROTTLE_STRATEGY_REJECT_SECONDS", "120") or "120"),
-                "STRATEGY_QUALITY_REFERENCE_BELOW_MIN symbol=%s strategy=%s side=%s score=%.2f reference_min=%.2f final_owner=runner",
+                "STRATEGY_QUALITY_REFERENCE_BELOW_MIN symbol=%s strategy=%s side=%s score=%.2f reference_min=%.2f final_owner=execution_validation",
                 symbol_norm,
                 best_vote.strategy,
                 best_vote.side,
@@ -5310,7 +5308,7 @@ class StrategyManager(_BaseStrategyManager):
                     "side": best_vote.side,
                     "score": quality_score,
                     "reference_min": quality_min_required,
-                    "final_owner": "runner_final_execution_score",
+                    "final_owner": "runner_execution_validation",
                 },
             )
 
