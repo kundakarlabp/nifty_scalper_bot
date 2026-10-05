@@ -1307,6 +1307,14 @@ class StrategyManager(_BaseStrategyManager):
             getattr(strategy, "name", strategy.__class__.__name__): set(strategy.get_required_indicators())
             for strategy in strategies
         }
+
+    def get_last_no_signal_decision(
+        self, symbol: str
+    ) -> StrategyNoSignalDecision | None:
+        """Return the latest fail-closed decision for *symbol*, if present."""
+        symbol_norm = str(normalize_symbol(symbol) or symbol or "").strip().upper()
+        return self._last_no_signal_decision_by_symbol.get(symbol_norm)
+
     def record_trade_result(
         self,
         strategy_name: str,
