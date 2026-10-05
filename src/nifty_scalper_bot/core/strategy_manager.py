@@ -3682,7 +3682,7 @@ class StrategyManager(_BaseStrategyManager):
                     action=combined.action,
                     symbol=combined.symbol,
                     quantity=combined.quantity,
-                    confidence=combined.confidence
+                    confidence=combined.confidence,
                     reason=combined.reason,
                     stop_loss=combined.stop_loss,
                     take_profit=combined.take_profit,
@@ -3709,8 +3709,6 @@ class StrategyManager(_BaseStrategyManager):
                 self._emit_metrics_snapshot()
                 exit_result = "signal"
                 signal_action = combined.action
-                signal_score = _signal_score_for_diagnostics(combined)
-                signal_confidence = float(combined.confidence)
                 _emit_strategy_exit()
                 return combined
         elif combined is None:
