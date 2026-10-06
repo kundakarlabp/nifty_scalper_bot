@@ -187,6 +187,7 @@ class OutcomeEvidenceGroup:
     mean_r_multiple: float | None
     mean_mfe_r: float | None
     mean_mae_r: float | None
+    mean_mfe_capture_ratio: float | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -230,6 +231,23 @@ def _optional_outcome_mean(
     return round(sum(values) / len(values), 6) if values else None
 
 
+def _mean_mfe_capture_ratio(
+    trades: Sequence[CanonicalCompletedTrade],
+) -> float | None:
+    """Return mean realised net-R divided by available MFE-R."""
+
+    values: list[float] = []
+    for trade in trades:
+        try:
+            realised_r = float(trade.outcome.get("r_multiple"))
+            mfe_r = float(trade.outcome.get("mfe_r"))
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(realised_r) and math.isfinite(mfe_r) and mfe_r > 0:
+            values.append(realised_r / mfe_r)
+    return round(sum(values) / len(values), 6) if values else None
+
+
 def post_cost_outcome_evidence(
     trades: Sequence[CanonicalCompletedTrade],
     *,
@@ -243,6 +261,7 @@ def post_cost_outcome_evidence(
         "entry_hour_ist",
         "days_to_expiry",
         "target_adjustment",
+        "exit_reason",
     }:
         raise ValueError("unsupported outcome evidence dimension")
     grouped: dict[str, list[CanonicalCompletedTrade]] = {}
@@ -251,6 +270,8 @@ def post_cost_outcome_evidence(
             value = str(trade.strategy or "").strip() or "unknown"
         elif dimension == "setup":
             value = str(trade.outcome.get("setup_name") or "").strip() or "unknown"
+        elif dimension == "exit_reason":
+            value = str(trade.exit_reason or "").strip().split(maxsplit=1)[0] or "unknown"
         elif dimension == "target_adjustment":
             adjusted = trade.outcome.get("premium_cost_target_adjusted")
             value = (
@@ -288,6 +309,7 @@ def post_cost_outcome_evidence(
                 mean_r_multiple=_optional_outcome_mean(sample, "r_multiple"),
                 mean_mfe_r=_optional_outcome_mean(sample, "mfe_r"),
                 mean_mae_r=_optional_outcome_mean(sample, "mae_r"),
+                mean_mfe_capture_ratio=_mean_mfe_capture_ratio(sample),
             )
         )
     return tuple(result)
