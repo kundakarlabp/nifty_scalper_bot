@@ -698,109 +698,6 @@ class ZerodhaKiteClient(BaseBrokerClient):
             "oi": quote_data.get("oi"),
         }
 
-    def _build_kite_params(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Construct a sanitized Kite order payload."""
-
-        resolver = getattr(self, "_resolver", None)
-        symbol = payload.get("symbol")
-        if not symbol:
-            raise BrokerError("Missing symbol")
-        resolver_exchange: str | None = None
-        if symbol and resolver is not None and hasattr(resolver, "exchange_for_symbol"):
-            resolver_exchange = cast(Any, resolver).exchange_for_symbol(symbol)
-
-        exchange = (
-            resolver_exchange
-            or payload.get("exchange")
-            or os.getenv("INSTRUMENTS__TRADE_EXCHANGE")
-            or "NFO"
-        )
-        if not exchange:
-            raise BrokerError("Missing exchange")
-
-        resolver_symbol: str | None = None
-        if (
-            symbol
-            and resolver is not None
-            and hasattr(resolver, "tradingsymbol_for_order")
-        ):
-            resolver_symbol = cast(Any, resolver).tradingsymbol_for_order(symbol)
-
-        symbol_text = str(symbol).strip()
-        if ":" in symbol_text:
-            symbol_prefix = symbol_text.split(":", 1)[0].strip().upper()
-            if symbol_prefix and symbol_prefix != "NFO":
-                raise BrokerError("Exchange must be NFO for NIFTY options")
-
-        tradingsymbol = payload.get("tradingsymbol") or resolver_symbol or symbol
-        if not tradingsymbol:
-            raise BrokerError("Missing tradingsymbol")
-
-        tradingsymbol_stripped = str(tradingsymbol).strip()
-        if ":" in tradingsymbol_stripped:
-            tradingsymbol_stripped = tradingsymbol_stripped.split(":", 1)[-1]
-        tradingsymbol_stripped = tradingsymbol_stripped.strip()
-        tradingsymbol_check = tradingsymbol_stripped.upper()
-
-        if tradingsymbol_check.endswith("FUT"):
-            raise BrokerError("Futures disabled for this bot")
-
-        if not tradingsymbol_check.endswith("CE") and not tradingsymbol_check.endswith(
-            "PE"
-        ):
-            raise BrokerError("Only NIFTY options (CE/PE) are allowed")
-
-        exchange_clean = str(exchange).strip().upper()
-        if exchange_clean != "NFO":
-            raise BrokerError("Only NFO exchange is supported for NIFTY options")
-
-        side = str(payload.get("side") or payload.get("transaction_type") or "").upper()
-        if side not in {"BUY", "SELL"}:
-            raise BrokerError("Missing side")
-
-        quantity_raw = payload.get("quantity")
-        if quantity_raw is None:
-            raise BrokerError("Missing quantity")
-        try:
-            quantity = int(quantity_raw)
-        except (TypeError, ValueError) as exc:
-            raise BrokerError("Invalid quantity") from exc
-        if quantity <= 0:
-            raise BrokerError("Invalid quantity")
-
-        order_type_value = payload.get("order_type", "MARKET")
-        order_type = (
-            str(order_type_value.value)
-            if hasattr(order_type_value, "value")
-            else str(order_type_value)
-        ).upper()
-
-        params: dict[str, Any] = {
-            "exchange": "NFO",
-            "tradingsymbol": tradingsymbol_stripped,
-            "transaction_type": side,
-            "quantity": quantity,
-            "order_type": "MARKET" if order_type == "MARKET" else "LIMIT",
-            "product": payload.get("product", "MIS"),
-            "validity": payload.get("validity", "DAY"),
-        }
-        if params["order_type"] == "LIMIT":
-            price_value = payload.get("price")
-            if price_value is None:
-                raise BrokerError("LIMIT order requires price")
-            if isinstance(price_value, (int, float, str)):
-                params["price"] = float(price_value)
-            else:
-                raise BrokerError("Invalid price type")
-
-        if "tag" in payload and payload["tag"] is not None:
-            params["tag"] = payload["tag"]
-        if "parent_order_id" in payload and payload["parent_order_id"] is not None:
-            params["parent_order_id"] = payload["parent_order_id"]
-        if "disclosed_quantity" in payload and payload["disclosed_quantity"]:
-            params["disclosed_quantity"] = int(payload["disclosed_quantity"])
-
-        return params
 
     def place_order(
         self,
@@ -830,10 +727,33 @@ class ZerodhaKiteClient(BaseBrokerClient):
                 params["exchange"] = params.get("exchange", "NFO")
                 params["tradingsymbol"] = raw_sym
 
-        # [FIX] Map 'side' to Kite Transaction Type
-        if "side" in params:
-            side_val = str(params.pop("side")).upper()
-            params["transaction_type"] = "BUY" if "BUY" in side_val else "SELL"
+        exchange = str(params.get("exchange") or "NFO").strip().upper()
+        tradingsymbol = str(params.get("tradingsymbol") or "").strip()
+        if not tradingsymbol:
+            raise BrokerError("Missing tradingsymbol")
+        symbol_check = tradingsymbol.upper()
+        if exchange != "NFO":
+            raise BrokerError("Only NFO exchange is supported for NIFTY options")
+        if symbol_check.endswith("FUT"):
+            raise BrokerError("Futures disabled for this bot")
+        if not symbol_check.endswith(("CE", "PE")):
+            raise BrokerError("Only NIFTY options (CE/PE) are allowed")
+        params["exchange"] = "NFO"
+
+        side_value = params.pop("side", params.get("transaction_type"))
+        side = str(side_value or "").strip().upper()
+        if side not in {"BUY", "SELL"}:
+            raise BrokerError("Missing side")
+        params["transaction_type"] = side
+
+        quantity_raw = params.get("quantity")
+        try:
+            quantity = int(quantity_raw)
+        except (TypeError, ValueError) as exc:
+            raise BrokerError("Invalid quantity") from exc
+        if quantity <= 0:
+            raise BrokerError("Invalid quantity")
+        params["quantity"] = quantity
 
         # [FIX] Robust Order Type Mapping
         if "order_type" in params:
