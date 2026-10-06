@@ -191,7 +191,7 @@ def test_fresh_same_side_context_conflict_vetoes_trigger_consensus(
 
     assert result is None
     decision = manager._last_no_signal_decision_by_symbol[_CE]
-    assert decision.reason == "fresh_conflicting_context"
+    assert decision.reason == "fresh_opposing_context"
     assert decision.blocked_at == "context_contract"
 
 
