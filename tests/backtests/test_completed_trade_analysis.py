@@ -446,7 +446,8 @@ def test_post_cost_outcome_evidence_reports_strategy_setup_and_r_excursions() ->
     assert strategy[0].mean_mfe_r == 0.85
     assert strategy[0].mean_mae_r == 0.5
     assert strategy[0].mean_mfe_capture_ratio == -0.309524
-    assert post_cost_outcome_evidence(trades, dimension="exit_reason")[0].value == "HARD_SL_BREACH"
+    exit_groups = post_cost_outcome_evidence(trades, dimension="exit_reason")
+    assert exit_groups[0].value == "HARD_SL_BREACH"
     assert setup[0].value == "continuation_pullback"
     assert setup[0].net_expectancy == 30.0
 
