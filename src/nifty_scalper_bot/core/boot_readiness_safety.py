@@ -1,17 +1,15 @@
 """Session readiness and startup-orchestration adapters."""
 
 from __future__ import annotations
-
-
-# IndicatorEngine owns missing-history diagnostics; boot safety must not wrap
-# get_history merely to suppress log duplication.
-
 import logging
 from collections.abc import Mapping
 from functools import wraps
 from typing import Any, Awaitable, Callable, TypeVar
 
 from nifty_scalper_bot.core.trading_switch import trading_switch
+
+# IndicatorEngine owns missing-history diagnostics; boot safety must not wrap
+# get_history merely to suppress log duplication.
 
 _LOGGER = logging.getLogger("nifty_scalper_bot.core.app")
 _T = TypeVar("_T")
