@@ -9,6 +9,7 @@ SERVICE="${BOT_SERVICE_NAME:-niftybot}"
 STREAMLIT_SERVICE="${BOT_STREAMLIT_SERVICE_NAME:-niftybot-streamlit}"
 AUTODEPLOY_SERVICE="${BOT_AUTODEPLOY_SERVICE_NAME:-niftybot-autodeploy}"
 PORT="${PORT:-8080}"
+ADMIN_PORT="${BOT_ADMIN_PORT:-8081}"
 STREAMLIT_PORT="${BOT_STREAMLIT_PORT:-8501}"
 CONFIG_DIR="${NIFTYBOT_CONFIG_DIR:-/home/ubuntu/.config/niftybot}"
 ENV_FILE="${BOT_ENV_FILE:-$CONFIG_DIR/niftybot.env}"
@@ -295,14 +296,19 @@ restart_streamlit() {
   return 1
 }
 
-# Fixed research poll runs outside the trading engine and never restarts it.
-# Requests are immutable IDs; the worker owns a separate cross-process lock.
+# Manifest polling is delegated to the persistent admin service. That service
+# owns the detached worker, so long research cannot hold the autodeploy oneshot
+# or its deployment lock.
 poll_research_request() {
-  if [ -f "$APP_DIR/scripts/run_research_job.py" ]; then
-    BOT_ENV_FILE="$ENV_FILE" PYTHONPATH="$APP_DIR/src" \
-      "$VENV/bin/python" "$APP_DIR/scripts/run_research_job.py" || \
-      log "WARNING: research request rejected; trading deployment unaffected"
-  fi
+  local code
+  code="$(curl -sS --max-time 5 -o /dev/null -w '%{http_code}' \
+    -X POST \
+    -H "Origin: http://127.0.0.1:${ADMIN_PORT}" \
+    "http://127.0.0.1:${ADMIN_PORT}/admin/research/poll-manifest" 2>/dev/null || true)"
+  case "$code" in
+    200|202|409) return 0 ;;
+    *) log "WARNING: research manifest poll unavailable (http=${code:-none}); trading deployment unaffected" ;;
+  esac
 }
 
 exec 9>"$LOCK_FILE"
