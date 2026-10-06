@@ -68,6 +68,45 @@ def test_orderflow_consumes_upstream_ofi_instead_of_tick_bonus() -> None:
     assert not hasattr(strategy, "_ofi_state")
 
 
+def test_strong_temporal_ofi_can_confirm_with_neutral_depth() -> None:
+    strategy = _strategy()
+    indicators = _indicators(
+        buy=105.0,
+        sell=100.0,
+        ofi_value=0.50,
+        supports=True,
+    )
+    indicators.pop("_expected_support")
+
+    signal = strategy._evaluate_signal(SYMBOL, indicators, current_price=100.25)
+
+    assert signal is not None
+    assert signal.metadata["depth_supports_side"] is False
+    assert signal.metadata["ofi_supports_side"] is True
+    assert signal.metadata["effective_context_alignment"] is True
+    assert signal.metadata["effective_context_conflict"] is False
+    assert signal.metadata["context_alignment_source"] == "temporal_ofi"
+
+
+def test_strong_adverse_depth_blocks_supportive_temporal_ofi() -> None:
+    strategy = _strategy()
+    indicators = _indicators(
+        buy=100.0,
+        sell=400.0,
+        ofi_value=0.50,
+        supports=True,
+    )
+    indicators.pop("_expected_support")
+
+    signal = strategy._evaluate_signal(SYMBOL, indicators, current_price=100.25)
+
+    assert signal is not None
+    assert signal.metadata["ofi_supports_side"] is True
+    assert signal.metadata["strong_depth_conflicts_side"] is True
+    assert signal.metadata["effective_context_alignment"] is False
+    assert signal.metadata["effective_context_conflict"] is True
+
+
 def test_adverse_upstream_ofi_cannot_add_context_bonus() -> None:
     strategy = _strategy()
     indicators = _indicators(
