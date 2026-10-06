@@ -131,8 +131,7 @@ def test_orderflow_context_log_exposes_microstructure_diagnostics(
     calls = [
         call
         for call in logger.info.call_args_list
-        if call.kwargs.get("extra", {}).get("event")
-        == "ORDERFLOW_CONTEXT_EVIDENCE"
+        if call.kwargs.get("extra", {}).get("event") == "ORDERFLOW_CONTEXT_EVIDENCE"
     ]
     assert len(calls) == 1
     extra = calls[0].kwargs["extra"]
