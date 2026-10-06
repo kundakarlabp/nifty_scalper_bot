@@ -382,9 +382,25 @@ def test_paper_fill_uses_measured_execution_calibration() -> None:
 
     assert calibration["slippage_bps_p50"] == 10.0
     assert calibration["fill_latency_seconds_p50"] == pytest.approx(0.6)
+    assert calibration["entry_slippage_bps_p50"] == 8.0
+    assert calibration["exit_slippage_bps_p50"] == 12.0
+    assert calibration["entry_fill_latency_seconds_p50"] == pytest.approx(0.4)
+    assert calibration["exit_fill_latency_seconds_p50"] == pytest.approx(0.8)
     assert order["average_price"] == pytest.approx(100.1)
-    assert order["fill_latency_seconds"] == pytest.approx(0.6)
-    assert order["first_fill_timestamp"] == pytest.approx(1_000.6)
+    assert order["fill_latency_seconds"] == pytest.approx(0.4)
+    assert order["first_fill_timestamp"] == pytest.approx(1_000.4)
+
+    exit_order = paper.place_order(
+        {
+            "symbol": "OPT",
+            "transaction_type": "SELL",
+            "quantity": 10,
+            "order_type": "MARKET",
+        }
+    )
+    assert exit_order["average_price"] == pytest.approx(99.88)
+    assert exit_order["fill_latency_seconds"] == pytest.approx(0.8)
+    assert exit_order["first_fill_timestamp"] == pytest.approx(1_000.8)
 
 
 def test_replay_harness_applies_completed_outcome_fill_calibration() -> None:
@@ -410,6 +426,14 @@ def test_replay_harness_applies_completed_outcome_fill_calibration() -> None:
         "latency_samples": 2,
         "slippage_bps_p50": 6.0,
         "fill_latency_seconds_p50": pytest.approx(0.4),
+        "entry_slippage_samples": 1,
+        "exit_slippage_samples": 1,
+        "entry_latency_samples": 1,
+        "exit_latency_samples": 1,
+        "entry_slippage_bps_p50": 4.0,
+        "exit_slippage_bps_p50": 8.0,
+        "entry_fill_latency_seconds_p50": pytest.approx(0.2),
+        "exit_fill_latency_seconds_p50": pytest.approx(0.6),
     }
 
 
