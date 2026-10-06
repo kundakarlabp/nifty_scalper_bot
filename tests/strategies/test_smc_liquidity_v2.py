@@ -184,8 +184,10 @@ def test_bullish_underlying_sweep_requires_later_confirmation_bar(monkeypatch) -
     assert signal.metadata["sweep_depth_points"] > 0
     assert signal.metadata["sweep_depth_atr"] > 0
     assert signal.metadata["reclaim_distance_points"] > 0
-    assert signal.metadata["requires_orderflow_confirmation"] is True
-    assert signal.metadata["orderflow_confirmation_owner"] == "StrategyManager"
+    assert signal.metadata["requires_independent_confirmation"] is True
+    assert signal.metadata["confirmation_owner"] == "StrategyManager"
+    assert "requires_orderflow_confirmation" not in signal.metadata
+    assert "orderflow_confirmation_owner" not in signal.metadata
     assert signal.metadata["underlying_invalidation_level"] < 23974.0
 
 
