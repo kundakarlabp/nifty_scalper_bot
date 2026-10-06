@@ -34,10 +34,9 @@ def test_ci_is_read_only_and_deduplicates_e2e_markers() -> None:
     assert "branches: [main]" in text
     assert "changed-code-quality:" in text
     assert "normal-test-shard:" in text
-    assert "tests:" in text
     assert "e2e-simulation:" in text
-    assert "needs: normal-test-shard" in text
-    assert "NORMAL_SHARDS_RESULT" in text
+    assert "normal-test-shard" in text
+    assert "TESTS_RESULT" in text
     assert "scripts/ci_test_shard.py" in text
     assert "fail-fast: false" in text
     assert "shard: [0, 1, 2, 3]" in text
@@ -61,7 +60,7 @@ def test_ci_uses_draft_fast_gate_before_final_full_validation() -> None:
     assert "--no-style-fix" in text
     assert "github.event.pull_request.draft == false" in text
     assert "final-validation:" in text
-    assert "needs: [changed-code-quality, tests, e2e-simulation]" in text
+    assert "needs: [changed-code-quality, normal-test-shard, e2e-simulation]" in text
 
 
 def test_no_one_off_patch_or_branch_specific_ci_remains() -> None:
@@ -86,21 +85,30 @@ def test_failure_memory_workflow_is_read_only() -> None:
     assert "agent_failure_learn.py" in text
 
 
-def test_ci_normal_test_shards_preserve_one_stable_aggregate_gate() -> None:
+def test_ci_normal_test_shards_feed_final_validation_directly() -> None:
     text = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
 
     assert "name: normal-tests-${{ matrix.shard }}" in text
-    assert "name: tests" in text
-    assert 'test "$NORMAL_SHARDS_RESULT" = "success"' in text
+    assert "needs: [changed-code-quality, normal-test-shard, e2e-simulation]" in text
+    assert "TESTS_RESULT: ${{ needs.normal-test-shard.result }}" in text
+    assert 'test "$TESTS_RESULT" = "success"' in text
     assert "${{ strategy.job-index }}" in text
     assert "${{ strategy.job-total }}" in text
 
 
-def test_full_collection_uses_path_safe_import_mode() -> None:
+def test_final_ci_does_not_repeat_global_collection() -> None:
     ci = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
     slow = (WORKFLOWS / "slow-suite-weekly.yml").read_text(encoding="utf-8")
 
-    assert "pytest tests --collect-only" in ci
-    assert "--import-mode=importlib" in ci
+    assert "pytest tests --collect-only" not in ci
     assert "pytest tests -m slow" in slow
     assert "--import-mode=importlib" in slow
+
+
+def test_quality_job_installs_python_only_when_python_changed() -> None:
+    text = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
+
+    assert "has_python=true" in text
+    assert "has_production_python=true" in text
+    assert "if: steps.changed.outputs.has_python == 'true'" in text
+    assert "if: steps.changed.outputs.has_production_python == 'true'" in text

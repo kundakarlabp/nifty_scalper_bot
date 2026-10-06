@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import Sequence
+from typing import Mapping, Sequence
 
 DEFAULT_SHARD_COUNT = 4
 
@@ -28,6 +28,7 @@ def shard_files(
     *,
     shard_index: int,
     shard_count: int,
+    weights: Mapping[str, int] | None = None,
 ) -> tuple[str, ...]:
     if shard_count < 1:
         raise ValueError("shard_count must be >= 1")
@@ -37,7 +38,34 @@ def shard_files(
         )
 
     ordered = tuple(sorted(dict.fromkeys(files)))
-    return ordered[shard_index::shard_count]
+    if weights is None:
+        return ordered[shard_index::shard_count]
+
+    buckets: list[list[str]] = [[] for _ in range(shard_count)]
+    totals = [0] * shard_count
+    weighted = sorted(
+        ordered,
+        key=lambda path: (-max(1, int(weights.get(path, 1))), path),
+    )
+    for path in weighted:
+        target = min(
+            range(shard_count),
+            key=lambda index: (totals[index], len(buckets[index]), index),
+        )
+        buckets[target].append(path)
+        totals[target] += max(1, int(weights.get(path, 1)))
+    return tuple(sorted(buckets[shard_index]))
+
+
+def test_file_weights(root: Path, files: Sequence[str]) -> dict[str, int]:
+    """Use source size as a stable low-cost proxy for pytest runtime."""
+    weights: dict[str, int] = {}
+    for name in files:
+        try:
+            weights[name] = max(1, int((root / name).stat().st_size))
+        except OSError:
+            weights[name] = 1
+    return weights
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -60,6 +88,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         files,
         shard_index=args.shard_index,
         shard_count=args.shard_count,
+        weights=test_file_weights(root, files),
     )
     if not selected:
         parser.error(

@@ -70,6 +70,36 @@ def test_shard_partition_is_stable_and_balanced() -> None:
     assert max(map(len, shards)) - min(map(len, shards)) <= 1
 
 
+def test_weighted_shards_balance_source_weight_deterministically() -> None:
+    module = _load_module()
+    files = tuple(f"tests/test_{index}.py" for index in range(8))
+    weights = {
+        files[0]: 100,
+        files[1]: 90,
+        files[2]: 80,
+        files[3]: 70,
+        files[4]: 60,
+        files[5]: 50,
+        files[6]: 40,
+        files[7]: 30,
+    }
+
+    shards = [
+        module.shard_files(
+            files,
+            shard_index=index,
+            shard_count=2,
+            weights=weights,
+        )
+        for index in range(2)
+    ]
+    totals = [sum(weights[path] for path in shard) for shard in shards]
+
+    assert totals == [260, 260]
+    assert [path for shard in shards for path in shard]
+    assert set(shards[0]).isdisjoint(shards[1])
+
+
 def test_invalid_shard_arguments_fail_closed() -> None:
     module = _load_module()
     files = ("tests/test_one.py",)

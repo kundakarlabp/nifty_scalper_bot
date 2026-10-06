@@ -103,9 +103,13 @@ These tools turn recurring reasoning into deterministic repository feedback.
 - Changed-code quality and deterministic broker-free E2E remain independent jobs.
 - The normal non-slow pytest surface is partitioned by `scripts/ci_test_shard.py` into deterministic file-level shards.
 - Every discovered pytest-style file belongs to exactly one normal shard.
+- Final CI uses source-file size as a stable low-cost runtime proxy and greedily balances shard weight; the plain API keeps round-robin behavior for callers without weights.
 - Shard coordinates come from GitHub's matrix strategy context, not a second routing table.
 - Each job uses one dependency resolver/install pass with pip caching; no virtualenv artifact/cache layer is added.
-- A stable aggregate `tests` job succeeds only when every normal shard succeeds, preserving one branch-protection status.
+- `final-validation` depends directly on the matrix result instead of launching an intermediate aggregate runner.
+- The quality job resolves the diff before Python setup, skips Python installation for non-Python changes, and runs architecture lint only when production Python changed.
+- Global `pytest --collect-only` is not repeated in final CI because the normal shards collectively collect every discovered test file.
+- The Black delta checker first batch-checks the current changed set in one process and falls back to debt-aware per-file comparison only when needed.
 - Marker exclusions remain identical to the previous monolithic normal-suite command, so E2E/slow tests are not duplicated.
 
 Sharding changes elapsed CI time only; it does not replace full-suite coverage.
