@@ -905,19 +905,13 @@ def execution_data_quality(
             else None
         ),
         median_exit_slippage_bps=(
-            round(float(statistics.median(exit_slippage)), 6)
-            if exit_slippage
-            else None
+            round(float(statistics.median(exit_slippage)), 6) if exit_slippage else None
         ),
         median_entry_fill_latency_seconds=(
-            round(float(statistics.median(entry_latency)), 6)
-            if entry_latency
-            else None
+            round(float(statistics.median(entry_latency)), 6) if entry_latency else None
         ),
         median_exit_fill_latency_seconds=(
-            round(float(statistics.median(exit_latency)), 6)
-            if exit_latency
-            else None
+            round(float(statistics.median(exit_latency)), 6) if exit_latency else None
         ),
         total_execution_shortfall_cost=round(sum(shortfall_costs), 2),
         blockers=tuple(blockers),
