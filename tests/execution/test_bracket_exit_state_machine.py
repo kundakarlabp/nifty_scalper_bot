@@ -315,23 +315,33 @@ def test_two_bracket_lifecycles_each_emit_exit_triggered(caplog) -> None:
         ],
     )
     om = _OrderManager(broker=broker, order_id="exit-1")
-    manager = _active_manager(om)
+    manager = BracketManager(order_manager=om)
+    manager.register_virtual_bracket(
+        order_id="entry-1",
+        symbol="NFO:NIFTY2660923100CE",
+        side="BUY",
+        qty=65,
+        price=150.65,
+        sl=145.10,
+        tp=175.00,
+    )
+    manager.confirm_entry_fill("entry-1", 150.65)
     manager.register_virtual_bracket(
         order_id="entry-2",
         symbol="NFO:NIFTY2660923100PE",
         side="BUY",
         qty=65,
         price=150.65,
-        sl=157.10,
+        sl=145.10,
         tp=175.00,
     )
     manager.confirm_entry_fill("entry-2", 150.65)
 
     with caplog.at_level(logging.INFO):
-        manager.on_tick("NFO:NIFTY2660923100CE", 157.10)
-        manager.on_tick("NFO:NIFTY2660923100CE", 156.90)
-        manager.on_tick("NFO:NIFTY2660923100PE", 157.10)
-        manager.on_tick("NFO:NIFTY2660923100PE", 156.90)
+        manager.on_tick("NFO:NIFTY2660923100CE", 145.10)
+        manager.on_tick("NFO:NIFTY2660923100CE", 144.90)
+        manager.on_tick("NFO:NIFTY2660923100PE", 145.10)
+        manager.on_tick("NFO:NIFTY2660923100PE", 144.90)
 
     exit_triggered = [
         rec for rec in caplog.records if getattr(rec, "event", "") == "EXIT_TRIGGERED"
