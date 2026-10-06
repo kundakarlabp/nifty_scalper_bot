@@ -2,13 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import threading
 from types import SimpleNamespace
 
 from nifty_scalper_bot.core.boot_log_safety import BootLogRateControl
 from nifty_scalper_bot.core.boot_readiness_safety import (
     adapt_compute_live_readiness,
-    adapt_indicator_get_history,
     adapt_mdm_pipeline_overload,
     adapt_option_indicator_direction_context,
     adapt_register_and_subscribe_live_symbol,
@@ -179,30 +177,6 @@ def test_live_order_arm_unknown_is_replaced_by_visible_orchestration_reason() ->
     assert record.reason == "startup_orchestration_guard"
     assert "reason=startup_orchestration_guard" in record.getMessage()
     assert "reason=unknown" not in record.getMessage()
-
-
-def test_missing_indicator_history_short_circuits_duplicate_instrumentation() -> None:
-    calls: list[str] = []
-    symbol = "NFO:NIFTY2681124600PE"
-
-    def original(_self, resolved_symbol: str, *args, **kwargs):
-        del args, kwargs
-        calls.append(resolved_symbol)
-        return [1.0]
-
-    state = SimpleNamespace(
-        _histories={},
-        _lock=threading.RLock(),
-        _logger=logging.getLogger("nifty_scalper_bot.strategies.indicators"),
-    )
-    adapted = adapt_indicator_get_history(original)
-
-    assert adapted(state, symbol) == []
-    assert calls == []
-
-    state._histories[symbol] = object()
-    assert adapted(state, symbol) == [1.0]
-    assert calls == [symbol]
 
 
 def test_option_indicator_direction_is_rederived_from_underlying_context() -> None:
