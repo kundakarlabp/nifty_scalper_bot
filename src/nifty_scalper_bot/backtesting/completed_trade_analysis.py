@@ -238,9 +238,13 @@ def _mean_mfe_capture_ratio(
 
     values: list[float] = []
     for trade in trades:
+        raw_realised_r = trade.outcome.get("r_multiple")
+        raw_mfe_r = trade.outcome.get("mfe_r")
+        if raw_realised_r is None or raw_mfe_r is None:
+            continue
         try:
-            realised_r = float(trade.outcome.get("r_multiple"))
-            mfe_r = float(trade.outcome.get("mfe_r"))
+            realised_r = float(raw_realised_r)
+            mfe_r = float(raw_mfe_r)
         except (TypeError, ValueError):
             continue
         if math.isfinite(realised_r) and math.isfinite(mfe_r) and mfe_r > 0:
