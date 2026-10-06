@@ -170,6 +170,31 @@ def test_two_independent_same_side_triggers_can_confirm(monkeypatch) -> None:
     assert result.metadata["confirming_trigger_strategies"] == ["ORBPro"]
 
 
+def test_fresh_same_side_context_conflict_vetoes_trigger_consensus(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    manager = _manager()
+    vwap = _signal_evidence("VWAPPro")
+    orb = _signal_evidence("ORBPro")
+    adverse_context = _signal_evidence(
+        "OrderFlow",
+        role="context",
+        aligned_context=False,
+    )
+
+    result = manager._combine_strategy_votes(
+        symbol=_CE,
+        signals=[vwap, orb, adverse_context],
+        indicators=_live_indicators("CE"),
+    )
+
+    assert result is None
+    decision = manager._last_no_signal_decision_by_symbol[_CE]
+    assert decision.reason == "fresh_opposing_context"
+    assert decision.blocked_at == "context_contract"
+
+
 def test_opposite_trigger_sides_fail_closed(monkeypatch) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     manager = _manager()
