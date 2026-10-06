@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import json
 import math
+import statistics
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from nifty_scalper_bot.backtesting.research_validation import bootstrap_mean_interval
 from nifty_scalper_bot.utils.market_hours import IST
 
 
@@ -31,6 +33,7 @@ class CanonicalCompletedTrade:
     cost_source: str
     net_pnl: float
     exit_reason: str
+    execution_quality: Mapping[str, Any]
     outcome: Mapping[str, Any]
 
 
@@ -184,6 +187,8 @@ class OutcomeEvidenceGroup:
     value: str
     trade_count: int
     net_expectancy: float
+    net_expectancy_ci_lower: float
+    net_expectancy_ci_upper: float
     mean_r_multiple: float | None
     mean_mfe_r: float | None
     mean_mae_r: float | None
@@ -262,6 +267,8 @@ def post_cost_outcome_evidence(
     if dimension not in {
         "strategy",
         "setup",
+        "regime",
+        "confirmation_type",
         "entry_hour_ist",
         "days_to_expiry",
         "target_adjustment",
@@ -277,6 +284,10 @@ def post_cost_outcome_evidence(
         elif dimension == "exit_reason":
             exit_reason = str(trade.exit_reason or "").strip()
             value = exit_reason.split(maxsplit=1)[0] or "unknown"
+        elif dimension == "regime":
+            value = str(trade.outcome.get("regime") or "").strip().upper() or "unknown"
+        elif dimension == "confirmation_type":
+            value = _confirmation_type(trade.outcome)
         elif dimension == "target_adjustment":
             adjusted = trade.outcome.get("premium_cost_target_adjusted")
             value = (
@@ -305,12 +316,15 @@ def post_cost_outcome_evidence(
     result: list[OutcomeEvidenceGroup] = []
     for value, sample in sorted(grouped.items()):
         summary = summarize_completed_trades(sample)
+        interval = bootstrap_mean_interval([trade.net_pnl for trade in sample])
         result.append(
             OutcomeEvidenceGroup(
                 dimension=dimension,
                 value=value,
                 trade_count=summary.trade_count,
                 net_expectancy=summary.expectancy,
+                net_expectancy_ci_lower=interval.lower,
+                net_expectancy_ci_upper=interval.upper,
                 mean_r_multiple=_optional_outcome_mean(sample, "r_multiple"),
                 mean_mfe_r=_optional_outcome_mean(sample, "mfe_r"),
                 mean_mae_r=_optional_outcome_mean(sample, "mae_r"),
@@ -372,11 +386,20 @@ def summarize_gate_effectiveness(
 
 @dataclass(frozen=True, slots=True)
 class ExecutionDataQuality:
-    """Known execution-evidence caveats in the realized historical sample."""
+    """Execution-evidence coverage and realized implementation shortfall."""
 
     total_trades: int
     known_stale_quote_exit_trades: int
     known_stale_quote_exit_fraction: float
+    measured_quality_trades: int
+    measured_quality_fraction: float
+    entry_slippage_samples: int
+    exit_slippage_samples: int
+    median_entry_slippage_bps: float | None
+    median_exit_slippage_bps: float | None
+    median_entry_fill_latency_seconds: float | None
+    median_exit_fill_latency_seconds: float | None
+    total_execution_shortfall_cost: float
     blockers: tuple[str, ...]
 
 
@@ -445,6 +468,22 @@ def _canonical_strategy(value: Any) -> str:
     text = str(value or "").strip()
     key = "".join(character for character in text.upper() if character.isalnum())
     return _STRATEGY_ALIASES.get(key, text or "UNKNOWN")
+
+
+def _execution_quality(row: Mapping[str, Any]) -> Mapping[str, Any]:
+    value = row.get("execution_quality")
+    if isinstance(value, Mapping):
+        return dict(value)
+    value = row.get("execution_quality_json")
+    if isinstance(value, Mapping):
+        return dict(value)
+    if value in (None, ""):
+        return {}
+    try:
+        parsed = json.loads(str(value))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return dict(parsed) if isinstance(parsed, Mapping) else {}
 
 
 def _has_attribution_provenance(outcome: Mapping[str, Any]) -> bool:
@@ -587,6 +626,7 @@ def canonicalize_completed_trades(
                 cost_source=cost_source,
                 net_pnl=net_pnl,
                 exit_reason=str(row.get("exit_reason") or "").strip(),
+                execution_quality=_execution_quality(row),
                 outcome=outcome,
             )
         )
@@ -817,18 +857,70 @@ def attribution_readiness(
 def execution_data_quality(
     trades: Sequence[CanonicalCompletedTrade],
 ) -> ExecutionDataQuality:
-    """Flag explicit stale-quote exits without silently excluding realized trades."""
+    """Summarize measured execution drag without excluding realized trades."""
 
     total = len(trades)
     stale = sum(
         _STALE_QUOTE_EXIT_MARKER in trade.exit_reason.lower() for trade in trades
     )
-    blockers = (f"known_stale_quote_exit_trades:{stale}",) if stale else ()
+    measured = sum(bool(trade.execution_quality) for trade in trades)
+
+    def values(key: str) -> list[float]:
+        resolved: list[float] = []
+        for trade in trades:
+            raw = trade.execution_quality.get(key)
+            if raw is None:
+                continue
+            try:
+                value = float(raw)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(value) and value >= 0:
+                resolved.append(value)
+        return resolved
+
+    entry_slippage = values("entry_slippage_bps")
+    exit_slippage = values("exit_slippage_bps")
+    entry_latency = values("entry_submit_to_fill_seconds")
+    exit_latency = values("exit_submit_to_fill_seconds")
+    shortfall_costs = values("entry_slippage_cost") + values("exit_slippage_cost")
+
+    blockers: list[str] = []
+    if stale:
+        blockers.append(f"known_stale_quote_exit_trades:{stale}")
+    if total and measured != total:
+        blockers.append(f"execution_quality_coverage:{measured}/{total}")
+
     return ExecutionDataQuality(
         total_trades=total,
         known_stale_quote_exit_trades=stale,
         known_stale_quote_exit_fraction=round(stale / total, 4) if total else 0.0,
-        blockers=blockers,
+        measured_quality_trades=measured,
+        measured_quality_fraction=round(measured / total, 4) if total else 0.0,
+        entry_slippage_samples=len(entry_slippage),
+        exit_slippage_samples=len(exit_slippage),
+        median_entry_slippage_bps=(
+            round(float(statistics.median(entry_slippage)), 6)
+            if entry_slippage
+            else None
+        ),
+        median_exit_slippage_bps=(
+            round(float(statistics.median(exit_slippage)), 6)
+            if exit_slippage
+            else None
+        ),
+        median_entry_fill_latency_seconds=(
+            round(float(statistics.median(entry_latency)), 6)
+            if entry_latency
+            else None
+        ),
+        median_exit_fill_latency_seconds=(
+            round(float(statistics.median(exit_latency)), 6)
+            if exit_latency
+            else None
+        ),
+        total_execution_shortfall_cost=round(sum(shortfall_costs), 2),
+        blockers=tuple(blockers),
     )
 
 
