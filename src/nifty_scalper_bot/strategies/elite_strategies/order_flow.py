@@ -333,18 +333,22 @@ class OrderFlowStrategy(EliteStrategy):
                 and spread_pct <= max_spread_pct
                 and direction_available
             )
-            microstructure_supports_side = bool(
-                (
-                    ofi_directional
-                    and ofi_supports_side
-                    and not strong_depth_conflicts_side
-                )
-                or (
-                    depth_supports_side
-                    and not flow_conflicts_side
-                    and (flow_supports_side or strong_depth_supports_side)
-                )
-            )
+            context_alignment_source: str | None = None
+            if (
+                ofi_directional
+                and ofi_supports_side
+                and not strong_depth_conflicts_side
+            ):
+                context_alignment_source = "temporal_ofi"
+            elif (
+                depth_supports_side
+                and flow_supports_side
+                and not flow_conflicts_side
+            ):
+                context_alignment_source = "depth_plus_flow"
+            elif strong_depth_supports_side and not flow_conflicts_side:
+                context_alignment_source = "strong_depth"
+            microstructure_supports_side = context_alignment_source is not None
             microstructure_conflicts_side = bool(
                 (ofi_directional and ofi_conflicts_side)
                 or strong_depth_conflicts_side
@@ -422,17 +426,7 @@ class OrderFlowStrategy(EliteStrategy):
                 "flow_conflicts_side": flow_conflicts_side,
                 "microstructure_supports_side": microstructure_supports_side,
                 "microstructure_conflicts_side": microstructure_conflicts_side,
-                "context_alignment_source": (
-                    "temporal_ofi"
-                    if (
-                        ofi_directional
-                        and ofi_supports_side
-                        and microstructure_supports_side
-                    )
-                    else "depth_plus_flow"
-                    if microstructure_supports_side
-                    else None
-                ),
+                "context_alignment_source": context_alignment_source,
                 "context_age_seconds": context_age_seconds,
                 "context_fresh": context_fresh,
                 "context_quality_eligible": context_quality_eligible,
