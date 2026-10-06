@@ -8,7 +8,6 @@ For **any NIFTY Scalper Bot code audit, edit, debugging, understanding, review, 
 
 It is the orchestration layer, not a replacement for specialist procedures. After it frames the task and blast radius, load one primary specialist skill from the routing table below. The user does not need to name the orchestrator explicitly.
 
-
 ## Fast path
 
 1. Read `docs/REPO_MAP.md`.
