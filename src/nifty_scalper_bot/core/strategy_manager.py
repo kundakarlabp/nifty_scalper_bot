@@ -4127,7 +4127,7 @@ class StrategyManager(_BaseStrategyManager):
         if conflicting_context:
             _record_no_signal(
                 "context_conflict",
-                "fresh_opposing_context",
+                "fresh_conflicting_context",
                 "context_contract",
                 trigger_vote_count=len(trigger_votes),
                 context_vote_count=len(context_votes),
