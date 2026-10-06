@@ -207,17 +207,17 @@ class SMCStrategy(EliteStrategy):
         return current / average if average > 0 else 0.0
 
     @staticmethod
-    def _latest_confirmed_pivots(
+    def _confirmed_pivot_candidates(
         rows: list[dict[str, Any]], *, strength: int, lookback: int
-    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-        """Return latest confirmed pivot low/high before the evaluation bar."""
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Return look-ahead-safe confirmed pivot candidates before the current bar."""
         if len(rows) < (strength * 2) + 2:
-            return None, None
+            return [], []
         history = rows[:-1]
         start = max(strength, len(history) - max(lookback, strength * 2 + 1))
         stop = len(history) - strength
-        pivot_low: dict[str, Any] | None = None
-        pivot_high: dict[str, Any] | None = None
+        lows: list[dict[str, Any]] = []
+        highs: list[dict[str, Any]] = []
 
         for index in range(start, stop):
             left = history[index - strength : index]
@@ -230,10 +230,122 @@ class SMCStrategy(EliteStrategy):
             neighbor_lows = [float(item["low"]) for item in (*left, *right)]
             neighbor_highs = [float(item["high"]) for item in (*left, *right)]
             if low <= min(neighbor_lows) and low < max(neighbor_lows):
-                pivot_low = row
+                lows.append({**row, "_pivot_index": index})
             if high >= max(neighbor_highs) and high > min(neighbor_highs):
-                pivot_high = row
-        return pivot_low, pivot_high
+                highs.append({**row, "_pivot_index": index})
+        return lows, highs
+
+    def _rank_liquidity_pivots(
+        self,
+        rows: list[dict[str, Any]],
+        *,
+        strength: int,
+        lookback: int,
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        """Prefer visible multi-touch/major levels among levels the current bar tests."""
+        lows, highs = self._confirmed_pivot_candidates(
+            rows, strength=strength, lookback=lookback
+        )
+        major_strength = max(4, strength + 1)
+        major_lows, major_highs = self._confirmed_pivot_candidates(
+            rows,
+            strength=major_strength,
+            lookback=max(lookback, (major_strength * 2) + 1),
+        )
+        major_low_indexes = {
+            int(item["_pivot_index"]) for item in major_lows if "_pivot_index" in item
+        }
+        major_high_indexes = {
+            int(item["_pivot_index"]) for item in major_highs if "_pivot_index" in item
+        }
+        atr = self._atr(rows)
+        equal_tolerance = max(0.05, atr * 0.08)
+        current = rows[-1]
+
+        def _select(
+            candidates: list[dict[str, Any]],
+            *,
+            level_key: str,
+            major_indexes: set[int],
+            is_low: bool,
+        ) -> dict[str, Any] | None:
+            if not candidates:
+                return None
+            enriched: list[dict[str, Any]] = []
+            for candidate in candidates:
+                level = float(candidate[level_key])
+                touches = sum(
+                    1
+                    for other in candidates
+                    if abs(float(other[level_key]) - level) <= equal_tolerance
+                )
+                index = int(candidate["_pivot_index"])
+                major = index in major_indexes
+                equal_cluster = touches >= 2
+                kind = (
+                    f"equal_{'low' if is_low else 'high'}"
+                    if equal_cluster
+                    else (
+                        f"major_swing_{'low' if is_low else 'high'}"
+                        if major
+                        else f"swing_{'low' if is_low else 'high'}"
+                    )
+                )
+                priority = 3 if equal_cluster else (2 if major else 1)
+                enriched.append(
+                    {
+                        **candidate,
+                        "liquidity_level_type": kind,
+                        "liquidity_touch_count": touches,
+                        "liquidity_level_priority": priority,
+                        "liquidity_level_age_bars": max(1, len(rows) - 1 - index),
+                        "liquidity_major_pivot": major,
+                    }
+                )
+
+            tested = [
+                item
+                for item in enriched
+                if (
+                    float(current["low"]) < float(item[level_key])
+                    if is_low
+                    else float(current["high"]) > float(item[level_key])
+                )
+            ]
+            pool = tested or enriched
+            return max(
+                pool,
+                key=lambda item: (
+                    int(item["liquidity_level_priority"]),
+                    int(item["liquidity_touch_count"]),
+                    -int(item["liquidity_level_age_bars"]),
+                ),
+            )
+
+        return (
+            _select(
+                lows,
+                level_key="low",
+                major_indexes=major_low_indexes,
+                is_low=True,
+            ),
+            _select(
+                highs,
+                level_key="high",
+                major_indexes=major_high_indexes,
+                is_low=False,
+            ),
+        )
+
+    def _latest_confirmed_pivots(
+        self, rows: list[dict[str, Any]], *, strength: int, lookback: int
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        """Return the highest-significance confirmed liquidity levels in play."""
+        return self._rank_liquidity_pivots(
+            rows,
+            strength=strength,
+            lookback=lookback,
+        )
 
     def _underlying_snapshot(
         self, indicators: Mapping[str, Any]
@@ -379,17 +491,26 @@ class SMCStrategy(EliteStrategy):
         effective_min = max(0.05, min(configured_cap, atr * min_sweep_atr))
         reclaim_buffer = atr * reclaim_buffer_atr
 
-        bullish: dict[str, Any] = {
-            "exists": False,
-            "valid": False,
-            "reason": "missing_pivot",
-        }
-        pivot_low = snapshot.get("pivot_low")
-        if isinstance(pivot_low, Mapping) and pivot_low.get("low") is not None:
-            level = float(pivot_low["low"])
-            depth = level - float(current["low"])
-            reclaim = float(current["close"]) - level
-            bullish = {
+        def _diagnose(
+            pivot: Any,
+            *,
+            level_key: str,
+            bullish: bool,
+        ) -> dict[str, Any]:
+            if not isinstance(pivot, Mapping) or pivot.get(level_key) is None:
+                return {"exists": False, "valid": False, "reason": "missing_pivot"}
+            level = float(pivot[level_key])
+            depth = (
+                level - float(current["low"])
+                if bullish
+                else float(current["high"]) - level
+            )
+            reclaim = (
+                float(current["close"]) - level
+                if bullish
+                else level - float(current["close"])
+            )
+            return {
                 "exists": depth > 0,
                 "valid": bool(
                     depth >= effective_min
@@ -404,34 +525,33 @@ class SMCStrategy(EliteStrategy):
                 "too_shallow": bool(0 < depth < effective_min),
                 "too_deep": bool(depth > atr * max_sweep_atr),
                 "reclaim_failed": bool(depth > 0 and reclaim < reclaim_buffer),
+                "liquidity_level_type": str(
+                    pivot.get("liquidity_level_type") or f"swing_{level_key}"
+                ),
+                "liquidity_touch_count": int(
+                    pivot.get("liquidity_touch_count") or 1
+                ),
+                "liquidity_level_priority": int(
+                    pivot.get("liquidity_level_priority") or 1
+                ),
+                "liquidity_level_age_bars": int(
+                    pivot.get("liquidity_level_age_bars") or 0
+                ),
+                "liquidity_major_pivot": bool(
+                    pivot.get("liquidity_major_pivot")
+                ),
             }
 
-        bearish: dict[str, Any] = {
-            "exists": False,
-            "valid": False,
-            "reason": "missing_pivot",
-        }
-        pivot_high = snapshot.get("pivot_high")
-        if isinstance(pivot_high, Mapping) and pivot_high.get("high") is not None:
-            level = float(pivot_high["high"])
-            depth = float(current["high"]) - level
-            reclaim = level - float(current["close"])
-            bearish = {
-                "exists": depth > 0,
-                "valid": bool(
-                    depth >= effective_min
-                    and depth <= atr * max_sweep_atr
-                    and reclaim >= reclaim_buffer
-                ),
-                "level": level,
-                "depth_points": max(0.0, depth),
-                "depth_atr": max(0.0, depth) / atr,
-                "reclaim_points": reclaim,
-                "reclaim_atr": reclaim / atr,
-                "too_shallow": bool(0 < depth < effective_min),
-                "too_deep": bool(depth > atr * max_sweep_atr),
-                "reclaim_failed": bool(depth > 0 and reclaim < reclaim_buffer),
-            }
+        bullish = _diagnose(
+            snapshot.get("pivot_low"),
+            level_key="low",
+            bullish=True,
+        )
+        bearish = _diagnose(
+            snapshot.get("pivot_high"),
+            level_key="high",
+            bullish=False,
+        )
 
         self.last_sweep_diagnostics = {
             "effective_min_sweep_points": effective_min,
@@ -478,6 +598,21 @@ class SMCStrategy(EliteStrategy):
             "volume_confirmation": volume_confirmation,
             "effective_min_sweep_points": float(
                 self.last_sweep_diagnostics["effective_min_sweep_points"]
+            ),
+            "liquidity_level_type": str(
+                desired.get("liquidity_level_type") or "swing"
+            ),
+            "liquidity_touch_count": int(
+                desired.get("liquidity_touch_count") or 1
+            ),
+            "liquidity_level_priority": int(
+                desired.get("liquidity_level_priority") or 1
+            ),
+            "liquidity_level_age_bars": int(
+                desired.get("liquidity_level_age_bars") or 0
+            ),
+            "liquidity_major_pivot": bool(
+                desired.get("liquidity_major_pivot")
             ),
             "recovered_from_history": bool(recovered_from_history),
         }
@@ -817,19 +952,25 @@ class SMCStrategy(EliteStrategy):
                 if balanced_sweep_depth:
                     reasons.append("balanced_sweep_depth")
 
-                independent_confirmation = bool(
-                    bool(event["volume_confirmation"])
-                    or structure_confirmed
-                    or retest_confirmed
-                    or premium_reclaim
-                )
+                local_support_sources = [
+                    name
+                    for name, present in (
+                        ("volume", bool(event["volume_confirmation"])),
+                        ("structure", structure_confirmed),
+                        ("retest", retest_confirmed),
+                        ("premium_reclaim", premium_reclaim),
+                    )
+                    if present
+                ]
+                local_support_present = bool(local_support_sources)
+                # SMC owns the structural setup. StrategyManager already owns
+                # independent confirmation (fresh OrderFlow or another trigger);
+                # do not duplicate that gate with correlated option features here.
                 structural_failures: list[str] = []
                 if not direction_aligned:
                     structural_failures.append("smc_direction_conflict")
                 if not context_fresh:
                     structural_failures.append("underlying_context_stale")
-                if not independent_confirmation:
-                    structural_failures.append("smc_independent_confirmation_missing")
                 if structural_failures:
                     self._no_vote(structural_failures[0])
                     LOGGER.info(
@@ -935,6 +1076,15 @@ class SMCStrategy(EliteStrategy):
                     "effective_min_sweep_points": float(
                         event["effective_min_sweep_points"]
                     ),
+                    "liquidity_level_type": str(event["liquidity_level_type"]),
+                    "liquidity_touch_count": int(event["liquidity_touch_count"]),
+                    "liquidity_level_priority": int(
+                        event["liquidity_level_priority"]
+                    ),
+                    "liquidity_level_age_bars": int(
+                        event["liquidity_level_age_bars"]
+                    ),
+                    "liquidity_major_pivot": bool(event["liquidity_major_pivot"]),
                     "underlying_atr": atr,
                     "underlying_invalidation_level": underlying_invalidation,
                     "premium_stop_distance": max(
@@ -945,7 +1095,8 @@ class SMCStrategy(EliteStrategy):
                     "premium_target_rr": 2.0,
                     "partial_features_used": False,
                     "feature_completeness": feature_completeness,
-                    "smc_independent_confirmation": independent_confirmation,
+                    "smc_local_support_present": local_support_present,
+                    "smc_local_support_sources": local_support_sources,
                     "smc_block_reason": "",
                     "latest_bar_ts": current_ts,
                     "setup_candle_timestamp": current_ts,
