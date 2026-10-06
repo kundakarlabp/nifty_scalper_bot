@@ -144,14 +144,15 @@ def test_candidate_selector_takes_its_floor_from_the_execution_policy(
     assert selector.min_option_premium == 45.0
 
 
-def test_runner_final_spread_guard_uses_execution_policy() -> None:
+def test_runner_trade_plan_uses_execution_policy_spread_cap() -> None:
     from pathlib import Path
 
     source = Path("src/nifty_scalper_bot/strategies/runner.py").read_text(
         encoding="utf-8"
     )
-    assert "spread_pct > resolve_entry_policy().execution_max_spread_pct" in source
-    assert "spread_pct > resolve_entry_policy().evaluation_max_spread_pct" not in source
+    assert "max_spread_pct = resolve_entry_policy().execution_max_spread_pct" in source
+    assert "max_spread_pct=max_spread_pct" in source
+    assert "resolve_entry_policy().evaluation_max_spread_pct" not in source
 
 
 def test_strategy_manager_does_not_duplicate_execution_spread_ownership() -> None:
