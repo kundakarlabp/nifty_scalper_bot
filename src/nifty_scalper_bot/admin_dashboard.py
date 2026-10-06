@@ -556,6 +556,32 @@ def start_research(request: Request, mode: str = "all", days: int = 30) -> JSONR
     return JSONResponse(result, status_code=409 if result["state"] == "busy" else 202)
 
 
+@router.post("/admin/research/poll-manifest")
+def poll_research_manifest(request: Request) -> JSONResponse:
+    """Launch the fixed manifest request from the persistent admin service."""
+
+    from nifty_scalper_bot.ops.research_jobs import start_job
+    from nifty_scalper_bot.superlite_admin_core import same_origin
+
+    _check_auth(request)
+    same_origin(request)
+    manifest = APP_DIR / "deploy/research_request.json"
+    if not manifest.is_file():
+        return JSONResponse(
+            {"state": "not_requested", "backtest_completed": False},
+            status_code=200,
+        )
+    try:
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+        result = start_job(APP_DIR, payload)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return JSONResponse(
+            {"error": "Invalid research request manifest"},
+            status_code=422,
+        )
+    return JSONResponse(result, status_code=409 if result["state"] == "busy" else 202)
+
+
 @router.get("/admin/research/status")
 def research_status(request: Request) -> JSONResponse:
     from nifty_scalper_bot.ops.research_jobs import read_status

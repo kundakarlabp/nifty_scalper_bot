@@ -92,6 +92,50 @@ def test_dashboard_rejects_cross_site_start(tmp_path, monkeypatch):
     assert client.get("/admin/research/status").json()["state"] == "not_requested"
 
 
+def test_admin_manifest_poll_launches_exact_fixed_request(tmp_path, monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from nifty_scalper_bot import admin_dashboard
+    from nifty_scalper_bot.ops import research_jobs
+
+    manifest = tmp_path / "deploy/research_request.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(
+        json.dumps({"id": "manifest-job", "days": 14, "mode": "components"}),
+        encoding="utf-8",
+    )
+    launched = []
+
+    def launch(root, payload, **kwargs):
+        launched.append((root, payload, kwargs))
+        return {
+            "id": payload["id"],
+            "state": "queued",
+            "backtest_completed": False,
+        }
+
+    monkeypatch.setattr(admin_dashboard, "APP_DIR", tmp_path)
+    monkeypatch.setattr(research_jobs, "start_job", launch)
+    app = FastAPI()
+    app.include_router(admin_dashboard.router)
+    client = TestClient(app)
+
+    response = client.post(
+        "/admin/research/poll-manifest",
+        headers={"origin": "http://testserver"},
+    )
+
+    assert response.status_code == 202
+    assert launched == [
+        (
+            tmp_path,
+            {"id": "manifest-job", "days": 14, "mode": "components"},
+            {},
+        )
+    ]
+
+
 @pytest.mark.parametrize("ledger_error", [False, True])
 def test_worker_completes_component_research_without_claiming_live_parity(
     tmp_path, monkeypatch, ledger_error
@@ -158,6 +202,24 @@ def test_worker_completes_component_research_without_claiming_live_parity(
             "selection": {"promotion_eligible": False},
         },
     )
+
+    def blocked_runtime(root, request):
+        in_progress = json.loads(
+            (tmp_path / "data/research/real-job/status.json").read_text()
+        )
+        assert in_progress["state"] == "collecting"
+        assert in_progress["stage"] == "runtime_replay"
+        assert in_progress["component_backtest_completed"] is True
+        assert in_progress["requested_work_completed"] is False
+        return {
+            "scope": "production_composition_recorded_feed_replay",
+            "state": "blocked",
+            "completed_sessions": 0,
+            "failed_sessions": 0,
+            "available_sessions_fully_processed": False,
+        }
+
+    monkeypatch.setattr(worker, "run_recorded_replays", blocked_runtime)
     if ledger_error:
         journal = tmp_path / "no-ledger/trades.db"
         journal.parent.mkdir()
@@ -179,8 +241,12 @@ def test_worker_completes_component_research_without_claiming_live_parity(
     request = validate_request({"id": "real-job"}, today=date(2026, 10, 2))
     result = worker.run_worker(request, tmp_path / "empty.env")
     assert captures[0][0] == ["NSE:NIFTY 50", "NFO:NIFTY26OCTFUT", "NFO:CE", "NFO:PE"]
-    assert result["state"] == "completed"
+    assert result["state"] == "partial"
     assert result["backtest_completed"] is True
+    assert result["component_backtest_completed"] is True
+    assert result["requested_work_completed"] is False
+    assert result["runtime_replay_completed"] is False
+    assert result["runtime_replay"]["state"] == "blocked"
     assert result["orb_comparison"]["selection"]["promotion_eligible"] is False
     assert (tmp_path / "data/research/real-job/orb_comparison.json").is_file()
     assert result["live_equivalent"] is False
@@ -192,7 +258,13 @@ def test_worker_completes_component_research_without_claiming_live_parity(
         assert "private-id" not in json.dumps(result)
 
 
-def test_updater_waits_for_worker_before_oneshot_service_exits(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("mode", "expected_timeout"),
+    [("all", 3600), ("components", 2100), ("runtime", 1800)],
+)
+def test_updater_waits_with_mode_aware_budget(
+    tmp_path, monkeypatch, mode, expected_timeout
+):
     from nifty_scalper_bot.ops.research_jobs import start_job, write_json
 
     waited = []
@@ -200,7 +272,12 @@ def test_updater_waits_for_worker_before_oneshot_service_exits(tmp_path, monkeyp
     class Worker:
         def wait(self, timeout):
             waited.append(timeout)
-            status = {"id": "oneshot", "state": "blocked", "backtest_completed": False}
+            status = {
+                "id": "oneshot",
+                "mode": mode,
+                "state": "blocked",
+                "backtest_completed": False,
+            }
             write_json(tmp_path / "data/research/oneshot/status.json", status)
             write_json(tmp_path / "data/research/latest.json", status)
             return 0
@@ -209,8 +286,8 @@ def test_updater_waits_for_worker_before_oneshot_service_exits(tmp_path, monkeyp
         "nifty_scalper_bot.ops.research_jobs.subprocess.Popen",
         lambda *args, **kwargs: Worker(),
     )
-    result = start_job(tmp_path, {"id": "oneshot"}, wait=True)
-    assert waited == [1800]
+    result = start_job(tmp_path, {"id": "oneshot", "mode": mode}, wait=True)
+    assert waited == [expected_timeout]
     assert result["state"] == "blocked"
 
 
@@ -220,13 +297,26 @@ def test_updater_records_worker_timeout_or_unexpected_exit(
 ):
     import subprocess
 
-    from nifty_scalper_bot.ops.research_jobs import start_job
+    from nifty_scalper_bot.ops.research_jobs import start_job, write_json
 
     killed = []
 
     class Worker:
         def wait(self, timeout=None):
             if timeout is not None and globals_timeout:
+                progress = {
+                    "id": "dead-worker",
+                    "mode": "all",
+                    "state": "collecting",
+                    "stage": "runtime_replay",
+                    "backtest_completed": True,
+                    "completed_trade_analysis": "completed_trade_analysis.json",
+                }
+                write_json(
+                    tmp_path / "data/research/dead-worker/status.json",
+                    progress,
+                )
+                write_json(tmp_path / "data/research/latest.json", progress)
                 raise subprocess.TimeoutExpired("fixed-worker", timeout)
             return 1
 
@@ -244,6 +334,39 @@ def test_updater_records_worker_timeout_or_unexpected_exit(
         "WorkerTimeout" if timeout else "WorkerExitedWithoutResult"
     )
     assert bool(killed) is timeout
+    if timeout:
+        assert result["timed_out_stage"] == "runtime_replay"
+        assert result["worker_timeout_seconds"] == 3600
+        assert result["completed_trade_analysis"] == "completed_trade_analysis.json"
+
+
+def test_timeout_terminates_research_process_group(monkeypatch):
+    import signal
+    import subprocess
+
+    from nifty_scalper_bot.ops.research_jobs import _terminate_worker
+
+    signals = []
+
+    class Worker:
+        pid = 4321
+
+        def wait(self, timeout=None):
+            if timeout is not None:
+                raise subprocess.TimeoutExpired("research-worker", timeout)
+            return 0
+
+        def kill(self):
+            raise AssertionError("process-group cleanup should be used")
+
+    monkeypatch.setattr(
+        "nifty_scalper_bot.ops.research_jobs.os.killpg",
+        lambda pid, sig: signals.append((pid, sig)),
+    )
+
+    _terminate_worker(Worker())
+
+    assert signals == [(4321, signal.SIGTERM), (4321, signal.SIGKILL)]
 
 
 def test_worker_waits_for_startup_basket_and_redacts_unknown_errors(monkeypatch):
@@ -278,6 +401,56 @@ def test_worker_waits_for_startup_basket_and_redacts_unknown_errors(monkeypatch)
         )
         == "ledger_requires_verified_costs"
     )
+
+
+def test_recorded_replay_budget_exhaustion_is_partial_not_completed(
+    tmp_path, monkeypatch
+):
+    from types import SimpleNamespace
+
+    from nifty_scalper_bot.ops.research_jobs import run_recorded_replays
+
+    archive = tmp_path / "data/replay_archive"
+    archive.mkdir(parents=True)
+    for day in ("2026-09-30", "2026-10-01"):
+        (archive / f"{day}.jsonl").write_text("{}\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "nifty_scalper_bot.config.paths.get_data_dir", lambda: tmp_path / "data"
+    )
+    clock = iter([0.0, 1.0, 1501.0])
+    monkeypatch.setattr(
+        "nifty_scalper_bot.ops.research_jobs.time.monotonic",
+        lambda: next(clock),
+    )
+
+    def replay(command, **kwargs):
+        output = Path(command[command.index("--output") + 1])
+        (output / "report.json").write_text(
+            json.dumps({"events_processed": 10}),
+            encoding="utf-8",
+        )
+        return SimpleNamespace(returncode=0)
+
+    from pathlib import Path
+
+    monkeypatch.setattr(
+        "nifty_scalper_bot.ops.research_jobs.subprocess.run",
+        replay,
+    )
+    request = validate_request(
+        {"id": "budgeted", "mode": "runtime", "days": 2},
+        today=date(2026, 10, 2),
+    )
+
+    report = run_recorded_replays(tmp_path, request)
+
+    assert report["state"] == "partial"
+    assert report["budget_exhausted"] is True
+    assert report["completed_sessions"] == 1
+    assert report["failed_sessions"] == 0
+    assert report["available_sessions_fully_processed"] is False
+    assert report["deferred_from"] == "2026-10-01"
 
 
 def test_runtime_mode_is_bounded_and_requires_no_operator_login(tmp_path, monkeypatch):
