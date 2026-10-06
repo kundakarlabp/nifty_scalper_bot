@@ -271,10 +271,8 @@ def post_cost_outcome_evidence(
         elif dimension == "setup":
             value = str(trade.outcome.get("setup_name") or "").strip() or "unknown"
         elif dimension == "exit_reason":
-            value = (
-                str(trade.exit_reason or "").strip().split(maxsplit=1)[0]
-                or "unknown"
-            )
+            exit_reason = str(trade.exit_reason or "").strip()
+            value = exit_reason.split(maxsplit=1)[0] or "unknown"
         elif dimension == "target_adjustment":
             adjusted = trade.outcome.get("premium_cost_target_adjusted")
             value = (
