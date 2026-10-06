@@ -109,6 +109,17 @@ def _terminate_worker(process: Any) -> None:
     process.wait()
 
 
+def _same_request_definition(
+    existing: dict[str, Any], request: dict[str, Any]
+) -> bool:
+    """Keep immutable job IDs bound to one mode and requested duration."""
+
+    return all(
+        existing.get(key) == request.get(key)
+        for key in ("id", "days", "mode")
+    )
+
+
 def read_status(root: Path) -> dict[str, Any]:
     try:
         return json.loads((root / "data/research/latest.json").read_text())
@@ -132,9 +143,20 @@ def start_job(
         lock.close()
         return {"state": "busy", "backtest_completed": False}
     status_file = directory / request["id"] / "status.json"
+    existing: dict[str, Any] = {}
+    recovered_from_state: str | None = None
     if status_file.exists():
-        lock.close()
-        return json.loads(status_file.read_text())
+        existing = _read_job_status(status_file, {})
+        if not _same_request_definition(existing, request):
+            lock.close()
+            raise ValueError("research_request_id_conflict")
+        state = str(existing.get("state") or "")
+        if state not in {"queued", "collecting"}:
+            lock.close()
+            return existing
+        # Acquiring the worker lock proves the prior worker is no longer alive:
+        # live workers inherit and hold this descriptor until exit.
+        recovered_from_state = state
     env = dict(os.environ)
     env.update(
         ENABLE_LIVE="false",
@@ -151,7 +173,20 @@ def start_job(
     if not interpreter.is_file():
         interpreter = Path(sys.executable)
     env_file = os.getenv("BOT_ENV_FILE", "/home/ubuntu/.config/niftybot/niftybot.env")
-    queued = {**request, "state": "queued", "backtest_completed": False}
+    queued = {
+        **request,
+        "state": "queued",
+        "backtest_completed": False,
+        "component_backtest_completed": False,
+        "runtime_replay_completed": False,
+        "requested_work_completed": False,
+        "launch_attempt": int(existing.get("launch_attempt") or 0) + 1,
+    }
+    if recovered_from_state is not None:
+        queued.update(
+            recovered_from_state=recovered_from_state,
+            recovery_reason="nonterminal_status_without_worker_lock",
+        )
     write_json(status_file, queued)
     write_json(directory / "latest.json", queued)
     try:
