@@ -242,7 +242,7 @@ class SMCStrategy(EliteStrategy):
         strength: int,
         lookback: int,
     ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-        """Prefer visible multi-touch/major levels among levels the current bar tests."""
+        """Prefer visible multi-touch/major levels among those the current bar tests."""
         lows, highs = self._confirmed_pivot_candidates(
             rows, strength=strength, lookback=lookback
         )
