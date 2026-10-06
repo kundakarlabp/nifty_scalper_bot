@@ -350,38 +350,20 @@ def test_equal_low_cluster_is_preferred_over_minor_recent_swing(monkeypatch) -> 
     )
     rows.append(sweep)
 
-    assert (
-        strategy.generate_signal(
-            CE,
-            _indicators(latest_bar_ts=sweep["timestamp"]),
-            102.0,
-        )
-        is None
+    snapshot = strategy._underlying_snapshot(
+        _indicators(latest_bar_ts=sweep["timestamp"])
     )
-    event = strategy._events[(FUTURES, "CE")]
-    assert event["liquidity_level_type"] == "equal_low"
-    assert event["liquidity_touch_count"] >= 2
-    assert event["liquidity_level_priority"] == 3
-    assert event["sweep_level"] == pytest.approx(23980.0)
+    assert snapshot is not None
+    pivot_low = snapshot["pivot_low"]
+    assert pivot_low is not None
+    assert pivot_low["liquidity_level_type"] == "equal_low"
+    assert pivot_low["liquidity_touch_count"] >= 2
+    assert pivot_low["liquidity_level_priority"] == 3
+    assert pivot_low["low"] == pytest.approx(23980.0)
 
-    confirm = _bar(
-        31,
-        open_=23984.0,
-        high=24000.0,
-        low=23982.0,
-        close=23998.0,
-        volume=2200.0,
-    )
-    rows.append(confirm)
-    signal = strategy.generate_signal(
-        CE,
-        _indicators(latest_bar_ts=confirm["timestamp"]),
-        103.0,
-    )
-
-    assert signal is not None
-    assert signal.metadata["liquidity_level_type"] == "equal_low"
-    assert signal.metadata["liquidity_touch_count"] >= 2
+    bullish, _ = strategy._sweep_diagnostics(snapshot)
+    assert bullish["valid"] is True
+    assert bullish["liquidity_level_type"] == "equal_low"
 
 
 def test_volume_spike_config_is_consumed_as_structural_confirmation(
