@@ -200,12 +200,14 @@ class _CallingStrategy:
 
     def __init__(self) -> None:
         self.calls = 0
+        self.last_indicators: dict | None = None
 
     def get_required_indicators(self):
         return []
 
     def generate_signal(self, symbol, indicators, current_price, position=None):
         self.calls += 1
+        self.last_indicators = dict(indicators)
         return None
 
 
@@ -443,6 +445,98 @@ def test_live_strategy_manager_fails_closed_on_selected_contract_mismatch(
     assert (
         manager.get_last_no_signal_decision("NFO:NIFTY2662324100CE").reason
         == "no_strategy_signal"
+    )
+
+
+def test_live_single_fresh_spot_direction_is_preserved(monkeypatch) -> None:
+    _live_env(monkeypatch)
+    manager, strategy = _manager_with_strategy(_Engine(5))
+    now = time.time()
+    manager._latest_context_snapshots = {
+        "spot_context": {
+            "timestamp": now - 1.0,
+            "direction_bias": "CE",
+            "underlying_direction_bias": "CE",
+            "underlying_direction_confidence": 0.80,
+            "context_snapshot_version": 10,
+        },
+        "futures_context": {
+            "timestamp": now - 1.0,
+            "context_snapshot_version": 11,
+        },
+    }
+
+    manager.generate_signal("NFO:NIFTY2662324050CE", 100.0)
+
+    assert strategy.last_indicators is not None
+    assert strategy.last_indicators["direction_bias"] == "CE"
+    assert strategy.last_indicators["direction_context_source"] == "spot_context"
+    assert (
+        strategy.last_indicators["direction_resolution_reason"]
+        == "single_fresh_underlying_source"
+    )
+
+
+def test_live_single_fresh_futures_direction_is_preserved(monkeypatch) -> None:
+    _live_env(monkeypatch)
+    manager, strategy = _manager_with_strategy(_Engine(5))
+    now = time.time()
+    manager._latest_context_snapshots = {
+        "spot_context": {
+            "timestamp": now - 1.0,
+            "context_snapshot_version": 10,
+        },
+        "futures_context": {
+            "timestamp": now - 1.0,
+            "direction_bias": "PE",
+            "underlying_direction_bias": "PE",
+            "underlying_direction_confidence": 0.82,
+            "context_snapshot_version": 11,
+        },
+    }
+
+    manager.generate_signal("NFO:NIFTY2662324050CE", 100.0)
+
+    assert strategy.last_indicators is not None
+    assert strategy.last_indicators["direction_bias"] == "PE"
+    assert strategy.last_indicators["direction_context_source"] == "futures_context"
+    assert (
+        strategy.last_indicators["direction_resolution_reason"]
+        == "single_fresh_underlying_source"
+    )
+
+
+def test_live_fresh_spot_futures_disagreement_remains_fail_closed(
+    monkeypatch,
+) -> None:
+    _live_env(monkeypatch)
+    manager, strategy = _manager_with_strategy(_Engine(5))
+    now = time.time()
+    manager._latest_context_snapshots = {
+        "spot_context": {
+            "timestamp": now - 1.0,
+            "direction_bias": "CE",
+            "underlying_direction_bias": "CE",
+            "underlying_direction_confidence": 0.80,
+            "context_snapshot_version": 10,
+        },
+        "futures_context": {
+            "timestamp": now - 1.0,
+            "direction_bias": "PE",
+            "underlying_direction_bias": "PE",
+            "underlying_direction_confidence": 0.82,
+            "context_snapshot_version": 11,
+        },
+    }
+
+    manager.generate_signal("NFO:NIFTY2662324050CE", 100.0)
+
+    assert strategy.last_indicators is not None
+    assert "direction_bias" not in strategy.last_indicators
+    assert strategy.last_indicators["direction_transition"] is True
+    assert (
+        strategy.last_indicators["direction_resolution_reason"]
+        == "fresh_spot_futures_disagreement"
     )
 
 

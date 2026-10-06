@@ -3248,13 +3248,7 @@ class StrategyManager(_BaseStrategyManager):
                         "futures_bias": futures_observation.bias if futures_observation else None,
                     },
                 )
-            elif (
-                resolution.observation is not None
-                and (
-                    str(os.getenv("EXECUTION_MODE", "SHADOW")).strip().upper() != "LIVE"
-                    or resolution.reason == "spot_futures_agree"
-                )
-            ):
+            elif resolution.observation is not None:
                 observation = resolution.observation
                 indicators["direction_bias"] = observation.bias
                 indicators["underlying_direction_bias"] = observation.bias
