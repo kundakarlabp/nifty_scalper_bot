@@ -8,7 +8,9 @@ from nifty_scalper_bot.data.rest.zerodha_client import ZerodhaKiteClient
 from nifty_scalper_bot.utils.errors import BrokerError
 
 
-def _client(monkeypatch: pytest.MonkeyPatch) -> tuple[ZerodhaKiteClient, dict[str, Any]]:
+def _client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[ZerodhaKiteClient, dict[str, Any]]:
     client = ZerodhaKiteClient(api_key="k", api_secret="s", access_token="t")
     captured: dict[str, Any] = {}
 
@@ -47,7 +49,9 @@ def test_place_order_rejects_non_executable_contracts_before_broker_call(
     assert "data" not in captured
 
 
-def test_place_order_preserves_tradingsymbol_case(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_place_order_preserves_tradingsymbol_case(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     client, captured = _client(monkeypatch)
 
     result = client.place_order(
