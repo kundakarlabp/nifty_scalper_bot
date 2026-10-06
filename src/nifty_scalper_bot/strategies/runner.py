@@ -11292,15 +11292,15 @@ class StrategyRunner:
         """
         try:
             normalized = self._normalize_symbol(symbol)
+            counter = getattr(self._indicator_engine, "history_count", None)
+            if callable(counter):
+                return max(0, int(counter(normalized) or 0))
             return len(self._indicator_engine.get_history(normalized) or [])
         except Exception:
             return 0
 
     def _history_count_for_symbol(self, symbol: str) -> int:
-        try:
-            return len(self._indicator_engine.get_history(symbol) or [])
-        except Exception:
-            return 0
+        return self.indicator_history_count(symbol)
 
     def _same_bar_eval_reason(
         self,
