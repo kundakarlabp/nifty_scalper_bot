@@ -14,7 +14,7 @@ def test_freshness_is_armed_on_canonical_entry_plan() -> None:
     block_start = source.index("plan = TradePlan(")
     block_end = source.index("submit_result = submit_result_fn(plan)", block_start)
     block = source[block_start:block_end]
-    assert 'max_signal_age_seconds=max(' in block
-    assert 'max_entry_drift_pct=max(' in block
+    assert "max_signal_age_seconds=max(" in block
+    assert "max_entry_drift_pct=max(" in block
     assert '"decision_ts": now_epoch' in block
     assert ".place_order(" not in block
