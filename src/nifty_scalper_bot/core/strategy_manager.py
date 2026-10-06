@@ -2499,7 +2499,12 @@ class StrategyManager(_BaseStrategyManager):
         exit_result = "no_signal"
         policy = HistoryReadinessPolicy.from_env()
         required_bars = int(getattr(self, "_required_candles", policy.option_eval_min_bars) or policy.option_eval_min_bars)
-        bars_available = len(self._indicator_engine.get_history(symbol) or [])
+        history_count_fn = getattr(self._indicator_engine, "history_count", None)
+        bars_available = (
+            int(history_count_fn(symbol))
+            if callable(history_count_fn)
+            else len(self._indicator_engine.get_history(symbol) or [])
+        )
         indicators_ready = bars_available >= required_bars
         hub_ready = None
         if self._data_hub is not None:
