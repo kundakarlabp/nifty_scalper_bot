@@ -104,6 +104,43 @@ def test_live_vwap_accepts_meaningful_atr_penetration(monkeypatch):
     assert signal.metadata["vwap_event_confirmed"] is True
 
 
+def test_relaxed_vwap_distance_requires_high_confidence_context(monkeypatch):
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    symbol = "NFO:NIFTY26FEB22500CE"
+    setup = _indicators(
+        atr=1.0,
+        close=103.0,
+        open=99.0,
+        high=103.2,
+        low=99.0,
+        volume=1000.0,
+        avg_volume=900.0,
+        context_age_seconds=0.0,
+        futures_vwap_slope=1.0,
+    )
+
+    low_confidence = VWAPProStrategy(VWAPProStrategyConfig(), _DummyEngine())
+    rejected = low_confidence._evaluate_signal(
+        symbol,
+        {**setup, "underlying_direction_confidence": 0.50},
+        103.0,
+    )
+
+    assert rejected is None
+    assert low_confidence.last_no_vote_reason == "distance_outside_band"
+
+    high_confidence = VWAPProStrategy(VWAPProStrategyConfig(), _DummyEngine())
+    accepted = high_confidence._evaluate_signal(
+        symbol,
+        {**setup, "underlying_direction_confidence": 0.95},
+        103.0,
+    )
+
+    assert accepted is not None
+    assert accepted.metadata["vwap_distance_atr"] == 3.0
+    assert accepted.metadata["vwap_strong_fresh_trend_context"] is True
+
+
 def test_vwap_thesis_uses_stable_structural_id_until_closed_candle_reset(monkeypatch):
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     strategy = VWAPProStrategy(VWAPProStrategyConfig(), _DummyEngine())
