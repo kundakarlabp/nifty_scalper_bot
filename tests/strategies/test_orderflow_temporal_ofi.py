@@ -1,3 +1,5 @@
+import logging
+
 from nifty_scalper_bot.strategies.elite_strategies.order_flow import (
     OrderFlowStrategy,
     OrderFlowStrategyConfig,
@@ -106,6 +108,34 @@ def test_strong_adverse_depth_blocks_supportive_temporal_ofi() -> None:
     assert signal.metadata["strong_depth_conflicts_side"] is True
     assert signal.metadata["effective_context_alignment"] is False
     assert signal.metadata["effective_context_conflict"] is True
+
+
+def test_orderflow_context_log_exposes_microstructure_diagnostics(caplog) -> None:
+    caplog.set_level(logging.INFO)
+    strategy = _strategy()
+    indicators = _indicators(
+        buy=105.0,
+        sell=100.0,
+        ofi_value=0.50,
+        supports=True,
+    )
+    indicators.pop("_expected_support")
+
+    signal = strategy._evaluate_signal(SYMBOL, indicators, current_price=100.25)
+
+    assert signal is not None
+    records = [
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "ORDERFLOW_CONTEXT_EVIDENCE"
+    ]
+    assert len(records) == 1
+    record = records[0]
+    assert record.context_alignment_source == "temporal_ofi"
+    assert record.ofi_ready is True
+    assert record.ofi_1s_normalized == 0.50
+    assert record.depth_imbalance == signal.metadata["depth_imbalance"]
+    assert record.strong_depth_conflicts_side is False
 
 
 def test_adverse_upstream_ofi_cannot_add_context_bonus() -> None:
