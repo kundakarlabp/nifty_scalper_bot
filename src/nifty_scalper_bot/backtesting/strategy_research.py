@@ -231,13 +231,13 @@ def _research_direction_payload(
     )
 
 
-def _research_underlying_structural_context(
+def _research_orb_structural_context(
     engine: IndicatorEngine,
     *,
     spot_symbol: str,
     futures_symbol: str,
 ) -> dict[str, Any]:
-    """Return completed-bar underlying context shared by research strategies."""
+    """Return completed-bar underlying context shared by ORB and VWAP research."""
     spot_payload, spot_observation = _research_direction_payload(
         engine, spot_symbol, role="spot_context"
     )
@@ -606,7 +606,7 @@ def _scenario(
                 if compact_orb_context
                 else dict(engine.get_indicators(symbol))
             )
-            underlying_context = _research_underlying_structural_context(
+            underlying_context = _research_orb_structural_context(
                 engine,
                 spot_symbol="NSE:NIFTY 50",
                 futures_symbol=future,
