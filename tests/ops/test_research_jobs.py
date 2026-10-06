@@ -158,6 +158,24 @@ def test_worker_completes_component_research_without_claiming_live_parity(
             "selection": {"promotion_eligible": False},
         },
     )
+
+    def blocked_runtime(root, request):
+        in_progress = json.loads(
+            (tmp_path / "data/research/real-job/status.json").read_text()
+        )
+        assert in_progress["state"] == "collecting"
+        assert in_progress["stage"] == "runtime_replay"
+        assert in_progress["component_backtest_completed"] is True
+        assert in_progress["requested_work_completed"] is False
+        return {
+            "scope": "production_composition_recorded_feed_replay",
+            "state": "blocked",
+            "completed_sessions": 0,
+            "failed_sessions": 0,
+            "available_sessions_fully_processed": False,
+        }
+
+    monkeypatch.setattr(worker, "run_recorded_replays", blocked_runtime)
     if ledger_error:
         journal = tmp_path / "no-ledger/trades.db"
         journal.parent.mkdir()
@@ -276,6 +294,35 @@ def test_updater_records_worker_timeout_or_unexpected_exit(
         assert result["timed_out_stage"] == "runtime_replay"
         assert result["worker_timeout_seconds"] == 3600
         assert result["completed_trade_analysis"] == "completed_trade_analysis.json"
+
+
+def test_timeout_terminates_research_process_group(monkeypatch):
+    import signal
+    import subprocess
+
+    from nifty_scalper_bot.ops.research_jobs import _terminate_worker
+
+    signals = []
+
+    class Worker:
+        pid = 4321
+
+        def wait(self, timeout=None):
+            if timeout is not None:
+                raise subprocess.TimeoutExpired("research-worker", timeout)
+            return 0
+
+        def kill(self):
+            raise AssertionError("process-group cleanup should be used")
+
+    monkeypatch.setattr(
+        "nifty_scalper_bot.ops.research_jobs.os.killpg",
+        lambda pid, sig: signals.append((pid, sig)),
+    )
+
+    _terminate_worker(Worker())
+
+    assert signals == [(4321, signal.SIGTERM), (4321, signal.SIGKILL)]
 
 
 def test_worker_waits_for_startup_basket_and_redacts_unknown_errors(monkeypatch):
