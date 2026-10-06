@@ -109,7 +109,8 @@ def test_market_data_manager_has_single_depth_coercer() -> None:
 def test_runner_active_entry_path_uses_canonical_trade_plan_api() -> None:
     runner_path = SRC_ROOT / "strategies" / "runner.py"
     source = runner_path.read_text(encoding="utf-8")
-    assert "submit_trade_plan_result(plan)" in source
+    assert '"submit_trade_plan_result", None' in source
+    assert "submit_result = submit_result_fn(plan)" in source
     assert "self._order_manager.place_order(" not in source
     assert "self._order_manager.execute_market_order(" not in source
 
