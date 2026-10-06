@@ -19742,10 +19742,7 @@ class StrategyRunner:
             )
 
             max_quote_age_ms = app_settings.ORDER_MAX_QUOTE_AGE_MS
-            max_spread_pct = float(
-                os.getenv("ORDER_MAX_SPREAD_PCT", os.getenv("SPREAD_MAX_PCT", "10.0"))
-                or "10.0"
-            )
+            max_spread_pct = resolve_entry_policy().execution_max_spread_pct
             min_depth_qty = int(
                 float(
                     os.getenv("ORDER_MIN_DEPTH_QTY", os.getenv("MIN_DEPTH_QTY", "0"))
