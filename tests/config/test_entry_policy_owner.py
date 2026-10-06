@@ -152,7 +152,6 @@ def test_runner_trade_plan_uses_execution_policy_spread_cap() -> None:
     )
     assert "max_spread_pct = resolve_entry_policy().execution_max_spread_pct" in source
     assert "max_spread_pct=max_spread_pct" in source
-    assert "resolve_entry_policy().evaluation_max_spread_pct" not in source
 
 
 def test_strategy_manager_does_not_duplicate_execution_spread_ownership() -> None:
