@@ -3311,9 +3311,15 @@ class BracketManager:
         room = max(cost, 0.05)
         if bracket.side == "BUY":
             proposed = max(float(candidate), entry + locked)
-            return None if proposed >= (ltp - room) else proposed
+            if proposed < (ltp - room):
+                return proposed
+            breakeven = max(float(candidate), entry + cost)
+            return None if breakeven >= (ltp - room) else breakeven
         proposed = min(float(candidate), entry - locked)
-        return None if proposed <= (ltp + room) else proposed
+        if proposed > (ltp + room):
+            return proposed
+        breakeven = min(float(candidate), entry - cost)
+        return None if breakeven <= (ltp + room) else breakeven
 
     def _calculate_tiered_trailing_sl(
         self,
