@@ -8,7 +8,9 @@ from functools import wraps
 from typing import Any, Awaitable, Callable, TypeVar
 
 from nifty_scalper_bot.core.trading_switch import trading_switch
-from nifty_scalper_bot.utils.logging import log_throttled
+
+# IndicatorEngine owns missing-history diagnostics; boot safety must not wrap
+# get_history merely to suppress log duplication.
 
 _LOGGER = logging.getLogger("nifty_scalper_bot.core.app")
 _T = TypeVar("_T")
@@ -270,60 +272,6 @@ def adapt_mdm_pipeline_overload(original: Callable[..., Any]) -> Callable[..., A
     return wrapped
 
 
-def adapt_indicator_get_history(original: Callable[..., list[Any]]) -> Callable[..., list[Any]]:
-    """Short-circuit missing histories before duplicate INFO instrumentation runs."""
-
-    @wraps(original)
-    def wrapped(self: Any, symbol: str, *args: Any, **kwargs: Any) -> list[Any]:
-        histories = getattr(self, "_histories", None)
-        lock = getattr(self, "_lock", None)
-        if not isinstance(histories, dict):
-            return original(self, symbol, *args, **kwargs)
-        if lock is not None:
-            with lock:
-                missing = symbol not in histories
-        else:
-            missing = symbol not in histories
-        if not missing:
-            return original(self, symbol, *args, **kwargs)
-
-        market_open = True
-        try:
-            from nifty_scalper_bot.utils.market_hours import is_market_open_now
-
-            market_open = bool(is_market_open_now())
-        except Exception:  # noqa: BLE001 - diagnostics must not affect data access
-            pass
-        logger = getattr(
-            self,
-            "_logger",
-            logging.getLogger("nifty_scalper_bot.strategies.indicators"),
-        )
-        log_throttled(
-            logger,
-            (
-                f"indicator_history_missing:{symbol}"
-                if market_open
-                else f"indicator_history_missing_offmarket:{symbol}"
-            ),
-            (
-                "Condition met: indicator_history_missing"
-                if market_open
-                else "Condition met: indicator_history_missing (market_closed)"
-            ),
-            interval_sec=60.0 if market_open else 900.0,
-            level=logging.INFO if market_open else logging.DEBUG,
-            extra={
-                "event": "indicator_engine_history_missing",
-                "symbol": symbol,
-                "market_session_state": "open" if market_open else "closed",
-            },
-        )
-        return []
-
-    return wrapped
-
-
 def adapt_option_indicator_direction_context(
     original: Callable[..., Any],
 ) -> Callable[..., Any]:
@@ -428,12 +376,6 @@ def apply_app_patch(app_module: Any) -> None:
     if indicator_cls is not None:
         _patch_function(
             indicator_cls,
-            "get_history",
-            adapt_indicator_get_history,
-            "_missing_history_single_log_adapted",
-        )
-        _patch_function(
-            indicator_cls,
             "get_indicators",
             adapt_option_indicator_direction_context,
             "_option_direction_context_authority_adapted",
@@ -442,7 +384,6 @@ def apply_app_patch(app_module: Any) -> None:
 
 __all__ = [
     "adapt_compute_live_readiness",
-    "adapt_indicator_get_history",
     "adapt_mdm_pipeline_overload",
     "adapt_option_indicator_direction_context",
     "adapt_register_and_subscribe_live_symbol",

@@ -162,11 +162,6 @@ def _boot_readiness_installation_complete(app_module: Any) -> bool:
         ),
         _marked_callable(
             IndicatorEngine,
-            "get_history",
-            "_missing_history_single_log_adapted",
-        ),
-        _marked_callable(
-            IndicatorEngine,
             "get_indicators",
             "_option_direction_context_authority_adapted",
         ),

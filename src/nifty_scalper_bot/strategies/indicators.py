@@ -568,7 +568,7 @@ class IndicatorEngine:
         *,
         field: Literal["close", "bars"] = "close",
     ) -> list[Any]:
-        """Args: symbol, count. Returns: close-price history list. Raises: Exception."""
+        """Return history; missing-history diagnostics are throttled natively."""
         LOGGER.debug(
             "Entered IndicatorEngine.get_history",
             extra={"event": "indicator_engine_get_history_enter", "symbol": symbol},
@@ -586,20 +586,6 @@ class IndicatorEngine:
                     except Exception:
                         market_open_now = True
                     if market_open_now:
-                        logging.getLogger(__name__).info(
-                            "Condition met: indicator_history_missing",
-                            extra={
-                                "event": "indicator_engine_history_missing",
-                                "symbol": symbol,
-                            },
-                        )
-                        LOGGER.info(
-                            "Condition met: indicator_history_missing",
-                            extra={
-                                "event": "indicator_engine_history_missing",
-                                "symbol": symbol,
-                            },
-                        )
                         log_throttled(
                             LOGGER,
                             f"indicator_history_missing:{symbol}",
