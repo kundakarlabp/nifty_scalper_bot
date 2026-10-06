@@ -78,7 +78,7 @@ Before a non-trivial edit:
 
 1. Read `docs/AGENT_START_HERE.md` and `docs/REPO_MAP.md`.
 2. Use `scripts/agent_context.py` to rank relevant files/tests when the location is not already obvious.
-3. Load one primary skill; add another only when the task genuinely crosses concerns.
+3. In skill-aware ChatGPT/Codex hosts, automatically activate `nifty-scalper-engineering` as the orchestration layer; then load one primary specialist skill and add another only when the task genuinely crosses concerns.
 4. Read only matching entries from `docs/ENGINEERING_FAILURE_PATTERNS.md`.
 5. Trace symptom → owner → downstream safety effect.
 6. Define one observable invariant and the smallest coherent change.
@@ -116,6 +116,7 @@ Never claim a test, replay, backtest, deployment, production state, or merge is 
 - Optimization workflow: `docs/AI_OPTIMIZATION_WORKFLOW.md`
 - Recurring failures: `docs/ENGINEERING_FAILURE_PATTERNS.md`
 - Tooling design: `docs/AGENT_TOOLING_DESIGN.md`
+- Default engineering orchestrator: `.agents/skills/nifty-scalper-engineering/SKILL.md`
 - Specialist skills: `.agents/skills/README.md`
 
 Keep this file compact. Detailed procedures belong in those documents/skills and executable guards.

@@ -6,13 +6,15 @@ This repository is optimized for code work performed from ordinary ChatGPT chats
 
 At the beginning of a task, do not repeatedly test different repository-access methods. Use the GitHub connector as the authoritative read/write path.
 
+For every NIFTY Scalper Bot **audit, code edit, debugging, architecture-understanding, review, validation, or merge-readiness task**, automatically activate `nifty-scalper-engineering`. When the personal ChatGPT skill and the repository-local skill are both available, treat them as the same orchestration layer; repository-local `AGENTS.md` and the agent manifest remain authoritative.
+
 Read only these files first:
 
 1. `AGENTS.md`
 2. `docs/REPO_MAP.md`
 3. `.agents/skills/README.md`
 
-Then load one primary skill from `docs/AGENT_START_HERE.md`. Use a specialist skill only when the task actually matches it; do not load the entire catalog.
+Then keep `nifty-scalper-engineering` active and load one primary specialist skill from `docs/AGENT_START_HERE.md`. Use an additional specialist only when the task actually crosses that concern; do not load the entire catalog.
 
 For Python/tooling changes, use `docs/ENGINEERING_FAILURE_PATTERNS.md` as the repository's institutional memory. Read only matching pattern IDs. Prefer the automated prevention/detector described there over adding more prompt text.
 
@@ -36,6 +38,7 @@ Use that report to fetch only the highest-ranked files. Avoid broad searches and
 
 ```text
 GitHub connector available
+→ automatically activate nifty-scalper-engineering
 → read repository contract and map once
 → obtain compact context report for non-trivial work
 → reproduce the exact symptom

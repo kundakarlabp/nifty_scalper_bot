@@ -1,5 +1,7 @@
 # GitHub Copilot instructions — NIFTY Scalper Bot
 
+For every code audit, edit, debug, refactor, understanding, review, validation, or merge-readiness task, automatically route through `.agents/skills/nifty-scalper-engineering/SKILL.md` first. It is the orchestration layer; then select one specialist skill from `docs/AGENT_START_HERE.md`.
+
 Start with `docs/AGENT_START_HERE.md`, `docs/REPO_MAP.md`, and `.agents/skills/README.md`. Read the full `AGENTS.md` before changing high-risk runtime paths.
 
 ## Fast context

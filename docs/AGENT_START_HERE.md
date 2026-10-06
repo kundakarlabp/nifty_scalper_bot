@@ -2,6 +2,12 @@
 
 Use the smallest amount of repository context that can safely answer the task.
 
+## Default orchestration
+
+For **any NIFTY Scalper Bot code audit, edit, debugging, understanding, review, refactor, validation, or merge-readiness task**, automatically activate `nifty-scalper-engineering` first.
+
+It is the orchestration layer, not a replacement for specialist procedures. After it frames the task and blast radius, load one primary specialist skill from the routing table below. The user does not need to name the orchestrator explicitly.
+
 ## Fast path
 
 1. Read `docs/REPO_MAP.md`.
@@ -11,13 +17,15 @@ Use the smallest amount of repository context that can safely answer the task.
    python scripts/agent_task.py context --query "exact error, symbol, class, function, or behavior"
    ```
 
-3. Load **one primary skill** for the task. Add a secondary skill only when the task actually crosses that concern.
+3. Keep `nifty-scalper-engineering` active as the orchestration layer, then load **one primary specialist skill** for the task. Add a secondary specialist only when the task actually crosses that concern.
 4. For Python/tooling edits, scan the matching entries in `docs/ENGINEERING_FAILURE_PATTERNS.md`; do not load unrelated patterns.
 5. Read full `AGENTS.md` before editing a high-risk runtime path.
 6. Validate the changed surface first through `agent_task.py check`. It prefers exact importing/co-located tests, falls back to the SSOT area suite when no direct test is found, and adds architecture/E2E checks when warranted.
 7. Require full validation and final-head CI before merge, then run `agent_task.py merge-check` against the exact validated base/head.
 
 ## Minimal skill routing
+
+`nifty-scalper-engineering` is always the orchestration layer for repository engineering tasks; the table selects the primary specialist procedure.
 
 | Task | Primary skill | Add only when needed |
 |---|---|---|
