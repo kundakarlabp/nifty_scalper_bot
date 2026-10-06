@@ -75,17 +75,18 @@ def test_architecture_doc_declares_canonical_path_and_compatibility_layers() -> 
     assert "Forbidden runtime layers" in doc
 
 
-def test_runner_has_single_execute_order_definition() -> None:
+def test_runner_has_no_retired_direct_execution_helpers() -> None:
     runner_path = SRC_ROOT / "strategies" / "runner.py"
     tree = ast.parse(runner_path.read_text(encoding="utf-8"))
     for node in tree.body:
         if isinstance(node, ast.ClassDef) and node.name == "StrategyRunner":
-            names = [
+            names = {
                 n.name
                 for n in node.body
                 if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-            ]
-            assert names.count("_execute_order") == 1
+            }
+            assert "_execute_order" not in names
+            assert "_process_token" not in names
             return
     raise AssertionError("StrategyRunner class not found")
 
@@ -105,21 +106,12 @@ def test_market_data_manager_has_single_depth_coercer() -> None:
     raise AssertionError("MarketDataManager class not found")
 
 
-def test_runner_execute_order_does_not_bypass_canonical_entry_api() -> None:
+def test_runner_active_entry_path_uses_canonical_trade_plan_api() -> None:
     runner_path = SRC_ROOT / "strategies" / "runner.py"
-    tree = ast.parse(runner_path.read_text(encoding="utf-8"))
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "_execute_order":
-            calls = {
-                call.func.attr
-                for call in ast.walk(node)
-                if isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
-            }
-            assert "submit_trade_plan_result" in calls
-            assert "place_order" not in calls
-            assert "execute_market_order" not in calls
-            return
-    raise AssertionError("StrategyRunner._execute_order not found")
+    source = runner_path.read_text(encoding="utf-8")
+    assert "submit_trade_plan_result(plan)" in source
+    assert "self._order_manager.place_order(" not in source
+    assert "self._order_manager.execute_market_order(" not in source
 
 
 def test_stale_signal_arbitration_reservation_enters_reentry_cooldown() -> None:
