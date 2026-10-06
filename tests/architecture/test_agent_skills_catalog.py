@@ -71,6 +71,9 @@ def test_nifty_scalper_engineering_is_default_orchestrator() -> None:
         encoding="utf-8"
     )
     assert "Automatically use for every engineering task" in skill
+    assert len(skill.splitlines()) <= 90
+    assert "one primary specialist skill" in skill
+    assert "same orchestration layer" in skill
 
     required = {
         "AGENTS.md": "nifty-scalper-engineering",
