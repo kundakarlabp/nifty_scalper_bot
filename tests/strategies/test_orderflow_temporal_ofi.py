@@ -1,5 +1,6 @@
-import logging
+from unittest.mock import Mock
 
+import nifty_scalper_bot.strategies.elite_strategies.order_flow as order_flow_module
 from nifty_scalper_bot.strategies.elite_strategies.order_flow import (
     OrderFlowStrategy,
     OrderFlowStrategyConfig,
@@ -110,8 +111,11 @@ def test_strong_adverse_depth_blocks_supportive_temporal_ofi() -> None:
     assert signal.metadata["effective_context_conflict"] is True
 
 
-def test_orderflow_context_log_exposes_microstructure_diagnostics(caplog) -> None:
-    caplog.set_level(logging.INFO)
+def test_orderflow_context_log_exposes_microstructure_diagnostics(
+    monkeypatch,
+) -> None:
+    logger = Mock()
+    monkeypatch.setattr(order_flow_module, "LOGGER", logger)
     strategy = _strategy()
     indicators = _indicators(
         buy=105.0,
@@ -124,18 +128,19 @@ def test_orderflow_context_log_exposes_microstructure_diagnostics(caplog) -> Non
     signal = strategy._evaluate_signal(SYMBOL, indicators, current_price=100.25)
 
     assert signal is not None
-    records = [
-        record
-        for record in caplog.records
-        if getattr(record, "event", None) == "ORDERFLOW_CONTEXT_EVIDENCE"
+    calls = [
+        call
+        for call in logger.info.call_args_list
+        if call.kwargs.get("extra", {}).get("event")
+        == "ORDERFLOW_CONTEXT_EVIDENCE"
     ]
-    assert len(records) == 1
-    record = records[0]
-    assert record.context_alignment_source == "temporal_ofi"
-    assert record.ofi_ready is True
-    assert record.ofi_1s_normalized == 0.50
-    assert record.depth_imbalance == signal.metadata["depth_imbalance"]
-    assert record.strong_depth_conflicts_side is False
+    assert len(calls) == 1
+    extra = calls[0].kwargs["extra"]
+    assert extra["context_alignment_source"] == "temporal_ofi"
+    assert extra["ofi_ready"] is True
+    assert extra["ofi_1s_normalized"] == 0.50
+    assert extra["depth_imbalance"] == signal.metadata["depth_imbalance"]
+    assert extra["strong_depth_conflicts_side"] is False
 
 
 def test_adverse_upstream_ofi_cannot_add_context_bonus() -> None:
