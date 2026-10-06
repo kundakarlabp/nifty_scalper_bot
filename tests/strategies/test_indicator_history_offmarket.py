@@ -39,6 +39,27 @@ def test_indicator_history_missing_market_open_emits_info(monkeypatch, caplog):
     assert any(level >= logging.INFO for level in levels), levels
 
 
+def test_indicator_history_missing_market_open_is_single_throttled_event(
+    monkeypatch, caplog
+) -> None:
+    from nifty_scalper_bot.utils import market_hours
+
+    monkeypatch.setattr(market_hours, "is_market_open_now", lambda: True)
+    engine = IndicatorEngine()
+    with caplog.at_level(
+        logging.INFO, logger="nifty_scalper_bot.strategies.indicators"
+    ):
+        engine.get_history("NFO:NIFTY26JUN24000CE")
+        engine.get_history("NFO:NIFTY26JUN24000CE")
+
+    records = [
+        record
+        for record in caplog.records
+        if getattr(record, "event", "") == "indicator_engine_history_missing"
+    ]
+    assert len(records) == 1
+
+
 def test_indicator_history_missing_market_closed_is_debug(monkeypatch, caplog):
     """Args: monkeypatch, caplog. Returns: None. Raises: AssertionError."""
     from nifty_scalper_bot.utils import market_hours
