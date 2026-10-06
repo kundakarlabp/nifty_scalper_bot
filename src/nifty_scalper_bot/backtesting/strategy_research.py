@@ -237,7 +237,7 @@ def _research_orb_structural_context(
     spot_symbol: str,
     futures_symbol: str,
 ) -> dict[str, Any]:
-    """Return the external structural context consumed by ORB."""
+    """Return completed-bar underlying context shared by ORB and VWAP research."""
     spot_payload, spot_observation = _research_direction_payload(
         engine, spot_symbol, role="spot_context"
     )
@@ -257,6 +257,7 @@ def _research_orb_structural_context(
         ),
         "context_fresh": bool(spot_observation or futures_observation),
         "futures_vwap_slope": futures_payload.get("vwap_slope"),
+        "futures_volume_ratio": futures_payload.get("futures_volume_ratio"),
         "research_direction_resolution": resolution.reason,
         "research_spot_direction": (
             spot_observation.bias if spot_observation else None
@@ -605,13 +606,13 @@ def _scenario(
                 if compact_orb_context
                 else dict(engine.get_indicators(symbol))
             )
-            orb_context = _research_orb_structural_context(
+            underlying_context = _research_orb_structural_context(
                 engine,
                 spot_symbol="NSE:NIFTY 50",
                 futures_symbol=future,
             )
             if compact_orb_context:
-                indicators.update(orb_context)
+                indicators.update(underlying_context)
             indicators.update(
                 history_count=engine.history_count(symbol),
                 bar_timestamp=timestamp,
@@ -627,8 +628,8 @@ def _scenario(
                     continue
                 evaluated[strategy.name] += 1
                 strategy_indicators = dict(indicators)
-                if strategy.name == "ORBPro":
-                    strategy_indicators.update(orb_context)
+                if strategy.name in {"ORBPro", "VWAPPro"}:
+                    strategy_indicators.update(underlying_context)
                 signal = strategy.generate_signal(
                     symbol,
                     strategy_indicators,
