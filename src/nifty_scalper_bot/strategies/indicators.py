@@ -568,7 +568,7 @@ class IndicatorEngine:
         *,
         field: Literal["close", "bars"] = "close",
     ) -> list[Any]:
-        """Args: symbol, count. Returns: close-price history list. Raises: Exception."""
+        """Return history; missing-history diagnostics are throttled natively."""
         LOGGER.debug(
             "Entered IndicatorEngine.get_history",
             extra={"event": "indicator_engine_get_history_enter", "symbol": symbol},
