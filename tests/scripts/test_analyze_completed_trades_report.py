@@ -121,4 +121,5 @@ def test_build_analysis_emits_repeatable_realized_post_cost_evidence() -> None:
         report["realized_post_cost_evidence"]["by_setup"][0]["value"]
         == "breakout_retest"
     )
-    assert report["realized_post_cost_evidence"]["by_exit_reason"][0]["value"] == "TARGET"
+    exit_reason = report["realized_post_cost_evidence"]["by_exit_reason"][0]
+    assert exit_reason["value"] == "TARGET"
