@@ -3444,10 +3444,25 @@ class OrderManager:
                         details={"detail": detail},
                     )
                     return None
-            except Exception as e:
+            except Exception as exc:
+                self.set_last_skip_reason("time_guard_error")
                 self._logger.error(
-                    f"Time Guard Check Failed: {e}. Proceeding with caution."
+                    "ORDER_BLOCKED reason=time_guard_error symbol=%s error_type=%s",
+                    normalized_symbol,
+                    type(exc).__name__,
+                    extra={
+                        "event": "ORDER_BLOCKED",
+                        "reason": "time_guard_error",
+                        "symbol": normalized_symbol,
+                        "error_type": type(exc).__name__,
+                    },
                 )
+                _log_order_decision(
+                    allowed=False,
+                    block_reason="time_guard_error",
+                    details={"error_type": type(exc).__name__},
+                )
+                return None
 
         # ---------------------------------------------------------------------
         # 3. TRADING SWITCH GUARD
