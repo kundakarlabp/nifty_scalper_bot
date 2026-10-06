@@ -92,6 +92,50 @@ def test_dashboard_rejects_cross_site_start(tmp_path, monkeypatch):
     assert client.get("/admin/research/status").json()["state"] == "not_requested"
 
 
+def test_admin_manifest_poll_launches_exact_fixed_request(tmp_path, monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from nifty_scalper_bot import admin_dashboard
+    from nifty_scalper_bot.ops import research_jobs
+
+    manifest = tmp_path / "deploy/research_request.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(
+        json.dumps({"id": "manifest-job", "days": 14, "mode": "components"}),
+        encoding="utf-8",
+    )
+    launched = []
+
+    def launch(root, payload, **kwargs):
+        launched.append((root, payload, kwargs))
+        return {
+            "id": payload["id"],
+            "state": "queued",
+            "backtest_completed": False,
+        }
+
+    monkeypatch.setattr(admin_dashboard, "APP_DIR", tmp_path)
+    monkeypatch.setattr(research_jobs, "start_job", launch)
+    app = FastAPI()
+    app.include_router(admin_dashboard.router)
+    client = TestClient(app)
+
+    response = client.post(
+        "/admin/research/poll-manifest",
+        headers={"origin": "http://testserver"},
+    )
+
+    assert response.status_code == 202
+    assert launched == [
+        (
+            tmp_path,
+            {"id": "manifest-job", "days": 14, "mode": "components"},
+            {},
+        )
+    ]
+
+
 @pytest.mark.parametrize("ledger_error", [False, True])
 def test_worker_completes_component_research_without_claiming_live_parity(
     tmp_path, monkeypatch, ledger_error
