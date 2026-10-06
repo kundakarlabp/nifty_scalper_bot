@@ -20,6 +20,10 @@ from zoneinfo import ZoneInfo
 
 IST = ZoneInfo("Asia/Kolkata")
 
+_COMPONENT_WORKER_BUDGET_SECONDS = 1800
+_RUNTIME_REPLAY_BUDGET_SECONDS = 1500
+_WORKER_WAIT_GRACE_SECONDS = 300
+
 
 def validate_request(
     payload: dict[str, Any], *, today: date | None = None
@@ -51,6 +55,29 @@ def write_json(path: Path, payload: dict[str, Any]) -> None:
     temporary = path.with_suffix(".tmp")
     temporary.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
     temporary.replace(path)
+
+
+def _worker_wait_timeout_seconds(request: dict[str, Any]) -> int:
+    """Return a bounded parent wait budget aligned with requested research work."""
+
+    mode = str(request.get("mode") or "all")
+    if mode == "runtime":
+        return _RUNTIME_REPLAY_BUDGET_SECONDS + _WORKER_WAIT_GRACE_SECONDS
+    if mode == "components":
+        return _COMPONENT_WORKER_BUDGET_SECONDS + _WORKER_WAIT_GRACE_SECONDS
+    return (
+        _COMPONENT_WORKER_BUDGET_SECONDS
+        + _RUNTIME_REPLAY_BUDGET_SECONDS
+        + _WORKER_WAIT_GRACE_SECONDS
+    )
+
+
+def _read_job_status(path: Path, fallback: dict[str, Any]) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return dict(fallback)
+    return value if isinstance(value, dict) else dict(fallback)
 
 
 def read_status(root: Path) -> dict[str, Any]:
@@ -120,21 +147,30 @@ def start_job(
             if wait:
                 # A systemd oneshot kills remaining children when it exits.
                 # Keep that parent alive; dashboard callers remain detached.
+                wait_timeout = _worker_wait_timeout_seconds(request)
                 try:
-                    process.wait(timeout=1800)
+                    process.wait(timeout=wait_timeout)
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait()
-                    queued.update(state="failed", error_type="WorkerTimeout")
-                    write_json(status_file, queued)
-                    write_json(directory / "latest.json", queued)
-                queued = json.loads(status_file.read_text())
-                if queued["state"] in {"queued", "collecting"}:
+                    queued = _read_job_status(status_file, queued)
                     queued.update(
-                        state="failed", error_type="WorkerExitedWithoutResult"
+                        state="failed",
+                        error_type="WorkerTimeout",
+                        timed_out_stage=queued.get("stage"),
+                        worker_timeout_seconds=wait_timeout,
                     )
                     write_json(status_file, queued)
                     write_json(directory / "latest.json", queued)
+                else:
+                    queued = _read_job_status(status_file, queued)
+                    if queued.get("state") in {"queued", "collecting"}:
+                        queued.update(
+                            state="failed",
+                            error_type="WorkerExitedWithoutResult",
+                        )
+                        write_json(status_file, queued)
+                        write_json(directory / "latest.json", queued)
     except OSError as exc:
         queued.update(state="failed", error_type=type(exc).__name__)
         write_json(status_file, queued)
@@ -165,7 +201,9 @@ def run_recorded_replays(root: Path, request: dict[str, Any]) -> dict[str, Any]:
     }
     cursor = date.fromisoformat(request["start"])
     end = date.fromisoformat(request["end"])
-    deadline = time.monotonic() + 1500
+    report["budget_seconds"] = _RUNTIME_REPLAY_BUDGET_SECONDS
+    report["budget_exhausted"] = False
+    deadline = time.monotonic() + _RUNTIME_REPLAY_BUDGET_SECONDS
     while cursor <= end:
         day = cursor.isoformat()
         remaining = deadline - time.monotonic()
@@ -253,10 +291,15 @@ def run_recorded_replays(root: Path, request: dict[str, Any]) -> dict[str, Any]:
                     )
         cursor += timedelta(days=1)
     completed = sum(row["state"] == "completed" for row in report["sessions"])
+    failed = sum(row["state"] == "failed" for row in report["sessions"])
     report["completed_sessions"] = completed
+    report["failed_sessions"] = failed
+    report["available_sessions_fully_processed"] = bool(report["sessions"]) and (
+        not report["budget_exhausted"] and failed == 0
+    )
     report["state"] = (
         "completed"
-        if completed and completed == len(report["sessions"])
+        if completed and report["available_sessions_fully_processed"]
         else "partial" if completed else "blocked"
     )
     report["full_requested_period_covered"] = (
