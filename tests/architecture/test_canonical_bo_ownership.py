@@ -34,19 +34,19 @@ def _imports(path: Path) -> set[str]:
     return modules
 
 
-def _strategy_runner_handle_signal_source() -> str:
+def _strategy_runner_entry_execution_source() -> str:
     path = SRC / "strategies" / "runner.py"
     source = path.read_text(encoding="utf-8")
     tree = ast.parse(source)
     for node in ast.walk(tree):
         if (
             isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-            and node.name == "_handle_signal"
+            and node.name == "_handle_entry_signal_inner"
         ):
             segment = ast.get_source_segment(source, node)
             if segment is not None:
                 return segment
-    raise AssertionError("StrategyRunner._handle_signal not found")
+    raise AssertionError("StrategyRunner._handle_entry_signal_inner not found")
 
 
 def test_public_runtime_has_one_owner_per_lifecycle_domain() -> None:
@@ -142,7 +142,7 @@ def test_market_aware_bracket_hooks_are_explicit_native_methods() -> None:
 
 
 def test_runner_uses_only_canonical_entry_api() -> None:
-    source = _strategy_runner_handle_signal_source()
+    source = _strategy_runner_entry_execution_source()
     assert '"submit_trade_plan_result"' in source
     assert "submit_result = submit_result_fn(plan)" in source
     assert "self._order_manager.place_order(" not in source
