@@ -81,6 +81,36 @@ def test_large_monotonic_option_volume_delta_is_trusted_interval_volume() -> Non
     assert resumed["volume"] == 25
 
 
+def test_live_tick_normalization_preserves_large_monotonic_volume_delta() -> None:
+    mdm = _mdm()
+    first = mdm._normalize_tick(
+        _SYM,
+        {
+            "last_price": 45.0,
+            "volume_traded_today": 10_000,
+            "instrument_token": 1,
+            "source": "ws",
+        },
+    )
+    large = mdm._normalize_tick(
+        _SYM,
+        {
+            "last_price": 45.2,
+            "volume_traded_today": 6_010_000,
+            "instrument_token": 1,
+            "source": "ws",
+        },
+    )
+
+    assert first is not None
+    assert first["volume_delta"] == 0.0
+    assert large is not None
+    assert large["volume_transition"]["state"] == "accepted"
+    assert large["volume_delta_untrusted"] is False
+    assert large["volume_delta"] == 6_000_000.0
+    assert large["volume"] == 6_000_000.0
+
+
 def test_raw_cumulative_never_becomes_completed_candle_volume() -> None:
     mdm = _mdm()
     processed = [
