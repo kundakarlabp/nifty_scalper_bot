@@ -358,10 +358,33 @@ class SMCStrategy(EliteStrategy):
                     valid_tested.append(item)
 
             # A distant visible level that was decisively broken must not mask
-            # a nearer level with valid sweep/reclaim geometry.
-            pool = valid_tested or tested or enriched
+            # a nearer level with valid sweep/reclaim geometry. If no tested
+            # level is valid, diagnose the nearest breach instead of allowing
+            # significance ranking to change shallow/deep failure semantics.
+            if valid_tested:
+                return max(
+                    valid_tested,
+                    key=lambda item: (
+                        int(item["liquidity_level_priority"]),
+                        int(item["liquidity_touch_count"]),
+                        -int(item["liquidity_level_age_bars"]),
+                    ),
+                )
+            if tested:
+                return min(
+                    tested,
+                    key=lambda item: (
+                        (
+                            float(item[level_key]) - float(current["low"])
+                            if is_low
+                            else float(current["high"]) - float(item[level_key])
+                        ),
+                        -int(item["liquidity_level_priority"]),
+                        int(item["liquidity_level_age_bars"]),
+                    ),
+                )
             return max(
-                pool,
+                enriched,
                 key=lambda item: (
                     int(item["liquidity_level_priority"]),
                     int(item["liquidity_touch_count"]),
