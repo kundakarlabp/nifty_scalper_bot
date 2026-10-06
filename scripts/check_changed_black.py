@@ -89,6 +89,24 @@ def _black_check(path: Path) -> bool:
     return result.returncode == 0
 
 
+def _black_check_many(paths: Iterable[Path]) -> bool:
+    """Fast-path a fully clean changed set with one Black process."""
+    materialized = tuple(paths)
+    if not materialized:
+        return True
+    result = _run(
+        sys.executable,
+        "-m",
+        "black",
+        "--check",
+        "--quiet",
+        "--config",
+        "pyproject.toml",
+        *(str(path) for path in materialized),
+    )
+    return result.returncode == 0
+
+
 def _black_diff(path: Path) -> str:
     result = _run(
         sys.executable,
@@ -222,8 +240,19 @@ def main() -> int:
     parser.add_argument("--files-from", type=Path, required=True)
     args = parser.parse_args()
 
+    paths = _read_paths(args.files_from)
+    existing = tuple(path for path in paths if path.exists())
+    missing = tuple(path for path in paths if not path.exists())
+    for path in missing:
+        print(f"SKIP {path}: file no longer exists")
+
+    if existing and _black_check_many(existing):
+        for path in existing:
+            print(f"PASS {path}: current file is Black-clean")
+        return 0
+
     failed = False
-    for path in _read_paths(args.files_from):
+    for path in existing:
         ok, message = check_file(args.base, path)
         print(message)
         failed = failed or not ok

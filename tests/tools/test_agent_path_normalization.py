@@ -46,3 +46,32 @@ def test_agent_check_normalizes_absolute_source_path(tmp_path: Path) -> None:
     ]
     assert "streaming" in payload["areas"]
     assert "tests/streaming" in payload["focused_tests"]
+
+
+def test_agent_check_preserves_leading_dot_directories(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    (repository / "src").mkdir(parents=True)
+    (repository / "tests").mkdir()
+    (repository / "dashboard").mkdir()
+    module_path = repository / ".github" / "workflows" / "ci.yml"
+    module_path.parent.mkdir(parents=True)
+    module_path.write_text("name: CI\n", encoding="utf-8")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(CHECK_SCRIPT),
+            "--root",
+            str(repository),
+            "--files",
+            ".github/workflows/ci.yml",
+            "--format",
+            "json",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    payload = json.loads(result.stdout)
+    assert payload["changed_files"] == [".github/workflows/ci.yml"]

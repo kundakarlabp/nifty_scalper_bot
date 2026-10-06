@@ -95,3 +95,29 @@ def test_git_changed_ranges_compares_base_to_worktree(monkeypatch) -> None:
     assert calls
     assert "origin/main" in calls[0]
     assert "HEAD" not in calls[0]
+
+
+def test_black_batch_fast_path_checks_all_paths_in_one_process(
+    tmp_path: Path, monkeypatch
+) -> None:
+    first = tmp_path / "first.py"
+    second = tmp_path / "second.py"
+    first.write_text("x = 1\n", encoding="utf-8")
+    second.write_text("y = 2\n", encoding="utf-8")
+    calls: list[tuple[str, ...]] = []
+
+    class Result:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(*args: str, **_kwargs):
+        calls.append(args)
+        return Result()
+
+    monkeypatch.setattr(_MODULE, "_run", fake_run)
+
+    assert _MODULE._black_check_many((first, second)) is True
+    assert len(calls) == 1
+    assert str(first) in calls[0]
+    assert str(second) in calls[0]

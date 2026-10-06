@@ -82,7 +82,7 @@ def normalize_files(root: Path, files: Sequence[str]) -> tuple[str, ...]:
             relative = resolved.relative_to(root)
         except (OSError, ValueError):
             relative = candidate
-        normalized.append(relative.as_posix().lstrip("./"))
+        normalized.append(relative.as_posix())
     return tuple(dict.fromkeys(normalized))
 
 
