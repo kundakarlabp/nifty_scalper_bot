@@ -158,6 +158,7 @@ def test_vwap_component_receives_underlying_futures_context(tmp_path, monkeypatc
                     key: indicators.get(key)
                     for key in (
                         "underlying_direction_bias",
+                        "direction_bias",
                         "underlying_direction_confidence",
                         "futures_vwap_slope",
                         "futures_volume_ratio",
