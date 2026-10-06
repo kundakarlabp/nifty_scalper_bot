@@ -246,11 +246,7 @@ class SMCStrategy(EliteStrategy):
         lows, highs = self._confirmed_pivot_candidates(
             rows, strength=strength, lookback=lookback
         )
-        major_strength = _env_int(
-            "SMC_MAJOR_PIVOT_STRENGTH",
-            max(4, strength + 1),
-            minimum=strength + 1,
-        )
+        major_strength = max(4, strength + 1)
         major_lows, major_highs = self._confirmed_pivot_candidates(
             rows,
             strength=major_strength,
@@ -263,10 +259,7 @@ class SMCStrategy(EliteStrategy):
             int(item["_pivot_index"]) for item in major_highs if "_pivot_index" in item
         }
         atr = self._atr(rows)
-        equal_tolerance = max(
-            0.05,
-            atr * max(0.0, safe_float_env("SMC_EQUAL_LEVEL_TOLERANCE_ATR", 0.08)),
-        )
+        equal_tolerance = max(0.05, atr * 0.08)
         current = rows[-1]
 
         def _select(
