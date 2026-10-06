@@ -925,6 +925,9 @@ class StrategyRunner:
         self._symbol_last_signal_ts: dict[str, float] = {}
         self._terminal_signal_trace_ids: dict[str, float] = {}
         self._terminal_signal_lock = threading.RLock()
+        # Keep strong references to fire-and-forget preparation tasks until
+        # completion. asyncio's event loop keeps only weak task references.
+        self._signal_preparation_tasks: set[asyncio.Task[None]] = set()
         self._underlying_last_signal_ts: dict[str, float] = {}
         self._reason_last_signal_ts: dict[str, float] = {}
         self._submitted_entry_order_context: dict[str, dict[str, Any]] = {}
@@ -3770,7 +3773,17 @@ class StrategyRunner:
                     broker_attempted=False,
                 )
 
+        tasks = getattr(self, "_signal_preparation_tasks", None)
+        if tasks is None:
+            tasks = set()
+            self._signal_preparation_tasks = tasks
+        tasks.add(task)
+
+        def _release_task(done_task: asyncio.Task[None]) -> None:
+            tasks.discard(done_task)
+
         task.add_done_callback(_on_done)
+        task.add_done_callback(_release_task)
         return True, "signal_preparation_scheduled"
 
     def _maybe_promote_pending_active_basket(
