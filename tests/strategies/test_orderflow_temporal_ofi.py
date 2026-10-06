@@ -32,6 +32,7 @@ def _indicators(
         "direction_bias": "CE",
         "atr": 2.0,
         "data_age_seconds": 0.2,
+        "context_age_seconds": 0.2,
         "quote_update_version": 3,
         "ofi_ready": True,
         "ofi_event": ofi_value,
