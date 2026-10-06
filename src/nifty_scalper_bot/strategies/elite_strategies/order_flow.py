@@ -424,7 +424,11 @@ class OrderFlowStrategy(EliteStrategy):
                 "microstructure_conflicts_side": microstructure_conflicts_side,
                 "context_alignment_source": (
                     "temporal_ofi"
-                    if ofi_directional and ofi_supports_side and microstructure_supports_side
+                    if (
+                        ofi_directional
+                        and ofi_supports_side
+                        and microstructure_supports_side
+                    )
                     else "depth_plus_flow"
                     if microstructure_supports_side
                     else None
