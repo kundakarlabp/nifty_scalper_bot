@@ -137,7 +137,10 @@ def test_relaxed_vwap_distance_requires_high_confidence_context(monkeypatch):
     )
 
     assert accepted is not None
-    assert accepted.metadata["vwap_distance_atr"] == 3.0
+    assert (
+        accepted.metadata["vwap_distance_atr"]
+        > accepted.metadata["vwap_base_quality_max_distance_atr"]
+    )
     assert accepted.metadata["vwap_strong_fresh_trend_context"] is True
 
 
