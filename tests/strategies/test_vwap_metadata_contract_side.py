@@ -81,8 +81,32 @@ def test_live_vwap_rejects_threshold_pass_from_small_noise(monkeypatch):
     assert strategy.last_no_vote_reason == "vwap_event_unconfirmed"
 
 
-def test_live_vwap_accepts_meaningful_atr_penetration(monkeypatch):
+def test_live_vwap_rejects_penetration_only_by_default(monkeypatch):
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("VWAP_ALLOW_PENETRATION_ONLY_ENTRY", "false")
+    strategy = VWAPProStrategy(VWAPProStrategyConfig(), _DummyEngine())
+
+    signal = strategy._evaluate_signal(
+        "NFO:NIFTY26FEB22500CE",
+        _indicators(
+            close=100.80,
+            open=99.80,
+            high=100.85,
+            low=99.50,
+            volume=0.0,
+            avg_volume=0.0,
+            futures_volume_ratio=1.2,
+        ),
+        100.80,
+    )
+
+    assert signal is None
+    assert strategy.last_no_vote_reason == "vwap_penetration_only_disabled"
+
+
+def test_vwap_penetration_only_requires_explicit_opt_in(monkeypatch):
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("VWAP_ALLOW_PENETRATION_ONLY_ENTRY", "true")
     strategy = VWAPProStrategy(VWAPProStrategyConfig(), _DummyEngine())
 
     signal = strategy._evaluate_signal(
@@ -101,7 +125,78 @@ def test_live_vwap_accepts_meaningful_atr_penetration(monkeypatch):
 
     assert signal is not None
     assert signal.metadata["penetration_confirmed"] is True
+    assert signal.metadata["setup_type"] == "vwap_penetration"
     assert signal.metadata["vwap_event_confirmed"] is True
+
+
+def test_vwap_reclaim_momentum_has_distinct_structural_subtype(monkeypatch):
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    strategy = VWAPProStrategy(VWAPProStrategyConfig(), _DummyEngine())
+
+    signal = strategy._evaluate_signal(
+        "NFO:NIFTY26FEB22500CE",
+        _indicators(
+            open=99.0,
+            high=103.5,
+            low=98.0,
+            close=103.0,
+            futures_volume_ratio=1.2,
+        ),
+        103.0,
+    )
+
+    assert signal is not None
+    assert signal.metadata["setup_type"] == "vwap_reclaim_momentum"
+    assert signal.metadata["setup_name"] == "vwap_reclaim_momentum"
+    assert signal.metadata["signal_family"] == "reclaim_structure"
+
+
+def test_vwap_default_strong_trend_distance_cap_is_three_atr(monkeypatch):
+    monkeypatch.delenv("VWAP_TREND_QUALITY_MAX_DISTANCE_ATR", raising=False)
+    strategy = VWAPProStrategy(VWAPProStrategyConfig(), _DummyEngine())
+
+    assert strategy._trend_quality_max_distance_atr == 3.0
+
+
+def test_vwap_futures_slope_uses_bps_floor(monkeypatch):
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("VWAP_FUTURES_SLOPE_MIN_BPS", "1.0")
+    strategy = VWAPProStrategy(VWAPProStrategyConfig(), _DummyEngine())
+
+    signal = strategy._evaluate_signal(
+        "NFO:NIFTY26FEB22500CE",
+        _indicators(
+            futures_vwap_slope=0.005,
+            futures_volume_ratio=1.2,
+        ),
+        103.0,
+    )
+
+    assert signal is None
+    assert strategy.last_no_vote_reason == "futures_slope_not_aligned"
+
+
+def test_vwap_emits_sigma_and_volume_quality_telemetry(monkeypatch):
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    strategy = VWAPProStrategy(VWAPProStrategyConfig(), _DummyEngine())
+
+    signal = strategy._evaluate_signal(
+        "NFO:NIFTY26FEB22500CE",
+        _indicators(
+            vwap_stddev=2.0,
+            volume=450.0,
+            avg_volume=1000.0,
+            futures_volume_ratio=1.2,
+        ),
+        103.0,
+    )
+
+    assert signal is not None
+    assert signal.metadata["vwap_distance_sigma"] == 1.5
+    assert signal.metadata["option_volume_ratio"] == 0.45
+    assert signal.metadata["volume_confirmation_source"] == "futures"
+    assert signal.metadata["quality_calibrated"] is False
+    assert signal.metadata["quality_probability"] is None
 
 
 def test_relaxed_vwap_distance_requires_high_confidence_context(monkeypatch):

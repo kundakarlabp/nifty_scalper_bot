@@ -95,10 +95,20 @@ class VWAPProStrategy(EliteStrategy):
             "yes",
             "on",
         }
-        self._slack_atr_mult = float(os.getenv("VWAP_SLACK_ATR_MULT", "1.5") or 1.5)
-        self._max_distance_pct = float(
-            os.getenv("VWAP_MAX_OPTION_DISTANCE_PCT", "0.18") or 0.18
-        )
+        self._allow_penetration_only = str(
+            os.getenv("VWAP_ALLOW_PENETRATION_ONLY_ENTRY", "0")
+        ).lower() in {"1", "true", "yes", "on"}
+
+        # Keep the historical option-distance environment value as a fraction
+        # (0.18 == 18%) to avoid silently tightening live option-premium
+        # geometry.  The new name makes the unit explicit; the old name remains
+        # a compatibility fallback.
+        max_distance_raw = os.getenv("VWAP_MAX_OPTION_DISTANCE_FRACTION")
+        if max_distance_raw in (None, ""):
+            max_distance_raw = os.getenv("VWAP_MAX_OPTION_DISTANCE_PCT", "0.18")
+        self._max_distance_fraction = max(0.0, float(max_distance_raw or 0.18))
+        self._max_distance_pct = self._max_distance_fraction  # legacy attribute
+
         self._max_atr_distance_mult = float(
             os.getenv("VWAP_MAX_ATR_DISTANCE_MULT", "1.5") or 1.5
         )
@@ -107,19 +117,47 @@ class VWAPProStrategy(EliteStrategy):
         )
         self._trend_quality_max_distance_atr = max(
             self._quality_max_distance_atr,
-            float(os.getenv("VWAP_TREND_QUALITY_MAX_DISTANCE_ATR", "5.0") or 5.0),
+            float(os.getenv("VWAP_TREND_QUALITY_MAX_DISTANCE_ATR", "3.0") or 3.0),
         )
         self._min_penetration_atr = max(
             0.0,
             float(os.getenv("VWAP_MIN_PENETRATION_ATR_MULT", "0.15") or 0.15),
         )
+
+        # Express reclaim depth directly in ATR units.  Preserve the legacy
+        # VWAP_SLACK_ATR_MULT contract as a fallback (1.5 * 0.2 == 0.30 ATR).
+        reclaim_depth_raw = os.getenv("VWAP_RECLAIM_MIN_DEPTH_ATR")
+        if reclaim_depth_raw in (None, ""):
+            legacy_slack = float(os.getenv("VWAP_SLACK_ATR_MULT", "1.5") or 1.5)
+            reclaim_depth_raw = str(legacy_slack * 0.2)
+        self._reclaim_min_depth_atr = max(0.0, float(reclaim_depth_raw))
+        self._slack_atr_mult = self._reclaim_min_depth_atr / 0.2
+
+        self._option_volume_min_ratio = max(
+            0.0, float(os.getenv("VWAP_OPTION_VOLUME_MIN_RATIO", "0.6") or 0.6)
+        )
+        self._futures_volume_min_ratio = max(
+            0.0, float(os.getenv("VWAP_FUTURES_VOLUME_MIN_RATIO", "1.0") or 1.0)
+        )
+
+        # get_session_vwap_slope() returns percentage change over finalized
+        # bars. Convert percentage points to basis points for a scale-readable
+        # threshold. Preserve the legacy epsilon if explicitly configured.
+        slope_bps_raw = os.getenv("VWAP_FUTURES_SLOPE_MIN_BPS")
+        if slope_bps_raw in (None, ""):
+            legacy_slope_eps = os.getenv("VWAP_FUTURES_SLOPE_NEUTRAL_EPS")
+            slope_bps_raw = (
+                str(float(legacy_slope_eps) * 100.0)
+                if legacy_slope_eps not in (None, "")
+                else "1.0"
+            )
+        self._futures_slope_min_bps = max(0.0, float(slope_bps_raw))
+        self._futures_slope_neutral_eps = self._futures_slope_min_bps / 100.0
+
         # A reclaim thesis belongs to one concrete option contract in one
         # trading session. Keying only by CE/PE allowed ATM rotations to inherit
         # another contract's structural state.
         self._thesis_anchor_by_scope: dict[tuple[str, str], str] = {}
-        self._futures_slope_neutral_eps = float(
-            os.getenv("VWAP_FUTURES_SLOPE_NEUTRAL_EPS", "0.00005") or 0.00005
-        )
         self._early_trend_min_context_conf = float(
             os.getenv("VWAP_EARLY_TREND_MIN_CONTEXT_CONF", "0.90") or 0.90
         )
@@ -133,6 +171,8 @@ class VWAPProStrategy(EliteStrategy):
             "vwap",
             "exchange_vwap",
             "session_vwap",
+            "vwap_std",
+            "vwap_stddev",
             "atr",
             "close",
             "open",
@@ -153,6 +193,9 @@ class VWAPProStrategy(EliteStrategy):
             "futures_context",
             "stale_data_used",
             "data_age_seconds",
+            "days_to_expiry",
+            "strike_distance_from_atm",
+            "minutes_since_open",
         }
 
     def _recover_thesis_anchor_from_history(
@@ -315,6 +358,13 @@ class VWAPProStrategy(EliteStrategy):
 
             futures_vwap_slope = _optional_float(indicators.get("futures_vwap_slope"))
             futures_volume_ratio = _optional_float(indicators.get("futures_volume_ratio"))
+            vwap_stddev = _optional_float(indicators.get("vwap_stddev"))
+            if vwap_stddev is None:
+                vwap_stddev = _optional_float(indicators.get("vwap_std"))
+            futures_slope_bps = (
+                None if futures_vwap_slope is None else futures_vwap_slope * 100.0
+            )
+            option_volume_ratio = vol / avg_vol if avg_vol > 0 else None
             if current_price <= 0 or vwap <= 0:
                 self._no_vote("missing_vwap")
                 LOGGER.debug("STRATEGY_NO_VOTE strategy=VWAPPro reason=missing_vwap")
@@ -338,8 +388,13 @@ class VWAPProStrategy(EliteStrategy):
             configured_proximity_fraction = configured_proximity_pct / 100.0
             near_configured_vwap = distance_pct <= configured_proximity_fraction
             allowed_distance = max(
-                self._max_distance_pct,
+                self._max_distance_fraction,
                 self._max_atr_distance_mult * atr_safe / max(vwap, 1e-9),
+            )
+            vwap_distance_sigma = (
+                distance_points / vwap_stddev
+                if vwap_stddev is not None and vwap_stddev > 0
+                else None
             )
             symbol_upper = str(symbol or "").upper()
             preliminary_side = (
@@ -469,11 +524,11 @@ class VWAPProStrategy(EliteStrategy):
 
             premium_above_vwap = close >= vwap
             candle_body = abs(close - open_price)
-            continuation_confirmed = bool(
+            momentum_continuation_confirmed = bool(
                 close > open_price and candle_body >= (0.35 * atr_safe)
             )
             reclaim_from_below = bool(
-                low <= (vwap - (atr_safe * self._slack_atr_mult * 0.2))
+                low <= (vwap - (atr_safe * self._reclaim_min_depth_atr))
                 and close >= vwap
             )
             if self._allow_pullback and reclaim_from_below:
@@ -484,11 +539,32 @@ class VWAPProStrategy(EliteStrategy):
                 premium_above_vwap
                 and penetration_atr >= self._min_penetration_atr
             )
-
-            vol_support = avg_vol > 0 and vol >= 0.6 * avg_vol
-            fut_vol_support = (
-                futures_volume_ratio is not None and futures_volume_ratio >= 1.0
+            continuation_hold_confirmed = bool(
+                open_price >= vwap
+                and low >= vwap
+                and close >= vwap
+                and penetration_confirmed
             )
+            continuation_confirmed = bool(
+                momentum_continuation_confirmed or continuation_hold_confirmed
+            )
+
+            vol_support = bool(
+                option_volume_ratio is not None
+                and option_volume_ratio >= self._option_volume_min_ratio
+            )
+            fut_vol_support = bool(
+                futures_volume_ratio is not None
+                and futures_volume_ratio >= self._futures_volume_min_ratio
+            )
+            if vol_support and fut_vol_support:
+                volume_confirmation_source = "option_and_futures"
+            elif vol_support:
+                volume_confirmation_source = "option"
+            elif fut_vol_support:
+                volume_confirmation_source = "futures"
+            else:
+                volume_confirmation_source = None
 
             # Explicit underlying direction owns alignment; generic bias is a
             # fallback only when no usable underlying direction is available.
@@ -502,16 +578,16 @@ class VWAPProStrategy(EliteStrategy):
                 if not trend_alignment:
                     reasons.append("direction_conflict")
 
-            if futures_vwap_slope is None:
+            if futures_slope_bps is None:
                 slope_support = False
                 reasons.append("futures_slope_unavailable")
-            elif abs(futures_vwap_slope) <= self._futures_slope_neutral_eps:
+            elif abs(futures_slope_bps) < self._futures_slope_min_bps:
                 slope_support = False
-                reasons.append("futures_slope_neutral")
+                reasons.append("futures_slope_below_floor")
             else:
                 slope_support = (
-                    (contract_side == "CE" and futures_vwap_slope > 0)
-                    or (contract_side == "PE" and futures_vwap_slope < 0)
+                    (contract_side == "CE" and futures_slope_bps > 0)
+                    or (contract_side == "PE" and futures_slope_bps < 0)
                 )
                 if not slope_support:
                     reasons.append("futures_slope_conflict")
@@ -541,9 +617,20 @@ class VWAPProStrategy(EliteStrategy):
                 self._no_vote("underlying_direction_conflict")
                 return None
 
-            event_confirmed = bool(
-                continuation_confirmed or pullback_flag or penetration_confirmed
-            )
+            setup_type: str | None = None
+            if pullback_flag and continuation_confirmed:
+                setup_type = "vwap_reclaim_momentum"
+            elif pullback_flag:
+                setup_type = "vwap_reclaim"
+            elif continuation_confirmed:
+                setup_type = "vwap_continuation"
+            elif penetration_confirmed:
+                if not self._allow_penetration_only:
+                    self._no_vote("vwap_penetration_only_disabled")
+                    return None
+                setup_type = "vwap_penetration"
+
+            event_confirmed = setup_type is not None
             setup_lifecycle_id = (
                 f"vwap:{contract_side}:{thesis_anchor}:{session_scope}:{symbol_scope}"
             )
@@ -608,9 +695,11 @@ class VWAPProStrategy(EliteStrategy):
                 )
                 return None
 
-            if pullback_flag:
+            if setup_type == "vwap_reclaim_momentum":
+                reasons.extend(["premium_reclaim_vwap", "premium_continuation"])
+            elif setup_type == "vwap_reclaim":
                 reasons.append("premium_reclaim_vwap")
-            elif continuation_confirmed:
+            elif setup_type == "vwap_continuation":
                 reasons.append("premium_continuation")
             else:
                 reasons.append("premium_vwap_penetration")
@@ -627,7 +716,7 @@ class VWAPProStrategy(EliteStrategy):
                 "strategy_name": "VWAPPro",
                 "role": "trigger",
                 "source_domain": "option_premium",
-                "signal_family": "directional_trigger",
+                "signal_family": "reclaim_structure",
                 "trade_side": contract_side,
                 "side": contract_side,
                 "contract_side": contract_side,
@@ -656,7 +745,9 @@ class VWAPProStrategy(EliteStrategy):
                 "strategy_family": "vwap_continuation_pullback",
                 "context_required": False,
                 "setup_reasons": reasons,
-                "setup_type": "continuation_pullback",
+                "setup_type": setup_type,
+                "setup_name": setup_type,
+                "vwap_event_subtype": setup_type,
                 "required_data_present": required_data_present,
                 "stale_data_used": stale_data,
                 "candidate_symbol": symbol,
@@ -664,13 +755,22 @@ class VWAPProStrategy(EliteStrategy):
                 "vwap": vwap,
                 "distance_pct": round(distance_pct, 4),
                 "vwap_distance_atr": round(distance_atr, 4),
+                "vwap_stddev": vwap_stddev,
+                "vwap_distance_sigma": (
+                    round(vwap_distance_sigma, 4)
+                    if vwap_distance_sigma is not None
+                    else None
+                ),
                 "allowed_distance_pct": round(allowed_distance, 4),
+                "allowed_distance_fraction": round(allowed_distance, 4),
+                "vwap_max_option_distance_fraction": self._max_distance_fraction,
                 "vwap_quality_max_distance_atr": effective_quality_max_distance_atr,
                 "vwap_base_quality_max_distance_atr": self._quality_max_distance_atr,
                 "vwap_trend_quality_max_distance_atr": self._trend_quality_max_distance_atr,
                 "vwap_strong_fresh_trend_context": strong_fresh_trend_context,
                 "vwap_configured_proximity_pct": configured_proximity_pct,
                 "vwap_configured_proximity_pass": near_configured_vwap,
+                "vwap_configured_proximity_role": "telemetry_only",
                 "atr": atr_safe,
                 "pullback_flag": pullback_flag,
                 "trend_alignment": trend_alignment,
@@ -683,15 +783,32 @@ class VWAPProStrategy(EliteStrategy):
                     or indicators.get("futures_vwap") is not None
                 ),
                 "futures_vwap_slope": futures_vwap_slope,
+                "futures_vwap_slope_bps": futures_slope_bps,
+                "futures_vwap_slope_min_bps": self._futures_slope_min_bps,
                 "vwap_domain": "option_premium",
                 "underlying_alignment": trend_alignment,
                 "futures_alignment": slope_support,
                 "futures_volume_ratio": futures_volume_ratio,
+                "futures_volume_min_ratio": self._futures_volume_min_ratio,
+                "option_volume_ratio": option_volume_ratio,
+                "option_volume_min_ratio": self._option_volume_min_ratio,
+                "volume_confirmation_source": volume_confirmation_source,
                 "trigger_block_reason": "",
                 "continuation_confirmed": continuation_confirmed,
+                "momentum_continuation_confirmed": momentum_continuation_confirmed,
+                "continuation_hold_confirmed": continuation_hold_confirmed,
+                "reclaim_confirmed": pullback_flag,
+                "reclaim_min_depth_atr": self._reclaim_min_depth_atr,
                 "penetration_confirmed": penetration_confirmed,
+                "penetration_only_enabled": self._allow_penetration_only,
                 "vwap_penetration_atr": round(penetration_atr, 4),
                 "vwap_event_confirmed": event_confirmed,
+                "days_to_expiry": indicators.get("days_to_expiry"),
+                "strike_distance_from_atm": indicators.get("strike_distance_from_atm"),
+                "minutes_since_open": indicators.get("minutes_since_open"),
+                "quality_calibrated": False,
+                "quality_probability": None,
+                "quality_model": "structural_evidence_only",
                 "thesis_scope_symbol": symbol_scope,
                 "thesis_scope_session": session_scope,
                 "thesis_recovered_from_history": thesis_recovered_from_history,
