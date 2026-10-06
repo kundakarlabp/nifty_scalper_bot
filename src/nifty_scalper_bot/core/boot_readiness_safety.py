@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+
+# IndicatorEngine owns missing-history diagnostics; boot safety must not wrap
+# get_history merely to suppress log duplication.
+
 import logging
 from collections.abc import Mapping
 from functools import wraps
