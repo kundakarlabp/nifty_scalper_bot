@@ -1,157 +1,68 @@
 ---
 name: nifty-scalper-engineering
-description: Automatically use for every engineering task involving kundakarlabp/nifty_scalper_bot or the NIFTY Scalper Bot, including code audit, code editing, debugging, refactoring, architecture understanding, repository review, strategy implementation review, validation, merge-readiness review, or requests to simplify/canonicalize the bot. This is the repository orchestration layer: apply the repository contract, load only the minimum relevant context, select one specialist repository skill, make minimal canonical changes, validate proportionally to risk, and report only verified states.
+description: Automatically use for every engineering task involving this NIFTY Scalper Bot repository: audit, understand, review, debug, edit, refactor, simplify, validate, or merge-readiness work. This is a thin orchestration bridge to the repository contract and one task-specific specialist skill; it should reduce context and process overhead, not add another framework.
 ---
 
-# Nifty Scalper Engineering — repository orchestrator
+# Nifty Scalper Engineering
 
 ## Purpose
 
-This is the default orchestration skill for engineering work in this repository.
+Default lightweight orchestrator for repository engineering. Do not treat it as another specialist procedure.
 
-Use it automatically whenever the task is to **understand, audit, review, edit, debug, refactor, validate, simplify, optimize, or merge** NIFTY Scalper Bot code. The user should not need to name this skill explicitly.
+Authority:
+1. `AGENTS.md`
+2. `docs/architecture/agent_manifest.json`
+3. current code/tests/CI/runtime evidence
+4. this orchestrator
+5. one primary specialist skill from `docs/AGENT_START_HERE.md`
 
-This skill does **not** replace the repository contract or specialist skills. It routes work into them without duplicating their detailed procedures.
+If the account-level Nifty Scalper Engineering skill is already active, treat both as the **same orchestration layer**; do not duplicate their procedures in context.
 
-## Authority and precedence
+## Fast path
 
-Use this order:
+1. **Recover exact state**
+   - Confirm current `main`, branch/head, relevant diff, and current vs historical symptom.
+   - Read `docs/REPO_MAP.md`; read full `AGENTS.md` before high-risk runtime edits.
+   - Reuse verified context instead of repeating broad repository discovery.
 
-1. `AGENTS.md` — behavioral and safety contract.
-2. `docs/architecture/agent_manifest.json` — machine-readable ownership, runtime path, high-risk markers, and validation routing.
-3. This orchestration skill — task framing, minimal-context loading, specialist selection, and closure discipline.
-4. One primary specialist skill from `docs/AGENT_START_HERE.md`; add another only when the task genuinely crosses that concern.
-5. Current code, tests, CI, runtime evidence, and broker state — factual evidence.
+2. **Scope by risk**
+   - Local: one owner/behavior → focused path/test.
+   - Cross-cutting: multiple owners/contracts → trace affected interfaces/state.
+   - Critical trading: data, strategy routing, risk, sizing, orders, reconciliation, protective exits, persistence/live mode → inspect relevant normal + failure paths.
 
-If generic/global skill guidance conflicts with repository-local rules, repository-local rules win.
+3. **Load one specialist**
+   - Use `docs/AGENT_START_HERE.md`.
+   - Add another specialist only when the task genuinely crosses concerns.
+   - Read only matching entries from `docs/ENGINEERING_FAILURE_PATTERNS.md`.
 
-## Automatic activation
+4. **Fix the owner, not the symptom**
+   - Define objective, canonical owner, observable behavior, safety invariant, non-goals, and focused validation.
+   - Prefer modifying/deleting existing canonical code over wrappers, parallel managers, compatibility layers, hidden fallbacks, new dependencies, or duplicate state.
 
-Activate this skill for any request concerning this repository that includes one or more of:
+5. **Validate and repair**
+   - `python scripts/agent_task.py check --files <changed files>`
+   - `python scripts/agent_task.py full --files <changed files>` before merge when supported.
+   - On syntax/Ruff/Black/type/test/architecture failure: classify → fix introduced/directly exposed issue → rerun failed gate and affected upstream checks.
 
-- audit, deep-dive audit, understand, review, inspect, trace, status;
-- edit, fix, implement, correct, simplify, canonicalize, refactor, clean up;
-- strategy, market data, scoring, gate, blocker, risk, order, broker, stop, position, backtest;
-- test, Ruff, Black, mypy, syntax, CI, regression, validation;
-- PR, diff, merge, deploy-readiness, production-readiness;
-- "no loss of function", "no new errors", "no duplication", "no overengineering".
-
-Do not wait for an explicit `$nifty-scalper-engineering` mention.
-
-## Fast orchestration sequence
-
-### 1. Recover exact state
-
-- identify repository, branch/base/head, and existing changes;
-- read `docs/AGENT_START_HERE.md` and `docs/REPO_MAP.md`;
-- read full `AGENTS.md` before any high-risk runtime edit;
-- use `python scripts/agent_task.py context --query "..."` when the owner/path is not already obvious;
-- do not repeat broad repository discovery once access and ownership are known.
-
-### 2. Classify blast radius
-
-Use the smallest safe depth:
-
-- **Local** — one owner, one behavior, low-risk surface: focused context and focused regression.
-- **Cross-cutting** — multiple owners/contracts: trace interfaces and affected state.
-- **Critical trading** — market data truth, risk, sizing, order lifecycle, reconciliation, protective exits, persistence, or live mode: full relevant trading-path and failure-path audit.
-
-A "deep dive" means enough depth to prove the requested behavior and its safety effects, not reading every file.
-
-### 3. Select one specialist skill
-
-Route through `docs/AGENT_START_HERE.md`.
-
-Typical mapping:
-
-- concrete failure → `diagnosing-trading-bugs`
-- WebSocket/depth/freshness → `market-data-path-audit`
-- strategy/backtest/profitability → `strategy-research-validation`
-- well-scoped code change → `tdd-trading-changes`
-- duplicate/legacy cleanup → `architecture-cleanup`
-- ownership/interface change → `codebase-design`
-- boundary/schema/broker payload → `runtime-contract-validation`
-- live status/incident → `live-runtime-diagnosis`
-- PR/final diff review → `pre-merge-trading-review`
-
-The orchestrator does not count as the specialist skill. Do not run the entire catalog.
-
-### 4. Establish the patch contract
-
-For non-trivial changes define:
-
-```text
-Objective:
-Owner module:
-Observable behavior:
-Safety invariant:
-Non-goals:
-Focused validation:
-```
-
-Trace symptom → canonical owner → downstream safety effect.
-
-Prefer deletion or modification of the existing owner over wrappers, parallel managers, compatibility layers, hidden fallback paths, or duplicated state.
-
-### 5. Implement and verify
-
-- reproduce before fixing when practical;
-- add or strengthen a regression that can fail for the right reason;
-- make the smallest owner-consistent change;
-- preserve unrelated behavior;
-- remove superseded paths end to end when behavior is intentionally retired;
-- in a local/worktree host, run `python scripts/agent_task.py check --files <changed files>` before publishing changes; this is the single fast pre-push gate and may safely fix style first;
-- repair introduced/exposed validation failures before requesting the full suite;
-- in GitHub-connector-only chats, finish the coherent patch on the branch before opening a PR when practical, then open the PR as **draft**;
-- while the PR is draft, use only the repository's focused draft CI gate for iteration;
-- review the exact diff and make the PR ready for review only after the draft gate is green;
-- marking the PR ready triggers the authoritative full quality + four-shard normal suite + deterministic E2E validation on that exact head;
-- if a further commit is needed after full validation starts, convert the PR back to draft before editing, repair against the fast gate, then mark ready again;
-- run `python scripts/agent_task.py full --files <changed files>` before merge when a local/worktree host supports it; GitHub-connector work may use the final ready-for-review CI as the full-suite authority.
-
-For risky refactors, characterize current intended behavior first and use differential before/after checks where practical.
-
-### 6. Merge discipline
-
-Before merge:
-
-- verify exact base/head;
-- confirm no unrelated diff;
-- confirm the **final-validation** gate is green on the exact final PR head;
-- resolve valid review findings;
-- use `python scripts/agent_task.py merge-check --validated-base <base-sha> --validated-head <head-sha>` when a local/worktree host supports it; otherwise verify the same base/head lease through repository metadata immediately before merge;
-- never merge a draft PR;
-- never report "merged", "deployed", or "observed live" without direct evidence.
-
-## Repository learning
-
-This repository already has a durable engineering memory:
-
-`docs/ENGINEERING_FAILURE_PATTERNS.md`
-
-Use it instead of creating a parallel `.codex/NIFTY_SCALPER_LEARNINGS.md` diary.
-
-When a recurring failure is verified and materially reusable:
-
-1. fix the immediate defect;
-2. identify the prevention rule or detector;
-3. update the matching repository failure pattern only when warranted;
-4. prefer executable prevention/tests over additional prompt text.
+6. **Close on exact evidence**
+   - Review `base...head`, scope, duplicate/legacy remnants, accidental deletions, safety effects, and exact-head CI.
+   - Reconcile base drift before merge.
+   - Read back `main` after merge.
 
 ## Non-negotiables
 
-- Preserve capital-protective fail-closed behavior.
-- Do not weaken hard risk/execution/readiness safeguards merely to increase trades.
-- Do not reintroduce retired scoring/legacy paths through aliases or fallbacks.
-- Do not create multiple owners for the same state or calculation.
-- Do not claim profitability from code quality or parameter changes alone.
-- Do not claim "no loss of function" without relevant regression evidence.
-- Never place real-money orders merely to validate a code change.
+- Preserve fail-closed behavior for ambiguous market data, broker/order state, risk state, and execution safety.
+- Do not weaken hard risk/readiness/execution safeguards to increase trade count.
+- Keep one source of truth; do not reintroduce retired scoring, duplicate managers, shadow state, or alternate execution paths.
+- Prefer the smallest coherent change; avoid unrelated cleanup and overengineering.
+- Never claim no loss of function without relevant regression evidence.
+- Never claim profitability from code/refactor/parameter changes without realistic cost and out-of-sample/live evidence.
+- Never place real-money orders merely to validate code.
 
 ## Completion
 
-For substantial work, report the exact verified state:
+Report only observed states:
 
 `understood → patched → focused-tested → full-tested → reviewed → merged → deployed → live-observed`
 
-Only mark stages that were actually observed. State remaining blockers precisely.
+Stop expanding the audit once ownership, root cause, affected boundaries, and falsifying tests are clear.
