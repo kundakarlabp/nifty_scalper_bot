@@ -162,6 +162,8 @@ def build_analysis(
             for dimension in (
                 "strategy",
                 "setup",
+                "regime",
+                "confirmation_type",
                 "entry_hour_ist",
                 "days_to_expiry",
                 "target_adjustment",
