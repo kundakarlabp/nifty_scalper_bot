@@ -8,7 +8,6 @@ At the beginning of a task, do not repeatedly test different repository-access m
 
 For every NIFTY Scalper Bot **audit, code edit, debugging, architecture-understanding, review, validation, or merge-readiness task**, automatically activate `nifty-scalper-engineering`. When the personal ChatGPT skill and the repository-local skill are both available, treat them as the same orchestration layer; repository-local `AGENTS.md` and the agent manifest remain authoritative.
 
-
 Read only these files first:
 
 1. `AGENTS.md`
