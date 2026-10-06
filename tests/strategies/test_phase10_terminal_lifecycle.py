@@ -110,7 +110,7 @@ async def test_preparation_task_cancellation_has_terminal_result() -> None:
     await started.wait()
     task = next(
         task
-        for task in asyncio.all_tasks()
+        for task in runner._signal_preparation_tasks
         if task.get_name().endswith(":prepare-cancel")
     )
     task.cancel()
