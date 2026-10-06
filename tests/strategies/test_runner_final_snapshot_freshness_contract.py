@@ -12,7 +12,9 @@ def test_runner_arms_final_trade_plan_freshness_contract() -> None:
 def test_freshness_is_armed_on_canonical_entry_plan() -> None:
     source = Path("src/nifty_scalper_bot/strategies/runner.py").read_text()
     block_start = source.index("plan = TradePlan(")
-    block_end = source.index("submit_result = submit_result_fn(plan)", block_start)
+    block_end = source.index(
+        "submit_result = submit_result_fn(plan)", block_start
+    )
     block = source[block_start:block_end]
     assert 'max_signal_age_seconds=max(' in block
     assert 'max_entry_drift_pct=max(' in block
