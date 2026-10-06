@@ -165,6 +165,7 @@ def build_analysis(
                 "entry_hour_ist",
                 "days_to_expiry",
                 "target_adjustment",
+                "exit_reason",
             )
         },
         "execution_data_quality": asdict(execution_quality),

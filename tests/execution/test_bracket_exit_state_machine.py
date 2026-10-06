@@ -74,8 +74,14 @@ class _OrderManager:
         return self.order_id
 
 
-def _active_manager(order_manager: _OrderManager) -> BracketManager:
+def _active_manager(
+    order_manager: _OrderManager,
+    *,
+    notifier: Any | None = None,
+) -> BracketManager:
     manager = BracketManager(order_manager=order_manager)
+    if notifier is not None:
+        manager.set_notifier(notifier)
     manager.register_virtual_bracket(
         order_id="entry-1",
         symbol="NFO:NIFTY2660923100CE",
@@ -135,8 +141,8 @@ def test_deferred_exit_latches_without_waiting_for_broker() -> None:
     assert bracket is not None
     assert elapsed < 0.1
     assert bracket.exit_pending is True
-    assert bracket.exit_state == BracketExitLifecycle.EXIT_TRIGGERED.value
     assert broker_started.wait(timeout=1.0)
+    assert bracket.exit_state == BracketExitLifecycle.EXIT_ORDER_PENDING.value
 
     # A concurrent watchdog/tick trigger must not submit a second exit.
     manager.on_tick(
@@ -195,8 +201,10 @@ def test_retryable_submit_failure_uses_backoff_without_infinite_retry() -> None:
 def test_fatal_submit_failure_escalates_and_freezes_entries() -> None:
     events: list[tuple[str, dict[str, object]]] = []
     om = _OrderManager(exc=RuntimeError("invalid symbol rejected"))
-    manager = _active_manager(om)
-    manager.set_notifier(lambda event, payload: events.append((event, dict(payload or {}))))
+    manager = _active_manager(
+        om,
+        notifier=lambda event, payload: events.append((event, dict(payload or {}))),
+    )
 
     manager.on_tick("NFO:NIFTY2660923100CE", 157.10)
 

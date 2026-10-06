@@ -23,6 +23,7 @@ def test_build_analysis_emits_research_cohorts_without_fabricated_facts() -> Non
         "by_entry_hour_ist": [],
         "by_days_to_expiry": [],
         "by_target_adjustment": [],
+        "by_exit_reason": [],
     }
     assert report["parameter_change"]["allowed"] is False
 
@@ -114,8 +115,11 @@ def test_build_analysis_emits_repeatable_realized_post_cost_evidence() -> None:
         "mean_r_multiple": 0.8,
         "mean_mfe_r": 1.2,
         "mean_mae_r": 0.25,
+        "mean_mfe_capture_ratio": 0.666667,
     }
     assert (
         report["realized_post_cost_evidence"]["by_setup"][0]["value"]
         == "breakout_retest"
     )
+    exit_reason = report["realized_post_cost_evidence"]["by_exit_reason"][0]
+    assert exit_reason["value"] == "TARGET"
