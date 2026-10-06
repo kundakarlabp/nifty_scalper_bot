@@ -366,6 +366,71 @@ def test_volume_spike_config_is_consumed_as_structural_confirmation(
     assert "volume_confirmation" in signal.metadata["setup_reasons"]
 
 
+def test_balanced_sweep_geometry_cannot_replace_independent_confirmation(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    rows = _base_rows()
+    engine = FakeIndicatorEngine({FUTURES: rows})
+    strategy = SMCStrategy(
+        SMCStrategyConfig(volume_spike_mult=10.0),
+        engine,
+    )
+
+    sweep = _bar(
+        30,
+        open_=23988.0,
+        high=23991.0,
+        low=23975.0,
+        close=23984.0,
+        volume=1000.0,
+    )
+    rows.append(sweep)
+    assert (
+        strategy.generate_signal(
+            CE,
+            _indicators(
+                latest_bar_ts=sweep["timestamp"],
+                premium_reclaim=False,
+                bos_confirmed=False,
+                choch_confirmed=False,
+                retest_confirmed=False,
+            ),
+            102.0,
+        )
+        is None
+    )
+
+    event = strategy._events[(FUTURES, "CE")]
+    assert 0.12 <= float(event["depth_atr"]) <= 0.50
+    assert event["volume_confirmation"] is False
+
+    confirm = _bar(
+        31,
+        open_=23984.0,
+        high=23999.0,
+        low=23982.0,
+        close=23997.0,
+        volume=1000.0,
+    )
+    rows.append(confirm)
+
+    signal = strategy.generate_signal(
+        CE,
+        _indicators(
+            latest_bar_ts=confirm["timestamp"],
+            premium_reclaim=False,
+            bos_confirmed=False,
+            choch_confirmed=False,
+            retest_confirmed=False,
+        ),
+        103.0,
+    )
+
+    assert signal is None
+    assert strategy.last_no_vote_reason == "smc_independent_confirmation_missing"
+
+
 def test_bearish_underlying_sweep_confirms_long_pe(monkeypatch) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
     rows = _base_rows()
