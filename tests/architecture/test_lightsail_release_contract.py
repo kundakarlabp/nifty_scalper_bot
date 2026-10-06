@@ -140,6 +140,18 @@ def test_unchanged_release_confirms_health_failure_before_restart() -> None:
     assert 'service_healthy "$BEFORE"' not in unchanged
 
 
+def test_release_delegates_research_manifest_to_persistent_admin() -> None:
+    release = _text("deploy/lightsail_release.sh")
+    assert 'ADMIN_PORT="${BOT_ADMIN_PORT:-8081}"' in release
+    block = release.split("poll_research_request()", 1)[1].split("exec 9>", 1)[0]
+
+    assert "/admin/research/poll-manifest" in block
+    assert "http://127.0.0.1:${ADMIN_PORT}" in block
+    assert "--max-time 5" in block
+    assert "run_research_job.py" not in block
+    assert "200|202|409" in block
+
+
 def test_deploy_helpers_do_not_embed_credentials() -> None:
     paths = (
         "deploy/lightsail_setup.sh",
