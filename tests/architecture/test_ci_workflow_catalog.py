@@ -51,6 +51,19 @@ def test_ci_is_read_only_and_deduplicates_e2e_markers() -> None:
     assert e2e_suite in text
 
 
+def test_ci_uses_draft_fast_gate_before_final_full_validation() -> None:
+    text = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
+
+    assert "types: [opened, synchronize, reopened, ready_for_review]" in text
+    assert "draft-fast-check:" in text
+    assert "github.event.pull_request.draft == true" in text
+    assert "python scripts/agent_task.py check" in text
+    assert "--no-style-fix" in text
+    assert "github.event.pull_request.draft == false" in text
+    assert "final-validation:" in text
+    assert "needs: [changed-code-quality, tests, e2e-simulation]" in text
+
+
 def test_no_one_off_patch_or_branch_specific_ci_remains() -> None:
     combined = "\n".join(
         path.read_text(encoding="utf-8") for path in WORKFLOWS.glob("*.yml")
