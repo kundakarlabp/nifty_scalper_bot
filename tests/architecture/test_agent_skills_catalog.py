@@ -66,7 +66,6 @@ def test_skill_readme_routes_all_installed_skills() -> None:
     assert "kundakarlabp/dr-bhanu-prasad" in readme
 
 
-
 def test_nifty_scalper_engineering_is_default_orchestrator() -> None:
     skill = (SKILLS_ROOT / "nifty-scalper-engineering" / "SKILL.md").read_text(encoding="utf-8")
     assert "Automatically use for every engineering task" in skill
