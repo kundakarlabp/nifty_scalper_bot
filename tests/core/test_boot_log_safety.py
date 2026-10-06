@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import threading
 from types import SimpleNamespace
 
 from nifty_scalper_bot.core.boot_log_safety import BootLogRateControl
