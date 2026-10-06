@@ -627,7 +627,7 @@ def test_completed_trade_outcome_reports_r_normalised_excursions() -> None:
     assert outcome["r_multiple"] is not None
     assert outcome["r_multiple"] < 2.0  # net of costs
     assert outcome["trail_revision"] == 3
-    assert outcome["trail_activation_r"] == 0.75
+    assert outcome["trail_activation_r"] == 0.60
     assert outcome["final_stop_price"] == 103.0
 
 

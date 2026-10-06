@@ -21,7 +21,7 @@ def _manager(monkeypatch, *, cost_points: float = 1.0) -> RuntimeBracketManager:
     manager._trail_tier4_r = 3.0
     manager._calculate_momentum = lambda _symbol: 0.0
     manager._breakeven_cost_per_unit = lambda _bracket: cost_points
-    manager._trail_activation_r = lambda _bracket: 0.75
+    manager._trail_activation_r = lambda _bracket: 0.60
     manager._min_locked_profit_r = lambda: 0.10
     return manager
 
@@ -100,14 +100,30 @@ def test_tier4_uses_r_metric_not_premium_percentage(monkeypatch) -> None:
 
 def test_floor_is_not_installed_before_activation(monkeypatch) -> None:
     manager = _manager(monkeypatch, cost_points=1.0)
-    bracket = _bracket(side="BUY", entry=100.0, sl=90.0, high=107.0, low=100.0)
+    bracket = _bracket(side="BUY", entry=100.0, sl=90.0, high=105.5, low=100.0)
 
     candidate = _trail(
-        manager, bracket, ltp=107.0, profit_pct=7.0,
-        high_water=107.0, atr=0.0,
+        manager, bracket, ltp=105.5, profit_pct=5.5,
+        high_water=105.5, atr=0.0,
     )
 
     assert candidate is None
+
+
+def test_point_six_r_activation_clears_costs_before_profit_floor(monkeypatch) -> None:
+    manager = _manager(monkeypatch, cost_points=1.0)
+    bracket = _bracket(side="BUY", entry=100.0, sl=90.0, high=106.5, low=100.0)
+
+    candidate = _trail(
+        manager,
+        bracket,
+        ltp=106.5,
+        profit_pct=6.5,
+        high_water=106.5,
+        atr=0.0,
+    )
+
+    assert candidate == pytest.approx(101.0)
 
 
 def test_floor_is_rejected_when_execution_room_is_insufficient(monkeypatch) -> None:

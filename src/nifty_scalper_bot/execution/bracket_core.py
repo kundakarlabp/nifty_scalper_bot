@@ -1787,11 +1787,11 @@ class BracketManager:
             return float(
                 bracket.trailing_config.get(
                     "breakeven_activation_r",
-                    os.getenv("TRAIL_BREAKEVEN_ACTIVATION_R", 0.75),
+                    os.getenv("TRAIL_BREAKEVEN_ACTIVATION_R", 0.60),
                 )
             )
         except (TypeError, ValueError):
-            return 0.75
+            return 0.60
 
     def _trailing_executable_state(
         self, bracket: BracketState, ltp: float
@@ -3303,9 +3303,9 @@ class BracketManager:
             return candidate
 
         cost = self._breakeven_cost_per_unit(bracket)
-        # The positive-profit component starts only after real progress (0.75R);
-        # before that only costs are cleared, so an early cost-adjusted breakeven
-        # is not converted into a noise-sensitive profit stop.
+        # Trailing activates at 0.60R by clearing costs first. The positive-profit
+        # component starts only after 0.75R, so earlier activation does not become
+        # a noise-sensitive profit stop.
         locked_r = self._min_locked_profit_r() if mfe_r >= 0.75 else 0.0
         locked = cost + (initial_risk * locked_r)
         room = max(cost, 0.05)
@@ -3341,12 +3341,7 @@ class BracketManager:
             mfe = float(high_water or ltp or entry) - entry
         else:
             mfe = entry - float(high_water or ltp or entry)
-        activation_r = float(
-            bracket.trailing_config.get(
-                "breakeven_activation_r",
-                os.getenv("TRAIL_BREAKEVEN_ACTIVATION_R", 0.75),
-            )
-        )
+        activation_r = self._trail_activation_r(bracket)
 
         # Use instance-cached thresholds (set at __init__) — not os.getenv on every tick.
         # Canonical metric is achieved executable MFE in R. Using current open
