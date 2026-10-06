@@ -109,6 +109,7 @@ def run_worker(request: dict[str, Any], env_file: Path) -> dict[str, Any]:
     from nifty_scalper_bot.backtesting.strategy_research import (
         run_archived_research,
         run_orb_comparison,
+        run_vwap_comparison,
     )
     from nifty_scalper_bot.config.paths import get_data_dir
     from nifty_scalper_bot.data.rest.zerodha_client import ZerodhaKiteClient
@@ -190,6 +191,24 @@ def run_worker(request: dict[str, Any], env_file: Path) -> dict[str, Any]:
         }
         for candidate in comparison["candidates"]
     ]
+    status["stage"] = "vwap_comparison"
+    write_json(directory / "status.json", status)
+    write_json(ROOT / "data/research/latest.json", status)
+    vwap_comparison = run_vwap_comparison(directory / "history")
+    write_json(directory / "vwap_comparison.json", vwap_comparison)
+    status["vwap_comparison"] = {
+        key: value for key, value in vwap_comparison.items() if key != "candidates"
+    }
+    status["vwap_comparison"]["candidates"] = [
+        {
+            **candidate,
+            "scenarios": [
+                {key: value for key, value in scenario.items() if key != "trades"}
+                for scenario in candidate["scenarios"]
+            ],
+        }
+        for candidate in vwap_comparison["candidates"]
+    ]
     run_runtime = request.get("mode", "all") == "all"
     status.update(
         state="collecting" if run_runtime else "completed",
@@ -213,9 +232,10 @@ def run_worker(request: dict[str, Any], env_file: Path) -> dict[str, Any]:
             for scenario in report["scenarios"]
         ],
         explanation=(
-            "Completed modeled strategy component bar research; historical ATM "
-            "selection, depth and full live-pipeline parity remain unverified. "
-            "See report assumptions and limitations."
+            "Completed modeled strategy component bar research plus bounded "
+            "ORB/VWAP comparisons; historical ATM selection, depth and full "
+            "live-pipeline parity remain unverified. See report assumptions "
+            "and limitations."
         ),
     )
     if run_runtime:

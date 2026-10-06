@@ -220,6 +220,97 @@ def test_research_structural_context_includes_futures_volume_ratio(tmp_path):
     )
 
     assert context["futures_volume_ratio"] == pytest.approx(1.0)
+    assert context["context_age_seconds"] == 0.0
+
+
+def test_vwap_research_geometry_uses_structural_metadata_proxy() -> None:
+    from nifty_scalper_bot.backtesting.strategy_research import (
+        _resolve_research_signal_geometry,
+    )
+
+    signal = SimpleNamespace(
+        stop_loss=None,
+        take_profit=None,
+        metadata={
+            "setup_invalidation_premium": 95.0,
+            "premium_target_rr": 2.0,
+        },
+    )
+
+    stop, target, source = _resolve_research_signal_geometry(signal, 100.0)
+
+    assert stop == 95.0
+    assert target == 110.0
+    assert source == "strategy_metadata_proxy"
+
+
+def test_vwap_research_preserves_subtype_and_emits_setup_metrics(tmp_path, monkeypatch):
+    from nifty_scalper_bot.backtesting.strategy_research import _scenario, load_archive
+
+    archive(tmp_path)
+    for path in (tmp_path / "candles").glob("*.json"):
+        payload = json.loads(path.read_text())
+        if payload["instrument"]["instrument_type"] in {"CE", "PE"}:
+            payload["candles"][1][2] = 112.0
+            payload["candles"][1][3] = 99.0
+            payload["candles"][1][4] = 105.0
+            path.write_text(json.dumps(payload))
+
+    class Strategy:
+        name = "VWAPPro"
+
+        def generate_signal(self, symbol, indicators, current_price, position=None):
+            if indicators["history_count"] == 1:
+                return SimpleNamespace(
+                    action="BUY",
+                    stop_loss=None,
+                    take_profit=None,
+                    metadata={
+                        "setup_id": f"vwap:{symbol}:1",
+                        "setup_name": "vwap_reclaim",
+                        "setup_type": "vwap_reclaim",
+                        "signal_family": "reclaim_structure",
+                        "setup_invalidation_premium": 95.0,
+                        "premium_target_rr": 2.0,
+                        "vwap_distance_atr": 0.4,
+                        "futures_vwap_slope_bps": 2.5,
+                        "option_volume_ratio": 0.9,
+                        "futures_volume_ratio": 1.2,
+                        "volume_confirmation_source": "option_and_futures",
+                    },
+                )
+            return None
+
+        @property
+        def evaluation_health(self):
+            return {"healthy": True}
+
+        def notify_entry_accepted(self, side, *, setup_id=None):
+            pass
+
+    monkeypatch.setattr(
+        "nifty_scalper_bot.backtesting.strategy_research.build_elite_strategies",
+        lambda settings, engine: [Strategy()],
+    )
+    histories, instruments, _ = load_archive(tmp_path)
+    result = _scenario(
+        histories,
+        instruments,
+        None,
+        0,
+        components={"VWAPPro"},
+    )[
+        "strategies"
+    ]["VWAPPro"]
+
+    assert len(result["trades"]) == 2
+    assert {trade["setup_name"] for trade in result["trades"]} == {"vwap_reclaim"}
+    assert {trade["research_geometry_source"] for trade in result["trades"]} == {
+        "strategy_metadata_proxy"
+    }
+    assert all(trade["vwap_distance_atr"] == 0.4 for trade in result["trades"])
+    assert result["setup_metrics"]["vwap_reclaim"]["metrics"]["trade_count"] == 2
+    assert result["setup_metrics"]["vwap_reclaim"]["metrics"]["net_pnl"] > 0
 
 
 def test_invalid_archive_fails_instead_of_reporting_empty_success(tmp_path):
@@ -279,6 +370,59 @@ def test_archive_identity_and_duplicate_defects_fail_closed(tmp_path, defect):
     path.write_text(json.dumps(payload))
     with pytest.raises(ValueError):
         run_archived_research(tmp_path)
+
+
+def test_vwap_comparison_is_bounded_restores_environment_and_never_auto_promotes(
+    tmp_path, monkeypatch
+):
+    import os
+
+    from nifty_scalper_bot.backtesting.strategy_research import run_vwap_comparison
+
+    archive(tmp_path)
+    observed: list[dict[str, str | None]] = []
+
+    def replay(*args, **kwargs):
+        observed.append(
+            {
+                "distance": os.environ.get("VWAP_TREND_QUALITY_MAX_DISTANCE_ATR"),
+                "slope": os.environ.get("VWAP_FUTURES_SLOPE_MIN_BPS"),
+                "futures_rvol": os.environ.get("VWAP_FUTURES_VOLUME_MIN_RATIO"),
+                "penetration": os.environ.get("VWAP_ALLOW_PENETRATION_ONLY_ENTRY"),
+            }
+        )
+        return {
+            "strategies": {
+                "VWAPPro": {
+                    "metrics": {"trade_count": 0, "expectancy": None},
+                    "development_metrics": {"trade_count": 0, "expectancy": None},
+                    "data_quality": {"development_unresolved_exit_count": 0},
+                    "trades": [],
+                    "setup_metrics": {},
+                }
+            }
+        }
+
+    monkeypatch.setattr(
+        "nifty_scalper_bot.backtesting.strategy_research._scenario",
+        replay,
+    )
+    monkeypatch.setenv("VWAP_FUTURES_SLOPE_MIN_BPS", "1.25")
+    before = dict(os.environ)
+
+    report = run_vwap_comparison(tmp_path)
+
+    assert dict(os.environ) == before
+    assert report["candidate_count"] == 7
+    assert report["slippage_scenario_count"] == 3
+    assert len(observed) == 21
+    slippages = {
+        row["slippage_bps_per_side"] for row in report["candidates"][0]["scenarios"]
+    }
+    assert slippages == {10.0, 25.0, 50.0}
+    assert report["selection"]["promotion_eligible"] is False
+    assert report["selection"]["selected_for_live"] is None
+    assert report["selection"]["development_ranking"] == []
 
 
 def test_bounded_comparison_restores_environment_and_never_promotes_small_sample(

@@ -161,6 +161,74 @@ def summarize(trades: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _summarize_by_setup(
+    trades: list[dict[str, Any]],
+    *,
+    cutoff: str,
+) -> dict[str, dict[str, Any]]:
+    """Return post-cost outcome summaries by preserved structural setup subtype."""
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for trade in trades:
+        setup_name = (
+            str(trade.get("setup_name") or trade.get("setup_type") or "unknown").strip()
+            or "unknown"
+        )
+        grouped.setdefault(setup_name, []).append(trade)
+    return {
+        setup_name: {
+            "metrics": summarize(sample),
+            "development_metrics": summarize(
+                [trade for trade in sample if trade["entry_time"][:10] < cutoff]
+            ),
+            "holdout_metrics": summarize(
+                [trade for trade in sample if trade["entry_time"][:10] >= cutoff]
+            ),
+            "exit_reasons": dict(Counter(trade["exit_reason"] for trade in sample)),
+        }
+        for setup_name, sample in sorted(grouped.items())
+    }
+
+
+def _resolve_research_signal_geometry(
+    signal: Any,
+    current_price: float,
+) -> tuple[float | None, float | None, str]:
+    """Resolve causal component-research geometry without taking live ownership."""
+    try:
+        stop = (
+            float(signal.stop_loss)
+            if getattr(signal, "stop_loss", None) is not None
+            else None
+        )
+        target = (
+            float(signal.take_profit)
+            if getattr(signal, "take_profit", None) is not None
+            else None
+        )
+    except (TypeError, ValueError):
+        stop = target = None
+    if stop is not None and target is not None:
+        return stop, target, "signal"
+
+    metadata = dict(getattr(signal, "metadata", {}) or {})
+    try:
+        proxy_stop = float(metadata.get("setup_invalidation_premium"))
+        target_rr = float(metadata.get("premium_target_rr"))
+    except (TypeError, ValueError):
+        return stop, target, "unavailable"
+    if (
+        not math.isfinite(proxy_stop)
+        or not math.isfinite(target_rr)
+        or not 0 < proxy_stop < current_price
+        or target_rr <= 0
+    ):
+        return stop, target, "unavailable"
+    proxy_target = current_price + (current_price - proxy_stop) * target_rr
+    if not math.isfinite(proxy_target) or proxy_target <= current_price:
+        return stop, target, "unavailable"
+    return proxy_stop, proxy_target, "strategy_metadata_proxy"
+
+
 def _research_direction_payload(
     engine: IndicatorEngine,
     symbol: str,
@@ -256,6 +324,7 @@ def _research_orb_structural_context(
             observation.confidence if observation else 0.0
         ),
         "context_fresh": bool(spot_observation or futures_observation),
+        "context_age_seconds": 0.0,
         "futures_vwap_slope": futures_payload.get("vwap_slope"),
         "futures_volume_ratio": futures_payload.get("futures_volume_ratio"),
         "research_direction_resolution": resolution.reason,
@@ -642,11 +711,15 @@ def _scenario(
                         getattr(strategy, "last_no_vote_reason", "no_signal")
                     ] += 1
                     continue
+                metadata = dict(signal.metadata or {})
+                stop_loss, take_profit, geometry_source = (
+                    _resolve_research_signal_geometry(signal, bar["close"])
+                )
                 if (
                     signal.action != "BUY"
-                    or signal.stop_loss is None
-                    or signal.take_profit is None
-                    or not 0 < signal.stop_loss < bar["close"] < signal.take_profit
+                    or stop_loss is None
+                    or take_profit is None
+                    or not 0 < stop_loss < bar["close"] < take_profit
                 ):
                     rejections[strategy.name]["invalid_signal_geometry"] += 1
                     continue
@@ -663,29 +736,47 @@ def _scenario(
                             )
                         ] += 1
                         continue
-                metadata = dict(signal.metadata or {})
                 pending[key] = {
                     "available_at": timestamp + timedelta(minutes=1),
-                    "stop_loss": signal.stop_loss,
-                    "take_profit": signal.take_profit,
+                    "stop_loss": stop_loss,
+                    "take_profit": take_profit,
                     "strategy": strategy,
                     "setup_id": metadata.get("setup_id"),
                     "research_signal_metadata": {
-                        field: metadata.get(field)
-                        for field in (
-                            "setup_reasons",
-                            "entry_branch",
-                            "retest_confirmed",
-                            "underlying_volume_ratio",
-                            "underlying_penetration_atr",
-                            "opening_range_width_atr",
-                            "opening_range_balanced",
-                            "underlying_breakout_body_pct",
-                            "underlying_direction_confidence",
-                            "direction_contract",
-                            "setup_contract",
-                            "confirmation_contract",
-                        )
+                        "research_geometry_source": geometry_source,
+                        **{
+                            field: metadata.get(field)
+                            for field in (
+                                "setup_id",
+                                "setup_name",
+                                "setup_type",
+                                "signal_family",
+                                "setup_reasons",
+                                "entry_branch",
+                                "retest_confirmed",
+                                "underlying_volume_ratio",
+                                "underlying_penetration_atr",
+                                "opening_range_width_atr",
+                                "opening_range_balanced",
+                                "underlying_breakout_body_pct",
+                                "underlying_direction_confidence",
+                                "vwap_event_subtype",
+                                "vwap_distance_atr",
+                                "vwap_distance_sigma",
+                                "futures_vwap_slope_bps",
+                                "option_volume_ratio",
+                                "futures_volume_ratio",
+                                "volume_confirmation_source",
+                                "days_to_expiry",
+                                "strike_distance_from_atm",
+                                "minutes_since_open",
+                                "setup_invalidation_premium",
+                                "premium_target_rr",
+                                "direction_contract",
+                                "setup_contract",
+                                "confirmation_contract",
+                            )
+                        },
                     },
                 }
     for key in list(positions):
@@ -714,6 +805,7 @@ def _scenario(
                 "development_metrics": summarize(
                     [trade for trade in trades if trade["entry_time"][:10] < cutoff]
                 ),
+                "setup_metrics": _summarize_by_setup(trades, cutoff=cutoff),
                 "exit_reasons": dict(Counter(trade["exit_reason"] for trade in trades)),
                 "worst_case_stress_exit_reasons": dict(
                     Counter(trade["exit_reason"] for trade in stress_outcomes[name])
@@ -894,6 +986,124 @@ def opening_relative_volume(
         volumes.append(sum(float(history[key]["volume"]) for key in keys))
     mean = sum(volumes[:-1]) / 14
     return volumes[-1] / mean if mean > 0 else None
+
+
+def run_vwap_comparison(directory: Path) -> dict[str, Any]:
+    """Compare a small prespecified VWAP hypothesis set without live promotion."""
+    if os.getenv("EXECUTION_MODE", "SHADOW").upper() != "SHADOW":
+        raise ValueError("research_requires_shadow_process")
+    histories, instruments, digest = load_archive(directory)
+    settings = get_settings().elite
+    variants: list[tuple[str, dict[str, str]]] = [
+        ("current_reference", {}),
+        ("distance_2_atr", {"VWAP_TREND_QUALITY_MAX_DISTANCE_ATR": "2.0"}),
+        ("legacy_distance_5_atr", {"VWAP_TREND_QUALITY_MAX_DISTANCE_ATR": "5.0"}),
+        ("slope_floor_0_5bp", {"VWAP_FUTURES_SLOPE_MIN_BPS": "0.5"}),
+        ("slope_floor_2bp", {"VWAP_FUTURES_SLOPE_MIN_BPS": "2.0"}),
+        ("futures_rvol_1_2", {"VWAP_FUTURES_VOLUME_MIN_RATIO": "1.2"}),
+        ("penetration_opt_in", {"VWAP_ALLOW_PENETRATION_ONLY_ENTRY": "true"}),
+    ]
+    environment_keys = (
+        "VWAP_TREND_QUALITY_MAX_DISTANCE_ATR",
+        "VWAP_FUTURES_SLOPE_MIN_BPS",
+        "VWAP_FUTURES_VOLUME_MIN_RATIO",
+        "VWAP_ALLOW_PENETRATION_ONLY_ENTRY",
+    )
+    baseline_environment = {key: os.environ.get(key) for key in environment_keys}
+    candidates: list[dict[str, Any]] = []
+    for name, overrides in variants:
+        original = {key: os.environ.get(key) for key in overrides}
+        try:
+            os.environ.update(overrides)
+            scenarios: list[dict[str, Any]] = []
+            for slippage in (10.0, 25.0, 50.0):
+                result = _scenario(
+                    histories,
+                    instruments,
+                    settings,
+                    slippage,
+                    components={"VWAPPro"},
+                    minimum_net_rr=1.5,
+                    strict_liquidity=True,
+                    lifecycle_proxy=True,
+                )["strategies"]["VWAPPro"]
+                scenarios.append({"slippage_bps_per_side": slippage, **result})
+            candidates.append(
+                {
+                    "name": name,
+                    "environment_overrides": overrides,
+                    "minimum_net_rr": 1.5,
+                    "lifecycle_proxy": True,
+                    "scenarios": scenarios,
+                }
+            )
+        finally:
+            for key, value in original.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+    eligible = [
+        candidate
+        for candidate in candidates
+        if all(
+            row["development_metrics"]["trade_count"] >= 30
+            and row["data_quality"]["development_unresolved_exit_count"] == 0
+            for row in candidate["scenarios"]
+        )
+    ]
+    ranked = sorted(
+        eligible,
+        key=lambda candidate: min(
+            row["development_metrics"]["expectancy"]
+            for row in candidate["scenarios"]
+            if row["development_metrics"]["expectancy"] is not None
+        ),
+        reverse=True,
+    )
+    return {
+        "scope": "bounded_vwap_active_contract_component_comparison",
+        "evidence_label": "RESEARCH_CANDIDATE",
+        "live_equivalent": False,
+        "data_sha256": digest,
+        "baseline_configuration": asdict(settings.vwap),
+        "baseline_environment": baseline_environment,
+        "candidate_count": len(candidates),
+        "slippage_scenario_count": 3,
+        "retrospective_check_is_untouched": False,
+        "selection": {
+            "ranking_rule": (
+                "worst_development_expectancy_across_slippage; "
+                ">=30 resolved development trades per scenario; "
+                "zero unresolved development exits"
+            ),
+            "development_ranking": [candidate["name"] for candidate in ranked],
+            "best_observed_research_candidate": ranked[0]["name"] if ranked else None,
+            "minimum_development_trades_for_further_validation": 30,
+            "selected_for_live": None,
+            "promotion_eligible": False,
+            "blockers": [
+                "Retrospectively selected active contracts; no historical ATM rotation",
+                "Reused archive is not an untouched holdout",
+                "Historical bid/ask depth and full live arbitration unavailable",
+                "Prospective chronological and paper validation required",
+            ],
+        },
+        "assumptions": {
+            "geometry": (
+                "Explicit signal stop/target when available; otherwise existing "
+                "strategy structural invalidation and target-RR metadata"
+            ),
+            "entry": "next_minute_open",
+            "net_rr_filter": "minimum 1.5 after modeled slippage and canonical fees",
+            "lifecycle": "existing causal 0.6R minute-bar trailing/time-stop proxy",
+            "quantity": "one_archived_lot",
+            "check": "Last 20 percent of option sessions; excluded from ranking",
+            "zero_trades": "Abstention, not demonstrated alpha",
+        },
+        "candidates": candidates,
+    }
 
 
 def run_orb_comparison(directory: Path) -> dict[str, Any]:
