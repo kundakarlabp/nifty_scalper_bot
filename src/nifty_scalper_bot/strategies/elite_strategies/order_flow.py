@@ -459,12 +459,18 @@ class OrderFlowStrategy(EliteStrategy):
             _stamp_quote_update_identity(signal.metadata, indicators)
             LOGGER.info(
                 "ORDERFLOW_CONTEXT_EVIDENCE symbol=%s side=%s eligible=%s "
-                "aligned=%s conflict=%s spread_pct=%.3f age_s=%.3f",
+                "aligned=%s conflict=%s source=%s ofi_ready=%s ofi_norm=%s "
+                "depth=%.3f strong_depth_conflict=%s spread_pct=%.3f age_s=%.3f",
                 symbol,
                 side,
                 context_quality_eligible,
                 effective_context_alignment,
                 effective_context_conflict,
+                context_alignment_source,
+                ofi_ready,
+                ofi_value,
+                depth_imbalance,
+                strong_depth_conflicts_side,
                 spread_pct,
                 context_age_seconds,
                 extra={
@@ -474,6 +480,11 @@ class OrderFlowStrategy(EliteStrategy):
                     "context_quality_eligible": context_quality_eligible,
                     "effective_context_alignment": effective_context_alignment,
                     "effective_context_conflict": effective_context_conflict,
+                    "context_alignment_source": context_alignment_source,
+                    "ofi_ready": ofi_ready,
+                    "ofi_1s_normalized": ofi_value,
+                    "depth_imbalance": round(depth_imbalance, 4),
+                    "strong_depth_conflicts_side": strong_depth_conflicts_side,
                 },
             )
             return signal
