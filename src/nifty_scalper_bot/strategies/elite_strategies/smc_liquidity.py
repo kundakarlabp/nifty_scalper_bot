@@ -235,6 +235,30 @@ class SMCStrategy(EliteStrategy):
                 highs.append({**row, "_pivot_index": index})
         return lows, highs
 
+    def _sweep_geometry_limits(self, atr: float) -> dict[str, float]:
+        """Return the single SMC sweep/reclaim geometry contract."""
+        atr = max(1.0, float(atr))
+        min_sweep_atr = max(0.0, safe_float_env("SMC_MIN_SWEEP_ATR", 0.08))
+        max_sweep_atr = max(
+            min_sweep_atr,
+            safe_float_env("SMC_MAX_SWEEP_ATR", 0.75),
+        )
+        reclaim_buffer_atr = max(
+            0.0,
+            safe_float_env("SMC_RECLAIM_BUFFER_ATR", 0.03),
+        )
+        configured_cap = max(0.05, float(self._cfg.sweep_distance_points or 0.05))
+        return {
+            "atr": atr,
+            "min_sweep_atr": min_sweep_atr,
+            "max_sweep_atr": max_sweep_atr,
+            "reclaim_buffer_atr": reclaim_buffer_atr,
+            "configured_cap": configured_cap,
+            "effective_min": max(0.05, min(configured_cap, atr * min_sweep_atr)),
+            "max_depth": atr * max_sweep_atr,
+            "reclaim_buffer": atr * reclaim_buffer_atr,
+        }
+
     def _rank_liquidity_pivots(
         self,
         rows: list[dict[str, Any]],
@@ -259,6 +283,7 @@ class SMCStrategy(EliteStrategy):
             int(item["_pivot_index"]) for item in major_highs if "_pivot_index" in item
         }
         atr = self._atr(rows)
+        limits = self._sweep_geometry_limits(atr)
         equal_tolerance = max(0.05, atr * 0.08)
         current = rows[-1]
 
@@ -303,16 +328,38 @@ class SMCStrategy(EliteStrategy):
                     }
                 )
 
-            tested = [
-                item
-                for item in enriched
-                if (
-                    float(current["low"]) < float(item[level_key])
+            tested: list[dict[str, Any]] = []
+            valid_tested: list[dict[str, Any]] = []
+            for item in enriched:
+                level = float(item[level_key])
+                breached = (
+                    float(current["low"]) < level
                     if is_low
-                    else float(current["high"]) > float(item[level_key])
+                    else float(current["high"]) > level
                 )
-            ]
-            pool = tested or enriched
+                if not breached:
+                    continue
+                depth = (
+                    level - float(current["low"])
+                    if is_low
+                    else float(current["high"]) - level
+                )
+                reclaim = (
+                    float(current["close"]) - level
+                    if is_low
+                    else level - float(current["close"])
+                )
+                tested.append(item)
+                if (
+                    depth >= limits["effective_min"]
+                    and depth <= limits["max_depth"]
+                    and reclaim >= limits["reclaim_buffer"]
+                ):
+                    valid_tested.append(item)
+
+            # A distant visible level that was decisively broken must not mask
+            # a nearer level with valid sweep/reclaim geometry.
+            pool = valid_tested or tested or enriched
             return max(
                 pool,
                 key=lambda item: (
@@ -480,16 +527,14 @@ class SMCStrategy(EliteStrategy):
         self, snapshot: Mapping[str, Any]
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         current = snapshot["current"]
-        atr = max(1.0, float(snapshot["atr"]))
-        min_sweep_atr = max(0.0, safe_float_env("SMC_MIN_SWEEP_ATR", 0.08))
-        max_sweep_atr = max(
-            min_sweep_atr,
-            safe_float_env("SMC_MAX_SWEEP_ATR", 0.75),
-        )
-        reclaim_buffer_atr = max(0.0, safe_float_env("SMC_RECLAIM_BUFFER_ATR", 0.03))
-        configured_cap = max(0.05, float(self._cfg.sweep_distance_points or 0.05))
-        effective_min = max(0.05, min(configured_cap, atr * min_sweep_atr))
-        reclaim_buffer = atr * reclaim_buffer_atr
+        limits = self._sweep_geometry_limits(float(snapshot["atr"]))
+        atr = limits["atr"]
+        min_sweep_atr = limits["min_sweep_atr"]
+        max_sweep_atr = limits["max_sweep_atr"]
+        reclaim_buffer_atr = limits["reclaim_buffer_atr"]
+        configured_cap = limits["configured_cap"]
+        effective_min = limits["effective_min"]
+        reclaim_buffer = limits["reclaim_buffer"]
 
         def _diagnose(
             pivot: Any,
