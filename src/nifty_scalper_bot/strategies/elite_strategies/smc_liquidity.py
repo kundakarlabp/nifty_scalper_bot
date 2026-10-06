@@ -528,18 +528,14 @@ class SMCStrategy(EliteStrategy):
                 "liquidity_level_type": str(
                     pivot.get("liquidity_level_type") or f"swing_{level_key}"
                 ),
-                "liquidity_touch_count": int(
-                    pivot.get("liquidity_touch_count") or 1
-                ),
+                "liquidity_touch_count": int(pivot.get("liquidity_touch_count") or 1),
                 "liquidity_level_priority": int(
                     pivot.get("liquidity_level_priority") or 1
                 ),
                 "liquidity_level_age_bars": int(
                     pivot.get("liquidity_level_age_bars") or 0
                 ),
-                "liquidity_major_pivot": bool(
-                    pivot.get("liquidity_major_pivot")
-                ),
+                "liquidity_major_pivot": bool(pivot.get("liquidity_major_pivot")),
             }
 
         bullish = _diagnose(
@@ -599,21 +595,15 @@ class SMCStrategy(EliteStrategy):
             "effective_min_sweep_points": float(
                 self.last_sweep_diagnostics["effective_min_sweep_points"]
             ),
-            "liquidity_level_type": str(
-                desired.get("liquidity_level_type") or "swing"
-            ),
-            "liquidity_touch_count": int(
-                desired.get("liquidity_touch_count") or 1
-            ),
+            "liquidity_level_type": str(desired.get("liquidity_level_type") or "swing"),
+            "liquidity_touch_count": int(desired.get("liquidity_touch_count") or 1),
             "liquidity_level_priority": int(
                 desired.get("liquidity_level_priority") or 1
             ),
             "liquidity_level_age_bars": int(
                 desired.get("liquidity_level_age_bars") or 0
             ),
-            "liquidity_major_pivot": bool(
-                desired.get("liquidity_major_pivot")
-            ),
+            "liquidity_major_pivot": bool(desired.get("liquidity_major_pivot")),
             "recovered_from_history": bool(recovered_from_history),
         }
 
@@ -1078,12 +1068,8 @@ class SMCStrategy(EliteStrategy):
                     ),
                     "liquidity_level_type": str(event["liquidity_level_type"]),
                     "liquidity_touch_count": int(event["liquidity_touch_count"]),
-                    "liquidity_level_priority": int(
-                        event["liquidity_level_priority"]
-                    ),
-                    "liquidity_level_age_bars": int(
-                        event["liquidity_level_age_bars"]
-                    ),
+                    "liquidity_level_priority": int(event["liquidity_level_priority"]),
+                    "liquidity_level_age_bars": int(event["liquidity_level_age_bars"]),
                     "liquidity_major_pivot": bool(event["liquidity_major_pivot"]),
                     "underlying_atr": atr,
                     "underlying_invalidation_level": underlying_invalidation,
