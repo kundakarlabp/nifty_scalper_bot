@@ -46,9 +46,12 @@ GitHub connector available
 → create a branch from current main
 → make the smallest architecture-consistent change
 → add regression coverage
-→ open one focused PR
-→ inspect final diff and automated review
-→ require final-head CI
+→ complete the coherent branch patch before opening the PR when practical
+→ open one focused PR as **draft**
+→ iterate only against the focused draft CI gate
+→ inspect the final diff
+→ mark ready for review once
+→ require the full final-validation gate on that exact head
 → squash merge when explicitly requested
 ```
 
@@ -103,16 +106,28 @@ The public façade delegates to the risk-aware focused ring: it runs delta-aware
 
 ## Validation and merge rule
 
-Focused tests provide fast feedback but never replace the full suite. A PR may be squash-merged only when:
+`python scripts/agent_task.py check --files ...` is the single fast pre-push command for hosts with a working tree. It performs safe style fixing plus the risk-aware focused validation ring.
 
-- the root cause is documented
-- the diff is narrow
-- regression coverage exists where practical
-- no trading-safety invariant is weakened
-- all valid review threads are resolved
-- CI passes on the final PR head
+For GitHub-connector-only work, use the staged remote equivalent:
 
-When the task explicitly asks ChatGPT to merge after validation, verify the exact validated base/head with `scripts/agent_task.py merge-check` immediately before squash merge. If the base or head moved, refresh and rerun final-head CI. Otherwise, leave the PR open for review.
+1. finish the coherent branch patch before opening the PR when practical;
+2. open the PR as **draft**;
+3. let draft CI run the focused gate only;
+4. fix failures while the PR remains draft;
+5. mark it ready for review only when the draft gate and final diff are clean;
+6. ready-for-review triggers the full quality + four normal-test shards + deterministic E2E suite;
+7. if another commit becomes necessary, convert the PR back to draft first and repeat the focused cycle.
+
+Focused validation never replaces the full suite. A PR may be squash-merged only when:
+
+- the root cause is documented;
+- the diff is narrow;
+- regression coverage exists where practical;
+- no trading-safety invariant is weakened;
+- all valid review threads are resolved;
+- the stable `final-validation` gate passes on the exact final PR head.
+
+When the task explicitly asks ChatGPT to merge after validation, verify the exact validated base/head immediately before squash merge. Use `scripts/agent_task.py merge-check` when a local/worktree host is available; otherwise verify the same lease from repository metadata. If the base or head moved, refresh and rerun final-head CI.
 
 ## Access and confidentiality
 

@@ -1,12 +1,13 @@
-# File purpose: Canonical pull-request/main validation for the NIFTY scalper.
-# Key responsibilities: Run changed-code quality, shard the complete normal non-slow suite, and run deterministic E2E validation once.
-# Operational constraints: Read-only CI; no broker/network access; do not duplicate marked E2E tests in the normal suite.
+# File purpose: Canonical staged validation for the NIFTY scalper.
+# Key responsibilities: Run a focused draft-PR gate during iteration, then the complete normal and deterministic E2E suites on the final reviewable head and on main.
+# Operational constraints: Read-only CI; no broker/network access; draft iteration must not weaken the final merge validation bar.
 
 name: CI
 
 on:
   pull_request:
     branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches: [main]
 
@@ -23,7 +24,8 @@ env:
   ALLOW_REAL_BROKER: "false"
 
 jobs:
-  changed-code-quality:
+  draft-fast-check:
+    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft == true }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -35,7 +37,29 @@ jobs:
           python-version: "3.12"
           cache: pip
       - name: Install development dependencies
-        run: python -m pip install -e '.[dev]' -r dashboard/requirements.txt -q
+        run: python -m pip install -e '.[dev]' -q
+      - name: Fetch pull-request base
+        run: git fetch --no-tags origin "${{ github.base_ref }}" --depth=50
+      - name: Run focused draft validation
+        run: >-
+          python scripts/agent_task.py check
+          --base-ref "origin/${{ github.base_ref }}"
+          --no-style-fix
+
+  changed-code-quality:
+    if: ${{ github.event_name == 'push' || github.event.pull_request.draft == false }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 50
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install development dependencies
+        run: python -m pip install -e '.[dev]' -q
       - name: Compile production, dashboard and tooling
         run: python -m compileall -q src dashboard scripts
       - name: Enforce architecture ownership
@@ -83,6 +107,7 @@ jobs:
           --files-from /tmp/changed-python.txt
 
   normal-test-shard:
+    if: ${{ github.event_name == 'push' || github.event.pull_request.draft == false }}
     name: normal-tests-${{ matrix.shard }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -97,7 +122,7 @@ jobs:
           python-version: "3.12"
           cache: pip
       - name: Install project and test dependencies
-        run: python -m pip install -e '.[dev]' -r dashboard/requirements.txt -q
+        run: python -m pip install -e '.[dev]' -q
       - name: Select deterministic normal-suite shard
         run: >-
           python scripts/ci_test_shard.py
@@ -119,7 +144,7 @@ jobs:
 
   tests:
     name: tests
-    if: always()
+    if: ${{ always() && (github.event_name == 'push' || github.event.pull_request.draft == false) }}
     needs: normal-test-shard
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -132,6 +157,7 @@ jobs:
           test "$NORMAL_SHARDS_RESULT" = "success"
 
   e2e-simulation:
+    if: ${{ github.event_name == 'push' || github.event.pull_request.draft == false }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -161,3 +187,23 @@ jobs:
             e2e_candles.json
           if-no-files-found: ignore
           retention-days: 3
+
+  final-validation:
+    name: final-validation
+    if: ${{ always() && (github.event_name == 'push' || github.event.pull_request.draft == false) }}
+    needs: [changed-code-quality, tests, e2e-simulation]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require final validation gates
+        env:
+          QUALITY_RESULT: ${{ needs.changed-code-quality.result }}
+          TESTS_RESULT: ${{ needs.tests.result }}
+          E2E_RESULT: ${{ needs.e2e-simulation.result }}
+        run: |
+          echo "Quality: $QUALITY_RESULT"
+          echo "Tests: $TESTS_RESULT"
+          echo "E2E: $E2E_RESULT"
+          test "$QUALITY_RESULT" = "success"
+          test "$TESTS_RESULT" = "success"
+          test "$E2E_RESULT" = "success"

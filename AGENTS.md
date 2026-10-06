@@ -96,9 +96,11 @@ python scripts/agent_task.py check --files <changed files>
 python scripts/agent_task.py full --files <changed files>
 ```
 
-The façade performs debt-safe style preflight, SSOT-driven focused validation, and relevant historical-regression benchmarks. Final-head GitHub CI remains authoritative before merge.
+The façade performs debt-safe style preflight, SSOT-driven focused validation, and relevant historical-regression benchmarks.
 
-Before merge, verify the exact validated base/head through the same façade:
+For GitHub-connector-only work, keep iterative PRs in **draft** so CI runs the focused remote gate only. Mark the PR ready once to trigger the full final validation matrix on the intended merge head. If another commit is required, return the PR to draft before editing. Final-head GitHub `final-validation` remains authoritative before merge.
+
+Before merge, verify the exact validated base/head through the same façade when a working tree is available:
 
 ```bash
 python scripts/agent_task.py merge-check \

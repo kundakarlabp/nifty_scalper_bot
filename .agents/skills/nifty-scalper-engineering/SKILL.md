@@ -100,10 +100,14 @@ Prefer deletion or modification of the existing owner over wrappers, parallel ma
 - make the smallest owner-consistent change;
 - preserve unrelated behavior;
 - remove superseded paths end to end when behavior is intentionally retired;
-- run `python scripts/agent_task.py check --files <changed files>`;
-- repair introduced/exposed validation failures and rerun;
-- run `python scripts/agent_task.py full --files <changed files>` before merge when supported;
-- review the exact final diff and final-head CI.
+- in a local/worktree host, run `python scripts/agent_task.py check --files <changed files>` before publishing changes; this is the single fast pre-push gate and may safely fix style first;
+- repair introduced/exposed validation failures before requesting the full suite;
+- in GitHub-connector-only chats, finish the coherent patch on the branch before opening a PR when practical, then open the PR as **draft**;
+- while the PR is draft, use only the repository's focused draft CI gate for iteration;
+- review the exact diff and make the PR ready for review only after the draft gate is green;
+- marking the PR ready triggers the authoritative full quality + four-shard normal suite + deterministic E2E validation on that exact head;
+- if a further commit is needed after full validation starts, convert the PR back to draft before editing, repair against the fast gate, then mark ready again;
+- run `python scripts/agent_task.py full --files <changed files>` before merge when a local/worktree host supports it; GitHub-connector work may use the final ready-for-review CI as the full-suite authority.
 
 For risky refactors, characterize current intended behavior first and use differential before/after checks where practical.
 
@@ -113,9 +117,10 @@ Before merge:
 
 - verify exact base/head;
 - confirm no unrelated diff;
-- confirm final-head validation/CI;
+- confirm the **final-validation** gate is green on the exact final PR head;
 - resolve valid review findings;
-- use `python scripts/agent_task.py merge-check --validated-base <base-sha> --validated-head <head-sha>`;
+- use `python scripts/agent_task.py merge-check --validated-base <base-sha> --validated-head <head-sha>` when a local/worktree host supports it; otherwise verify the same base/head lease through repository metadata immediately before merge;
+- never merge a draft PR;
 - never report "merged", "deployed", or "observed live" without direct evidence.
 
 ## Repository learning
