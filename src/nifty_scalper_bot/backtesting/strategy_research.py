@@ -300,7 +300,7 @@ def _apply_bar_lifecycle_proxy(
     position["high_water"] = high_water
     mfe = max(0.0, high_water - entry)
     mfe_r = mfe / initial_risk
-    if mfe_r < 0.75:
+    if mfe_r < 0.60:
         return False
 
     atr = float(prior_atr or 0.0)
