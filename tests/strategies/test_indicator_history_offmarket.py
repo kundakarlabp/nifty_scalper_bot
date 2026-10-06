@@ -55,7 +55,7 @@ def test_indicator_history_missing_market_open_is_single_throttled_event(
     records = [
         record
         for record in caplog.records
-        if getattr(record, "event", "") == "indicator_engine_history_missing"
+        if "indicator_history_missing" in record.getMessage()
     ]
     assert len(records) == 1
 
