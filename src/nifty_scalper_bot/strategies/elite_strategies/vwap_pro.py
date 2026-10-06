@@ -352,6 +352,8 @@ class VWAPProStrategy(EliteStrategy):
             strong_fresh_trend_context = bool(
                 preliminary_side in {"CE", "PE"}
                 and underlying_direction == preliminary_side
+                and underlying_direction_confidence
+                >= self._early_trend_min_context_conf
                 and context_age_seconds <= self._early_trend_max_context_age
             )
             effective_quality_max_distance_atr = (
