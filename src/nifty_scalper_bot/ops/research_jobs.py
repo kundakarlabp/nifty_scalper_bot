@@ -109,15 +109,10 @@ def _terminate_worker(process: Any) -> None:
     process.wait()
 
 
-def _same_request_definition(
-    existing: dict[str, Any], request: dict[str, Any]
-) -> bool:
+def _same_request_definition(existing: dict[str, Any], request: dict[str, Any]) -> bool:
     """Keep immutable job IDs bound to one mode and requested duration."""
 
-    return all(
-        existing.get(key) == request.get(key)
-        for key in ("id", "days", "mode")
-    )
+    return all(existing.get(key) == request.get(key) for key in ("id", "days", "mode"))
 
 
 def read_status(root: Path) -> dict[str, Any]:
