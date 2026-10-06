@@ -33,7 +33,10 @@ class _Positions:
 
 
 @pytest.fixture
-def live_manager(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> tuple[OrderManager, _Broker]:
+def live_manager(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> tuple[OrderManager, _Broker]:
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     monkeypatch.setenv("ENABLE_LIVE", "true")
     monkeypatch.setenv("ENABLE_LIVE_TRADING", "true")
