@@ -109,3 +109,23 @@ async def test_selected_option_sync_mirrors_canonical_depth_beyond_readiness_min
     assert result.runner_bars == 50
     assert result.indicator_bars == 50
     assert runner._indicator_engine.get_adx(OPTION) is not None
+
+
+def test_indicator_history_count_uses_side_effect_free_counter() -> None:
+    calls: list[str] = []
+
+    class _CountingEngine:
+        def history_count(self, symbol: str) -> int:
+            calls.append(symbol)
+            return 7
+
+        def get_history(self, *_args, **_kwargs):
+            raise AssertionError("readiness count must not materialize history")
+
+    runner = StrategyRunner.__new__(StrategyRunner)
+    runner._normalize_symbol = lambda value: str(value).upper()
+    runner._indicator_engine = _CountingEngine()
+
+    assert runner.indicator_history_count("nfo:test") == 7
+    assert runner._history_count_for_symbol("nfo:test") == 7
+    assert calls == ["NFO:TEST", "NFO:TEST"]

@@ -586,20 +586,6 @@ class IndicatorEngine:
                     except Exception:
                         market_open_now = True
                     if market_open_now:
-                        logging.getLogger(__name__).info(
-                            "Condition met: indicator_history_missing",
-                            extra={
-                                "event": "indicator_engine_history_missing",
-                                "symbol": symbol,
-                            },
-                        )
-                        LOGGER.info(
-                            "Condition met: indicator_history_missing",
-                            extra={
-                                "event": "indicator_engine_history_missing",
-                                "symbol": symbol,
-                            },
-                        )
                         log_throttled(
                             LOGGER,
                             f"indicator_history_missing:{symbol}",
@@ -609,6 +595,7 @@ class IndicatorEngine:
                             extra={
                                 "event": "indicator_engine_history_missing",
                                 "symbol": symbol,
+                                "market_session_state": "open",
                             },
                         )
                     else:

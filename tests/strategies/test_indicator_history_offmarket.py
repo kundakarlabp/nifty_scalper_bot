@@ -28,15 +28,19 @@ def test_indicator_history_missing_market_open_emits_info(monkeypatch, caplog):
     monkeypatch.setattr(market_hours, "is_market_open_now", lambda: True)
     engine = IndicatorEngine()
     with caplog.at_level(logging.INFO):
-        result = engine.get_history("NSE:NIFTY")
+        first = engine.get_history("NSE:NIFTY")
+        second = engine.get_history("NSE:NIFTY")
 
-    assert result == []
-    levels = [
-        record.levelno
+    assert first == []
+    assert second == []
+    records = [
+        record
         for record in caplog.records
         if "indicator_history_missing" in record.getMessage()
     ]
-    assert any(level >= logging.INFO for level in levels), levels
+    assert len(records) == 1
+    assert records[0].levelno == logging.INFO
+    assert getattr(records[0], "market_session_state", None) == "open"
 
 
 def test_indicator_history_missing_market_closed_is_debug(monkeypatch, caplog):

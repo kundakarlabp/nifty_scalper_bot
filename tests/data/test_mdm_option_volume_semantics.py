@@ -45,41 +45,70 @@ def test_option_volume_baseline_normal_delta_generation_reset_and_duplicate() ->
     assert reset["volume_delta"] == 0
 
 
-def test_option_volume_rollback_and_suspicious_jump_do_not_poison_candle_volume() -> (
-    None
-):
+def test_option_volume_rollback_does_not_move_baseline() -> None:
     mdm = _mdm()
     symbol = "NFO:NIFTY26JUN24000CE"
     mdm._normalise_tick_volume_delta(symbol, _raw(1_000))
+
     rollback = mdm._normalise_tick_volume_delta(symbol, _raw(900, ts=2))
-    suspicious = mdm._normalise_tick_volume_delta(symbol, _raw(2_000_000, ts=3))
-    after = mdm._normalise_tick_volume_delta(symbol, _raw(1_050, ts=4))
+    resumed = mdm._normalise_tick_volume_delta(symbol, _raw(1_050, ts=3))
 
     assert rollback["volume_transition"]["state"] == "counter_rollback"
+    assert rollback["volume_delta_untrusted"] is True
     assert rollback["volume_delta"] == 0
-    assert suspicious["volume_transition"]["state"] == "suspicious_jump"
-    assert suspicious["volume_delta_untrusted"] is True
-    assert suspicious["volume"] == 0
-    assert suspicious["volume_cumulative"] == 2_000_000
-    assert after["volume_delta"] == 50
-    assert after["volume"] == 50
+    assert resumed["volume_transition"]["state"] == "accepted"
+    assert resumed["volume_delta"] == 50
+    assert resumed["volume_delta_untrusted"] is False
 
 
-def test_option_volume_rebaselines_after_monotonic_confirmation_without_crediting_jump() -> None:
+def test_large_monotonic_option_volume_delta_is_trusted_interval_volume() -> None:
     mdm = _mdm()
     symbol = "NFO:NIFTY26JUN24000CE"
     mdm._normalise_tick_volume_delta(symbol, _raw(1_000))
 
-    suspicious = mdm._normalise_tick_volume_delta(symbol, _raw(2_000_000, ts=2))
-    confirmed = mdm._normalise_tick_volume_delta(symbol, _raw(2_000_025, ts=3))
-    resumed = mdm._normalise_tick_volume_delta(symbol, _raw(2_000_050, ts=4))
+    large = mdm._normalise_tick_volume_delta(symbol, _raw(6_000_000, ts=2))
+    resumed = mdm._normalise_tick_volume_delta(symbol, _raw(6_000_025, ts=3))
 
-    assert suspicious["volume_transition"]["state"] == "suspicious_jump"
-    assert confirmed["volume_transition"]["state"] == "suspicious_jump_rebased"
-    assert confirmed["volume"] == 0
-    assert confirmed["volume_delta_untrusted"] is True
+    assert large["volume_transition"]["state"] == "accepted"
+    assert large["volume_transition"]["accepted"] is True
+    assert large["volume_transition"]["trusted"] is True
+    assert large["volume_delta_untrusted"] is False
+    assert large["volume_cumulative"] == 6_000_000
+    assert large["volume_delta"] == 5_999_000
+    assert large["effective_volume_delta"] == 5_999_000
+    assert large["volume"] == 5_999_000
     assert resumed["volume_transition"]["state"] == "accepted"
     assert resumed["volume"] == 25
+
+
+def test_live_tick_normalization_preserves_large_monotonic_volume_delta() -> None:
+    mdm = _mdm()
+    first = mdm._normalize_tick(
+        _SYM,
+        {
+            "last_price": 45.0,
+            "volume_traded_today": 10_000,
+            "instrument_token": 1,
+            "source": "ws",
+        },
+    )
+    large = mdm._normalize_tick(
+        _SYM,
+        {
+            "last_price": 45.2,
+            "volume_traded_today": 6_010_000,
+            "instrument_token": 1,
+            "source": "ws",
+        },
+    )
+
+    assert first is not None
+    assert first["volume_delta"] == 0.0
+    assert large is not None
+    assert large["volume_transition"]["state"] == "accepted"
+    assert large["volume_delta_untrusted"] is False
+    assert large["volume_delta"] == 6_000_000.0
+    assert large["volume"] == 6_000_000.0
 
 
 def test_raw_cumulative_never_becomes_completed_candle_volume() -> None:
