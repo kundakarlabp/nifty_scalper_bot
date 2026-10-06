@@ -142,6 +142,85 @@ def test_missing_next_minute_never_creates_a_delayed_entry(tmp_path, monkeypatch
     assert result["no_vote_reasons"]["next_minute_unavailable"] == 1
 
 
+def test_vwap_component_receives_underlying_futures_context(tmp_path, monkeypatch):
+    from nifty_scalper_bot.backtesting.strategy_research import run_archived_research
+
+    archive(tmp_path)
+    observed = []
+
+    class Strategy:
+        name = "VWAPPro"
+        config = SimpleNamespace(enabled=True)
+
+        def generate_signal(self, symbol, indicators, current_price, position=None):
+            observed.append(
+                {
+                    key: indicators.get(key)
+                    for key in (
+                        "underlying_direction_bias",
+                        "underlying_direction_confidence",
+                        "futures_vwap_slope",
+                        "futures_volume_ratio",
+                        "context_fresh",
+                    )
+                }
+            )
+            return None
+
+        @property
+        def evaluation_health(self):
+            return {"healthy": True}
+
+        def notify_entry_accepted(self, side, *, setup_id=None):
+            pass
+
+    context = {
+        "underlying_direction_bias": "CE",
+        "direction_bias": "CE",
+        "underlying_direction_confidence": 0.91,
+        "context_fresh": True,
+        "futures_vwap_slope": 0.05,
+        "futures_volume_ratio": 1.25,
+    }
+    monkeypatch.setattr(
+        "nifty_scalper_bot.backtesting.strategy_research.build_elite_strategies",
+        lambda settings, engine: [Strategy()],
+    )
+    monkeypatch.setattr(
+        "nifty_scalper_bot.backtesting.strategy_research._research_orb_structural_context",
+        lambda *args, **kwargs: dict(context),
+    )
+
+    run_archived_research(tmp_path, slippage_bps=0)
+
+    assert observed
+    assert all(row == context for row in observed)
+
+
+def test_research_structural_context_includes_futures_volume_ratio(tmp_path):
+    from nifty_scalper_bot.backtesting.strategy_research import (
+        IndicatorEngine,
+        _research_orb_structural_context,
+        load_archive,
+    )
+
+    first = archive(tmp_path)
+    histories, _, _ = load_archive(tmp_path)
+    engine = IndicatorEngine()
+    for minute in range(4):
+        timestamp = first + timedelta(minutes=minute)
+        for symbol in ("NSE:NIFTY 50", "NFO:NIFTY26OCTFUT"):
+            engine.ingest_historical_bar(symbol, histories[symbol][timestamp])
+
+    context = _research_orb_structural_context(
+        engine,
+        spot_symbol="NSE:NIFTY 50",
+        futures_symbol="NFO:NIFTY26OCTFUT",
+    )
+
+    assert context["futures_volume_ratio"] == pytest.approx(1.0)
+
+
 def test_invalid_archive_fails_instead_of_reporting_empty_success(tmp_path):
     from nifty_scalper_bot.backtesting.strategy_research import run_archived_research
 
