@@ -61,13 +61,17 @@ class PaperFillEngine:
         self._sequence = 0
         self._clock = time.time
         self._children: dict[str, list[str]] = {}
-        self._queue_depth = self._coerce_int(os.getenv("PAPER__QUEUE_DEPTH", "0"))
+        self._queue_depth_default = self._coerce_int(
+            os.getenv("PAPER__QUEUE_DEPTH", "0")
+        )
         self._respect_lot = self._coerce_bool(
             os.getenv("PAPER__RESPECT_LOTSIZE", "true")
         )
         self._slip_bps = max(0.0, _safe_float(os.getenv("PAPER__SLIPPAGE_BPS"), 0.0))
-        self._calibrated_slippage_bps: float | None = None
-        self._calibrated_fill_latency_s: float | None = None
+        self._calibrated_entry_slippage_bps: float | None = None
+        self._calibrated_exit_slippage_bps: float | None = None
+        self._calibrated_entry_fill_latency_s: float | None = None
+        self._calibrated_exit_fill_latency_s: float | None = None
         self._slippage_model = SlippageModel()
         self._execution_simulator = execution_simulator or ExecutionSimulator()
 
@@ -82,34 +86,55 @@ class PaperFillEngine:
     ) -> dict[str, float | int | None]:
         """Calibrate replay drag from measured completed-trade telemetry."""
 
-        slippage: list[float] = []
-        latency: list[float] = []
+        entry_slippage: list[float] = []
+        exit_slippage: list[float] = []
+        entry_latency: list[float] = []
+        exit_latency: list[float] = []
         for outcome in outcomes:
             quality = outcome.get("execution_quality")
             if not isinstance(quality, Mapping):
                 continue
-            for key in ("entry_slippage_bps", "exit_slippage_bps"):
-                value = _finite_non_negative(quality.get(key))
-                if value is not None:
-                    slippage.append(value)
-            for key in (
-                "entry_submit_to_fill_seconds",
-                "exit_submit_to_fill_seconds",
+            for key, destination in (
+                ("entry_slippage_bps", entry_slippage),
+                ("exit_slippage_bps", exit_slippage),
+                ("entry_submit_to_fill_seconds", entry_latency),
+                ("exit_submit_to_fill_seconds", exit_latency),
             ):
                 value = _finite_non_negative(quality.get(key))
                 if value is not None:
-                    latency.append(value)
-        self._calibrated_slippage_bps = (
-            float(statistics.median(slippage)) if slippage else None
+                    destination.append(value)
+
+        self._calibrated_entry_slippage_bps = (
+            float(statistics.median(entry_slippage)) if entry_slippage else None
         )
-        self._calibrated_fill_latency_s = (
-            float(statistics.median(latency)) if latency else None
+        self._calibrated_exit_slippage_bps = (
+            float(statistics.median(exit_slippage)) if exit_slippage else None
         )
+        self._calibrated_entry_fill_latency_s = (
+            float(statistics.median(entry_latency)) if entry_latency else None
+        )
+        self._calibrated_exit_fill_latency_s = (
+            float(statistics.median(exit_latency)) if exit_latency else None
+        )
+        all_slippage = entry_slippage + exit_slippage
+        all_latency = entry_latency + exit_latency
         return {
-            "slippage_samples": len(slippage),
-            "latency_samples": len(latency),
-            "slippage_bps_p50": self._calibrated_slippage_bps,
-            "fill_latency_seconds_p50": self._calibrated_fill_latency_s,
+            "slippage_samples": len(all_slippage),
+            "latency_samples": len(all_latency),
+            "slippage_bps_p50": (
+                float(statistics.median(all_slippage)) if all_slippage else None
+            ),
+            "fill_latency_seconds_p50": (
+                float(statistics.median(all_latency)) if all_latency else None
+            ),
+            "entry_slippage_samples": len(entry_slippage),
+            "exit_slippage_samples": len(exit_slippage),
+            "entry_latency_samples": len(entry_latency),
+            "exit_latency_samples": len(exit_latency),
+            "entry_slippage_bps_p50": self._calibrated_entry_slippage_bps,
+            "exit_slippage_bps_p50": self._calibrated_exit_slippage_bps,
+            "entry_fill_latency_seconds_p50": self._calibrated_entry_fill_latency_s,
+            "exit_fill_latency_seconds_p50": self._calibrated_exit_fill_latency_s,
         }
 
     def process_quote(self, symbol: str) -> None:
@@ -177,6 +202,7 @@ class PaperFillEngine:
             "parent_order_id": parent_id,
             "remaining_quantity": quantity,
             "fees": 0.0,
+            "queue_ahead": (self._queue_depth_default if order_type != "MARKET" else 0),
         }
 
         if parent_id:
@@ -204,6 +230,7 @@ class PaperFillEngine:
             order["quantity"] = max(0, int(quantity))
         if price is not None:
             order["price"] = float(price)
+            order["queue_ahead"] = self._queue_depth_default
         order["timestamp"] = self._clock()
         order.setdefault("filled_quantity", 0)
         order.setdefault("remaining_quantity", order.get("quantity", 0))
@@ -286,9 +313,14 @@ class PaperFillEngine:
         ref_price = metrics.ask if side == "BUY" else metrics.bid
         if ref_price <= 0:
             ref_price = metrics.mid or metrics.ltp
+        calibrated_slippage_bps = (
+            self._calibrated_entry_slippage_bps
+            if side == "BUY"
+            else self._calibrated_exit_slippage_bps
+        )
         slip_bps = (
-            self._calibrated_slippage_bps
-            if self._calibrated_slippage_bps is not None
+            calibrated_slippage_bps
+            if calibrated_slippage_bps is not None
             else self._slip_bps
         )
         ref_price *= 1.0 + (slip_bps / 10000.0) * (1.0 if side == "BUY" else -1.0)
@@ -312,7 +344,11 @@ class PaperFillEngine:
             if best_quantity is None
             else min(remaining, max(best_quantity, 0))
         )
-        partial = min(remaining, self._consume_queue(available)) if available > 0 else 0
+        partial = (
+            min(remaining, self._consume_queue(order, available))
+            if available > 0
+            else 0
+        )
         if partial <= 0:
             order["status"] = "open"
             order["remaining_quantity"] = quantity - int(
@@ -322,11 +358,16 @@ class PaperFillEngine:
 
         previous_fill = int(order.get("filled_quantity", 0))
         new_total = min(quantity, previous_fill + partial)
-        weighted_price = limit_price
+        execution_price = (
+            min(float(limit_price), ref_price)
+            if side == "BUY"
+            else max(float(limit_price), ref_price)
+        )
+        weighted_price = execution_price
         if previous_fill > 0 and order.get("average_price") is not None:
             weighted_price = (
                 previous_fill * float(order["average_price"])
-                + partial * float(limit_price)
+                + partial * execution_price
             ) / new_total
 
         order["filled_quantity"] = new_total
@@ -370,13 +411,18 @@ class PaperFillEngine:
             order["status"] = "open"
             order["remaining_quantity"] = remaining
             return
-        if self._calibrated_slippage_bps is not None:
+        calibrated_slippage_bps = (
+            self._calibrated_entry_slippage_bps
+            if side == "BUY"
+            else self._calibrated_exit_slippage_bps
+        )
+        if calibrated_slippage_bps is not None:
             base_price = metrics.mid or metrics.ltp
             if base_price <= 0:
                 base_price = metrics.bid if side == "BUY" else metrics.ask
             total_adjustment = max(
                 metrics.spread / 2.0,
-                self._calibrated_slippage_bps / 10000.0 * base_price,
+                calibrated_slippage_bps / 10000.0 * base_price,
             )
             fill_price = (
                 base_price + total_adjustment
@@ -444,7 +490,12 @@ class PaperFillEngine:
         order["fees"] = _safe_float(order.get("fees"), 0.0) + fill_fees
         order["filled_turnover"] = filled_turnover
         order["status"] = "complete" if new_total >= quantity else "open"
-        latency = self._calibrated_fill_latency_s or 0.0
+        calibrated_latency = (
+            self._calibrated_entry_fill_latency_s
+            if side == "BUY"
+            else self._calibrated_exit_fill_latency_s
+        )
+        latency = calibrated_latency or 0.0
         order.setdefault("first_fill_timestamp", self._clock() + latency)
         order["last_fill_timestamp"] = self._clock() + latency
         order["fill_latency_seconds"] = latency
@@ -497,16 +548,16 @@ class PaperFillEngine:
                 return 65
         return 65
 
-    def _consume_queue(self, quantity: int) -> int:
-        depth = max(self._queue_depth, 0)
+    @staticmethod
+    def _consume_queue(order: dict[str, Any], quantity: int) -> int:
+        """Consume per-order queue-ahead without leaking priority across orders."""
+
+        depth = max(int(order.get("queue_ahead") or 0), 0)
         if depth <= 0:
             return quantity
-        if quantity <= depth:
-            self._queue_depth = depth - quantity
-            return 0
-        filled = quantity - depth
-        self._queue_depth = 0
-        return filled
+        consumed = min(quantity, depth)
+        order["queue_ahead"] = depth - consumed
+        return max(quantity - consumed, 0)
 
     def _quote_metrics(self, quote: Mapping[str, Any]) -> _QuoteMetrics:
         bid = _safe_float(

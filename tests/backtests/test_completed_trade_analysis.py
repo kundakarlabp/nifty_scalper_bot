@@ -29,6 +29,7 @@ def _trade(
     state: str = "CLOSED",
     structural_evidence: bool = False,
     exit_reason: str = "HARD_SL_BREACH src=ltp sl=90.0",
+    execution_quality: dict[str, object] | None = None,
 ) -> dict[str, object]:
     outcome: dict[str, object] = {
         "cost_source": "broker_virtual_contract_note",
@@ -60,6 +61,7 @@ def _trade(
         "ledger_complete": ledger_complete,
         "state": state,
         "exit_reason": exit_reason,
+        "execution_quality": execution_quality or {},
         "outcome": outcome,
     }
 
@@ -360,8 +362,27 @@ def test_execution_data_quality_flags_explicit_stale_quote_exits() -> None:
                 "stale",
                 1.0,
                 exit_reason="HARD_SL_BREACH src=ltp_stale_quote sl=90.0",
+                execution_quality={
+                    "entry_slippage_bps": 4.0,
+                    "exit_slippage_bps": 12.0,
+                    "entry_submit_to_fill_seconds": 0.2,
+                    "exit_submit_to_fill_seconds": 0.8,
+                    "entry_slippage_cost": 10.0,
+                    "exit_slippage_cost": 20.0,
+                },
             ),
-            _trade("live", 2.0),
+            _trade(
+                "live",
+                2.0,
+                execution_quality={
+                    "entry_slippage_bps": 6.0,
+                    "exit_slippage_bps": 8.0,
+                    "entry_submit_to_fill_seconds": 0.4,
+                    "exit_submit_to_fill_seconds": 0.6,
+                    "entry_slippage_cost": 5.0,
+                    "exit_slippage_cost": 15.0,
+                },
+            ),
         ]
     )
 
@@ -370,6 +391,15 @@ def test_execution_data_quality_flags_explicit_stale_quote_exits() -> None:
     assert quality.total_trades == 2
     assert quality.known_stale_quote_exit_trades == 1
     assert quality.known_stale_quote_exit_fraction == 0.5
+    assert quality.measured_quality_trades == 2
+    assert quality.measured_quality_fraction == 1.0
+    assert quality.entry_slippage_samples == 2
+    assert quality.exit_slippage_samples == 2
+    assert quality.median_entry_slippage_bps == 5.0
+    assert quality.median_exit_slippage_bps == 10.0
+    assert quality.median_entry_fill_latency_seconds == 0.3
+    assert quality.median_exit_fill_latency_seconds == 0.7
+    assert quality.total_execution_shortfall_cost == 50.0
     assert quality.blockers == ("known_stale_quote_exit_trades:1",)
 
 
@@ -442,6 +472,8 @@ def test_post_cost_outcome_evidence_reports_strategy_setup_and_r_excursions() ->
 
     assert strategy[0].value == "VWAPPro"
     assert strategy[0].net_expectancy == 30.0
+    assert strategy[0].net_expectancy_ci_lower <= 30.0
+    assert strategy[0].net_expectancy_ci_upper >= 30.0
     assert strategy[0].mean_r_multiple == 0.3
     assert strategy[0].mean_mfe_r == 0.85
     assert strategy[0].mean_mae_r == 0.5
@@ -450,6 +482,14 @@ def test_post_cost_outcome_evidence_reports_strategy_setup_and_r_excursions() ->
     assert exit_groups[0].value == "HARD_SL_BREACH"
     assert setup[0].value == "continuation_pullback"
     assert setup[0].net_expectancy == 30.0
+
+    regime = post_cost_outcome_evidence(trades, dimension="regime")
+    assert regime[0].value == "TREND"
+    confirmation = post_cost_outcome_evidence(
+        trades,
+        dimension="confirmation_type",
+    )
+    assert confirmation[0].value == "single_trigger_unconfirmed"
 
 
 def test_post_cost_cohorts_use_decision_time_and_preserve_missing_facts() -> None:

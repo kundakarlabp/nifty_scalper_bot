@@ -20,6 +20,8 @@ def test_build_analysis_emits_research_cohorts_without_fabricated_facts() -> Non
     assert report["realized_post_cost_evidence"] == {
         "by_strategy": [],
         "by_setup": [],
+        "by_regime": [],
+        "by_confirmation_type": [],
         "by_entry_hour_ist": [],
         "by_days_to_expiry": [],
         "by_target_adjustment": [],
@@ -112,6 +114,8 @@ def test_build_analysis_emits_repeatable_realized_post_cost_evidence() -> None:
         "value": "ORBPro",
         "trade_count": 1,
         "net_expectancy": 80.0,
+        "net_expectancy_ci_lower": 80.0,
+        "net_expectancy_ci_upper": 80.0,
         "mean_r_multiple": 0.8,
         "mean_mfe_r": 1.2,
         "mean_mae_r": 0.25,
