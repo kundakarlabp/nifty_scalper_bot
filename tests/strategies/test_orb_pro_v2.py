@@ -136,7 +136,9 @@ def test_orb_uses_configured_futures_opening_range_not_option_premium(
     assert signal.metadata["opening_range_high"] == 24_020.0
     assert signal.metadata["opening_range_low"] == 23_980.0
     assert signal.metadata["orb_window_minutes"] == 15
-    assert signal.metadata["legacy_option_orb_high"] == 105.0
+    assert "legacy_option_orb_high" not in signal.metadata
+    assert "legacy_option_orb_low" not in signal.metadata
+    assert "legacy_option_orb_ready" not in signal.metadata
     assert signal.metadata["signal_domain"] == "NIFTY_FUTURES"
     assert signal.stop_loss is not None and 0 < signal.stop_loss < 50.0
     assert signal.take_profit is not None and signal.take_profit > 50.0
