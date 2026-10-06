@@ -10,6 +10,7 @@ Read `docs/AGENT_START_HERE.md` and `docs/REPO_MAP.md`. For non-trivial work, ge
 
 | Skill | Purpose | Explicit invocation |
 |---|---|---|
+| `nifty-scalper-engineering` | Automatic orchestration for every NIFTY Scalper Bot audit/edit/debug/review/validation task; selects minimal context and one specialist procedure | `$nifty-scalper-engineering` |
 | `grill-trading-plan` | Stress-test a fuzzy or safety-critical trading-bot change before PRD/code work | `$grill-trading-plan` |
 | `domain-modeling-trading` | Clarify vocabulary, ownership, state, and invariants before design changes | `$domain-modeling-trading` |
 | `to-prd-trading-change` | Convert resolved trading-bot context into a concise PRD with non-goals and tests | `$to-prd-trading-change` |
@@ -25,11 +26,19 @@ Read `docs/AGENT_START_HERE.md` and `docs/REPO_MAP.md`. For non-trivial work, ge
 | `pre-merge-trading-review` | Trading-specific code, backtest, risk, execution, deployment, and merge review | `$pre-merge-trading-review` |
 | `session-worklog` | Durable record of decisions, changed files, validation, residual risk, and next action | `$session-worklog` |
 
-Use a skill automatically when the request matches its description, or invoke it explicitly by name in compatible tools.
+Automatically activate `nifty-scalper-engineering` for any repository engineering task. Then automatically select the one specialist skill whose description matches the task, or invoke a specialist explicitly by name in compatible tools.
 
 ## Routing policy
 
-Load the **minimum applicable skill set**. Do not run all skills for every non-trivial task.
+Start every repository engineering task with:
+
+```text
+nifty-scalper-engineering (orchestration)
+→ exactly one primary specialist skill
+→ a secondary specialist only when the concern genuinely crosses boundaries
+```
+
+Load the **minimum applicable specialist skill set**. Do not run all skills for every non-trivial task.
 
 ```text
 runtime symptom / failed test
@@ -73,7 +82,7 @@ This routing keeps specialist procedures available without paying the context an
 
 ## Relationship to repository instructions
 
-`AGENTS.md` remains authoritative for architecture, trading safety, validation, and merge rules. Skill files provide detailed procedures and should be loaded only when relevant. `docs/AGENT_START_HERE.md` is the canonical task router.
+`AGENTS.md` remains authoritative for architecture, trading safety, validation, and merge rules. `nifty-scalper-engineering` is the repository-wide orchestration skill and should be automatically active for repository engineering tasks; specialist skill files provide detailed procedures and are loaded only when relevant. `docs/AGENT_START_HERE.md` is the canonical specialist router.
 
 ## Source and adaptation
 
