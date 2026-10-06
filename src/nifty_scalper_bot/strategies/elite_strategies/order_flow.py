@@ -340,18 +340,13 @@ class OrderFlowStrategy(EliteStrategy):
                 and not strong_depth_conflicts_side
             ):
                 context_alignment_source = "temporal_ofi"
-            elif (
-                depth_supports_side
-                and flow_supports_side
-                and not flow_conflicts_side
-            ):
+            elif depth_supports_side and flow_supports_side and not flow_conflicts_side:
                 context_alignment_source = "depth_plus_flow"
             elif strong_depth_supports_side and not flow_conflicts_side:
                 context_alignment_source = "strong_depth"
             microstructure_supports_side = context_alignment_source is not None
             microstructure_conflicts_side = bool(
-                (ofi_directional and ofi_conflicts_side)
-                or strong_depth_conflicts_side
+                (ofi_directional and ofi_conflicts_side) or strong_depth_conflicts_side
             )
             effective_context_alignment = bool(
                 context_quality_eligible
