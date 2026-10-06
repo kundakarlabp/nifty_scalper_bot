@@ -58,6 +58,8 @@ Do **not** automatically load or execute the full skill catalog. Skills are sele
 
 Prefer one small PR at a time.
 
+For ChatGPT/GitHub-connector edits, keep the PR **draft during iteration**. Draft PRs run the focused gate only. Mark the PR ready once the coherent patch and regression coverage are complete; that transition is the signal to run the authoritative full validation matrix on the final head. If the final head must change, return the PR to draft before editing rather than repeatedly spending full-CI cycles on intermediate commits.
+
 Allowed PR scope examples:
 
 ```text
@@ -161,13 +163,15 @@ Fast iteration ring:
 python scripts/agent_task.py check --files path/to/changed.py
 ```
 
-Pre-merge ring:
+This is the single local pre-push gate: it safely fixes changed-file style where possible, then runs delta-aware Ruff/Black/mypy, architecture ownership checks for production code, focused tests, and deterministic E2E for high-risk paths.
+
+Pre-merge ring for hosts with a working tree:
 
 ```bash
 python scripts/agent_task.py full --files path/to/changed.py
 ```
 
-`focused` is risk-aware: changed-file quality always runs for changed Python, production changes also run architecture ownership checks, and high-risk paths add deterministic E2E. `full` also runs the complete repository suite. Final-head CI remains authoritative before merge.
+For GitHub-connector-only work, draft PR CI is the remote focused ring and the ready-for-review `final-validation` job is the authoritative full ring. Do not repeatedly run the full matrix on intermediate draft commits.
 
 For documentation-only changes, review the changed paths and ensure no production trading files are touched.
 
