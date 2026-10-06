@@ -755,4 +755,3 @@ def test_runner_history_count_uses_quiet_indicator_count_api() -> None:
 
     assert runner.indicator_history_count("NFO:NIFTY26JUN24000CE") == 37
     assert runner._history_count_for_symbol("NFO:NIFTY26JUN24000CE") == 37
-
