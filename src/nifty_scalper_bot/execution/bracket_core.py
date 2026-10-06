@@ -3303,10 +3303,10 @@ class BracketManager:
             return candidate
 
         cost = self._breakeven_cost_per_unit(bracket)
-        # Trailing activates at 0.60R by clearing costs first. The positive-profit
-        # component starts only after 0.75R, so earlier activation does not become
-        # a noise-sensitive profit stop.
-        locked_r = self._min_locked_profit_r() if mfe_r >= 0.75 else 0.0
+        # The activation threshold owns the first positive-profit lock as well:
+        # keeping a second hard-coded 0.75R threshold makes a configured 0.60R
+        # activation silently behave like cost-only breakeven until 0.75R.
+        locked_r = self._min_locked_profit_r()
         locked = cost + (initial_risk * locked_r)
         room = max(cost, 0.05)
         if bracket.side == "BUY":
