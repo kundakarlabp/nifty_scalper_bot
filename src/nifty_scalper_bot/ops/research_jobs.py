@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -23,6 +24,7 @@ IST = ZoneInfo("Asia/Kolkata")
 _COMPONENT_WORKER_BUDGET_SECONDS = 1800
 _RUNTIME_REPLAY_BUDGET_SECONDS = 1500
 _WORKER_WAIT_GRACE_SECONDS = 300
+_WORKER_TERMINATION_GRACE_SECONDS = 10
 
 
 def validate_request(
@@ -78,6 +80,33 @@ def _read_job_status(path: Path, fallback: dict[str, Any]) -> dict[str, Any]:
     except (OSError, ValueError):
         return dict(fallback)
     return value if isinstance(value, dict) else dict(fallback)
+
+
+def _terminate_worker(process: Any) -> None:
+    """Stop the isolated worker and its replay subprocesses after a hard timeout."""
+
+    pid = getattr(process, "pid", None)
+    if isinstance(pid, int) and pid > 0:
+        try:
+            os.killpg(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return
+        except OSError:
+            process.kill()
+            process.wait()
+            return
+        try:
+            process.wait(timeout=_WORKER_TERMINATION_GRACE_SECONDS)
+            return
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                return
+            process.wait()
+            return
+    process.kill()
+    process.wait()
 
 
 def read_status(root: Path) -> dict[str, Any]:
@@ -151,8 +180,7 @@ def start_job(
                 try:
                     process.wait(timeout=wait_timeout)
                 except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait()
+                    _terminate_worker(process)
                     queued = _read_job_status(status_file, queued)
                     queued.update(
                         state="failed",
