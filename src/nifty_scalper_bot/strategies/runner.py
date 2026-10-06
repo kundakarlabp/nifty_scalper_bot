@@ -168,7 +168,6 @@ from nifty_scalper_bot.strategies.trade_selector import TradeCandidateSelector
 from nifty_scalper_bot.strategies.setup_lifecycle import SETUP_LIFECYCLE, SetupStage, transition_setup
 from nifty_scalper_bot.utils import metrics
 from nifty_scalper_bot.utils.async_helpers import safe_task
-from nifty_scalper_bot.utils.errors import OrderPlacementError
 from nifty_scalper_bot.utils.log_throttle import (
     log_on_change,
 )
@@ -387,30 +386,6 @@ _NIFTY_OPTION_IV_GAUGE = metrics.Gauge(
 _NIFTY_OPTION_LIQUIDITY_GAUGE = metrics.Gauge(
     "nifty_option_best_liquidity",
     "Liquidity metric of the selected NIFTY option candidate",
-    ["underlying"],
-)
-
-_NIFTY_OPTION_SIGNAL_LATENCY = metrics.Histogram(
-    "nifty_option_signal_to_trade_latency_seconds",
-    "Latency between signal generation and order submission",
-    ["underlying"],
-)
-
-_NIFTY_OPTION_EXECUTION_COUNTER = metrics.Counter(
-    "nifty_option_execution_total",
-    "NIFTY option execution outcomes by result",
-    ["underlying", "result"],
-)
-
-_NIFTY_OPTION_SUCCESS_RATE = metrics.Gauge(
-    "nifty_option_execution_success_rate",
-    "Rolling execution success ratio for NIFTY options",
-    ["underlying"],
-)
-
-_NIFTY_OPTION_SLIPPAGE_GAUGE = metrics.Gauge(
-    "nifty_option_order_slippage",
-    "Observed slippage for NIFTY option orders",
     ["underlying"],
 )
 
@@ -1067,9 +1042,6 @@ class StrategyRunner:
                     "Unable to read selector settings: %s", exc, exc_info=True
                 )
 
-        self._execution_totals: Dict[str, Dict[str, int]] = defaultdict(
-            lambda: {"success": 0, "error": 0}
-        )
         self._trade_candidate_selector = TradeCandidateSelector(
             option_metrics_getter=getattr(self._data_hub, "get_option_metrics", None)
         )
