@@ -187,7 +187,7 @@ def test_vwap_component_receives_underlying_futures_context(tmp_path, monkeypatc
         lambda settings, engine: [Strategy()],
     )
     monkeypatch.setattr(
-        "nifty_scalper_bot.backtesting.strategy_research._research_orb_structural_context",
+        "nifty_scalper_bot.backtesting.strategy_research._research_underlying_structural_context",
         lambda *args, **kwargs: dict(context),
     )
 
@@ -200,7 +200,7 @@ def test_vwap_component_receives_underlying_futures_context(tmp_path, monkeypatc
 def test_research_structural_context_includes_futures_volume_ratio(tmp_path):
     from nifty_scalper_bot.backtesting.strategy_research import (
         IndicatorEngine,
-        _research_orb_structural_context,
+        _research_underlying_structural_context,
         load_archive,
     )
 
@@ -212,7 +212,7 @@ def test_research_structural_context_includes_futures_volume_ratio(tmp_path):
         for symbol in ("NSE:NIFTY 50", "NFO:NIFTY26OCTFUT"):
             engine.ingest_historical_bar(symbol, histories[symbol][timestamp])
 
-    context = _research_orb_structural_context(
+    context = _research_underlying_structural_context(
         engine,
         spot_symbol="NSE:NIFTY 50",
         futures_symbol="NFO:NIFTY26OCTFUT",
