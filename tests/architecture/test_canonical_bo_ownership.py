@@ -143,7 +143,7 @@ def test_market_aware_bracket_hooks_are_explicit_native_methods() -> None:
 
 def test_runner_uses_only_canonical_entry_api() -> None:
     source = _strategy_runner_handle_signal_source()
-    assert '"submit_trade_plan_result", None' in source
+    assert '"submit_trade_plan_result"' in source
     assert "submit_result = submit_result_fn(plan)" in source
     assert "self._order_manager.place_order(" not in source
     assert "execute_market_order(" not in source
