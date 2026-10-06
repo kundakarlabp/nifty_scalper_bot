@@ -22,8 +22,10 @@ def test_research_request_uses_completed_dates_and_no_user_command():
             validate_request(payload, today=date(2026, 10, 2))
 
 
-def test_launch_is_idempotent_and_forces_offline_order_flags(tmp_path, monkeypatch):
-    from nifty_scalper_bot.ops.research_jobs import start_job
+def test_launch_is_idempotent_after_terminal_result_and_forces_offline_flags(
+    tmp_path, monkeypatch
+):
+    from nifty_scalper_bot.ops.research_jobs import start_job, write_json
 
     launches = []
     monkeypatch.setattr(
@@ -34,8 +36,18 @@ def test_launch_is_idempotent_and_forces_offline_order_flags(tmp_path, monkeypat
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     payload = {"id": "one-job", "days": 30}
     first = start_job(tmp_path, payload)
+    terminal = {
+        **first,
+        "state": "completed",
+        "backtest_completed": True,
+        "requested_work_completed": True,
+    }
+    write_json(tmp_path / "data/research/one-job/status.json", terminal)
+    write_json(tmp_path / "data/research/latest.json", terminal)
+
     second = start_job(tmp_path, payload)
-    assert first == second
+
+    assert second == terminal
     assert len(launches) == 1
     command, options = launches[0]
     assert command[1] == str(tmp_path / "scripts/run_research_job.py")
@@ -43,8 +55,64 @@ def test_launch_is_idempotent_and_forces_offline_order_flags(tmp_path, monkeypat
     assert options["env"]["ORDERS__ENABLE_LIVE"] == "false"
     assert options["env"]["EXECUTION_MODE"] == "SHADOW"
     assert options["pass_fds"]
+    assert first["launch_attempt"] == 1
     assert first["backtest_completed"] is False
     assert __import__("os").environ["EXECUTION_MODE"] == "LIVE"
+
+
+@pytest.mark.parametrize("stale_state", ["queued", "collecting"])
+def test_stale_nonterminal_job_is_relaunched_when_worker_lock_is_free(
+    tmp_path, monkeypatch, stale_state
+):
+    from nifty_scalper_bot.ops.research_jobs import start_job, write_json
+
+    payload = {"id": "stale-job", "days": 30, "mode": "components"}
+    stale = {
+        "id": "stale-job",
+        "days": 30,
+        "mode": "components",
+        "start": "2026-09-07",
+        "end": "2026-10-06",
+        "state": stale_state,
+        "stage": "history",
+        "backtest_completed": False,
+        "launch_attempt": 1,
+    }
+    status_file = tmp_path / "data/research/stale-job/status.json"
+    write_json(status_file, stale)
+    write_json(tmp_path / "data/research/latest.json", stale)
+    launches = []
+    monkeypatch.setattr(
+        "nifty_scalper_bot.ops.research_jobs.subprocess.Popen",
+        lambda command, **kwargs: launches.append((command, kwargs)),
+    )
+
+    result = start_job(tmp_path, payload)
+
+    assert len(launches) == 1
+    assert result["state"] == "queued"
+    assert result["launch_attempt"] == 2
+    assert result["recovered_from_state"] == stale_state
+    assert json.loads(status_file.read_text())["launch_attempt"] == 2
+
+
+def test_reused_request_id_with_different_definition_is_rejected(tmp_path):
+    from nifty_scalper_bot.ops.research_jobs import start_job, write_json
+
+    existing = {
+        "id": "immutable-job",
+        "days": 30,
+        "mode": "components",
+        "state": "completed",
+        "backtest_completed": True,
+    }
+    write_json(tmp_path / "data/research/immutable-job/status.json", existing)
+
+    with pytest.raises(ValueError, match="research_request_id_conflict"):
+        start_job(
+            tmp_path,
+            {"id": "immutable-job", "days": 14, "mode": "components"},
+        )
 
 
 def test_overlapping_job_is_rejected(tmp_path):
