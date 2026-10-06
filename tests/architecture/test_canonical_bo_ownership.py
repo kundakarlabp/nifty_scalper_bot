@@ -34,20 +34,19 @@ def _imports(path: Path) -> set[str]:
     return modules
 
 
-def _strategy_runner_execute_order_calls() -> set[str]:
+def _strategy_runner_handle_signal_source() -> str:
     path = SRC / "strategies" / "runner.py"
-    tree = ast.parse(path.read_text(encoding="utf-8"))
+    source = path.read_text(encoding="utf-8")
+    tree = ast.parse(source)
     for node in ast.walk(tree):
         if (
             isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-            and node.name == "_execute_order"
+            and node.name == "_handle_signal"
         ):
-            return {
-                call.func.attr
-                for call in ast.walk(node)
-                if isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
-            }
-    raise AssertionError("StrategyRunner._execute_order not found")
+            segment = ast.get_source_segment(source, node)
+            if segment is not None:
+                return segment
+    raise AssertionError("StrategyRunner._handle_signal not found")
 
 
 def test_public_runtime_has_one_owner_per_lifecycle_domain() -> None:
@@ -143,12 +142,13 @@ def test_market_aware_bracket_hooks_are_explicit_native_methods() -> None:
 
 
 def test_runner_uses_only_canonical_entry_api() -> None:
-    calls = _strategy_runner_execute_order_calls()
-    assert "submit_trade_plan_result" in calls
-    assert "execute_market_order" not in calls
-    assert "place_order" not in calls
-    assert "attach_dynamic_tp" not in calls
-    assert "stop_dynamic_tp" not in calls
+    source = _strategy_runner_handle_signal_source()
+    assert '"submit_trade_plan_result", None' in source
+    assert "submit_result = submit_result_fn(plan)" in source
+    assert "self._order_manager.place_order(" not in source
+    assert "execute_market_order(" not in source
+    assert "attach_dynamic_tp(" not in source
+    assert "stop_dynamic_tp(" not in source
 
 
 def test_runtime_classes_own_required_methods_through_explicit_mro() -> None:
