@@ -822,7 +822,6 @@ class SMCStrategy(EliteStrategy):
                     or structure_confirmed
                     or retest_confirmed
                     or premium_reclaim
-                    or balanced_sweep_depth
                 )
                 structural_failures: list[str] = []
                 if not direction_aligned:
