@@ -83,11 +83,15 @@ def run_worker(request: dict[str, Any], env_file: Path) -> dict[str, Any]:
     """Use broker read methods and the canonical completed-trade analyzer only."""
     if request.get("mode") == "runtime":
         runtime = run_recorded_replays(ROOT, request)
+        completed = runtime["state"] == "completed"
         return {
             **request,
             "state": runtime["state"],
             "stage": "finished",
-            "backtest_completed": runtime["state"] == "completed",
+            "backtest_completed": completed,
+            "component_backtest_completed": False,
+            "runtime_replay_completed": completed,
+            "requested_work_completed": completed,
             "backtest_scope": runtime["scope"],
             "runtime_replay": runtime,
             "live_equivalent": False,
@@ -118,6 +122,9 @@ def run_worker(request: dict[str, Any], env_file: Path) -> dict[str, Any]:
         "state": "collecting",
         "stage": "history",
         "backtest_completed": False,
+        "component_backtest_completed": False,
+        "runtime_replay_completed": False,
+        "requested_work_completed": False,
     }
     write_json(directory / "status.json", status)
     write_json(ROOT / "data/research/latest.json", status)
@@ -183,10 +190,13 @@ def run_worker(request: dict[str, Any], env_file: Path) -> dict[str, Any]:
         }
         for candidate in comparison["candidates"]
     ]
+    run_runtime = request.get("mode", "all") == "all"
     status.update(
-        state="completed",
-        stage="finished",
+        state="collecting" if run_runtime else "completed",
+        stage="runtime_replay" if run_runtime else "finished",
         backtest_completed=True,
+        component_backtest_completed=True,
+        requested_work_completed=not run_runtime,
         backtest_scope=report["scope"],
         live_equivalent=False,
         evidence_label=report["evidence_label"],
@@ -208,12 +218,18 @@ def run_worker(request: dict[str, Any], env_file: Path) -> dict[str, Any]:
             "See report assumptions and limitations."
         ),
     )
-    if request.get("mode", "all") == "all":
-        status["stage"] = "runtime_replay"
+    if run_runtime:
         write_json(directory / "status.json", status)
         write_json(ROOT / "data/research/latest.json", status)
-        status["runtime_replay"] = run_recorded_replays(ROOT, request)
-        status["stage"] = "finished"
+        runtime = run_recorded_replays(ROOT, request)
+        runtime_completed = runtime["state"] == "completed"
+        status.update(
+            runtime_replay=runtime,
+            runtime_replay_completed=runtime_completed,
+            requested_work_completed=runtime_completed,
+            state="completed" if runtime_completed else "partial",
+            stage="finished",
+        )
     return status
 
 
@@ -247,7 +263,12 @@ def main() -> int:
         result = {
             **previous,
             "state": "failed",
-            "backtest_completed": False,
+            "backtest_completed": bool(previous.get("backtest_completed")),
+            "component_backtest_completed": bool(
+                previous.get("component_backtest_completed")
+            ),
+            "runtime_replay_completed": False,
+            "requested_work_completed": False,
             "error_type": type(exc).__name__,
             "error_code": safe_error_code(exc),
         }
