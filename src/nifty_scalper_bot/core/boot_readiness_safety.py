@@ -8,7 +8,6 @@ from functools import wraps
 from typing import Any, Awaitable, Callable, TypeVar
 
 from nifty_scalper_bot.core.trading_switch import trading_switch
-from nifty_scalper_bot.utils.logging import log_throttled
 
 _LOGGER = logging.getLogger("nifty_scalper_bot.core.app")
 _T = TypeVar("_T")
