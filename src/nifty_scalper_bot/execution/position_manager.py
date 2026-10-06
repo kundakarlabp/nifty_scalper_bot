@@ -48,6 +48,14 @@ from nifty_scalper_bot.execution.position_snapshot import (
     decode_position_snapshot,
 )
 from nifty_scalper_bot.options.strike_selector import SelectedContract
+from nifty_scalper_bot.utils.broker_pnl import (
+    _MATCH_TOLERANCE_RUPEES,
+    _broker_proves_no_current_day_trading,
+    _effective_refresh_seconds,
+    _finite_float,
+    _max_age_seconds,
+    _strip_legacy_position_pnl,
+)
 from nifty_scalper_bot.utils.logging import get_logger
 from nifty_scalper_bot.utils.metrics import Counter
 from nifty_scalper_bot.utils.reasons import canonical
@@ -676,6 +684,11 @@ def _classify_unknown_broker_order(manager: Any, payload: Mapping[str, Any]) -> 
             return "broker_position_quarantined", state, qty, "broker_position_unowned_or_cost_basis_unresolved"
         return "broker_state_unverified", state, qty, "broker_state_unverified"
     return "active_external_order", None, None, "active_external_order"
+
+
+def _broker_supports_dedicated_pnl(owner: Any) -> bool:
+    broker = getattr(owner, "_broker_client", None)
+    return callable(getattr(broker, "get_pnl_snapshot", None))
 
 
 def _signal_stop_setup_metadata(signal: object) -> tuple[str | None, float | None]:
@@ -1530,6 +1543,8 @@ class PositionManager:
     _canonical_registry_state_native = True
     _manual_quarantine_native = True
     _broker_order_ledger_native = True
+    _broker_pnl_native = True
+    _pnl_session_rollover_native = True
     _position_key = staticmethod(_canonical_key)
 
     """Track open positions and pending orders with persistence support."""
@@ -1585,6 +1600,11 @@ class PositionManager:
         self._baseline_established_at: datetime | None = None
         self._baseline_source: str | None = None
         self._require_pnl_baseline_for_entries: bool = False
+        self._broker_account_pnl_snapshot: dict[str, Any] = {}
+        self._broker_pnl_last_fetch_mono: float = 0.0
+        self._broker_pnl_fetch_error: str | None = None
+        self._broker_pnl_last_log_mono: float = 0.0
+        self._broker_pnl_last_log_fingerprint: object | None = None
         self._active_contracts: Dict[str, ActiveContract] = {}
         self._contract_index: Dict[str, str] = {}
         self._persistent_state: PersistentStateManager | None = None
@@ -1629,6 +1649,10 @@ class PositionManager:
         self._persistence_pending_threshold = 10
         self._last_persistence_check = 0.0
         self.load_state()
+        # Legacy position-row realised P&L is not broker-account authority.
+        self._broker_realized_pnl = None
+        with self._lock:
+            self._refresh_realized_pnl_locked()
         self._last_reconciled_state = copy.deepcopy(self._positions)
 
     def set_on_symbols_flat(self, hook: Any | None) -> None:
@@ -2768,11 +2792,341 @@ class PositionManager:
         with self._lock:
             return float(self._daily_realized_pnl)
 
-    def pnl_reconciliation_snapshot(self) -> dict[str, object]:
-        """Return current confirmed P&L authority and mismatch details."""
+    def _should_emit_pnl_log(
+        self, fingerprint: object, now_mono: float
+    ) -> bool:
+        """Throttle repetitive diagnostics while surfacing state changes."""
 
         with self._lock:
-            return {
+            previous = self._broker_pnl_last_log_fingerprint
+            last_log = float(self._broker_pnl_last_log_mono or 0.0)
+            should_log = previous != fingerprint or now_mono - last_log >= 60.0
+            if should_log:
+                self._broker_pnl_last_log_fingerprint = fingerprint
+                self._broker_pnl_last_log_mono = now_mono
+            return should_log
+
+    def _refresh_broker_pnl_diagnostic_core(
+        self,
+        *,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        """Refresh dedicated broker P&L evidence without mutating strategy P&L."""
+
+        now_mono = time.monotonic()
+        with self._lock:
+            cached = dict(self._broker_account_pnl_snapshot)
+            last_fetch = float(self._broker_pnl_last_fetch_mono or 0.0)
+        if (
+            not force
+            and cached
+            and last_fetch > 0.0
+            and now_mono - last_fetch < _effective_refresh_seconds()
+        ):
+            return cached
+
+        broker = self._broker_client
+        fetcher = getattr(broker, "get_pnl_snapshot", None)
+        if not callable(fetcher):
+            return cached
+
+        try:
+            raw = fetcher()
+            if not isinstance(raw, Mapping):
+                raise RuntimeError("broker P&L snapshot is not a mapping")
+            margin_realized = _finite_float(raw.get("account_realized"))
+            unrealized = _finite_float(raw.get("account_unrealized"))
+        except Exception as exc:  # diagnostic evidence must never block execution
+            error = f"{type(exc).__name__}: {exc}"
+            with self._lock:
+                self._broker_pnl_fetch_error = error
+                self._broker_pnl_last_fetch_mono = now_mono
+            if self._should_emit_pnl_log(("unavailable", error), now_mono):
+                self._logger.warning(
+                    "PNL_BROKER_DIAGNOSTIC_UNAVAILABLE error=%s",
+                    error,
+                    extra={
+                        "event": "PNL_BROKER_DIAGNOSTIC_UNAVAILABLE",
+                        "error": error,
+                        "diagnostic_only": True,
+                    },
+                )
+            return cached
+
+        persist_baseline = False
+        with self._lock:
+            strategy_realized = float(self._local_realized_pnl or 0.0)
+            tradebook_realized = _finite_float(
+                raw.get("strategy_tradebook_realized_gross")
+            )
+            tradebook_fills = int(
+                _finite_float(raw.get("strategy_tradebook_fill_count")) or 0
+            )
+            positions_closed = _finite_float(raw.get("strategy_day_closed_gross"))
+            positions_marked = _finite_float(raw.get("strategy_day_marked_gross"))
+            positions_flat = (
+                (_finite_float(raw.get("strategy_day_rows")) or 0) > 0
+                and positions_closed is not None
+                and positions_marked is not None
+                and abs(positions_marked - positions_closed)
+                <= _MATCH_TOLERANCE_RUPEES
+            )
+            if tradebook_realized is not None and tradebook_fills > 0:
+                broker_evidence = tradebook_realized
+                evidence_source = "zerodha_trades"
+            elif positions_flat:
+                broker_evidence = positions_closed
+                evidence_source = "zerodha_positions_day"
+            else:
+                broker_evidence = margin_realized
+                evidence_source = "zerodha_margins_m2m"
+
+            difference = (
+                None
+                if broker_evidence is None
+                else float(broker_evidence) - strategy_realized
+            )
+            if difference is None:
+                status = "unavailable"
+            elif abs(difference) <= _MATCH_TOLERANCE_RUPEES:
+                status = "matched"
+            else:
+                status = "mismatch"
+            positions_difference = (
+                None
+                if positions_closed is None
+                else positions_closed - strategy_realized
+            )
+            margin_difference = (
+                None
+                if margin_realized is None
+                else float(margin_realized) - strategy_realized
+            )
+            snapshot = dict(raw)
+            snapshot.update(
+                {
+                    "account_realized": margin_realized,
+                    "account_unrealized": (
+                        None if unrealized is None else float(unrealized)
+                    ),
+                    "margin_m2m_realized": margin_realized,
+                    "margin_m2m_unrealized": (
+                        None if unrealized is None else float(unrealized)
+                    ),
+                    "broker_realized_evidence": broker_evidence,
+                    "broker_realized_evidence_source": evidence_source,
+                    "strategy_realized": strategy_realized,
+                    "difference": difference,
+                    "margin_vs_strategy_difference": margin_difference,
+                    "positions_vs_strategy_difference": positions_difference,
+                    "status": status,
+                    "diagnostic_only": True,
+                    "fetched_monotonic": now_mono,
+                }
+            )
+            self._broker_account_pnl_snapshot = snapshot
+            self._broker_pnl_last_fetch_mono = now_mono
+            self._broker_pnl_fetch_error = None
+
+            today = self._trading_date_ist()
+            if (
+                self._pnl_trading_date != today
+                or self._session_opening_realized_baseline != 0.0
+                or self._baseline_source != "zerodha_margins_m2m"
+            ):
+                self._pnl_trading_date = today
+                self._session_opening_realized_baseline = 0.0
+                self._baseline_established_at = datetime.now(timezone.utc)
+                self._baseline_source = "zerodha_margins_m2m"
+                self._pnl_product_scope = "ACCOUNT_EQUITY_FNO"
+                persist_baseline = True
+
+            self._broker_realized_pnl = None
+            self._refresh_realized_pnl_locked()
+            self._pnl_authority = "local_confirmed_ledger"
+            self._pnl_reconciliation_status = (
+                f"broker_account_diagnostic_{status}"
+            )
+
+        log = self._logger.warning if status == "mismatch" else self._logger.info
+        fingerprint = (
+            "available",
+            status,
+            None
+            if broker_evidence is None
+            else round(float(broker_evidence), 2),
+            round(float(strategy_realized), 2),
+        )
+        if self._should_emit_pnl_log(fingerprint, now_mono):
+            log(
+                "PNL_BROKER_DIAGNOSTIC broker_evidence=%s strategy_realized=%.2f "
+                "difference=%s status=%s source=%s margin_m2m_realized=%s "
+                "positions_closed=%s",
+                broker_evidence,
+                strategy_realized,
+                difference,
+                status,
+                evidence_source,
+                margin_realized,
+                positions_closed,
+                extra={
+                    "event": "PNL_BROKER_DIAGNOSTIC",
+                    "broker_realized_evidence": broker_evidence,
+                    "strategy_realized": strategy_realized,
+                    "difference": difference,
+                    "margin_m2m_realized": margin_realized,
+                    "margin_vs_strategy_difference": margin_difference,
+                    "positions_vs_strategy_difference": positions_difference,
+                    "status": status,
+                    "source": evidence_source,
+                    "diagnostic_only": True,
+                },
+            )
+
+        if persist_baseline:
+            try:
+                self.save_state()
+            except Exception:
+                self._logger.warning("PNL_BASELINE_PERSIST_FAILED", exc_info=True)
+        return snapshot
+
+    def _reset_local_pnl_session_state(
+        self,
+        *,
+        today: str,
+        reason: str,
+    ) -> bool:
+        """Clear stale session-only P&L while retaining durable trade history."""
+
+        with self._lock:
+            stale_confirmed = float(self._local_realized_pnl or 0.0)
+            stale_provisional = float(self._local_provisional_realized_pnl or 0.0)
+            if abs(stale_confirmed) <= 1e-6 and abs(stale_provisional) <= 1e-6:
+                return False
+
+            self._local_realized_pnl = 0.0
+            self._local_provisional_realized_pnl = 0.0
+            for position in self._positions.values():
+                position.realized_pnl = 0.0
+
+            self._pnl_trading_date = today
+            self._session_opening_realized_baseline = 0.0
+            self._baseline_established_at = datetime.now(timezone.utc)
+            self._baseline_source = "zerodha_margins_m2m"
+            self._pnl_product_scope = "ACCOUNT_EQUITY_FNO"
+            self._broker_realized_pnl = None
+            self._refresh_realized_pnl_locked()
+            self._pnl_authority = "local_confirmed_ledger"
+            self._broker_account_pnl_snapshot = {}
+            self._broker_pnl_last_fetch_mono = 0.0
+
+        self._logger.warning(
+            "PNL_SESSION_STALE_LOCAL_RESET stale_confirmed=%.2f "
+            "stale_provisional=%.2f trading_date=%s reason=%s "
+            "broker_authority=zerodha_margins_m2m",
+            stale_confirmed,
+            stale_provisional,
+            today,
+            reason,
+            extra={
+                "event": "PNL_SESSION_STALE_LOCAL_RESET",
+                "stale_confirmed": stale_confirmed,
+                "stale_provisional": stale_provisional,
+                "trading_date": today,
+                "reason": reason,
+                "broker_authority": "zerodha_margins_m2m",
+            },
+        )
+        try:
+            self.save_state()
+        except Exception:
+            self._logger.warning("PNL_SESSION_RESET_PERSIST_FAILED", exc_info=True)
+        return True
+
+    def refresh_broker_pnl_diagnostic(
+        self,
+        *,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        """Refresh broker evidence and normalize stale IST session carryover."""
+
+        today = str(self._trading_date_ist())
+        with self._lock:
+            prior_date = self._pnl_trading_date
+            prior_local = float(self._local_realized_pnl or 0.0)
+            prior_provisional = float(self._local_provisional_realized_pnl or 0.0)
+
+        snapshot = self._refresh_broker_pnl_diagnostic_core(force=force)
+        if _finite_float(snapshot.get("account_realized")) is None:
+            return dict(snapshot)
+
+        stale_session = prior_date not in (None, today)
+        unverified_session = prior_date is None
+        broker_zero_day = _broker_proves_no_current_day_trading(snapshot)
+        has_local_carryover = (
+            abs(prior_local) > 1e-6 or abs(prior_provisional) > 1e-6
+        )
+
+        reset_reason: str | None = None
+        if has_local_carryover and stale_session:
+            reset_reason = "trading_date_rollover"
+        elif has_local_carryover and broker_zero_day:
+            reset_reason = (
+                "broker_zero_day_unverified_local"
+                if unverified_session
+                else "broker_zero_day_stale_local"
+            )
+
+        if reset_reason and self._reset_local_pnl_session_state(
+            today=today,
+            reason=reset_reason,
+        ):
+            return dict(self._refresh_broker_pnl_diagnostic_core(force=True))
+        return dict(snapshot)
+
+    def get_broker_account_pnl_snapshot(
+        self,
+        *,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        """Return detached dedicated broker P&L evidence."""
+
+        return dict(self.refresh_broker_pnl_diagnostic(force=force))
+
+    def get_broker_account_realized_pnl(
+        self,
+        *,
+        force: bool = False,
+        max_age_s: float | None = None,
+    ) -> float | None:
+        """Return fresh broker realized evidence or None when stale/unavailable."""
+
+        snapshot = self.refresh_broker_pnl_diagnostic(force=force)
+        realized = _finite_float(snapshot.get("broker_realized_evidence"))
+        fetched = _finite_float(snapshot.get("fetched_monotonic"))
+        if realized is None or fetched is None:
+            return None
+        max_age = (
+            _max_age_seconds()
+            if max_age_s is None
+            else max(0.0, float(max_age_s))
+        )
+        if time.monotonic() - fetched > max_age:
+            return None
+        return float(realized)
+
+    def get_strategy_realized_pnl(self) -> float:
+        """Return bot-owned confirmed strategy realized P&L."""
+
+        with self._lock:
+            return float(self._local_realized_pnl or 0.0)
+
+    def pnl_reconciliation_snapshot(self) -> dict[str, object]:
+        """Return local accounting truth plus broker diagnostic evidence."""
+
+        diagnostic = self.refresh_broker_pnl_diagnostic()
+        with self._lock:
+            base: dict[str, object] = {
                 "local_confirmed_realized": float(self._local_realized_pnl),
                 "local_provisional_realized": float(
                     self._local_provisional_realized_pnl
@@ -2801,9 +3155,65 @@ class PositionManager:
                 ),
                 "baseline_source": self._baseline_source,
                 "pnl_snapshot_at": (
-                    self._pnl_snapshot_at.isoformat() if self._pnl_snapshot_at else None
+                    self._pnl_snapshot_at.isoformat()
+                    if self._pnl_snapshot_at
+                    else None
                 ),
             }
+            error = self._broker_pnl_fetch_error
+            strategy_realized = float(self._local_realized_pnl or 0.0)
+
+        base.update(
+            {
+                "strategy_realized": float(
+                    diagnostic.get("strategy_realized", strategy_realized)
+                ),
+                "broker_account_realized": diagnostic.get("account_realized"),
+                "broker_account_unrealized": diagnostic.get("account_unrealized"),
+                "broker_account_total": diagnostic.get("account_total"),
+                "broker_margin_m2m_realized": diagnostic.get(
+                    "margin_m2m_realized"
+                ),
+                "broker_margin_m2m_unrealized": diagnostic.get(
+                    "margin_m2m_unrealized"
+                ),
+                "broker_realized_evidence": diagnostic.get(
+                    "broker_realized_evidence"
+                ),
+                "broker_realized_evidence_source": diagnostic.get(
+                    "broker_realized_evidence_source"
+                ),
+                "broker_tradebook_realized_gross": diagnostic.get(
+                    "strategy_tradebook_realized_gross"
+                ),
+                "broker_tradebook_fill_count": diagnostic.get(
+                    "strategy_tradebook_fill_count", 0
+                ),
+                "broker_strategy_day_marked_gross": diagnostic.get(
+                    "strategy_day_marked_gross"
+                ),
+                "broker_strategy_day_closed_gross": diagnostic.get(
+                    "strategy_day_closed_gross"
+                ),
+                "broker_strategy_day_rows": diagnostic.get(
+                    "strategy_day_rows", 0
+                ),
+                "broker_vs_strategy_realized_difference": diagnostic.get(
+                    "difference"
+                ),
+                "broker_positions_vs_strategy_difference": diagnostic.get(
+                    "positions_vs_strategy_difference"
+                ),
+                "broker_account_pnl_status": diagnostic.get(
+                    "status", "unavailable"
+                ),
+                "broker_account_pnl_source": diagnostic.get("source"),
+                "broker_account_pnl_observed_at": diagnostic.get("observed_at"),
+                "broker_account_pnl_error": error,
+                "pnl_diagnostic_only": True,
+            }
+        )
+        return base
 
     def current_pnl_reconciliation_blocker(self) -> str | None:
         """Block new entries when confirmed local and broker P&L disagree."""
@@ -3938,8 +4348,12 @@ class PositionManager:
         """Canonicalize broker truth and reconcile restart-safe session P&L state."""
 
         broker_positions = _materialize_broker_positions(broker_positions)
-        broker_realized_authoritative = _snapshot_has_authoritative_realized(
-            broker_positions
+        dedicated_pnl = _broker_supports_dedicated_pnl(self)
+        if dedicated_pnl:
+            broker_positions = _strip_legacy_position_pnl(broker_positions)
+        broker_realized_authoritative = (
+            not dedicated_pnl
+            and _snapshot_has_authoritative_realized(broker_positions)
         )
         lifecycle_snapshot = _snapshot_owned_position_lifecycle(self)
         prepared, unresolved = _prepare_broker_positions(self, broker_positions)
@@ -3967,6 +4381,8 @@ class PositionManager:
         self._maybe_seed_pnl_session_baseline(broker_positions)
         if broker_realized_authoritative:
             self._reconcile_local_pnl_to_broker_snapshot()
+        if dedicated_pnl:
+            self.refresh_broker_pnl_diagnostic()
         _canonicalize_position_store(self)
         restored = _restore_owned_position_lifecycle(self, lifecycle_snapshot)
         if restored:
