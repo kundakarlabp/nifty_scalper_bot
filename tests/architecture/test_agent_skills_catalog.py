@@ -14,6 +14,7 @@ EXPECTED_SKILLS = {
     "grill-trading-plan",
     "live-runtime-diagnosis",
     "market-data-path-audit",
+    "nifty-scalper-engineering",
     "pre-merge-trading-review",
     "runtime-contract-validation",
     "session-worklog",
@@ -63,6 +64,23 @@ def test_skill_readme_routes_all_installed_skills() -> None:
     for name in EXPECTED_SKILLS:
         assert f"`{name}`" in readme
     assert "kundakarlabp/dr-bhanu-prasad" in readme
+
+
+
+def test_nifty_scalper_engineering_is_default_orchestrator() -> None:
+    skill = (SKILLS_ROOT / "nifty-scalper-engineering" / "SKILL.md").read_text(encoding="utf-8")
+    assert "Automatically use for every engineering task" in skill
+
+    required = {
+        "AGENTS.md": "nifty-scalper-engineering",
+        "docs/AGENT_START_HERE.md": "nifty-scalper-engineering",
+        "docs/CHATGPT_CODE_WORKFLOW.md": "nifty-scalper-engineering",
+        ".github/copilot-instructions.md": "nifty-scalper-engineering",
+        ".agents/skills/README.md": "nifty-scalper-engineering",
+    }
+    for relative_path, needle in required.items():
+        text = (ROOT / relative_path).read_text(encoding="utf-8")
+        assert needle in text
 
 
 def test_specialist_skills_are_routed_from_agent_start_here() -> None:
