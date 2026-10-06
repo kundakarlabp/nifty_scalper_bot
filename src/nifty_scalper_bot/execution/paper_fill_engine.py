@@ -202,9 +202,7 @@ class PaperFillEngine:
             "parent_order_id": parent_id,
             "remaining_quantity": quantity,
             "fees": 0.0,
-            "queue_ahead": (
-                self._queue_depth_default if order_type != "MARKET" else 0
-            ),
+            "queue_ahead": (self._queue_depth_default if order_type != "MARKET" else 0),
         }
 
         if parent_id:
