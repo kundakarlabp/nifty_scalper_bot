@@ -24,11 +24,12 @@
 
 ## Validation
 
-- Focused preflight:
+- Local/focused preflight:
+- Draft fast gate:
 - Affected suites:
-- Full suite:
+- Full suite / ready-for-review CI:
 - Deterministic E2E:
-- Final-head CI:
+- Final `final-validation` head:
 
 ## Failure-memory check
 
