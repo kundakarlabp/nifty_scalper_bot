@@ -747,6 +747,8 @@ class ZerodhaKiteClient(BaseBrokerClient):
         params["transaction_type"] = side
 
         quantity_raw = params.get("quantity")
+        if quantity_raw is None:
+            raise BrokerError("Invalid quantity")
         try:
             quantity = int(quantity_raw)
         except (TypeError, ValueError) as exc:
