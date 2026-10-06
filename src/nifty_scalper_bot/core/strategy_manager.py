@@ -4117,16 +4117,14 @@ class StrategyManager(_BaseStrategyManager):
             )
             return None
 
-        opposite_context = [
+        conflicting_context = [
             evidence
             for _signal, evidence in context_votes
-            if str(evidence.side or "").upper() in {"CE", "PE"}
-            and str(evidence.side or "").upper() != side
-            and self._context_vote_is_timestamped(evidence)
+            if self._context_vote_is_timestamped(evidence)
             and bool((evidence.metadata or {}).get("context_quality_eligible"))
             and bool((evidence.metadata or {}).get("effective_context_conflict"))
         ]
-        if opposite_context:
+        if conflicting_context:
             _record_no_signal(
                 "context_conflict",
                 "fresh_opposing_context",
@@ -4162,6 +4160,19 @@ class StrategyManager(_BaseStrategyManager):
                     ),
                     "conflict": bool(
                         (evidence.metadata or {}).get("effective_context_conflict")
+                    ),
+                    "alignment_source": (evidence.metadata or {}).get(
+                        "context_alignment_source"
+                    ),
+                    "ofi_ready": bool((evidence.metadata or {}).get("ofi_ready")),
+                    "ofi_1s_normalized": (evidence.metadata or {}).get(
+                        "ofi_1s_normalized"
+                    ),
+                    "depth_imbalance": (evidence.metadata or {}).get(
+                        "depth_imbalance"
+                    ),
+                    "strong_depth_conflict": bool(
+                        (evidence.metadata or {}).get("strong_depth_conflicts_side")
                     ),
                     "reasons": list(evidence.reasons),
                 }

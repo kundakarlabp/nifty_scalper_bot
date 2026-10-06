@@ -61,6 +61,23 @@ def _normalised_depth_thresholds(
     return support, strong
 
 
+def _depth_conflicts_side(
+    depth_imbalance: float,
+    *,
+    side: str,
+    option_premium_domain: bool,
+    threshold: float,
+) -> bool:
+    """Return whether signed book pressure is materially adverse to the side."""
+    threshold = max(0.0, float(threshold))
+    if option_premium_domain:
+        return depth_imbalance <= -threshold
+    return bool(
+        (side == "CE" and depth_imbalance <= -threshold)
+        or (side == "PE" and depth_imbalance >= threshold)
+    )
+
+
 def _safe_float_value(value: Any) -> float | None:
     try:
         number = float(value)
@@ -247,6 +264,18 @@ class OrderFlowStrategy(EliteStrategy):
                 option_premium_domain=option_premium_domain,
                 threshold=strong_support_threshold,
             )
+            depth_conflicts_side = _depth_conflicts_side(
+                depth_imbalance,
+                side=side,
+                option_premium_domain=option_premium_domain,
+                threshold=support_threshold,
+            )
+            strong_depth_conflicts_side = _depth_conflicts_side(
+                depth_imbalance,
+                side=side,
+                option_premium_domain=option_premium_domain,
+                threshold=strong_support_threshold,
+            )
 
             tick_direction = str(indicators.get("tick_direction") or "").upper()
             tick_supports_side = (
@@ -304,15 +333,33 @@ class OrderFlowStrategy(EliteStrategy):
                 and spread_pct <= max_spread_pct
                 and direction_available
             )
+            context_alignment_source: str | None = None
+            if (
+                ofi_directional
+                and ofi_supports_side
+                and not strong_depth_conflicts_side
+            ):
+                context_alignment_source = "temporal_ofi"
+            elif depth_supports_side and flow_supports_side and not flow_conflicts_side:
+                context_alignment_source = "depth_plus_flow"
+            elif strong_depth_supports_side and not flow_conflicts_side:
+                context_alignment_source = "strong_depth"
+            microstructure_supports_side = context_alignment_source is not None
+            microstructure_conflicts_side = bool(
+                (ofi_directional and ofi_conflicts_side) or strong_depth_conflicts_side
+            )
             effective_context_alignment = bool(
                 context_quality_eligible
                 and side_aligns
-                and depth_supports_side
-                and not flow_conflicts_side
-                and (flow_supports_side or strong_depth_supports_side)
+                and microstructure_supports_side
+                and not microstructure_conflicts_side
             )
             effective_context_conflict = bool(
-                context_quality_eligible and direction_available and direction != side
+                context_quality_eligible
+                and (
+                    (direction_available and direction != side)
+                    or (side_aligns and microstructure_conflicts_side)
+                )
             )
 
             reasons: list[str] = []
@@ -356,6 +403,8 @@ class OrderFlowStrategy(EliteStrategy):
                 "depth_imbalance": round(depth_imbalance, 4),
                 "depth_supports_side": depth_supports_side,
                 "strong_depth_supports_side": strong_depth_supports_side,
+                "depth_conflicts_side": depth_conflicts_side,
+                "strong_depth_conflicts_side": strong_depth_conflicts_side,
                 "depth_support_threshold": round(support_threshold, 4),
                 "strong_depth_support_threshold": round(strong_support_threshold, 4),
                 "tick_direction": tick_direction,
@@ -370,6 +419,9 @@ class OrderFlowStrategy(EliteStrategy):
                 "flow_confirmation_source": flow_confirmation_source,
                 "flow_supports_side": flow_supports_side,
                 "flow_conflicts_side": flow_conflicts_side,
+                "microstructure_supports_side": microstructure_supports_side,
+                "microstructure_conflicts_side": microstructure_conflicts_side,
+                "context_alignment_source": context_alignment_source,
                 "context_age_seconds": context_age_seconds,
                 "context_fresh": context_fresh,
                 "context_quality_eligible": context_quality_eligible,
