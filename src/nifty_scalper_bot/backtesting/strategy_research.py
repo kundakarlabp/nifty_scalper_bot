@@ -211,9 +211,13 @@ def _resolve_research_signal_geometry(
         return stop, target, "signal"
 
     metadata = dict(getattr(signal, "metadata", {}) or {})
+    proxy_stop_raw = metadata.get("setup_invalidation_premium")
+    target_rr_raw = metadata.get("premium_target_rr")
+    if proxy_stop_raw is None or target_rr_raw is None:
+        return stop, target, "unavailable"
     try:
-        proxy_stop = float(metadata.get("setup_invalidation_premium"))
-        target_rr = float(metadata.get("premium_target_rr"))
+        proxy_stop = float(proxy_stop_raw)
+        target_rr = float(target_rr_raw)
     except (TypeError, ValueError):
         return stop, target, "unavailable"
     if (
