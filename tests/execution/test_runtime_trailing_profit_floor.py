@@ -110,7 +110,7 @@ def test_floor_is_not_installed_before_activation(monkeypatch) -> None:
     assert candidate is None
 
 
-def test_point_six_r_activation_clears_costs_before_profit_floor(monkeypatch) -> None:
+def test_point_six_r_activation_locks_costs_plus_min_profit(monkeypatch) -> None:
     manager = _manager(monkeypatch, cost_points=1.0)
     bracket = _bracket(side="BUY", entry=100.0, sl=90.0, high=106.5, low=100.0)
 
@@ -123,7 +123,7 @@ def test_point_six_r_activation_clears_costs_before_profit_floor(monkeypatch) ->
         atr=0.0,
     )
 
-    assert candidate == pytest.approx(101.0)
+    assert candidate == pytest.approx(102.0)
 
 
 def test_floor_is_rejected_when_execution_room_is_insufficient(monkeypatch) -> None:
