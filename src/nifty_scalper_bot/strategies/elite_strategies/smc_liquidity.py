@@ -791,7 +791,9 @@ class SMCStrategy(EliteStrategy):
                 recovered_from_history=True,
             )
             if self._event_consumed_or_invalidated_before_current(rows, index, event):
-                continue
+                # Recovery scans newest to oldest. A terminal newer setup
+                # supersedes older candidates; never resurrect stale liquidity.
+                return None
             LOGGER.info(
                 "SMC_SWEEP_RECOVERED structure_symbol=%s option_side=%s sweep_ts=%s current_ts=%s source=%s",
                 snapshot["symbol"],
