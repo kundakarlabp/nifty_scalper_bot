@@ -138,6 +138,8 @@ def test_lightsail_release_migrates_autodeploy_entrypoint_to_bash() -> None:
         "ExecStart=/usr/bin/env bash ${APP_DIR}/deploy/lightsail_release.sh --auto"
         in migration_block
     )
+    assert "TimeoutStartSec=600" in migration_block
+    assert "KillMode=control-group" in migration_block
     assert "AUTODEPLOY_ENTRYPOINT_MIGRATED=true" in migration_block
     assert "sudo systemctl daemon-reload" in migration_block
 
