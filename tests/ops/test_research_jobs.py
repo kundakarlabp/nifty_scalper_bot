@@ -101,11 +101,8 @@ def test_systemd_launcher_uses_independent_transient_service(tmp_path, monkeypat
     assert result["launcher"] == "systemd"
     assert result["worker_unit"] == "niftybot-research-worker.service"
     assert result["launch_revision"] == "abc123def456"
-    launch = next(
-        command
-        for command, _ in calls
-        if command[:3] == ["sudo", "-n", "systemd-run"]
-    )
+    systemd_prefix = ["sudo", "-n", "systemd-run"]
+    launch = next(command for command, _ in calls if command[:3] == systemd_prefix)
     assert "--unit=niftybot-research-worker.service" in launch
     assert "--collect" in launch
     assert "--service-type=exec" in launch
