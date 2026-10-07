@@ -373,9 +373,9 @@ def start_job(
         "requested_work_completed": False,
         "launch_attempt": 1,
         "launcher": "direct" if wait else launcher,
-        "launch_revision": _current_revision(root),
     }
     if launcher == "systemd" and not wait:
+        queued["launch_revision"] = _current_revision(root)
         queued["worker_unit"] = _SYSTEMD_RESEARCH_UNIT
     write_json(status_file, queued)
     write_json(directory / "latest.json", queued)
