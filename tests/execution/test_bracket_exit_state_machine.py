@@ -80,6 +80,8 @@ def _active_manager(
     notifier: Any | None = None,
 ) -> BracketManager:
     manager = BracketManager(order_manager=order_manager)
+    manager._running = False
+    manager._watchdog_thread.join(timeout=1.0)
     if notifier is not None:
         manager.set_notifier(notifier)
     manager.register_virtual_bracket(
@@ -100,7 +102,10 @@ def test_first_sl_breach_latches_and_submits_once(caplog) -> None:
     om = _OrderManager(broker=broker, order_id="exit-1")
     manager = _active_manager(om)
 
-    with caplog.at_level(logging.INFO):
+    with caplog.at_level(
+        logging.INFO,
+        logger="nifty_scalper_bot.execution.bracket_core",
+    ):
         manager.on_tick("NFO:NIFTY2660923100CE", 157.10)
         manager.on_tick("NFO:NIFTY2660923100CE", 156.90)
         manager.on_tick("NFO:NIFTY2660923100CE", 156.80)
@@ -112,7 +117,12 @@ def test_first_sl_breach_latches_and_submits_once(caplog) -> None:
     assert bracket.exit_order_id == "exit-1"
     assert len(om.calls) == 1
     assert om.calls[0]["side"] == "SELL"
-    assert caplog.text.count("EXIT_TRIGGERED") == 1
+    triggered = [
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "EXIT_TRIGGERED"
+    ]
+    assert len(triggered) == 1
 
 
 def test_deferred_exit_latches_without_waiting_for_broker() -> None:
