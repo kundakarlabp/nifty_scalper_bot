@@ -50,6 +50,23 @@ def _inputs(**overrides: float | int | str | None) -> MarginInputs:
     return MarginInputs(**base)  # type: ignore[arg-type]
 
 
+def test_non_option_fallback_retains_configured_margin_factor() -> None:
+    engine = MarginEngine(
+        broker=object(), data_hub=None, lot_size_resolver=None, clock=lambda: 0.0
+    )
+    decision = engine.plan(
+        _inputs(
+            symbol="NIFTY",
+            requested_qty=1,
+            max_lots_per_trade=1,
+            margin_factor=1.1,
+        )
+    )
+
+    assert decision.ok
+    assert decision.est_required == pytest.approx(110.0)
+
+
 def test_plan_steps_down_fallback_margin_to_affordable_quantity() -> None:
     engine = MarginEngine(
         broker=object(), data_hub=None, lot_size_resolver=None, clock=lambda: 0.0
