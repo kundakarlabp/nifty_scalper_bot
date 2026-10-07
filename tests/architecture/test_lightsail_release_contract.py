@@ -315,7 +315,7 @@ def test_release_provisions_nonsecret_trade_replication_settings() -> None:
     assert (
         'if [ "$RUNTIME_ENV_CHANGED" = true ]; then FORCE_RESTART=true; fi' in release
     )
-    assert "tests/infra/test_supabase_trade_replication.py" in release
+    assert 'ci_state="$(github_ci_state "$AFTER")"' in release
 
 
 def test_release_health_separates_candidate_integrity_from_broker_auth() -> None:
