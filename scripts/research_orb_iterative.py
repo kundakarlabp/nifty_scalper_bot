@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Five predeclared ORB improvement runs with production-like exit lifecycle.
+"""Four predeclared ORB improvement runs with production-like exit lifecycle.
 
 This research is broker-free and never writes live settings. It reuses the
 checksum-verified 2017-2020 prepared sessions and applies a causal minute-bar
-proxy of production trailing/time-stop behavior. The five variants each change
+proxy of production trailing/time-stop behavior. The four variants each change
 one ORB setting relative to the lifecycle reference.
 """
 
@@ -31,7 +31,7 @@ BASE_OVERRIDES = {
 
 
 def candidates() -> list[dict[str, Any]]:
-    """Return reference rows and the five canonical one-change runs."""
+    """Return reference rows and the four canonical one-change runs."""
     return [
         {
             "name": "static_reference_075_25",
@@ -63,16 +63,11 @@ def candidates() -> list[dict[str, Any]]:
             "overrides": {**BASE_OVERRIDES, "ORB_MOMENTUM_MIN_VOLUME_RATIO": "1.5"},
             "lifecycle_proxy": True,
         },
-        {
-            "name": "run5_one_event_per_side",
-            "overrides": {**BASE_OVERRIDES, "ORB_MAX_EVENTS_PER_SIDE": "1"},
-            "lifecycle_proxy": True,
-        },
     ]
 
 
 def quality_score_8_candidate() -> dict[str, Any]:
-    """Return the focused score-8 experiment outside the canonical five-run set."""
+    """Return the focused score-8 experiment outside the canonical four-run set."""
     return {
         "name": "quality_score_8",
         "overrides": {**BASE_OVERRIDES, "ORB_QUALITY_MIN_SCORE_SHADOW": "8.0"},
@@ -217,7 +212,7 @@ def main() -> None:
             "live_parity": False,
         },
         "candidates": selected_candidates,
-        "selection": "none; all five changes predeclared and reported",
+        "selection": "none; all four changes predeclared and reported",
         "promotion_eligible": False,
     }
     _write_json(args.study_dir / "iterative_protocol.json", protocol)

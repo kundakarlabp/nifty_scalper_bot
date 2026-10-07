@@ -1147,7 +1147,6 @@ def run_orb_comparison(directory: Path) -> dict[str, Any]:
         "ORB_MOMENTUM_MIN_BODY_PCT",
         "ORB_MOMENTUM_MIN_PENETRATION_ATR",
         "ORB_MOMENTUM_MIN_VOLUME_RATIO",
-        "ORB_MAX_EVENTS_PER_SIDE",
     )
     baseline_environment = {key: os.environ.get(key) for key in environment_keys}
     candidates: list[dict[str, Any]] = []

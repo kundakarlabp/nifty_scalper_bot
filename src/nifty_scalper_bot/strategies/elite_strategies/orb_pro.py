@@ -28,13 +28,6 @@ def _env_float(name: str, default: float) -> float:
         return float(default)
 
 
-def _env_int(name: str, default: int) -> int:
-    try:
-        return int(float(os.getenv(name, str(default)) or default))
-    except (TypeError, ValueError):
-        return int(default)
-
-
 def _env_bool(name: str, default: bool) -> bool:
     raw = os.getenv(name)
     if raw is None:
@@ -90,7 +83,6 @@ class ORBProStrategy(EliteStrategy):
         self._cfg = config
         self._events: dict[tuple[str, str, str], dict[str, Any]] = {}
         self._last_bar_by_key: dict[tuple[str, str, str], datetime] = {}
-        self._event_count_by_key: dict[tuple[str, str, str], int] = {}
 
     def get_required_indicators(self) -> set[str]:
         """Return strategy-facing option and underlying context requirements."""
@@ -707,10 +699,6 @@ class ORBProStrategy(EliteStrategy):
                 self._events[key] = event
 
         if event is None:
-            max_events = max(1, _env_int("ORB_MAX_EVENTS_PER_SIDE", 2))
-            if self._event_count_by_key.get(key, 0) >= max_events:
-                self._no_vote("orb_session_event_limit")
-                return None
             if side == "CE":
                 boundary = orb_high
                 fresh_breakout = (
@@ -795,7 +783,6 @@ class ORBProStrategy(EliteStrategy):
                     )
                     return None
                 event["status"] = "EMITTED"
-                self._event_count_by_key[key] = self._event_count_by_key.get(key, 0) + 1
                 return signal
             transition_setup(
                 SetupStage.CONFIRMING,
@@ -928,7 +915,6 @@ class ORBProStrategy(EliteStrategy):
             )
             return None
         event["status"] = "EMITTED"
-        self._event_count_by_key[key] = self._event_count_by_key.get(key, 0) + 1
         return signal
 
 

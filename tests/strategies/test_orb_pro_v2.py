@@ -173,6 +173,74 @@ def test_same_completed_breakout_bar_cannot_vote_twice(monkeypatch) -> None:
     assert strategy.last_no_vote_reason == "orb_bar_already_evaluated"
 
 
+def test_orb_frequency_is_restart_deterministic_after_prior_emission(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    monkeypatch.setenv("ORB_MAX_EVENTS_PER_SIDE", "1")
+    monkeypatch.setenv("ORB_BALANCED_RANGE_MAX_ATR", "2.0")
+    rows = _opening_rows()
+    rows.append(
+        _bar(
+            15,
+            open_=24_008.0,
+            high=24_034.0,
+            low=24_006.0,
+            close=24_030.0,
+            volume=3_000.0,
+        )
+    )
+    engine = _IndicatorEngine({FUTURE: rows})
+    continuous = ORBProStrategy(
+        ORBProStrategyConfig(orb_minutes=15),
+        indicator_engine=engine,
+    )
+    first = _base_indicators("CE", rows[-1]["timestamp"])
+
+    assert continuous.generate_signal(CE, first, 50.0) is not None
+
+    # Return inside the range to close the first structural event.
+    rows.append(
+        _bar(
+            16,
+            open_=24_018.0,
+            high=24_019.0,
+            low=24_010.0,
+            close=24_015.0,
+            volume=1_000.0,
+        )
+    )
+    reset = _base_indicators("CE", rows[-1]["timestamp"])
+    assert continuous.generate_signal(CE, reset, 50.0) is None
+
+    # A second independent breakout must not depend on whether the process
+    # restarted between the two setups.
+    rows.append(
+        _bar(
+            17,
+            open_=24_015.0,
+            high=24_038.0,
+            low=24_014.0,
+            close=24_034.0,
+            volume=3_000.0,
+        )
+    )
+    second = _base_indicators("CE", rows[-1]["timestamp"])
+    restarted = ORBProStrategy(
+        ORBProStrategyConfig(orb_minutes=15),
+        indicator_engine=engine,
+    )
+
+    continuous_signal = continuous.generate_signal(CE, second, 50.0)
+    restarted_signal = restarted.generate_signal(CE, second, 50.0)
+
+    assert continuous_signal is not None
+    assert restarted_signal is not None
+    continuous_setup_id = continuous_signal.metadata["setup_id"]
+    restarted_setup_id = restarted_signal.metadata["setup_id"]
+    assert continuous_setup_id == restarted_setup_id
+
+
 def test_retest_must_follow_breakout_before_retest_branch_votes(monkeypatch) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
     monkeypatch.setenv("ORB_MOMENTUM_BRANCH_ENABLED", "false")
