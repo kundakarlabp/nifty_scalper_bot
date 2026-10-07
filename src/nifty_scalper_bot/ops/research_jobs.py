@@ -139,7 +139,6 @@ def start_job(
         return {"state": "busy", "backtest_completed": False}
     status_file = directory / request["id"] / "status.json"
     existing: dict[str, Any] = {}
-    recovered_from_state: str | None = None
     if status_file.exists():
         existing = _read_job_status(status_file, {})
         if not _same_request_definition(existing, request):
@@ -150,8 +149,22 @@ def start_job(
             lock.close()
             return existing
         # Acquiring the worker lock proves the prior worker is no longer alive:
-        # live workers inherit and hold this descriptor until exit.
-        recovered_from_state = state
+        # live workers inherit and hold this descriptor until exit. A repeated
+        # poll of the same immutable job must not create an unbounded restart
+        # loop; persist the stale worker as an explicit terminal failure.
+        stale = {
+            **existing,
+            "state": "failed",
+            "error_type": "WorkerExitedWithoutResult",
+            "error_code": "stale_research_worker",
+            "stale_state": state,
+            "recovery_reason": "nonterminal_status_without_worker_lock",
+            "requested_work_completed": False,
+        }
+        write_json(status_file, stale)
+        write_json(directory / "latest.json", stale)
+        lock.close()
+        return stale
     env = dict(os.environ)
     env.update(
         ENABLE_LIVE="false",
@@ -175,13 +188,8 @@ def start_job(
         "component_backtest_completed": False,
         "runtime_replay_completed": False,
         "requested_work_completed": False,
-        "launch_attempt": int(existing.get("launch_attempt") or 0) + 1,
+        "launch_attempt": 1,
     }
-    if recovered_from_state is not None:
-        queued.update(
-            recovered_from_state=recovered_from_state,
-            recovery_reason="nonterminal_status_without_worker_lock",
-        )
     write_json(status_file, queued)
     write_json(directory / "latest.json", queued)
     try:
