@@ -603,6 +603,7 @@ def research_report(request: Request) -> JSONResponse:
             "completed_trade_analysis",
             "strategy_bar_research",
             "orb_comparison",
+            "vwap_comparison",
             "runtime_replay",
         ):
             path = APP_DIR / "data/research" / status["id"] / f"{name}.json"
