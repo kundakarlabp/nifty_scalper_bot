@@ -402,6 +402,34 @@ def test_hard_stop_waits_for_exchange_stop_before_market_fallback(monkeypatch) -
     assert bracket.exchange_stop_order_id is None
 
 
+def test_flat_reconcile_cancels_exchange_stop_before_unregister(monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    monkeypatch.setenv("EXCHANGE_PROTECTIVE_STOP_ENABLED", "true")
+    broker = _Broker()
+    order_manager = _OrderManager(broker)
+    manager = BracketManager(order_manager=order_manager)
+    manager._running = False
+    manager._watchdog_thread.join(timeout=1.0)
+    manager.register_virtual_bracket(
+        order_id="entry-flat",
+        symbol=SYMBOL,
+        side="BUY",
+        qty=65,
+        price=150.0,
+        sl=140.0,
+        tp=175.0,
+        activate_immediately=False,
+    )
+    manager.confirm_entry_fill("entry-flat", 150.0, 65)
+
+    removed = manager.reconcile_symbol_flat(SYMBOL)
+
+    assert removed == 1
+    assert broker.cancel_calls == ["rescue-1"]
+    assert manager.get_bracket("entry-flat") is None
+
+
 def test_actual_fill_resynchronizes_trailing_watermarks() -> None:
     """Trailing has one authority (the tiered bracket math), so an actual fill
     must re-anchor the bracket's own watermarks — there is no second controller
