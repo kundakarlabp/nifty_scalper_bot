@@ -30,18 +30,18 @@ def test_restart_recovers_unconfirmed_breakout_for_current_retest(monkeypatch) -
     breakout = _bar(
         15,
         open_=24_014.0,
-        high=24_029.0,
+        high=24_034.0,
         low=24_012.0,
-        close=24_025.0,
-        volume=1_100.0,
+        close=24_030.0,
+        volume=1_600.0,
     )
     retest = _bar(
         16,
         open_=24_024.0,
-        high=24_030.0,
+        high=24_026.0,
         low=24_019.0,
-        close=24_027.0,
-        volume=1_300.0,
+        close=24_021.0,
+        volume=400.0,
     )
     rows.extend([breakout, retest])
 
@@ -55,6 +55,10 @@ def test_restart_recovers_unconfirmed_breakout_for_current_retest(monkeypatch) -
     assert signal.metadata["entry_branch"] == "retest"
     assert signal.metadata["breakout_recovered_from_history"] is True
     assert signal.metadata["breakout_timestamp"] == breakout["timestamp"].timestamp()
+    assert signal.metadata["underlying_volume_ratio"] > 1.2
+    assert signal.metadata["underlying_current_volume_ratio"] < 1.2
+    assert signal.metadata["underlying_penetration_atr"] >= 0.2
+    assert signal.metadata["underlying_current_penetration_atr"] < 0.2
 
 
 def test_recovery_does_not_late_enter_after_prior_retest(monkeypatch) -> None:
