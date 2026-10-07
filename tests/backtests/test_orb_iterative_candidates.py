@@ -1,4 +1,4 @@
-"""Five ORB research runs must remain one-change experiments."""
+"""Canonical ORB research runs must remain one-change experiments."""
 
 from scripts.research_orb_iterative import (
     BASE_OVERRIDES,
@@ -9,14 +9,14 @@ from scripts.research_orb_iterative import (
 )
 
 
-def test_five_runs_change_exactly_one_orb_setting_from_lifecycle_reference():
+def test_four_runs_change_exactly_one_orb_setting_from_lifecycle_reference():
     rows = candidates()
     assert [row["name"] for row in rows[:2]] == [
         "static_reference_075_25",
         "lifecycle_reference_075_25",
     ]
     experiments = rows[2:]
-    assert len(experiments) == 5
+    assert len(experiments) == 4
     assert all(row["lifecycle_proxy"] is True for row in experiments)
     for row in experiments:
         extra = {
@@ -27,7 +27,7 @@ def test_five_runs_change_exactly_one_orb_setting_from_lifecycle_reference():
         assert len(extra) == 1
 
 
-def test_quality_score_8_candidate_is_focused_and_preserves_canonical_five():
+def test_quality_score_8_candidate_is_focused_and_preserves_canonical_four():
     canonical_names = [row["name"] for row in candidates()]
     assert "quality_score_8" not in canonical_names
     row = quality_score_8_candidate()
