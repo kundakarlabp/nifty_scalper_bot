@@ -371,12 +371,51 @@ def test_pe_breakout_keeps_long_option_stop_below_entry(monkeypatch) -> None:
     assert signal.metadata["breakout_side"] == "PE"
 
 
-def test_futures_unavailable_uses_spot_context_but_never_executes_spot(
+def test_futures_unavailable_does_not_use_non_traded_spot_volume(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    rows = _opening_rows()
+    for row in rows:
+        row["volume"] = 0.0
+    rows.append(
+        _bar(
+            15,
+            open_=24_008.0,
+            high=24_034.0,
+            low=24_006.0,
+            close=24_030.0,
+            volume=0.0,
+        )
+    )
+    strategy = _strategy({SPOT: rows})
+    indicators = _base_indicators("CE", rows[-1]["timestamp"])
+    indicators["futures_price"] = None
+    indicators["spot_price"] = 24_030.0
+
+    assert strategy.generate_signal(CE, indicators, 50.0) is None
+    assert strategy.last_no_vote_reason == "underlying_orb_not_ready"
+
+
+def test_prior_session_volume_cannot_dilute_current_breakout_participation(
     monkeypatch,
 ) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
     monkeypatch.setenv("ORB_BALANCED_RANGE_MAX_ATR", "2.0")
-    rows = _opening_rows()
+    prior_session = []
+    for minute in range(5):
+        row = _bar(
+            minute,
+            open_=23_900.0,
+            high=23_910.0,
+            low=23_890.0,
+            close=23_900.0,
+            volume=100_000.0,
+        )
+        row["timestamp"] = row["timestamp"] - timedelta(days=1)
+        prior_session.append(row)
+
+    rows = [*prior_session, *_opening_rows()]
     rows.append(
         _bar(
             15,
@@ -387,17 +426,53 @@ def test_futures_unavailable_uses_spot_context_but_never_executes_spot(
             volume=3_000.0,
         )
     )
-    strategy = _strategy({SPOT: rows})
-    indicators = _base_indicators("CE", rows[-1]["timestamp"])
-    indicators["futures_price"] = None
-    indicators["spot_price"] = 24_030.0
-
-    signal = strategy.generate_signal(CE, indicators, 50.0)
+    strategy = _strategy({FUTURE: rows})
+    signal = strategy.generate_signal(
+        CE, _base_indicators("CE", rows[-1]["timestamp"]), 50.0
+    )
 
     assert signal is not None
-    assert signal.symbol == CE
-    assert signal.metadata["opening_range_source"] == "spot_fallback"
-    assert signal.metadata["underlying_symbol"] == SPOT
+    assert signal.metadata["underlying_volume_ratio"] == pytest.approx(3.0)
+    assert (
+        signal.metadata["underlying_volume_ratio_basis"]
+        == "same_session_prior_completed_bars"
+    )
+
+
+def test_short_orb_atr_ignores_previous_session_gap(monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    monkeypatch.setenv("ORB_BALANCED_RANGE_MAX_ATR", "2.0")
+    prior_session = []
+    for minute in range(10):
+        row = _bar(
+            minute,
+            open_=23_000.0,
+            high=23_005.0,
+            low=22_995.0,
+            close=23_000.0,
+        )
+        row["timestamp"] = row["timestamp"] - timedelta(days=1)
+        prior_session.append(row)
+
+    rows = [*prior_session, *_opening_rows()[:5]]
+    rows.append(
+        _bar(
+            5,
+            open_=24_008.0,
+            high=24_034.0,
+            low=24_006.0,
+            close=24_030.0,
+            volume=3_000.0,
+        )
+    )
+    strategy = _strategy({FUTURE: rows}, orb_minutes=5)
+    signal = strategy.generate_signal(
+        CE, _base_indicators("CE", rows[-1]["timestamp"]), 50.0
+    )
+
+    assert signal is not None
+    assert signal.metadata["underlying_atr"] < 50.0
+    assert signal.metadata["underlying_atr_basis"] == "same_session_completed_bars"
 
 
 def test_late_breakout_outside_orb_entry_lifetime_fails_closed(monkeypatch) -> None:
@@ -453,27 +528,29 @@ def test_incomplete_opening_range_cannot_generate_breakout(
     assert strategy.last_no_vote_reason == "underlying_orb_not_ready"
 
 
-def test_incomplete_futures_range_can_use_complete_spot_range(monkeypatch) -> None:
+def test_incomplete_futures_range_cannot_be_rescued_by_spot_index(monkeypatch) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
-    rows = _opening_rows()
-    rows.append(
-        _bar(
-            15,
-            open_=24_008.0,
-            high=24_034.0,
-            low=24_006.0,
-            close=24_030.0,
-            volume=3_000.0,
+    futures_rows = _opening_rows()
+    spot_rows = [dict(row) for row in futures_rows]
+    breakout = _bar(
+        15,
+        open_=24_008.0,
+        high=24_034.0,
+        low=24_006.0,
+        close=24_030.0,
+        volume=3_000.0,
+    )
+    futures_rows.append(breakout)
+    spot_rows.append({**breakout, "volume": 0.0})
+    strategy = _strategy({FUTURE: futures_rows[1:], SPOT: spot_rows})
+
+    assert (
+        strategy.generate_signal(
+            CE, _base_indicators("CE", breakout["timestamp"]), 50.0
         )
+        is None
     )
-    strategy = _strategy({FUTURE: rows[1:], SPOT: rows})
-
-    signal = strategy.generate_signal(
-        CE, _base_indicators("CE", rows[-1]["timestamp"]), 50.0
-    )
-
-    assert signal is not None
-    assert signal.metadata["opening_range_source"] == "spot_fallback"
+    assert strategy.last_no_vote_reason == "underlying_orb_not_ready"
 
 
 @pytest.mark.parametrize("orb_minutes", [5, 10, 15])
