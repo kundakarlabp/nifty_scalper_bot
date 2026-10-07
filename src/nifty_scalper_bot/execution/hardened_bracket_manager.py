@@ -285,6 +285,7 @@ class HardenedBracketManager(_CoreBracketManager):
                 )
         except Exception:  # noqa: BLE001 - notification must never break trailing
             pass
+        self._sync_exchange_protective_stop(target)
         return True
 
     # ------------------------------------------------------------------
@@ -306,6 +307,13 @@ class HardenedBracketManager(_CoreBracketManager):
             ),
         )
         if not symbol or qty <= 0:
+            return
+
+        if self._prepare_exchange_stop_for_exit(
+            bracket,
+            reason=str(action.get("reason") or bracket.exit_reason or "EXIT"),
+            now=now,
+        ):
             return
 
         with self._lock:
