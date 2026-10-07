@@ -60,6 +60,149 @@ def test_launch_is_idempotent_after_terminal_result_and_forces_offline_flags(
     assert __import__("os").environ["EXECUTION_MODE"] == "LIVE"
 
 
+def test_systemd_launcher_uses_independent_transient_service(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from nifty_scalper_bot.ops.research_jobs import start_job
+
+    calls = []
+    monkeypatch.setenv("BOT_RESEARCH_LAUNCHER", "systemd")
+    monkeypatch.setattr(
+        "nifty_scalper_bot.ops.research_jobs._current_revision",
+        lambda _root: "abc123def456",
+    )
+
+    def run(command, **kwargs):
+        calls.append((command, kwargs))
+        if command[0] == "systemctl":
+            return SimpleNamespace(
+                returncode=0,
+                stdout="LoadState=not-found\nActiveState=inactive\n",
+                stderr="",
+            )
+        if command[:3] == ["sudo", "-n", "systemd-run"]:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        raise AssertionError(command)
+
+    monkeypatch.setattr("nifty_scalper_bot.ops.research_jobs.subprocess.run", run)
+    monkeypatch.setattr(
+        "nifty_scalper_bot.ops.research_jobs.subprocess.Popen",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("systemd mode must not spawn an admin child")
+        ),
+    )
+
+    result = start_job(
+        tmp_path,
+        {"id": "systemd-job", "days": 30, "mode": "components"},
+    )
+
+    assert result["state"] == "queued"
+    assert result["launcher"] == "systemd"
+    assert result["worker_unit"] == "niftybot-research-worker.service"
+    assert result["launch_revision"] == "abc123def456"
+    systemd_prefix = ["sudo", "-n", "systemd-run"]
+    launch = next(command for command, _ in calls if command[:3] == systemd_prefix)
+    assert "--unit=niftybot-research-worker.service" in launch
+    assert "--collect" in launch
+    assert "--service-type=exec" in launch
+    assert "--property=RuntimeMaxSec=2100s" in launch
+    assert "--property=CPUWeight=5" in launch
+    assert "--property=IOWeight=10" in launch
+    assert "--property=OOMScoreAdjust=500" in launch
+    assert "--setenv=ENABLE_LIVE=false" in launch
+    assert "--setenv=ORDERS__ENABLE_LIVE=false" in launch
+    assert "--setenv=EXECUTION_MODE=SHADOW" in launch
+    assert str(tmp_path / "scripts/run_research_job.py") in launch
+
+
+def test_systemd_active_worker_keeps_same_nonterminal_job_live(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from nifty_scalper_bot.ops.research_jobs import start_job, write_json
+
+    monkeypatch.setenv("BOT_RESEARCH_LAUNCHER", "systemd")
+    payload = {"id": "live-job", "days": 30, "mode": "components"}
+    existing = {
+        "id": "live-job",
+        "days": 30,
+        "mode": "components",
+        "state": "collecting",
+        "stage": "history",
+        "backtest_completed": False,
+        "component_backtest_completed": False,
+        "runtime_replay_completed": False,
+        "requested_work_completed": False,
+        "launch_attempt": 1,
+        "launcher": "systemd",
+        "worker_unit": "niftybot-research-worker.service",
+    }
+    write_json(tmp_path / "data/research/live-job/status.json", existing)
+    write_json(tmp_path / "data/research/latest.json", existing)
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append(command)
+        assert command[0] == "systemctl"
+        return SimpleNamespace(
+            returncode=0,
+            stdout="LoadState=loaded\nActiveState=active\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr("nifty_scalper_bot.ops.research_jobs.subprocess.run", run)
+
+    result = start_job(tmp_path, payload)
+
+    assert result == existing
+    assert all(command[:3] != ["sudo", "-n", "systemd-run"] for command in calls)
+
+
+def test_systemd_active_worker_rejects_overlapping_request(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from nifty_scalper_bot.ops.research_jobs import start_job
+
+    monkeypatch.setenv("BOT_RESEARCH_LAUNCHER", "systemd")
+    monkeypatch.setattr(
+        "nifty_scalper_bot.ops.research_jobs.subprocess.run",
+        lambda command, **kwargs: SimpleNamespace(
+            returncode=0,
+            stdout="LoadState=loaded\nActiveState=activating\n",
+            stderr="",
+        ),
+    )
+
+    result = start_job(tmp_path, {"id": "second-systemd-job", "mode": "components"})
+
+    assert result["state"] == "busy"
+    assert result["worker_unit"] == "niftybot-research-worker.service"
+    assert not (tmp_path / "data/research/second-systemd-job").exists()
+
+
+def test_systemd_launcher_state_failure_fails_closed(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from nifty_scalper_bot.ops.research_jobs import read_status, start_job
+
+    monkeypatch.setenv("BOT_RESEARCH_LAUNCHER", "systemd")
+    monkeypatch.setattr(
+        "nifty_scalper_bot.ops.research_jobs.subprocess.run",
+        lambda command, **kwargs: SimpleNamespace(
+            returncode=1,
+            stdout="",
+            stderr="private host detail",
+        ),
+    )
+
+    result = start_job(tmp_path, {"id": "systemd-unavailable", "mode": "components"})
+
+    assert result["state"] == "failed"
+    assert result["error_code"] == "research_launcher_state_unavailable"
+    assert "private host detail" not in json.dumps(result)
+    assert read_status(tmp_path) == result
+
+
 @pytest.mark.parametrize("stale_state", ["queued", "collecting"])
 def test_stale_nonterminal_job_fails_closed_without_relaunch(
     tmp_path, monkeypatch, stale_state

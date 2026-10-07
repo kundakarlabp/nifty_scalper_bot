@@ -25,6 +25,8 @@ _COMPONENT_WORKER_BUDGET_SECONDS = 1800
 _RUNTIME_REPLAY_BUDGET_SECONDS = 1500
 _WORKER_WAIT_GRACE_SECONDS = 300
 _WORKER_TERMINATION_GRACE_SECONDS = 10
+_SYSTEMD_RESEARCH_UNIT = "niftybot-research-worker.service"
+_SYSTEMD_BUSY_STATES = {"active", "activating", "reloading", "deactivating"}
 
 
 def validate_request(
@@ -115,6 +117,119 @@ def _same_request_definition(existing: dict[str, Any], request: dict[str, Any]) 
     return all(existing.get(key) == request.get(key) for key in ("id", "days", "mode"))
 
 
+def _launcher_mode() -> str:
+    """Return the configured research launcher without silently changing semantics."""
+
+    return (os.getenv("BOT_RESEARCH_LAUNCHER", "direct") or "direct").strip().lower()
+
+
+def _current_revision(root: Path) -> str:
+    """Return the checked-out revision for research provenance, when available."""
+
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    value = (result.stdout or "").strip()
+    if result.returncode == 0 and re.fullmatch(r"[0-9a-fA-F]{7,64}", value):
+        return value
+    return "unknown"
+
+
+def _systemd_unit_state() -> str | None:
+    """Return transient worker state; None means launcher state is unavailable."""
+
+    try:
+        result = subprocess.run(
+            [
+                "systemctl",
+                "show",
+                _SYSTEMD_RESEARCH_UNIT,
+                "--property=LoadState",
+                "--property=ActiveState",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    properties = {}
+    for line in (result.stdout or "").splitlines():
+        key, separator, value = line.partition("=")
+        if separator:
+            properties[key.strip()] = value.strip()
+    if properties.get("LoadState") == "not-found":
+        return "inactive"
+    state = properties.get("ActiveState")
+    return state or None
+
+
+def _launch_systemd_worker(
+    root: Path,
+    request: dict[str, Any],
+    *,
+    interpreter: Path,
+    env_file: str,
+) -> None:
+    """Launch the fixed worker in an independent transient systemd service."""
+
+    timeout = _worker_wait_timeout_seconds(request)
+    command = [
+        "sudo",
+        "-n",
+        "systemd-run",
+        f"--unit={_SYSTEMD_RESEARCH_UNIT}",
+        "--collect",
+        "--service-type=exec",
+        f"--uid={os.getuid()}",
+        f"--gid={os.getgid()}",
+        f"--working-directory={root}",
+        "--nice=10",
+        f"--property=RuntimeMaxSec={timeout}s",
+        "--property=CPUWeight=5",
+        "--property=IOWeight=10",
+        "--property=OOMScoreAdjust=500",
+        "--property=KillMode=control-group",
+        "--setenv=ENABLE_LIVE=false",
+        "--setenv=ENABLE_LIVE_TRADING=false",
+        "--setenv=ORDERS__ENABLE_LIVE=false",
+        "--setenv=EXECUTION_MODE=SHADOW",
+        "--setenv=PAPER_MODE=true",
+        "--setenv=SHADOW_MODE=true",
+        "--setenv=SUPABASE_TRADE_REPLICATION_ENABLED=false",
+        "--setenv=SUPABASE_LOG_ARCHIVE_ENABLED=false",
+        f"--setenv=PYTHONPATH={root / 'src'}:{root}",
+        str(interpreter),
+        str(root / "scripts/run_research_job.py"),
+        "--worker",
+        "--request-id",
+        str(request["id"]),
+        "--env-file",
+        env_file,
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            cwd=root,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise OSError("research_systemd_launch_failed") from exc
+    if result.returncode != 0:
+        raise OSError("research_systemd_launch_failed")
+
+
 def read_status(root: Path) -> dict[str, Any]:
     try:
         return json.loads((root / "data/research/latest.json").read_text())
@@ -125,7 +240,7 @@ def read_status(root: Path) -> dict[str, Any]:
 def start_job(
     root: Path, payload: dict[str, Any], *, wait: bool = False
 ) -> dict[str, Any]:
-    """Launch one detached worker; an OS lock rejects overlapping requests."""
+    """Launch one bounded worker; detached production work is systemd-owned."""
     import fcntl
 
     request = validate_request(payload)
@@ -137,6 +252,8 @@ def start_job(
     except BlockingIOError:
         lock.close()
         return {"state": "busy", "backtest_completed": False}
+
+    launcher = _launcher_mode()
     status_file = directory / request["id"] / "status.json"
     existing: dict[str, Any] = {}
     if status_file.exists():
@@ -148,23 +265,89 @@ def start_job(
         if state not in {"queued", "collecting"}:
             lock.close()
             return existing
-        # Acquiring the worker lock proves the prior worker is no longer alive:
-        # live workers inherit and hold this descriptor until exit. A repeated
-        # poll of the same immutable job must not create an unbounded restart
-        # loop; persist the stale worker as an explicit terminal failure.
+        if launcher == "systemd" and not wait:
+            unit_state = _systemd_unit_state()
+            if unit_state is None:
+                failed = {
+                    **existing,
+                    "state": "failed",
+                    "error_type": "ResearchLauncherUnavailable",
+                    "error_code": "research_launcher_state_unavailable",
+                    "requested_work_completed": False,
+                }
+                write_json(status_file, failed)
+                write_json(directory / "latest.json", failed)
+                lock.close()
+                return failed
+            if unit_state in _SYSTEMD_BUSY_STATES:
+                lock.close()
+                return existing
+        # Acquiring the launcher lock while the owning worker is absent proves
+        # the previous nonterminal request is stale. Systemd mode additionally
+        # verifies that the independent transient worker is no longer active.
         stale = {
             **existing,
             "state": "failed",
             "error_type": "WorkerExitedWithoutResult",
             "error_code": "stale_research_worker",
             "stale_state": state,
-            "recovery_reason": "nonterminal_status_without_worker_lock",
+            "recovery_reason": (
+                "nonterminal_status_without_live_worker"
+                if launcher == "systemd" and not wait
+                else "nonterminal_status_without_worker_lock"
+            ),
             "requested_work_completed": False,
         }
         write_json(status_file, stale)
         write_json(directory / "latest.json", stale)
         lock.close()
         return stale
+
+    if launcher not in {"direct", "systemd"}:
+        failed = {
+            **request,
+            "state": "failed",
+            "backtest_completed": False,
+            "component_backtest_completed": False,
+            "runtime_replay_completed": False,
+            "requested_work_completed": False,
+            "launch_attempt": 0,
+            "error_type": "ResearchLauncherInvalid",
+            "error_code": "research_launcher_invalid",
+        }
+        write_json(status_file, failed)
+        write_json(directory / "latest.json", failed)
+        lock.close()
+        return failed
+
+    if launcher == "systemd" and not wait:
+        unit_state = _systemd_unit_state()
+        if unit_state is None:
+            failed = {
+                **request,
+                "state": "failed",
+                "backtest_completed": False,
+                "component_backtest_completed": False,
+                "runtime_replay_completed": False,
+                "requested_work_completed": False,
+                "launch_attempt": 0,
+                "launcher": "systemd",
+                "worker_unit": _SYSTEMD_RESEARCH_UNIT,
+                "error_type": "ResearchLauncherUnavailable",
+                "error_code": "research_launcher_state_unavailable",
+            }
+            write_json(status_file, failed)
+            write_json(directory / "latest.json", failed)
+            lock.close()
+            return failed
+        if unit_state in _SYSTEMD_BUSY_STATES:
+            lock.close()
+            return {
+                "state": "busy",
+                "backtest_completed": False,
+                "worker_unit": _SYSTEMD_RESEARCH_UNIT,
+            }
+
     env = dict(os.environ)
     env.update(
         ENABLE_LIVE="false",
@@ -189,9 +372,34 @@ def start_job(
         "runtime_replay_completed": False,
         "requested_work_completed": False,
         "launch_attempt": 1,
+        "launcher": "direct" if wait else launcher,
     }
+    if launcher == "systemd" and not wait:
+        queued["launch_revision"] = _current_revision(root)
+        queued["worker_unit"] = _SYSTEMD_RESEARCH_UNIT
     write_json(status_file, queued)
     write_json(directory / "latest.json", queued)
+
+    if launcher == "systemd" and not wait:
+        try:
+            _launch_systemd_worker(
+                root,
+                request,
+                interpreter=interpreter,
+                env_file=env_file,
+            )
+        except OSError as exc:
+            queued.update(
+                state="failed",
+                error_type=type(exc).__name__,
+                error_code="research_systemd_launch_failed",
+            )
+            write_json(status_file, queued)
+            write_json(directory / "latest.json", queued)
+        finally:
+            lock.close()
+        return queued
+
     try:
         with (directory / request["id"] / "worker.log").open("a") as log:
             process = subprocess.Popen(
@@ -213,7 +421,7 @@ def start_job(
             )
             if wait:
                 # A systemd oneshot kills remaining children when it exits.
-                # Keep that parent alive; dashboard callers remain detached.
+                # Keep that parent alive; direct/manual callers remain bounded.
                 wait_timeout = _worker_wait_timeout_seconds(request)
                 try:
                     process.wait(timeout=wait_timeout)
@@ -242,7 +450,7 @@ def start_job(
         write_json(status_file, queued)
         write_json(directory / "latest.json", queued)
     finally:
-        # Child holds the same descriptor until it exits, including HTTP timeouts.
+        # Direct child holds the descriptor until it exits, including HTTP timeouts.
         lock.close()
     return queued
 

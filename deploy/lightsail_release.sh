@@ -309,9 +309,9 @@ restart_streamlit() {
   return 1
 }
 
-# Manifest polling is delegated to the persistent admin service. That service
-# owns the detached worker, so long research cannot hold the autodeploy oneshot
-# or its deployment lock.
+# Manifest polling is delegated to the persistent admin service. The admin only
+# requests a transient systemd research service; long research therefore owns an
+# independent cgroup and cannot hold the deploy lock or die with an admin restart.
 poll_research_request() {
   local code
   code="$(curl -sS --max-time 5 -o /dev/null -w '%{http_code}' \
@@ -338,6 +338,7 @@ if [ ! -f "$ENV_FILE" ] && [ -f "$APP_DIR/.env" ]; then
   cp -p "$APP_DIR/.env" "$ENV_FILE"; chmod 600 "$ENV_FILE"
 fi
 validate_environment
+ensure_env_default BOT_RESEARCH_LAUNCHER systemd
 ensure_env_default SUPABASE_TRADE_REPLICATION_ENABLED true
 ensure_env_default SUPABASE_TRADE_REPLICATION_URL "https://dehdptgkqbrkyzyodicd.supabase.co/functions/v1/nifty-trade-ingest"
 ensure_env_default SUPABASE_TRADE_REPLICATION_SOURCE lightsail
