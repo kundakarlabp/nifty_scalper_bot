@@ -5040,6 +5040,380 @@ class BracketManager:
         ).strip().lower() in {"1", "true", "yes", "on"}
         return mode == "LIVE" and enabled
 
+    def _exchange_stop_prices(
+        self,
+        bracket: BracketState,
+        trigger_price: float,
+    ) -> tuple[float, float]:
+        """Return broker-compatible trigger/limit prices for one protective SL."""
+        trigger = _round_to_tick(max(float(trigger_price), 0.05))
+        buffer = self._exchange_protective_stop_limit_buffer_pct / 100.0
+        if bracket.side == "BUY":
+            limit_price = _round_to_tick(max(0.05, trigger * (1.0 - buffer)))
+            if limit_price >= trigger:
+                limit_price = _round_to_tick(max(0.05, trigger - 0.05))
+        else:
+            limit_price = _round_to_tick(trigger * (1.0 + buffer))
+            if limit_price <= trigger:
+                limit_price = _round_to_tick(trigger + 0.05)
+        return trigger, limit_price
+
+    def _clear_exchange_stop_locked(self, bracket: BracketState) -> None:
+        bracket.exchange_stop_order_id = None
+        bracket.exchange_stop_trigger_price = None
+        bracket.exchange_stop_limit_price = None
+        bracket.exchange_stop_triggered_at = None
+        bracket.exchange_stop_degraded_reason = None
+
+    def _ensure_exchange_protective_stop(self, bracket: BracketState) -> bool:
+        """Arm exactly one exchange-resident SL-limit for a confirmed live position."""
+        if (
+            not self._exchange_protective_stop_enabled
+            or not self._is_live_execution()
+            or not bracket.active
+            or not bracket.entry_confirmed
+            or bracket.remaining_quantity <= 0
+            or bracket.sl_trigger_price <= 0
+        ):
+            return False
+        with self._lock:
+            if bracket.exchange_stop_order_id:
+                return True
+            trigger, limit_price = self._exchange_stop_prices(
+                bracket,
+                bracket.sl_trigger_price,
+            )
+            qty = int(bracket.remaining_quantity)
+            side = "SELL" if bracket.side == "BUY" else "BUY"
+        try:
+            order_id = self.order_manager.place_order(
+                symbol=bracket.symbol,
+                side=side,
+                quantity=qty,
+                order_type="SL",
+                price=limit_price,
+                trigger_price=trigger,
+                tag=f"psl_{bracket.entry_order_id[:8]}",
+                check_risk=False,
+                product=bracket.product,
+                intent="EXIT",
+                strategy_name="protective_exit",
+                linked_entry_order_id=bracket.entry_order_id,
+                trade_lifecycle_id=(
+                    bracket.trade_lifecycle_id or bracket.entry_order_id
+                ),
+                bracket_id=bracket.bracket_id,
+            )
+        except Exception as exc:  # noqa: BLE001 - virtual stop remains active
+            order_id = None
+            with self._lock:
+                bracket.exchange_stop_degraded_reason = (
+                    f"placement_exception:{type(exc).__name__}"
+                )
+            LOGGER.critical(
+                "EXCHANGE_PROTECTIVE_STOP_ARM_FAILED bracket_id=%s symbol=%s error=%s",
+                bracket.bracket_id,
+                bracket.symbol,
+                exc,
+                extra={
+                    "event": "EXCHANGE_PROTECTIVE_STOP_ARM_FAILED",
+                    "bracket_id": bracket.bracket_id,
+                    "symbol": bracket.symbol,
+                    "error_type": type(exc).__name__,
+                },
+            )
+        if not order_id:
+            with self._lock:
+                bracket.exchange_stop_degraded_reason = (
+                    bracket.exchange_stop_degraded_reason or "placement_rejected"
+                )
+            LOGGER.critical(
+                "EXCHANGE_PROTECTIVE_STOP_NOT_ARMED bracket_id=%s symbol=%s "
+                "trigger=%s limit=%s; software watchdog remains active",
+                bracket.bracket_id,
+                bracket.symbol,
+                trigger,
+                limit_price,
+                extra={
+                    "event": "EXCHANGE_PROTECTIVE_STOP_NOT_ARMED",
+                    "bracket_id": bracket.bracket_id,
+                    "symbol": bracket.symbol,
+                    "trigger_price": trigger,
+                    "limit_price": limit_price,
+                },
+            )
+            with suppress(Exception):
+                self.save_state()
+            return False
+
+        stop_id = str(order_id)
+        with self._lock:
+            bracket.exchange_stop_order_id = stop_id
+            bracket.exchange_stop_trigger_price = trigger
+            bracket.exchange_stop_limit_price = limit_price
+            bracket.exchange_stop_triggered_at = None
+            bracket.exchange_stop_degraded_reason = None
+            if stop_id not in bracket.linked_exit_order_ids:
+                bracket.linked_exit_order_ids.append(stop_id)
+            self._order_to_entry[stop_id] = bracket.entry_order_id
+            bracket.updated_at = time.time()
+        LOGGER.info(
+            "EXCHANGE_PROTECTIVE_STOP_ARMED bracket_id=%s order_id=%s "
+            "symbol=%s side=%s qty=%s trigger=%s limit=%s",
+            bracket.bracket_id,
+            stop_id,
+            bracket.symbol,
+            side,
+            qty,
+            trigger,
+            limit_price,
+            extra={
+                "event": "EXCHANGE_PROTECTIVE_STOP_ARMED",
+                "bracket_id": bracket.bracket_id,
+                "order_id": stop_id,
+                "symbol": bracket.symbol,
+                "side": side,
+                "quantity": qty,
+                "trigger_price": trigger,
+                "limit_price": limit_price,
+            },
+        )
+        with suppress(Exception):
+            self.save_state()
+        return True
+
+    def _sync_exchange_protective_stop(self, bracket: BracketState) -> bool:
+        """Ratchet the resting broker SL to the canonical virtual stop."""
+        with self._lock:
+            order_id = str(bracket.exchange_stop_order_id or "").strip()
+            if not order_id:
+                return False
+            trigger, limit_price = self._exchange_stop_prices(
+                bracket,
+                bracket.sl_trigger_price,
+            )
+        modifier = getattr(self.order_manager, "modify_order", None)
+        if not callable(modifier):
+            with self._lock:
+                bracket.exchange_stop_degraded_reason = "modify_unavailable"
+            return False
+        try:
+            modified = bool(
+                modifier(
+                    order_id,
+                    trigger_price=trigger,
+                    price=limit_price,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            modified = False
+            LOGGER.error(
+                "EXCHANGE_PROTECTIVE_STOP_MODIFY_FAILED order_id=%s symbol=%s error=%s",
+                order_id,
+                bracket.symbol,
+                exc,
+                exc_info=exc,
+            )
+        with self._lock:
+            if modified:
+                bracket.exchange_stop_trigger_price = trigger
+                bracket.exchange_stop_limit_price = limit_price
+                bracket.exchange_stop_degraded_reason = None
+            else:
+                bracket.exchange_stop_degraded_reason = "modify_failed"
+            bracket.updated_at = time.time()
+        if modified:
+            LOGGER.info(
+                "EXCHANGE_PROTECTIVE_STOP_RATCHETED order_id=%s symbol=%s "
+                "trigger=%s limit=%s",
+                order_id,
+                bracket.symbol,
+                trigger,
+                limit_price,
+                extra={
+                    "event": "EXCHANGE_PROTECTIVE_STOP_RATCHETED",
+                    "order_id": order_id,
+                    "symbol": bracket.symbol,
+                    "trigger_price": trigger,
+                    "limit_price": limit_price,
+                },
+            )
+        with suppress(Exception):
+            self.save_state()
+        return modified
+
+    def _retire_exchange_protective_stop(
+        self,
+        bracket: BracketState,
+        *,
+        reason: str,
+    ) -> str:
+        """Return absent/cancelled/filled/unresolved for the resting broker stop."""
+        with self._lock:
+            order_id = str(bracket.exchange_stop_order_id or "").strip()
+        if not order_id:
+            return "absent"
+
+        status = self._get_broker_order_status(order_id)
+        status_text = str((status or {}).get("status") or "").strip().upper()
+        if status_text in _FILLED_STATUSES:
+            return "filled"
+        if status_text in _CANCELLED_STATUSES:
+            with self._lock:
+                self._clear_exchange_stop_locked(bracket)
+                bracket.updated_at = time.time()
+            return "cancelled"
+
+        cancel = getattr(self.order_manager, "cancel_order", None)
+        if not callable(cancel):
+            with self._lock:
+                bracket.exchange_stop_degraded_reason = "cancel_unavailable"
+            return "unresolved"
+        try:
+            cancel(order_id)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.error(
+                "EXCHANGE_PROTECTIVE_STOP_CANCEL_FAILED order_id=%s symbol=%s "
+                "reason=%s error=%s",
+                order_id,
+                bracket.symbol,
+                reason,
+                exc,
+                exc_info=exc,
+            )
+
+        status = self._get_broker_order_status(order_id)
+        status_text = str((status or {}).get("status") or "").strip().upper()
+        if status_text in _FILLED_STATUSES:
+            return "filled"
+        if status_text in _CANCELLED_STATUSES:
+            with self._lock:
+                self._clear_exchange_stop_locked(bracket)
+                bracket.updated_at = time.time()
+            LOGGER.info(
+                "EXCHANGE_PROTECTIVE_STOP_CANCELLED order_id=%s symbol=%s reason=%s",
+                order_id,
+                bracket.symbol,
+                reason,
+                extra={
+                    "event": "EXCHANGE_PROTECTIVE_STOP_CANCELLED",
+                    "order_id": order_id,
+                    "symbol": bracket.symbol,
+                    "reason": reason,
+                },
+            )
+            with suppress(Exception):
+                self.save_state()
+            return "cancelled"
+
+        with self._lock:
+            bracket.exchange_stop_degraded_reason = (
+                f"cancel_unconfirmed:{status_text or 'unknown'}"
+            )
+        LOGGER.critical(
+            "EXCHANGE_PROTECTIVE_STOP_CANCEL_UNCONFIRMED order_id=%s symbol=%s "
+            "reason=%s status=%s",
+            order_id,
+            bracket.symbol,
+            reason,
+            status_text or "UNKNOWN",
+            extra={
+                "event": "EXCHANGE_PROTECTIVE_STOP_CANCEL_UNCONFIRMED",
+                "order_id": order_id,
+                "symbol": bracket.symbol,
+                "reason": reason,
+                "status": status_text or "UNKNOWN",
+            },
+        )
+        return "unresolved"
+
+    def _promote_filled_exchange_stop(
+        self,
+        bracket: BracketState,
+        *,
+        reason: str,
+    ) -> bool:
+        """Make a filled resting stop the canonical exit order and reconcile it."""
+        with self._lock:
+            order_id = str(bracket.exchange_stop_order_id or "").strip()
+            if not order_id:
+                return False
+            bracket.exit_order_id = order_id
+            bracket.pending_exit_order_id = order_id
+            bracket.exit_reason = reason
+            bracket.exit_pending = True
+            bracket.exit_in_progress = False
+            bracket.exit_submission_inflight = False
+            bracket.exit_intent = "EXIT"
+            bracket.expected_exit_side = "SELL" if bracket.side == "BUY" else "BUY"
+            bracket.expected_exit_qty = int(bracket.remaining_quantity)
+            bracket.exit_state = BracketExitLifecycle.EXIT_ORDER_SUBMITTED.value
+            bracket.entry_status = bracket.exit_state
+            bracket.updated_at = time.time()
+        return bool(
+            self._reconcile_exit_state(
+                bracket,
+                requested_by="exchange_protective_stop_fill",
+            )
+        )
+
+    def _prepare_exchange_stop_for_exit(
+        self,
+        bracket: BracketState,
+        *,
+        reason: str,
+        now: float,
+    ) -> bool:
+        """Return True while the resting exchange stop owns the reducing order."""
+        with self._lock:
+            order_id = str(bracket.exchange_stop_order_id or "").strip()
+        if not order_id:
+            return False
+
+        status = self._get_broker_order_status(order_id)
+        status_text = str((status or {}).get("status") or "").strip().upper()
+        if status_text in _FILLED_STATUSES:
+            self._promote_filled_exchange_stop(bracket, reason=reason)
+            return True
+        if status_text in _CANCELLED_STATUSES:
+            with self._lock:
+                self._clear_exchange_stop_locked(bracket)
+                bracket.updated_at = time.time()
+            return False
+
+        upper_reason = str(reason or "").upper()
+        hard_stop = any(
+            token in upper_reason
+            for token in ("HARD_SL_BREACH", "WATCHDOG_HARD_SL", "FORCED_SL_EXIT")
+        )
+        if hard_stop:
+            with self._lock:
+                if bracket.exchange_stop_triggered_at is None:
+                    bracket.exchange_stop_triggered_at = now
+                triggered_at = float(bracket.exchange_stop_triggered_at)
+            if now - triggered_at < self._exchange_protective_stop_grace_seconds:
+                self._log_throttled(
+                    "info",
+                    f"exchange_stop_grace:{bracket.bracket_id}",
+                    0.25,
+                    "EXCHANGE_PROTECTIVE_STOP_GRACE bracket_id=%s order_id=%s "
+                    "symbol=%s elapsed=%.3f grace=%.3f",
+                    bracket.bracket_id,
+                    order_id,
+                    bracket.symbol,
+                    now - triggered_at,
+                    self._exchange_protective_stop_grace_seconds,
+                )
+                return True
+
+        outcome = self._retire_exchange_protective_stop(bracket, reason=reason)
+        if outcome == "filled":
+            self._promote_filled_exchange_stop(bracket, reason=reason)
+            return True
+        if outcome == "unresolved":
+            return True
+        return False
+
     def _mark_persistence_degraded(
         self,
         reason: str,
