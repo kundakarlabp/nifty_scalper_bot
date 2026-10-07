@@ -255,6 +255,26 @@ def test_option_one_lot_accepted_as_broker_units() -> None:
     assert decision.quantity == 65
 
 
+def test_long_option_fallback_margin_uses_single_cash_reserve() -> None:
+    decision = _opt_engine().plan(
+        _opt_inputs(
+            price=153.2,
+            stop_loss=152.0,
+            balance=11_355.70,
+            per_trade_risk_pct=100.0,
+            per_trade_cap_pct=100.0,
+            margin_factor=1.1,
+            margin_buffer=0.9,
+            max_lots_per_trade=1,
+        )
+    )
+
+    assert decision.ok
+    assert decision.quantity == 65
+    assert decision.est_required == pytest.approx(153.2 * 65)
+    assert decision.available == pytest.approx(11_355.70)
+
+
 def test_option_two_lots_accepted() -> None:
     decision = _opt_engine().plan(
         _opt_inputs(requested_qty=130, balance=2_000_000.0)
