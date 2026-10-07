@@ -57,8 +57,14 @@ def test_host_release_validation_is_short_and_bounded() -> None:
     release = _text("deploy/lightsail_release.sh")
     setup = _text("deploy/lightsail_setup.sh")
 
-    assert 'RELEASE_TEST_TIMEOUT_SECONDS="${BOT_RELEASE_TEST_TIMEOUT_SECONDS:-300}"' in release
-    assert 'timeout --signal=TERM --kill-after=30s "$RELEASE_TEST_TIMEOUT_SECONDS"' in release
+    assert (
+        'RELEASE_TEST_TIMEOUT_SECONDS="${BOT_RELEASE_TEST_TIMEOUT_SECONDS:-300}"'
+        in release
+    )
+    assert (
+        'timeout --signal=TERM --kill-after=30s "$RELEASE_TEST_TIMEOUT_SECONDS"'
+        in release
+    )
     assert "tests/architecture/test_lightsail_release_contract.py" in release
     assert "tests/ops/test_research_jobs.py" in release
     assert "tests/test_execution_path_contract.py" in release
