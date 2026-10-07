@@ -702,84 +702,71 @@ class SMCStrategy(EliteStrategy):
                 self._last_emitted_bar[event_key] = confirmation_ts
             return
 
-    def _bar_terminates_event(
+    def _event_consumed_or_invalidated_before_current(
         self,
         rows: list[dict[str, Any]],
-        index: int,
+        candidate_index: int,
         event: Mapping[str, Any],
     ) -> bool:
-        """Return whether one completed bar invalidates or confirms an SMC event."""
-        row = rows[index]
+        """Reject stale reconstruction when uninterrupted runtime already acted."""
         side = str(event["side"])
-        close = float(row["close"])
         extreme = float(event["sweep_extreme"])
-        if (side == "CE" and close <= extreme) or (side == "PE" and close >= extreme):
-            return True
-
-        atr = max(1.0, self._atr(rows[: index + 1]))
-        body = abs(close - float(row["open"]))
         displacement_min = max(
             0.05,
             safe_float_env("SMC_CONFIRMATION_DISPLACEMENT_ATR", 0.25),
         )
-        price_confirmation = (
-            close > float(event["sweep_bar_high"])
-            if side == "CE"
-            else close < float(event["sweep_bar_low"])
-        )
-        return bool(price_confirmation and (body / atr) >= displacement_min)
+        for index in range(candidate_index + 1, len(rows) - 1):
+            row = rows[index]
+            close = float(row["close"])
+            if (side == "CE" and close <= extreme) or (
+                side == "PE" and close >= extreme
+            ):
+                return True
+            atr = max(1.0, self._atr(rows[: index + 1]))
+            body = abs(close - float(row["open"]))
+            price_confirmation = (
+                close > float(event["sweep_bar_high"])
+                if side == "CE"
+                else close < float(event["sweep_bar_low"])
+            )
+            if price_confirmation and (body / atr) >= displacement_min:
+                return True
+        return False
 
     def _recover_recent_sweep_event(
         self,
         snapshot: Mapping[str, Any],
         contract_side: str,
     ) -> dict[str, Any] | None:
-        """Replay the bounded completed-bar SMC lifecycle after state loss.
+        """Recover one still-unconfirmed underlying sweep after state loss.
 
-        Recovery follows the same one-event-at-a-time semantics as uninterrupted
-        runtime. A bar used to expire, invalidate, or confirm an active setup
-        cannot simultaneously arm a new recovered setup.
+        Reconstruction uses only completed futures/spot history already owned by
+        the SMC structure source. It never reads option-premium history and it
+        refuses a sweep if an intervening completed bar would already have
+        confirmed or invalidated the setup.
         """
         rows = [
             dict(row) for row in snapshot.get("rows", []) if isinstance(row, Mapping)
         ]
         if len(rows) < 2 or contract_side not in {"CE", "PE"}:
             return None
-
         current_ts = snapshot["current_ts"]
         max_age_minutes = max(1.0, safe_float_env("SMC_CONFIRMATION_MAX_MINUTES", 5.0))
-        recovery_bars = min(_env_int("SMC_RECOVERY_LOOKBACK_BARS", 5), 20)
+        recovery_bars = _env_int("SMC_RECOVERY_LOOKBACK_BARS", 5)
+        recovery_bars = min(recovery_bars, 20)
         strength = _env_int("SMC_PIVOT_STRENGTH", 2)
-        lookback = _env_int(
-            "SMC_PIVOT_LOOKBACK",
-            30,
-            minimum=(strength * 2) + 1,
-        )
+        lookback = _env_int("SMC_PIVOT_LOOKBACK", 30, minimum=(strength * 2) + 1)
         earliest = max((strength * 2) + 1, len(rows) - 1 - recovery_bars)
-        active_event: dict[str, Any] | None = None
 
-        for index in range(earliest, len(rows) - 1):
-            candidate = rows[index]
-            candidate_ts = candidate["timestamp"]
-
-            if active_event is not None:
-                age_minutes = (
-                    candidate_ts - active_event["sweep_ts"]
-                ).total_seconds() / 60.0
-                if age_minutes > max_age_minutes or self._bar_terminates_event(
-                    rows,
-                    index,
-                    active_event,
-                ):
-                    active_event = None
-                # The active setup owned this bar even when it terminated here.
-                continue
-
+        for index in range(len(rows) - 2, earliest - 1, -1):
             prefix = rows[: index + 1]
+            candidate = prefix[-1]
+            candidate_ts = candidate["timestamp"]
+            age_minutes = (current_ts - candidate_ts).total_seconds() / 60.0
+            if age_minutes <= 0 or age_minutes > max_age_minutes:
+                continue
             pivot_low, pivot_high = self._latest_confirmed_pivots(
-                prefix,
-                strength=strength,
-                lookback=lookback,
+                prefix, strength=strength, lookback=lookback
             )
             candidate_snapshot = {
                 "source": snapshot["source"],
@@ -795,38 +782,35 @@ class SMCStrategy(EliteStrategy):
             }
             bullish, bearish = self._sweep_diagnostics(candidate_snapshot)
             desired = bullish if contract_side == "CE" else bearish
-            if bool(desired.get("valid")):
-                active_event = self._build_sweep_event(
-                    candidate_snapshot,
-                    contract_side,
-                    desired,
-                    recovered_from_history=True,
-                )
-
-        if active_event is None:
-            return None
-        age_minutes = (current_ts - active_event["sweep_ts"]).total_seconds() / 60.0
-        if age_minutes <= 0 or age_minutes > max_age_minutes:
-            return None
-
-        LOGGER.info(
-            "SMC_SWEEP_RECOVERED structure_symbol=%s option_side=%s "
-            "sweep_ts=%s current_ts=%s source=%s",
-            snapshot["symbol"],
-            contract_side,
-            active_event["sweep_ts"],
-            current_ts,
-            snapshot["source"],
-            extra={
-                "event": "SMC_SWEEP_RECOVERED",
-                "structure_symbol": snapshot["symbol"],
-                "side": contract_side,
-                "sweep_timestamp": active_event["sweep_ts"],
-                "current_timestamp": current_ts,
-                "structure_source": snapshot["source"],
-            },
-        )
-        return active_event
+            if not bool(desired.get("valid")):
+                continue
+            event = self._build_sweep_event(
+                candidate_snapshot,
+                contract_side,
+                desired,
+                recovered_from_history=True,
+            )
+            if self._event_consumed_or_invalidated_before_current(rows, index, event):
+                continue
+            LOGGER.info(
+                "SMC_SWEEP_RECOVERED structure_symbol=%s option_side=%s "
+                "sweep_ts=%s current_ts=%s source=%s",
+                snapshot["symbol"],
+                contract_side,
+                candidate_ts,
+                current_ts,
+                snapshot["source"],
+                extra={
+                    "event": "SMC_SWEEP_RECOVERED",
+                    "structure_symbol": snapshot["symbol"],
+                    "side": contract_side,
+                    "sweep_timestamp": candidate_ts,
+                    "current_timestamp": current_ts,
+                    "structure_source": snapshot["source"],
+                },
+            )
+            return event
+        return None
 
     @staticmethod
     def _side_from_symbol(symbol: str) -> str:
