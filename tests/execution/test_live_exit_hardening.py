@@ -77,6 +77,7 @@ class _OrderManager:
         self._positions = _Positions()
         self._last_order_decision: dict[str, Any] = {}
         self.place_calls: list[dict[str, Any]] = []
+        self.modify_calls: list[tuple[str, dict[str, Any]]] = []
         self.submit_plan_calls = 0
         self._next_id = 1
 
