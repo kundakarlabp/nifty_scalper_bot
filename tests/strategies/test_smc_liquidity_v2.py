@@ -325,6 +325,47 @@ def test_configured_sweep_distance_is_used_as_normalized_threshold_cap(
     assert strategy.last_sweep_diagnostics["effective_min_sweep_points"] == 0.5
 
 
+def test_equal_low_cluster_is_preferred_over_minor_recent_swing(monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    rows = _base_rows()
+    rows[13] = _bar(13, open_=23990, high=23997, low=23986, close=23993)
+    rows[14] = _bar(14, open_=23989, high=23996, low=23985, close=23992)
+    rows[15] = _bar(15, open_=23987, high=23994, low=23980.4, close=23991)
+    rows[16] = _bar(16, open_=23991, high=23998, low=23985, close=23995)
+    rows[17] = _bar(17, open_=23995, high=24000, low=23987, close=23997)
+    rows[25] = _bar(25, open_=24000, high=24012, low=23994, close=24006)
+    rows[26] = _bar(26, open_=24006, high=24010, low=23991, close=24002)
+    rows[27] = _bar(27, open_=24002, high=24008, low=23986, close=23999)
+    rows[28] = _bar(28, open_=23999, high=24007, low=23992, close=24002)
+    rows[29] = _bar(29, open_=24002, high=24009, low=23993, close=24004)
+    strategy = _strategy(rows)
+
+    sweep = _bar(
+        30,
+        open_=23988.0,
+        high=23991.0,
+        low=23976.0,
+        close=23984.0,
+        volume=2400.0,
+    )
+    rows.append(sweep)
+
+    snapshot = strategy._underlying_snapshot(
+        _indicators(latest_bar_ts=sweep["timestamp"])
+    )
+    assert snapshot is not None
+    pivot_low = snapshot["pivot_low"]
+    assert pivot_low is not None
+    assert pivot_low["liquidity_level_type"] == "equal_low"
+    assert pivot_low["liquidity_touch_count"] >= 2
+    assert pivot_low["liquidity_level_priority"] == 3
+    assert pivot_low["low"] == pytest.approx(23980.0)
+
+    bullish, _ = strategy._sweep_diagnostics(snapshot)
+    assert bullish["valid"] is True
+    assert bullish["liquidity_level_type"] == "equal_low"
+
+
 def test_volume_spike_config_is_consumed_as_structural_confirmation(
     monkeypatch,
 ) -> None:
@@ -366,7 +407,7 @@ def test_volume_spike_config_is_consumed_as_structural_confirmation(
     assert "volume_confirmation" in signal.metadata["setup_reasons"]
 
 
-def test_balanced_sweep_geometry_cannot_replace_independent_confirmation(
+def test_smc_setup_leaves_independent_confirmation_to_strategy_manager(
     monkeypatch,
 ) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
@@ -427,8 +468,11 @@ def test_balanced_sweep_geometry_cannot_replace_independent_confirmation(
         103.0,
     )
 
-    assert signal is None
-    assert strategy.last_no_vote_reason == "smc_independent_confirmation_missing"
+    assert signal is not None
+    assert signal.metadata["requires_independent_confirmation"] is True
+    assert signal.metadata["confirmation_owner"] == "StrategyManager"
+    assert signal.metadata["smc_local_support_present"] is False
+    assert signal.metadata["smc_local_support_sources"] == []
 
 
 def test_bearish_underlying_sweep_confirms_long_pe(monkeypatch) -> None:
