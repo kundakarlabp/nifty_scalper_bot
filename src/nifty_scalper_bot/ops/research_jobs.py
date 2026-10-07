@@ -137,7 +137,9 @@ def _current_revision(root: Path) -> str:
     except (OSError, subprocess.SubprocessError):
         return "unknown"
     value = (result.stdout or "").strip()
-    return value if result.returncode == 0 and re.fullmatch(r"[0-9a-fA-F]{7,64}", value) else "unknown"
+    if result.returncode == 0 and re.fullmatch(r"[0-9a-fA-F]{7,64}", value):
+        return value
+    return "unknown"
 
 
 def _systemd_unit_state() -> str | None:
