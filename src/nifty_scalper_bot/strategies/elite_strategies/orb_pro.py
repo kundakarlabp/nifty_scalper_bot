@@ -220,18 +220,14 @@ class ORBProStrategy(EliteStrategy):
         # today's breakout depend on yesterday's close/volume and creates live
         # versus daily-reset research drift.
         session_rows = [
-            row
-            for row in rows
-            if session_open <= row["timestamp"] <= latest_ts
+            row for row in rows if session_open <= row["timestamp"] <= latest_ts
         ]
         if len(session_rows) < 2:
             return None
 
         # Minute bars are timestamped by bar start, therefore a 15-minute OR
         # is [09:15, 09:30), not [09:15, 09:30].
-        range_rows = [
-            row for row in session_rows if row["timestamp"] < cutoff
-        ]
+        range_rows = [row for row in session_rows if row["timestamp"] < cutoff]
         # Elapsed time or row count cannot prove coverage: a missing minute
         # can hide the true range extreme, even when duplicates fill the count.
         expected_starts = {
@@ -242,9 +238,7 @@ class ORBProStrategy(EliteStrategy):
         } != expected_starts or latest_ts < cutoff:
             return None
 
-        prior_rows = [
-            row for row in session_rows if row["timestamp"] < latest_ts
-        ]
+        prior_rows = [row for row in session_rows if row["timestamp"] < latest_ts]
         if not prior_rows:
             return None
         previous = prior_rows[-1]
@@ -569,9 +563,7 @@ class ORBProStrategy(EliteStrategy):
             ),
             "underlying_current_penetration_atr": round(current_penetration_atr, 4),
             "underlying_atr_basis": snapshot["underlying_atr_basis"],
-            "underlying_volume_ratio_basis": snapshot[
-                "underlying_volume_ratio_basis"
-            ],
+            "underlying_volume_ratio_basis": snapshot["underlying_volume_ratio_basis"],
             "underlying_entry": current_underlying,
             "underlying_invalidation": underlying_invalidation,
             "premium_stop_distance": premium_stop_distance,
