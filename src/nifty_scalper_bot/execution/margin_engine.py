@@ -350,11 +350,12 @@ class MarginEngine:
             except Exception as exc:  # noqa: BLE001
                 raise _BrokerMarginUnavailable(type(exc).__name__) from exc
 
-        return (
-            max(float(inputs.price), 0.0)
-            * max(int(quantity), 0)
-            * max(float(inputs.margin_factor), 1.0)
-        )
+        price = max(float(inputs.price), 0.0)
+        units = max(int(quantity), 0)
+        normalized_symbol = str(symbol or "").strip().upper().split(":", 1)[-1]
+        is_long_option_buy = side == "BUY" and normalized_symbol.endswith(("CE", "PE"))
+        factor = 1.0 if is_long_option_buy else max(float(inputs.margin_factor), 1.0)
+        return price * units * factor
 
     def _session_reason(self, now_ist: datetime, order_type: str) -> str | None:
         if order_type == "MIS" and now_ist.timetz() >= MIS_CUTOFF:
