@@ -171,7 +171,8 @@ def test_rollback_restarts_admin_on_restored_revision() -> None:
 def test_release_enables_independent_research_systemd_launcher() -> None:
     release = _text("deploy/lightsail_release.sh")
 
-    assert "ensure_env_default BOT_RESEARCH_LAUNCHER systemd" in release
+    assert "set_env_value BOT_RESEARCH_LAUNCHER systemd" in release
+    assert "ensure_env_default BOT_RESEARCH_LAUNCHER" not in release
     assert "transient systemd research service" in release
     block = release.split("poll_research_request()", 1)[1].split("exec 9>", 1)[0]
     assert "run_research_job.py" not in block
