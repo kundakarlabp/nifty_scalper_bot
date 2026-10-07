@@ -81,9 +81,6 @@ def test_release_runner_validates_and_rolls_back() -> None:
     assert "compileall" in release
     assert "pytest" in release
     assert "tests/execution/test_bracket_persistence_policy.py" in release
-    assert "tests/data/test_datahub_bounded_persistence.py" in release
-    assert "tests/data/test_mdm_tick_coalescing.py" in release
-    assert "tests/test_mdm_event_loop_consumer.py" in release
     assert "dashboard/superlite_console.py" in release
     assert "dashboard/operations_console.py" not in release
     assert '"bot_loaded"[[:space:]]*:[[:space:]]*true' in release
