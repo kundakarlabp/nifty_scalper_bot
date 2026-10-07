@@ -332,9 +332,7 @@ def test_full_protective_exit_uses_open_position_units_when_lot_lookup_unavailab
     assert broker.payloads[-1]["quantity"] == 65
 
 
-def test_option_exchange_sl_preserves_distinct_trigger_and_limit(
-    monkeypatch, tmp_path
-):
+def test_option_exchange_sl_preserves_distinct_trigger_and_limit(monkeypatch, tmp_path):
     monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
 
@@ -636,7 +634,9 @@ def test_non_nifty_option_uses_its_exact_metadata_lot_size(monkeypatch, tmp_path
     assert manager._lot_size_for_symbol("NFO:BANKNIFTY2671452000CE") == 35
 
 
-def test_exit_order_raw_broker_receives_only_zerodha_supported_tag(monkeypatch, tmp_path):
+def test_exit_order_raw_broker_receives_only_zerodha_supported_tag(
+    monkeypatch, tmp_path
+):
     from nifty_scalper_bot.execution.order_manager import OrderType
 
     monkeypatch.setenv("EXECUTION_MODE", "LIVE_SIMULATION")
