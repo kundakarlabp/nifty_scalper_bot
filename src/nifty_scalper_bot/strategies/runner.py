@@ -18824,7 +18824,12 @@ class StrategyRunner:
                         if callable(notify_entry_rejected):
                             try:
                                 notify_entry_rejected(
-                                    strategy_name,
+                                    str(
+                                        metadata.get("strategy_name")
+                                        or metadata.get("strategy")
+                                        or signal.reason
+                                        or ""
+                                    ),
                                     option_side,
                                     setup_id=(
                                         str(metadata.get("setup_id") or "").strip()
@@ -18836,7 +18841,12 @@ class StrategyRunner:
                                 self._logger.error(
                                     "STRATEGY_ENTRY_REJECTED_HOOK_FAILED "
                                     "strategy=%s side=%s reason=%s error=%s",
-                                    strategy_name,
+                                    str(
+                                        metadata.get("strategy_name")
+                                        or metadata.get("strategy")
+                                        or signal.reason
+                                        or ""
+                                    ),
                                     option_side,
                                     "no_affordable_execution_candidate",
                                     exc,
