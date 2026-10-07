@@ -182,9 +182,11 @@ def evaluate_minimum_lot_affordability(
 ) -> MinimumLotAffordability:
     """Evaluate whether one supplied BUY option lot is cash executable.
 
-    Readiness mirrors the MarginEngine cash-capacity path: ask premium × lot
-    size × margin factor, with the configured margin buffer reducing executable
-    cash. Risk-budget fields remain diagnostic unless the caller supplies the
+    Readiness mirrors the MarginEngine long-option cash-capacity path: the BUY
+    premium debit is ask × lot size, with the configured margin buffer retaining
+    one explicit cash reserve. The margin-factor setting remains observable for
+    legacy non-option fallback paths but is not stacked onto a fully paid option
+    BUY. Risk-budget fields remain diagnostic unless the caller supplies the
     materialized entry and stop. In particular,
     ``candidate_min_risk_distance`` is a transaction-cost/net-R:R modelling
     quantity, not an actual strategy stop, so it must never veto a contract.
@@ -259,7 +261,10 @@ def evaluate_minimum_lot_affordability(
             balance_source,
         )
 
-    required = ask * lot_size * margin_factor
+    # A long option BUY is fully paid premium. Keep one explicit reserve by
+    # reducing executable cash; do not also inflate the premium by margin_factor.
+    # Stacking both policies previously required ~22% headroom for a 10% reserve.
+    required = ask * lot_size
     executable_capacity = available * margin_buffer
     cash_affordable = bool(required > 0 and executable_capacity >= required)
     (
