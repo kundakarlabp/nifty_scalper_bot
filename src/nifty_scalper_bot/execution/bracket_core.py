@@ -340,6 +340,11 @@ class BracketState:
     entry_order_intent: str = "ENTRY"
     trade_lifecycle_id: str | None = None
     linked_exit_order_ids: list[str] = field(default_factory=list)
+    exchange_stop_order_id: str | None = None
+    exchange_stop_trigger_price: float | None = None
+    exchange_stop_limit_price: float | None = None
+    exchange_stop_triggered_at: float | None = None
+    exchange_stop_degraded_reason: str | None = None
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
     exit_executed: bool = False
@@ -484,6 +489,12 @@ class BracketState:
             "tag": self.tag,
             "product": self.product,
             "trade_provenance": dict(self.trade_provenance),
+            "linked_exit_order_ids": list(self.linked_exit_order_ids),
+            "exchange_stop_order_id": self.exchange_stop_order_id,
+            "exchange_stop_trigger_price": self.exchange_stop_trigger_price,
+            "exchange_stop_limit_price": self.exchange_stop_limit_price,
+            "exchange_stop_triggered_at": self.exchange_stop_triggered_at,
+            "exchange_stop_degraded_reason": self.exchange_stop_degraded_reason,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "exit_executed": self.exit_executed,
@@ -725,6 +736,23 @@ class BracketManager:
         )
         self._exit_fallback_to_market_on_quote_missing = _env_bool(
             "EXIT_FALLBACK_TO_MARKET_ON_QUOTE_MISSING", True
+        )
+        self._exchange_protective_stop_enabled = _env_bool(
+            "EXCHANGE_PROTECTIVE_STOP_ENABLED", True
+        )
+        self._exchange_protective_stop_limit_buffer_pct = max(
+            0.1,
+            parse_float_env(
+                os.getenv("EXCHANGE_PROTECTIVE_STOP_LIMIT_BUFFER_PCT"),
+                5.0,
+            ),
+        )
+        self._exchange_protective_stop_grace_seconds = max(
+            0.25,
+            parse_float_env(
+                os.getenv("EXCHANGE_PROTECTIVE_STOP_GRACE_SECONDS"),
+                1.0,
+            ),
         )
 
         if _env_bool("BRACKET_AUTO_RESTORE", True):
@@ -5150,6 +5178,42 @@ class BracketManager:
             tag=payload.get("tag"),
             product=str(payload.get("product") or "MIS"),
             trade_provenance=dict(payload.get("trade_provenance") or {}),
+            linked_exit_order_ids=[
+                str(value)
+                for value in payload.get("linked_exit_order_ids", []) or []
+                if str(value or "").strip()
+            ],
+            exchange_stop_order_id=(
+                str(payload.get("exchange_stop_order_id") or "").strip() or None
+            ),
+            exchange_stop_trigger_price=(
+                finite_float(
+                    "exchange stop trigger",
+                    payload.get("exchange_stop_trigger_price"),
+                )
+                if payload.get("exchange_stop_trigger_price") is not None
+                else None
+            ),
+            exchange_stop_limit_price=(
+                finite_float(
+                    "exchange stop limit",
+                    payload.get("exchange_stop_limit_price"),
+                )
+                if payload.get("exchange_stop_limit_price") is not None
+                else None
+            ),
+            exchange_stop_triggered_at=(
+                finite_float(
+                    "exchange stop triggered at",
+                    payload.get("exchange_stop_triggered_at"),
+                )
+                if payload.get("exchange_stop_triggered_at") is not None
+                else None
+            ),
+            exchange_stop_degraded_reason=(
+                str(payload.get("exchange_stop_degraded_reason") or "").strip()
+                or None
+            ),
             created_at=finite_float(
                 "created at", payload.get("created_at", time.time())
             ),
