@@ -286,6 +286,7 @@ def test_live_entry_arms_one_canonical_exchange_stop(monkeypatch) -> None:
     order_manager = _OrderManager(broker)
     manager = BracketManager(order_manager=order_manager)
     monkeypatch.setattr(manager, "_is_live_execution", lambda: True)
+    monkeypatch.setattr(manager, "save_state", lambda: None)
     manager._running = False
     manager._watchdog_thread.join(timeout=1.0)
     manager.register_virtual_bracket(
@@ -325,6 +326,7 @@ def test_exchange_stop_is_tightened_with_canonical_trailing_stop(monkeypatch) ->
     order_manager = _OrderManager(broker)
     manager = BracketManager(order_manager=order_manager)
     monkeypatch.setattr(manager, "_is_live_execution", lambda: True)
+    monkeypatch.setattr(manager, "save_state", lambda: None)
     manager._running = False
     manager._watchdog_thread.join(timeout=1.0)
     manager.register_virtual_bracket(
@@ -361,6 +363,7 @@ def test_stale_exchange_stop_skips_grace_and_uses_market_fallback(
     order_manager = _OrderManager(broker)
     manager = BracketManager(order_manager=order_manager)
     monkeypatch.setattr(manager, "_is_live_execution", lambda: True)
+    monkeypatch.setattr(manager, "save_state", lambda: None)
     manager._running = False
     manager._watchdog_thread.join(timeout=1.0)
     manager.register_virtual_bracket(
@@ -407,6 +410,7 @@ def test_hard_stop_waits_for_exchange_stop_before_market_fallback(monkeypatch) -
     order_manager = _OrderManager(broker)
     manager = BracketManager(order_manager=order_manager)
     monkeypatch.setattr(manager, "_is_live_execution", lambda: True)
+    monkeypatch.setattr(manager, "save_state", lambda: None)
     manager._running = False
     manager._watchdog_thread.join(timeout=1.0)
     manager.register_virtual_bracket(
@@ -460,6 +464,7 @@ def test_flat_reconcile_cancels_exchange_stop_before_unregister(monkeypatch) -> 
     order_manager = _OrderManager(broker)
     manager = BracketManager(order_manager=order_manager)
     monkeypatch.setattr(manager, "_is_live_execution", lambda: True)
+    monkeypatch.setattr(manager, "save_state", lambda: None)
     manager._running = False
     manager._watchdog_thread.join(timeout=1.0)
     manager.register_virtual_bracket(
