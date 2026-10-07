@@ -713,9 +713,7 @@ class SMCStrategy(EliteStrategy):
         side = str(event["side"])
         close = float(row["close"])
         extreme = float(event["sweep_extreme"])
-        if (side == "CE" and close <= extreme) or (
-            side == "PE" and close >= extreme
-        ):
+        if (side == "CE" and close <= extreme) or (side == "PE" and close >= extreme):
             return True
 
         atr = max(1.0, self._atr(rows[: index + 1]))
@@ -807,9 +805,7 @@ class SMCStrategy(EliteStrategy):
 
         if active_event is None:
             return None
-        age_minutes = (
-            current_ts - active_event["sweep_ts"]
-        ).total_seconds() / 60.0
+        age_minutes = (current_ts - active_event["sweep_ts"]).total_seconds() / 60.0
         if age_minutes <= 0 or age_minutes > max_age_minutes:
             return None
 
