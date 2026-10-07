@@ -13,6 +13,7 @@ from contextlib import suppress
 from dataclasses import asdict, dataclass
 from typing import Any, Mapping
 
+from nifty_scalper_bot.execution.margin_engine import estimate_fallback_cash_required
 from nifty_scalper_bot.risk.cost_model import estimate_round_trip_cost
 
 
@@ -261,10 +262,13 @@ def evaluate_minimum_lot_affordability(
             balance_source,
         )
 
-    # A long option BUY is fully paid premium. Keep one explicit reserve by
-    # reducing executable cash; do not also inflate the premium by margin_factor.
-    # Stacking both policies previously required ~22% headroom for a 10% reserve.
-    required = ask * lot_size
+    required = estimate_fallback_cash_required(
+        symbol=normalized_symbol,
+        side="BUY",
+        price=ask,
+        quantity=lot_size,
+        margin_factor=margin_factor,
+    )
     executable_capacity = available * margin_buffer
     cash_affordable = bool(required > 0 and executable_capacity >= required)
     (
