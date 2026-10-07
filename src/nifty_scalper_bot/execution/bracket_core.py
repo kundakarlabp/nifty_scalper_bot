@@ -4914,6 +4914,21 @@ class BracketManager:
         removed = 0
         for eid in entry_ids:
             try:
+                bracket = self.get_bracket(eid)
+                if bracket is not None and bracket.exchange_stop_order_id:
+                    outcome = self._retire_exchange_protective_stop(
+                        bracket,
+                        reason="broker_position_flat",
+                    )
+                    if outcome == "unresolved":
+                        LOGGER.critical(
+                            "BRACKET_FLAT_CLEANUP_BLOCKED_BY_OPEN_EXCHANGE_STOP "
+                            "bracket_id=%s symbol=%s order_id=%s",
+                            bracket.bracket_id,
+                            bracket.symbol,
+                            bracket.exchange_stop_order_id,
+                        )
+                        continue
                 self.unregister_bracket(eid)
                 removed += 1
             except Exception:  # noqa: BLE001
@@ -5844,6 +5859,10 @@ class BracketManager:
                 bracket = self._decode_restored_bracket(entry_id, record)
                 temp_brackets[entry_id] = bracket
                 temp_order_map[entry_id] = entry_id
+                for linked_order_id in bracket.linked_exit_order_ids:
+                    temp_order_map[str(linked_order_id)] = entry_id
+                if bracket.exchange_stop_order_id:
+                    temp_order_map[str(bracket.exchange_stop_order_id)] = entry_id
                 temp_symbol_map.setdefault(bracket.symbol, []).append(entry_id)
             parsed_rescue = {
                 str(key): int(value) for key, value in rescue_attempts.items()
