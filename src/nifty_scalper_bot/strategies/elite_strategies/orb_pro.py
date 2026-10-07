@@ -343,20 +343,15 @@ class ORBProStrategy(EliteStrategy):
                 return None
 
             for following in rows[index + 1 : -1]:
-                following_close = float(following["close"])
-                if side == "CE":
-                    invalidated = following_close < boundary - breakout_tolerance
-                    retested = bool(
-                        float(following["low"]) <= boundary + breakout_tolerance
-                        and following_close >= boundary
+                if (
+                    self._classify_retest_bar(
+                        following,
+                        side=side,
+                        boundary=boundary,
+                        tolerance=breakout_tolerance,
                     )
-                else:
-                    invalidated = following_close > boundary + breakout_tolerance
-                    retested = bool(
-                        float(following["high"]) >= boundary - breakout_tolerance
-                        and following_close <= boundary
-                    )
-                if invalidated or retested:
+                    is not None
+                ):
                     return None
 
             return {
@@ -379,6 +374,28 @@ class ORBProStrategy(EliteStrategy):
         if upper.endswith("PE"):
             return "PE"
         return ""
+
+    @staticmethod
+    def _classify_retest_bar(
+        row: Mapping[str, Any],
+        *,
+        side: str,
+        boundary: float,
+        tolerance: float,
+    ) -> str | None:
+        """Classify one completed underlying bar against an active ORB event."""
+        close = float(row["close"])
+        if side == "CE":
+            if close < boundary - tolerance:
+                return "INVALIDATED"
+            if float(row["low"]) <= boundary + tolerance and close >= boundary:
+                return "RETESTED"
+        else:
+            if close > boundary + tolerance:
+                return "INVALIDATED"
+            if float(row["high"]) >= boundary - tolerance and close <= boundary:
+                return "RETESTED"
+        return None
 
     def _structural_evidence(
         self,
@@ -822,29 +839,63 @@ class ORBProStrategy(EliteStrategy):
         event_tolerance = (
             max(0.0, _env_float("ORB_RETEST_TOLERANCE_ATR", 0.15)) * event_atr
         )
-        if side == "CE":
-            invalidated = current_close < boundary - event_tolerance
-            retest = bool(
-                current_ts > breakout_ts
-                and float(current_bar["low"]) <= boundary + event_tolerance
-                and current_close >= boundary
+        prior_resolution: str | None = None
+        for following in snapshot["rows"]:
+            following_ts = following["timestamp"]
+            if not breakout_ts < following_ts < current_ts:
+                continue
+            prior_resolution = self._classify_retest_bar(
+                following,
+                side=side,
+                boundary=boundary,
+                tolerance=event_tolerance,
             )
-        else:
-            invalidated = current_close > boundary + event_tolerance
-            retest = bool(
-                current_ts > breakout_ts
-                and float(current_bar["high"]) >= boundary - event_tolerance
-                and current_close <= boundary
+            if prior_resolution is not None:
+                break
+
+        setup_id = (
+            f"orbv2:{snapshot['session_date']}:{snapshot['symbol']}:{side}:"
+            f"{breakout_ts.isoformat()}"
+        )
+        if prior_resolution == "INVALIDATED":
+            event["status"] = "INVALIDATED"
+            transition_setup(
+                SetupStage.INVALIDATED,
+                strategy="ORBPro",
+                setup_id=setup_id,
+                symbol=symbol,
+                side=side,
+                reason="orb_breakout_invalidated",
             )
+            self._no_vote("orb_breakout_invalidated")
+            return None
+        if prior_resolution == "RETESTED":
+            event["status"] = "EXPIRED"
+            transition_setup(
+                SetupStage.EXPIRED,
+                strategy="ORBPro",
+                setup_id=setup_id,
+                symbol=symbol,
+                side=side,
+                reason="orb_retest_missed",
+            )
+            self._no_vote("orb_retest_missed")
+            return None
+
+        current_resolution = self._classify_retest_bar(
+            current_bar,
+            side=side,
+            boundary=boundary,
+            tolerance=event_tolerance,
+        )
+        invalidated = current_resolution == "INVALIDATED"
+        retest = current_ts > breakout_ts and current_resolution == "RETESTED"
         if invalidated:
             event["status"] = "INVALIDATED"
             transition_setup(
                 SetupStage.INVALIDATED,
                 strategy="ORBPro",
-                setup_id=(
-                    f"orbv2:{snapshot['session_date']}:{snapshot['symbol']}:{side}:"
-                    f"{breakout_ts.isoformat()}"
-                ),
+                setup_id=setup_id,
                 symbol=symbol,
                 side=side,
                 reason="orb_breakout_invalidated",
@@ -870,10 +921,7 @@ class ORBProStrategy(EliteStrategy):
             transition_setup(
                 SetupStage.CONTRACT_REJECTED,
                 strategy="ORBPro",
-                setup_id=(
-                    f"orbv2:{snapshot['session_date']}:{snapshot['symbol']}:{side}:"
-                    f"{breakout_ts.isoformat()}"
-                ),
+                setup_id=setup_id,
                 symbol=symbol,
                 side=side,
                 reason="orb_structural_contract_rejected",
