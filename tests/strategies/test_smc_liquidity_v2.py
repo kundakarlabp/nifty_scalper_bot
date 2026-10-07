@@ -563,6 +563,7 @@ def test_capacity_rejected_smc_requires_fresh_completed_bar_confirmation(
     assert refreshed is not None
     assert refreshed.metadata["setup_id"] == first.metadata["setup_id"]
     assert refreshed.metadata["setup_candle_timestamp"] == fresh_confirm["timestamp"]
+    assert refreshed.metadata["capacity_rejection_retry"] is True
 
 
 def test_same_confirmation_bar_reuses_identity_until_entry_is_accepted(
