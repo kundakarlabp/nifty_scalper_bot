@@ -917,10 +917,20 @@ class SMCStrategy(EliteStrategy):
                 return None
 
             event = self._events.get(event_key)
+            current_sweep_diagnostics: (
+                tuple[dict[str, Any], dict[str, Any]] | None
+            ) = None
             if event is None:
-                event = self._recover_recent_sweep_event(snapshot, contract_side)
-                if event is not None:
-                    self._events[event_key] = event
+                current_sweep_diagnostics = self._sweep_diagnostics(snapshot)
+                current_desired = (
+                    current_sweep_diagnostics[0]
+                    if contract_side == "CE"
+                    else current_sweep_diagnostics[1]
+                )
+                if not bool(current_desired.get("valid")):
+                    event = self._recover_recent_sweep_event(snapshot, contract_side)
+                    if event is not None:
+                        self._events[event_key] = event
             if event is not None:
                 max_age_minutes = max(
                     1.0,
@@ -1200,7 +1210,10 @@ class SMCStrategy(EliteStrategy):
                     metadata=metadata,
                 )
 
-            bullish, bearish = self._sweep_diagnostics(snapshot)
+            if current_sweep_diagnostics is None:
+                bullish, bearish = self._sweep_diagnostics(snapshot)
+            else:
+                bullish, bearish = current_sweep_diagnostics
             desired = bullish if contract_side == "CE" else bearish
             opposite = bearish if contract_side == "CE" else bullish
 
