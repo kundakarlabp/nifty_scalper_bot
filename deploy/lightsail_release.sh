@@ -7,6 +7,7 @@ set -euo pipefail
 APP_DIR="${BOT_APP_DIR:-/home/ubuntu/nifty_scalper_bot}"
 SERVICE="${BOT_SERVICE_NAME:-niftybot}"
 STREAMLIT_SERVICE="${BOT_STREAMLIT_SERVICE_NAME:-niftybot-streamlit}"
+ADMIN_SERVICE="${BOT_ADMIN_SERVICE_NAME:-niftybot-admin}"
 AUTODEPLOY_SERVICE="${BOT_AUTODEPLOY_SERVICE_NAME:-niftybot-autodeploy}"
 PORT="${PORT:-8080}"
 ADMIN_PORT="${BOT_ADMIN_PORT:-8081}"
@@ -280,6 +281,18 @@ PY_MIGRATE
   log "migrated $AUTODEPLOY_SERVICE ExecStart to bash wrapper"
 }
 
+restart_admin() {
+  if ! systemctl is-enabled --quiet "$ADMIN_SERVICE" 2>/dev/null; then
+    return 1
+  fi
+  sudo -n systemctl restart "$ADMIN_SERVICE" 2>/dev/null || return 1
+  for _ in $(seq 1 20); do
+    curl -fsS --max-time 2 "http://127.0.0.1:${ADMIN_PORT}/admin/api/status" >/dev/null 2>&1 && return 0
+    sleep 1
+  done
+  return 1
+}
+
 restart_streamlit() {
   if ! systemctl is-enabled --quiet "$STREAMLIT_SERVICE" 2>/dev/null; then
     return 0
@@ -454,6 +467,12 @@ if ! set_runtime_build_sha "$AFTER"; then
 fi
 sudo systemctl restart "$SERVICE"
 if wait_for_service "$AFTER"; then
+  admin_ready=false
+  if restart_admin; then
+    admin_ready=true
+  else
+    log "WARNING: admin service restart/health check failed; research manifest launch skipped"
+  fi
   if broker_auth_dependency_degraded; then
     restart_streamlit || log "WARNING: dashboard restart failed while broker auth is degraded"
     write_status deployed_dependency_degraded "deployed ${AFTER:0:7}; engine healthy, broker authentication unavailable; trading blocked"
@@ -465,7 +484,9 @@ if wait_for_service "$AFTER"; then
     logger -t niftybot-deploy "bot deployed; Streamlit health check failed"
   fi
   logger -t niftybot-deploy "validated and deployed ${BEFORE:0:7} -> ${AFTER:0:7}"
-  poll_research_request
+  if [ "$admin_ready" = true ]; then
+    poll_research_request
+  fi
   exit 0
 fi
 
@@ -474,6 +495,7 @@ if [ "$BEFORE" != "$AFTER" ]; then
   "$VENV/bin/python" -m pip install --quiet -e . || true
   set_runtime_build_sha "$BEFORE" || true
   sudo systemctl restart "$SERVICE"
+  restart_admin || true
   restart_streamlit || true
   write_status rolled_back "bot health check failed; restored ${BEFORE:0:7}"
 else
