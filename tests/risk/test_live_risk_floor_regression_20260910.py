@@ -72,7 +72,7 @@ def test_live_cash_affordable_contract_is_not_preblocked_by_fixed_rr_cost_floor(
         fallback_balance=BALANCE,
     )
 
-    assert decision.required == pytest.approx(82.15 * LOT_SIZE * 1.1)
+    assert decision.required == pytest.approx(82.15 * LOT_SIZE)
     assert decision.required < decision.executable_capacity
     assert decision.risk_floor_affordable is False
     assert decision.affordable is True

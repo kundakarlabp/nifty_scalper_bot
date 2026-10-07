@@ -23,6 +23,30 @@ class _Hub:
         return self.balance
 
 
+class _LiveOrderManager:
+    _margin_factor = 1.1
+    _margin_buffer = 0.9
+
+    def resolve_lot_size(self, symbol: str) -> int:
+        return 65
+
+
+def test_long_option_cash_reserve_is_not_stacked_with_margin_factor() -> None:
+    result = evaluate_minimum_lot_affordability(
+        symbol="NFO:NIFTY26O1322700CE",
+        quote={"bid": 153.0, "ask": 153.2, "ltp": 153.1},
+        order_manager=_LiveOrderManager(),
+        data_hub=_Hub(11_355.70),
+    )
+
+    assert result.determinate is True
+    assert result.affordable is True
+    assert result.required == 153.2 * 65
+    assert result.executable_capacity == 11_355.70 * 0.9
+    assert result.margin_factor == 1.1
+    assert result.margin_buffer == 0.9
+
+
 def test_minimum_lot_unaffordable_uses_ask_lot_and_cash_reserve() -> None:
     result = evaluate_minimum_lot_affordability(
         symbol="NFO:NIFTY26AUG25000CE",

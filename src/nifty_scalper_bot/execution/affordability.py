@@ -13,6 +13,7 @@ from contextlib import suppress
 from dataclasses import asdict, dataclass
 from typing import Any, Mapping
 
+from nifty_scalper_bot.execution.margin_engine import estimate_fallback_cash_required
 from nifty_scalper_bot.risk.cost_model import estimate_round_trip_cost
 
 
@@ -182,9 +183,11 @@ def evaluate_minimum_lot_affordability(
 ) -> MinimumLotAffordability:
     """Evaluate whether one supplied BUY option lot is cash executable.
 
-    Readiness mirrors the MarginEngine cash-capacity path: ask premium × lot
-    size × margin factor, with the configured margin buffer reducing executable
-    cash. Risk-budget fields remain diagnostic unless the caller supplies the
+    Readiness mirrors the MarginEngine long-option cash-capacity path: the BUY
+    premium debit is ask × lot size, with the configured margin buffer retaining
+    one explicit cash reserve. The margin-factor setting remains observable for
+    legacy non-option fallback paths but is not stacked onto a fully paid option
+    BUY. Risk-budget fields remain diagnostic unless the caller supplies the
     materialized entry and stop. In particular,
     ``candidate_min_risk_distance`` is a transaction-cost/net-R:R modelling
     quantity, not an actual strategy stop, so it must never veto a contract.
@@ -259,7 +262,13 @@ def evaluate_minimum_lot_affordability(
             balance_source,
         )
 
-    required = ask * lot_size * margin_factor
+    required = estimate_fallback_cash_required(
+        symbol=normalized_symbol,
+        side="BUY",
+        price=ask,
+        quantity=lot_size,
+        margin_factor=margin_factor,
+    )
     executable_capacity = available * margin_buffer
     cash_affordable = bool(required > 0 and executable_capacity >= required)
     (

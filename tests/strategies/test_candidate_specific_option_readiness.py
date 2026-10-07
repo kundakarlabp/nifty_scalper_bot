@@ -541,9 +541,9 @@ def test_live_candidate_selection_skips_unaffordable_ranked_contract() -> None:
     snapshots = [
         {
             "symbol": expensive.symbol,
-            "bid": 146.75,
-            "ask": 147.10,
-            "ltp": 147.00,
+            "bid": 159.75,
+            "ask": 160.00,
+            "ltp": 159.90,
         },
         {
             "symbol": affordable.symbol,

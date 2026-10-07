@@ -50,6 +50,23 @@ def _inputs(**overrides: float | int | str | None) -> MarginInputs:
     return MarginInputs(**base)  # type: ignore[arg-type]
 
 
+def test_non_option_fallback_retains_configured_margin_factor() -> None:
+    engine = MarginEngine(
+        broker=object(), data_hub=None, lot_size_resolver=None, clock=lambda: 0.0
+    )
+    decision = engine.plan(
+        _inputs(
+            symbol="NIFTY",
+            requested_qty=1,
+            max_lots_per_trade=1,
+            margin_factor=1.1,
+        )
+    )
+
+    assert decision.ok
+    assert decision.est_required == pytest.approx(110.0)
+
+
 def test_plan_steps_down_fallback_margin_to_affordable_quantity() -> None:
     engine = MarginEngine(
         broker=object(), data_hub=None, lot_size_resolver=None, clock=lambda: 0.0
@@ -253,6 +270,26 @@ def test_option_one_lot_accepted_as_broker_units() -> None:
     decision = _opt_engine().plan(_opt_inputs())
     assert decision.ok
     assert decision.quantity == 65
+
+
+def test_long_option_fallback_margin_uses_single_cash_reserve() -> None:
+    decision = _opt_engine().plan(
+        _opt_inputs(
+            price=153.2,
+            stop_loss=152.0,
+            balance=11_355.70,
+            per_trade_risk_pct=100.0,
+            per_trade_cap_pct=100.0,
+            margin_factor=1.1,
+            margin_buffer=0.9,
+            max_lots_per_trade=1,
+        )
+    )
+
+    assert decision.ok
+    assert decision.quantity == 65
+    assert decision.est_required == pytest.approx(153.2 * 65)
+    assert decision.available == pytest.approx(11_355.70)
 
 
 def test_option_two_lots_accepted() -> None:

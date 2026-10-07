@@ -66,6 +66,27 @@ class _BrokerMarginUnavailable(RuntimeError):
 MIS_CUTOFF = time(15, 25)
 
 
+def estimate_fallback_cash_required(
+    *,
+    symbol: str,
+    side: OrderSide,
+    price: float,
+    quantity: int,
+    margin_factor: float,
+) -> float:
+    """Estimate cash required when no concrete broker margin quote exists.
+
+    Long option BUY orders are fully paid premium, so the configured cash reserve
+    is applied separately through margin_buffer and must not be stacked with
+    margin_factor. Other order shapes retain the historical factor.
+    """
+
+    normalized_symbol = str(symbol or "").strip().upper().split(":", 1)[-1]
+    is_long_option_buy = side == "BUY" and normalized_symbol.endswith(("CE", "PE"))
+    factor = 1.0 if is_long_option_buy else max(float(margin_factor), 1.0)
+    return max(float(price), 0.0) * max(int(quantity), 0) * factor
+
+
 class MarginEngine:
     """Evaluate margin availability and sizing before broker submission."""
 
@@ -350,10 +371,12 @@ class MarginEngine:
             except Exception as exc:  # noqa: BLE001
                 raise _BrokerMarginUnavailable(type(exc).__name__) from exc
 
-        return (
-            max(float(inputs.price), 0.0)
-            * max(int(quantity), 0)
-            * max(float(inputs.margin_factor), 1.0)
+        return estimate_fallback_cash_required(
+            symbol=symbol,
+            side=side,
+            price=inputs.price,
+            quantity=quantity,
+            margin_factor=inputs.margin_factor,
         )
 
     def _session_reason(self, now_ist: datetime, order_type: str) -> str | None:
@@ -367,5 +390,6 @@ __all__ = [
     "MarginDecision",
     "MarginInputs",
     "MIS_CUTOFF",
+    "estimate_fallback_cash_required",
     "SizingResult",
 ]
