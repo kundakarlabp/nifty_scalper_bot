@@ -338,7 +338,7 @@ if [ ! -f "$ENV_FILE" ] && [ -f "$APP_DIR/.env" ]; then
   cp -p "$APP_DIR/.env" "$ENV_FILE"; chmod 600 "$ENV_FILE"
 fi
 validate_environment
-ensure_env_default BOT_RESEARCH_LAUNCHER systemd
+set_env_value BOT_RESEARCH_LAUNCHER systemd
 ensure_env_default SUPABASE_TRADE_REPLICATION_ENABLED true
 ensure_env_default SUPABASE_TRADE_REPLICATION_URL "https://dehdptgkqbrkyzyodicd.supabase.co/functions/v1/nifty-trade-ingest"
 ensure_env_default SUPABASE_TRADE_REPLICATION_SOURCE lightsail

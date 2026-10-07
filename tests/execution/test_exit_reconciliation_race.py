@@ -914,6 +914,10 @@ async def test_real_bracket_manager_flat_reconcile_clears_unresolved_entry_block
     order_manager._positions = pm
     bm = BracketManager(order_manager=order_manager)
     order_manager._bracket_manager = bm
+    # This test owns reconciliation explicitly; the live watchdog would add
+    # nondeterministic broker snapshots and race the assertions below.
+    bm._running = False
+    bm._watchdog_thread.join(timeout=1.0)
 
     try:
         bm.register_virtual_bracket(
