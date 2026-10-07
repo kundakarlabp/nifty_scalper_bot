@@ -322,6 +322,110 @@ def test_retest_tolerance_stays_anchored_to_breakout_volatility(monkeypatch) -> 
     assert signal.metadata["entry_branch"] == "retest"
 
 
+def test_missed_prior_retest_cannot_be_replayed_on_later_bar(monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    monkeypatch.setenv("ORB_MOMENTUM_BRANCH_ENABLED", "false")
+    monkeypatch.setenv("ORB_BALANCED_RANGE_MAX_ATR", "2.0")
+    rows = _opening_rows()
+    rows.append(
+        _bar(
+            15,
+            open_=24_014.0,
+            high=24_034.0,
+            low=24_012.0,
+            close=24_030.0,
+            volume=1_600.0,
+        )
+    )
+    engine = _IndicatorEngine({FUTURE: rows})
+    strategy = ORBProStrategy(
+        ORBProStrategyConfig(orb_minutes=15),
+        indicator_engine=engine,
+    )
+    first = _base_indicators("CE", rows[-1]["timestamp"])
+
+    assert strategy.generate_signal(CE, first, 50.0) is None
+    assert strategy.last_no_vote_reason == "awaiting_orb_retest"
+
+    # Minute 16 is a valid first retest, but the strategy is not evaluated on it.
+    rows.append(
+        _bar(
+            16,
+            open_=24_024.0,
+            high=24_026.0,
+            low=24_019.0,
+            close=24_021.0,
+            volume=400.0,
+        )
+    )
+    rows.append(
+        _bar(
+            17,
+            open_=24_024.0,
+            high=24_026.0,
+            low=24_019.0,
+            close=24_021.0,
+            volume=400.0,
+        )
+    )
+    later = _base_indicators("CE", rows[-1]["timestamp"])
+
+    assert strategy.generate_signal(CE, later, 50.0) is None
+    assert strategy.last_no_vote_reason == "orb_retest_missed"
+
+
+def test_missed_prior_invalidation_blocks_later_retest(monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    monkeypatch.setenv("ORB_MOMENTUM_BRANCH_ENABLED", "false")
+    monkeypatch.setenv("ORB_BALANCED_RANGE_MAX_ATR", "2.0")
+    rows = _opening_rows()
+    rows.append(
+        _bar(
+            15,
+            open_=24_014.0,
+            high=24_034.0,
+            low=24_012.0,
+            close=24_030.0,
+            volume=1_600.0,
+        )
+    )
+    engine = _IndicatorEngine({FUTURE: rows})
+    strategy = ORBProStrategy(
+        ORBProStrategyConfig(orb_minutes=15),
+        indicator_engine=engine,
+    )
+    first = _base_indicators("CE", rows[-1]["timestamp"])
+
+    assert strategy.generate_signal(CE, first, 50.0) is None
+    assert strategy.last_no_vote_reason == "awaiting_orb_retest"
+
+    # Minute 16 invalidates the breakout while the strategy is not evaluated.
+    rows.append(
+        _bar(
+            16,
+            open_=24_018.0,
+            high=24_020.0,
+            low=24_006.0,
+            close=24_010.0,
+            volume=400.0,
+        )
+    )
+    rows.append(
+        _bar(
+            17,
+            open_=24_024.0,
+            high=24_026.0,
+            low=24_019.0,
+            close=24_021.0,
+            volume=400.0,
+        )
+    )
+    later = _base_indicators("CE", rows[-1]["timestamp"])
+
+    assert strategy.generate_signal(CE, later, 50.0) is None
+    assert strategy.last_no_vote_reason == "orb_breakout_invalidated"
+
+
 def test_option_premium_breakout_without_underlying_breakout_does_not_vote(
     monkeypatch,
 ) -> None:
