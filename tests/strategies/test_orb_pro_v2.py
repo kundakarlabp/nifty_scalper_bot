@@ -236,7 +236,10 @@ def test_orb_frequency_is_restart_deterministic_after_prior_emission(
 
     assert continuous_signal is not None
     assert restarted_signal is not None
-    assert continuous_signal.metadata["setup_id"] == restarted_signal.metadata["setup_id"]
+    assert (
+        continuous_signal.metadata["setup_id"]
+        == restarted_signal.metadata["setup_id"]
+    )
 
 
 def test_retest_must_follow_breakout_before_retest_branch_votes(monkeypatch) -> None:
