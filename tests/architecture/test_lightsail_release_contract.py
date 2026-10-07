@@ -145,9 +145,7 @@ def test_changed_release_restarts_current_revision_admin_before_research_poll() 
 
     assert 'ADMIN_SERVICE="${BOT_ADMIN_SERVICE_NAME:-niftybot-admin}"' in release
     assert "restart_admin()" in release
-    helper = release.split("restart_admin()", 1)[1].split(
-        "restart_streamlit()", 1
-    )[0]
+    helper = release.split("restart_admin()", 1)[1].split("restart_streamlit()", 1)[0]
     assert 'systemctl restart "$ADMIN_SERVICE"' in helper
     assert "http://127.0.0.1:${ADMIN_PORT}/admin/api/status" in helper
 
