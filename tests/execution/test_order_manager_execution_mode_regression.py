@@ -333,6 +333,8 @@ def test_full_protective_exit_uses_open_position_units_when_lot_lookup_unavailab
 
 
 def test_option_exchange_sl_preserves_distinct_trigger_and_limit(monkeypatch, tmp_path):
+    from nifty_scalper_bot.execution.order_manager import OrderType
+
     monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
 
@@ -367,7 +369,7 @@ def test_option_exchange_sl_preserves_distinct_trigger_and_limit(monkeypatch, tm
 
     assert order_id == "STOP-1"
     payload = broker.payloads[-1]
-    assert payload["order_type"] == "SL"
+    assert payload["order_type"] is OrderType.STOP_LOSS
     assert payload["price"] == pytest.approx(133.0)
     assert payload["trigger_price"] == pytest.approx(140.0)
 
