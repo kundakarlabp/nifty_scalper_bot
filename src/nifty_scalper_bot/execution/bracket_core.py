@@ -5426,10 +5426,26 @@ class BracketManager:
         )
         if hard_stop:
             with self._lock:
-                if bracket.exchange_stop_triggered_at is None:
+                exchange_trigger = float(
+                    bracket.exchange_stop_trigger_price or 0.0
+                )
+                virtual_trigger = float(bracket.sl_trigger_price or 0.0)
+                exchange_stop_current = (
+                    bracket.exchange_stop_degraded_reason is None
+                    and abs(exchange_trigger - virtual_trigger) < 0.025
+                )
+                if exchange_stop_current and bracket.exchange_stop_triggered_at is None:
                     bracket.exchange_stop_triggered_at = now
-                triggered_at = float(bracket.exchange_stop_triggered_at)
-            if now - triggered_at < self._exchange_protective_stop_grace_seconds:
+                triggered_at = (
+                    float(bracket.exchange_stop_triggered_at)
+                    if bracket.exchange_stop_triggered_at is not None
+                    else now
+                )
+            if (
+                exchange_stop_current
+                and now - triggered_at
+                < self._exchange_protective_stop_grace_seconds
+            ):
                 self._log_throttled(
                     "info",
                     f"exchange_stop_grace:{bracket.bracket_id}",
