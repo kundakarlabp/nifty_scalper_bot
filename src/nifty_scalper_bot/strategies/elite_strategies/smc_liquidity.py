@@ -905,16 +905,29 @@ class SMCStrategy(EliteStrategy):
                 None
             )
             if event is None:
-                current_sweep_diagnostics = self._sweep_diagnostics(snapshot)
-                current_desired = (
-                    current_sweep_diagnostics[0]
-                    if contract_side == "CE"
-                    else current_sweep_diagnostics[1]
-                )
-                if not bool(current_desired.get("valid")):
-                    event = self._recover_recent_sweep_event(snapshot, contract_side)
+                event = self._recover_recent_sweep_event(snapshot, contract_side)
+                if event is not None:
+                    recovered_side = str(event["side"])
+                    recovered_invalidated = (
+                        recovered_side == "CE"
+                        and float(current["close"]) <= float(event["sweep_extreme"])
+                    ) or (
+                        recovered_side == "PE"
+                        and float(current["close"]) >= float(event["sweep_extreme"])
+                    )
+                    if recovered_invalidated:
+                        current_sweep_diagnostics = self._sweep_diagnostics(snapshot)
+                        current_desired = (
+                            current_sweep_diagnostics[0]
+                            if contract_side == "CE"
+                            else current_sweep_diagnostics[1]
+                        )
+                        if bool(current_desired.get("valid")):
+                            event = None
                     if event is not None:
                         self._events[event_key] = event
+                else:
+                    current_sweep_diagnostics = self._sweep_diagnostics(snapshot)
             if event is not None:
                 max_age_minutes = max(
                     1.0,
