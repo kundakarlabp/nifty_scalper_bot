@@ -146,6 +146,8 @@ After=network-online.target
 [Service]
 Type=oneshot
 User=ubuntu
+TimeoutStartSec=600
+KillMode=control-group
 Environment=BOT_APP_DIR=$APP_DIR
 Environment=BOT_ENV_FILE=$ENV_FILE
 Environment=BOT_SERVICE_NAME=$SERVICE
