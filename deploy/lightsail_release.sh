@@ -246,40 +246,86 @@ PY_MIGRATE
 migrate_autodeploy_entrypoint() {
   local unit_path="/etc/systemd/system/${AUTODEPLOY_SERVICE}.service"
   local canonical_exec="ExecStart=/usr/bin/env bash ${APP_DIR}/deploy/lightsail_release.sh --auto"
+  local canonical_timeout="TimeoutStartSec=600"
+  local canonical_kill_mode="KillMode=control-group"
   if [ ! -f "$unit_path" ]; then
     AUTODEPLOY_ENTRYPOINT_MIGRATED=false
     return 0
   fi
-  if grep -Fqx "$canonical_exec" "$unit_path" 2>/dev/null; then
+  if grep -Fqx "$canonical_exec" "$unit_path" 2>/dev/null \
+    && grep -Fqx "$canonical_timeout" "$unit_path" 2>/dev/null \
+    && grep -Fqx "$canonical_kill_mode" "$unit_path" 2>/dev/null; then
     AUTODEPLOY_ENTRYPOINT_MIGRATED=false
     return 0
   fi
-  if ! grep -q '^ExecStart=' "$unit_path" 2>/dev/null; then
-    log "WARNING: $unit_path has no ExecStart; skipping auto-deploy entrypoint migration"
+  if ! grep -q '^\[Service\]$' "$unit_path" 2>/dev/null \
+    || ! grep -q '^ExecStart=' "$unit_path" 2>/dev/null; then
+    log "WARNING: $unit_path lacks a canonical Service/ExecStart block; skipping auto-deploy migration"
     AUTODEPLOY_ENTRYPOINT_MIGRATED=false
     return 0
   fi
-  sudo python3 - "$unit_path" "$canonical_exec" <<'PY_MIGRATE'
+  sudo python3 - "$unit_path" "$canonical_exec" "$canonical_timeout" "$canonical_kill_mode" <<'PY_MIGRATE'
 import sys
 from pathlib import Path
+
 unit = Path(sys.argv[1])
-canonical = sys.argv[2]
-text = unit.read_text(encoding="utf-8")
-lines = text.splitlines()
+canonical_exec = sys.argv[2]
+canonical_timeout = sys.argv[3]
+canonical_kill_mode = sys.argv[4]
+lines = unit.read_text(encoding="utf-8").splitlines()
 out = []
+service = False
+seen_exec = False
+seen_timeout = False
+seen_kill_mode = False
 changed = False
-for line in lines:
-    if line.startswith("ExecStart=") and not changed:
-        out.append(canonical)
+
+def append_missing_service_fields():
+    global changed
+    if not seen_timeout:
+        out.append(canonical_timeout)
         changed = True
-    else:
+    if not seen_kill_mode:
+        out.append(canonical_kill_mode)
+        changed = True
+
+for line in lines:
+    if line.startswith("[") and line.endswith("]"):
+        if service:
+            append_missing_service_fields()
+        service = line == "[Service]"
         out.append(line)
+        continue
+    if service and line.startswith("ExecStart="):
+        if line != canonical_exec:
+            changed = True
+        out.append(canonical_exec)
+        seen_exec = True
+        continue
+    if service and line.startswith("TimeoutStartSec="):
+        if line != canonical_timeout:
+            changed = True
+        out.append(canonical_timeout)
+        seen_timeout = True
+        continue
+    if service and line.startswith("KillMode="):
+        if line != canonical_kill_mode:
+            changed = True
+        out.append(canonical_kill_mode)
+        seen_kill_mode = True
+        continue
+    out.append(line)
+
+if service:
+    append_missing_service_fields()
+if not seen_exec:
+    raise SystemExit("autodeploy unit missing ExecStart")
 if changed:
     unit.write_text("\n".join(out).rstrip() + "\n", encoding="utf-8")
 PY_MIGRATE
   sudo systemctl daemon-reload
   AUTODEPLOY_ENTRYPOINT_MIGRATED=true
-  log "migrated $AUTODEPLOY_SERVICE ExecStart to bash wrapper"
+  log "migrated $AUTODEPLOY_SERVICE to bounded bash release runner"
 }
 
 restart_admin() {
