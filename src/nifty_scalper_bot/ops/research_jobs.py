@@ -118,8 +118,11 @@ def _same_request_definition(existing: dict[str, Any], request: dict[str, Any]) 
 
 
 def _launcher_mode() -> str:
-    """Return the configured research launcher without silently changing semantics."""
+    """Keep production research outside restartable application cgroups."""
 
+    platform = (os.getenv("DEPLOYMENT_PLATFORM", "") or "").strip().lower()
+    if platform == "aws_lightsail":
+        return "systemd"
     return (os.getenv("BOT_RESEARCH_LAUNCHER", "direct") or "direct").strip().lower()
 
 
