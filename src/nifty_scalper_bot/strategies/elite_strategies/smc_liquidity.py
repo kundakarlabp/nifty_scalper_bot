@@ -917,9 +917,9 @@ class SMCStrategy(EliteStrategy):
                 return None
 
             event = self._events.get(event_key)
-            current_sweep_diagnostics: (
-                tuple[dict[str, Any], dict[str, Any]] | None
-            ) = None
+            current_sweep_diagnostics: tuple[dict[str, Any], dict[str, Any]] | None = (
+                None
+            )
             if event is None:
                 current_sweep_diagnostics = self._sweep_diagnostics(snapshot)
                 current_desired = (
