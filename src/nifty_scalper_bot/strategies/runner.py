@@ -18817,6 +18817,31 @@ class StrategyRunner:
                             now_epoch=now_epoch,
                             broker_attempted=False,
                         )
+                        strategy_manager = getattr(self, "_strategy_manager", None)
+                        notify_entry_rejected = getattr(
+                            strategy_manager, "notify_entry_rejected", None
+                        )
+                        if callable(notify_entry_rejected):
+                            try:
+                                notify_entry_rejected(
+                                    strategy_name,
+                                    option_side,
+                                    setup_id=(
+                                        str(metadata.get("setup_id") or "").strip()
+                                        or None
+                                    ),
+                                    reason="no_affordable_execution_candidate",
+                                )
+                            except Exception as exc:  # noqa: BLE001 - rejection stands
+                                self._logger.error(
+                                    "STRATEGY_ENTRY_REJECTED_HOOK_FAILED "
+                                    "strategy=%s side=%s reason=%s error=%s",
+                                    strategy_name,
+                                    option_side,
+                                    "no_affordable_execution_candidate",
+                                    exc,
+                                    exc_info=exc,
+                                )
                     self._reset_execution_state(base_symbol)
                     return self._reject_signal_execution(
                         symbol=base_symbol,
