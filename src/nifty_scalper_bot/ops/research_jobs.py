@@ -289,7 +289,11 @@ def start_job(
             "error_type": "WorkerExitedWithoutResult",
             "error_code": "stale_research_worker",
             "stale_state": state,
-            "recovery_reason": "nonterminal_status_without_live_worker",
+            "recovery_reason": (
+                "nonterminal_status_without_live_worker"
+                if launcher == "systemd" and not wait
+                else "nonterminal_status_without_worker_lock"
+            ),
             "requested_work_completed": False,
         }
         write_json(status_file, stale)
