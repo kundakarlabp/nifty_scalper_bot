@@ -349,6 +349,52 @@ def test_exchange_stop_is_tightened_with_canonical_trailing_stop(monkeypatch) ->
     assert 0.0 < float(changes["price"]) < 150.0
 
 
+def test_stale_exchange_stop_skips_grace_and_uses_market_fallback(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    monkeypatch.setenv("EXCHANGE_PROTECTIVE_STOP_ENABLED", "true")
+    broker = _Broker()
+    order_manager = _OrderManager(broker)
+    manager = BracketManager(order_manager=order_manager)
+    manager._running = False
+    manager._watchdog_thread.join(timeout=1.0)
+    manager.register_virtual_bracket(
+        order_id="entry-stale-stop",
+        symbol=SYMBOL,
+        side="BUY",
+        qty=65,
+        price=150.0,
+        sl=140.0,
+        tp=175.0,
+        activate_immediately=False,
+    )
+    manager.confirm_entry_fill("entry-stale-stop", 150.0, 65)
+    bracket = manager.get_bracket("entry-stale-stop")
+    assert bracket is not None
+    bracket.sl_trigger_price = 145.0
+    bracket.exchange_stop_degraded_reason = "modify_failed"
+
+    manager._fire_exits_batch(
+        [
+            (
+                bracket,
+                {
+                    "qty": 65,
+                    "price": 144.5,
+                    "reason": "HARD_SL_BREACH prev=145.10 curr=144.50",
+                },
+            )
+        ]
+    )
+
+    assert broker.cancel_calls == ["rescue-1"]
+    assert len(order_manager.place_calls) == 2
+    assert order_manager.place_calls[-1]["order_type"] == "MARKET"
+    assert bracket.exchange_stop_order_id is None
+
+
 def test_hard_stop_waits_for_exchange_stop_before_market_fallback(monkeypatch) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     monkeypatch.setenv("ENABLE_LIVE", "true")
