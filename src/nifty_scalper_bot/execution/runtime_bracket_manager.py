@@ -427,6 +427,28 @@ class RuntimeBracketManager(LedgerBracketManager):
         )
         residual = self._broker_position_quantity(symbol)
         if residual == 0 and quantity >= int(bracket.remaining_quantity or 0):
+            resting_stop_id = str(
+                getattr(bracket, "exchange_stop_order_id", "") or ""
+            ).strip()
+            if resting_stop_id and resting_stop_id != order_id:
+                outcome = self._retire_exchange_protective_stop(
+                    bracket,
+                    reason="external_or_alternate_exit_fill",
+                )
+                if outcome == "filled":
+                    return self._promote_filled_exchange_stop(
+                        bracket,
+                        reason=str(bracket.exit_reason or "BROKER_EXIT"),
+                    )
+                if outcome == "unresolved":
+                    _core.LOGGER.critical(
+                        "EXIT_CLOSE_DEFERRED_OPEN_EXCHANGE_STOP bracket_id=%s "
+                        "symbol=%s stop_order_id=%s",
+                        bracket.bracket_id,
+                        symbol,
+                        resting_stop_id,
+                    )
+                    return False
             self._log_bracket_event(
                 "EXIT_FILLED",
                 bracket,
