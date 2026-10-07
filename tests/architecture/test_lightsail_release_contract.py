@@ -13,6 +13,18 @@ def _text(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
 
 
+def test_lightsail_shell_scripts_parse() -> None:
+    for path in ("deploy/lightsail_release.sh", "deploy/lightsail_setup.sh"):
+        result = subprocess.run(
+            ["bash", "-n", str(ROOT / path)],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+
+
 def test_dotenv_is_not_tracked() -> None:
     result = subprocess.run(
         ["git", "ls-files", ".env"],
