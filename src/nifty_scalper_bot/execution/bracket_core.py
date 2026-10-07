@@ -340,6 +340,11 @@ class BracketState:
     entry_order_intent: str = "ENTRY"
     trade_lifecycle_id: str | None = None
     linked_exit_order_ids: list[str] = field(default_factory=list)
+    exchange_stop_order_id: str | None = None
+    exchange_stop_trigger_price: float | None = None
+    exchange_stop_limit_price: float | None = None
+    exchange_stop_triggered_at: float | None = None
+    exchange_stop_degraded_reason: str | None = None
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
     exit_executed: bool = False
@@ -484,6 +489,12 @@ class BracketState:
             "tag": self.tag,
             "product": self.product,
             "trade_provenance": dict(self.trade_provenance),
+            "linked_exit_order_ids": list(self.linked_exit_order_ids),
+            "exchange_stop_order_id": self.exchange_stop_order_id,
+            "exchange_stop_trigger_price": self.exchange_stop_trigger_price,
+            "exchange_stop_limit_price": self.exchange_stop_limit_price,
+            "exchange_stop_triggered_at": self.exchange_stop_triggered_at,
+            "exchange_stop_degraded_reason": self.exchange_stop_degraded_reason,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "exit_executed": self.exit_executed,
@@ -725,6 +736,23 @@ class BracketManager:
         )
         self._exit_fallback_to_market_on_quote_missing = _env_bool(
             "EXIT_FALLBACK_TO_MARKET_ON_QUOTE_MISSING", True
+        )
+        self._exchange_protective_stop_enabled = _env_bool(
+            "EXCHANGE_PROTECTIVE_STOP_ENABLED", True
+        )
+        self._exchange_protective_stop_limit_buffer_pct = max(
+            0.1,
+            parse_float_env(
+                os.getenv("EXCHANGE_PROTECTIVE_STOP_LIMIT_BUFFER_PCT"),
+                5.0,
+            ),
+        )
+        self._exchange_protective_stop_grace_seconds = max(
+            0.25,
+            parse_float_env(
+                os.getenv("EXCHANGE_PROTECTIVE_STOP_GRACE_SECONDS"),
+                1.0,
+            ),
         )
 
         if _env_bool("BRACKET_AUTO_RESTORE", True):
@@ -1748,6 +1776,8 @@ class BracketManager:
                     },
                 )
 
+        self._ensure_exchange_protective_stop(bracket)
+
     # --------------------------------------------------------------------------
     # 2. MARKET DATA INGESTION (NEW)
     # --------------------------------------------------------------------------
@@ -1850,55 +1880,56 @@ class BracketManager:
 
     def _virtual_modify_sl(self, order_id: str, price: float) -> bool:
         """Callback for AdaptiveController to update Virtual SL."""
-        # Find bracket by iterating (Safety lookup)
-        target_bracket = None
+        target_bracket: BracketState | None = None
         with self._lock:
-            for b in self._brackets.values():
-                if b.virtual_sl_id == order_id:
-                    target_bracket = b
+            for candidate in self._brackets.values():
+                if candidate.virtual_sl_id == order_id:
+                    target_bracket = candidate
                     break
 
-            if target_bracket:
-                old_sl = target_bracket.sl_trigger_price
-                rounded = _round_to_tick(price)
-                ltp = float(target_bracket.last_ltp or 0.0)
-                if not self._is_trail_candidate_allowed(target_bracket, rounded, ltp):
-                    return False
-                target_bracket.sl_trigger_price = rounded
-                target_bracket.updated_at = time.time()
-                target_bracket.last_trail_price = ltp or None
-                target_bracket.trail_revision += 1
-                LOGGER.info(
-                    "BRACKET_TRAIL_UPDATED symbol=%s old_sl=%s new_sl=%s",
-                    target_bracket.symbol,
-                    round(old_sl, 2),
-                    round(rounded, 2),
-                    extra={
-                        "event": "BRACKET_TRAIL_UPDATED",
-                        "trade_lifecycle_id": target_bracket.trade_lifecycle_id,
-                        "entry_order_id": target_bracket.entry_order_id,
-                        "symbol": target_bracket.symbol,
-                        "old_sl": old_sl,
-                        "new_sl": rounded,
-                        "ltp": ltp,
-                        "trail_revision": target_bracket.trail_revision,
-                    },
-                )
-                self._log_bracket_event(
-                    "TRAIL_UPDATED",
-                    target_bracket,
-                    meta={
-                        "old_sl": old_sl,
-                        "new_sl": rounded,
-                        "ltp": ltp,
-                        "trail_revision": target_bracket.trail_revision,
-                        "source": "virtual_modify_sl",
-                    },
-                )
-                # ✅ FIX: Persist trailing update
-                self.save_state()
-                return True
-        return False
+            if target_bracket is None:
+                return False
+
+            old_sl = target_bracket.sl_trigger_price
+            rounded = _round_to_tick(price)
+            ltp = float(target_bracket.last_ltp or 0.0)
+            if not self._is_trail_candidate_allowed(target_bracket, rounded, ltp):
+                return False
+            target_bracket.sl_trigger_price = rounded
+            target_bracket.updated_at = time.time()
+            target_bracket.last_trail_price = ltp or None
+            target_bracket.trail_revision += 1
+            LOGGER.info(
+                "BRACKET_TRAIL_UPDATED symbol=%s old_sl=%s new_sl=%s",
+                target_bracket.symbol,
+                round(old_sl, 2),
+                round(rounded, 2),
+                extra={
+                    "event": "BRACKET_TRAIL_UPDATED",
+                    "trade_lifecycle_id": target_bracket.trade_lifecycle_id,
+                    "entry_order_id": target_bracket.entry_order_id,
+                    "symbol": target_bracket.symbol,
+                    "old_sl": old_sl,
+                    "new_sl": rounded,
+                    "ltp": ltp,
+                    "trail_revision": target_bracket.trail_revision,
+                },
+            )
+            self._log_bracket_event(
+                "TRAIL_UPDATED",
+                target_bracket,
+                meta={
+                    "old_sl": old_sl,
+                    "new_sl": rounded,
+                    "ltp": ltp,
+                    "trail_revision": target_bracket.trail_revision,
+                    "source": "virtual_modify_sl",
+                },
+            )
+            self.save_state()
+
+        self._sync_exchange_protective_stop(target_bracket)
+        return True
 
     # --------------------------------------------------------------------------
     # 3. EXECUTION LOGIC (The "Sniper")
@@ -2521,6 +2552,13 @@ class BracketManager:
             ),
         )
         if not symbol or qty <= 0:
+            return
+
+        if self._prepare_exchange_stop_for_exit(
+            bracket,
+            reason=reason,
+            now=now,
+        ):
             return
 
         if self._reconcile_exit_state(bracket, requested_by="pre_submit"):
@@ -4448,6 +4486,19 @@ class BracketManager:
             return ExitExecutionResult(
                 False, False, None, 0, reason, status="INVALID_QTY"
             )
+        if self._prepare_exchange_stop_for_exit(
+            bracket,
+            reason=reason,
+            now=time.time(),
+        ):
+            return ExitExecutionResult(
+                True,
+                False,
+                bracket.exchange_stop_order_id,
+                0,
+                reason,
+                status="EXCHANGE_STOP_PENDING",
+            )
         if self._reconcile_exit_state(bracket, requested_by="direct_pre_submit"):
             return ExitExecutionResult(
                 True,
@@ -4863,6 +4914,21 @@ class BracketManager:
         removed = 0
         for eid in entry_ids:
             try:
+                bracket = self.get_bracket(eid)
+                if bracket is not None and bracket.exchange_stop_order_id:
+                    outcome = self._retire_exchange_protective_stop(
+                        bracket,
+                        reason="broker_position_flat",
+                    )
+                    if outcome == "unresolved":
+                        LOGGER.critical(
+                            "BRACKET_FLAT_CLEANUP_BLOCKED_BY_OPEN_EXCHANGE_STOP "
+                            "bracket_id=%s symbol=%s order_id=%s",
+                            bracket.bracket_id,
+                            bracket.symbol,
+                            bracket.exchange_stop_order_id,
+                        )
+                        continue
                 self.unregister_bracket(eid)
                 removed += 1
             except Exception:  # noqa: BLE001
@@ -5012,6 +5078,396 @@ class BracketManager:
         ).strip().lower() in {"1", "true", "yes", "on"}
         return mode == "LIVE" and enabled
 
+    def _exchange_stop_prices(
+        self,
+        bracket: BracketState,
+        trigger_price: float,
+    ) -> tuple[float, float]:
+        """Return broker-compatible trigger/limit prices for one protective SL."""
+        trigger = _round_to_tick(max(float(trigger_price), 0.05))
+        buffer = self._exchange_protective_stop_limit_buffer_pct / 100.0
+        if bracket.side == "BUY":
+            limit_price = _round_to_tick(max(0.05, trigger * (1.0 - buffer)))
+            if limit_price >= trigger:
+                limit_price = _round_to_tick(max(0.05, trigger - 0.05))
+        else:
+            limit_price = _round_to_tick(trigger * (1.0 + buffer))
+            if limit_price <= trigger:
+                limit_price = _round_to_tick(trigger + 0.05)
+        return trigger, limit_price
+
+    def _clear_exchange_stop_locked(self, bracket: BracketState) -> None:
+        bracket.exchange_stop_order_id = None
+        bracket.exchange_stop_trigger_price = None
+        bracket.exchange_stop_limit_price = None
+        bracket.exchange_stop_triggered_at = None
+        bracket.exchange_stop_degraded_reason = None
+
+    def _ensure_exchange_protective_stop(self, bracket: BracketState) -> bool:
+        """Arm exactly one exchange-resident SL-limit for a confirmed live position."""
+        if (
+            not self._exchange_protective_stop_enabled
+            or not self._is_live_execution()
+            or not bracket.active
+            or not bracket.entry_confirmed
+            or bracket.remaining_quantity <= 0
+            or bracket.sl_trigger_price <= 0
+        ):
+            return False
+        with self._lock:
+            if bracket.exchange_stop_order_id:
+                return True
+            trigger, limit_price = self._exchange_stop_prices(
+                bracket,
+                bracket.sl_trigger_price,
+            )
+            qty = int(bracket.remaining_quantity)
+            side = "SELL" if bracket.side == "BUY" else "BUY"
+        try:
+            order_id = self.order_manager.place_order(
+                symbol=bracket.symbol,
+                side=side,
+                quantity=qty,
+                order_type="SL",
+                price=limit_price,
+                trigger_price=trigger,
+                tag=f"psl_{bracket.entry_order_id[:8]}",
+                check_risk=False,
+                product=bracket.product,
+                intent="EXIT",
+                strategy_name="protective_exit",
+                linked_entry_order_id=bracket.entry_order_id,
+                trade_lifecycle_id=(
+                    bracket.trade_lifecycle_id or bracket.entry_order_id
+                ),
+                bracket_id=bracket.bracket_id,
+            )
+        except Exception as exc:  # noqa: BLE001 - virtual stop remains active
+            order_id = None
+            with self._lock:
+                bracket.exchange_stop_degraded_reason = (
+                    f"placement_exception:{type(exc).__name__}"
+                )
+            LOGGER.critical(
+                "EXCHANGE_PROTECTIVE_STOP_ARM_FAILED bracket_id=%s symbol=%s error=%s",
+                bracket.bracket_id,
+                bracket.symbol,
+                exc,
+                extra={
+                    "event": "EXCHANGE_PROTECTIVE_STOP_ARM_FAILED",
+                    "bracket_id": bracket.bracket_id,
+                    "symbol": bracket.symbol,
+                    "error_type": type(exc).__name__,
+                },
+            )
+        if not order_id:
+            with self._lock:
+                bracket.exchange_stop_degraded_reason = (
+                    bracket.exchange_stop_degraded_reason or "placement_rejected"
+                )
+            LOGGER.critical(
+                "EXCHANGE_PROTECTIVE_STOP_NOT_ARMED bracket_id=%s symbol=%s "
+                "trigger=%s limit=%s; software watchdog remains active",
+                bracket.bracket_id,
+                bracket.symbol,
+                trigger,
+                limit_price,
+                extra={
+                    "event": "EXCHANGE_PROTECTIVE_STOP_NOT_ARMED",
+                    "bracket_id": bracket.bracket_id,
+                    "symbol": bracket.symbol,
+                    "trigger_price": trigger,
+                    "limit_price": limit_price,
+                },
+            )
+            with suppress(Exception):
+                self.save_state()
+            return False
+
+        stop_id = str(order_id)
+        with self._lock:
+            bracket.exchange_stop_order_id = stop_id
+            bracket.exchange_stop_trigger_price = trigger
+            bracket.exchange_stop_limit_price = limit_price
+            bracket.exchange_stop_triggered_at = None
+            bracket.exchange_stop_degraded_reason = None
+            if stop_id not in bracket.linked_exit_order_ids:
+                bracket.linked_exit_order_ids.append(stop_id)
+            self._order_to_entry[stop_id] = bracket.entry_order_id
+            bracket.updated_at = time.time()
+        LOGGER.info(
+            "EXCHANGE_PROTECTIVE_STOP_ARMED bracket_id=%s order_id=%s "
+            "symbol=%s side=%s qty=%s trigger=%s limit=%s",
+            bracket.bracket_id,
+            stop_id,
+            bracket.symbol,
+            side,
+            qty,
+            trigger,
+            limit_price,
+            extra={
+                "event": "EXCHANGE_PROTECTIVE_STOP_ARMED",
+                "bracket_id": bracket.bracket_id,
+                "order_id": stop_id,
+                "symbol": bracket.symbol,
+                "side": side,
+                "quantity": qty,
+                "trigger_price": trigger,
+                "limit_price": limit_price,
+            },
+        )
+        with suppress(Exception):
+            self.save_state()
+        return True
+
+    def _sync_exchange_protective_stop(self, bracket: BracketState) -> bool:
+        """Ratchet the resting broker SL to the canonical virtual stop."""
+        with self._lock:
+            order_id = str(bracket.exchange_stop_order_id or "").strip()
+            if not order_id:
+                return False
+            trigger, limit_price = self._exchange_stop_prices(
+                bracket,
+                bracket.sl_trigger_price,
+            )
+        modifier = getattr(self.order_manager, "modify_order", None)
+        if not callable(modifier):
+            with self._lock:
+                bracket.exchange_stop_degraded_reason = "modify_unavailable"
+            return False
+        try:
+            modified = bool(
+                modifier(
+                    order_id,
+                    trigger_price=trigger,
+                    price=limit_price,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            modified = False
+            LOGGER.error(
+                "EXCHANGE_PROTECTIVE_STOP_MODIFY_FAILED order_id=%s symbol=%s error=%s",
+                order_id,
+                bracket.symbol,
+                exc,
+                exc_info=exc,
+            )
+        with self._lock:
+            if modified:
+                bracket.exchange_stop_trigger_price = trigger
+                bracket.exchange_stop_limit_price = limit_price
+                bracket.exchange_stop_degraded_reason = None
+            else:
+                bracket.exchange_stop_degraded_reason = "modify_failed"
+            bracket.updated_at = time.time()
+        if modified:
+            LOGGER.info(
+                "EXCHANGE_PROTECTIVE_STOP_RATCHETED order_id=%s symbol=%s "
+                "trigger=%s limit=%s",
+                order_id,
+                bracket.symbol,
+                trigger,
+                limit_price,
+                extra={
+                    "event": "EXCHANGE_PROTECTIVE_STOP_RATCHETED",
+                    "order_id": order_id,
+                    "symbol": bracket.symbol,
+                    "trigger_price": trigger,
+                    "limit_price": limit_price,
+                },
+            )
+        with suppress(Exception):
+            self.save_state()
+        return modified
+
+    def _retire_exchange_protective_stop(
+        self,
+        bracket: BracketState,
+        *,
+        reason: str,
+    ) -> str:
+        """Return absent/cancelled/filled/unresolved for the resting broker stop."""
+        with self._lock:
+            order_id = str(bracket.exchange_stop_order_id or "").strip()
+        if not order_id:
+            return "absent"
+
+        status = self._get_broker_order_status(order_id)
+        status_text = str((status or {}).get("status") or "").strip().upper()
+        if status_text in _FILLED_STATUSES:
+            return "filled"
+        if status_text in _CANCELLED_STATUSES:
+            with self._lock:
+                self._clear_exchange_stop_locked(bracket)
+                bracket.updated_at = time.time()
+            return "cancelled"
+
+        cancel = getattr(self.order_manager, "cancel_order", None)
+        if not callable(cancel):
+            with self._lock:
+                bracket.exchange_stop_degraded_reason = "cancel_unavailable"
+            return "unresolved"
+        try:
+            cancel(order_id)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.error(
+                "EXCHANGE_PROTECTIVE_STOP_CANCEL_FAILED order_id=%s symbol=%s "
+                "reason=%s error=%s",
+                order_id,
+                bracket.symbol,
+                reason,
+                exc,
+                exc_info=exc,
+            )
+
+        status = self._get_broker_order_status(order_id)
+        status_text = str((status or {}).get("status") or "").strip().upper()
+        if status_text in _FILLED_STATUSES:
+            return "filled"
+        if status_text in _CANCELLED_STATUSES:
+            with self._lock:
+                self._clear_exchange_stop_locked(bracket)
+                bracket.updated_at = time.time()
+            LOGGER.info(
+                "EXCHANGE_PROTECTIVE_STOP_CANCELLED order_id=%s symbol=%s reason=%s",
+                order_id,
+                bracket.symbol,
+                reason,
+                extra={
+                    "event": "EXCHANGE_PROTECTIVE_STOP_CANCELLED",
+                    "order_id": order_id,
+                    "symbol": bracket.symbol,
+                    "reason": reason,
+                },
+            )
+            with suppress(Exception):
+                self.save_state()
+            return "cancelled"
+
+        with self._lock:
+            bracket.exchange_stop_degraded_reason = (
+                f"cancel_unconfirmed:{status_text or 'unknown'}"
+            )
+        LOGGER.critical(
+            "EXCHANGE_PROTECTIVE_STOP_CANCEL_UNCONFIRMED order_id=%s symbol=%s "
+            "reason=%s status=%s",
+            order_id,
+            bracket.symbol,
+            reason,
+            status_text or "UNKNOWN",
+            extra={
+                "event": "EXCHANGE_PROTECTIVE_STOP_CANCEL_UNCONFIRMED",
+                "order_id": order_id,
+                "symbol": bracket.symbol,
+                "reason": reason,
+                "status": status_text or "UNKNOWN",
+            },
+        )
+        return "unresolved"
+
+    def _promote_filled_exchange_stop(
+        self,
+        bracket: BracketState,
+        *,
+        reason: str,
+    ) -> bool:
+        """Make a filled resting stop the canonical exit order and reconcile it."""
+        with self._lock:
+            order_id = str(bracket.exchange_stop_order_id or "").strip()
+            if not order_id:
+                return False
+            bracket.exit_order_id = order_id
+            bracket.pending_exit_order_id = order_id
+            bracket.exit_reason = reason
+            bracket.exit_pending = True
+            bracket.exit_in_progress = False
+            bracket.exit_submission_inflight = False
+            bracket.exit_intent = "EXIT"
+            bracket.expected_exit_side = "SELL" if bracket.side == "BUY" else "BUY"
+            bracket.expected_exit_qty = int(bracket.remaining_quantity)
+            bracket.exit_state = BracketExitLifecycle.EXIT_ORDER_SUBMITTED.value
+            bracket.entry_status = bracket.exit_state
+            bracket.updated_at = time.time()
+        return bool(
+            self._reconcile_exit_state(
+                bracket,
+                requested_by="exchange_protective_stop_fill",
+            )
+        )
+
+    def _prepare_exchange_stop_for_exit(
+        self,
+        bracket: BracketState,
+        *,
+        reason: str,
+        now: float,
+    ) -> bool:
+        """Return True while the resting exchange stop owns the reducing order."""
+        with self._lock:
+            order_id = str(bracket.exchange_stop_order_id or "").strip()
+        if not order_id:
+            return False
+
+        status = self._get_broker_order_status(order_id)
+        status_text = str((status or {}).get("status") or "").strip().upper()
+        if status_text in _FILLED_STATUSES:
+            self._promote_filled_exchange_stop(bracket, reason=reason)
+            return True
+        if status_text in _CANCELLED_STATUSES:
+            with self._lock:
+                self._clear_exchange_stop_locked(bracket)
+                bracket.updated_at = time.time()
+            return False
+
+        upper_reason = str(reason or "").upper()
+        hard_stop = any(
+            token in upper_reason
+            for token in ("HARD_SL_BREACH", "WATCHDOG_HARD_SL", "FORCED_SL_EXIT")
+        )
+        if hard_stop:
+            with self._lock:
+                exchange_trigger = float(
+                    bracket.exchange_stop_trigger_price or 0.0
+                )
+                virtual_trigger = float(bracket.sl_trigger_price or 0.0)
+                exchange_stop_current = (
+                    bracket.exchange_stop_degraded_reason is None
+                    and abs(exchange_trigger - virtual_trigger) < 0.025
+                )
+                if exchange_stop_current and bracket.exchange_stop_triggered_at is None:
+                    bracket.exchange_stop_triggered_at = now
+                triggered_at = (
+                    float(bracket.exchange_stop_triggered_at)
+                    if bracket.exchange_stop_triggered_at is not None
+                    else now
+                )
+            if (
+                exchange_stop_current
+                and now - triggered_at
+                < self._exchange_protective_stop_grace_seconds
+            ):
+                self._log_throttled(
+                    "info",
+                    f"exchange_stop_grace:{bracket.bracket_id}",
+                    0.25,
+                    "EXCHANGE_PROTECTIVE_STOP_GRACE bracket_id=%s order_id=%s "
+                    "symbol=%s elapsed=%.3f grace=%.3f",
+                    bracket.bracket_id,
+                    order_id,
+                    bracket.symbol,
+                    now - triggered_at,
+                    self._exchange_protective_stop_grace_seconds,
+                )
+                return True
+
+        outcome = self._retire_exchange_protective_stop(bracket, reason=reason)
+        if outcome == "filled":
+            self._promote_filled_exchange_stop(bracket, reason=reason)
+            return True
+        if outcome == "unresolved":
+            return True
+        return False
+
     def _mark_persistence_degraded(
         self,
         reason: str,
@@ -5150,6 +5606,42 @@ class BracketManager:
             tag=payload.get("tag"),
             product=str(payload.get("product") or "MIS"),
             trade_provenance=dict(payload.get("trade_provenance") or {}),
+            linked_exit_order_ids=[
+                str(value)
+                for value in payload.get("linked_exit_order_ids", []) or []
+                if str(value or "").strip()
+            ],
+            exchange_stop_order_id=(
+                str(payload.get("exchange_stop_order_id") or "").strip() or None
+            ),
+            exchange_stop_trigger_price=(
+                finite_float(
+                    "exchange stop trigger",
+                    payload.get("exchange_stop_trigger_price"),
+                )
+                if payload.get("exchange_stop_trigger_price") is not None
+                else None
+            ),
+            exchange_stop_limit_price=(
+                finite_float(
+                    "exchange stop limit",
+                    payload.get("exchange_stop_limit_price"),
+                )
+                if payload.get("exchange_stop_limit_price") is not None
+                else None
+            ),
+            exchange_stop_triggered_at=(
+                finite_float(
+                    "exchange stop triggered at",
+                    payload.get("exchange_stop_triggered_at"),
+                )
+                if payload.get("exchange_stop_triggered_at") is not None
+                else None
+            ),
+            exchange_stop_degraded_reason=(
+                str(payload.get("exchange_stop_degraded_reason") or "").strip()
+                or None
+            ),
             created_at=finite_float(
                 "created at", payload.get("created_at", time.time())
             ),
@@ -5383,6 +5875,10 @@ class BracketManager:
                 bracket = self._decode_restored_bracket(entry_id, record)
                 temp_brackets[entry_id] = bracket
                 temp_order_map[entry_id] = entry_id
+                for linked_order_id in bracket.linked_exit_order_ids:
+                    temp_order_map[str(linked_order_id)] = entry_id
+                if bracket.exchange_stop_order_id:
+                    temp_order_map[str(bracket.exchange_stop_order_id)] = entry_id
                 temp_symbol_map.setdefault(bracket.symbol, []).append(entry_id)
             parsed_rescue = {
                 str(key): int(value) for key, value in rescue_attempts.items()

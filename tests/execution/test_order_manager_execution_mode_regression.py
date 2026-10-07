@@ -332,6 +332,48 @@ def test_full_protective_exit_uses_open_position_units_when_lot_lookup_unavailab
     assert broker.payloads[-1]["quantity"] == 65
 
 
+def test_option_exchange_sl_preserves_distinct_trigger_and_limit(monkeypatch, tmp_path):
+    from nifty_scalper_bot.execution.order_manager import OrderType
+
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+
+    class Broker(_MarkedSubmittingBroker):
+        def __init__(self):
+            super().__init__()
+            self.payloads = []
+
+        def place_order(self, **kwargs):
+            self.payloads.append(dict(kwargs))
+            return {"order_id": "STOP-1", "status": "SUBMITTED"}
+
+    broker = Broker()
+    manager = _live_sim_order_manager(tmp_path, broker)
+    manager._positions.open_position(
+        "NFO:NIFTY2671423950CE", "LONG", 65, 150.0, order_id="entry-stop"
+    )
+
+    order_id = manager.place_order(
+        symbol="NFO:NIFTY2671423950CE",
+        side="SELL",
+        quantity=65,
+        order_type="SL",
+        price=133.0,
+        trigger_price=140.0,
+        check_risk=False,
+        intent="EXIT",
+        tag="psl_entry",
+        linked_entry_order_id="entry-stop",
+        bracket_id="entry-stop",
+    )
+
+    assert order_id == "STOP-1"
+    payload = broker.payloads[-1]
+    assert payload["order_type"] is OrderType.STOP_LOSS
+    assert payload["price"] == pytest.approx(133.0)
+    assert payload["trigger_price"] == pytest.approx(140.0)
+
+
 def test_option_exit_without_position_is_blocked_before_broker(monkeypatch, tmp_path):
     from nifty_scalper_bot.execution.order_manager import OrderType
 
@@ -594,7 +636,9 @@ def test_non_nifty_option_uses_its_exact_metadata_lot_size(monkeypatch, tmp_path
     assert manager._lot_size_for_symbol("NFO:BANKNIFTY2671452000CE") == 35
 
 
-def test_exit_order_raw_broker_receives_only_zerodha_supported_tag(monkeypatch, tmp_path):
+def test_exit_order_raw_broker_receives_only_zerodha_supported_tag(
+    monkeypatch, tmp_path
+):
     from nifty_scalper_bot.execution.order_manager import OrderType
 
     monkeypatch.setenv("EXECUTION_MODE", "LIVE_SIMULATION")

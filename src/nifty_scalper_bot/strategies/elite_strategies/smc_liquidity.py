@@ -702,6 +702,36 @@ class SMCStrategy(EliteStrategy):
                 self._last_emitted_bar[event_key] = confirmation_ts
             return
 
+    def notify_entry_rejected(
+        self,
+        side: str,
+        *,
+        setup_id: str | None = None,
+        reason: str | None = None,
+    ) -> None:
+        """Require a later completed-bar confirmation after capacity rejection."""
+        if str(reason or "").strip() != "no_affordable_execution_candidate":
+            return
+        resolved_side = str(side or "").strip().upper()
+        resolved_setup_id = str(setup_id or "").strip()
+        if resolved_side not in {"CE", "PE"} or not resolved_setup_id:
+            return
+        for event_key, event in self._events.items():
+            underlying_symbol, event_side = event_key
+            if event_side != resolved_side:
+                continue
+            event_setup_id = self._setup_id(
+                underlying_symbol,
+                event_side,
+                event["sweep_ts"],
+            )
+            if event_setup_id != resolved_setup_id:
+                continue
+            confirmation_ts = event.get("confirmation_ts")
+            if isinstance(confirmation_ts, datetime):
+                event["retry_after_confirmation_ts"] = confirmation_ts
+            return
+
     def _bar_terminates_event(
         self,
         rows: list[dict[str, Any]],
@@ -976,6 +1006,14 @@ class SMCStrategy(EliteStrategy):
                     self._no_vote("smc_awaiting_confirmation")
                     return None
 
+                rejected_confirmation_ts = event.get("retry_after_confirmation_ts")
+                if (
+                    isinstance(rejected_confirmation_ts, datetime)
+                    and current_ts <= rejected_confirmation_ts
+                ):
+                    self._no_vote("smc_retry_requires_fresh_confirmation")
+                    return None
+
                 atr = max(1.0, float(snapshot["atr"]))
                 body = abs(float(current["close"]) - float(current["open"]))
                 displacement_atr = body / atr
@@ -1115,6 +1153,10 @@ class SMCStrategy(EliteStrategy):
                     1 for name in feature_names if indicators.get(name) is not None
                 ) / float(len(feature_names))
                 context_age_seconds = resolve_context_age_seconds(indicators)
+                capacity_rejection_retry = isinstance(
+                    event.get("retry_after_confirmation_ts"),
+                    datetime,
+                )
                 metadata = {
                     "strategy": "SMC",
                     "strategy_name": "SMC",
@@ -1198,10 +1240,14 @@ class SMCStrategy(EliteStrategy):
                     "sweep_recovered_from_history": bool(
                         event.get("recovered_from_history")
                     ),
+                    "capacity_rejection_retry": capacity_rejection_retry,
                 }
                 # Generating a preliminary vote must not consume the structural
                 # setup. StrategyManager may still be waiting for asynchronous
                 # OrderFlow confirmation. Broker-accepted entry owns consumption.
+                # A deterministic capacity rejection can, however, require the
+                # same sweep to earn a fresh completed-bar confirmation.
+                event.pop("retry_after_confirmation_ts", None)
                 event["confirmation_ts"] = current_ts
                 LOGGER.info(
                     "STRATEGY_EVIDENCE strategy=SMC side=%s source=%s "

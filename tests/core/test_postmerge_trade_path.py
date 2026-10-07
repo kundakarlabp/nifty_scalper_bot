@@ -152,6 +152,47 @@ def test_single_trigger_requires_fresh_independent_context(monkeypatch) -> None:
     assert result.metadata["context_confirmation_strategies"] == ["OrderFlow"]
 
 
+def test_capacity_rejected_smc_retry_requires_trigger_consensus(monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    manager = _manager()
+    smc_signal, smc_evidence = _signal_evidence("SMC")
+    smc_signal.metadata["capacity_rejection_retry"] = True
+    smc_evidence.metadata["capacity_rejection_retry"] = True
+    context = _signal_evidence("OrderFlow", role="context")
+
+    result = manager._combine_strategy_votes(
+        symbol=_CE,
+        signals=[(smc_signal, smc_evidence), context],
+        indicators=_live_indicators("CE"),
+    )
+
+    assert result is None
+    decision = manager._last_no_signal_decision_by_symbol[_CE]
+    assert decision.reason == "capacity_retry_independent_confirmation_missing"
+    assert decision.blocked_at == "context_contract"
+
+
+def test_capacity_rejected_smc_retry_allows_independent_trigger_consensus(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    manager = _manager()
+    smc_signal, smc_evidence = _signal_evidence("SMC")
+    smc_signal.metadata["capacity_rejection_retry"] = True
+    smc_evidence.metadata["capacity_rejection_retry"] = True
+    orb = _signal_evidence("ORBPro")
+
+    result = manager._combine_strategy_votes(
+        symbol=_CE,
+        signals=[(smc_signal, smc_evidence), orb],
+        indicators=_live_indicators("CE"),
+    )
+
+    assert result is not None
+    assert result.metadata["approval_path"] == "aligned_trigger_consensus"
+    assert result.metadata["confirmation_contract"]["trigger_consensus"] is True
+
+
 def test_two_independent_same_side_triggers_can_confirm(monkeypatch) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     manager = _manager()
