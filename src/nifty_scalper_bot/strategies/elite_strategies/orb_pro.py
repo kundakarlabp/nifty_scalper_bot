@@ -75,9 +75,11 @@ class ORBProStrategy(EliteStrategy):
     """Underlying-led NIFTY opening-range breakout trigger.
 
     Spot/futures remain context-only. The strategy evaluates the selected option
-    symbol but derives opening-range structure from already-hydrated NIFTY
-    futures history, with spot as a fail-safe context fallback. It never selects
-    or executes an underlying instrument.
+    symbol but derives opening-range structure and participation only from
+    already-hydrated NIFTY futures history. Spot may still contribute to the
+    external direction context, but it cannot authorize ORB structure because
+    the NIFTY index itself has no traded volume. The strategy never selects or
+    executes an underlying instrument.
     """
 
     MIN_BARS_REQUIRED = 5
@@ -107,8 +109,6 @@ class ORBProStrategy(EliteStrategy):
             "stale_data_used",
             "futures_symbol",
             "futures_price",
-            "spot_symbol",
-            "spot_price",
             "futures_vwap_slope",
         }
 
@@ -194,79 +194,90 @@ class ORBProStrategy(EliteStrategy):
         self, indicators: Mapping[str, Any]
     ) -> dict[str, Any] | None:
         orb_minutes = max(1, int(self._cfg.orb_minutes or 1))
-        candidates = (
-            (str(indicators.get("futures_symbol") or "").strip(), "futures"),
-            (str(indicators.get("spot_symbol") or "").strip(), "spot_fallback"),
-        )
-        for underlying_symbol, source in candidates:
-            if not underlying_symbol:
-                continue
-            rows = self._read_completed_bars(underlying_symbol)
-            if len(rows) < 2:
-                continue
-            latest = rows[-1]
-            latest_ts = latest["timestamp"]
-            local_ts = latest_ts.astimezone(_INDIA_TZ)
-            session_open_local = local_ts.replace(
-                hour=_MARKET_OPEN.hour,
-                minute=_MARKET_OPEN.minute,
-                second=0,
-                microsecond=0,
-            )
-            if local_ts.time() < _MARKET_OPEN:
-                session_open_local -= timedelta(days=1)
-            session_open = session_open_local.astimezone(timezone.utc)
-            cutoff = session_open + timedelta(minutes=orb_minutes)
+        underlying_symbol = str(indicators.get("futures_symbol") or "").strip()
+        if not underlying_symbol:
+            return None
+        rows = self._read_completed_bars(underlying_symbol)
+        if len(rows) < 2:
+            return None
 
-            # Minute bars are timestamped by bar start, therefore a 15-minute OR
-            # is [09:15, 09:30), not [09:15, 09:30].
-            range_rows = [
-                row for row in rows if session_open <= row["timestamp"] < cutoff
-            ]
-            # Elapsed time or row count cannot prove coverage: a missing minute
-            # can hide the true range extreme, even when duplicates fill the count.
-            expected_starts = {
-                session_open + timedelta(minutes=minute)
-                for minute in range(orb_minutes)
-            }
-            if {
-                row["timestamp"] for row in range_rows
-            } != expected_starts or latest_ts < cutoff:
-                continue
-            prior_rows = [row for row in rows if row["timestamp"] < latest_ts]
-            if not prior_rows:
-                continue
-            previous = prior_rows[-1]
-            orb_high = max(float(row["high"]) for row in range_rows)
-            orb_low = min(float(row["low"]) for row in range_rows)
-            if orb_high <= orb_low:
-                continue
-            atr = self._underlying_atr(rows)
-            body_range = max(float(latest["high"]) - float(latest["low"]), 1e-9)
-            body_ratio = (
-                abs(float(latest["close"]) - float(latest["open"])) / body_range
-            )
-            return {
-                "source": source,
-                "symbol": underlying_symbol,
-                "session_date": session_open_local.date().isoformat(),
-                "session_open": session_open,
-                "cutoff": cutoff,
-                "orb_minutes": orb_minutes,
-                "orb_high": orb_high,
-                "orb_low": orb_low,
-                "previous": previous,
-                "current": latest,
-                "current_ts": latest_ts,
-                "atr": atr,
-                "body_ratio": body_ratio,
-                "volume_ratio": self._volume_ratio(rows),
-                "rows": rows,
-                "minutes_after_range": max(
-                    0.0, (latest_ts - cutoff).total_seconds() / 60.0
-                ),
-            }
-        return None
+        latest = rows[-1]
+        latest_ts = latest["timestamp"]
+        local_ts = latest_ts.astimezone(_INDIA_TZ)
+        session_open_local = local_ts.replace(
+            hour=_MARKET_OPEN.hour,
+            minute=_MARKET_OPEN.minute,
+            second=0,
+            microsecond=0,
+        )
+        if local_ts.time() < _MARKET_OPEN:
+            session_open_local -= timedelta(days=1)
+        session_open = session_open_local.astimezone(timezone.utc)
+        cutoff = session_open + timedelta(minutes=orb_minutes)
+
+        # Normalize ORB features strictly within the active session. Carrying
+        # prior-session closing bars into opening participation or ATR makes
+        # today's breakout depend on yesterday's close/volume and creates live
+        # versus daily-reset research drift.
+        session_rows = [
+            row
+            for row in rows
+            if session_open <= row["timestamp"] <= latest_ts
+        ]
+        if len(session_rows) < 2:
+            return None
+
+        # Minute bars are timestamped by bar start, therefore a 15-minute OR
+        # is [09:15, 09:30), not [09:15, 09:30].
+        range_rows = [
+            row for row in session_rows if row["timestamp"] < cutoff
+        ]
+        # Elapsed time or row count cannot prove coverage: a missing minute
+        # can hide the true range extreme, even when duplicates fill the count.
+        expected_starts = {
+            session_open + timedelta(minutes=minute) for minute in range(orb_minutes)
+        }
+        if {
+            row["timestamp"] for row in range_rows
+        } != expected_starts or latest_ts < cutoff:
+            return None
+
+        prior_rows = [
+            row for row in session_rows if row["timestamp"] < latest_ts
+        ]
+        if not prior_rows:
+            return None
+        previous = prior_rows[-1]
+        orb_high = max(float(row["high"]) for row in range_rows)
+        orb_low = min(float(row["low"]) for row in range_rows)
+        if orb_high <= orb_low:
+            return None
+
+        atr = self._underlying_atr(session_rows)
+        body_range = max(float(latest["high"]) - float(latest["low"]), 1e-9)
+        body_ratio = abs(float(latest["close"]) - float(latest["open"])) / body_range
+        return {
+            "source": "futures",
+            "symbol": underlying_symbol,
+            "session_date": session_open_local.date().isoformat(),
+            "session_open": session_open,
+            "cutoff": cutoff,
+            "orb_minutes": orb_minutes,
+            "orb_high": orb_high,
+            "orb_low": orb_low,
+            "previous": previous,
+            "current": latest,
+            "current_ts": latest_ts,
+            "atr": atr,
+            "body_ratio": body_ratio,
+            "volume_ratio": self._volume_ratio(session_rows),
+            "rows": session_rows,
+            "underlying_atr_basis": "same_session_completed_bars",
+            "underlying_volume_ratio_basis": "same_session_prior_completed_bars",
+            "minutes_after_range": max(
+                0.0, (latest_ts - cutoff).total_seconds() / 60.0
+            ),
+        }
 
     def _recover_unconfirmed_breakout(
         self,
@@ -522,9 +533,7 @@ class ORBProStrategy(EliteStrategy):
             "candidate_symbol": symbol,
             "setup_id": setup_id,
             "setup_type": "underlying_opening_range_breakout",
-            "signal_domain": (
-                "NIFTY_FUTURES" if source == "futures" else "NIFTY_SPOT_FALLBACK"
-            ),
+            "signal_domain": "NIFTY_FUTURES",
             "source_domain": "underlying_orb",
             "opening_range_source": source,
             "underlying_symbol": snapshot["symbol"],
@@ -559,6 +568,10 @@ class ORBProStrategy(EliteStrategy):
                 float(snapshot["volume_ratio"]), 4
             ),
             "underlying_current_penetration_atr": round(current_penetration_atr, 4),
+            "underlying_atr_basis": snapshot["underlying_atr_basis"],
+            "underlying_volume_ratio_basis": snapshot[
+                "underlying_volume_ratio_basis"
+            ],
             "underlying_entry": current_underlying,
             "underlying_invalidation": underlying_invalidation,
             "premium_stop_distance": premium_stop_distance,
