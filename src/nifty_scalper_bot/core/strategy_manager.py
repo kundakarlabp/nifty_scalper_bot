@@ -1535,6 +1535,40 @@ class StrategyManager(_BaseStrategyManager):
                 )
             return
 
+    def notify_entry_rejected(
+        self,
+        strategy_name: str,
+        side: str,
+        *,
+        setup_id: str | None = None,
+        reason: str | None = None,
+    ) -> None:
+        """Notify the originating strategy after deterministic pre-broker rejection."""
+        resolved_name = str(strategy_name or "").strip()
+        if not resolved_name:
+            return
+        for strategy in self._strategies:
+            if str(getattr(strategy, "name", "") or "") != resolved_name:
+                continue
+            hook = getattr(strategy, "notify_entry_rejected", None)
+            if not callable(hook):
+                return
+            try:
+                hook(side, setup_id=setup_id, reason=reason)
+            except Exception as exc:  # noqa: BLE001 - rejection already decided
+                log.error(
+                    "Failure in strategy entry-rejected hook: %s",
+                    exc,
+                    exc_info=exc,
+                    extra={
+                        "event": "strategy_entry_rejected_hook_error",
+                        "strategy": resolved_name,
+                        "side": side,
+                        "reason": reason,
+                    },
+                )
+            return
+
     def get_allocation_snapshot(self) -> dict[str, float]:
         """Return deterministic manual/equal allocation across enabled strategies.
 
