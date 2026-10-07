@@ -172,8 +172,8 @@ def test_release_enables_independent_research_systemd_launcher() -> None:
     release = _text("deploy/lightsail_release.sh")
 
     assert "ensure_env_default BOT_RESEARCH_LAUNCHER systemd" in release
+    assert "transient systemd research service" in release
     block = release.split("poll_research_request()", 1)[1].split("exec 9>", 1)[0]
-    assert "transient systemd research service" in block
     assert "run_research_job.py" not in block
 
 
