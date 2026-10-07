@@ -60,6 +60,33 @@ def test_launch_is_idempotent_after_terminal_result_and_forces_offline_flags(
     assert __import__("os").environ["EXECUTION_MODE"] == "LIVE"
 
 
+def test_lightsail_launcher_defaults_to_systemd_without_bootstrap_env(monkeypatch):
+    from nifty_scalper_bot.ops.research_jobs import _launcher_mode
+
+    monkeypatch.delenv("BOT_RESEARCH_LAUNCHER", raising=False)
+    monkeypatch.setenv("DEPLOYMENT_PLATFORM", "aws_lightsail")
+
+    assert _launcher_mode() == "systemd"
+
+
+def test_lightsail_launcher_cannot_regress_to_direct_child(monkeypatch):
+    from nifty_scalper_bot.ops.research_jobs import _launcher_mode
+
+    monkeypatch.setenv("BOT_RESEARCH_LAUNCHER", "direct")
+    monkeypatch.setenv("DEPLOYMENT_PLATFORM", "aws_lightsail")
+
+    assert _launcher_mode() == "systemd"
+
+
+def test_non_lightsail_launcher_keeps_direct_default(monkeypatch):
+    from nifty_scalper_bot.ops.research_jobs import _launcher_mode
+
+    monkeypatch.delenv("BOT_RESEARCH_LAUNCHER", raising=False)
+    monkeypatch.delenv("DEPLOYMENT_PLATFORM", raising=False)
+
+    assert _launcher_mode() == "direct"
+
+
 def test_systemd_launcher_uses_independent_transient_service(tmp_path, monkeypatch):
     from types import SimpleNamespace
 
