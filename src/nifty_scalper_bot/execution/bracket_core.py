@@ -1776,6 +1776,8 @@ class BracketManager:
                     },
                 )
 
+        self._ensure_exchange_protective_stop(bracket)
+
     # --------------------------------------------------------------------------
     # 2. MARKET DATA INGESTION (NEW)
     # --------------------------------------------------------------------------
@@ -1878,55 +1880,56 @@ class BracketManager:
 
     def _virtual_modify_sl(self, order_id: str, price: float) -> bool:
         """Callback for AdaptiveController to update Virtual SL."""
-        # Find bracket by iterating (Safety lookup)
-        target_bracket = None
+        target_bracket: BracketState | None = None
         with self._lock:
-            for b in self._brackets.values():
-                if b.virtual_sl_id == order_id:
-                    target_bracket = b
+            for candidate in self._brackets.values():
+                if candidate.virtual_sl_id == order_id:
+                    target_bracket = candidate
                     break
 
-            if target_bracket:
-                old_sl = target_bracket.sl_trigger_price
-                rounded = _round_to_tick(price)
-                ltp = float(target_bracket.last_ltp or 0.0)
-                if not self._is_trail_candidate_allowed(target_bracket, rounded, ltp):
-                    return False
-                target_bracket.sl_trigger_price = rounded
-                target_bracket.updated_at = time.time()
-                target_bracket.last_trail_price = ltp or None
-                target_bracket.trail_revision += 1
-                LOGGER.info(
-                    "BRACKET_TRAIL_UPDATED symbol=%s old_sl=%s new_sl=%s",
-                    target_bracket.symbol,
-                    round(old_sl, 2),
-                    round(rounded, 2),
-                    extra={
-                        "event": "BRACKET_TRAIL_UPDATED",
-                        "trade_lifecycle_id": target_bracket.trade_lifecycle_id,
-                        "entry_order_id": target_bracket.entry_order_id,
-                        "symbol": target_bracket.symbol,
-                        "old_sl": old_sl,
-                        "new_sl": rounded,
-                        "ltp": ltp,
-                        "trail_revision": target_bracket.trail_revision,
-                    },
-                )
-                self._log_bracket_event(
-                    "TRAIL_UPDATED",
-                    target_bracket,
-                    meta={
-                        "old_sl": old_sl,
-                        "new_sl": rounded,
-                        "ltp": ltp,
-                        "trail_revision": target_bracket.trail_revision,
-                        "source": "virtual_modify_sl",
-                    },
-                )
-                # ✅ FIX: Persist trailing update
-                self.save_state()
-                return True
-        return False
+            if target_bracket is None:
+                return False
+
+            old_sl = target_bracket.sl_trigger_price
+            rounded = _round_to_tick(price)
+            ltp = float(target_bracket.last_ltp or 0.0)
+            if not self._is_trail_candidate_allowed(target_bracket, rounded, ltp):
+                return False
+            target_bracket.sl_trigger_price = rounded
+            target_bracket.updated_at = time.time()
+            target_bracket.last_trail_price = ltp or None
+            target_bracket.trail_revision += 1
+            LOGGER.info(
+                "BRACKET_TRAIL_UPDATED symbol=%s old_sl=%s new_sl=%s",
+                target_bracket.symbol,
+                round(old_sl, 2),
+                round(rounded, 2),
+                extra={
+                    "event": "BRACKET_TRAIL_UPDATED",
+                    "trade_lifecycle_id": target_bracket.trade_lifecycle_id,
+                    "entry_order_id": target_bracket.entry_order_id,
+                    "symbol": target_bracket.symbol,
+                    "old_sl": old_sl,
+                    "new_sl": rounded,
+                    "ltp": ltp,
+                    "trail_revision": target_bracket.trail_revision,
+                },
+            )
+            self._log_bracket_event(
+                "TRAIL_UPDATED",
+                target_bracket,
+                meta={
+                    "old_sl": old_sl,
+                    "new_sl": rounded,
+                    "ltp": ltp,
+                    "trail_revision": target_bracket.trail_revision,
+                    "source": "virtual_modify_sl",
+                },
+            )
+            self.save_state()
+
+        self._sync_exchange_protective_stop(target_bracket)
+        return True
 
     # --------------------------------------------------------------------------
     # 3. EXECUTION LOGIC (The "Sniper")
@@ -2549,6 +2552,13 @@ class BracketManager:
             ),
         )
         if not symbol or qty <= 0:
+            return
+
+        if self._prepare_exchange_stop_for_exit(
+            bracket,
+            reason=reason,
+            now=now,
+        ):
             return
 
         if self._reconcile_exit_state(bracket, requested_by="pre_submit"):
@@ -4475,6 +4485,19 @@ class BracketManager:
         if qty <= 0:
             return ExitExecutionResult(
                 False, False, None, 0, reason, status="INVALID_QTY"
+            )
+        if self._prepare_exchange_stop_for_exit(
+            bracket,
+            reason=reason,
+            now=time.time(),
+        ):
+            return ExitExecutionResult(
+                True,
+                False,
+                bracket.exchange_stop_order_id,
+                0,
+                reason,
+                status="EXCHANGE_STOP_PENDING",
             )
         if self._reconcile_exit_state(bracket, requested_by="direct_pre_submit"):
             return ExitExecutionResult(
