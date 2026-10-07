@@ -1153,6 +1153,10 @@ class SMCStrategy(EliteStrategy):
                     1 for name in feature_names if indicators.get(name) is not None
                 ) / float(len(feature_names))
                 context_age_seconds = resolve_context_age_seconds(indicators)
+                capacity_rejection_retry = isinstance(
+                    event.get("retry_after_confirmation_ts"),
+                    datetime,
+                )
                 metadata = {
                     "strategy": "SMC",
                     "strategy_name": "SMC",
@@ -1236,6 +1240,7 @@ class SMCStrategy(EliteStrategy):
                     "sweep_recovered_from_history": bool(
                         event.get("recovered_from_history")
                     ),
+                    "capacity_rejection_retry": capacity_rejection_retry,
                 }
                 # Generating a preliminary vote must not consume the structural
                 # setup. StrategyManager may still be waiting for asynchronous
