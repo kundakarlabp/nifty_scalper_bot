@@ -204,14 +204,20 @@ def _execution_runner(monkeypatch, *, ce_ok=True, pe_ok=False):
     runner._position_manager = None
     runner._orchestrator = None
     accepted_notifications = []
+    rejected_notifications = []
 
     def notify_entry_accepted(strategy, side, setup_id=None):
         accepted_notifications.append((strategy, side, setup_id))
 
+    def notify_entry_rejected(strategy, side, setup_id=None, reason=None):
+        rejected_notifications.append((strategy, side, setup_id, reason))
+
     runner._strategy_manager = SimpleNamespace(
-        notify_entry_accepted=notify_entry_accepted
+        notify_entry_accepted=notify_entry_accepted,
+        notify_entry_rejected=notify_entry_rejected,
     )
     runner._accepted_strategy_notifications = accepted_notifications
+    runner._rejected_strategy_notifications = rejected_notifications
     runner._active_atm_strike = 25000
     runner._active_option_symbols = {"NFO:CE", "NFO:PE"}
     runner._active_basket_all_symbols = {"NFO:CE", "NFO:PE"}
@@ -626,6 +632,7 @@ def test_capacity_exhaustion_arms_existing_prebroker_risk_cooldown(monkeypatch) 
         _signal("NFO:CE"),
         metadata={
             "strategy_name": "test",
+            "setup_id": "smcv2:test:CE:capacity",
             "atm_strike": 25000,
             "candidate_snapshots": [
                 {
@@ -656,6 +663,14 @@ def test_capacity_exhaustion_arms_existing_prebroker_risk_cooldown(monkeypatch) 
     assert runner._execution_reject_cooldown_ts == {
         "NFO:CE:test:risk_capacity_unavailable": pytest.approx(time.time(), abs=2.0)
     }
+    assert runner._rejected_strategy_notifications == [
+        (
+            "test",
+            "CE",
+            "smcv2:test:CE:capacity",
+            "no_affordable_execution_candidate",
+        )
+    ]
     runner._exec_reject_runtime_not_ready_seconds = 10.0
     runner._exec_reject_invalid_lot_seconds = 300.0
     runner._exec_reject_rr_seconds = 5.0
