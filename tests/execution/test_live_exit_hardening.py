@@ -342,9 +342,11 @@ def test_exchange_stop_is_tightened_with_canonical_trailing_stop(monkeypatch) ->
 
     assert manager._virtual_modify_sl(bracket.virtual_sl_id, 150.0) is True
 
-    assert order_manager.modify_calls == [
-        ("rescue-1", {"trigger_price": pytest.approx(150.0)})
-    ]
+    assert len(order_manager.modify_calls) == 1
+    stop_id, changes = order_manager.modify_calls[0]
+    assert stop_id == "rescue-1"
+    assert changes["trigger_price"] == pytest.approx(150.0)
+    assert 0.0 < float(changes["price"]) < 150.0
 
 
 def test_hard_stop_waits_for_exchange_stop_before_market_fallback(monkeypatch) -> None:
