@@ -4179,6 +4179,23 @@ class StrategyManager(_BaseStrategyManager):
         independent_trigger_confirmation, confirming_trigger_strategies = (
             independent_same_side_confirmation(trigger_votes)
         )
+        capacity_retry_requires_consensus = any(
+            str(evidence.strategy or "").strip().upper() == "SMC"
+            and bool(
+                (signal.metadata or {}).get("capacity_rejection_retry")
+                or (evidence.metadata or {}).get("capacity_rejection_retry")
+            )
+            for signal, evidence in trigger_votes
+        )
+        if capacity_retry_requires_consensus and not independent_trigger_confirmation:
+            _record_no_signal(
+                "strategy_confirmation_missing",
+                "capacity_retry_independent_confirmation_missing",
+                "context_contract",
+                trigger_vote_count=len(trigger_votes),
+                context_vote_count=len(context_votes),
+            )
+            return None
         if not independent_trigger_confirmation and not same_side_context:
             context_diagnostics = [
                 {
