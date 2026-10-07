@@ -565,6 +565,54 @@ def test_capacity_rejected_smc_requires_fresh_completed_bar_confirmation(
     assert refreshed.metadata["setup_candle_timestamp"] == fresh_confirm["timestamp"]
 
 
+def test_capacity_rejected_smc_requires_fresh_completed_bar_confirmation(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    rows = _base_rows()
+    strategy = _strategy(rows)
+    sweep = _bar(30, open_=23988, high=23991, low=23974, close=23984, volume=2500)
+    rows.append(sweep)
+    assert (
+        strategy.generate_signal(
+            CE, _indicators(latest_bar_ts=sweep["timestamp"]), 102.0
+        )
+        is None
+    )
+    confirm = _bar(31, open_=23984, high=24000, low=23982, close=23998, volume=2200)
+    rows.append(confirm)
+    indicators = _indicators(latest_bar_ts=confirm["timestamp"])
+
+    first = strategy.generate_signal(CE, indicators, 103.0)
+    assert first is not None
+    strategy.notify_entry_rejected(
+        "CE",
+        setup_id=first.metadata["setup_id"],
+        reason="no_affordable_execution_candidate",
+    )
+
+    assert strategy.generate_signal(CE, indicators, 103.0) is None
+    assert strategy.last_no_vote_reason == "smc_retry_requires_fresh_confirmation"
+
+    fresh_confirm = _bar(
+        32,
+        open_=23994.0,
+        high=24005.0,
+        low=23992.0,
+        close=24002.0,
+        volume=2100.0,
+    )
+    rows.append(fresh_confirm)
+    refreshed = strategy.generate_signal(
+        CE,
+        _indicators(latest_bar_ts=fresh_confirm["timestamp"]),
+        104.0,
+    )
+    assert refreshed is not None
+    assert refreshed.metadata["setup_id"] == first.metadata["setup_id"]
+    assert refreshed.metadata["setup_candle_timestamp"] == fresh_confirm["timestamp"]
+
+
 def test_same_confirmation_bar_reuses_identity_until_entry_is_accepted(
     monkeypatch,
 ) -> None:
