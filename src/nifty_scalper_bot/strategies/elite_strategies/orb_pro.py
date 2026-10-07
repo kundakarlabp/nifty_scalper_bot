@@ -921,10 +921,7 @@ class ORBProStrategy(EliteStrategy):
             transition_setup(
                 SetupStage.CONTRACT_REJECTED,
                 strategy="ORBPro",
-                setup_id=(
-                    f"orbv2:{snapshot['session_date']}:{snapshot['symbol']}:{side}:"
-                    f"{breakout_ts.isoformat()}"
-                ),
+                setup_id=setup_id,
                 symbol=symbol,
                 side=side,
                 reason="orb_structural_contract_rejected",
