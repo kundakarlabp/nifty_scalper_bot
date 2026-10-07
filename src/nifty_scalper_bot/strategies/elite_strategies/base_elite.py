@@ -518,6 +518,16 @@ class EliteStrategy(Strategy):
         """Compatibility hook; order lifecycle is owned by the runner."""
         del side, setup_id
 
+    def notify_entry_rejected(
+        self,
+        side: str,
+        *,
+        setup_id: str | None = None,
+        reason: str | None = None,
+    ) -> None:
+        """Compatibility hook for deterministic pre-broker entry rejection."""
+        del side, setup_id, reason
+
     def _no_vote(self, reason: str) -> None:
         """Record a single no-vote reason. Args: reason. Returns: None. Raises: none."""
         self.last_no_vote_reason = reason
