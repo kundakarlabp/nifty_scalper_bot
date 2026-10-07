@@ -140,6 +140,36 @@ def test_unchanged_release_confirms_health_failure_before_restart() -> None:
     assert 'service_healthy "$BEFORE"' not in unchanged
 
 
+def test_changed_release_restarts_current_revision_admin_before_research_poll() -> None:
+    release = _text("deploy/lightsail_release.sh")
+
+    assert 'ADMIN_SERVICE="${BOT_ADMIN_SERVICE_NAME:-niftybot-admin}"' in release
+    assert "restart_admin()" in release
+    helper = release.split("restart_admin()", 1)[1].split(
+        "restart_streamlit()", 1
+    )[0]
+    assert 'systemctl restart "$ADMIN_SERVICE"' in helper
+    assert "http://127.0.0.1:${ADMIN_PORT}/admin/api/status" in helper
+
+    deployed = release.split('if wait_for_service "$AFTER"; then', 1)[1].split(
+        "exit 0", 1
+    )[0]
+    admin_restart = deployed.index("restart_admin")
+    research_poll = deployed.index("poll_research_request")
+    assert admin_restart < research_poll
+    assert "admin_ready=true" in deployed
+    assert 'if [ "$admin_ready" = true ]; then' in deployed
+
+
+def test_rollback_restarts_admin_on_restored_revision() -> None:
+    release = _text("deploy/lightsail_release.sh")
+    rollback = release.split('if [ "$BEFORE" != "$AFTER" ]; then', 2)[-1]
+    reset = rollback.index('git reset --hard --quiet "$BEFORE"')
+    engine_restart = rollback.index('sudo systemctl restart "$SERVICE"', reset)
+    admin_restart = rollback.index("restart_admin", engine_restart)
+    assert reset < engine_restart < admin_restart
+
+
 def test_release_delegates_research_manifest_to_persistent_admin() -> None:
     release = _text("deploy/lightsail_release.sh")
     assert 'ADMIN_PORT="${BOT_ADMIN_PORT:-8081}"' in release
