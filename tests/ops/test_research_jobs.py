@@ -61,7 +61,7 @@ def test_launch_is_idempotent_after_terminal_result_and_forces_offline_flags(
 
 
 @pytest.mark.parametrize("stale_state", ["queued", "collecting"])
-def test_stale_nonterminal_job_is_relaunched_when_worker_lock_is_free(
+def test_stale_nonterminal_job_fails_closed_without_relaunch(
     tmp_path, monkeypatch, stale_state
 ):
     from nifty_scalper_bot.ops.research_jobs import start_job, write_json
@@ -76,6 +76,9 @@ def test_stale_nonterminal_job_is_relaunched_when_worker_lock_is_free(
         "state": stale_state,
         "stage": "history",
         "backtest_completed": False,
+        "component_backtest_completed": False,
+        "runtime_replay_completed": False,
+        "requested_work_completed": False,
         "launch_attempt": 1,
     }
     status_file = tmp_path / "data/research/stale-job/status.json"
@@ -89,11 +92,15 @@ def test_stale_nonterminal_job_is_relaunched_when_worker_lock_is_free(
 
     result = start_job(tmp_path, payload)
 
-    assert len(launches) == 1
-    assert result["state"] == "queued"
-    assert result["launch_attempt"] == 2
-    assert result["recovered_from_state"] == stale_state
-    assert json.loads(status_file.read_text())["launch_attempt"] == 2
+    assert launches == []
+    assert result["state"] == "failed"
+    assert result["error_type"] == "WorkerExitedWithoutResult"
+    assert result["error_code"] == "stale_research_worker"
+    assert result["stale_state"] == stale_state
+    assert result["launch_attempt"] == 1
+    persisted = json.loads(status_file.read_text())
+    assert persisted == result
+    assert json.loads((tmp_path / "data/research/latest.json").read_text()) == result
 
 
 def test_reused_request_id_with_different_definition_is_rejected(tmp_path):
@@ -202,6 +209,41 @@ def test_admin_manifest_poll_launches_exact_fixed_request(tmp_path, monkeypatch)
             {},
         )
     ]
+
+
+def test_admin_research_report_exposes_vwap_comparison(tmp_path, monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from nifty_scalper_bot import admin_dashboard
+    from nifty_scalper_bot.ops.research_jobs import write_json
+
+    monkeypatch.setattr(admin_dashboard, "APP_DIR", tmp_path)
+    status = {
+        "id": "report-job",
+        "days": 30,
+        "mode": "components",
+        "state": "completed",
+        "backtest_completed": True,
+    }
+    write_json(tmp_path / "data/research/latest.json", status)
+    write_json(
+        tmp_path / "data/research/report-job/vwap_comparison.json",
+        {
+            "scope": "bounded_vwap_active_contract_component_comparison",
+            "selection": {"promotion_eligible": False},
+        },
+    )
+    app = FastAPI()
+    app.include_router(admin_dashboard.router)
+    client = TestClient(app)
+
+    response = client.get("/admin/research/report")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"]["id"] == "report-job"
+    assert payload["vwap_comparison"]["selection"]["promotion_eligible"] is False
 
 
 @pytest.mark.parametrize("ledger_error", [False, True])
@@ -477,6 +519,14 @@ def test_worker_waits_for_startup_basket_and_redacts_unknown_errors(monkeypatch)
             )
         )
         == "ledger_requires_verified_costs"
+    )
+    assert (
+        worker.safe_error_code(
+            ValueError(
+                "Zerodha authentication invalid: Incorrect api_key or access_token"
+            )
+        )
+        == "broker_authentication_invalid"
     )
 
 

@@ -40,6 +40,7 @@ def safe_error_code(exc: Exception) -> str:
         "broker-calculated costs required": "ledger_requires_verified_costs",
         "broker-calculated costs missing": "ledger_requires_verified_costs",
         "completed trade violates gross_pnl": "ledger_net_pnl_inconsistent",
+        "Zerodha authentication invalid": "broker_authentication_invalid",
     }
     for code in (
         "research_history_unavailable",
