@@ -46,9 +46,9 @@ def test_release_waits_for_exact_main_ci_before_host_smoke() -> None:
     assert "github_ci_state()" in release
     assert "actions/runs?head_sha=" in release
     assert 'ci_state="$(github_ci_state "$AFTER")"' in release
-    assert 'write_status awaiting_ci' in release
-    assert 'write_status ci_failed' in release
-    candidate = release.index('CANDIDATE=')
+    assert "write_status awaiting_ci" in release
+    assert "write_status ci_failed" in release
+    candidate = release.index("CANDIDATE=")
     ci_gate = release.index('ci_state="$(github_ci_state "$AFTER")"')
     assert ci_gate < candidate
 
