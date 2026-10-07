@@ -40,6 +40,40 @@ def test_lightsail_uses_external_environment_file() -> None:
     )
 
 
+def test_release_waits_for_exact_main_ci_before_host_smoke() -> None:
+    release = _text("deploy/lightsail_release.sh")
+
+    assert "github_ci_state()" in release
+    assert "actions/runs?head_sha=" in release
+    assert 'ci_state="$(github_ci_state "$AFTER")"' in release
+    assert 'write_status awaiting_ci' in release
+    assert 'write_status ci_failed' in release
+    candidate = release.index('CANDIDATE=')
+    ci_gate = release.index('ci_state="$(github_ci_state "$AFTER")"')
+    assert ci_gate < candidate
+
+
+def test_host_release_validation_is_short_and_bounded() -> None:
+    release = _text("deploy/lightsail_release.sh")
+    setup = _text("deploy/lightsail_setup.sh")
+
+    assert 'RELEASE_TEST_TIMEOUT_SECONDS="${BOT_RELEASE_TEST_TIMEOUT_SECONDS:-300}"' in release
+    assert 'timeout --signal=TERM --kill-after=30s "$RELEASE_TEST_TIMEOUT_SECONDS"' in release
+    assert "tests/architecture/test_lightsail_release_contract.py" in release
+    assert "tests/ops/test_research_jobs.py" in release
+    assert "tests/test_execution_path_contract.py" in release
+    assert "tests/execution/test_runtime_order_facade.py" in release
+    assert "tests/execution/test_runtime_bracket_facade.py" in release
+    assert "tests/execution/test_bracket_persistence_policy.py" in release
+    assert "tests/integration/test_canonical_bo_end_to_end.py" in release
+    assert "tests/dashboard/test_superlite_admin_core.py" in release
+    assert "tests/backtests/test_strategy_bar_research.py" not in release
+    assert "tests/data/test_mdm_tick_coalescing.py" not in release
+    assert "tests/infra/test_daily_log_archive.py" not in release
+    assert "TimeoutStartSec=600" in setup
+    assert "KillMode=control-group" in setup
+
+
 def test_release_runner_validates_and_rolls_back() -> None:
     release = _text("deploy/lightsail_release.sh")
     assert "flock -n 9" in release
