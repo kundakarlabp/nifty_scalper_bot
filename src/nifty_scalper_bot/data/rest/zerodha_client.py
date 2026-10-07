@@ -351,6 +351,17 @@ class ZerodhaKiteClient(BaseBrokerClient):
         )
         return any(token in text for token in auth_tokens)
 
+    @staticmethod
+    def _request_proves_authentication(endpoint: str) -> bool:
+        """Return whether a successful endpoint response proves token validity."""
+        path = str(endpoint or "").split("?", 1)[0].strip()
+        parts = [part for part in path.split("/") if part]
+        # Zerodha's instrument master is intentionally unauthenticated. It may
+        # succeed with an expired/invalid access token, so it cannot clear the
+        # authentication latch. Historical candle routes live below
+        # /instruments/historical/... and remain authenticated evidence.
+        return not (parts and parts[0].lower() == "instruments" and len(parts) <= 2)
+
     def _clear_rest_caches(self) -> None:
         self._positions_cache = None
         self._orders_cache = None
@@ -383,13 +394,19 @@ class ZerodhaKiteClient(BaseBrokerClient):
             f"Zerodha authentication invalid: {self._auth_invalid_reason}"
         )
 
-    def _raise_if_authentication_latched(self) -> None:
+    def _raise_if_authentication_latched(
+        self, *, request_proves_authentication: bool = True
+    ) -> None:
         if not self._auth_invalid:
+            return
+        if not request_proves_authentication:
+            # Public instrument-master requests remain usable while auth is
+            # latched, but they neither consume nor satisfy the auth re-probe.
             return
         now = self._log_time_fn()
         if now >= self._auth_reprobe_next:
-            # Let exactly one request through per interval as a re-probe;
-            # a success clears the latch via _reset_transient_state.
+            # Let exactly one authenticated request through per interval as a
+            # re-probe; only authenticated success may clear the latch.
             self._auth_reprobe_next = now + self._auth_reprobe_interval
             return
         raise BrokerAuthenticationError(
@@ -2768,8 +2785,11 @@ class ZerodhaKiteClient(BaseBrokerClient):
             BrokerError: If the request exhausts retries or encounters a fatal error.
         """
 
-        self._raise_if_authentication_latched()
         url = endpoint if endpoint.startswith("/") else f"/{endpoint}"
+        request_proves_authentication = self._request_proves_authentication(url)
+        self._raise_if_authentication_latched(
+            request_proves_authentication=request_proves_authentication
+        )
         label = operation_label or (url.lstrip("/") or "zerodha")
         should_retry, on_retry = self._build_retry_handlers(endpoint=url)
 
@@ -2792,7 +2812,9 @@ class ZerodhaKiteClient(BaseBrokerClient):
 
             if raw_response:
                 if response.is_success:
-                    self._reset_transient_state()
+                    self._reset_transient_state(
+                        authenticated_success=request_proves_authentication
+                    )
                     return response
                 self._reset_transient_state(authenticated_success=False)
                 self._raise_for_status(response, expect_order_response)
@@ -2833,7 +2855,9 @@ class ZerodhaKiteClient(BaseBrokerClient):
                         if isinstance(payload, Mapping)
                         else "authentication_failed"
                     )
-                self._reset_transient_state()
+                self._reset_transient_state(
+                    authenticated_success=request_proves_authentication
+                )
                 return payload
 
             if response.status_code == 429:
