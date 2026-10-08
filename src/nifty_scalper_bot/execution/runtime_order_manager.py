@@ -328,9 +328,7 @@ def _maybe_reprice_open_entry(
 
     provenance_raw = getattr(order, "trade_provenance", None)
     provenance = dict(provenance_raw) if isinstance(provenance_raw, Mapping) else {}
-    anchor_mode = (
-        str(provenance.get("bracket_anchor_mode") or "").strip().lower()
-    )
+    anchor_mode = str(provenance.get("bracket_anchor_mode") or "").strip().lower()
     guard = provenance.get("entry_reprice_guard")
     if anchor_mode != "distance" or not isinstance(guard, Mapping):
         return False
@@ -471,9 +469,7 @@ def _maybe_reprice_open_entry(
             max_quote_age_ms=int(float(guard.get("max_quote_age_ms") or 1000)),
             max_spread_pct=float(guard.get("max_spread_pct") or 0.0),
             min_depth_qty=int(float(guard.get("min_depth_qty") or quantity)),
-            max_signal_age_seconds=float(
-                guard.get("max_signal_age_seconds") or 0.0
-            ),
+            max_signal_age_seconds=float(guard.get("max_signal_age_seconds") or 0.0),
             max_entry_drift_pct=float(guard.get("max_entry_drift_pct") or 0.0),
             intent="ENTRY",
             intended_position_side=(
@@ -590,6 +586,7 @@ def _maybe_reprice_open_entry(
         )
     return True
 
+
 def _enrich_trade_plan_exit_provenance(
     plan: Any,
     *,
@@ -619,9 +616,11 @@ def _enrich_trade_plan_exit_provenance(
 
     if lot_size > 0:
         enriched["resolved_lot_size"] = lot_size
-    enriched["bracket_anchor_mode"] = str(
-        getattr(plan, "bracket_anchor_mode", "distance") or "distance"
-    ).strip().lower()
+    enriched["bracket_anchor_mode"] = (
+        str(getattr(plan, "bracket_anchor_mode", "distance") or "distance")
+        .strip()
+        .lower()
+    )
     enriched["entry_reprice_guard"] = {
         "max_quote_age_ms": int(getattr(plan, "max_quote_age_ms", 0) or 0),
         "max_spread_pct": float(getattr(plan, "max_spread_pct", 0.0) or 0.0),
@@ -629,9 +628,7 @@ def _enrich_trade_plan_exit_provenance(
         "max_signal_age_seconds": float(
             getattr(plan, "max_signal_age_seconds", 0.0) or 0.0
         ),
-        "max_entry_drift_pct": float(
-            getattr(plan, "max_entry_drift_pct", 0.0) or 0.0
-        ),
+        "max_entry_drift_pct": float(getattr(plan, "max_entry_drift_pct", 0.0) or 0.0),
     }
 
     risk = None
@@ -754,6 +751,7 @@ def _enrich_trade_plan_exit_provenance(
 
     setattr(plan, "trade_provenance", enriched)
     return plan
+
 
 def _submit_core_with_exit_provenance(manager: Any, plan: Any) -> Any:
     """Persist guard metadata; core finalizes TP1 after protected-price reanchor."""
