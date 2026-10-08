@@ -25,3 +25,26 @@ def test_installer_preserves_external_environment() -> None:
     assert "enable --quiet --now niftybot-autodeploy.timer" in installer
     assert "niftybot-admin.service niftybot-streamlit.service" in installer
     assert "rm -rf -- {}" in installer
+
+
+def test_update_control_delegates_only_to_validated_autodeployer() -> None:
+    admin = (ROOT.parent / "src/nifty_scalper_bot/admin_dashboard.py").read_text(
+        encoding="utf-8"
+    )
+    superlite = (ROOT.parent / "src/nifty_scalper_bot/superlite_admin.py").read_text(
+        encoding="utf-8"
+    )
+    service_control = (
+        ROOT.parent / "src/nifty_scalper_bot/ops/service_control.py"
+    ).read_text(encoding="utf-8")
+
+    update_block = admin.split("def _git_update()", 1)[1].split(
+        "# ---------------- UI ----------------", 1
+    )[0]
+    assert "restart_deployer()" in update_block
+    assert "git" not in update_block
+    assert "pull" not in update_block
+
+    assert "restart_deployer()" in superlite
+    assert "niftybot-autodeploy.service" in service_control
+    assert 'action="restart_deployer"' in service_control
