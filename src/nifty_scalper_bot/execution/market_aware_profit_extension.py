@@ -846,9 +846,29 @@ def _protected_profit_floor(manager: Any, bracket: Any) -> bool:
     cost = _cost_floor(manager, bracket)
     if entry <= 0 or current_sl <= 0:
         return False
-    if str(getattr(bracket, "side", "BUY")).upper() == "BUY":
-        return current_sl >= entry + max(cost, _TICK_SIZE) - 1e-9
-    return current_sl <= entry - max(cost, _TICK_SIZE) + 1e-9
+    side = str(getattr(bracket, "side", "BUY")).upper()
+    required = max(cost, _TICK_SIZE)
+    virtual_protected = (
+        current_sl >= entry + required - 1e-9
+        if side == "BUY"
+        else current_sl <= entry - required + 1e-9
+    )
+    if not virtual_protected:
+        return False
+    # Extending the profit target must not rely on a virtual-only lock while
+    # a looser exchange order still owns the actual emergency protection.
+    if getattr(bracket, "exchange_stop_order_id", None):
+        broker_stop = _positive(
+            getattr(bracket, "exchange_stop_trigger_price", None)
+        )
+        if broker_stop is None:
+            return False
+        return (
+            broker_stop >= entry + required - 1e-9
+            if side == "BUY"
+            else broker_stop <= entry - required + 1e-9
+        )
+    return True
 
 
 def _ratchet_stop(
