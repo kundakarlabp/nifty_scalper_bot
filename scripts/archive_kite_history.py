@@ -107,7 +107,8 @@ def history_universe(rows: list[dict], selected: dict, future: str) -> list[str]
         atm_strike=atm,
         max_options=max_options,
     )
-    return list(dict.fromkeys(nominated[:2] + [item[0] for item in capped] + nominated[2:]))
+    option_symbols = [item[0] for item in capped]
+    return list(dict.fromkeys(nominated[:2] + option_symbols + nominated[2:]))
 
 
 def archive_history(
