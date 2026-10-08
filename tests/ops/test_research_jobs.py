@@ -27,6 +27,8 @@ def test_launch_is_idempotent_after_terminal_result_and_forces_offline_flags(
 ):
     from nifty_scalper_bot.ops.research_jobs import start_job, write_json
 
+    monkeypatch.delenv("DEPLOYMENT_PLATFORM", raising=False)
+    monkeypatch.setenv("BOT_RESEARCH_LAUNCHER", "direct")
     launches = []
     monkeypatch.setattr(
         "nifty_scalper_bot.ops.research_jobs.subprocess.Popen",
