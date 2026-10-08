@@ -92,12 +92,9 @@ def history_universe(rows: list[dict], selected: dict, future: str) -> list[str]
             continue
         if token <= 0 or strike <= 0:
             continue
-        option_items.append(
-            (f"NFO:{row['tradingsymbol']}", token, strike, side)
-        )
+        option_items.append((f"NFO:{row['tradingsymbol']}", token, strike, side))
     max_options = parse_int_env(
-        os.getenv("MAX_ACTIVE_OPTION_SYMBOLS")
-        or os.getenv("MAX_LIVE_OPTION_SYMBOLS"),
+        os.getenv("MAX_ACTIVE_OPTION_SYMBOLS") or os.getenv("MAX_LIVE_OPTION_SYMBOLS"),
         8,
     )
     capped = cap_option_universe(
