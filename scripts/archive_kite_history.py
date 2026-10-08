@@ -8,13 +8,16 @@ import datetime as dt
 import hashlib
 import json
 import math
+import os
 import time
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 
+from nifty_scalper_bot.config.env_utils import parse_int_env
 from nifty_scalper_bot.data.rest.zerodha_client import ZerodhaKiteClient
+from nifty_scalper_bot.instruments.active_contracts import cap_option_universe
 
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -58,30 +61,53 @@ def _validate_candles(candles: list, first: dt.datetime, last: dt.datetime) -> N
 
 
 def history_universe(rows: list[dict], selected: dict, future: str) -> list[str]:
-    """Collect nominated and adjacent current contracts; do not infer past baskets."""
+    """Mirror the live capped current-expiry basket; never infer past baskets."""
     nominated = ["NSE:NIFTY 50", future, selected["ce"], selected["pe"]]
     ce = next(
         (row for row in rows if f"NFO:{row.get('tradingsymbol')}" == selected["ce"]),
         None,
     )
-    if ce is None or not ce.get("strike"):
+    if (
+        ce is None
+        or not ce.get("strike")
+        or not ce.get("expiry")
+        or not ce.get("instrument_token")
+    ):
         return nominated
     atm = float(ce["strike"])
-    options = [
-        row
-        for row in rows
-        if row.get("name") == "NIFTY"
-        and row.get("instrument_type") in {"CE", "PE"}
-        and row.get("expiry")
-    ]
-    expiries = sorted({str(row["expiry"]) for row in options})[:2]
-    extra = [
-        f"NFO:{row['tradingsymbol']}"
-        for row in options
-        if str(row["expiry"]) in expiries
-        and abs(float(row.get("strike") or 0) - atm) <= 500
-    ]
-    return list(dict.fromkeys(nominated + sorted(extra)))
+    expiry = str(ce["expiry"])
+    option_items: list[tuple[str, int, float, str]] = []
+    for row in rows:
+        side = str(row.get("instrument_type") or "").upper()
+        if (
+            row.get("name") != "NIFTY"
+            or side not in {"CE", "PE"}
+            or str(row.get("expiry") or "") != expiry
+        ):
+            continue
+        try:
+            token = int(row.get("instrument_token") or 0)
+            strike = float(row.get("strike") or 0)
+        except (TypeError, ValueError):
+            continue
+        if token <= 0 or strike <= 0:
+            continue
+        option_items.append(
+            (f"NFO:{row['tradingsymbol']}", token, strike, side)
+        )
+    max_options = parse_int_env(
+        os.getenv("MAX_ACTIVE_OPTION_SYMBOLS")
+        or os.getenv("MAX_LIVE_OPTION_SYMBOLS"),
+        8,
+    )
+    capped = cap_option_universe(
+        option_items,
+        selected_ce=selected["ce"],
+        selected_pe=selected["pe"],
+        atm_strike=atm,
+        max_options=max_options,
+    )
+    return list(dict.fromkeys(nominated[:2] + [item[0] for item in capped] + nominated[2:]))
 
 
 def archive_history(
