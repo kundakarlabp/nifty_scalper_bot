@@ -564,7 +564,7 @@ def test_flat_reconcile_cancels_exchange_stop_before_unregister(monkeypatch) -> 
 
 
 @pytest.mark.parametrize("status", ["UNKNOWN", ""])
-def test_flat_reconcile_recovers_exact_broker_filled_exchange_stop_when_status_unavailable(
+def test_flat_reconcile_recovers_confirmed_stop_when_status_unknown(
     status: str,
 ) -> None:
     manager, _order_manager, broker = _manager(cancel_confirms=False)
@@ -587,7 +587,9 @@ def test_flat_reconcile_recovers_exact_broker_filled_exchange_stop_when_status_u
     assert manager.reconcile_symbol_flat(SYMBOL) == 0
 
 
-@pytest.mark.parametrize("mismatch", ["wrong_exit_order", "not_broker_filled", "broker_reports_open"])
+@pytest.mark.parametrize(
+    "mismatch", ["wrong_exit_order", "not_broker_filled", "broker_reports_open"]
+)
 def test_flat_reconcile_never_clears_unproven_exchange_stop(
     mismatch: str,
 ) -> None:
