@@ -1019,7 +1019,8 @@ class LedgerBracketManager(CanonicalBracketManager):
         _core.LOGGER.info(
             "BRACKET_CLOSED bracket_id=%s symbol=%s close_source=%s side=%s "
             "qty=%s entry=%s exit=%s pnl=%s net_pnl=%s r=%s mfe_r=%s mae_r=%s "
-            "trail_rev=%s final_sl=%s exit_reason=%s ledger_complete=%s",
+            "trail_rev=%s final_sl=%s exit_reason=%s ledger_complete=%s "
+            "cost_source=%s charged_total=%s cost_model_delta=%s",
             bracket.bracket_id,
             bracket.symbol,
             close_source,
@@ -1036,6 +1037,9 @@ class LedgerBracketManager(CanonicalBracketManager):
             outcome.get("final_stop_price"),
             outcome.get("exit_reason"),
             ledger_complete,
+            outcome.get("cost_source"),
+            (outcome.get("effective_costs") or {}).get("total"),
+            (outcome.get("cost_reconciliation") or {}).get("difference"),
         )
         self._log_bracket_event(
             "BRACKET_CLOSED",

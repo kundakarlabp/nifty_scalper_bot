@@ -1374,15 +1374,23 @@ class BracketManager:
         with self._lock:
             owner = _existing_owner(self, symbol, str(order_id))
         if owner is not None:
-            LOGGER.warning(
+            # The orphan guardian retries every few seconds while the real
+            # bracket already owns the symbol. Keep blocking duplicate owners,
+            # but aggregate repeat diagnostics for the same confirmed owner.
+            owner_id = str(getattr(owner, "entry_order_id", "") or "")
+            log_throttled_live(
+                LOGGER,
+                logging.WARNING,
+                "BRACKET_OWNERSHIP_CONFLICT_SKIPPED",
+                f"bracket_owner:{symbol}:{owner_id}",
+                60.0,
                 "BRACKET_OWNERSHIP_CONFLICT_SKIPPED symbol=%s existing=%s attempted=%s",
                 symbol,
-                getattr(owner, "entry_order_id", None),
+                owner_id,
                 order_id,
                 extra={
-                    "event": "BRACKET_OWNERSHIP_CONFLICT_SKIPPED",
                     "symbol": symbol,
-                    "existing_entry_order_id": getattr(owner, "entry_order_id", None),
+                    "existing_entry_order_id": owner_id,
                     "attempted_order_id": str(order_id),
                 },
             )
@@ -2414,7 +2422,9 @@ class BracketManager:
                     bracket.exit_state = BracketExitLifecycle.EXIT_TRIGGERED.value
                     bracket.entry_status = BracketExitLifecycle.EXIT_TRIGGERED.value
                     bracket.updated_at = now
-                    LOGGER.info(
+                    # Entry/exit state transitions must remain auditable even
+                    # when a production process logs only WARNING and above.
+                    LOGGER.warning(
                         "EXIT_TRIGGERED bracket_id=%s symbol=%s reason=%s qty=%s",
                         bracket.bracket_id,
                         bracket.symbol,
@@ -3169,6 +3179,7 @@ class BracketManager:
         # sl_trigger_price between our stale read above and this write. Using the
         # stale value could write a LOWER SL than what the watchdog already set,
         # making protection WORSE on a trailing update.
+        trail_changed = False
         with self._lock:
             if bracket.side == "BUY":
                 current_sl = bracket.sl_trigger_price  # authoritative read under lock
@@ -3216,7 +3227,7 @@ class BracketManager:
                         },
                     )
                     self.save_state()
-                    return True
+                    trail_changed = True
             else:  # SELL
                 current_sl = bracket.sl_trigger_price  # authoritative read under lock
                 rounded_sl = _round_to_tick(new_sl)
@@ -3263,8 +3274,10 @@ class BracketManager:
                         },
                     )
                     self.save_state()
-                    return True
-        return False
+                    trail_changed = True
+        if trail_changed:
+            self._sync_exchange_protective_stop(bracket)
+        return trail_changed
 
     def _breakeven_cost_per_unit(self, bracket: BracketState) -> float:
         """Round-trip cost of this position expressed in premium points/unit."""
@@ -3730,6 +3743,7 @@ class BracketManager:
                     f"🔒 {bracket.symbol}: SL Moved to Breakeven ({bracket.entry_price})"
                 )
         if float(bracket.sl_trigger_price or 0.0) != old_sl:
+            bracket.trail_revision += 1
             self._log_bracket_event(
                 "TRAIL_UPDATED",
                 bracket,
@@ -3741,6 +3755,8 @@ class BracketManager:
                     "source": "breakeven",
                 },
             )
+            self.save_state()
+            self._sync_exchange_protective_stop(bracket)
 
     def _extract_exit_quote(
         self, symbol: str
@@ -4746,6 +4762,7 @@ class BracketManager:
     def update_trailing_sl(self, symbol: str, new_sl: float) -> None:
         """Update SL monotonically for all active brackets on a symbol. Args: symbol,new_sl; Returns: None; Raises: None."""
         rounded_sl = _round_to_tick(new_sl)
+        changed_brackets: list[BracketState] = []
         with self._lock:
             relevant_ids = self._symbol_map.get(symbol, [])
             if not relevant_ids:
@@ -4763,6 +4780,8 @@ class BracketManager:
                     bracket.sl_trigger_price = min(old_sl, rounded_sl)
 
                 if bracket.sl_trigger_price != old_sl:
+                    bracket.trail_revision += 1
+                    changed_brackets.append(bracket)
                     bracket.updated_at = time.time()
                     LOGGER.debug(
                         "TRAILING_SL_UPDATED symbol=%s old=%s new=%s",
@@ -4781,6 +4800,11 @@ class BracketManager:
                             "source": "update_trailing_sl",
                         },
                     )
+
+        if changed_brackets:
+            self.save_state()
+            for bracket in changed_brackets:
+                self._sync_exchange_protective_stop(bracket)
 
     # --------------------------------------------------------------------------
     # 6. HOUSEKEEPING & UTILS
@@ -5251,6 +5275,13 @@ class BracketManager:
     def _sync_exchange_protective_stop(self, bracket: BracketState) -> bool:
         """Coalesce broker SL ratchets and preserve a modification reserve."""
         with self._lock:
+            if (
+                not bracket.active
+                or bracket.exit_pending
+                or bracket.exit_executed
+                or bracket.remaining_quantity <= 0
+            ):
+                return False
             order_id = str(bracket.exchange_stop_order_id or "").strip()
             if not order_id:
                 return False

@@ -138,6 +138,8 @@ def test_orderflow_context_log_exposes_microstructure_diagnostics(
     assert extra["context_alignment_source"] == "temporal_ofi"
     assert extra["ofi_ready"] is True
     assert extra["ofi_1s_normalized"] == 0.50
+    assert extra["ofi_update_count_1s"] == 2
+    assert extra["ofi_unavailable_reason"] is None
     assert extra["depth_imbalance"] == signal.metadata["depth_imbalance"]
     assert extra["strong_depth_conflicts_side"] is False
 
@@ -158,6 +160,9 @@ def test_live_tick_only_depth_confirmation_needs_two_distinct_fresh_snapshots(
     assert first.metadata["context_alignment_candidate_source"] == "depth_plus_flow"
     assert first.metadata["context_alignment_source"] is None
     assert first.metadata["effective_context_alignment"] is False
+    assert (
+        first.metadata["ofi_unavailable_reason"] == "upstream_temporal_evidence_unready"
+    )
 
     clock[0] = 100.5
     repeat = strategy._evaluate_signal(SYMBOL, indicators, current_price=100.25)
@@ -195,3 +200,28 @@ def test_adverse_upstream_ofi_cannot_add_context_bonus() -> None:
     assert signal.metadata["flow_supports_side"] is False
     assert signal.metadata["effective_context_alignment"] is False
     assert "temporal_ofi_alignment" not in signal.metadata["setup_reasons"]
+
+
+def test_live_depth_persistence_survives_multiple_fast_quote_versions(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    clock = [100.0]
+    monkeypatch.setattr(order_flow_module.time, "monotonic", lambda: clock[0])
+    strategy = _strategy()
+    indicators = _indicators(buy=250.0, sell=100.0, ofi_value=0.0, supports=True)
+    indicators.pop("_expected_support")
+    indicators["ofi_ready"] = False
+
+    for timestamp, version in ((100.0, 3), (100.4, 4), (100.8, 5)):
+        clock[0] = timestamp
+        indicators["quote_update_version"] = version
+        signal = strategy._evaluate_signal(SYMBOL, indicators, current_price=100.25)
+        assert signal is not None
+        assert signal.metadata["effective_context_alignment"] is False
+
+    clock[0] = 101.2
+    indicators["quote_update_version"] = 6
+    confirmed = strategy._evaluate_signal(SYMBOL, indicators, current_price=100.25)
+    assert confirmed is not None
+    assert confirmed.metadata["effective_context_alignment"] is True

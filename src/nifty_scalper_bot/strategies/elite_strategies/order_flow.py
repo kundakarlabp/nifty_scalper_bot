@@ -291,6 +291,19 @@ class OrderFlowStrategy(EliteStrategy):
             )
             ofi_ready = bool(indicators.get("ofi_ready"))
             ofi_value = _safe_float_value(indicators.get("ofi_1s_normalized"))
+            try:
+                ofi_updates = max(0, int(indicators.get("ofi_update_count_1s") or 0))
+            except (TypeError, ValueError, OverflowError):
+                ofi_updates = 0
+            ofi_unavailable_reason = (
+                None
+                if ofi_ready
+                else (
+                    "insufficient_book_updates"
+                    if ofi_updates < 2
+                    else "upstream_temporal_evidence_unready"
+                )
+            )
             ofi_threshold = max(
                 0.01, safe_float_env("ORDERFLOW_OFI_NORMALIZED_MIN", 0.10)
             )
@@ -376,9 +389,10 @@ class OrderFlowStrategy(EliteStrategy):
                     and previous[0] != quote_version
                     and 1.0 <= now - previous[1] <= 12.0
                 )
-                if quote_version > 0 and (
-                    previous is None or previous[0] != quote_version
-                ):
+                # Anchor the start of continuous support, not the newest
+                # quote. Subsecond quote versions must not perpetually reset
+                # the one-second persistence window.
+                if quote_version > 0 and (previous is None or now - previous[1] > 12.0):
                     self._last_live_depth_support[symbol] = (
                         quote_version,
                         now,
@@ -455,6 +469,9 @@ class OrderFlowStrategy(EliteStrategy):
                 "tick_supports_side": tick_supports_side,
                 "ofi_ready": ofi_ready,
                 "ofi_1s_normalized": ofi_value,
+                "ofi_update_count_1s": ofi_updates,
+                "ofi_source": indicators.get("ofi_source"),
+                "ofi_unavailable_reason": ofi_unavailable_reason,
                 "ofi_threshold": ofi_threshold,
                 "ofi_directional": ofi_directional,
                 "ofi_supports_side": ofi_supports_side,
@@ -505,7 +522,8 @@ class OrderFlowStrategy(EliteStrategy):
             LOGGER.info(
                 "ORDERFLOW_CONTEXT_EVIDENCE symbol=%s side=%s eligible=%s "
                 "aligned=%s conflict=%s source=%s ofi_ready=%s ofi_norm=%s "
-                "depth=%.3f strong_depth_conflict=%s spread_pct=%.3f age_s=%.3f",
+                "depth=%.3f strong_depth_conflict=%s spread_pct=%.3f age_s=%.3f "
+                "ofi_updates_1s=%s ofi_unavailable=%s quote_version=%s",
                 symbol,
                 side,
                 context_quality_eligible,
@@ -518,6 +536,9 @@ class OrderFlowStrategy(EliteStrategy):
                 strong_depth_conflicts_side,
                 spread_pct,
                 context_age_seconds,
+                ofi_updates,
+                ofi_unavailable_reason,
+                quote_readiness.quote_update_version,
                 extra={
                     "event": "ORDERFLOW_CONTEXT_EVIDENCE",
                     "symbol": symbol,
@@ -528,6 +549,8 @@ class OrderFlowStrategy(EliteStrategy):
                     "context_alignment_source": context_alignment_source,
                     "ofi_ready": ofi_ready,
                     "ofi_1s_normalized": ofi_value,
+                    "ofi_update_count_1s": ofi_updates,
+                    "ofi_unavailable_reason": ofi_unavailable_reason,
                     "depth_imbalance": round(depth_imbalance, 4),
                     "strong_depth_conflicts_side": strong_depth_conflicts_side,
                 },
