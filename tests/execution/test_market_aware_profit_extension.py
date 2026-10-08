@@ -379,3 +379,14 @@ def test_market_aware_hooks_are_owned_explicitly_by_bound_manager():
     assert "_apply_trailing_math" in BoundBracketManager.__dict__
     assert "confirm_entry_fill" in BoundBracketManager.__dict__
     assert not hasattr(BoundBracketManager, "_market_aware_profit_extension_installed")
+
+def test_market_aware_profit_floor_reprices_exchange_stop() -> None:
+    manager = FakeManager(strong=False)
+    bracket = _bracket(protected=True)
+    bracket.highest_ltp = 120.0
+    calls = []
+    manager._sync_exchange_protective_stop = lambda target: calls.append(target.sl_trigger_price) or True
+
+    assert tighten_market_aware_floor(manager, bracket, 120.0) is True
+
+    assert calls == [bracket.sl_trigger_price]
