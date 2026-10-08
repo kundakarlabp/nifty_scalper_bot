@@ -1374,15 +1374,23 @@ class BracketManager:
         with self._lock:
             owner = _existing_owner(self, symbol, str(order_id))
         if owner is not None:
-            LOGGER.warning(
+            # The orphan guardian retries every few seconds while the real
+            # bracket already owns the symbol. Keep blocking duplicate owners,
+            # but aggregate repeat diagnostics for the same confirmed owner.
+            owner_id = str(getattr(owner, "entry_order_id", "") or "")
+            log_throttled_live(
+                LOGGER,
+                logging.WARNING,
+                "BRACKET_OWNERSHIP_CONFLICT_SKIPPED",
+                f"bracket_owner:{symbol}:{owner_id}",
+                60.0,
                 "BRACKET_OWNERSHIP_CONFLICT_SKIPPED symbol=%s existing=%s attempted=%s",
                 symbol,
-                getattr(owner, "entry_order_id", None),
+                owner_id,
                 order_id,
                 extra={
-                    "event": "BRACKET_OWNERSHIP_CONFLICT_SKIPPED",
                     "symbol": symbol,
-                    "existing_entry_order_id": getattr(owner, "entry_order_id", None),
+                    "existing_entry_order_id": owner_id,
                     "attempted_order_id": str(order_id),
                 },
             )
