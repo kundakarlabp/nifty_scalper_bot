@@ -682,9 +682,7 @@ def test_live_smc_declining_premium_past_initial_risk_invalidates_setup(
 ) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     rows = _base_rows()
-    rows.append(
-        _bar(30, open_=24012, high=24027, low=24009, close=24017, volume=2400)
-    )
+    rows.append(_bar(30, open_=24012, high=24027, low=24009, close=24017, volume=2400))
     strategy = _strategy(rows)
     assert (
         strategy.generate_signal(
