@@ -385,7 +385,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
                     "generation": self._auth_failure_generation,
                 },
             )
-            callback = self._auth_failure_callback
+            callback = getattr(self, "_auth_failure_callback", None)
             if callback is not None:
                 with suppress(Exception):
                     callback(self.authentication_status_snapshot())
@@ -3050,7 +3050,7 @@ class ZerodhaKiteClient(BaseBrokerClient):
                     "generation": self._auth_failure_generation,
                 },
             )
-            callback = self._auth_failure_callback
+            callback = getattr(self, "_auth_failure_callback", None)
             if callback is not None:
                 with suppress(Exception):
                     callback(self.authentication_status_snapshot())
