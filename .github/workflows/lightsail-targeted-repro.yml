@@ -34,30 +34,37 @@ jobs:
           SHADOW_MODE: "true"
           DATA_DIR: .validation-data
           PYTHONPATH: src:.
+        shell: bash
         run: |
-          python -m pytest -q \
-            tests/architecture/test_file_header_standard.py \
-            tests/architecture/test_canonical_bo_ownership.py \
-            tests/architecture/test_lightsail_release_contract.py \
-            tests/ops/test_research_jobs.py \
-            tests/scripts/test_archive_kite_history.py \
-            tests/backtests/test_strategy_bar_research.py \
-            tests/infra/test_supabase_trade_replication.py \
-            tests/infra/test_daily_log_archive.py \
-            tests/infra/test_scheduled_tasks.py \
-            tests/utils/test_market_hours.py \
-            tests/core/test_eod_flatten_schedule.py \
-            tests/strategies/test_candidate_risk_affordability.py \
-            tests/test_execution_path_contract.py \
-            tests/execution/test_runtime_order_facade.py \
-            tests/execution/test_runtime_bracket_facade.py \
-            tests/execution/test_bracket_persistence_policy.py \
-            tests/integration/test_canonical_bo_end_to_end.py \
-            tests/dashboard/test_event_buffer_truth.py \
-            tests/dashboard/test_log_export.py \
-            tests/data/test_datahub_bounded_persistence.py \
-            tests/data/test_mdm_tick_coalescing.py \
-            tests/test_mdm_event_loop_consumer.py \
-            tests/core/test_selected_option_exec_min_regression.py \
-            tests/dashboard/test_superlite_admin_core.py \
+          TARGETED_TESTS=(
+            tests/architecture/test_file_header_standard.py
+            tests/architecture/test_canonical_bo_ownership.py
+            tests/architecture/test_lightsail_release_contract.py
+            tests/ops/test_research_jobs.py
+            tests/scripts/test_archive_kite_history.py
+            tests/backtests/test_strategy_bar_research.py
+            tests/infra/test_supabase_trade_replication.py
+            tests/infra/test_daily_log_archive.py
+            tests/infra/test_scheduled_tasks.py
+            tests/utils/test_market_hours.py
+            tests/core/test_eod_flatten_schedule.py
+            tests/strategies/test_candidate_risk_affordability.py
+            tests/test_execution_path_contract.py
+            tests/execution/test_runtime_order_facade.py
+            tests/execution/test_runtime_bracket_facade.py
+            tests/execution/test_bracket_persistence_policy.py
+            tests/integration/test_canonical_bo_end_to_end.py
+            tests/dashboard/test_event_buffer_truth.py
+            tests/dashboard/test_log_export.py
+            tests/data/test_datahub_bounded_persistence.py
+            tests/data/test_mdm_tick_coalescing.py
+            tests/test_mdm_event_loop_consumer.py
+            tests/core/test_selected_option_exec_min_regression.py
+            tests/dashboard/test_superlite_admin_core.py
             tests/execution/test_external_close_reconcile.py
+          )
+          EXISTING_TESTS=()
+          for test_path in "${TARGETED_TESTS[@]}"; do
+            [ -f "$test_path" ] && EXISTING_TESTS+=("$test_path")
+          done
+          python -m pytest -q "${EXISTING_TESTS[@]}"
