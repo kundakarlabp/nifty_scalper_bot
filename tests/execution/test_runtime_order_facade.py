@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import replace
 import importlib
 import json
 import os
 import subprocess
 import sys
 import threading
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
 
@@ -746,7 +746,9 @@ def _configure_reprice_manager(manager, quote, modified, persisted=None) -> None
     manager._confirm_position_protection_for_fill = lambda *_args, **_kwargs: None
     manager._notify_failed_entry_terminal = lambda *_args, **_kwargs: None
     manager.save_orders = (
-        (lambda: persisted.append("save_orders")) if persisted is not None else lambda: None
+        (lambda: persisted.append("save_orders"))
+        if persisted is not None
+        else lambda: None
     )
     manager._persist_order_snapshot = (
         (lambda _order: persisted.append("snapshot"))
@@ -854,7 +856,9 @@ def test_open_entry_reprice_reapplies_spread_depth_and_risk(monkeypatch) -> None
     assert modified == []
 
 
-def test_open_entry_reprice_persists_budget_and_reanchored_geometry(monkeypatch) -> None:
+def test_open_entry_reprice_persists_budget_and_reanchored_geometry(
+    monkeypatch,
+) -> None:
     monkeypatch.setenv("ENTRY_OPEN_REPRICE_ENABLED", "true")
     monkeypatch.setenv("ENTRY_OPEN_REPRICE_MIN_INTERVAL_SECONDS", "0")
     manager = _manager(None)
