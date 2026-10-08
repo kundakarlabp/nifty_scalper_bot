@@ -573,6 +573,10 @@ def build_trading_runtime(
 def live_sim_system(monkeypatch, tmp_path) -> LiveSimSystem:
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     monkeypatch.setenv("ENABLE_LIVE", "true")
+    # ENABLE_LIVE_TRADING is the canonical live flag. Set it explicitly because
+    # the test process may have normalized it to false before this fixture runs;
+    # a legacy alias must not override an explicit canonical false value.
+    monkeypatch.setenv("ENABLE_LIVE_TRADING", "true")
     monkeypatch.setenv("SHADOW_MODE", "false")
     monkeypatch.setenv("PAPER_MODE", "false")
     monkeypatch.setenv("PAPER__ENABLED", "false")
@@ -603,6 +607,7 @@ def live_sim_system(monkeypatch, tmp_path) -> LiveSimSystem:
         event_observer=recorder,
         tmp_path=tmp_path,
     )
+    assert system.runner._resolve_execution_mode_snapshot().is_live_mode is True
     try:
         yield system
     finally:
