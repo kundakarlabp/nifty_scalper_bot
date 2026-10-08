@@ -231,7 +231,7 @@ def test_history_universe_matches_canonical_active_expiry_and_option_cap(monkeyp
     }
     universe = history_universe(rows, selected, "NFO:NIFTY26OCTFUT")
 
-    option_symbols = [symbol for symbol in universe if symbol.startswith("NFO:NIFTY26O")]
+    option_symbols = [\n        symbol for symbol in universe if symbol.startswith("NFO:NIFTY26O")\n    ]
     assert universe[:2] == ["NSE:NIFTY 50", "NFO:NIFTY26OCTFUT"]
     assert selected["ce"] in option_symbols
     assert selected["pe"] in option_symbols
