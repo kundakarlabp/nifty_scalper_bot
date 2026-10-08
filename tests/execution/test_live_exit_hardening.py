@@ -951,3 +951,58 @@ def test_bracket_flat_nonterminal_timing_round_trips_without_monotonic(tmp_path)
     restored = manager._decode_restored_bracket("entry-persist", payload)
     assert restored.flat_nonterminal_since_utc == "2026-07-11T10:00:00+00:00"
     assert restored.flat_nonterminal_since_monotonic is None
+
+def test_fallback_trail_reprices_the_existing_exchange_stop(monkeypatch) -> None:
+    manager, order_manager, _broker = _manager()
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    bracket.exchange_stop_order_id = "protect-1"
+    bracket.exchange_stop_trigger_price = 140.0
+    bracket.exchange_stop_limit_price = 133.0
+    bracket.last_ltp = 160.0
+    bracket.trailing_config["breakeven_activation_r"] = 0.20
+    manager._exit_quotes[SYMBOL] = (160.0, 160.10, time.time())
+    monkeypatch.setattr(manager, "_get_current_atr", lambda _symbol: 3.0)
+
+    assert manager._apply_trailing_math(bracket) is True
+
+    assert len(order_manager.modify_calls) == 1
+    order_id, changes = order_manager.modify_calls[0]
+    assert order_id == "protect-1"
+    assert changes["trigger_price"] == bracket.sl_trigger_price
+    assert changes["trigger_price"] > 140.0
+    assert bracket.exchange_stop_trigger_price == bracket.sl_trigger_price
+
+
+def test_breakeven_transition_reprices_exchange_protection() -> None:
+    manager, order_manager, _broker = _manager()
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    bracket.exchange_stop_order_id = "protect-1"
+    bracket.exchange_stop_trigger_price = 140.0
+    bracket.exchange_stop_limit_price = 133.0
+    bracket.last_ltp = 160.0
+
+    manager._move_sl_to_breakeven(bracket)
+
+    assert bracket.sl_trigger_price == 150.0
+    assert order_manager.modify_calls[0][0] == "protect-1"
+    assert order_manager.modify_calls[0][1]["trigger_price"] == 150.0
+    assert bracket.exchange_stop_trigger_price == 150.0
+
+
+def test_manual_trail_update_reprices_exchange_protection() -> None:
+    manager, order_manager, _broker = _manager()
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    bracket.exchange_stop_order_id = "protect-1"
+    bracket.exchange_stop_trigger_price = 140.0
+    bracket.exchange_stop_limit_price = 133.0
+    bracket.last_ltp = 160.0
+
+    manager.update_trailing_sl(SYMBOL, 150.0)
+
+    assert bracket.sl_trigger_price == 150.0
+    assert bracket.trail_revision == 1
+    assert order_manager.modify_calls[0][0] == "protect-1"
+    assert order_manager.modify_calls[0][1]["trigger_price"] == 150.0
