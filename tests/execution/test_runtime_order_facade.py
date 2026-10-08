@@ -596,7 +596,6 @@ def test_open_live_entry_reprices_same_order_within_small_budget(monkeypatch) ->
     assert entry.trade_provenance["entry_open_reprice_anchor_price"] == 100.5
 
 
-
 def test_open_entry_repricing_refuses_post_cost_unprofitable_geometry(
     monkeypatch,
 ) -> None:
@@ -650,7 +649,6 @@ def test_open_entry_repricing_refuses_post_cost_unprofitable_geometry(
     )
     assert modified == []
     assert entry.price == 100.5
-
 
 
 def test_absolute_level_entry_is_never_repriced(monkeypatch) -> None:
