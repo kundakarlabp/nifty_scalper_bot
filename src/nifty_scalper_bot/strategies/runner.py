@@ -12650,11 +12650,13 @@ class StrategyRunner:
         def _finish(final_ready: bool, reason: str) -> tuple[bool, str, dict[str, Any]]:
             details["final_ready"] = bool(final_ready)
             self._logger.info(
-                "SYMBOL_LIVE_ENTRY_READY_CHECK symbol=%s final_ready=%s reason=%s trace_id=%s",
+                "SYMBOL_LIVE_ENTRY_READY_CHECK symbol=%s final_ready=%s reason=%s trace_id=%s live_mode=%s live_ws_age_s=%s",
                 symbol,
                 bool(final_ready),
                 reason,
                 trace_id,
+                mode_snapshot.is_live_mode,
+                details.get("live_ws_age_s"),
                 extra={
                     "event": "SYMBOL_LIVE_ENTRY_READY_CHECK",
                     "symbol": symbol,
@@ -12750,6 +12752,16 @@ class StrategyRunner:
         details["candidate_history_ready"] = history_count >= required_bars
         if history_count < required_bars:
             return _finish(False, "insufficient_indicator_bar_count")
+        live_ws_age_s: float | None = None
+        live_ws_age_fn = getattr(self._market_data, "time_since_last_live_ws_tick", None)
+        if callable(live_ws_age_fn):
+            try:
+                raw_live_ws_age = live_ws_age_fn(symbol_norm)
+                if raw_live_ws_age is not None:
+                    live_ws_age_s = max(0.0, float(raw_live_ws_age))
+            except (TypeError, ValueError, RuntimeError):
+                live_ws_age_s = None
+        details["live_ws_age_s"] = live_ws_age_s
         quote_fresh = self._is_option_symbol_tick_fresh(symbol, max_age_s=60.0)
         details["quote_fresh"] = quote_fresh
         if not quote_fresh:
