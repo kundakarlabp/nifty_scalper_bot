@@ -32,6 +32,20 @@ jobs:
           ORDERS__ENABLE_LIVE: "false"
           PAPER_MODE: "true"
           SHADOW_MODE: "true"
+          DEPLOYMENT_PLATFORM: aws_lightsail
+          BOT_RESEARCH_LAUNCHER: systemd
+          KITE_API_KEY: dummy-key
+          KITE_API_SECRET: dummy-secret
+          KITE_ACCESS_TOKEN: dummy-token
+          ZERODHA_API_KEY: dummy-key
+          ZERODHA_API_SECRET: dummy-secret
+          ZERODHA_ACCESS_TOKEN: dummy-token
+          BROKER_API_KEY: dummy-key
+          BROKER_API_SECRET: dummy-secret
+          BROKER_ACCESS_TOKEN: dummy-token
+          TELEGRAM_BOT_TOKEN: dummy-telegram
+          TELEGRAM_CHAT_ID: "12345"
+          TELEGRAM_ALLOWED_ID: "12345"
           DATA_DIR: .validation-data
           PYTHONPATH: src:.
         shell: bash
