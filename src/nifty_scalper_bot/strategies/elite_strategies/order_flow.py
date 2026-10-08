@@ -376,8 +376,11 @@ class OrderFlowStrategy(EliteStrategy):
                     and previous[0] != quote_version
                     and 1.0 <= now - previous[1] <= 12.0
                 )
+                # Anchor the start of continuous support, not the newest
+                # quote. Subsecond quote versions must not perpetually reset
+                # the one-second persistence window.
                 if quote_version > 0 and (
-                    previous is None or previous[0] != quote_version
+                    previous is None or now - previous[1] > 12.0
                 ):
                     self._last_live_depth_support[symbol] = (
                         quote_version,
