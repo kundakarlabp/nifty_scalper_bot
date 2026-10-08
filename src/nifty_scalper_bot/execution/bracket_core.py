@@ -2422,7 +2422,9 @@ class BracketManager:
                     bracket.exit_state = BracketExitLifecycle.EXIT_TRIGGERED.value
                     bracket.entry_status = BracketExitLifecycle.EXIT_TRIGGERED.value
                     bracket.updated_at = now
-                    LOGGER.info(
+                    # Entry/exit state transitions must remain auditable even
+                    # when a production process logs only WARNING and above.
+                    LOGGER.warning(
                         "EXIT_TRIGGERED bracket_id=%s symbol=%s reason=%s qty=%s",
                         bracket.bracket_id,
                         bracket.symbol,
