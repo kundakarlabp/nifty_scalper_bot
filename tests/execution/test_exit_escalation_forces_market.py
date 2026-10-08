@@ -15,8 +15,11 @@ from nifty_scalper_bot.execution.bracket_manager import (
 
 
 class _Broker:
+    def __init__(self) -> None:
+        self.order_status = "OPEN PENDING"
+
     def get_order_status(self, _oid: str) -> dict[str, Any]:
-        return {"status": "OPEN PENDING", "average_price": 0.0}
+        return {"status": self.order_status, "average_price": 0.0}
 
     def get_positions(self) -> list[dict[str, Any]]:
         return [{"symbol": "NFO:NIFTY2660923100CE", "quantity": 65}]
@@ -34,6 +37,8 @@ class _OM:
 
     def cancel_order(self, order_id: str) -> bool:
         self.cancelled.append(order_id)
+        # A successful request is not enough: model the exchange's terminal ACK.
+        self._broker.order_status = "CANCELLED"
         return True
 
 
