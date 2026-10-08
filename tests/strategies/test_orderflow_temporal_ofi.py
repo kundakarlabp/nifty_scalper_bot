@@ -161,8 +161,7 @@ def test_live_tick_only_depth_confirmation_needs_two_distinct_fresh_snapshots(
     assert first.metadata["context_alignment_source"] is None
     assert first.metadata["effective_context_alignment"] is False
     assert (
-        first.metadata["ofi_unavailable_reason"]
-        == "upstream_temporal_evidence_unready"
+        first.metadata["ofi_unavailable_reason"] == "upstream_temporal_evidence_unready"
     )
 
     clock[0] = 100.5
@@ -201,6 +200,7 @@ def test_adverse_upstream_ofi_cannot_add_context_bonus() -> None:
     assert signal.metadata["flow_supports_side"] is False
     assert signal.metadata["effective_context_alignment"] is False
     assert "temporal_ofi_alignment" not in signal.metadata["setup_reasons"]
+
 
 def test_live_depth_persistence_survives_multiple_fast_quote_versions(
     monkeypatch,
