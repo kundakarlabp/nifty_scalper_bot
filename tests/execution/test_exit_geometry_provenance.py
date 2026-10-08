@@ -188,3 +188,41 @@ def test_recovery_submit_enriches_rebuilt_plan(monkeypatch) -> None:
     assert captured["plan"] is rebuilt
     assert rebuilt.trade_provenance["tp1_price"] == 110.0
     assert rebuilt.trade_provenance["tp1_qty"] == 65
+
+def test_auto_tp1_is_recomputed_after_final_entry_reanchor(monkeypatch) -> None:
+    monkeypatch.setenv("TP1_R_MULT", "1.0")
+    monkeypatch.setenv("TP1_MIN_INCREMENTAL_EDGE_MULTIPLE", "0")
+    plan = _plan(quantity=130)
+
+    _enrich_trade_plan_exit_provenance(plan)
+    assert plan.trade_provenance["tp1_price"] == 110.0
+    assert plan.trade_provenance["tp1_source"] == "auto"
+
+    reanchored = OrderManager._reanchor_bracket_to_price(
+        SimpleNamespace(_logger=logging.getLogger("reanchor-test")),
+        plan,
+        110.0,
+    )
+    refreshed = runtime_module._refresh_auto_tp1_after_reanchor(reanchored)
+
+    assert refreshed.trade_provenance["tp1_price"] == 120.0
+    assert refreshed.trade_provenance["tp1_qty"] == 65
+    assert refreshed.trade_provenance["tp1_source"] == "auto"
+    assert refreshed.trade_provenance["tp1_incremental_cost"] > 0.0
+
+
+def test_explicit_tp1_is_not_rewritten_after_reanchor(monkeypatch) -> None:
+    plan = _plan(
+        quantity=130,
+        provenance={
+            "tp1_price": 108.0,
+            "tp1_qty": 65,
+            "tp1_source": "explicit",
+        },
+    )
+    _enrich_trade_plan_exit_provenance(plan)
+    refreshed = runtime_module._refresh_auto_tp1_after_reanchor(plan)
+
+    assert refreshed.trade_provenance["tp1_price"] == 108.0
+    assert refreshed.trade_provenance["tp1_qty"] == 65
+    assert refreshed.trade_provenance["tp1_source"] == "explicit"

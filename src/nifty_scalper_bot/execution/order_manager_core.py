@@ -5513,6 +5513,23 @@ class OrderManager:
                     broker_attempted=False,
                 )
         plan = self._reanchor_bracket_to_price(plan, price)
+        post_reanchor = getattr(self, "_post_reanchor_trade_plan", None)
+        if callable(post_reanchor):
+            try:
+                refreshed = post_reanchor(plan)
+            except Exception as exc:  # noqa: BLE001 - fail closed before broker
+                return TradePlanSubmitResult(
+                    False,
+                    reason="post_reanchor_plan_refresh_failed",
+                    details={
+                        "symbol": symbol,
+                        "trace_id": plan.trace_id,
+                        "error_type": type(exc).__name__,
+                    },
+                    broker_attempted=False,
+                )
+            if isinstance(refreshed, TradePlan):
+                plan = refreshed
         if plan.side == "BUY":
             if plan.stop_loss is not None and plan.stop_loss >= price:
                 details = {
@@ -13190,6 +13207,9 @@ class OrderManager:
             ),
             "quantity": order.quantity,
             "price": order.price,
+            "stop_loss": order.stop_loss,
+            "take_profit": order.take_profit,
+            "trigger_price": order.trigger_price,
             # [FIX] Convert Status Enum to value
             "status": (
                 order.status.value
@@ -13219,6 +13239,8 @@ class OrderManager:
             "requested_lots": order.requested_lots,
             "resolved_lot_size": order.resolved_lot_size,
             "entry_lifecycle_state": order.entry_lifecycle_state,
+            "trade_provenance": dict(order.trade_provenance or {}),
+            "product": order.product,
         }
 
     def _serialize_bracket_state(self, state: BracketState) -> BracketDict:
@@ -13320,6 +13342,9 @@ class OrderManager:
                 order_type=order_type,
                 quantity=quantity,
                 price=price,
+                stop_loss=self._coerce_float(payload.get("stop_loss")),
+                take_profit=self._coerce_float(payload.get("take_profit")),
+                trigger_price=self._coerce_float(payload.get("trigger_price")),
                 status=status,
                 timestamp=timestamp,
                 filled_quantity=int(payload.get("filled_quantity", 0)),
@@ -13347,6 +13372,12 @@ class OrderManager:
                     if isinstance(payload.get("entry_lifecycle_state"), dict)
                     else None
                 ),
+                trade_provenance=(
+                    dict(payload.get("trade_provenance") or {})
+                    if isinstance(payload.get("trade_provenance"), Mapping)
+                    else {}
+                ),
+                product=str(payload.get("product") or "MIS"),
             )
         except Exception as e:
             logger = getattr(self, "_logger", logging.getLogger(__name__))
