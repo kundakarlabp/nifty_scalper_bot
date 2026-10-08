@@ -192,8 +192,12 @@ class LiveSimSystem:
         assert isinstance(self.risk_manager, RiskManager)
         assert isinstance(self.order_manager, OrderManager)
         for symbol, inst in self.exchange.instruments.items():
-            self.websocket.activate(symbol, inst.token)
+            # Match the production lifecycle: register the MDM consumer first,
+            # then request/confirm the current subscription generation. Activating
+            # before subscribe would let subscribe advance the generation and
+            # correctly invalidate the simulator's earlier freshness proof.
             self.market_data.subscribe(symbol, self.runner.on_datahub_tick)
+            self.websocket.activate(symbol, inst.token)
             self.runner._active_symbols.add(symbol)  # noqa: SLF001
             self.runner._tracked_symbols.add(symbol)  # noqa: SLF001
             self.runner._active_basket_token_by_symbol[symbol] = (
@@ -463,6 +467,19 @@ def build_trading_runtime(
         )
     resolver = FixedInstrumentResolver(instruments)
     market_data = MarketDataManager(broker=broker, websocket=None, cache_len=250)
+    token_by_symbol = {inst.symbol: inst.token for inst in instruments}
+    market_data.set_active_contract_basket(
+        {
+            "spot_symbol": scenario.spot_symbol,
+            "futures_symbol": scenario.future_symbol,
+            "selected_ce": scenario.ce_symbol,
+            "selected_pe": scenario.pe_symbol,
+            "option_symbols": [scenario.ce_symbol, scenario.pe_symbol],
+            "all_symbols": [inst.symbol for inst in instruments],
+            "token_by_symbol": token_by_symbol,
+            "all_tokens": list(token_by_symbol.values()),
+        }
+    )
     websocket = SimulatedWebSocket(market_data, event_observer)
     indicator = IndicatorEngine()
     position_manager = PositionManager(str(tmp_path / "positions.json"))
@@ -535,9 +552,19 @@ def build_trading_runtime(
         observers=observers,
     )
     market_data.subscribe_bars(system._on_closed_bar)  # noqa: SLF001
-    exchange.subscribe(
-        lambda tick: market_data._process_queued_tick(tick)
-    )  # noqa: SLF001
+
+    # Deterministic equivalent of the production WS callback + consumer.
+    # The synchronous simulator has no owning asyncio loop, so record the same
+    # raw-receive/generation evidence before invoking the canonical consumer.
+    def _ingest_simulated_ws_tick(tick: dict[str, Any]) -> None:
+        market_data._record_raw_ws_receive(tick)  # noqa: SLF001
+        symbol = str(tick.get("symbol") or "")
+        token = int(tick.get("instrument_token") or tick.get("token") or 0)
+        if symbol and token > 0:
+            websocket.mark_first_current_generation_tick(symbol, token)
+        market_data._process_queued_tick(tick)  # noqa: SLF001
+
+    exchange.subscribe(_ingest_simulated_ws_tick)
     broker.register_callback(system._on_broker_update)  # noqa: SLF001
     return system
 

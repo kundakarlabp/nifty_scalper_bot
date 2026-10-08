@@ -36,11 +36,16 @@ def _float(payload: Mapping[str, Any] | object | None, *keys: str) -> float | No
 
 
 def resolve_tick_age_ms(payload: Mapping[str, Any] | object | None) -> float | None:
+    # Explicit receive-age evidence is canonical for execution freshness.
+    # Market event timestamps order the stream but may legitimately differ from
+    # the local wall clock (replay/simulation, broker clock skew).
+    age_s = resolve_quote_age_seconds(payload)
+    if age_s is not None:
+        return age_s * 1000.0
     timestamp_ms = _float(payload, "last_tick_ts_ms")
     if timestamp_ms is not None and timestamp_ms > 10_000_000_000:
         return max(0.0, time.time() * 1000.0 - timestamp_ms)
-    age_s = resolve_quote_age_seconds(payload)
-    return None if age_s is None else age_s * 1000.0
+    return None
 
 
 def resolve_tick_age_seconds(
@@ -140,15 +145,22 @@ def evaluate_execution_quote(
     tick_age_ms = resolve_tick_age_ms(payload)
     quote_version = resolve_quote_version(payload)
     depth = _value(payload, "depth")
-    depth_available = bool(
-        _value(payload, "depth_available") is True
-        or _value(payload, "quote_depth_valid") is True
-        or (
-            isinstance(depth, Mapping)
-            and bool(depth.get("buy"))
-            and bool(depth.get("sell"))
+    explicit_two_sided = _value(payload, "depth_two_sided")
+    if explicit_two_sided is not None:
+        depth_available = bool(explicit_two_sided)
+    else:
+        # Explicit two-sided evidence is authoritative when present. Older
+        # producers/tests without the new field retain their established
+        # depth_available/quote_depth_valid contract until normalized by MDM.
+        depth_available = bool(
+            _value(payload, "quote_depth_valid") is True
+            or _value(payload, "depth_available") is True
+            or (
+                isinstance(depth, Mapping)
+                and bool(depth.get("buy"))
+                and bool(depth.get("sell"))
+            )
         )
-    )
     explicit_tradable = _value(payload, "tradable_quote")
     tradable_quote = bool(has_bid_ask and explicit_tradable is not False)
     real_ticks, derived = resolve_real_tick_count(

@@ -5,6 +5,7 @@ import time
 from datetime import datetime, timezone
 
 import pandas as pd
+import pytest
 
 from nifty_scalper_bot.data.market_data_hardening import (
     install_market_data_manager_hardening,
@@ -142,3 +143,93 @@ def test_native_mdm_initializes_candle_flush_lifecycle_state() -> None:
     assert mdm._candle_flush_task is None
     assert mdm._candle_flush_interval_s >= 0.25
     assert mdm._candle_flush_grace_s >= 0.0
+
+
+def test_cached_quote_read_does_not_refresh_ingress_age_or_midpoint() -> None:
+    mdm = _manager()
+    mdm._now_ms = lambda: 2_500.0
+    with mdm._lock:
+        mdm._tick_cache[SYMBOL] = {
+            "symbol": SYMBOL,
+            "instrument_token": TOKEN,
+            "ltp": 100.0,
+            "bid": 99.5,
+            "ask": 100.5,
+            "timestamp": "2026-10-07T03:30:00+00:00",
+            "source": "ws_full",
+        }
+        mdm._last_quote_ts_ms[SYMBOL] = 1_000.0
+        mdm._last_mid[SYMBOL] = (100.0, 1_000.0)
+
+    quote = mdm.get_quote(SYMBOL)
+
+    assert quote is not None
+    assert quote["ltp"] == 100.0
+    assert quote["tick_age_ms"] == 1_500.0
+    assert quote["quote_age_s"] == 1.5
+    assert mdm._last_quote_ts_ms[SYMBOL] == 1_000.0
+    assert mdm._last_mid[SYMBOL] == (100.0, 1_000.0)
+
+
+def test_live_normalization_marks_synthetic_ws_time_non_tradable() -> None:
+    mdm = _manager()
+    tick = mdm.normalize_live_tick(
+        {
+            "symbol": SYMBOL,
+            "instrument_token": TOKEN,
+            "ltp": 100.0,
+            "depth": {
+                "buy": [{"price": 99.5, "quantity": 100}],
+                "sell": [{"price": 100.5, "quantity": 120}],
+            },
+        },
+        source="ws",
+    )
+
+    assert tick is not None
+    assert tick["timestamp_quality"] == "synthetic"
+    assert tick["source_timestamp_valid"] is False
+    assert tick["hard_readiness_eligible"] is False
+    assert tick["tradable_quote"] is False
+
+
+def test_live_normalization_exposes_two_sided_depth_and_microprice() -> None:
+    mdm = _manager()
+    tick = mdm.normalize_live_tick(
+        {
+            "symbol": SYMBOL,
+            "instrument_token": TOKEN,
+            "ltp": 100.0,
+            "exchange_timestamp": "2026-10-07T03:30:00Z",
+            "depth": {
+                "buy": [
+                    {"price": 99.5, "quantity": 100},
+                    {"price": 99.0, "quantity": 80},
+                    {"price": 98.5, "quantity": 70},
+                    {"price": 98.0, "quantity": 60},
+                    {"price": 97.5, "quantity": 50},
+                ],
+                "sell": [
+                    {"price": 100.5, "quantity": 120},
+                    {"price": 101.0, "quantity": 90},
+                    {"price": 101.5, "quantity": 80},
+                    {"price": 102.0, "quantity": 70},
+                    {"price": 102.5, "quantity": 60},
+                ],
+            },
+        },
+        source="ws",
+    )
+
+    assert tick is not None
+    assert tick["depth_two_sided"] is True
+    assert tick["depth_complete_5x5"] is True
+    assert tick["bid_depth_levels"] == 5
+    assert tick["ask_depth_levels"] == 5
+    assert tick["bid_depth_qty_5"] == 360
+    assert tick["ask_depth_qty_5"] == 420
+    assert tick["depth_imbalance_5"] == pytest.approx(-60 / 780)
+    assert 99.5 < tick["microprice"] < 100.5
+    assert tick["event_timestamp_ms"] > 0
+    assert tick["received_timestamp_ms"] > 0
+    assert tick["received_monotonic_ns"] > 0

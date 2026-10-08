@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 import time
+from datetime import datetime, timezone
 
 from nifty_scalper_bot.data.market_data_manager import MarketDataManager
 
@@ -443,3 +444,182 @@ def test_trigger_zombie_ws_restart_returns_dispatch_flag_and_backoff() -> None:
     # Immediate re-trigger: inflight/backoff must gate it.
     assert mdm._trigger_zombie_ws_restart() is False
     assert ws.calls == 1
+
+
+def test_cache_authority_rejects_older_subscription_generation() -> None:
+    mdm = MarketDataManager()
+    symbol = "NFO:NIFTY26JUN24000CE"
+    current = {
+        "symbol": symbol,
+        "source": "ws_full",
+        "timestamp": "2026-10-07T03:30:00+00:00",
+        "subscription_generation": 3,
+        "depth_available": True,
+    }
+    incoming = {
+        "symbol": symbol,
+        "source": "ws_full",
+        "timestamp": "2026-10-07T03:31:00+00:00",
+        "subscription_generation": 2,
+        "depth_available": True,
+    }
+
+    assert (
+        mdm._should_replace_cached_tick(
+            symbol,
+            current,
+            incoming,
+            now_wall=datetime.now(timezone.utc).timestamp(),
+        )
+        is False
+    )
+
+
+def test_fresh_full_ws_quote_blocks_rest_even_when_last_trade_time_is_old() -> None:
+    mdm = MarketDataManager()
+    symbol = "NFO:NIFTY26JUN24000CE"
+    now_wall = datetime.now(timezone.utc).timestamp()
+    mdm._ltp_stale_threshold_for_symbol = lambda _symbol: 2.0
+    current = {
+        "symbol": symbol,
+        "source": "ws_full",
+        "timestamp": "2026-10-07T03:30:00+00:00",
+        "received_at": now_wall - 0.2,
+        "subscription_generation": 3,
+        "depth_available": True,
+    }
+    incoming = {
+        "symbol": symbol,
+        "source": "rest_poll",
+        "timestamp": "2026-10-07T03:31:00+00:00",
+        "received_at": now_wall,
+        "subscription_generation": 3,
+    }
+
+    assert (
+        mdm._should_replace_cached_tick(
+            symbol,
+            current,
+            incoming,
+            now_wall=now_wall,
+        )
+        is False
+    )
+
+
+def test_newer_subscription_generation_can_replace_older_event_time() -> None:
+    mdm = MarketDataManager()
+    symbol = "NFO:NIFTY26JUN24000CE"
+    current = {
+        "symbol": symbol,
+        "source": "rest_poll",
+        "timestamp": "2026-10-07T03:31:00+00:00",
+        "subscription_generation": 2,
+    }
+    incoming = {
+        "symbol": symbol,
+        "source": "ws_full",
+        "timestamp": "2026-10-07T03:30:59+00:00",
+        "subscription_generation": 3,
+        "depth_available": True,
+    }
+
+    assert (
+        mdm._should_replace_cached_tick(
+            symbol,
+            current,
+            incoming,
+            now_wall=datetime.now(timezone.utc).timestamp(),
+        )
+        is True
+    )
+
+
+def test_poll_candidates_reuse_live_tick_priority() -> None:
+    mdm = MarketDataManager()
+    open_symbol = "NFO:NIFTY26JUN24000CE"
+    selected_symbol = "NFO:NIFTY26JUN24000PE"
+    context_symbol = "NSE:NIFTY"
+    mdm._active_subscribed_symbols = {
+        context_symbol,
+        selected_symbol,
+        open_symbol,
+    }
+    mdm._tracked_symbols = set()
+    priority = {
+        open_symbol: (0, "open_position"),
+        selected_symbol: (1, "selected_option"),
+        context_symbol: (2, "spot_future_context"),
+    }
+    mdm._tick_priority = lambda symbol: priority[symbol]
+    mdm._should_poll_symbol = lambda symbol, now: True
+
+    candidates = mdm._poll_candidates(datetime.now(timezone.utc))
+
+    assert candidates[:3] == [
+        open_symbol,
+        selected_symbol,
+        context_symbol,
+    ]
+
+
+def test_processed_current_generation_ws_tick_refreshes_live_freshness() -> None:
+    mdm = MarketDataManager(kite=None, websocket=_FakeWebSocket())
+    symbol = "NFO:NIFTY26JUN24000CE"
+    token = 24000
+    _subscribe(mdm, symbol, token)
+    mdm._last_valid_live_tick_mono[symbol] = time.monotonic() - 30.0
+    now = datetime.now(timezone.utc)
+
+    mdm._process_queued_tick(
+        {
+            "symbol": symbol,
+            "instrument_token": token,
+            "last_price": 100.0,
+            "bid": 99.9,
+            "ask": 100.1,
+            "exchange_timestamp": now,
+            "timestamp": now,
+            "volume_traded_today": 1_000,
+            "source": "ws",
+        },
+    )
+
+    age = mdm.time_since_last_live_ws_tick(symbol)
+    assert age is not None
+    assert age < 1.0
+    readiness = mdm.classify_live_tick_readiness(symbol, token, max_age_s=5.0)
+    assert readiness["current_generation_tick_received"] is True
+    assert readiness["fresh"] is True
+
+
+def test_fresh_full_ws_reclaims_authority_from_rest_with_older_event_time() -> None:
+    mdm = MarketDataManager()
+    symbol = "NFO:NIFTY26JUN24000CE"
+    now_wall = datetime.now(timezone.utc).timestamp()
+    mdm._ltp_stale_threshold_for_symbol = lambda _symbol: 2.0
+    current = {
+        "symbol": symbol,
+        "source": "rest_poll",
+        "timestamp": "2026-10-07T03:31:00+00:00",
+        "received_at": now_wall - 0.5,
+        "subscription_generation": 3,
+    }
+    incoming = {
+        "symbol": symbol,
+        "source": "ws_full",
+        "timestamp": "2026-10-07T03:30:59+00:00",
+        "received_at": now_wall - 0.1,
+        "subscription_generation": 3,
+        "depth_available": True,
+    }
+
+    assert (
+        mdm._should_replace_cached_tick(
+            symbol,
+            current,
+            incoming,
+            now_wall=now_wall,
+        )
+        is True
+    )

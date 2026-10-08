@@ -11320,8 +11320,13 @@ class StrategyRunner:
         """Return reason for intentional same-bar strategy evaluation, else None."""
         bid = float(tick.get("bid") or 0.0)
         ask = float(tick.get("ask") or 0.0)
-        volume_now = float(tick.get("volume") or 0.0)
-        tick_ts = float(tick.get("timestamp_epoch") or tick.get("ts") or 0.0)
+        volume_now = float(tick.get("volume_delta") or tick.get("volume") or 0.0)
+        quote_marker = (
+            tick.get("quote_update_version")
+            or tick.get("timestamp_ms")
+            or tick.get("timestamp_epoch")
+            or tick.get("ts")
+        )
         if not _env_bool("RUNNER_ENABLE_INTRABAR_STRATEGY_EVAL", True):
             self._last_same_bar_eval_block_reason_by_symbol[symbol] = (
                 "intrabar_eval_env_disabled"
@@ -11418,10 +11423,13 @@ class StrategyRunner:
             spread_trigger = spread_delta >= float(
                 os.getenv("RUNNER_INTRABAR_SPREAD_DELTA_MIN", "0.25") or "0.25"
             )
-            ts_changed = tick_ts > float(last_quote.get("tick_ts") or 0.0)
-            volume_delta = max(
-                0.0, volume_now - float(last_quote.get("volume_now") or 0.0)
+            quote_changed = bool(
+                quote_marker not in (None, "", 0, 0.0)
+                and quote_marker != last_quote.get("quote_marker")
             )
+            # MDM publishes interval volume in volume_delta/volume. Do not
+            # difference an already-derived interval delta a second time.
+            volume_delta = max(0.0, volume_now)
             volume_trigger = volume_delta >= float(
                 os.getenv("RUNNER_INTRABAR_VOLUME_DELTA_MIN", "100") or "100"
             )
@@ -11430,12 +11438,12 @@ class StrategyRunner:
                     "volume_delta": round(volume_delta, 2),
                     "spread_now": round(spread_now, 4),
                     "spread_delta": round(spread_delta, 4),
-                    "bid_ask_fresh": bool(ts_changed),
-                    "tick_ts": tick_ts,
+                    "bid_ask_fresh": bool(quote_changed),
+                    "quote_marker": quote_marker,
                     "volume_now": volume_now,
                 }
             )
-            if spread_trigger or ts_changed or volume_trigger:
+            if spread_trigger or quote_changed or volume_trigger:
                 self._last_same_bar_eval_block_reason_by_symbol.pop(symbol, None)
                 self._last_same_bar_eval_block_detail_by_symbol.pop(symbol, None)
                 return "same_bar_market_update_eval"
@@ -12028,6 +12036,25 @@ class StrategyRunner:
         limit = float(
             max_age_s or os.getenv("OPTION_TICK_FRESH_MAX_AGE_S", "60") or 60.0
         )
+        try:
+            live_mode = bool(self._resolve_execution_mode_snapshot().is_live_mode)
+        except Exception:
+            live_mode = False
+        if live_mode:
+            mdm = getattr(self, "_market_data", None)
+            live_ws_age = getattr(mdm, "time_since_last_live_ws_tick", None)
+            if callable(live_ws_age):
+                try:
+                    age = live_ws_age(normalize_symbol(symbol))
+                except (TypeError, ValueError, RuntimeError):
+                    return False
+                if age is None:
+                    return False
+                try:
+                    return max(0.0, float(age)) <= limit
+                except (TypeError, ValueError):
+                    return False
+
         quote = self._get_cached_quote_for_live_entry(symbol)
         if isinstance(quote, Mapping):
             age_ms = resolve_tick_age_ms(quote)

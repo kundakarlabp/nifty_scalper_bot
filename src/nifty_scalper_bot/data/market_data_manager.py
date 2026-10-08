@@ -377,6 +377,24 @@ class MarketDataManager:
         self._websocket = websocket
         # FIX: Explicitly assign self._ws for internal use
         self._ws = websocket
+        if self._ws is not None:
+            # WebSocketManager remains transport-only: MDM wires read-only
+            # broker-auth/token providers because MDM already owns the broker
+            # integration boundary.
+            with suppress(Exception):
+                setattr(self._ws, "_market_data_manager", self)
+            set_auth_state_provider = getattr(self._ws, "set_auth_state_provider", None)
+            if callable(set_auth_state_provider):
+                set_auth_state_provider(
+                    lambda: bool(getattr(self._broker, "auth_invalid", False))
+                )
+            set_access_token_provider = getattr(
+                self._ws, "set_access_token_provider", None
+            )
+            if callable(set_access_token_provider):
+                set_access_token_provider(
+                    lambda: getattr(self._broker, "_access_token", None)
+                )
         self._settings = settings or {}
         self._md_policy = MarketDataPolicy.from_env()
         self._resolver = resolver
@@ -3592,7 +3610,19 @@ class MarketDataManager:
 
         with self._lock:
             tick = self._tick_cache.get(resolved_symbol)
-            return dict(tick) if tick is not None else None
+            ingress_ts_ms = self._last_quote_ts_ms.get(resolved_symbol)
+            snapshot = dict(tick) if tick is not None else None
+        if snapshot is None:
+            return None
+        if isinstance(ingress_ts_ms, (int, float)):
+            ingress_ts = float(ingress_ts_ms)
+            age_ms = max(0.0, self._now_ms() - ingress_ts)
+            snapshot["tick_age_ms"] = age_ms
+            snapshot["quote_age_ms"] = age_ms
+            snapshot["tick_age_s"] = age_ms / 1000.0
+            snapshot["quote_age_s"] = age_ms / 1000.0
+            snapshot.setdefault("received_timestamp_ms", ingress_ts)
+        return snapshot
 
     def get_last_tick(self, symbol: str | int) -> dict[str, Any] | None:
         """Return the most recent cached tick for *symbol*.
@@ -3856,6 +3886,9 @@ class MarketDataManager:
             )
             current_token = self._current_symbol_token_locked(canonical)
             tracked = canonical in (getattr(self, "_tracked_symbols", set()) or set())
+            latest_tick = dict(
+                (getattr(self, "_latest_ticks", {}) or {}).get(canonical) or {}
+            )
         subscription_requested = (
             token_int in desired if token_int is not None else False
         )
@@ -3902,16 +3935,43 @@ class MarketDataManager:
         else:
             reason = "ready"
         fresh = bool(age_s is not None and age_s <= max_age_s)
+        latest_bid = _coerce_float(latest_tick.get("bid"))
+        latest_ask = _coerce_float(latest_tick.get("ask"))
+        bbo_confirmed = bool(
+            current_generation_tick_received
+            and latest_bid is not None
+            and latest_ask is not None
+            and latest_bid > 0
+            and latest_ask > latest_bid
+        )
+        explicit_two_sided = latest_tick.get("depth_two_sided")
+        if explicit_two_sided is None:
+            latest_depth = latest_tick.get("depth")
+            depth_two_sided = bool(
+                isinstance(latest_depth, Mapping)
+                and latest_depth.get("buy")
+                and latest_depth.get("sell")
+            )
+        else:
+            depth_two_sided = bool(explicit_two_sided)
+        full_depth_confirmed = bool(
+            current_generation_tick_received
+            and depth_two_sided
+            and self._is_full_websocket_quote(latest_tick)
+        )
         return {
             "symbol": canonical,
             "token": token_int,
             "tracked": bool(tracked),
             "subscription_requested": bool(subscription_requested),
             "subscription_confirmed": bool(subscription_confirmed),
+            "full_mode_requested": bool(dispatch_attempted),
             "token_matches": token_matches,
             "expected_generation": sub_gen,
             "tick_generation": tick_gen,
             "current_generation_tick_received": current_generation_tick_received,
+            "bbo_confirmed": bbo_confirmed,
+            "full_depth_confirmed": full_depth_confirmed,
             "tick_age_s": age_s,
             "fresh": fresh,
             "ready": reason == "ready",
@@ -8421,8 +8481,13 @@ class MarketDataManager:
         timestamp_source, ts = self._resolve_candle_tick_timestamp(
             raw, rest_fallback=approved_rest_fallback
         )
-        source_timestamp_valid = timestamp_source is not None and ts is not None
-        if not source_timestamp_valid:
+        source_timestamp_valid = bool(
+            timestamp_source is not None
+            and ts is not None
+            and str(timestamp_source).lower()
+            not in {"received_at", "received_ts", "received_time"}
+        )
+        if timestamp_source is None or ts is None:
             present_timestamp_fields = self._present_market_timestamp_fields(raw)
             timestamp_reason = (
                 "missing_all" if not present_timestamp_fields else "all_present_invalid"
@@ -9346,7 +9411,8 @@ class MarketDataManager:
         """Persist a current authoritative tick; return whether it was accepted."""
 
         tick.setdefault("received_at", time.time())
-        wallclock = self._tick_wallclock(tick) or time.time()
+        received_wallclock = self._tick_wallclock(tick) or time.time()
+        event_wallclock = self._tick_event_wallclock(tick)
 
         # 🔥 PRODUCTION FIX — enforce canonical key
         symbol = self._canonical_symbol(symbol)
@@ -9355,7 +9421,9 @@ class MarketDataManager:
         token_value = cached_tick.get("instrument_token") or cached_tick.get("token")
         token_int = int(token_value) if token_value is not None else None
         now_wall = time.time()
-        exchange_ts = self._tick_wallclock(cached_tick) or now_wall
+        event_wallclock = self._tick_event_wallclock(cached_tick)
+        received_wallclock = self._tick_wallclock(cached_tick) or now_wall
+        exchange_ts = event_wallclock or received_wallclock
         with self._lock:
             current_tick = self._latest_ticks.get(symbol)
             if current_tick is not None and not self._should_replace_cached_tick(
@@ -9378,6 +9446,15 @@ class MarketDataManager:
             self._latest_ticks[symbol] = cached_tick
             self._tick_cache[symbol] = cached_tick
             self._last_tick_time[symbol] = float(exchange_ts)
+            bid = _coerce_float(cached_tick.get("bid"))
+            ask = _coerce_float(cached_tick.get("ask"))
+            if bid is not None and ask is not None and bid > 0 and ask > bid:
+                last_mid = getattr(self, "_last_mid", None)
+                if isinstance(last_mid, dict):
+                    last_mid[symbol] = (
+                        (float(bid) + float(ask)) / 2.0,
+                        self._now_ms(),
+                    )
             if "ltp" not in cached_tick or cached_tick.get("timestamp") is None:
                 self._logger.debug(
                     "Condition met: mdm_history_append_rejected",
@@ -9388,16 +9465,23 @@ class MarketDataManager:
             self._ticks_received_per_symbol[symbol] += 1
             self._symbols_with_tick.add(symbol)
             self._last_tick_wallclock[symbol] = float(now_wall)
-            self._last_quote_ts_ms[symbol] = self._now_ms()
+            # Quote age measures ingress age, never consumer read age.
+            self._last_quote_ts_ms[symbol] = float(now_wall) * 1000.0
+        latency_seconds: float | None = None
         staleness_seconds = 0.0
-        try:
-            staleness_seconds = max(time.time() - float(wallclock), 0.0)
-        except Exception:  # pragma: no cover - defensive fallback
-            staleness_seconds = 0.0
+        if event_wallclock is not None:
+            try:
+                latency_seconds = max(
+                    float(received_wallclock) - float(event_wallclock), 0.0
+                )
+                staleness_seconds = max(time.time() - float(event_wallclock), 0.0)
+            except (TypeError, ValueError):
+                latency_seconds = None
+                staleness_seconds = 0.0
         try:
             METRICS.observe_tick(
                 symbol=symbol,
-                latency_seconds=None,
+                latency_seconds=latency_seconds,
                 staleness_seconds=staleness_seconds,
             )
         except Exception as exc:  # noqa: BLE001
@@ -9413,16 +9497,29 @@ class MarketDataManager:
 
     @staticmethod
     def _tick_event_wallclock(tick: Mapping[str, Any]) -> float | None:
-        """Return the market-event timestamp used to reject out-of-order writes."""
+        """Return genuine market-event time, never local receive/synthetic time."""
 
-        for key in (
-            "exchange_timestamp",
-            "last_trade_time",
-            "broker_timestamp",
-            "timestamp",
-            "timestamp_ms",
+        explicit_event = MarketDataManager._parse_wallclock(
+            tick.get("event_timestamp_ms")
+        )
+        if explicit_event is not None:
+            return explicit_event
+        for key in ("exchange_timestamp", "last_trade_time", "broker_timestamp"):
+            parsed = MarketDataManager._parse_wallclock(tick.get(key))
+            if parsed is not None:
+                return parsed
+
+        timestamp_quality = str(tick.get("timestamp_quality") or "").strip().lower()
+        source_timestamp_valid = tick.get("source_timestamp_valid")
+        if source_timestamp_valid is False or timestamp_quality in {
+            "synthetic",
+            "unknown",
+            "invalid",
             "received_at",
-        ):
+        }:
+            return None
+
+        for key in ("timestamp", "timestamp_ms"):
             parsed = MarketDataManager._parse_wallclock(tick.get(key))
             if parsed is not None:
                 return parsed
@@ -9463,6 +9560,44 @@ class MarketDataManager:
     ) -> bool:
         """Enforce timestamp and transport authority at the canonical cache writer."""
 
+        current_generation_raw = current.get(
+            "subscription_generation", current.get("_mdm_subscription_generation")
+        )
+        incoming_generation_raw = incoming.get(
+            "subscription_generation", incoming.get("_mdm_subscription_generation")
+        )
+        try:
+            current_generation = (
+                int(current_generation_raw)
+                if current_generation_raw is not None
+                else None
+            )
+        except (TypeError, ValueError):
+            current_generation = None
+        try:
+            incoming_generation = (
+                int(incoming_generation_raw)
+                if incoming_generation_raw is not None
+                else None
+            )
+        except (TypeError, ValueError):
+            incoming_generation = None
+        if current_generation is not None and incoming_generation is not None:
+            if incoming_generation < current_generation:
+                return False
+            if incoming_generation > current_generation:
+                return True
+
+        if self._is_rest_tick(current) and self._is_full_websocket_quote(incoming):
+            incoming_received = self._tick_wallclock(incoming)
+            if incoming_received is not None:
+                threshold = self._ltp_stale_threshold_for_symbol(symbol)
+                if max(now_wall - incoming_received, 0.0) <= threshold:
+                    # REST is degraded-feed fallback. A fresh current-generation
+                    # FULL websocket quote reclaims live BBO/depth authority even
+                    # when last-trade/event time has not advanced.
+                    return True
+
         current_event = self._tick_event_wallclock(current)
         incoming_event = self._tick_event_wallclock(incoming)
         if (
@@ -9474,11 +9609,13 @@ class MarketDataManager:
 
         if self._is_full_websocket_quote(current) and self._is_rest_tick(incoming):
             current_received = self._tick_wallclock(current)
-            if current_received is not None and current_event is not None:
+            if current_received is not None:
                 threshold = self._ltp_stale_threshold_for_symbol(symbol)
                 arrival_fresh = max(now_wall - current_received, 0.0) <= threshold
-                event_fresh = max(now_wall - current_event, 0.0) <= threshold
-                if arrival_fresh and event_fresh:
+                if arrival_fresh:
+                    # A freshly received FULL websocket quote remains the live
+                    # authority even when its last-trade/event timestamp has not
+                    # advanced (common on quiet options while BBO/depth changes).
                     return False
         return True
 
@@ -9862,9 +9999,10 @@ class MarketDataManager:
 
     def _emit_tick(self, symbol: str, tick: dict[str, Any], *, source: str) -> None:
         source = str(source or "unknown").lower()
+        websocket_source = source in {"ws", "ws_full", "full", "websocket", "stream"}
         tick.pop("_volume_delta_normalized", None)
         accepted_current_generation_tick = False
-        if source == "ws":
+        if websocket_source:
             now_mono = time.monotonic()
             self._last_ws_tick_mono = now_mono
             canonical_symbol = self._canonical_symbol(symbol)
@@ -9958,16 +10096,16 @@ class MarketDataManager:
         # _last_valid_live_tick_mono (updated above), so a synthetic/future
         # cached timestamp would otherwise look fresh while live evaluation
         # silently stops. REST/poll rejects stay cache-only.
-        if not stored and source != "ws":
+        if not stored and not websocket_source:
             return
         try:
             canonical_emit_symbol = self._canonical_symbol(symbol)
         except Exception:
             canonical_emit_symbol = symbol
         if self._is_selected_option_tick_symbol(canonical_emit_symbol):
-            self._mdm_selected_tick_count = int(
-                getattr(self, "_mdm_selected_tick_count", 0) or 0
-            ) + 1
+            self._mdm_selected_tick_count = (
+                int(getattr(self, "_mdm_selected_tick_count", 0) or 0) + 1
+            )
             self._last_mdm_selected_tick_at = time.monotonic()
         callbacks: list[TickCallback]
         tick_payload = to_json_safe(dict(tick))
@@ -11216,9 +11354,37 @@ class MarketDataManager:
         consecutive_errors = 0
         last_ws_healthy: bool | None = None
         last_poll_active: bool | None = None
+        auth_blocked = False
 
         while not self._rest_poll_stop.is_set():
             loop_start = time.time()
+
+            broker_auth_invalid = bool(
+                getattr(getattr(self, "_broker", None), "auth_invalid", False)
+            )
+            if broker_auth_invalid:
+                if not auth_blocked:
+                    auth_blocked = True
+                    self._logger.warning(
+                        "REST_POLL_SUSPENDED reason=broker_auth_invalid",
+                        extra={
+                            "event": "REST_POLL_SUSPENDED",
+                            "reason": "broker_auth_invalid",
+                        },
+                    )
+                if self._rest_poll_stop.wait(2.0):
+                    break
+                continue
+            if auth_blocked:
+                auth_blocked = False
+                consecutive_errors = 0
+                self._logger.info(
+                    "REST_POLL_RESUMED reason=broker_auth_restored",
+                    extra={
+                        "event": "REST_POLL_RESUMED",
+                        "reason": "broker_auth_restored",
+                    },
+                )
 
             ws_healthy = self._is_ws_healthy()
             poll_active = bool(self._rest_poll_enabled) and (not ws_healthy)
@@ -11283,22 +11449,25 @@ class MarketDataManager:
                 error_msg = str(exc).lower()
                 consecutive_errors += 1
 
-                # [FIX 1] DETECT FATAL SESSION ERRORS (Cure for Zombie Mode)
-                # If broker says "Forbidden", "Unauthorized", or "Access Denied", our session is dead.
-                # We must kill the process so Docker/Railway restarts it with a fresh session.
+                # Authentication failure is terminal for trading but not a process
+                # failure. The broker latch and readiness gate fail closed; the
+                # poller pauses until an authenticated probe proves recovery.
                 if (
                     "403" in error_msg
                     or "401" in error_msg
                     or "unauthorized" in error_msg
                     or "access denied" in error_msg
+                    or "authentication invalid" in error_msg
                 ):
-                    self._logger.critical(
-                        "🚨 FATAL: Broker Session Expired. Killing process to force auto-restart.",
-                        extra={"event": "scout_session_expired", "error": str(exc)},
+                    auth_blocked = True
+                    self._logger.warning(
+                        "REST_POLL_SUSPENDED reason=broker_auth_invalid error=%s",
+                        str(exc),
+                        extra={
+                            "event": "REST_POLL_SUSPENDED",
+                            "reason": "broker_auth_invalid",
+                        },
                     )
-                    import os
-
-                    os._exit(1)  # Hard exit to ensure restart
 
                 # [FIX 2] Handle Rate Limits Gracefully
                 elif "rate limit" in error_msg or "429" in error_msg:
@@ -11811,15 +11980,10 @@ class MarketDataManager:
             return None
         if latest is None:
             return None
-        quote = dict(latest)
-        now_ms = self._now_ms()
-        bid = _coerce_float(quote.get("bid"))
-        ask = _coerce_float(quote.get("ask"))
-        if bid is not None and ask is not None and bid > 0 and ask > 0:
-            mid = (float(bid) + float(ask)) / 2.0
-            self._last_mid[canonical_symbol] = (mid, now_ms)
-        self._last_quote_ts_ms[canonical_symbol] = now_ms
-        return quote
+        # Cache reads are side-effect free. Freshness and midpoint timestamps are
+        # stamped only when a new market-data event is accepted by _store_tick().
+        # Otherwise frequent consumers could make an old cached quote appear fresh.
+        return dict(latest)
 
     def resolve_active_nifty_future_symbol(
         self, now: datetime | None = None
@@ -13149,7 +13313,10 @@ class MarketDataManager:
         """Build stale-only poll candidates. Args: now. Returns: symbols. Raises: none."""
         with self._lock:
             active = set(self._active_subscribed_symbols) | set(self._tracked_symbols)
-        ordered = sorted(sym for sym in active if sym)
+        ordered = sorted(
+            (sym for sym in active if sym),
+            key=lambda sym: self._tick_priority(sym),
+        )
         stale: list[str] = []
         skipped_fresh = 0
         for sym in ordered:
@@ -13229,6 +13396,7 @@ class MarketDataManager:
             ltp = float(ltp_raw)
             if ltp <= 0:
                 return None
+            timestamp_quality = "exchange"
             try:
                 normalized_ts = normalize_market_tick_timestamp(raw)
             except (TypeError, ValueError, OverflowError):
@@ -13241,14 +13409,59 @@ class MarketDataManager:
                     "rest_quote",
                 }:
                     return None
+                # Compatibility callers may still normalize an LTP-only WS payload,
+                # but synthetic local time is never eligible to prove freshness.
                 ts = pd.Timestamp.now(tz="UTC")
-                timestamp_source = raw.get("timestamp_source")
-                source_timestamp_valid = raw.get("source_timestamp_valid")
+                timestamp_source = "synthetic_receive_time"
+                timestamp_quality = "synthetic"
+                source_timestamp_valid = False
             else:
                 ts = pd.Timestamp(normalized_ts.timestamp)
-                timestamp_source = normalized_ts.source
-                source_timestamp_valid = True
+                original_timestamp_source = (
+                    str(raw.get("timestamp_source") or normalized_ts.source)
+                    .strip()
+                    .lower()
+                )
+                explicit_timestamp_quality = (
+                    str(raw.get("timestamp_quality") or "").strip().lower()
+                )
+                timestamp_source = original_timestamp_source
+                if (
+                    original_timestamp_source
+                    in {"received_at", "received_ts", "received_time"}
+                    or explicit_timestamp_quality
+                    in {"synthetic", "unknown", "invalid", "received_at"}
+                    or raw.get("source_timestamp_valid") is False
+                ):
+                    timestamp_quality = (
+                        explicit_timestamp_quality
+                        if explicit_timestamp_quality
+                        else "received_at"
+                    )
+                    source_timestamp_valid = False
+                else:
+                    source_timestamp_valid = True
+                    timestamp_quality = (
+                        "exchange"
+                        if "exchange" in original_timestamp_source
+                        or "last_trade" in original_timestamp_source
+                        else "broker"
+                    )
             ts_py = ts.to_pydatetime().astimezone(timezone.utc)
+            received_at_value = _coerce_float(raw.get("received_at"))
+            received_at = (
+                float(received_at_value)
+                if received_at_value is not None
+                else time.time()
+            )
+            enqueued_mono_value = _coerce_float(
+                raw.get("_enqueued_monotonic") or raw.get("_mdm_enqueued_mono")
+            )
+            received_monotonic_ns = (
+                int(float(enqueued_mono_value) * 1_000_000_000)
+                if enqueued_mono_value is not None
+                else time.monotonic_ns()
+            )
             bid = _coerce_float(
                 raw.get("bid")
                 or raw.get("best_bid")
@@ -13285,14 +13498,55 @@ class MarketDataManager:
                 bid_qty = _coerce_int((buy_levels[0] or {}).get("quantity"))
             if ask_qty is None and isinstance(sell_levels, list) and sell_levels:
                 ask_qty = _coerce_int((sell_levels[0] or {}).get("quantity"))
+            bid_levels = len(buy_levels) if isinstance(buy_levels, list) else 0
+            ask_levels = len(sell_levels) if isinstance(sell_levels, list) else 0
+            depth_two_sided = bid_levels > 0 and ask_levels > 0
+            depth_complete_5x5 = bid_levels >= 5 and ask_levels >= 5
+            bid_depth_qty_5 = (
+                sum(
+                    max(0, _coerce_int((level or {}).get("quantity")) or 0)
+                    for level in buy_levels[:5]
+                )
+                if isinstance(buy_levels, list)
+                else 0
+            )
+            ask_depth_qty_5 = (
+                sum(
+                    max(0, _coerce_int((level or {}).get("quantity")) or 0)
+                    for level in sell_levels[:5]
+                )
+                if isinstance(sell_levels, list)
+                else 0
+            )
+            depth_total_qty_5 = bid_depth_qty_5 + ask_depth_qty_5
+            depth_imbalance_5 = (
+                (bid_depth_qty_5 - ask_depth_qty_5) / depth_total_qty_5
+                if depth_total_qty_5 > 0
+                else None
+            )
             spread = None
             mid = None
             if bid is not None and ask is not None and ask > bid:
                 spread = float(ask) - float(bid)
                 mid = (float(ask) + float(bid)) / 2.0
             tradable_quote = bool(
-                bid is not None and ask is not None and bid > 0 and ask > bid
+                bid is not None
+                and ask is not None
+                and bid > 0
+                and ask > bid
+                and source_timestamp_valid is True
             )
+            microprice = None
+            if (
+                bid is not None
+                and ask is not None
+                and bid > 0
+                and ask > bid
+                and (bid_qty or 0) + (ask_qty or 0) > 0
+            ):
+                microprice = (
+                    float(ask) * float(bid_qty or 0) + float(bid) * float(ask_qty or 0)
+                ) / float((bid_qty or 0) + (ask_qty or 0))
             if "volume_delta" in raw:
                 volume_delta_value = _coerce_int(raw.get("volume_delta")) or 0
             elif "volume" in raw:
@@ -13336,8 +13590,18 @@ class MarketDataManager:
                 "oi": _coerce_int(raw.get("oi")),
                 "depth": depth_obj,
                 "depth_available": bool(depth_obj),
+                "bid_depth_levels": bid_levels,
+                "ask_depth_levels": ask_levels,
+                "depth_two_sided": depth_two_sided,
+                "depth_complete_5x5": depth_complete_5x5,
+                "bid_depth_qty_5": bid_depth_qty_5,
+                "ask_depth_qty_5": ask_depth_qty_5,
+                "depth_imbalance_5": depth_imbalance_5,
+                "microprice": microprice,
                 "bid_ask_source": bid_ask_source,
                 "tradable_quote": tradable_quote,
+                "hard_readiness_eligible": bool(source_timestamp_valid),
+                "timestamp_quality": timestamp_quality,
                 "tick_direction": tick_direction or None,
                 "tick_direction_source": (
                     str(tick_direction_source)
@@ -13345,8 +13609,20 @@ class MarketDataManager:
                     else ("market_tick" if tick_direction else None)
                 ),
                 "timestamp": ts_py,
+                "timestamp_ms": float(ts_py.timestamp() * 1000.0),
+                "event_timestamp_ms": (
+                    float(ts_py.timestamp() * 1000.0)
+                    if source_timestamp_valid is True
+                    else None
+                ),
+                "received_at": received_at,
+                "received_timestamp_ms": received_at * 1000.0,
+                "received_monotonic_ns": received_monotonic_ns,
                 "timestamp_source": timestamp_source,
                 "source_timestamp_valid": source_timestamp_valid,
+                "subscription_generation": raw.get(
+                    "_mdm_subscription_generation", raw.get("subscription_generation")
+                ),
                 "source": (
                     "poll"
                     if str(source).lower() == "poll"

@@ -157,6 +157,9 @@ class WebSocketManager:
         self._circuit = _CircuitState()
         self._fallback_start_callback: Callable[[], None] | None = None
         self._fallback_stop_callback: Callable[[], None] | None = None
+        self._auth_invalid_provider: Callable[[], bool] | None = None
+        self._access_token_provider: Callable[[], str | None] | None = None
+        self._last_auth_reconnect_suppressed_mono = 0.0
         self._fallback_active = False
         self._first_tick_logged = False
         self._subscription_log_tokens: set[int] = set()
@@ -197,6 +200,49 @@ class WebSocketManager:
 
         self._fallback_start_callback = on_start
         self._fallback_stop_callback = on_stop
+
+    def set_auth_state_provider(self, provider: Callable[[], bool] | None) -> None:
+        """Wire broker-auth truth used only to suppress futile reconnects."""
+        self._auth_invalid_provider = provider
+
+    def set_access_token_provider(
+        self, provider: Callable[[], str | None] | None
+    ) -> None:
+        """Wire current access-token lookup without making WS own credentials."""
+        self._access_token_provider = provider
+
+    def _broker_auth_invalid(self) -> bool:
+        provider = self._auth_invalid_provider
+        if provider is None:
+            return False
+        try:
+            return bool(provider())
+        except Exception:
+            # Auth-provider telemetry must never crash the transport. Execution
+            # remains independently fail-closed at broker/readiness boundaries.
+            return False
+
+    def _refresh_access_token_from_provider(self) -> None:
+        provider = self._access_token_provider
+        if provider is None:
+            return
+        try:
+            raw = provider()
+        except Exception:
+            return
+        token = str(raw or "").strip()
+        if ":" in token:
+            token = token.split(":", 1)[-1].strip()
+        if token and token != self._access_token:
+            self._access_token = token
+            self._logger.info(
+                "WS_ACCESS_TOKEN_GENERATION_REFRESHED token_length=%d",
+                len(token),
+                extra={
+                    "event": "WS_ACCESS_TOKEN_GENERATION_REFRESHED",
+                    "token_length": len(token),
+                },
+            )
 
     def _make_ticker_close_safe(self, ticker: Any | None = None) -> None:
         """Make ticker.close best-effort at the transport boundary."""
@@ -500,6 +546,8 @@ class WebSocketManager:
             "last_tick_age_s": last_tick_age,
             "last_pong_age_s": last_pong_age,
             "circuit_open": bool(self._circuit_is_open()),
+            "stream_health": self._stream_health,
+            "auth_blocked": bool(self._broker_auth_invalid()),
         }
 
     async def _connect_once(self, reason: str) -> None:
@@ -509,7 +557,26 @@ class WebSocketManager:
             async with self._connect_lock:
                 if self._shutdown or self._manual_disconnect:
                     return
-                if self._connected.is_set() and self._ticker is not None and self._tokens:
+                if self._broker_auth_invalid():
+                    self._stream_health = "auth_blocked"
+                    self._state = ConnectionState.DISCONNECTED
+                    self._connected.clear()
+                    self._logger.warning(
+                        "WS_CONNECT_SUPPRESSED reason=broker_auth_invalid "
+                        "requested_reason=%s",
+                        reason,
+                        extra={
+                            "event": "WS_CONNECT_SUPPRESSED",
+                            "reason": "broker_auth_invalid",
+                            "requested_reason": reason,
+                        },
+                    )
+                    return
+                if (
+                    self._connected.is_set()
+                    and self._ticker is not None
+                    and self._tokens
+                ):
                     self._logger.info(
                         "WS_CONNECT_SKIPPED already_connected reason=%s tokens=%d",
                         reason,
@@ -522,7 +589,7 @@ class WebSocketManager:
                         },
                     )
                     return
-        
+
                 self._state = ConnectionState.CONNECTING
                 self._connected.clear()
                 self._connect_started_mono = time.monotonic()
@@ -577,6 +644,23 @@ class WebSocketManager:
             async with self._reconnect_lock:
                 if self._shutdown or self._manual_disconnect:
                     return
+                if self._broker_auth_invalid():
+                    now = time.monotonic()
+                    if now - self._last_auth_reconnect_suppressed_mono >= 30.0:
+                        self._last_auth_reconnect_suppressed_mono = now
+                        self._logger.warning(
+                            "WS_RECONNECT_SUPPRESSED reason=broker_auth_invalid "
+                            "requested_reason=%s",
+                            reason,
+                            extra={
+                                "event": "WS_RECONNECT_SUPPRESSED",
+                                "reason": "broker_auth_invalid",
+                                "requested_reason": reason,
+                            },
+                        )
+                    self._stream_health = "auth_blocked"
+                    self._state = ConnectionState.DISCONNECTED
+                    return
                 if self._reconnect_task is not None and not self._reconnect_task.done():
                     return
                 self._state = ConnectionState.RECONNECTING
@@ -590,6 +674,9 @@ class WebSocketManager:
         try:
             while not self._shutdown and not self._manual_disconnect:
                 if self._connected.is_set():
+                    return
+                if self._broker_auth_invalid():
+                    self._stream_health = "auth_blocked"
                     return
                 if self._circuit_is_open():
                     await asyncio.sleep(min(self._heartbeat_interval, 1.0))
@@ -643,14 +730,35 @@ class WebSocketManager:
                     return
                 now = time.monotonic()
 
+                if not self._connected.is_set():
+                    if self._broker_auth_invalid():
+                        self._stream_health = "auth_blocked"
+                        continue
+                    if (
+                        self._running
+                        and self._is_within_trading_window()
+                        and (
+                            self._reconnect_task is None or self._reconnect_task.done()
+                        )
+                    ):
+                        self._schedule_reconnect("auth_or_transport_recovered")
+                        continue
+
                 # --- PRODUCTION SAFETY BLOCK: Handshake timeout detection. ---
                 if (
                     self._state == ConnectionState.CONNECTING
                     and self._connect_started_mono > 0.0
                     and (now - self._connect_started_mono) > self._handshake_timeout
                 ):
-                    recent_tick_age = (now - self._last_tick_mono) if self._last_tick_mono > 0.0 else None
-                    if recent_tick_age is not None and recent_tick_age <= self._stale_threshold:
+                    recent_tick_age = (
+                        (now - self._last_tick_mono)
+                        if self._last_tick_mono > 0.0
+                        else None
+                    )
+                    if (
+                        recent_tick_age is not None
+                        and recent_tick_age <= self._stale_threshold
+                    ):
                         self._connected.set()
                         self._state = ConnectionState.CONNECTED
                         self._stream_health = "healthy"
@@ -755,6 +863,7 @@ class WebSocketManager:
 
     def _build_ticker(self) -> KiteTicker:
         """Build a close-safe ticker from the configured transport factory."""
+        self._refresh_access_token_from_provider()
         if self._ticker_factory is not None:
             ticker = self._ticker_factory()
         else:
