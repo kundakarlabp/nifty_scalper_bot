@@ -426,7 +426,8 @@ def _maybe_reprice_open_entry(
     log = getattr(logger, "info", None)
     if callable(log):
         log(
-            "ENTRY_OPEN_REPRICED order_id=%s symbol=%s old_price=%.2f new_price=%.2f count=%s/%s",
+            "ENTRY_OPEN_REPRICED order_id=%s symbol=%s old_price=%.2f "
+            "new_price=%.2f count=%s/%s",
             order_id,
             symbol,
             current_price,
