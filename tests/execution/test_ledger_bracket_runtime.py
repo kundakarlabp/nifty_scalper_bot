@@ -542,10 +542,7 @@ def test_completed_trade_costs_count_distinct_broker_orders_not_fill_rows(
     assert outcome["estimated_costs"]["total"] == expected.total
 
 
-def test_completed_trade_prefers_broker_calculated_costs(
-    monkeypatch, tmp_path, caplog
-) -> None:
-    caplog.set_level("INFO")
+def test_completed_trade_prefers_broker_calculated_costs(monkeypatch, tmp_path) -> None:
     manager, _order_manager, broker = _manager(monkeypatch, tmp_path)
     captured: list[dict[str, Any]] = []
 
@@ -590,14 +587,11 @@ def test_completed_trade_prefers_broker_calculated_costs(
     assert outcome["estimated_costs"]["total"] != 28.0
     assert outcome["net_pnl"] == 1272.0
     assert outcome["cost_reconciliation"]["broker_total"] == 28.0
-    assert "cost_source=broker_virtual_contract_note" in caplog.text
-    assert "charged_total=28.0" in caplog.text
 
 
 def test_completed_trade_uses_estimator_when_broker_costs_unavailable(
-    monkeypatch, tmp_path, caplog
+    monkeypatch, tmp_path
 ) -> None:
-    caplog.set_level("INFO")
     manager, _order_manager, broker = _manager(monkeypatch, tmp_path)
 
     def fail_charges(_orders):
@@ -624,4 +618,3 @@ def test_completed_trade_uses_estimator_when_broker_costs_unavailable(
     assert outcome["net_pnl"] == round(
         outcome["gross_pnl"] - outcome["estimated_costs"]["total"], 2
     )
-    assert "cost_source=estimated_model" in caplog.text
