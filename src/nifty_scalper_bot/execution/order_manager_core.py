@@ -9132,6 +9132,21 @@ class OrderManager:
                         side=record.get("side", "BUY"),
                         quantity=int(record.get("quantity", 0)),
                         price=float(record.get("price", 0)),
+                        stop_loss=(
+                            float(record["stop_loss"])
+                            if record.get("stop_loss") not in (None, "")
+                            else None
+                        ),
+                        take_profit=(
+                            float(record["take_profit"])
+                            if record.get("take_profit") not in (None, "")
+                            else None
+                        ),
+                        trigger_price=(
+                            float(record["trigger_price"])
+                            if record.get("trigger_price") not in (None, "")
+                            else None
+                        ),
                         order_type=order_type,
                         status=status,
                         fill_price=(
@@ -9143,7 +9158,38 @@ class OrderManager:
                         applied_filled_quantity=int(
                             record.get("applied_filled_quantity", 0) or 0
                         ),
+                        pending_quantity=int(record.get("pending_quantity", 0) or 0),
                         intent=record.get("intent") or "UNKNOWN",
+                        intended_position_side=record.get("intended_position_side"),
+                        tag=record.get("tag"),
+                        product=str(record.get("product") or "MIS"),
+                        client_order_id=record.get("client_order_id"),
+                        trade_lifecycle_id=record.get("trade_lifecycle_id"),
+                        linked_entry_order_id=record.get("linked_entry_order_id"),
+                        bracket_id=record.get("bracket_id"),
+                        basket_version=record.get("basket_version"),
+                        instrument_token=(
+                            int(record["instrument_token"])
+                            if record.get("instrument_token") not in (None, "")
+                            else None
+                        ),
+                        contract_expiry=record.get("contract_expiry"),
+                        exchange_order_id=record.get("exchange_order_id"),
+                        signal_id=record.get("signal_id"),
+                        requested_lots=int(record.get("requested_lots", 0) or 0),
+                        resolved_lot_size=int(
+                            record.get("resolved_lot_size", 0) or 0
+                        ),
+                        entry_lifecycle_state=(
+                            record.get("entry_lifecycle_state")
+                            if isinstance(record.get("entry_lifecycle_state"), dict)
+                            else None
+                        ),
+                        trade_provenance=(
+                            dict(record.get("trade_provenance") or {})
+                            if isinstance(record.get("trade_provenance"), Mapping)
+                            else {}
+                        ),
                     )
 
                     with self._lock:
@@ -13219,6 +13265,7 @@ class OrderManager:
             "requested_lots": order.requested_lots,
             "resolved_lot_size": order.resolved_lot_size,
             "entry_lifecycle_state": order.entry_lifecycle_state,
+            "trade_provenance": dict(order.trade_provenance or {}),
         }
 
     def _serialize_bracket_state(self, state: BracketState) -> BracketDict:
@@ -13320,14 +13367,40 @@ class OrderManager:
                 order_type=order_type,
                 quantity=quantity,
                 price=price,
+                stop_loss=(
+                    float(payload["stop_loss"])
+                    if payload.get("stop_loss") not in (None, "")
+                    else None
+                ),
+                take_profit=(
+                    float(payload["take_profit"])
+                    if payload.get("take_profit") not in (None, "")
+                    else None
+                ),
+                trigger_price=(
+                    float(payload["trigger_price"])
+                    if payload.get("trigger_price") not in (None, "")
+                    else None
+                ),
                 status=status,
                 timestamp=timestamp,
                 filled_quantity=int(payload.get("filled_quantity", 0)),
+                applied_filled_quantity=int(
+                    payload.get("applied_filled_quantity", 0) or 0
+                ),
+                pending_quantity=int(payload.get("pending_quantity", 0) or 0),
                 average_price=avg_price,  # Mapped correctly
+                fill_price=(
+                    float(payload["fill_price"])
+                    if payload.get("fill_price") not in (None, "")
+                    else None
+                ),
                 tag=payload.get("tag"),
                 client_order_id=payload.get("client_order_id"),
                 rejection_reason=payload.get("rejection_reason"),
                 intent=payload.get("intent") or "UNKNOWN",
+                intended_position_side=payload.get("intended_position_side"),
+                product=str(payload.get("product") or "MIS"),
                 trade_lifecycle_id=payload.get("trade_lifecycle_id"),
                 linked_entry_order_id=payload.get("linked_entry_order_id"),
                 bracket_id=payload.get("bracket_id"),
@@ -13346,6 +13419,11 @@ class OrderManager:
                     payload.get("entry_lifecycle_state")
                     if isinstance(payload.get("entry_lifecycle_state"), dict)
                     else None
+                ),
+                trade_provenance=(
+                    dict(payload.get("trade_provenance") or {})
+                    if isinstance(payload.get("trade_provenance"), Mapping)
+                    else {}
                 ),
             )
         except Exception as e:
