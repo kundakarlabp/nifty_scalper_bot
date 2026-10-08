@@ -4329,19 +4329,43 @@ class BracketManager:
         return False
 
     def _get_broker_order_status(self, order_id: str) -> Mapping[str, Any]:
+        """Prefer order history; recover missing terminal states from the broker orderbook.
+
+        Kite's order-history lookup may temporarily return no usable status after
+        an exchange-side stop was filled. Do not treat UNKNOWN as an order state:
+        use the exact order ID in the broker's day orderbook before attempting a
+        cancellation or submitting any competing exit.
+        """
         broker = getattr(self.order_manager, "_broker", None)
         getter = (
             getattr(broker, "get_order_status", None) if broker is not None else None
         )
+        result: Mapping[str, Any] = {}
         if callable(getter):
-            result = getter(order_id)
-            return result if isinstance(result, Mapping) else {}
+            history = getter(order_id)
+            if isinstance(history, Mapping):
+                result = history
+                if str(history.get("status") or "").strip().upper() not in {
+                    "", "UNKNOWN"
+                }:
+                    return history
         getter = getattr(broker, "get_orders", None) if broker is not None else None
         if callable(getter):
-            for order in getter() or []:
-                if str(order.get("order_id") or order.get("id") or "") == str(order_id):
-                    return order if isinstance(order, Mapping) else {}
-        return {}
+            orders = getter()
+            # Broker orderbooks are lists; a missing/malformed response is not
+            # proof of cancellation or of a fill (also protects mock adapters).
+            if not isinstance(orders, (list, tuple)):
+                return result
+            for order in orders:
+                if not isinstance(order, Mapping):
+                    continue
+                if str(order.get("order_id") or order.get("id") or "") != str(order_id):
+                    continue
+                if str(order.get("status") or "").strip().upper() not in {
+                    "", "UNKNOWN"
+                }:
+                    return order
+        return result
 
     @staticmethod
     def _extract_status_price(status: Mapping[str, Any] | None) -> float | None:
