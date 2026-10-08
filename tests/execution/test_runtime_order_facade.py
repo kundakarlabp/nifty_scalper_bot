@@ -560,9 +560,7 @@ def test_open_live_entry_reprices_same_order_within_small_budget(monkeypatch) ->
     )
     manager._apply_entry_margin_gate = lambda plan, _price: (plan, None)
     manager._reanchor_bracket_to_price = lambda plan, price: (
-        order_manager_core.OrderManager._reanchor_bracket_to_price(
-            manager, plan, price
-        )
+        order_manager_core.OrderManager._reanchor_bracket_to_price(manager, plan, price)
     )
     manager._persist_order_snapshot = lambda _order: None
     manager._lock = threading.RLock()
@@ -762,9 +760,7 @@ def test_open_entry_reprice_rejects_non_ws_or_non_tradable_quote(monkeypatch) ->
     )
     manager._apply_entry_margin_gate = lambda plan, _price: (plan, None)
     manager._reanchor_bracket_to_price = lambda plan, price: (
-        order_manager_core.OrderManager._reanchor_bracket_to_price(
-            manager, plan, price
-        )
+        order_manager_core.OrderManager._reanchor_bracket_to_price(manager, plan, price)
     )
     manager._positions = SimpleNamespace(
         apply_broker_order_update=lambda *_args, **_kwargs: None
@@ -908,9 +904,7 @@ def test_open_entry_reprice_reapplies_spread_depth_and_risk_gates(monkeypatch) -
         lambda _plan: order_manager_core.OrderPreflightResult(True, "allowed", {})
     )
     manager._reanchor_bracket_to_price = lambda plan, price: (
-        order_manager_core.OrderManager._reanchor_bracket_to_price(
-            manager, plan, price
-        )
+        order_manager_core.OrderManager._reanchor_bracket_to_price(manager, plan, price)
     )
     manager._apply_entry_margin_gate = lambda plan, _price: (plan, None)
     modified: list[tuple[str, dict[str, Any]]] = []
@@ -976,9 +970,7 @@ def test_open_entry_reprice_persists_budget_after_modify(monkeypatch) -> None:
     )
     manager._apply_entry_margin_gate = lambda plan, _price: (plan, None)
     manager._reanchor_bracket_to_price = lambda plan, price: (
-        order_manager_core.OrderManager._reanchor_bracket_to_price(
-            manager, plan, price
-        )
+        order_manager_core.OrderManager._reanchor_bracket_to_price(manager, plan, price)
     )
     persisted: list[dict[str, Any]] = []
     saves: list[bool] = []
