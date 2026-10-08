@@ -605,7 +605,9 @@ def test_open_entry_repricing_refuses_post_cost_unprofitable_geometry(
     manager = _manager(None)
     manager.is_live_mode = lambda: True
     manager._get_latest_quote_safe = lambda _symbol: {
-        "bid": 100.85, "ask": 101.0, "age_ms": 10.0
+        "bid": 100.85,
+        "ask": 101.0,
+        "age_ms": 10.0,
     }
     manager._extract_quote_diagnostics = lambda payload: dict(payload)
     manager._lock = threading.RLock()
