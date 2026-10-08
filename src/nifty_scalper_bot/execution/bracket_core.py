@@ -787,6 +787,9 @@ class BracketManager:
             except Exception as exc:  # noqa: BLE001
                 self._mark_persistence_degraded("startup_restore_failed", exc)
 
+        # Serialize broker-side SL modifications: multiple trailing owners can
+        # otherwise acknowledge out of order and weaken the resting exchange stop.
+        self._exchange_stop_modify_mutex = threading.RLock()
         self._watchdog_thread = threading.Thread(
             target=self._watchdog_exit_loop,
             name="bracket-watchdog",
@@ -2980,24 +2983,43 @@ class BracketManager:
         side = "SELL" if bracket.side == "BUY" else "BUY"
 
         def _force_market_flatten() -> None:
-            # Cancel the unfilled pending limit so it can't fill alongside the market order.
+            # No true exchange OCO exists: cancellation must be terminal
+            # before placing a competing market SELL, including on broker
+            # timeout or a delayed exchange-stop fill.
             if stuck_order_id:
                 try:
                     self.order_manager.cancel_order(str(stuck_order_id))
-                    LOGGER.warning(
-                        "EXIT_ESCALATION_CANCELLED_STUCK_ORDER bracket_id=%s order_id=%s",
-                        bracket.bracket_id,
-                        stuck_order_id,
-                    )
-                except (
-                    Exception
-                ) as exc:  # noqa: BLE001 - cancel best-effort; still try market
-                    LOGGER.warning(
+                except Exception as exc:  # noqa: BLE001 - retain existing stop identity
+                    LOGGER.error(
                         "EXIT_ESCALATION_CANCEL_FAILED bracket_id=%s order_id=%s error=%s",
                         bracket.bracket_id,
                         stuck_order_id,
                         exc,
                     )
+                try:
+                    status = self._get_broker_order_status(str(stuck_order_id))
+                    status_text = str((status or {}).get("status") or "").strip().upper()
+                except Exception as exc:  # noqa: BLE001 - unknown is not cancellation
+                    LOGGER.error(
+                        "EXIT_ESCALATION_CANCEL_STATUS_UNKNOWN bracket_id=%s order_id=%s error=%s",
+                        bracket.bracket_id,
+                        stuck_order_id,
+                        exc,
+                    )
+                    status_text = "UNKNOWN"
+                if status_text not in _CANCELLED_STATUSES:
+                    LOGGER.critical(
+                        "EXIT_ESCALATION_REPLACEMENT_BLOCKED bracket_id=%s order_id=%s status=%s reason=cancel_unconfirmed",
+                        bracket.bracket_id,
+                        stuck_order_id,
+                        status_text or "UNKNOWN",
+                    )
+                    return
+                LOGGER.warning(
+                    "EXIT_ESCALATION_CANCELLED_STUCK_ORDER bracket_id=%s order_id=%s",
+                    bracket.bracket_id,
+                    stuck_order_id,
+                )
             with self._lock:
                 bracket.exit_order_id = None
                 bracket.pending_exit_order_id = None
@@ -3958,6 +3980,25 @@ class BracketManager:
         """Submit one broker exit order and return a sanitized structured result."""
         normalized_symbol = normalize_symbol(symbol)
         bracket = self.get_bracket(bracket_id)
+        # An exchange SL can fill while a deferred virtual exit is queued.
+        # A closed/flat bracket must never submit a second reducing order.
+        if bracket is not None:
+            with self._lock:
+                already_closed = (
+                    bracket.exit_executed
+                    or bracket.remaining_quantity <= 0
+                    or bracket.exit_state == BracketExitLifecycle.CLOSED.value
+                )
+            if already_closed:
+                LOGGER.info(
+                    "EXIT_SUBMISSION_SKIPPED_CLOSED bracket_id=%s symbol=%s",
+                    bracket_id,
+                    normalized_symbol,
+                )
+                return SubmitExitOrderResult(
+                    False, None, "already_closed", "already_closed",
+                    "broker position already closed", False, {},
+                )
         side = "SELL" if (bracket and bracket.side == "BUY") else "BUY"
         order_type, price, pricing_meta = self._price_exit_order(
             bracket=bracket,
@@ -5179,6 +5220,13 @@ class BracketManager:
         bracket.exchange_stop_modify_count = 0
 
     def _ensure_exchange_protective_stop(self, bracket: BracketState) -> bool:
+        """Prevent concurrent entry-fill callbacks from placing duplicate broker SLs."""
+        with self._exchange_stop_modify_mutex:
+            return self._ensure_exchange_protective_stop_serialized(bracket)
+
+    def _ensure_exchange_protective_stop_serialized(
+        self, bracket: BracketState
+    ) -> bool:
         """Arm exactly one exchange-resident SL-limit for a confirmed live position."""
         if (
             not self._exchange_protective_stop_enabled
@@ -5297,7 +5345,14 @@ class BracketManager:
         return True
 
     def _sync_exchange_protective_stop(self, bracket: BracketState) -> bool:
-        """Coalesce broker SL ratchets and preserve a modification reserve."""
+        """Serialize canonical exchange-stop ratchets across trailing callbacks."""
+        with self._exchange_stop_modify_mutex:
+            return self._sync_exchange_protective_stop_serialized(bracket)
+
+    def _sync_exchange_protective_stop_serialized(
+        self, bracket: BracketState
+    ) -> bool:
+        """Coalesce monotonic broker SL ratchets and preserve modification budget."""
         with self._lock:
             if (
                 not bracket.active
@@ -5322,6 +5377,13 @@ class BracketManager:
                 * self._exchange_protective_stop_min_ratchet_pct
                 / 100.0,
             )
+            # Once acknowledged, the exchange stop must never be loosened,
+            # even if a concurrent or restored virtual state is behind it.
+            if current_trigger > 0.0 and (
+                (bracket.side == "BUY" and trigger <= current_trigger)
+                or (bracket.side == "SELL" and trigger >= current_trigger)
+            ):
+                return False
             delta = abs(trigger - current_trigger)
 
             if current_trigger > 0.0 and delta + 1e-9 < min_delta:

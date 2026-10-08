@@ -3,14 +3,10 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 
-from nifty_scalper_bot.execution import live_safety_identity
 from nifty_scalper_bot.execution.bracket_core import BracketManager
 
 
 SYMBOL = "NFO:NIFTY2690124150PE"
-
-# Exercise the same runtime override that production installs.
-live_safety_identity._patch_bracket_manager()
 
 
 class _Positions:
@@ -76,6 +72,9 @@ def _manager(tmp_path, monkeypatch) -> tuple[BracketManager, _OrderManager]:
 
 
 def test_protective_exit_preserves_entry_product(tmp_path, monkeypatch) -> None:
+    assert BracketManager.submit_exit_order.__module__ == (
+        "nifty_scalper_bot.execution.bracket_core"
+    )
     manager, order_manager = _manager(tmp_path, monkeypatch)
 
     result = manager.submit_exit_order(

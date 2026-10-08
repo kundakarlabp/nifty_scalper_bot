@@ -1001,6 +1001,163 @@ def test_bracket_flat_nonterminal_timing_round_trips_without_monotonic(tmp_path)
     assert restored.flat_nonterminal_since_monotonic is None
 
 
+def test_simultaneous_entry_callbacks_arm_only_one_exchange_stop(monkeypatch) -> None:
+    from threading import Event, Thread
+
+    manager, order_manager, _broker = _manager()
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    bracket.entry_confirmed = True
+    bracket.active = True
+    manager._exchange_protective_stop_enabled = True
+    monkeypatch.setattr(manager, "_is_live_execution", lambda: True)
+    entered = Event()
+    release = Event()
+    submitted: list[str] = []
+
+    def slow_place(**kwargs: Any) -> str:
+        entered.set()
+        assert release.wait(2.0)
+        submitted.append(kwargs["order_type"])
+        return f"broker-stop-{len(submitted)}"
+
+    monkeypatch.setattr(order_manager, "place_order", slow_place)
+    first = Thread(target=manager._ensure_exchange_protective_stop, args=(bracket,))
+    first.start()
+    try:
+        assert entered.wait(1.0)
+        second = Thread(
+            target=manager._ensure_exchange_protective_stop, args=(bracket,)
+        )
+        second.start()
+        time.sleep(0.05)
+    finally:
+        release.set()
+    first.join(timeout=2.0)
+    second.join(timeout=2.0)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert submitted == ["SL"]
+    assert bracket.exchange_stop_order_id == "broker-stop-1"
+
+
+def test_escalation_never_sends_second_market_order_without_confirmed_cancel() -> None:
+    manager, order_manager, broker = _manager(cancel_confirms=False)
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    bracket.exit_order_id = "old-exit"
+    bracket.exit_pending = True
+    manager._exit_force_market_on_escalation = True
+
+    with manager._lock:
+        manager._escalate_exit_locked(bracket, "stale_exit")
+
+    assert broker.cancel_calls == ["old-exit"]
+    assert order_manager.place_calls == []
+    assert bracket.exit_order_id == "old-exit"
+
+
+def test_escalation_replaces_a_confirmed_cancel_once() -> None:
+    manager, order_manager, broker = _manager(cancel_confirms=True)
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    bracket.exit_order_id = "old-exit"
+    bracket.exit_pending = True
+    manager._exit_force_market_on_escalation = True
+
+    with manager._lock:
+        manager._escalate_exit_locked(bracket, "stale_exit")
+
+    assert broker.cancel_calls == ["old-exit"]
+    assert len(order_manager.place_calls) == 1
+    assert order_manager.place_calls[0]["order_type"] == "MARKET"
+    assert order_manager.place_calls[0]["intent"] == "EXIT"
+
+
+def test_closed_exchange_filled_bracket_never_submits_second_exit() -> None:
+    manager, order_manager, _broker = _manager()
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    bracket.exit_order_id = "filled-broker-stop"
+    bracket.exchange_stop_order_id = "filled-broker-stop"
+    bracket.remaining_quantity = 0
+    bracket.exit_executed = True
+    bracket.exit_state = BracketExitLifecycle.CLOSED.value
+
+    result = manager.submit_exit_order(
+        symbol=SYMBOL,
+        qty=65,
+        reason="WATCHDOG_HARD_SL",
+        bracket_id="entry-1",
+        preferred_order_type="MARKET",
+    )
+
+    assert result.accepted is False
+    assert result.status == "already_closed"
+    assert order_manager.place_calls == []
+
+
+def test_exchange_stop_cannot_be_loosened_by_stale_virtual_trail() -> None:
+    manager, order_manager, _broker = _manager()
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    bracket.exchange_stop_order_id = "protect-1"
+    bracket.exchange_stop_trigger_price = 150.0
+    bracket.exchange_stop_limit_price = 142.50
+    bracket.sl_trigger_price = 145.0
+
+    assert manager._sync_exchange_protective_stop(bracket) is False
+
+    assert bracket.exchange_stop_trigger_price == 150.0
+    assert order_manager.modify_calls == []
+
+
+def test_parallel_virtual_ratchets_preserve_latest_broker_stop(monkeypatch) -> None:
+    from threading import Event, Thread
+
+    manager, order_manager, _broker = _manager()
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    bracket.exchange_stop_order_id = "protect-1"
+    bracket.exchange_stop_trigger_price = 140.0
+    bracket.exchange_stop_limit_price = 133.0
+    bracket.sl_trigger_price = 145.0
+    entered = Event()
+    release = Event()
+    acknowledged: list[float] = []
+
+    def delayed_modify(order_id: str, **changes: Any) -> bool:
+        assert order_id == "protect-1"
+        trigger = float(changes["trigger_price"])
+        if trigger == 145.0:
+            entered.set()
+            assert release.wait(2.0)
+        acknowledged.append(trigger)
+        return True
+
+    monkeypatch.setattr(order_manager, "modify_order", delayed_modify)
+    first = Thread(target=manager._sync_exchange_protective_stop, args=(bracket,))
+    first.start()
+    try:
+        assert entered.wait(1.0)
+        bracket.sl_trigger_price = 150.0
+        second = Thread(target=manager._sync_exchange_protective_stop, args=(bracket,))
+        second.start()
+        # Without serialization, the new stop can acknowledge before the old.
+        time.sleep(0.05)
+    finally:
+        release.set()
+    first.join(timeout=2.0)
+    second.join(timeout=2.0)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert acknowledged == [145.0, 150.0]
+    assert bracket.exchange_stop_trigger_price == 150.0
+    assert bracket.exchange_stop_modify_count == 2
+
+
 def test_fallback_trail_reprices_the_existing_exchange_stop(monkeypatch) -> None:
     manager, order_manager, _broker = _manager()
     bracket = manager.get_bracket("entry-1")
