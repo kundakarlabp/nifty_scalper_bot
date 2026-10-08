@@ -314,6 +314,11 @@ def _maybe_reprice_open_entry(
     provenance = provenance_raw if isinstance(provenance_raw, dict) else {}
     if provenance is not provenance_raw:
         setattr(order, "trade_provenance", provenance)
+    anchor_mode = str(
+        provenance.get("bracket_anchor_mode") or "distance"
+    ).strip().lower()
+    if anchor_mode != "distance":
+        return False
     count = _positive_int(provenance.get("entry_open_reprice_count"))
     try:
         max_modifications = max(
