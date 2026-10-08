@@ -952,6 +952,7 @@ def test_bracket_flat_nonterminal_timing_round_trips_without_monotonic(tmp_path)
     assert restored.flat_nonterminal_since_utc == "2026-07-11T10:00:00+00:00"
     assert restored.flat_nonterminal_since_monotonic is None
 
+
 def test_fallback_trail_reprices_the_existing_exchange_stop(monkeypatch) -> None:
     manager, order_manager, _broker = _manager()
     bracket = manager.get_bracket("entry-1")
