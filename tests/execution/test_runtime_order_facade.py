@@ -638,7 +638,8 @@ def test_open_entry_repricing_refuses_post_cost_unprofitable_geometry(
         "modify_order",
         lambda _self, order_id, **changes: modified.append(
             (str(order_id), dict(changes))
-        ) or True,
+        )
+        or True,
     )
     RuntimeOrderManager._apply_broker_order_update(
         manager,
