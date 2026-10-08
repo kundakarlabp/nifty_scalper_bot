@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import logging
 import os
+import time
 from typing import Any, Mapping
 
 from nifty_scalper_bot.execution.readiness import HistoryReadinessPolicy
@@ -983,10 +984,49 @@ class SMCStrategy(EliteStrategy):
                     0.0,
                     (current_ts - event["sweep_ts"]).total_seconds() / 60.0,
                 )
+
                 if age_minutes > max_age_minutes:
                     self._events.pop(event_key, None)
                     self._no_vote("smc_sweep_expired")
                     return None
+
+                # The first confirmed vote is an execution opportunity, not
+                # permission to keep buying the same sweep minutes later.
+                # Preserve retries while independent OrderFlow evidence matures.
+                first_confirmation_ts = event.get("first_vote_confirmation_ts")
+                first_vote_mono = event.get("first_vote_monotonic")
+                retry_window_seconds = max(
+                    30.0, safe_float_env("SMC_CONFIRMED_VOTE_MAX_SECONDS", 120.0)
+                )
+                confirmation_age = (
+                    max(0.0, (current_ts - first_confirmation_ts).total_seconds())
+                    if isinstance(first_confirmation_ts, datetime)
+                    else 0.0
+                )
+                runtime_age = (
+                    max(0.0, time.monotonic() - float(first_vote_mono))
+                    if is_live and isinstance(first_vote_mono, (int, float))
+                    else 0.0
+                )
+                if max(confirmation_age, runtime_age) > retry_window_seconds:
+                    self._events.pop(event_key, None)
+                    self._no_vote("smc_confirmed_vote_expired")
+                    return None
+
+                # A broker rejection must not turn an already-invalidated
+                # premium thesis into a cheap late entry. This uses the
+                # original 1.5-ATR/3%-premium risk band, not a score gate.
+                if (
+                    is_live
+                    and event.get("first_vote_symbol") == symbol
+                    and event.get("first_vote_premium") is not None
+                ):
+                    first_premium = float(event["first_vote_premium"])
+                    first_risk = float(event.get("first_vote_risk_points") or 0.0)
+                    if first_risk > 0 and current_price <= first_premium - first_risk:
+                        self._events.pop(event_key, None)
+                        self._no_vote("smc_pre_entry_premium_invalidated")
+                        return None
 
                 side = str(event["side"])
                 if side == "CE" and float(current["close"]) <= float(
@@ -1257,6 +1297,15 @@ class SMCStrategy(EliteStrategy):
                 # same sweep to earn a fresh completed-bar confirmation.
                 event.pop("retry_after_confirmation_ts", None)
                 event["confirmation_ts"] = current_ts
+                if "first_vote_confirmation_ts" not in event:
+                    event["first_vote_confirmation_ts"] = current_ts
+                    event["first_vote_monotonic"] = time.monotonic()
+                if event.get("first_vote_symbol") != symbol:
+                    event["first_vote_symbol"] = symbol
+                    event["first_vote_premium"] = current_price
+                    event["first_vote_risk_points"] = max(
+                        1.0, option_atr * 1.5, current_price * 0.03
+                    )
                 LOGGER.info(
                     "STRATEGY_EVIDENCE strategy=SMC side=%s source=%s "
                     "sweep_depth_atr=%.3f displacement_atr=%.3f",
