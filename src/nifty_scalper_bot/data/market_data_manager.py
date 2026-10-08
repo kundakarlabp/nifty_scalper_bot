@@ -9609,13 +9609,15 @@ class MarketDataManager:
 
         if self._is_full_websocket_quote(current) and self._is_rest_tick(incoming):
             current_received = self._tick_wallclock(current)
-            if current_received is not None:
+            if current_received is not None and current_event is not None:
                 threshold = self._ltp_stale_threshold_for_symbol(symbol)
                 arrival_fresh = max(now_wall - current_received, 0.0) <= threshold
-                if arrival_fresh:
-                    # A freshly received FULL websocket quote remains the live
-                    # authority even when its last-trade/event timestamp has not
-                    # advanced (common on quiet options while BBO/depth changes).
+                event_fresh = max(now_wall - current_event, 0.0) <= threshold
+                if arrival_fresh and event_fresh:
+                    # Receive-time freshness alone cannot keep stale market
+                    # evidence authoritative. REST may repair a stale WS event;
+                    # current-generation WS reclaims authority once both clocks
+                    # prove the feed is current.
                     return False
         return True
 
