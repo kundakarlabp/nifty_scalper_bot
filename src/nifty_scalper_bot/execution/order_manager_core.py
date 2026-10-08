@@ -7775,6 +7775,1358 @@ class OrderManager:
 
                     # Create the order object so we track it from now on
                     order = OrderDetails(
+                        order_id=order_id,
+                        symbol=order_update.get("tradingsymbol")
+                        or order_update.get("symbol", "UNKNOWN"),
+                        side=order_update.get("transaction_type", "BUY"),
+                        quantity=max(qty, 1),  # Ensure we never adopt a 0-qty order
+                        order_type=OrderType.MARKET,  # Assume Market for manual entries
+                        price=float(order_update.get("price", 0.0) or 0.0),
+                        trigger_price=float(
+                            order_update.get("trigger_price", 0.0) or 0.0
+                        ),
+                        average_price=float(
+                            order_update.get("average_price", 0.0) or 0.0
+                        ),
+                        filled_quantity=int(
+                            float(order_update.get("filled_quantity", 0))
+                        ),
+                        status=self._parse_status(status_raw),
+                        timestamp=datetime.now(timezone.utc),
+                        tag="adopted_manual_trade",
+                        product=str(order_update.get("product") or "MIS"),
+                        intent="UNKNOWN",
+                    )
+
+                    # 1. Save to Memory (Stop "Unknown Order" warnings for future updates)
+                    self._orders[order_id] = order
+                    adopted = True
+
+                    # [FIX] CRITICAL: Sync with PositionManager immediately
+                    # This ensures the PositionManager knows this ID exists before we try to update it
+                    if hasattr(self._positions, "add_pending_order"):
+                        self._positions.add_pending_order(
+                            order_id=order.order_id,
+                            symbol=order.symbol,
+                            side=order.side,
+                            qty=order.quantity,
+                            price=order.price,
+                            order_type=order.order_type,
+                            intent="UNKNOWN",
+                        )
+
+                    self._logger.info(
+                        f"🆕 ADOPTED UNKNOWN ORDER: {order_id} [{order.symbol}]"
+                    )
+                    self._notify_bracket_event(
+                        "ORDER_ADOPTED",
+                        {
+                            "symbol": order.symbol,
+                            "order_id": order_id,
+                            "status": status_raw,
+                            "source": "manual_adoption",
+                        },
+                    )
+
+                    # 2. Persist to Disk Immediately (Survive Restarts)
+                    if hasattr(self, "save_orders"):
+                        self.save_orders()
+
+                except Exception as e:
+                    # Log as DEBUG so it doesn't spam your console if adoption fails
+                    self._logger.debug(f"⚠️ Failed to adopt order {order_id}: {e}")
+                    return None
+
+            # -----------------------------------------------------
+            # 🔄 STATE SYNCHRONIZATION
+            # -----------------------------------------------------
+            old_status = order.status
+            new_status = self._parse_status(status_raw)
+
+            order.status = new_status
+            incoming_filled_quantity = max(
+                0, int(float(order_update.get("filled_quantity", 0) or 0))
+            )
+            previous_broker_filled = max(
+                0, int(getattr(order, "filled_quantity", 0) or 0)
+            )
+            applied_filled_quantity = max(
+                0, int(getattr(order, "applied_filled_quantity", 0) or 0)
+            )
+            broker_filled_quantity = max(
+                previous_broker_filled, incoming_filled_quantity
+            )
+            order.filled_quantity = broker_filled_quantity
+
+            # Update Price: Prefer actual fill price ('average_price')
+            avg_px = order_update.get("average_price")
+            if avg_px and float(avg_px) > 0:
+                order.fill_price = float(avg_px)
+            elif not order.fill_price:
+                order.fill_price = float(order_update.get("price", 0.0) or 0.0)
+
+            # -----------------------------------------------------
+            # ✅ FILL PROCESSING (Trigger Stop Loss / Target)
+            # -----------------------------------------------------
+            fill_delta = max(0, broker_filled_quantity - applied_filled_quantity)
+            is_fill_update = status_raw in [
+                "PARTIALLY FILLED",
+                "PARTIAL",
+                "COMPLETE",
+                "FILLED",
+            ] and fill_delta > 0
+
+            if is_fill_update or (adopted and order.filled_quantity > 0):
+                self._logger.info(
+                    f"✅ FILL DETECTED: {order.symbol} ({order_id}) @ {order.fill_price}"
+                )
+
+                # Update Bracket (Stop Loss / Target)
+                self._register_virtual_bracket_for_fill(
+                    order, source="manual_adoption" if adopted else "order_update"
+                )
+
+                # Update Positions (Critical for Dashboard accuracy)
+                if hasattr(self._positions, "apply_broker_order_update"):
+                    try:
+                        self._positions.apply_broker_order_update(
+                            order.order_id,
+                            {
+                                **order_update,
+                                "status": status_raw,
+                                "average_price": order.fill_price,
+                                "filled_quantity": order.filled_quantity,
+                            },
+                        )
+                    except Exception:
+                        self._logger.exception("Unhandled exception", exc_info=True)
+                        raise
+                elif hasattr(self._positions, "update_from_order"):
+                    try:
+                        self._positions.update_from_order(order)
+                    except Exception:
+                        self._logger.exception("Unhandled exception", exc_info=True)
+                        raise
+
+                self._confirm_position_protection_for_fill(order)
+                order.applied_filled_quantity = broker_filled_quantity
+
+            self._notify_failed_entry_terminal(order, old_status, status_raw)
+
+            # ── FIX (BUG 3): CANCELLED exit orders — reactivate bracket.
+            # _check_zombie_orders cancels stuck PENDING orders after 45s via
+            # cancel_order(). If that order was an exit, on_order_update(CANCELLED)
+            # is the only place to catch it and recover the bracket.
+            # Without this, the position stays open with no SL protection.
+            is_cancelled = status_raw in (
+                "CANCELLED",
+                "CANCELED",
+            ) and old_status not in (OrderStatus.CANCELLED, OrderStatus.FILLED)
+            if is_cancelled and self._bracket_manager is not None:
+                tag_str = (order.tag or "").lower()
+                is_exit_tag = any(
+                    x in tag_str for x in ["exit", "stop", "target", "square", "guard"]
+                )
+                if is_exit_tag:
+                    try:
+                        recovered = self._bracket_manager.reactivate_bracket_after_rejected_exit(
+                            symbol=order.symbol,
+                            rejected_order_id=order_id,
+                            reason="CANCELLED",
+                        )
+                        if recovered:
+                            self._logger.critical(
+                                "🔁 CANCELLED EXIT recovered for %s (order=%s) — bracket reactivated.",
+                                order.symbol,
+                                order_id,
+                                extra={
+                                    "event": "cancelled_exit_bracket_reactivated",
+                                    "symbol": order.symbol,
+                                    "order_id": order_id,
+                                },
+                            )
+                    except Exception as _can_exc:
+                        self._logger.error(
+                            "Bracket reactivation failed after cancelled exit for %s: %s",
+                            order.symbol,
+                            _can_exc,
+                        )
+
+            # Final Persistence
+            if hasattr(self, "save_orders"):
+                try:
+                    self.save_orders()
+                except Exception:
+                    self._logger.exception("Unhandled exception", exc_info=True)
+                    raise
+
+            return order
+
+    def place_atomic_entry(
+        self,
+        legs: Sequence[AtomicLeg | Mapping[str, Any]],
+        *,
+        product: str | None = None,
+        tag: str | None = None,
+        partial_fill_tolerance: float = 0.0,
+    ) -> list[str]:
+        """Submit a two-leg entry atomically with risk-state enforcement.
+
+        Args:
+            legs: Iterable containing exactly two leg specifications.
+            product: Optional broker product type applied to both legs.
+            tag: Optional tag applied to both legs.
+            partial_fill_tolerance: Fractional tolerance (0-1] for partial fills.
+
+        Returns:
+            List of broker order identifiers for the accepted legs.
+
+        Raises:
+            ValueError: If the leg specification is invalid.
+            OrderPlacementError: If any leg fails placement or risk blocks the order.
+        """
+
+        if len(legs) != 2:
+            raise ValueError("Atomic entry requires exactly two legs")
+        normalized: list[AtomicLeg] = [self._normalize_leg(leg) for leg in legs]
+        tolerance = max(0.0, min(1.0, float(partial_fill_tolerance)))
+        for leg in normalized:
+            self._validate_quantity(leg.symbol, leg.quantity)
+            if not self._ensure_trading_allowed(
+                symbol=leg.symbol, side=leg.side, quantity=leg.quantity
+            ):
+                return []
+
+        placed: list[OrderDetails] = []
+        policy = self._options_policy
+        try:
+            for index, leg in enumerate(normalized):
+                client_order_id: str | None = None
+                price = leg.price
+                if policy is not None:
+                    policy.validate_qty(leg.symbol, leg.quantity)
+                    if price is not None:
+                        price = policy.round_to_tick(price)
+                        policy.validate_notional(price, leg.quantity)
+                    client_order_id = policy.client_order_id(
+                        leg.symbol,
+                        leg.side,
+                        leg.quantity,
+                        nonce=f"atomic:{index}",
+                    )
+                details = self._place_single_order(
+                    symbol=leg.symbol,
+                    side=leg.side,
+                    quantity=leg.quantity,
+                    order_type=leg.order_type,
+                    price=price,
+                    product=product,
+                    tag=tag,
+                    client_order_id=client_order_id,
+                )
+                placed.append(details)
+                if self._leg_failed(details, tolerance):
+                    status_value = details.status.value
+                    message = (
+                        f"Atomic leg {details.order_id} failed "
+                        f"with status {status_value}"
+                    )
+                    raise OrderPlacementError(message)
+        except Exception:
+            if placed:
+                try:
+                    self.cancel_and_reconcile([order.order_id for order in placed])
+                except Exception:  # pragma: no cover - defensive
+                    self._logger.warning(
+                        "atomic_entry_rollback_failed",
+                        extra={
+                            "event": "atomic_entry_rollback_failed",
+                            "orders": [order.order_id for order in placed],
+                        },
+                        exc_info=True,
+                    )
+            raise
+
+        order_ids = [order.order_id for order in placed]
+        self._logger.info(
+            "atomic_entry_submitted",
+            extra={
+                "event": "atomic_entry_submitted",
+                "orders": order_ids,
+                "client_order_ids": [order.client_order_id for order in placed],
+            },
+        )
+        return order_ids
+
+    def get_order_status(self, order_id: str) -> OrderStatus:
+        """Get current status of order."""
+
+        order = self._refresh_order(order_id)
+        return order.status
+
+    def cancel_order(self, order_id: str) -> bool:
+        """Cancel an order. Intercepts Virtual Brackets for clean shutdown."""
+
+        self._validate_execution_adapter()
+        # 1. Intercept Virtual Bracket Cancellation
+        if self._bracket_manager:
+            # If strategy tries to cancel the Entry ID, it implies "Abort Trade"
+            # We verify if this ID is tracked as a bracket
+            bracket = self._bracket_manager.get_bracket(order_id)
+            if bracket:
+                self._logger.info(f"🗑️ Cancelling Virtual Bracket {order_id}")
+                self._bracket_manager.unregister_bracket(order_id)
+                # We continue to cancel the physical order just in case it's still OPEN at broker
+        # ✅ OPTIMIZATION: Don't cancel if already finished
+        with self._lock:
+            order = self._orders.get(order_id)
+            if order and order.status in [
+                OrderStatus.FILLED,
+                OrderStatus.CANCELLED,
+                OrderStatus.REJECTED,
+            ]:
+                self._logger.info(
+                    f"⏭️ Skipping cancel for {order_id}: Already {order.status.name}"
+                )
+                return True
+
+        # 2. Standard Broker Cancel
+        cancel = getattr(self._broker, "cancel_order", None)
+        if cancel is None:
+            raise NotImplementedError("Broker does not support order cancellation")
+
+        try:
+            response = self._call_broker(cancel, order_id)
+            success = bool(response)
+            if success:
+                self._update_local_status(order_id, OrderStatus.CANCELLED)
+            return success
+        except Exception as e:
+            self._logger.warning(f"Cancel failed for {order_id}: {e}")
+            return False
+
+    def cancel_pending_orders(self) -> list[str]:
+        """Cancel all known pending orders and return cancelled IDs."""
+
+        cancelled: list[str] = []
+        for order in self._pending_orders():
+            try:
+                if self.cancel_order(order.order_id):
+                    cancelled.append(order.order_id)
+            except NotImplementedError:
+                break
+            except Exception as exc:  # noqa: BLE001
+                self._logger.warning(
+                    "cancel_pending_failed",
+                    extra={
+                        "event": "cancel_pending_failed",
+                        "order_id": order.order_id,
+                        "err": str(exc),
+                    },
+                )
+        return cancelled
+
+    def cancel_and_reconcile(self, order_ids: Sequence[str] | None = None) -> list[str]:
+        """Cancel provided orders and reconcile broker state.
+
+        Args:
+            order_ids: Optional iterable of order identifiers to cancel. When
+                omitted all pending orders are targeted.
+
+        Returns:
+            List of order identifiers that were successfully cancelled.
+        """
+
+        targets = (
+            list(order_ids)
+            if order_ids is not None
+            else [order.order_id for order in self._pending_orders()]
+        )
+        cancelled: list[str] = []
+        for order_id in targets:
+            try:
+                if self.cancel_order(order_id):
+                    cancelled.append(order_id)
+            except NotImplementedError:
+                break
+            except Exception as exc:  # noqa: BLE001
+                self._logger.warning(
+                    "cancel_failed",
+                    extra={
+                        "event": "cancel_failed",
+                        "order_id": order_id,
+                        "err": str(exc),
+                    },
+                )
+        try:
+            self.reconcile_open_orders()
+        except Exception:  # noqa: BLE001 - defensive
+            self._logger.warning(
+                "reconcile_failed",
+                extra={"event": "reconcile_failed", "orders": targets},
+                exc_info=True,
+            )
+        return cancelled
+
+    def reconcile_open_orders(self) -> None:
+        """Refresh open-order state from the broker to avoid duplicates.
+
+        Returns:
+            None. The local order cache is updated in place.
+        """
+
+        fetcher = self._resolve_open_orders_fetcher()
+        if fetcher is None:
+            return
+        try:
+            response = self._call_broker(fetcher)
+        except Exception:  # noqa: BLE001 - defensive
+            self._logger.debug("open_order_fetch_failed", exc_info=True)
+            return
+        if response is None:
+            return
+
+        raw_orders: list[Mapping[str, Any]] = []
+        if isinstance(response, Mapping):
+            raw_orders = [cast(Mapping[str, Any], response)]
+        elif isinstance(response, Sequence):
+            raw_orders = [
+                cast(Mapping[str, Any], item)
+                for item in response
+                if isinstance(item, Mapping)
+            ]
+        else:
+            return
+
+        reconciled: list[str] = []
+        for raw in raw_orders:
+            details = self._coerce_broker_open_order(raw)
+            if details is None:
+                continue
+
+            self._register_order(details)
+
+            # [FIX] CRITICAL: Sync with PositionManager
+            # We must pass the Enum object directly. Converting to string causes
+            # "AttributeError: 'str' object has no attribute 'value'" inside the manager.
+            if hasattr(self._positions, "add_pending_order"):
+                self._positions.add_pending_order(
+                    order_id=details.order_id,
+                    symbol=details.symbol,
+                    side=details.side,
+                    qty=details.quantity,
+                    price=details.price,
+                    order_type=details.order_type,  # ✅ CORRECT: Pass Enum Object
+                    intent=details.intent,
+                    bracket_id=details.bracket_id,
+                    signal_id=details.signal_id,
+                    signal_fingerprint=details.signal_fingerprint,
+                )
+
+            try:
+                # Safe Enum Access for Status updates (Status is usually a string in PM)
+                status_val = details.status
+                status_str = (
+                    status_val.name if hasattr(status_val, "name") else str(status_val)
+                )
+
+                self._positions.update_order_status(
+                    details.order_id, status_str, details.fill_price
+                )
+            except Exception:  # pragma: no cover - defensive
+                self._logger.debug("position_status_update_failed", exc_info=True)
+
+            if details.client_order_id and details.status in self.FINAL_STATUSES:
+                self._client_order_index.pop(details.client_order_id, None)
+
+            reconciled.append(details.order_id)
+
+        if reconciled:
+            self._sync_positions_to_hub()
+            self._logger.info(
+                "order_reconcile_complete",
+                extra={"event": "order_reconcile", "orders": reconciled},
+            )
+
+    def exit_position(
+        self, symbol: str, quantity: int, tag: str = "exit", force: bool = False
+    ) -> str | None:
+        """
+        Executes the 'Soft Exit' (Market Order) and cleans up the 'Hard' Safety Net.
+        This completes the Hybrid Approach.
+        """
+        symbol = symbol.strip().upper()
+
+        # 1. EXECUTE MARKET EXIT (The "Soft" Trigger)
+        self._logger.info(
+            f"⚡ Hybrid Exit Triggered for {symbol} (Qty: {quantity})",
+            extra={"event": "hybrid_exit_trigger", "symbol": symbol},
+        )
+
+        try:
+            # Determine exit side based on quantity direction or passed arg
+            # Assuming positive quantity means we HOLD Long, so we need to SELL
+            # If quantity is passed as absolute, you might need to check self._positions
+            exit_side = "SELL"  # Default for Long Exit
+
+            # ── FIX: resolve LTP so risk-accounting stats work correctly.
+            # MARKET exits MUST always bypass the risk-manager's "Price must be
+            # positive" guard — passing price=None→0.0 previously caused every
+            # soft-exit to be blocked.  check_risk=False is always correct here:
+            # the bracket already made the exit decision; the risk-manager must
+            # not veto it.
+            _exit_ltp: float | None = None
+            try:
+                _price_source = self._data_hub or self._market_data
+                if _price_source is not None:
+                    _exit_ltp = _price_source.get_latest_price(symbol)
+            except Exception:
+                self._logger.exception("Unhandled exception", exc_info=True)
+                raise
+
+            exit_id = self.place_order(
+                symbol=symbol,
+                side=exit_side,
+                quantity=abs(quantity),
+                order_type=OrderType.MARKET,
+                price=_exit_ltp,  # supply live LTP for accounting; None is safe
+                tag=tag,
+                check_risk=False,  # exits MUST never be blocked by risk-manager
+                intent="EXIT",
+            )
+
+            if not exit_id:
+                self._logger.error("❌ Soft Exit Failed: place_order returned None")
+                return None
+
+        except Exception as e:
+            self._logger.critical(f"❌ Soft Exit Failed: {e}", exc_info=True)
+            return None
+
+        # 2. CLEAN UP SAFETY NET (The "Hard" Cleanup)
+        # We must cancel the Hard SL and Wide TP we placed earlier
+        try:
+            with self._lock:
+                if symbol in self._brackets:
+                    bracket = self._brackets[symbol]
+
+                    # Cancel Hard SL
+                    if bracket.stop_order_id:
+                        self._logger.info(
+                            f"🗑️ Cancelling Safety SL: {bracket.stop_order_id}"
+                        )
+                        try:
+                            self.cancel_order(bracket.stop_order_id)
+                        except Exception as e:
+                            self._logger.warning(
+                                f"Failed to cancel SL {bracket.stop_order_id}: {e}"
+                            )
+
+                    # Cancel Wide TP
+                    if bracket.tp_primary_id:
+                        self._logger.info(
+                            f"🗑️ Cancelling Safety TP: {bracket.tp_primary_id}"
+                        )
+                        try:
+                            self.cancel_order(bracket.tp_primary_id)
+                        except Exception as e:
+                            self._logger.warning(
+                                f"Failed to cancel TP {bracket.tp_primary_id}: {e}"
+                            )
+
+                    # Remove local bracket state so we don't track dead orders
+                    del self._brackets[symbol]
+
+        except Exception as e:
+            self._logger.error(f"⚠️ Safety Net Cleanup Failed (Non-Critical): {e}")
+
+        self._signal_arbitrator.release(symbol)
+        return exit_id
+
+    def release_entry_reservation(
+        self, symbol: str, *, start_cooldown: bool = True
+    ) -> None:
+        """Converge the entry arbitrator after broker-confirmed terminal state."""
+        if start_cooldown:
+            self._signal_arbitrator.release(symbol)
+        else:
+            self._signal_arbitrator.clear(symbol)
+
+    def _notify_failed_entry_terminal(
+        self,
+        order: OrderDetails,
+        old_status: OrderStatus,
+        raw_status: str,
+    ) -> None:
+        """Converge entry guards once any broker ingress proves terminal failure."""
+        failed = {
+            OrderStatus.CANCELLED,
+            OrderStatus.REJECTED,
+            OrderStatus.EXPIRED,
+        }
+        if (
+            order.status not in failed
+            or old_status == order.status
+            or str(order.intent or "").upper() not in {"ENTRY", "UNKNOWN", ""}
+            or not callable(self.entry_order_failed_callback)
+        ):
+            return
+        try:
+            self.entry_order_failed_callback(
+                order_id=str(order.order_id),
+                symbol=str(order.symbol),
+                reason=str(raw_status or order.status.name).lower(),
+            )
+        except Exception:
+            self._logger.exception(
+                "ENTRY_ORDER_FAILED_CALLBACK_ERROR order_id=%s symbol=%s status=%s",
+                order.order_id,
+                order.symbol,
+                raw_status,
+            )
+
+    def modify_order(
+        self,
+        order_id: str,
+        price: float | None = None,
+        trigger_price: float | None = None,
+        quantity: int | None = None,
+    ) -> bool:
+        """
+        Modify an existing order.
+        SMART FIX: If modifying a 'Fake SL-M' (SL-Limit), auto-adjust the limit price.
+        """
+        try:
+            # ✅ FIX: Round Price/Trigger to 0.05 tick size
+            if price:
+                price = self._round_to_tick(price)
+            if trigger_price:
+                trigger_price = self._round_to_tick(trigger_price)
+
+            # 1. Fetch Order Context
+            with self._lock:
+                order = self._orders.get(order_id)
+            if not order:
+                self._logger.error(f"Cannot modify unknown order {order_id}")
+                return False
+
+            # 2. Smart Limit Adjustment for SL Orders
+            # If user is only updating trigger_price, we must also update limit price
+            # to maintain the "Market Buffer".
+            if (
+                order.order_type == OrderType.STOP_LOSS
+                and trigger_price is not None
+                and trigger_price > 0
+                and price is None
+            ):
+                buffer = 0.05  # 5%
+                if order.side == "SELL":  # Long SL
+                    price = round(trigger_price * (1 - buffer), 1)
+                else:  # Short SL
+                    price = round(trigger_price * (1 + buffer), 1)
+                self._logger.info(
+                    f"🔄 Auto-adjusting Limit Price to {price} for Trigger {trigger_price}"
+                )
+
+            # 3. Execute Modification
+            changes = {
+                key: value
+                for key, value in {
+                    "price": price,
+                    "trigger_price": trigger_price,
+                    "quantity": quantity,
+                }.items()
+                if value is not None
+            }
+            if not changes:
+                return False
+            self._validate_execution_adapter()
+            self._broker.modify_order(
+                order_id=order_id,
+                **changes,
+                variety="regular",  # Zerodha default
+            )
+            return True
+        except Exception as e:
+            self._logger.error(f"Modification Failed: {e}")
+            return False
+
+    def wait_for_fill(self, order_id: str, timeout_sec: float = 30.0) -> bool:
+        """Wait for order to fill. Returns True if filled within timeout."""
+
+        deadline = time.time() + float(timeout_sec)
+        # Use a tighter poll interval for execution workflows (max 0.2s)
+        poll_interval = min(0.2, self.POLL_INTERVAL_SEC)
+
+        while time.time() < deadline:
+            status = self.get_order_status(order_id)
+            if status == OrderStatus.FILLED:
+                return True
+            if status in self.FINAL_STATUSES:
+                return False
+            time.sleep(poll_interval)
+        return False
+
+    def get_fill_price(self, order_id: str) -> float | None:
+        """Get fill price for filled order."""
+
+        order = self._orders.get(order_id)
+        if order:
+            return order.fill_price
+        history_index = self._resolve_history_index(order_id)
+        if history_index is not None:
+            return self._history[history_index].fill_price
+        return None
+
+    def get_order_history(
+        self,
+        symbol: str | None = None,
+        limit: int = 100,
+    ) -> list[OrderDetails]:
+        """Get order history, optionally filtered by symbol."""
+
+        with self._lock:
+            history = list(self._history)
+        if symbol is not None:
+            symbol_key = symbol.upper()
+            history = [order for order in history if order.symbol == symbol_key]
+        return history[-limit:]
+
+    def recent_orders(self, limit: int = 10) -> list[dict[str, object]]:
+        """Return recent orders serialized for status endpoints."""
+
+        orders = self.get_order_history(limit=limit)
+        return [
+            {
+                "order_id": order.order_id,
+                "symbol": order.symbol,
+                "side": order.side,
+                "status": (
+                    order.status.value
+                    if hasattr(order.status, "value")
+                    else str(order.status)
+                ),
+                "quantity": order.quantity,
+                "filled_quantity": order.filled_quantity,
+                "price": order.price,
+                "fill_price": order.fill_price,
+                "timestamp": (
+                    order.timestamp.isoformat()
+                    if hasattr(order.timestamp, "isoformat")
+                    else float(order.timestamp)
+                ),
+                "rejection_reason": order.rejection_reason,
+            }
+            for order in orders
+        ]
+
+    def get_today_orders(self) -> list[OrderDetails]:
+        """Get all orders placed today."""
+
+        today = datetime.now(timezone.utc).date()
+        with self._lock:
+            return [order for order in self._history if order.timestamp.date() == today]
+
+    def _confirm_fill_fast(self, order_id: str, timeout_ms: int = 2000) -> bool:
+        """Confirm a fill only from broker status, quantity, and execution price."""
+        import time
+
+        start = time.monotonic()
+        backoff_ms = 50.0
+        max_backoff_ms = 300.0
+        attempts = 0
+
+        self._logger.debug("Fast fill check started for %s", order_id)
+
+        while (time.monotonic() - start) * 1000.0 < float(timeout_ms):
+            attempts += 1
+            try:
+                status = None
+                getter = getattr(self._broker, "get_order_status", None)
+                if callable(getter):
+                    status = getter(order_id)
+                else:
+                    history_getter = getattr(self._broker, "order_history", None)
+                    if callable(history_getter):
+                        history = history_getter(order_id)
+                        if isinstance(history, list) and history:
+                            status = history[-1]
+
+                if not isinstance(status, Mapping) or not status:
+                    time.sleep(backoff_ms / 1000.0)
+                    backoff_ms = min(backoff_ms * 1.5, max_backoff_ms)
+                    continue
+
+                status_text = str(status.get("status") or "").strip().upper()
+                if status_text in {"COMPLETE", "FILLED"}:
+                    try:
+                        filled_qty = int(
+                            float(
+                                status.get("filled_quantity")
+                                or status.get("filled")
+                                or 0
+                            )
+                        )
+                    except (TypeError, ValueError):
+                        filled_qty = 0
+                    try:
+                        fill_price = float(
+                            status.get("average_price")
+                            or status.get("avg_price")
+                            or status.get("fill_price")
+                            or 0.0
+                        )
+                    except (TypeError, ValueError):
+                        fill_price = 0.0
+                    if filled_qty > 0 and fill_price > 0:
+                        payload = dict(status)
+                        payload["filled_quantity"] = filled_qty
+                        payload["average_price"] = fill_price
+                        self.on_order_update(payload)
+                        self._logger.info(
+                            "BROKER_FILL_CONFIRMED order_id=%s qty=%s "
+                            "price=%.2f attempts=%s",
+                            order_id,
+                            filled_qty,
+                            fill_price,
+                            attempts,
+                        )
+                        return True
+                    self._logger.warning(
+                        "BROKER_FILL_EVIDENCE_INCOMPLETE order_id=%s status=%s "
+                        "filled_qty=%s fill_price=%s",
+                        order_id,
+                        status_text,
+                        filled_qty,
+                        fill_price,
+                    )
+
+                if status_text in {"REJECTED", "CANCELLED", "CANCELED", "EXPIRED"}:
+                    self.on_order_update(dict(status))
+                    return False
+
+            except Exception as exc:
+                self._logger.debug(
+                    "Fast fill check failed order_id=%s attempt=%s error=%s",
+                    order_id,
+                    attempts,
+                    exc,
+                )
+
+            time.sleep(backoff_ms / 1000.0)
+            backoff_ms = min(backoff_ms * 1.5, max_backoff_ms)
+
+        self._logger.warning(
+            "BROKER_FILL_CONFIRM_TIMEOUT order_id=%s timeout_ms=%s attempts=%s",
+            order_id,
+            timeout_ms,
+            attempts,
+        )
+        return False
+
+    def start_monitoring(self) -> None:
+        """Start background thread for order status monitoring."""
+
+        if self._monitor_thread and self._monitor_thread.is_alive():
+            return
+        self._stop_event.clear()
+        self._monitor_thread = Thread(target=self._monitor_orders, daemon=True)
+        self._monitor_thread.start()
+
+    def stop_monitoring(self) -> None:
+        """Stop background monitoring thread."""
+
+        self._stop_event.set()
+        if self._monitor_thread and self._monitor_thread.is_alive():
+            self._monitor_thread.join(timeout=self.POLL_INTERVAL_SEC * 2)
+        self._monitor_thread = None
+
+    def _log_status_report(self) -> None:
+        """
+        Emit a rich, insightful 'Situation Room' report every 60 seconds.
+        Shows active positions, P&L, distance to stops, and current battle plan.
+        """
+        # intent: suppress log spam by emitting only on meaningful state changes
+        try:
+            # 1. Gather Active Positions
+            positions = list(self._positions.get_open_positions())
+            if not positions:
+                # self._logger.info("💤 Status Report: Market is quiet. No active positions.")
+                return
+
+            report = ["\n📊 ------------------ SITUATION REPORT ------------------"]
+            state_changed = False
+            state_cache = getattr(self, "_last_status_report_state", None)
+            if state_cache is None:
+                state_cache = {}
+                self._last_status_report_state = state_cache
+
+            total_unrealized_pnl = 0.0
+
+            for pos in positions:
+                symbol = pos.symbol
+                qty = pos.quantity
+                entry = float(pos.entry_price or 0.0)
+                side = pos.side  # "LONG" or "SHORT"
+                tag = getattr(pos, "tag", "Manual/Unknown")
+
+                # Get Live Market Data via DataHub (SSOT)
+                _src = self._data_hub or self._market_data
+                ltp = (_src.get_latest_price(symbol) or 0.0) if _src else 0.0
+
+                # Calculate P&L
+                raw_pnl = 0.0
+                if ltp > 0 and entry > 0:
+                    raw_pnl = (
+                        (ltp - entry) * qty if side == "LONG" else (entry - ltp) * qty
+                    )
+
+                status_icon = "✅" if raw_pnl > 0 else "🔻"
+
+                # ═══════════════════════════════════════════════════════════════
+                # ✅ FIX: Query BracketManager (source of truth for virtual brackets)
+                # Fixed: Feb 3, 2026 - SITREP was looking in wrong dict
+                # ═══════════════════════════════════════════════════════════════
+                sl_info = "NONE ⚠️"
+                tp_info = "Open"
+                insight = "Monitoring..."
+                bracket = None
+
+                if self._bracket_manager:
+                    # Check if symbol is managed by BracketManager
+                    if self._bracket_manager.is_symbol_managed(symbol):
+                        # Get bracket via symbol lookup
+                        try:
+                            if hasattr(self._bracket_manager, "get_bracket_by_symbol"):
+                                bracket = self._bracket_manager.get_bracket_by_symbol(
+                                    symbol
+                                )
+                            else:
+                                # Fallback: Manual lookup via _symbol_map
+                                with self._bracket_manager._lock:
+                                    entry_ids = self._bracket_manager._symbol_map.get(
+                                        symbol, []
+                                    )
+                                    for entry_id in entry_ids:
+                                        b = self._bracket_manager._brackets.get(
+                                            entry_id
+                                        )
+                                        if b and b.remaining_quantity > 0:
+                                            bracket = b
+                                            break
+                        except Exception as e:
+                            self._logger.debug(f"Bracket lookup for {symbol}: {e}")
+
+                        if bracket:
+                            # ✅ Use correct BracketState attribute names
+                            sl_val = getattr(bracket, "sl_trigger_price", 0) or 0
+                            tp_val = getattr(bracket, "tp_trigger_price", 0) or 0
+
+                            sl_info = f"{sl_val:.2f}" if sl_val > 0 else "NONE ⚠️"
+                            tp_info = f"{tp_val:.2f}" if tp_val > 0 else "Open"
+
+                            # Generate insights
+                            is_active = getattr(bracket, "active", False)
+                            highest = getattr(bracket, "highest_ltp", 0)
+
+                            if ltp > 0 and sl_val > 0:
+                                dist_to_sl = abs(ltp - sl_val)
+                                risk_gap = abs(entry - sl_val) if entry > 0 else 1
+
+                                if raw_pnl > 0:
+                                    if tp_val > 0 and abs(tp_val - ltp) < (ltp * 0.01):
+                                        insight = "🎯 Sniper Mode: Near Target!"
+                                    elif is_active:
+                                        insight = (
+                                            f"🚀 Trailing Active | High: {highest:.2f}"
+                                        )
+                                    else:
+                                        insight = "🚀 Cruising: Holding for TP"
+                                else:
+                                    if risk_gap > 0 and dist_to_sl < (risk_gap * 0.25):
+                                        insight = "🚨 DANGER: Near Stop Loss!"
+                                    else:
+                                        insight = "🛡️ Defending: Structure holds"
+                            else:
+                                insight = f"✅ Protected | Active: {is_active}"
+                        else:
+                            insight = "⚠️ Symbol managed but bracket unavailable"
+                    else:
+                        insight = "⚠️ ORPHAN TRADE: No bracket protection!"
+                else:
+                    # Legacy fallback
+                    with self._lock:
+                        for b in self._brackets.values():
+                            if getattr(b, "symbol", None) == symbol:
+                                sl_info = f"{getattr(b, 'stop_price', 0):.2f}"
+                                tp_info = f"{getattr(b, 'tp_primary_price', 0):.2f}"
+                                insight = "✅ Legacy bracket"
+                                break
+                        else:
+                            insight = "⚠️ BracketManager not available"
+
+                # Track meaningful state change triggers
+                pnl_sign = "profit" if raw_pnl > 0 else "loss"
+                danger_flag = False
+                if ltp > 0 and sl_info not in {"NONE ⚠️", "NONE"} and entry > 0:
+                    try:
+                        sl_val = float(sl_info)
+                        risk_gap = abs(entry - sl_val) if entry > 0 else 0.0
+                        dist_to_sl = abs(ltp - sl_val)
+                        danger_flag = risk_gap > 0 and dist_to_sl < (risk_gap * 0.25)
+                    except (TypeError, ValueError):
+                        danger_flag = False
+                insight_severity = "neutral"
+                if "DANGER" in insight or "ORPHAN" in insight:
+                    insight_severity = "high"
+                elif "Sniper" in insight or "Trailing" in insight:
+                    insight_severity = "medium"
+
+                prev_state = state_cache.get(symbol)
+                current_state = {
+                    "pnl_sign": pnl_sign,
+                    "danger": danger_flag,
+                    "insight_severity": insight_severity,
+                }
+                if prev_state != current_state:
+                    state_cache[symbol] = current_state
+                    state_changed = True
+
+                # Format the Block
+                line = (
+                    f"{status_icon} {symbol} | {side} {qty} Qty | Strat: {tag}\n"
+                    f"   Entry: {entry:.2f} ➜ LTP: {ltp:.2f} ({raw_pnl:+.2f})\n"
+                    f"   🛑 SL: {sl_info} | 🎯 TP: {tp_info}\n"
+                    f"   🤖 Insight: {insight}"
+                )
+                report.append(line)
+                total_unrealized_pnl += raw_pnl
+
+            report.append(f"\n💰 Total Active P&L: {total_unrealized_pnl:+.2f}")
+            report.append("-------------------------------------------------------")
+            if state_changed:
+                self._logger.info("\n".join(report))
+
+        except Exception as e:
+            self._logger.error(f"Status Report Failed: {e}")
+
+    def _poll_pending_orders(self) -> None:
+        """
+        OPTIMIZED: Polls orders efficiently with lock snapshots to prevent race conditions.
+        """
+        # 1. Snapshot pending IDs inside lock (Fast)
+        # We grab the set of IDs we care about immediately. This prevents race conditions
+        # where the list of orders might change while we are fetching from the broker.
+        with self._lock:
+            pending_ids = {
+                oid
+                for oid, o in self._orders.items()
+                if o.status == OrderStatus.PENDING
+            }
+
+        # Optimization: If nothing is pending, don't waste network calls
+        if not pending_ids:
+            return
+
+        try:
+            # 2. Bulk Fetch (Network I/O - No Lock)
+            # Fetch the full order book from the broker
+            if hasattr(self._broker, "orders"):
+                all_orders = self._broker.orders()
+            elif hasattr(self._broker, "get_orders"):
+                all_orders = self._broker.get_orders()
+            else:
+                return  # Broker doesn't support bulk fetch
+
+            if not all_orders:
+                return
+
+            # 3. Process Updates
+            # Iterate through broker result and update ONLY orders we are tracking
+            for remote in all_orders:
+                oid = str(remote.get("order_id") or "")
+
+                # OPTIMIZATION: Only process orders that were pending in our snapshot
+                # This skips the hundreds of old/closed orders in the broker's book
+                if oid in pending_ids:
+                    # Normalize status
+                    status = str(remote.get("status", "")).upper()
+
+                    # Check against significant status updates
+                    if status in ["COMPLETE", "FILLED", "CANCELLED", "REJECTED"]:
+                        self._logger.info(
+                            f"⚡ Bulk Update: {oid} -> {status}",
+                            extra={
+                                "event": "bulk_poll_update",
+                                "order_id": oid,
+                                "status": status,
+                            },
+                        )
+                        # Call the central update handler (Handles its own locking safely)
+                        self.on_order_update(remote)
+
+        except Exception as e:
+            self._logger.debug(f"Bulk poll failed: {e}")
+
+    def _check_zombie_orders(self) -> None:
+        """
+        🛡️ SAFETY: Auto-cancel orders stuck in PENDING for too long (> 45s).
+        Prevents margin blockage and 'ghost' fills.
+        """
+        now = time.time()
+        ZOMBIE_TIMEOUT = 45.0  # Seconds
+
+        zombies = []
+        with self._lock:
+            for oid, order in self._orders.items():
+                if order.status == OrderStatus.PENDING:
+                    # Check age
+                    age = now - order.timestamp.timestamp()
+                    if age > ZOMBIE_TIMEOUT:
+                        zombies.append(oid)
+
+        if not zombies:
+            return
+
+        self._logger.warning(
+            f"🧟 Found {len(zombies)} ZOMBIE orders (> {ZOMBIE_TIMEOUT}s). Killing...",
+            extra={"event": "zombie_cleanup", "orders": zombies},
+        )
+
+        for oid in zombies:
+            try:
+                self.cancel_order(oid)
+            except Exception:
+                self._logger.exception("Unhandled exception", exc_info=True)
+                raise
+
+    # ----------------------------------------------------------------
+    # 💾 PERSISTENCE LAYER (Crash Recovery)
+    # ----------------------------------------------------------------
+    def save_orders(self) -> None:
+        """Persist active orders to disk (Thread-Safe & Crash-Proof).
+
+        ✅ PRODUCTION FIX: Uses DATA_DIR env var with /tmp fallback for Railway.
+        """
+        import os
+        import uuid
+
+        try:
+            data = {}
+            with self._lock:
+                for oid, order in self._orders.items():
+                    # Skip completely dead orders to keep file size manageable
+                    if order.status in [OrderStatus.CANCELLED, OrderStatus.REJECTED]:
+                        continue
+
+                    # 1. Convert Dataclass to dict
+                    record = asdict(order)
+
+                    # 2. SAFE ENUM SERIALIZATION
+                    if hasattr(order.status, "name"):
+                        record["status"] = order.status.name
+                    elif hasattr(order.status, "value"):
+                        record["status"] = order.status.value
+                    else:
+                        record["status"] = str(order.status).upper()
+
+                    if hasattr(order.order_type, "name"):
+                        record["order_type"] = order.order_type.name
+                    elif hasattr(order.order_type, "value"):
+                        record["order_type"] = order.order_type.value
+                    else:
+                        record["order_type"] = str(order.order_type).upper()
+
+                    data[oid] = record
+
+            # ✅ FIX: Use DATA_DIR environment variable with /tmp fallback
+            data_dir = os.getenv("DATA_DIR", "data")
+            path = Path(data_dir) / "orders.json"
+
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                # Test write permission
+                test_file = path.parent / ".write_test"
+                test_file.write_text("test")
+                test_file.unlink()
+            except (PermissionError, OSError):
+                # Fallback to /tmp for Railway/Cloud environments
+                path = Path(os.getenv("DATA_DIR", "data")) / "orders.json"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                self._logger.warning(f"⚠️ Using /tmp fallback: {path}")
+
+            # [FIX] Unique Temp File prevents Thread Collision
+            tmp_path = path.with_suffix(f".tmp.{uuid.uuid4().hex}")
+
+            with open(tmp_path, "w") as f:
+                json.dump(data, f, indent=2, default=str)
+                f.flush()
+                os.fsync(f.fileno())  # Force write to physical disk
+
+            # Atomic replacement
+            os.replace(tmp_path, path)
+            self._logger.debug(f"✅ Orders saved to {path}")
+
+        except Exception as e:
+            self._logger.error(f"❌ Failed to save orders: {e}")
+
+    def _restore_virtual_brackets(self) -> None:
+        """Hydrate brackets from SQLite and reconcile against live broker positions."""
+        try:
+            saved_brackets = self._bracket_store.load_all_brackets()
+            restored_symbols: set[str] = set()
+            if self._bracket_manager and saved_brackets:
+                for b_data in saved_brackets:
+                    try:
+                        self._bracket_manager.restore_bracket(
+                            order_id=b_data["order_id"],
+                            symbol=b_data["symbol"],
+                            side=b_data["side"],
+                            qty=b_data["qty"],
+                            entry_price=b_data["entry_price"],
+                            sl=b_data["current_sl"],
+                            tp=b_data.get("tp1"),
+                            trailing_enabled=b_data.get("trailing_active", False),
+                            highest_ltp=b_data.get("highest_ltp", 0.0),
+                            tag=b_data.get("tag"),
+                        )
+                        restored_symbols.add(str(b_data.get("symbol", "")).upper())
+                    except Exception as e:
+                        self._logger.warning(
+                            f"Skipped restoring bracket {b_data.get('order_id')}: {e}"
+                        )
+
+            broker_positions: list[dict[str, Any]] = []
+            try:
+                if hasattr(self._broker, "get_positions"):
+                    raw_positions = self._broker.get_positions()
+                    if asyncio.iscoroutine(raw_positions):
+                        raw_positions = asyncio.run(raw_positions)
+                    if isinstance(raw_positions, list):
+                        broker_positions = [
+                            p for p in raw_positions if isinstance(p, dict)
+                        ]
+                    elif isinstance(raw_positions, dict):
+                        net = raw_positions.get("net", raw_positions)
+                        if isinstance(net, list):
+                            broker_positions = [p for p in net if isinstance(p, dict)]
+            except Exception as exc:
+                self._logger.error(
+                    "Failed broker position fetch during bracket recovery: %s", exc
+                )
+
+            live_symbols: set[str] = set()
+            for payload in broker_positions:
+                symbol = str(
+                    payload.get("tradingsymbol") or payload.get("symbol") or ""
+                ).upper()
+                qty_raw = (
+                    payload.get("net_qty")
+                    or payload.get("quantity")
+                    or payload.get("net_quantity")
+                )
+                try:
+                    qty = int(float(qty_raw or 0))
+                except (TypeError, ValueError):
+                    qty = 0
+                if symbol and qty != 0:
+                    live_symbols.add(symbol)
+                    if self._bracket_manager and symbol not in restored_symbols:
+                        # Reconstruct missing brackets for broker-live positions.
+                        if hasattr(self._bracket_manager, "attach_orphan_position"):
+                            side = "LONG" if qty > 0 else "SHORT"
+                            entry = float(
+                                payload.get("average_price")
+                                or payload.get("avg_price")
+                                or 0.0
+                            )
+                            if entry > 0:
+                                try:
+                                    self._bracket_manager.attach_orphan_position(
+                                        symbol=symbol,
+                                        side=side,
+                                        qty=abs(qty),
+                                        entry_price=entry,
+                                    )
+                                    self._logger.info(
+                                        "Recovered missing bracket for %s", symbol
+                                    )
+                                except Exception as exc:
+                                    self._logger.error(
+                                        "Failed to recover orphan bracket %s: %s",
+                                        symbol,
+                                        exc,
+                                    )
+
+            # Purge stale persisted brackets when broker no longer has matching position.
+            for b_data in saved_brackets:
+                symbol = str(b_data.get("symbol", "")).upper()
+                if symbol and symbol not in live_symbols:
+                    try:
+                        self._bracket_store.delete_bracket(
+                            str(b_data.get("order_id", ""))
+                        )
+                    except Exception as exc:
+                        self._logger.error(
+                            "Failed stale bracket purge for %s: %s", symbol, exc
+                        )
+
+            if saved_brackets:
+                self._logger.info(
+                    "Bracket recovery complete persisted=%d live_positions=%d",
+                    len(saved_brackets),
+                    len(live_symbols),
+                )
+
+        except Exception as e:
+            self._logger.error(f"❌ Failed to restore virtual brackets: {e}")
+
+    def _load_orders(self) -> None:
+        """Restore orders from disk on startup.
+
+        ✅ PRODUCTION FIX: Uses DATA_DIR env var with /tmp fallback.
+        """
+        import os
+
+        # ✅ FIX: Use DATA_DIR environment variable
+        data_dir = os.getenv("DATA_DIR", "data")
+        path = Path(data_dir) / "orders.json"
+
+        if not path.exists():
+            # Try /tmp fallback location
+            fallback = Path(os.getenv("DATA_DIR", "data")) / "orders.json"
+            if fallback.exists():
+                path = fallback
+                self._logger.info(f"📂 Loading orders from fallback: {path}")
+            else:
+                self._logger.debug("No saved orders found")
+                return
+
+        try:
+            with open(path, "r") as f:
+                data = json.load(f)
+
+            restored_count = 0
+            for oid, record in data.items():
+                try:
+                    # Reconstruct OrderStatus enum
+                    status_str = record.get("status", "PENDING")
+                    if hasattr(OrderStatus, status_str):
+                        status = getattr(OrderStatus, status_str)
+                    else:
+                        status = OrderStatus.PENDING
+
+                    # Reconstruct OrderType enum
+                    order_type_str = record.get("order_type", "LIMIT")
+                    if hasattr(OrderType, order_type_str):
+                        order_type = getattr(OrderType, order_type_str)
+                    else:
+                        order_type = OrderType.LIMIT
+
+                    # Create the order object (OrderDetails is the class actually
+                    # stored in self._orders; 'Order' does not exist, which made
+                    # every restore raise NameError and silently skip).
+                    order = OrderDetails(
                         order_id=record.get("order_id", oid),
                         symbol=record.get("symbol", ""),
                         side=record.get("side", "BUY"),
