@@ -347,6 +347,7 @@ class OrderFlowStrategy(EliteStrategy):
                 context_alignment_source = "depth_plus_flow"
             elif strong_depth_supports_side and not flow_conflicts_side:
                 context_alignment_source = "strong_depth"
+            alignment_candidate_source = context_alignment_source
             # A single order-book imbalance plus the last tick can flip on
             # one quote update. In LIVE mode require two distinct, fresh
             # quote versions separated in time unless upstream temporal OFI
@@ -461,6 +462,7 @@ class OrderFlowStrategy(EliteStrategy):
                 "microstructure_supports_side": microstructure_supports_side,
                 "microstructure_conflicts_side": microstructure_conflicts_side,
                 "context_alignment_source": context_alignment_source,
+                "context_alignment_candidate_source": alignment_candidate_source,
                 "context_age_seconds": context_age_seconds,
                 "context_fresh": context_fresh,
                 "context_quality_eligible": context_quality_eligible,
