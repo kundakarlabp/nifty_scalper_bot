@@ -3,14 +3,10 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 
-from nifty_scalper_bot.execution import live_safety_identity
 from nifty_scalper_bot.execution.bracket_core import BracketManager
 
 
 SYMBOL = "NFO:NIFTY2690124150PE"
-
-# Exercise the same runtime override that production installs.
-live_safety_identity._patch_bracket_manager()
 
 
 class _Positions:
