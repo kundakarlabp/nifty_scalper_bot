@@ -5220,6 +5220,13 @@ class BracketManager:
         bracket.exchange_stop_modify_count = 0
 
     def _ensure_exchange_protective_stop(self, bracket: BracketState) -> bool:
+        """Prevent concurrent entry-fill callbacks from placing duplicate broker SLs."""
+        with self._exchange_stop_modify_mutex:
+            return self._ensure_exchange_protective_stop_serialized(bracket)
+
+    def _ensure_exchange_protective_stop_serialized(
+        self, bracket: BracketState
+    ) -> bool:
         """Arm exactly one exchange-resident SL-limit for a confirmed live position."""
         if (
             not self._exchange_protective_stop_enabled
