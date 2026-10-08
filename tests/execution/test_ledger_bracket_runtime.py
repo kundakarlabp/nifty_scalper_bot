@@ -545,6 +545,7 @@ def test_completed_trade_costs_count_distinct_broker_orders_not_fill_rows(
 def test_completed_trade_prefers_broker_calculated_costs(
     monkeypatch, tmp_path, caplog
 ) -> None:
+    caplog.set_level("INFO")
     manager, _order_manager, broker = _manager(monkeypatch, tmp_path)
     captured: list[dict[str, Any]] = []
 
@@ -596,6 +597,7 @@ def test_completed_trade_prefers_broker_calculated_costs(
 def test_completed_trade_uses_estimator_when_broker_costs_unavailable(
     monkeypatch, tmp_path, caplog
 ) -> None:
+    caplog.set_level("INFO")
     manager, _order_manager, broker = _manager(monkeypatch, tmp_path)
 
     def fail_charges(_orders):
