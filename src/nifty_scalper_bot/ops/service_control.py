@@ -57,6 +57,14 @@ def restart_bot() -> ControlResult:
     return restart_service(os.getenv("BOT_SERVICE_NAME", "niftybot"), action="restart_bot")
 
 
+def restart_deployer() -> ControlResult:
+    """Restart only the fixed validated deployment service."""
+    return restart_service(
+        os.getenv("BOT_DEPLOY_SERVICE_NAME", "niftybot-autodeploy.service"),
+        action="restart_deployer",
+    )
+
+
 def restart_console() -> ControlResult:
     return restart_service(
         os.getenv("BOT_STREAMLIT_SERVICE_NAME", "niftybot-streamlit"),
@@ -106,5 +114,6 @@ __all__ = [
     "memory_snapshot",
     "restart_bot",
     "restart_console",
+    "restart_deployer",
     "restart_service",
 ]

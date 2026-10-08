@@ -22,6 +22,8 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+from nifty_scalper_bot.ops.service_control import restart_deployer
+
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, PlainTextResponse, JSONResponse
 
@@ -241,18 +243,9 @@ def _restart_service() -> None:
 
 
 def _git_update() -> tuple[bool, str]:
-    try:
-        out = subprocess.run(
-            ["git", "-C", str(APP_DIR), "pull", "--ff-only", "origin", "main"],
-            capture_output=True, text=True, timeout=60,
-        )
-        log = (out.stdout + out.stderr).strip()
-        if out.returncode == 0:
-            _restart_service()
-            return True, log
-        return False, log
-    except Exception as exc:  # noqa: BLE001
-        return False, str(exc)
+    """Recover or trigger the canonical validated Lightsail deployer."""
+    result = restart_deployer()
+    return result.ok, result.message
 
 
 # ---------------- UI ----------------
