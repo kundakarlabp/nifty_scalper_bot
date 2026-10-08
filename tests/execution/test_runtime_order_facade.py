@@ -594,6 +594,61 @@ def test_open_live_entry_reprices_same_order_within_small_budget(monkeypatch) ->
     assert entry.trade_provenance["entry_open_reprice_anchor_price"] == 100.5
 
 
+def test_absolute_level_entry_is_never_repriced(monkeypatch) -> None:
+    monkeypatch.setenv("ENTRY_OPEN_REPRICE_ENABLED", "true")
+    monkeypatch.setenv("ENTRY_OPEN_REPRICE_MIN_INTERVAL_SECONDS", "0")
+    manager = _manager(None)
+    manager.is_live_mode = lambda: True
+    manager._get_latest_quote_safe = lambda _symbol: {
+        "bid": 101.0,
+        "ask": 101.2,
+        "age_ms": 10.0,
+    }
+    manager._extract_quote_diagnostics = lambda payload: dict(payload)
+    manager._lock = threading.RLock()
+    entry = order_manager_core.OrderDetails(
+        order_id="ENTRY-ABSOLUTE",
+        symbol="NFO:NIFTY2681124500CE",
+        side="BUY",
+        quantity=65,
+        order_type=order_manager_core.OrderType.LIMIT,
+        status=order_manager_core.OrderStatus.SUBMITTED,
+        price=100.5,
+        intent="ENTRY",
+        resolved_lot_size=65,
+        trade_provenance={"bracket_anchor_mode": "absolute_level"},
+    )
+    manager._orders = {entry.order_id: entry}
+    manager._positions = SimpleNamespace(
+        apply_broker_order_update=lambda *_args, **_kwargs: None
+    )
+    manager._register_virtual_bracket_for_fill = lambda *_args, **_kwargs: None
+    manager._confirm_position_protection_for_fill = lambda *_args, **_kwargs: None
+    manager._notify_failed_entry_terminal = lambda *_args, **_kwargs: None
+    manager.save_orders = lambda: None
+    modified: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(
+        order_manager_core.OrderManager,
+        "modify_order",
+        lambda _self, order_id, **changes: modified.append(
+            (str(order_id), dict(changes))
+        )
+        or True,
+    )
+
+    RuntimeOrderManager._apply_broker_order_update(
+        manager,
+        {
+            "order_id": entry.order_id,
+            "status": "OPEN",
+            "filled_quantity": 0,
+            "pending_quantity": 65,
+        },
+    )
+
+    assert modified == []
+
+
 def test_partially_filled_entry_is_never_repriced(monkeypatch) -> None:
     monkeypatch.setenv("ENTRY_OPEN_REPRICE_ENABLED", "true")
     monkeypatch.setenv("ENTRY_OPEN_REPRICE_MIN_INTERVAL_SECONDS", "0")
