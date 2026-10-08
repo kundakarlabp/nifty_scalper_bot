@@ -1001,6 +1001,39 @@ def test_bracket_flat_nonterminal_timing_round_trips_without_monotonic(tmp_path)
     assert restored.flat_nonterminal_since_monotonic is None
 
 
+def test_escalation_never_sends_second_market_order_without_confirmed_cancel() -> None:
+    manager, order_manager, broker = _manager(cancel_confirms=False)
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    bracket.exit_order_id = "old-exit"
+    bracket.exit_pending = True
+    manager._exit_force_market_on_escalation = True
+
+    with manager._lock:
+        manager._escalate_exit_locked(bracket, "stale_exit")
+
+    assert broker.cancel_calls == ["old-exit"]
+    assert order_manager.place_calls == []
+    assert bracket.exit_order_id == "old-exit"
+
+
+def test_escalation_replaces_a_confirmed_cancel_once() -> None:
+    manager, order_manager, broker = _manager(cancel_confirms=True)
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    bracket.exit_order_id = "old-exit"
+    bracket.exit_pending = True
+    manager._exit_force_market_on_escalation = True
+
+    with manager._lock:
+        manager._escalate_exit_locked(bracket, "stale_exit")
+
+    assert broker.cancel_calls == ["old-exit"]
+    assert len(order_manager.place_calls) == 1
+    assert order_manager.place_calls[0]["order_type"] == "MARKET"
+    assert order_manager.place_calls[0]["intent"] == "EXIT"
+
+
 def test_closed_exchange_filled_bracket_never_submits_second_exit() -> None:
     manager, order_manager, _broker = _manager()
     bracket = manager.get_bracket("entry-1")
