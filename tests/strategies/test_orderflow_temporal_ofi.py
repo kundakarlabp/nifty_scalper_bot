@@ -160,7 +160,10 @@ def test_live_tick_only_depth_confirmation_needs_two_distinct_fresh_snapshots(
     assert first.metadata["context_alignment_candidate_source"] == "depth_plus_flow"
     assert first.metadata["context_alignment_source"] is None
     assert first.metadata["effective_context_alignment"] is False
-    assert first.metadata["ofi_unavailable_reason"] == "upstream_temporal_evidence_unready"
+    assert (
+        first.metadata["ofi_unavailable_reason"]
+        == "upstream_temporal_evidence_unready"
+    )
 
     clock[0] = 100.5
     repeat = strategy._evaluate_signal(SYMBOL, indicators, current_price=100.25)
