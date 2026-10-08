@@ -48,3 +48,11 @@ def test_update_control_delegates_only_to_validated_autodeployer() -> None:
     assert "restart_deployer()" in superlite
     assert "niftybot-autodeploy.service" in service_control
     assert 'action="restart_deployer"' in service_control
+
+
+def test_update_control_routes_through_validated_deployer() -> None:
+    admin = (ROOT.parent / "src/nifty_scalper_bot/admin_dashboard.py").read_text(
+        encoding="utf-8"
+    )
+    assert "restart_deployer()" in admin
+    assert "git", "-C"" not in admin
