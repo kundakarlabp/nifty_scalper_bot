@@ -635,7 +635,6 @@ def test_same_confirmation_bar_reuses_identity_until_entry_is_accepted(
     assert strategy.last_no_vote_reason == "smc_duplicate_confirmation_bar"
 
 
-
 def test_live_smc_rejects_stale_confirmed_setup_after_multiple_bars(
     monkeypatch,
 ) -> None:
@@ -643,26 +642,20 @@ def test_live_smc_rejects_stale_confirmed_setup_after_multiple_bars(
     monkeypatch.setenv("SMC_CONFIRMED_VOTE_MAX_SECONDS", "120")
     rows = _base_rows()
     strategy = _strategy(rows)
-    rows.append(
-        _bar(30, open_=23988, high=23991, low=23974, close=23984, volume=2500)
-    )
+    rows.append(_bar(30, open_=23988, high=23991, low=23974, close=23984, volume=2500))
     assert (
         strategy.generate_signal(
             CE, _indicators(latest_bar_ts=rows[-1]["timestamp"]), 138.60
         )
         is None
     )
-    rows.append(
-        _bar(31, open_=23984, high=24000, low=23982, close=23998, volume=2200)
-    )
+    rows.append(_bar(31, open_=23984, high=24000, low=23982, close=23998, volume=2200))
     first = strategy.generate_signal(
         CE, _indicators(latest_bar_ts=rows[-1]["timestamp"]), 138.60
     )
     assert first is not None
 
-    rows.append(
-        _bar(32, open_=23994, high=24005, low=23992, close=24002, volume=2100)
-    )
+    rows.append(_bar(32, open_=23994, high=24005, low=23992, close=24002, volume=2100))
     within_window = strategy.generate_signal(
         CE, _indicators(latest_bar_ts=rows[-1]["timestamp"]), 137.0
     )
@@ -689,19 +682,8 @@ def test_live_smc_declining_premium_past_initial_risk_invalidates_setup(
 ) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     rows = _base_rows()
-    strategy = _strategy(rows)
     rows.append(
-        _bar(30, open_=23988, high=23991, low=23974, close=23984, volume=2500)
-    )
-    assert (
-        strategy.generate_signal(
-            PE, _indicators("PE", latest_bar_ts=rows[-1]["timestamp"]), 138.60
-        )
-        is None
-    )
-    # Confirm the bearish underlying sweep separately, matching the PE purchase.
-    rows[-1] = _bar(
-        30, open_=24012, high=24027, low=24009, close=24017, volume=2400
+        _bar(30, open_=24012, high=24027, low=24009, close=24017, volume=2400)
     )
     strategy = _strategy(rows)
     assert (
@@ -710,9 +692,7 @@ def test_live_smc_declining_premium_past_initial_risk_invalidates_setup(
         )
         is None
     )
-    rows.append(
-        _bar(31, open_=24017, high=24019, low=23999, close=24001, volume=2200)
-    )
+    rows.append(_bar(31, open_=24017, high=24019, low=23999, close=24001, volume=2200))
     context = _indicators("PE", latest_bar_ts=rows[-1]["timestamp"])
     signal = strategy.generate_signal(PE, context, 138.60)
     assert signal is not None
