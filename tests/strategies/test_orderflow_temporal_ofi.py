@@ -195,3 +195,27 @@ def test_adverse_upstream_ofi_cannot_add_context_bonus() -> None:
     assert signal.metadata["flow_supports_side"] is False
     assert signal.metadata["effective_context_alignment"] is False
     assert "temporal_ofi_alignment" not in signal.metadata["setup_reasons"]
+
+def test_live_depth_persistence_survives_multiple_fast_quote_versions(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    clock = [100.0]
+    monkeypatch.setattr(order_flow_module.time, "monotonic", lambda: clock[0])
+    strategy = _strategy()
+    indicators = _indicators(buy=250.0, sell=100.0, ofi_value=0.0, supports=True)
+    indicators.pop("_expected_support")
+    indicators["ofi_ready"] = False
+
+    for timestamp, version in ((100.0, 3), (100.4, 4), (100.8, 5)):
+        clock[0] = timestamp
+        indicators["quote_update_version"] = version
+        signal = strategy._evaluate_signal(SYMBOL, indicators, current_price=100.25)
+        assert signal is not None
+        assert signal.metadata["effective_context_alignment"] is False
+
+    clock[0] = 101.2
+    indicators["quote_update_version"] = 6
+    confirmed = strategy._evaluate_signal(SYMBOL, indicators, current_price=100.25)
+    assert confirmed is not None
+    assert confirmed.metadata["effective_context_alignment"] is True
