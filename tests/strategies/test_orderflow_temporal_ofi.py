@@ -142,7 +142,6 @@ def test_orderflow_context_log_exposes_microstructure_diagnostics(
     assert extra["strong_depth_conflicts_side"] is False
 
 
-
 def test_live_tick_only_depth_confirmation_needs_two_distinct_fresh_snapshots(
     monkeypatch,
 ) -> None:
@@ -158,7 +157,8 @@ def test_live_tick_only_depth_confirmation_needs_two_distinct_fresh_snapshots(
 
     first = strategy._evaluate_signal(SYMBOL, indicators, current_price=100.25)
     assert first is not None
-    assert first.metadata["context_alignment_source"] == "depth_plus_flow"
+    assert first.metadata["context_alignment_candidate_source"] == "depth_plus_flow"
+    assert first.metadata["context_alignment_source"] is None
     assert first.metadata["effective_context_alignment"] is False
 
     clock[0] = 100.5
@@ -177,7 +177,6 @@ def test_live_tick_only_depth_confirmation_needs_two_distinct_fresh_snapshots(
     expired = strategy._evaluate_signal(SYMBOL, indicators, current_price=100.25)
     assert expired is not None
     assert expired.metadata["effective_context_alignment"] is False
-
 
 
 def test_adverse_upstream_ofi_cannot_add_context_bonus() -> None:
