@@ -314,9 +314,9 @@ def _maybe_reprice_open_entry(
     provenance = provenance_raw if isinstance(provenance_raw, dict) else {}
     if provenance is not provenance_raw:
         setattr(order, "trade_provenance", provenance)
-    anchor_mode = str(
-        provenance.get("bracket_anchor_mode") or "distance"
-    ).strip().lower()
+    anchor_mode = (
+        str(provenance.get("bracket_anchor_mode") or "distance").strip().lower()
+    )
     if anchor_mode != "distance":
         return False
     count = _positive_int(provenance.get("entry_open_reprice_count"))
@@ -852,7 +852,9 @@ class RuntimeOrderManager(_core.OrderManager):
     def _place_order_native(self, *args: Any, **kwargs: Any) -> Any:
         effective_kwargs = dict(kwargs)
         managed_strategy = getattr(self, "_managed_strategy_name", None)
-        current_strategy = str(effective_kwargs.get("strategy_name") or "").strip().lower()
+        current_strategy = (
+            str(effective_kwargs.get("strategy_name") or "").strip().lower()
+        )
         if managed_strategy and current_strategy in {"", "manual"}:
             effective_kwargs["strategy_name"] = managed_strategy
         blocked = self._blocked("place_order", args, effective_kwargs)
