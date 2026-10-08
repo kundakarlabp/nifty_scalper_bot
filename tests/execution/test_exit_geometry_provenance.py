@@ -186,5 +186,62 @@ def test_recovery_submit_enriches_rebuilt_plan(monkeypatch) -> None:
     assert result.order_id == "OID-3"
     assert captured["manager"] is manager
     assert captured["plan"] is rebuilt
-    assert rebuilt.trade_provenance["tp1_price"] == 110.0
-    assert rebuilt.trade_provenance["tp1_qty"] == 65
+    assert "tp1_price" not in rebuilt.trade_provenance
+    assert "tp1_qty" not in rebuilt.trade_provenance
+    assert rebuilt.trade_provenance["tp1_status"] == "pending_reanchor"
+    assert rebuilt.trade_provenance["tp1_skip_reason"] == "pending_final_entry"
+
+
+def test_runtime_tp1_cost_gate_uses_final_reanchored_entry(monkeypatch) -> None:
+    monkeypatch.setenv("TP1_R_MULT", "0.20")
+    monkeypatch.setenv("TP1_MIN_INCREMENTAL_EDGE_MULTIPLE", "2.0")
+    plan = _plan(quantity=130)
+
+    manager = object.__new__(runtime_module.RuntimeOrderManager)
+    manager._logger = logging.getLogger("tp1-final-geometry")
+    runtime_module._enrich_trade_plan_exit_provenance(
+        plan,
+        finalize_tp1=False,
+    )
+
+    reanchored = runtime_module.RuntimeOrderManager._reanchor_bracket_to_price(
+        manager,
+        plan,
+        118.0,
+    )
+
+    assert reanchored.stop_loss == 108.0
+    assert reanchored.take_profit == 138.0
+    assert reanchored.trade_provenance["tp1_status"] == "armed"
+    assert reanchored.trade_provenance["tp1_price"] == 120.0
+    assert reanchored.trade_provenance["tp1_final_entry_price"] == 118.0
+    assert reanchored.trade_provenance["tp1_incremental_edge_multiple"] >= 2.0
+
+
+def test_runtime_tp1_can_skip_after_final_reanchor_even_if_signal_geometry_passes(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("TP1_R_MULT", "0.05")
+    monkeypatch.setenv("TP1_MIN_INCREMENTAL_EDGE_MULTIPLE", "2.0")
+    plan = _plan(quantity=130)
+
+    manager = object.__new__(runtime_module.RuntimeOrderManager)
+    manager._logger = logging.getLogger("tp1-final-skip")
+    runtime_module._enrich_trade_plan_exit_provenance(
+        plan,
+        finalize_tp1=False,
+    )
+
+    reanchored = runtime_module.RuntimeOrderManager._reanchor_bracket_to_price(
+        manager,
+        plan,
+        118.0,
+    )
+
+    assert "tp1_price" not in reanchored.trade_provenance
+    assert "tp1_qty" not in reanchored.trade_provenance
+    assert reanchored.trade_provenance["tp1_status"] == "skipped"
+    assert (
+        reanchored.trade_provenance["tp1_skip_reason"] == "incremental_cost_edge_thin"
+    )
+    assert reanchored.trade_provenance["tp1_final_entry_price"] == 118.0

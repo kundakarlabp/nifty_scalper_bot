@@ -174,6 +174,10 @@ def test_order_details_persists_lifecycle_contract_identity() -> None:
         contract_expiry="2026-07-30",
         exchange_order_id="ex-1",
         signal_id="sig-1",
+        trade_provenance={
+            "entry_open_reprice_count": 1,
+            "entry_open_reprice_anchor_price": 100.5,
+        },
     )
 
     payload = core.OrderManager._serialize(
@@ -186,6 +190,8 @@ def test_order_details_persists_lifecycle_contract_identity() -> None:
     assert restored.bracket_id == "bracket-1"
     assert restored.instrument_token == 123
     assert restored.contract_expiry == "2026-07-30"
+    assert restored.trade_provenance["entry_open_reprice_count"] == 1
+    assert restored.trade_provenance["entry_open_reprice_anchor_price"] == 100.5
 
 
 def test_live_trade_plan_requires_active_basket_before_broker_attempt(

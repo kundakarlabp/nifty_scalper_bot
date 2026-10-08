@@ -31,9 +31,18 @@ _original_enrich_trade_plan_exit_provenance = (
 )
 
 
-def _enrich_trade_plan_exit_provenance(plan):
+def _enrich_trade_plan_exit_provenance(
+    plan,
+    *,
+    finalize_tp1=True,
+    final_entry_price=None,
+):
     """Carry the TradePlan bracket anchor contract into durable provenance."""
-    plan = _original_enrich_trade_plan_exit_provenance(plan)
+    plan = _original_enrich_trade_plan_exit_provenance(
+        plan,
+        finalize_tp1=finalize_tp1,
+        final_entry_price=final_entry_price,
+    )
     try:
         provenance = dict(getattr(plan, "trade_provenance", {}) or {})
     except (TypeError, ValueError):

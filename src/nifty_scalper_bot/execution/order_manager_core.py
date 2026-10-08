@@ -9144,6 +9144,11 @@ class OrderManager:
                             record.get("applied_filled_quantity", 0) or 0
                         ),
                         intent=record.get("intent") or "UNKNOWN",
+                        trade_provenance=(
+                            dict(record.get("trade_provenance") or {})
+                            if isinstance(record.get("trade_provenance"), Mapping)
+                            else {}
+                        ),
                     )
 
                     with self._lock:
@@ -13219,6 +13224,7 @@ class OrderManager:
             "requested_lots": order.requested_lots,
             "resolved_lot_size": order.resolved_lot_size,
             "entry_lifecycle_state": order.entry_lifecycle_state,
+            "trade_provenance": dict(order.trade_provenance or {}),
         }
 
     def _serialize_bracket_state(self, state: BracketState) -> BracketDict:
@@ -13346,6 +13352,11 @@ class OrderManager:
                     payload.get("entry_lifecycle_state")
                     if isinstance(payload.get("entry_lifecycle_state"), dict)
                     else None
+                ),
+                trade_provenance=(
+                    dict(payload.get("trade_provenance") or {})
+                    if isinstance(payload.get("trade_provenance"), Mapping)
+                    else {}
                 ),
             )
         except Exception as e:
