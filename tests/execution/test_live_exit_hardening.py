@@ -1026,7 +1026,9 @@ def test_simultaneous_entry_callbacks_arm_only_one_exchange_stop(monkeypatch) ->
     first.start()
     try:
         assert entered.wait(1.0)
-        second = Thread(target=manager._ensure_exchange_protective_stop, args=(bracket,))
+        second = Thread(
+            target=manager._ensure_exchange_protective_stop, args=(bracket,)
+        )
         second.start()
         time.sleep(0.05)
     finally:
