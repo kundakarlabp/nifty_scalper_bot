@@ -353,6 +353,82 @@ def test_exchange_stop_is_tightened_with_canonical_trailing_stop(monkeypatch) ->
     assert 0.0 < float(changes["price"]) < 150.0
 
 
+def test_exchange_stop_coalesces_small_ratchets(monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    monkeypatch.setenv("EXCHANGE_PROTECTIVE_STOP_ENABLED", "true")
+    monkeypatch.setenv("EXCHANGE_PROTECTIVE_STOP_MIN_RATCHET_POINTS", "0.5")
+    monkeypatch.setenv("EXCHANGE_PROTECTIVE_STOP_MIN_RATCHET_PCT", "0")
+    broker = _Broker()
+    order_manager = _OrderManager(broker)
+    manager = BracketManager(order_manager=order_manager)
+    monkeypatch.setattr(manager, "_is_live_execution", lambda: True)
+    monkeypatch.setattr(manager, "save_state", lambda: None)
+    manager._running = False
+    manager._watchdog_thread.join(timeout=1.0)
+    manager.register_virtual_bracket(
+        order_id="entry-coalesce",
+        symbol=SYMBOL,
+        side="BUY",
+        qty=65,
+        price=150.0,
+        sl=140.0,
+        tp=175.0,
+        activate_immediately=False,
+    )
+    manager.confirm_entry_fill("entry-coalesce", 150.0, 65)
+    bracket = manager.get_bracket("entry-coalesce")
+    assert bracket is not None
+    bracket.last_ltp = 160.0
+
+    assert manager._virtual_modify_sl(bracket.virtual_sl_id, 140.10) is True
+    assert order_manager.modify_calls == []
+
+    assert manager._virtual_modify_sl(bracket.virtual_sl_id, 140.55) is True
+    assert len(order_manager.modify_calls) == 1
+    assert order_manager.modify_calls[0][1]["trigger_price"] == pytest.approx(140.55)
+    assert bracket.exchange_stop_modify_count == 1
+
+
+def test_exchange_stop_modification_budget_fails_safe_to_virtual_owner(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    monkeypatch.setenv("EXCHANGE_PROTECTIVE_STOP_ENABLED", "true")
+    monkeypatch.setenv("EXCHANGE_PROTECTIVE_STOP_MIN_RATCHET_POINTS", "0.05")
+    monkeypatch.setenv("EXCHANGE_PROTECTIVE_STOP_MIN_RATCHET_PCT", "0")
+    monkeypatch.setenv("EXCHANGE_PROTECTIVE_STOP_MAX_MODIFICATIONS", "1")
+    broker = _Broker()
+    order_manager = _OrderManager(broker)
+    manager = BracketManager(order_manager=order_manager)
+    monkeypatch.setattr(manager, "_is_live_execution", lambda: True)
+    monkeypatch.setattr(manager, "save_state", lambda: None)
+    manager._running = False
+    manager._watchdog_thread.join(timeout=1.0)
+    manager.register_virtual_bracket(
+        order_id="entry-budget",
+        symbol=SYMBOL,
+        side="BUY",
+        qty=65,
+        price=150.0,
+        sl=140.0,
+        tp=175.0,
+        activate_immediately=False,
+    )
+    manager.confirm_entry_fill("entry-budget", 150.0, 65)
+    bracket = manager.get_bracket("entry-budget")
+    assert bracket is not None
+    bracket.last_ltp = 160.0
+
+    assert manager._virtual_modify_sl(bracket.virtual_sl_id, 141.0) is True
+    assert len(order_manager.modify_calls) == 1
+    assert manager._virtual_modify_sl(bracket.virtual_sl_id, 142.0) is True
+    assert len(order_manager.modify_calls) == 1
+    assert bracket.exchange_stop_modify_count == 1
+    assert bracket.exchange_stop_degraded_reason == "modify_budget_exhausted"
+
+
 def test_stale_exchange_stop_skips_grace_and_uses_market_fallback(
     monkeypatch,
 ) -> None:
