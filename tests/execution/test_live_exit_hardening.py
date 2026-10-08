@@ -586,6 +586,54 @@ def test_flat_reconcile_recovers_confirmed_stop_when_status_unknown(
     assert manager.reconcile_symbol_flat(SYMBOL) == 0
 
 
+def test_flat_reconcile_checks_broker_orderbook_when_history_returns_unknown(
+    monkeypatch,
+) -> None:
+    """A confirmed exchange fill must not be cancelled repeatedly after history loss."""
+    manager, _order_manager, broker = _manager(cancel_confirms=False)
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    broker.statuses["exchange-stop"] = "UNKNOWN"
+    bracket.exchange_stop_order_id = "exchange-stop"
+    monkeypatch.setattr(
+        broker,
+        "get_orders",
+        lambda: [
+            {
+                "order_id": "exchange-stop",
+                "status": "COMPLETE",
+                "filled_quantity": 65,
+                "average_price": 120.30,
+            }
+        ],
+        raising=False,
+    )
+
+    assert manager.reconcile_symbol_flat(SYMBOL) == 1
+    assert manager.get_bracket("entry-1") is None
+    assert broker.cancel_calls == []
+
+
+def test_unknown_history_does_not_override_live_stop_in_orderbook(
+    monkeypatch,
+) -> None:
+    manager, _order_manager, broker = _manager(cancel_confirms=False)
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    broker.statuses["exchange-stop"] = "UNKNOWN"
+    bracket.exchange_stop_order_id = "exchange-stop"
+    monkeypatch.setattr(
+        broker,
+        "get_orders",
+        lambda: [{"order_id": "exchange-stop", "status": "OPEN"}],
+        raising=False,
+    )
+
+    assert manager.reconcile_symbol_flat(SYMBOL) == 0
+    assert manager.get_bracket("entry-1") is bracket
+    assert broker.cancel_calls == ["exchange-stop"]
+
+
 @pytest.mark.parametrize(
     "mismatch", ["wrong_exit_order", "not_broker_filled", "broker_reports_open"]
 )
