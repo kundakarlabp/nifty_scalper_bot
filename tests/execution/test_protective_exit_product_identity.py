@@ -72,6 +72,9 @@ def _manager(tmp_path, monkeypatch) -> tuple[BracketManager, _OrderManager]:
 
 
 def test_protective_exit_preserves_entry_product(tmp_path, monkeypatch) -> None:
+    assert BracketManager.submit_exit_order.__module__ == (
+        "nifty_scalper_bot.execution.bracket_core"
+    )
     manager, order_manager = _manager(tmp_path, monkeypatch)
 
     result = manager.submit_exit_order(
