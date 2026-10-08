@@ -16,6 +16,7 @@ from __future__ import annotations
 import inspect
 import os
 import time
+from dataclasses import replace
 from contextlib import suppress
 from types import SimpleNamespace
 from typing import Any, Callable, Mapping
@@ -264,7 +265,7 @@ def _maybe_reprice_open_entry(
     order: Any,
     payload: Mapping[str, Any],
 ) -> bool:
-    """Reprice one unfilled live BUY option order in place within a tiny budget."""
+    """Reprice one fully-unfilled live BUY option order after full revalidation."""
     enabled = str(
         os.getenv("ENTRY_OPEN_REPRICE_ENABLED", "true") or "true"
     ).strip().lower() in {"1", "true", "yes", "on"}
@@ -278,6 +279,7 @@ def _maybe_reprice_open_entry(
             return False
     except Exception:
         return False
+
     status_obj = getattr(order, "status", None)
     status = (
         str(payload.get("status") or getattr(status_obj, "name", status_obj) or "")
@@ -307,18 +309,39 @@ def _maybe_reprice_open_entry(
         return False
 
     current_price = _positive_float(getattr(order, "price", None))
+    stop_loss = _positive_float(getattr(order, "stop_loss", None))
+    take_profit = _positive_float(getattr(order, "take_profit", None))
     order_id = str(getattr(order, "order_id", "") or "").strip()
-    if current_price is None or not order_id:
+    if (
+        current_price is None
+        or stop_loss is None
+        or take_profit is None
+        or not order_id
+    ):
         return False
+
     provenance_raw = getattr(order, "trade_provenance", None)
     provenance = provenance_raw if isinstance(provenance_raw, dict) else {}
     if provenance is not provenance_raw:
         setattr(order, "trade_provenance", provenance)
     anchor_mode = (
-        str(provenance.get("bracket_anchor_mode") or "distance").strip().lower()
+        str(provenance.get("bracket_anchor_mode") or "").strip().lower()
     )
     if anchor_mode != "distance":
         return False
+
+    # Repricing is permitted only for orders that carry the original entry
+    # quote contract. Older/restored orders without these fields fail closed.
+    max_quote_age_ms = _positive_float(provenance.get("entry_max_quote_age_ms"))
+    max_spread_pct = _positive_float(provenance.get("entry_max_spread_pct"))
+    min_depth_qty = _positive_int(provenance.get("entry_min_depth_qty"))
+    if (
+        max_quote_age_ms is None
+        or max_spread_pct is None
+        or min_depth_qty <= 0
+    ):
+        return False
+
     count = _positive_int(provenance.get("entry_open_reprice_count"))
     try:
         max_modifications = max(
@@ -349,30 +372,50 @@ def _maybe_reprice_open_entry(
         raw_quote = quote_getter(symbol) or {}
     except Exception:
         return False
+    if not isinstance(raw_quote, Mapping):
+        return False
+
+    source = str(
+        raw_quote.get("source")
+        or raw_quote.get("quote_source")
+        or raw_quote.get("timestamp_source")
+        or ""
+    ).strip().lower()
+    live_ws_source = (
+        source in {"ws", "ws_full", "websocket", "stream", "full"}
+        or "websocket" in source
+        or source.startswith("ws_")
+    )
+    if (
+        not live_ws_source
+        or raw_quote.get("tradable_quote") is not True
+        or raw_quote.get("stale") is True
+        or raw_quote.get("depth_available") is False
+    ):
+        return False
+
     quote = diagnostics(raw_quote) if callable(diagnostics) else raw_quote
     if not isinstance(quote, Mapping):
         return False
     bid = _positive_float(quote.get("bid"))
     ask = _positive_float(quote.get("ask"))
+    ask_qty = _positive_int(quote.get("ask_qty"))
+    spread_pct = _positive_float(quote.get("spread_pct"))
     age_ms = quote.get("age_ms")
     try:
         age = float(age_ms) if age_ms is not None else None
     except (TypeError, ValueError):
         age = None
-    try:
-        max_age_ms = max(
-            1.0,
-            float(os.getenv("ENTRY_OPEN_REPRICE_MAX_QUOTE_AGE_MS", "1000") or 1000),
-        )
-    except ValueError:
-        max_age_ms = 1000.0
     if (
         bid is None
         or ask is None
         or ask < bid
         or age is None
-        or age > max_age_ms
+        or age > max_quote_age_ms
         or ask <= current_price
+        or spread_pct is None
+        or spread_pct > max_spread_pct
+        or ask_qty < max(int(getattr(order, "quantity", 0) or 0), min_depth_qty)
     ):
         return False
 
@@ -406,6 +449,65 @@ def _maybe_reprice_open_entry(
     if new_price - current_price < 0.05 * min_ticks - 1e-9:
         return False
 
+    candidate = _core.TradePlan(
+        symbol=symbol,
+        side="BUY",
+        quantity=int(getattr(order, "quantity", 0) or 0),
+        entry_price=current_price,
+        stop_loss=stop_loss,
+        take_profit=take_profit,
+        bracket_anchor_mode="distance",
+        strategy_name=str(provenance.get("strategy_name") or "runner"),
+        signal_id=getattr(order, "signal_id", None),
+        tag=str(getattr(order, "tag", None) or "runner"),
+        product=str(getattr(order, "product", None) or "MIS"),
+        max_quote_age_ms=max(1, int(max_quote_age_ms)),
+        max_spread_pct=float(max_spread_pct),
+        min_depth_qty=max(1, int(min_depth_qty)),
+        intent="ENTRY",
+        intended_position_side="LONG",
+        trade_lifecycle_id=getattr(order, "trade_lifecycle_id", None),
+        client_order_id=getattr(order, "client_order_id", None),
+        basket_version=getattr(order, "basket_version", None),
+        instrument_token=getattr(order, "instrument_token", None),
+        contract_expiry=getattr(order, "contract_expiry", None),
+        requested_lots=max(1, int(getattr(order, "requested_lots", 0) or 0)),
+        resolved_lot_size=max(1, int(getattr(order, "resolved_lot_size", 0) or 0)),
+        trade_provenance=dict(provenance),
+    )
+    reanchor = getattr(manager, "_reanchor_bracket_to_price", None)
+    if not callable(reanchor):
+        return False
+    try:
+        candidate = reanchor(candidate, new_price)
+        candidate = _refresh_auto_tp1_after_reanchor(candidate)
+    except Exception:
+        return False
+    if (
+        candidate.stop_loss is None
+        or candidate.take_profit is None
+        or not (float(candidate.stop_loss) < new_price < float(candidate.take_profit))
+    ):
+        return False
+
+    # Re-run the exact final entry sizing/risk gate against the candidate fill
+    # price and reanchored stop. Never modify if the existing quantity would be
+    # reduced or rejected.
+    entry_gate = getattr(manager, "_apply_entry_margin_gate", None)
+    if not callable(entry_gate):
+        return False
+    try:
+        effective_plan, sizing_rejection = entry_gate(candidate, new_price)
+    except Exception:
+        return False
+    if (
+        sizing_rejection is not None
+        or effective_plan is None
+        or int(getattr(effective_plan, "quantity", 0) or 0)
+        != int(getattr(order, "quantity", 0) or 0)
+    ):
+        return False
+
     modifier = getattr(manager, "modify_order", None)
     if not callable(modifier):
         return False
@@ -417,10 +519,26 @@ def _maybe_reprice_open_entry(
         return False
 
     order.price = new_price
+    order.stop_loss = float(candidate.stop_loss)
+    order.take_profit = float(candidate.take_profit)
+    order.trade_provenance = dict(candidate.trade_provenance)
+    provenance = order.trade_provenance
     provenance["entry_open_reprice_anchor_price"] = float(anchor_price)
     provenance["entry_open_reprice_count"] = count + 1
     provenance["entry_open_reprice_last_monotonic"] = now
     provenance["entry_open_reprice_last_price"] = new_price
+
+    # Persist after the broker confirms modification; superclass update
+    # persistence ran before this helper, so this second write is intentional.
+    persister = getattr(manager, "_persist_order_snapshot", None)
+    if callable(persister):
+        with suppress(Exception):
+            persister(order)
+    save_orders = getattr(manager, "save_orders", None)
+    if callable(save_orders):
+        with suppress(Exception):
+            save_orders()
+
     logger = getattr(manager, "_logger", None)
     log = getattr(logger, "info", None)
     if callable(log):
@@ -439,6 +557,8 @@ def _maybe_reprice_open_entry(
                 "symbol": symbol,
                 "old_price": current_price,
                 "new_price": new_price,
+                "stop_loss": order.stop_loss,
+                "take_profit": order.take_profit,
                 "count": count + 1,
                 "max_modifications": max_modifications,
                 "anchor_price": anchor_price,
@@ -468,6 +588,19 @@ def _enrich_trade_plan_exit_provenance(plan: Any) -> Any:
 
     if lot_size > 0:
         enriched.setdefault("resolved_lot_size", lot_size)
+    enriched.setdefault(
+        "entry_max_quote_age_ms",
+        max(1, int(getattr(plan, "max_quote_age_ms", 5000) or 5000)),
+    )
+    enriched.setdefault(
+        "entry_max_spread_pct",
+        float(getattr(plan, "max_spread_pct", 5.0) or 5.0),
+    )
+    enriched.setdefault(
+        "entry_min_depth_qty",
+        max(1, int(getattr(plan, "min_depth_qty", quantity or 1) or 1)),
+    )
+    enriched.setdefault("strategy_name", str(getattr(plan, "strategy_name", "runner")))
 
     risk = None
     reward = None
@@ -491,6 +624,7 @@ def _enrich_trade_plan_exit_provenance(plan: Any) -> Any:
     tp1_skip_reason = "unknown"
 
     if existing_tp1_price is not None and existing_tp1_qty > 0:
+        enriched.setdefault("tp1_source", "explicit")
         tp1_status = "armed"
         tp1_skip_reason = ""
     elif lot_size <= 0:
@@ -502,6 +636,7 @@ def _enrich_trade_plan_exit_provenance(plan: Any) -> Any:
     elif risk is None or reward is None or entry is None or target is None:
         tp1_skip_reason = "invalid_geometry"
     else:
+        enriched["tp1_source"] = "auto"
         tp1_r = _positive_float(os.getenv("TP1_R_MULT", "1.0")) or 1.0
         tp1_lots = max(1, total_lots // 2)
         tp1_qty = tp1_lots * lot_size
@@ -567,6 +702,29 @@ def _enrich_trade_plan_exit_provenance(plan: Any) -> Any:
     return plan
 
 
+def _refresh_auto_tp1_after_reanchor(plan: Any) -> Any:
+    """Recompute auto TP1 economics from final protected-entry geometry."""
+    provenance_raw = getattr(plan, "trade_provenance", None)
+    if not isinstance(provenance_raw, Mapping):
+        return plan
+    if str(provenance_raw.get("tp1_source") or "").strip().lower() != "auto":
+        return plan
+    refreshed = dict(provenance_raw)
+    for key in (
+        "tp1_price",
+        "tp1_qty",
+        "tp1_status",
+        "tp1_skip_reason",
+        "tp1_incremental_cost",
+        "tp1_incremental_edge_multiple",
+        "tp1_min_incremental_edge_multiple",
+    ):
+        refreshed.pop(key, None)
+    refreshed["tp1_source"] = "auto"
+    setattr(plan, "trade_provenance", refreshed)
+    return _enrich_trade_plan_exit_provenance(plan)
+
+
 def _submit_core_with_exit_provenance(manager: Any, plan: Any) -> Any:
     """Enrich every initial or rebuilt recovery plan before core submission."""
     _enrich_trade_plan_exit_provenance(plan)
@@ -575,6 +733,9 @@ def _submit_core_with_exit_provenance(manager: Any, plan: Any) -> Any:
 
 class RuntimeOrderManager(_core.OrderManager):
     """Production order manager with native recovery and entry gating."""
+
+    def _post_reanchor_trade_plan(self, plan: Any) -> Any:
+        return _refresh_auto_tp1_after_reanchor(plan)
 
     def emergency_stop(self, reason: str = "telegram_emergency") -> dict[str, Any]:
         """Pause entries, cancel pending orders and flatten open exposure."""
@@ -972,6 +1133,7 @@ __all__ = [
     "_cost_adjust_entry_target",
     "_maybe_reprice_open_entry",
     "_enrich_trade_plan_exit_provenance",
+    "_refresh_auto_tp1_after_reanchor",
     "_strip_exit_identity_kwargs",
     "_submit_core_with_exit_provenance",
 ]
