@@ -44,6 +44,22 @@ def test_multilot_plan_gets_lot_aligned_tp1() -> None:
     assert plan.trade_provenance["tp1_status"] == "armed"
 
 
+def test_auto_tp1_is_skipped_when_incremental_order_cost_has_thin_edge(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("TP1_R_MULT", "0.05")
+    monkeypatch.setenv("TP1_MIN_INCREMENTAL_EDGE_MULTIPLE", "2.0")
+    plan = _plan(quantity=130)
+
+    _enrich_trade_plan_exit_provenance(plan)
+
+    assert "tp1_price" not in plan.trade_provenance
+    assert "tp1_qty" not in plan.trade_provenance
+    assert plan.trade_provenance["tp1_status"] == "skipped"
+    assert plan.trade_provenance["tp1_skip_reason"] == "incremental_cost_edge_thin"
+    assert plan.trade_provenance["tp1_incremental_edge_multiple"] < 2.0
+
+
 def test_single_lot_plan_does_not_create_fractional_tp1() -> None:
     plan = _plan(quantity=65)
 
