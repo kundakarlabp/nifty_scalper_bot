@@ -240,7 +240,6 @@ def test_runtime_tp1_can_skip_after_final_reanchor_even_if_signal_geometry_passe
     assert "tp1_qty" not in reanchored.trade_provenance
     assert reanchored.trade_provenance["tp1_status"] == "skipped"
     assert (
-        reanchored.trade_provenance["tp1_skip_reason"]
-        == "incremental_cost_edge_thin"
+        reanchored.trade_provenance["tp1_skip_reason"] == "incremental_cost_edge_thin"
     )
     assert reanchored.trade_provenance["tp1_final_entry_price"] == 118.0
