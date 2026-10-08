@@ -385,13 +385,15 @@ def test_market_aware_profit_floor_reprices_exchange_stop() -> None:
     bracket = _bracket(protected=True)
     bracket.highest_ltp = 120.0
     calls = []
-    manager._sync_exchange_protective_stop = lambda target: calls.append(target.sl_trigger_price) or True
+    manager._sync_exchange_protective_stop = (
+        lambda target: calls.append(target.sl_trigger_price) or True
+    )
 
     assert tighten_market_aware_floor(manager, bracket, 120.0) is True
 
     assert calls == [bracket.sl_trigger_price]
 
-def test_target_extension_requires_broker_profit_protection_when_stop_is_resting() -> None:
+def test_target_extension_requires_broker_profit_stop() -> None:
     manager = FakeManager(strong=True)
     bracket = _bracket(protected=True)
     bracket.exchange_stop_order_id = "broker-stop-1"
