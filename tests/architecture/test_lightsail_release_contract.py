@@ -13,6 +13,18 @@ def _text(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
 
 
+def test_lightsail_shell_scripts_parse() -> None:
+    for path in ("deploy/lightsail_release.sh", "deploy/lightsail_setup.sh"):
+        result = subprocess.run(
+            ["bash", "-n", str(ROOT / path)],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+
+
 def test_dotenv_is_not_tracked() -> None:
     result = subprocess.run(
         ["git", "ls-files", ".env"],
@@ -40,6 +52,46 @@ def test_lightsail_uses_external_environment_file() -> None:
     )
 
 
+def test_release_waits_for_exact_main_ci_before_host_smoke() -> None:
+    release = _text("deploy/lightsail_release.sh")
+
+    assert "github_ci_state()" in release
+    assert "actions/runs?head_sha=" in release
+    assert 'ci_state="$(github_ci_state "$AFTER")"' in release
+    assert "write_status awaiting_ci" in release
+    assert "write_status ci_failed" in release
+    candidate = release.index("CANDIDATE=")
+    ci_gate = release.index('ci_state="$(github_ci_state "$AFTER")"')
+    assert ci_gate < candidate
+
+
+def test_host_release_validation_is_short_and_bounded() -> None:
+    release = _text("deploy/lightsail_release.sh")
+    setup = _text("deploy/lightsail_setup.sh")
+
+    assert (
+        'RELEASE_TEST_TIMEOUT_SECONDS="${BOT_RELEASE_TEST_TIMEOUT_SECONDS:-300}"'
+        in release
+    )
+    assert (
+        'timeout --signal=TERM --kill-after=30s "$RELEASE_TEST_TIMEOUT_SECONDS"'
+        in release
+    )
+    assert "tests/architecture/test_lightsail_release_contract.py" in release
+    assert "tests/ops/test_research_jobs.py" in release
+    assert "tests/test_execution_path_contract.py" in release
+    assert "tests/execution/test_runtime_order_facade.py" in release
+    assert "tests/execution/test_runtime_bracket_facade.py" in release
+    assert "tests/execution/test_bracket_persistence_policy.py" in release
+    assert "tests/integration/test_canonical_bo_end_to_end.py" in release
+    assert "tests/dashboard/test_superlite_admin_core.py" in release
+    assert "tests/backtests/test_strategy_bar_research.py" not in release
+    assert "tests/data/test_mdm_tick_coalescing.py" not in release
+    assert "tests/infra/test_daily_log_archive.py" not in release
+    assert "TimeoutStartSec=600" in setup
+    assert "KillMode=control-group" in setup
+
+
 def test_release_runner_validates_and_rolls_back() -> None:
     release = _text("deploy/lightsail_release.sh")
     assert "flock -n 9" in release
@@ -47,9 +99,6 @@ def test_release_runner_validates_and_rolls_back() -> None:
     assert "compileall" in release
     assert "pytest" in release
     assert "tests/execution/test_bracket_persistence_policy.py" in release
-    assert "tests/data/test_datahub_bounded_persistence.py" in release
-    assert "tests/data/test_mdm_tick_coalescing.py" in release
-    assert "tests/test_mdm_event_loop_consumer.py" in release
     assert "dashboard/superlite_console.py" in release
     assert "dashboard/operations_console.py" not in release
     assert '"bot_loaded"[[:space:]]*:[[:space:]]*true' in release
@@ -107,6 +156,8 @@ def test_lightsail_release_migrates_autodeploy_entrypoint_to_bash() -> None:
         "ExecStart=/usr/bin/env bash ${APP_DIR}/deploy/lightsail_release.sh --auto"
         in migration_block
     )
+    assert "TimeoutStartSec=600" in migration_block
+    assert "KillMode=control-group" in migration_block
     assert "AUTODEPLOY_ENTRYPOINT_MIGRATED=true" in migration_block
     assert "sudo systemctl daemon-reload" in migration_block
 
@@ -264,7 +315,7 @@ def test_release_provisions_nonsecret_trade_replication_settings() -> None:
     assert (
         'if [ "$RUNTIME_ENV_CHANGED" = true ]; then FORCE_RESTART=true; fi' in release
     )
-    assert "tests/infra/test_supabase_trade_replication.py" in release
+    assert 'ci_state="$(github_ci_state "$AFTER")"' in release
 
 
 def test_release_health_separates_candidate_integrity_from_broker_auth() -> None:
