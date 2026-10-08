@@ -2983,24 +2983,43 @@ class BracketManager:
         side = "SELL" if bracket.side == "BUY" else "BUY"
 
         def _force_market_flatten() -> None:
-            # Cancel the unfilled pending limit so it can't fill alongside the market order.
+            # No true exchange OCO exists: cancellation must be terminal
+            # before placing a competing market SELL, including on broker
+            # timeout or a delayed exchange-stop fill.
             if stuck_order_id:
                 try:
                     self.order_manager.cancel_order(str(stuck_order_id))
-                    LOGGER.warning(
-                        "EXIT_ESCALATION_CANCELLED_STUCK_ORDER bracket_id=%s order_id=%s",
-                        bracket.bracket_id,
-                        stuck_order_id,
-                    )
-                except (
-                    Exception
-                ) as exc:  # noqa: BLE001 - cancel best-effort; still try market
-                    LOGGER.warning(
+                except Exception as exc:  # noqa: BLE001 - retain existing stop identity
+                    LOGGER.error(
                         "EXIT_ESCALATION_CANCEL_FAILED bracket_id=%s order_id=%s error=%s",
                         bracket.bracket_id,
                         stuck_order_id,
                         exc,
                     )
+                try:
+                    status = self._get_broker_order_status(str(stuck_order_id))
+                    status_text = str((status or {}).get("status") or "").strip().upper()
+                except Exception as exc:  # noqa: BLE001 - unknown is not cancellation
+                    LOGGER.error(
+                        "EXIT_ESCALATION_CANCEL_STATUS_UNKNOWN bracket_id=%s order_id=%s error=%s",
+                        bracket.bracket_id,
+                        stuck_order_id,
+                        exc,
+                    )
+                    status_text = "UNKNOWN"
+                if status_text not in _CANCELLED_STATUSES:
+                    LOGGER.critical(
+                        "EXIT_ESCALATION_REPLACEMENT_BLOCKED bracket_id=%s order_id=%s status=%s reason=cancel_unconfirmed",
+                        bracket.bracket_id,
+                        stuck_order_id,
+                        status_text or "UNKNOWN",
+                    )
+                    return
+                LOGGER.warning(
+                    "EXIT_ESCALATION_CANCELLED_STUCK_ORDER bracket_id=%s order_id=%s",
+                    bracket.bracket_id,
+                    stuck_order_id,
+                )
             with self._lock:
                 bracket.exit_order_id = None
                 bracket.pending_exit_order_id = None
