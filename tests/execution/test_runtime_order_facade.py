@@ -555,8 +555,8 @@ def test_open_live_entry_reprices_same_order_within_small_budget(monkeypatch) ->
         **dict(payload),
         "spread_pct": (payload["ask"] - payload["bid"]) / payload["bid"] * 100.0,
     }
-    manager._validate_trade_plan = lambda _plan: order_manager_core.OrderPreflightResult(
-        True, "allowed", {}
+    manager._validate_trade_plan = (
+        lambda _plan: order_manager_core.OrderPreflightResult(True, "allowed", {})
     )
     manager._apply_entry_margin_gate = lambda plan, _price: (plan, None)
     manager._reanchor_bracket_to_price = lambda plan, price: (
@@ -757,8 +757,8 @@ def test_open_entry_reprice_rejects_non_ws_or_non_tradable_quote(monkeypatch) ->
     manager = _manager(None)
     manager.is_live_mode = lambda: True
     manager._lock = threading.RLock()
-    manager._validate_trade_plan = lambda _plan: order_manager_core.OrderPreflightResult(
-        True, "allowed", {}
+    manager._validate_trade_plan = (
+        lambda _plan: order_manager_core.OrderPreflightResult(True, "allowed", {})
     )
     manager._apply_entry_margin_gate = lambda plan, _price: (plan, None)
     manager._reanchor_bracket_to_price = lambda plan, price: (
@@ -904,8 +904,8 @@ def test_open_entry_reprice_reapplies_spread_depth_and_risk_gates(monkeypatch) -
         **dict(payload),
         "spread_pct": (payload["ask"] - payload["bid"]) / payload["bid"] * 100.0,
     }
-    manager._validate_trade_plan = lambda _plan: order_manager_core.OrderPreflightResult(
-        True, "allowed", {}
+    manager._validate_trade_plan = (
+        lambda _plan: order_manager_core.OrderPreflightResult(True, "allowed", {})
     )
     manager._reanchor_bracket_to_price = lambda plan, price: (
         order_manager_core.OrderManager._reanchor_bracket_to_price(
@@ -971,8 +971,8 @@ def test_open_entry_reprice_persists_budget_after_modify(monkeypatch) -> None:
         **dict(payload),
         "spread_pct": (payload["ask"] - payload["bid"]) / payload["bid"] * 100.0,
     }
-    manager._validate_trade_plan = lambda _plan: order_manager_core.OrderPreflightResult(
-        True, "allowed", {}
+    manager._validate_trade_plan = (
+        lambda _plan: order_manager_core.OrderPreflightResult(True, "allowed", {})
     )
     manager._apply_entry_margin_gate = lambda plan, _price: (plan, None)
     manager._reanchor_bracket_to_price = lambda plan, price: (
