@@ -665,9 +665,17 @@ def _scenario(
             )
             if timestamp > entry_end:
                 continue
-        for symbol in options:
-            if symbol not in bars or future not in bars or "NSE:NIFTY 50" not in bars:
-                continue
+        if future not in bars or "NSE:NIFTY 50" not in bars:
+            continue
+        eligible_options = [symbol for symbol in options if symbol in bars]
+        if not eligible_options:
+            continue
+        underlying_context = _research_orb_structural_context(
+            engine,
+            spot_symbol="NSE:NIFTY 50",
+            futures_symbol=future,
+        )
+        for symbol in eligible_options:
             bar = bars[symbol]
             if strict_liquidity and bar["volume"] <= 0:
                 continue
@@ -678,11 +686,6 @@ def _scenario(
                 {"atr": engine.get_atr(symbol)}
                 if compact_orb_context
                 else dict(engine.get_indicators(symbol))
-            )
-            underlying_context = _research_orb_structural_context(
-                engine,
-                spot_symbol="NSE:NIFTY 50",
-                futures_symbol=future,
             )
             if compact_orb_context:
                 indicators.update(underlying_context)

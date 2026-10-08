@@ -198,6 +198,57 @@ def test_vwap_component_receives_underlying_futures_context(tmp_path, monkeypatc
     assert all(row == context for row in observed)
 
 
+def test_scenario_computes_shared_underlying_context_once_per_timestamp(
+    tmp_path, monkeypatch
+):
+    from nifty_scalper_bot.backtesting.strategy_research import _scenario, load_archive
+
+    archive(tmp_path)
+    calls = []
+
+    class Strategy:
+        name = "VWAPPro"
+
+        def generate_signal(self, symbol, indicators, current_price, position=None):
+            return None
+
+        @property
+        def evaluation_health(self):
+            return {"healthy": True}
+
+    monkeypatch.setattr(
+        "nifty_scalper_bot.backtesting.strategy_research.build_elite_strategies",
+        lambda settings, engine: [Strategy()],
+    )
+
+    def context(*args, **kwargs):
+        calls.append(kwargs.get("futures_symbol"))
+        return {
+            "underlying_direction_bias": "CE",
+            "direction_bias": "CE",
+            "underlying_direction_confidence": 0.8,
+            "context_fresh": True,
+            "futures_vwap_slope": 0.1,
+            "futures_volume_ratio": 1.0,
+        }
+
+    monkeypatch.setattr(
+        "nifty_scalper_bot.backtesting.strategy_research._research_orb_structural_context",
+        context,
+    )
+    histories, instruments, _ = load_archive(tmp_path)
+
+    _scenario(
+        histories,
+        instruments,
+        None,
+        0,
+        components={"VWAPPro"},
+    )
+
+    assert len(calls) == 4
+
+
 def test_research_structural_context_includes_futures_volume_ratio(tmp_path):
     from nifty_scalper_bot.backtesting.strategy_research import (
         IndicatorEngine,
