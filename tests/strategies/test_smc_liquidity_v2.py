@@ -268,6 +268,46 @@ def test_tiny_one_tick_breach_is_not_accepted_as_liquidity_sweep(monkeypatch) ->
     assert strategy.last_no_vote_reason == "smc_sweep_too_shallow"
 
 
+
+def test_shallow_smc_sweep_needs_structural_or_volume_confirmation(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    rows = _base_rows()
+    strategy = _strategy(rows, sweep_distance_points=0.5)
+    sweep = _bar(
+        30,
+        open_=23984.0,
+        high=23991.0,
+        low=23979.4,
+        close=23984.0,
+        volume=1000.0,
+    )
+    rows.append(sweep)
+    indicators = _indicators(
+        latest_bar_ts=sweep["timestamp"],
+        bos_confirmed=False,
+        choch_confirmed=False,
+        retest_confirmed=True,
+        premium_reclaim=False,
+    )
+    assert strategy.generate_signal(CE, indicators, 102.0) is None
+    rows.append(
+        _bar(
+            31,
+            open_=23984.0,
+            high=23999.0,
+            low=23982.0,
+            close=23997.0,
+            volume=1000.0,
+        )
+    )
+    indicators["latest_bar_ts"] = rows[-1]["timestamp"]
+    assert strategy.generate_signal(CE, indicators, 103.0) is None
+    assert strategy.last_no_vote_reason == "smc_shallow_sweep_unconfirmed"
+
+
+
 def test_sweep_that_is_too_deep_is_treated_as_break_not_liquidity_grab(
     monkeypatch,
 ) -> None:
