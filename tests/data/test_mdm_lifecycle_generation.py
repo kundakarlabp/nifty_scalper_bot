@@ -483,7 +483,11 @@ def test_fresh_full_ws_quote_blocks_rest_even_when_last_trade_time_is_old() -> N
     current = {
         "symbol": symbol,
         "source": "ws_full",
-        "timestamp": "2026-10-07T03:30:00+00:00",
+        # The option may not have traded recently, while a fresh FULL packet
+        # still proves current BBO/depth through its exchange event time.
+        "last_trade_time": "2026-10-07T03:30:00+00:00",
+        "exchange_timestamp": now_wall - 0.2,
+        "timestamp": now_wall - 0.2,
         "received_at": now_wall - 0.2,
         "subscription_generation": 3,
         "depth_available": True,
@@ -491,7 +495,7 @@ def test_fresh_full_ws_quote_blocks_rest_even_when_last_trade_time_is_old() -> N
     incoming = {
         "symbol": symbol,
         "source": "rest_poll",
-        "timestamp": "2026-10-07T03:31:00+00:00",
+        "timestamp": now_wall,
         "received_at": now_wall,
         "subscription_generation": 3,
     }
