@@ -359,9 +359,8 @@ class OrderFlowStrategy(EliteStrategy):
                 and context_quality_eligible
                 and side_aligns
             ):
-                raw_version = (
-                    quote_readiness.quote_update_version
-                    or indicators.get("quote_update_version")
+                raw_version = quote_readiness.quote_update_version or indicators.get(
+                    "quote_update_version"
                 )
                 try:
                     quote_version = int(float(raw_version))
