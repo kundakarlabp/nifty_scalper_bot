@@ -142,6 +142,41 @@ def test_orderflow_context_log_exposes_microstructure_diagnostics(
     assert extra["strong_depth_conflicts_side"] is False
 
 
+def test_live_tick_only_depth_confirmation_needs_two_distinct_fresh_snapshots(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    clock = [100.0]
+    monkeypatch.setattr(order_flow_module.time, "monotonic", lambda: clock[0])
+    strategy = _strategy()
+    indicators = _indicators(buy=250.0, sell=100.0, ofi_value=0.0, supports=True)
+    indicators.pop("_expected_support")
+    indicators["ofi_ready"] = False
+
+    first = strategy._evaluate_signal(SYMBOL, indicators, current_price=100.25)
+    assert first is not None
+    assert first.metadata["context_alignment_candidate_source"] == "depth_plus_flow"
+    assert first.metadata["context_alignment_source"] is None
+    assert first.metadata["effective_context_alignment"] is False
+
+    clock[0] = 100.5
+    repeat = strategy._evaluate_signal(SYMBOL, indicators, current_price=100.25)
+    assert repeat is not None
+    assert repeat.metadata["effective_context_alignment"] is False
+
+    clock[0] = 101.0
+    indicators["quote_update_version"] = 4
+    confirmed = strategy._evaluate_signal(SYMBOL, indicators, current_price=100.25)
+    assert confirmed is not None
+    assert confirmed.metadata["effective_context_alignment"] is True
+
+    clock[0] = 120.0
+    indicators["quote_update_version"] = 5
+    expired = strategy._evaluate_signal(SYMBOL, indicators, current_price=100.25)
+    assert expired is not None
+    assert expired.metadata["effective_context_alignment"] is False
+
+
 def test_adverse_upstream_ofi_cannot_add_context_bonus() -> None:
     strategy = _strategy()
     indicators = _indicators(

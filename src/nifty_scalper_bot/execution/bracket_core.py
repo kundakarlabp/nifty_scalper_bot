@@ -5397,6 +5397,35 @@ class BracketManager:
                 bracket.updated_at = time.time()
             return "cancelled"
 
+        # The same broker order may already be the confirmed terminal exit,
+        # even when a later order-status lookup returns UNKNOWN (e.g. after
+        # the broker tradebook was reconciled). Never try to cancel a proven
+        # filled stop. Do not trust local state alone or override an OPEN order.
+        if (
+            reason == "broker_position_flat"
+            and status_text in {"", "UNKNOWN"}
+            and str(bracket.exit_order_id or "") == order_id
+            and bracket.close_source == "broker_fill"
+            and bracket.exit_state == BracketExitLifecycle.CLOSED.value
+            and bracket.position_flat_confirmed
+            and bracket.exit_executed
+            and int(bracket.remaining_quantity) == 0
+            and bracket.closed_at is not None
+            and bracket.exit_price is not None
+        ):
+            LOGGER.info(
+                "EXCHANGE_PROTECTIVE_STOP_FILL_RECOVERED order_id=%s symbol=%s "
+                "reason=confirmed_terminal_broker_fill",
+                order_id,
+                bracket.symbol,
+                extra={
+                    "event": "EXCHANGE_PROTECTIVE_STOP_FILL_RECOVERED",
+                    "order_id": order_id,
+                    "symbol": bracket.symbol,
+                },
+            )
+            return "filled"
+
         cancel = getattr(self.order_manager, "cancel_order", None)
         if not callable(cancel):
             with self._lock:

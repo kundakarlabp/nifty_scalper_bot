@@ -143,6 +143,9 @@ class OrderFlowStrategy(EliteStrategy):
         """Args: config, indicator_engine. Returns: None. Raises: Exception."""
         super().__init__(config=config, indicator_engine=indicator_engine)
         self._cfg = config
+        # Only one owner tracks whether a live tick-only confirmation persists.
+        # Temporal OFI already measures persistence upstream.
+        self._last_live_depth_support: dict[str, tuple[int, float]] = {}
 
     def get_required_indicators(self) -> set[str]:
         """Args: none. Returns: indicator keys. Raises: Exception."""
@@ -344,6 +347,47 @@ class OrderFlowStrategy(EliteStrategy):
                 context_alignment_source = "depth_plus_flow"
             elif strong_depth_supports_side and not flow_conflicts_side:
                 context_alignment_source = "strong_depth"
+            alignment_candidate_source = context_alignment_source
+            # A single order-book imbalance plus the last tick can flip on
+            # one quote update. In LIVE mode require two distinct, fresh
+            # quote versions separated in time unless upstream temporal OFI
+            # provides its own multi-tick confirmation.
+            if (
+                is_live
+                and context_alignment_source == "depth_plus_flow"
+                and not ofi_directional
+                and context_quality_eligible
+                and side_aligns
+            ):
+                raw_version = quote_readiness.quote_update_version or indicators.get(
+                    "quote_update_version"
+                )
+                try:
+                    quote_version = (
+                        int(float(raw_version)) if raw_version is not None else 0
+                    )
+                except (TypeError, ValueError, OverflowError):
+                    quote_version = 0
+                now = time.monotonic()
+                previous = self._last_live_depth_support.get(symbol)
+                persisted = bool(
+                    quote_version > 0
+                    and previous is not None
+                    and previous[0] != quote_version
+                    and 1.0 <= now - previous[1] <= 12.0
+                )
+                if quote_version > 0 and (
+                    previous is None or previous[0] != quote_version
+                ):
+                    self._last_live_depth_support[symbol] = (
+                        quote_version,
+                        now,
+                    )
+                if not persisted:
+                    context_alignment_source = None
+            elif is_live:
+                self._last_live_depth_support.pop(symbol, None)
+
             microstructure_supports_side = context_alignment_source is not None
             microstructure_conflicts_side = bool(
                 (ofi_directional and ofi_conflicts_side) or strong_depth_conflicts_side
@@ -422,6 +466,7 @@ class OrderFlowStrategy(EliteStrategy):
                 "microstructure_supports_side": microstructure_supports_side,
                 "microstructure_conflicts_side": microstructure_conflicts_side,
                 "context_alignment_source": context_alignment_source,
+                "context_alignment_candidate_source": alignment_candidate_source,
                 "context_age_seconds": context_age_seconds,
                 "context_fresh": context_fresh,
                 "context_quality_eligible": context_quality_eligible,

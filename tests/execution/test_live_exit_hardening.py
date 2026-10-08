@@ -562,6 +562,61 @@ def test_flat_reconcile_cancels_exchange_stop_before_unregister(monkeypatch) -> 
     assert manager.get_bracket("entry-flat") is None
 
 
+@pytest.mark.parametrize("status", ["UNKNOWN", ""])
+def test_flat_reconcile_recovers_confirmed_stop_when_status_unknown(
+    status: str,
+) -> None:
+    manager, _order_manager, broker = _manager(cancel_confirms=False)
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    broker.statuses["filled-stop"] = status
+    bracket.exchange_stop_order_id = "filled-stop"
+    bracket.exit_order_id = "filled-stop"
+    bracket.exit_state = BracketExitLifecycle.CLOSED.value
+    bracket.exit_executed = True
+    bracket.position_flat_confirmed = True
+    bracket.remaining_quantity = 0
+    bracket.close_source = "broker_fill"
+    bracket.closed_at = time.time()
+    bracket.exit_price = 120.30
+
+    assert manager.reconcile_symbol_flat(SYMBOL) == 1
+    assert manager.get_bracket("entry-1") is None
+    assert broker.cancel_calls == []
+    assert manager.reconcile_symbol_flat(SYMBOL) == 0
+
+
+@pytest.mark.parametrize(
+    "mismatch", ["wrong_exit_order", "not_broker_filled", "broker_reports_open"]
+)
+def test_flat_reconcile_never_clears_unproven_exchange_stop(
+    mismatch: str,
+) -> None:
+    manager, _order_manager, broker = _manager(cancel_confirms=False)
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    broker.statuses["stop-unresolved"] = "UNKNOWN"
+    bracket.exchange_stop_order_id = "stop-unresolved"
+    bracket.exit_order_id = "stop-unresolved"
+    bracket.exit_state = BracketExitLifecycle.CLOSED.value
+    bracket.exit_executed = True
+    bracket.position_flat_confirmed = True
+    bracket.remaining_quantity = 0
+    bracket.close_source = "broker_fill"
+    bracket.closed_at = time.time()
+    bracket.exit_price = 120.30
+    if mismatch == "wrong_exit_order":
+        bracket.exit_order_id = "different-exit"
+    elif mismatch == "not_broker_filled":
+        bracket.close_source = "local_state"
+    else:
+        broker.statuses["stop-unresolved"] = "OPEN"
+
+    assert manager.reconcile_symbol_flat(SYMBOL) == 0
+    assert manager.get_bracket("entry-1") is bracket
+    assert broker.cancel_calls == ["stop-unresolved"]
+
+
 def test_actual_fill_resynchronizes_trailing_watermarks() -> None:
     """Trailing has one authority (the tiered bracket math), so an actual fill
     must re-anchor the bracket's own watermarks — there is no second controller
