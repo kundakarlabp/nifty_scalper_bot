@@ -942,6 +942,7 @@ class RuntimeOrderManager(_core.OrderManager):
                             "error_type": type(exc).__name__,
                         },
                     )
+            _maybe_reprice_open_entry(self, updated, order_update)
         self._sync_filled_exit_bracket(updated, order_update)
         return updated
 
@@ -967,6 +968,8 @@ class RuntimeOrderManager(_core.OrderManager):
                         "error_type": type(exc).__name__,
                     },
                 )
+        if updated is not None:
+            _maybe_reprice_open_entry(self, updated, payload)
         self._sync_filled_exit_bracket(updated, payload)
         return updated
 
