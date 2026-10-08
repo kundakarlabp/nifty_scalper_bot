@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import importlib
 import json
 import os
@@ -754,13 +755,11 @@ def _configure_reprice_manager(manager, quote, modified, persisted=None) -> None
     )
     manager._apply_entry_margin_gate = lambda plan, _price: (plan, None)
     manager._reanchor_bracket_to_price = (
-        lambda plan, price: order_manager_core.TradePlan(
-            **{
-                **plan.__dict__,
-                "entry_price": price,
-                "stop_loss": round(price - 10.0, 2),
-                "take_profit": round(price + 20.0, 2),
-            }
+        lambda plan, price: replace(
+            plan,
+            entry_price=price,
+            stop_loss=round(price - 10.0, 2),
+            take_profit=round(price + 20.0, 2),
         )
     )
     manager.modify_order = lambda order_id, **changes: modified.append(
@@ -845,7 +844,7 @@ def test_open_entry_reprice_reapplies_spread_depth_and_risk(monkeypatch) -> None
 
     quote["ask_qty"] = 130
     manager._apply_entry_margin_gate = lambda plan, _price: (
-        order_manager_core.TradePlan(**{**plan.__dict__, "quantity": 0}),
+        replace(plan, quantity=0),
         None,
     )
     RuntimeOrderManager._apply_broker_order_update(
