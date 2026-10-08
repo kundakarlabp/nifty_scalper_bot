@@ -238,6 +238,8 @@ def test_stale_nonterminal_job_fails_closed_without_relaunch(
 ):
     from nifty_scalper_bot.ops.research_jobs import start_job, write_json
 
+    monkeypatch.delenv("DEPLOYMENT_PLATFORM", raising=False)
+    monkeypatch.setenv("BOT_RESEARCH_LAUNCHER", "direct")
     payload = {"id": "stale-job", "days": 30, "mode": "components"}
     stale = {
         "id": "stale-job",
@@ -309,6 +311,9 @@ def test_overlapping_job_is_rejected(tmp_path):
 
 def test_failed_launch_is_explicit_without_secret_exception_text(tmp_path, monkeypatch):
     from nifty_scalper_bot.ops.research_jobs import read_status, start_job
+
+    monkeypatch.delenv("DEPLOYMENT_PLATFORM", raising=False)
+    monkeypatch.setenv("BOT_RESEARCH_LAUNCHER", "direct")
 
     def fail(*args, **kwargs):
         raise OSError("SECRET_TOKEN")
@@ -558,6 +563,8 @@ def test_updater_waits_with_mode_aware_budget(
 ):
     from nifty_scalper_bot.ops.research_jobs import start_job, write_json
 
+    monkeypatch.delenv("DEPLOYMENT_PLATFORM", raising=False)
+    monkeypatch.setenv("BOT_RESEARCH_LAUNCHER", "direct")
     waited = []
 
     class Worker:
@@ -590,6 +597,8 @@ def test_updater_records_worker_timeout_or_unexpected_exit(
 
     from nifty_scalper_bot.ops.research_jobs import start_job, write_json
 
+    monkeypatch.delenv("DEPLOYMENT_PLATFORM", raising=False)
+    monkeypatch.setenv("BOT_RESEARCH_LAUNCHER", "direct")
     killed = []
 
     class Worker:
