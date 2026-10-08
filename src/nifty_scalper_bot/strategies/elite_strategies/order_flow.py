@@ -291,7 +291,10 @@ class OrderFlowStrategy(EliteStrategy):
             )
             ofi_ready = bool(indicators.get("ofi_ready"))
             ofi_value = _safe_float_value(indicators.get("ofi_1s_normalized"))
-            ofi_updates = int(indicators.get("ofi_update_count_1s") or 0)
+            try:
+                ofi_updates = max(0, int(indicators.get("ofi_update_count_1s") or 0))
+            except (TypeError, ValueError, OverflowError):
+                ofi_updates = 0
             ofi_unavailable_reason = (
                 None
                 if ofi_ready
@@ -389,9 +392,7 @@ class OrderFlowStrategy(EliteStrategy):
                 # Anchor the start of continuous support, not the newest
                 # quote. Subsecond quote versions must not perpetually reset
                 # the one-second persistence window.
-                if quote_version > 0 and (
-                    previous is None or now - previous[1] > 12.0
-                ):
+                if quote_version > 0 and (previous is None or now - previous[1] > 12.0):
                     self._last_live_depth_support[symbol] = (
                         quote_version,
                         now,
