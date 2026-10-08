@@ -279,16 +279,19 @@ def _maybe_reprice_open_entry(
     except Exception:
         return False
     status_obj = getattr(order, "status", None)
-    status = str(
-        payload.get("status") or getattr(status_obj, "name", status_obj) or ""
-    ).strip().upper().replace("_", " ")
+    status = (
+        str(payload.get("status") or getattr(status_obj, "name", status_obj) or "")
+        .strip()
+        .upper()
+        .replace("_", " ")
+    )
     intent = str(getattr(order, "intent", "") or "").strip().upper()
     side = str(getattr(order, "side", "") or "").strip().upper()
     symbol = str(getattr(order, "symbol", "") or "").strip().upper()
     order_type_obj = getattr(order, "order_type", None)
-    order_type = str(
-        getattr(order_type_obj, "name", order_type_obj) or ""
-    ).strip().upper()
+    order_type = (
+        str(getattr(order_type_obj, "name", order_type_obj) or "").strip().upper()
+    )
     filled = max(
         _positive_int(payload.get("filled_quantity")),
         _positive_int(getattr(order, "filled_quantity", 0)),
@@ -325,10 +328,7 @@ def _maybe_reprice_open_entry(
     try:
         min_interval = max(
             0.0,
-            float(
-                os.getenv("ENTRY_OPEN_REPRICE_MIN_INTERVAL_SECONDS", "0.35")
-                or 0.35
-            ),
+            float(os.getenv("ENTRY_OPEN_REPRICE_MIN_INTERVAL_SECONDS", "0.35") or 0.35),
         )
     except ValueError:
         min_interval = 0.35
@@ -378,9 +378,7 @@ def _maybe_reprice_open_entry(
     try:
         max_deviation_pct = max(
             0.0,
-            float(
-                os.getenv("ENTRY_OPEN_REPRICE_MAX_DEVIATION_PCT", "0.75") or 0.75
-            ),
+            float(os.getenv("ENTRY_OPEN_REPRICE_MAX_DEVIATION_PCT", "0.75") or 0.75),
         )
     except ValueError:
         max_deviation_pct = 0.75
@@ -391,17 +389,13 @@ def _maybe_reprice_open_entry(
     rounder = getattr(manager, "_round_to_tick", None)
     try:
         new_price = (
-            float(rounder(ask))
-            if callable(rounder)
-            else round(ask / 0.05) * 0.05
+            float(rounder(ask)) if callable(rounder) else round(ask / 0.05) * 0.05
         )
     except Exception:
         return False
     new_price = round(new_price, 2)
     try:
-        min_ticks = max(
-            1, int(os.getenv("ENTRY_OPEN_REPRICE_MIN_TICKS", "1") or 1)
-        )
+        min_ticks = max(1, int(os.getenv("ENTRY_OPEN_REPRICE_MIN_TICKS", "1") or 1))
     except ValueError:
         min_ticks = 1
     if new_price - current_price < 0.05 * min_ticks - 1e-9:
@@ -508,9 +502,7 @@ def _enrich_trade_plan_exit_provenance(plan: Any) -> Any:
         tp1_qty = tp1_lots * lot_size
         tp1_price = entry + risk * tp1_r if side == "BUY" else entry - risk * tp1_r
         strictly_before_final = (
-            entry < tp1_price < target
-            if side == "BUY"
-            else target < tp1_price < entry
+            entry < tp1_price < target if side == "BUY" else target < tp1_price < entry
         )
         if tp1_qty >= quantity:
             tp1_skip_reason = "no_remainder"
@@ -529,9 +521,7 @@ def _enrich_trade_plan_exit_provenance(plan: Any) -> Any:
                 quantity=quantity,
                 executed_orders=3,
             )
-            incremental_cost = max(
-                0.0, three_order_cost.total - two_order_cost.total
-            )
+            incremental_cost = max(0.0, three_order_cost.total - two_order_cost.total)
             tp1_gross_reward = abs(tp1_price - entry) * tp1_qty
             edge_multiple = (
                 tp1_gross_reward / incremental_cost
@@ -541,18 +531,13 @@ def _enrich_trade_plan_exit_provenance(plan: Any) -> Any:
             try:
                 min_incremental_edge = max(
                     0.0,
-                    float(
-                        os.getenv("TP1_MIN_INCREMENTAL_EDGE_MULTIPLE", "2.0")
-                        or 2.0
-                    ),
+                    float(os.getenv("TP1_MIN_INCREMENTAL_EDGE_MULTIPLE", "2.0") or 2.0),
                 )
             except ValueError:
                 min_incremental_edge = 2.0
             enriched["tp1_incremental_cost"] = float(incremental_cost)
             enriched["tp1_incremental_edge_multiple"] = float(edge_multiple)
-            enriched["tp1_min_incremental_edge_multiple"] = float(
-                min_incremental_edge
-            )
+            enriched["tp1_min_incremental_edge_multiple"] = float(min_incremental_edge)
             if edge_multiple < min_incremental_edge:
                 tp1_skip_reason = "incremental_cost_edge_thin"
             else:
@@ -569,9 +554,7 @@ def _enrich_trade_plan_exit_provenance(plan: Any) -> Any:
 
     trailing_mult = _positive_float(enriched.get("trailing_atr_mult"))
     if trailing_mult is None:
-        trailing_mult = _positive_float(
-            os.getenv("BRACKET_TRAILING_ATR_MULT", "0")
-        )
+        trailing_mult = _positive_float(os.getenv("BRACKET_TRAILING_ATR_MULT", "0"))
     if trailing_mult is not None:
         enriched["trailing_atr_mult"] = float(trailing_mult)
 
