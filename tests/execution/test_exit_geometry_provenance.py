@@ -198,7 +198,7 @@ def test_auto_tp1_is_recomputed_after_final_entry_reanchor(monkeypatch) -> None:
     assert plan.trade_provenance["tp1_price"] == 110.0
     assert plan.trade_provenance["tp1_source"] == "auto"
 
-    reanchored = order_manager_core.OrderManager._reanchor_bracket_to_price(
+    reanchored = OrderManager._reanchor_bracket_to_price(
         SimpleNamespace(_logger=logging.getLogger("reanchor-test")),
         plan,
         110.0,
