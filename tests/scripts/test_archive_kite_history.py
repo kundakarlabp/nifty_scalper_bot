@@ -201,3 +201,41 @@ def test_shared_history_cache_reuses_valid_bytes_between_jobs(tmp_path):
         next((tmp_path / "one/candles").glob("*.json")).read_bytes()
         == next((tmp_path / "two/candles").glob("*.json")).read_bytes()
     )
+
+def test_history_universe_matches_canonical_active_expiry_and_option_cap(monkeypatch):
+    from scripts.archive_kite_history import history_universe
+
+    monkeypatch.setenv("MAX_ACTIVE_OPTION_SYMBOLS", "8")
+    rows = []
+    token = 1000
+    for expiry, expiry_code in (("2026-10-13", "13"), ("2026-10-20", "20")):
+        for strike in range(22000, 23001, 50):
+            for side in ("CE", "PE"):
+                token += 1
+                rows.append(
+                    {
+                        "exchange": "NFO",
+                        "tradingsymbol": f"NIFTY26O{expiry_code}{strike}{side}",
+                        "name": "NIFTY",
+                        "instrument_type": side,
+                        "instrument_token": token,
+                        "expiry": expiry,
+                        "strike": strike,
+                        "lot_size": 65,
+                    }
+                )
+
+    selected = {
+        "ce": "NFO:NIFTY26O1322500CE",
+        "pe": "NFO:NIFTY26O1322500PE",
+    }
+    universe = history_universe(rows, selected, "NFO:NIFTY26OCTFUT")
+
+    option_symbols = [symbol for symbol in universe if symbol.startswith("NFO:NIFTY26O")]
+    assert universe[:2] == ["NSE:NIFTY 50", "NFO:NIFTY26OCTFUT"]
+    assert selected["ce"] in option_symbols
+    assert selected["pe"] in option_symbols
+    assert len(option_symbols) == 8
+    assert all("NIFTY26O13" in symbol for symbol in option_symbols)
+    assert not any("NIFTY26O20" in symbol for symbol in option_symbols)
+
