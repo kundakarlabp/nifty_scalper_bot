@@ -4351,7 +4351,12 @@ class BracketManager:
                     return history
         getter = getattr(broker, "get_orders", None) if broker is not None else None
         if callable(getter):
-            for order in getter() or []:
+            orders = getter()
+            # Broker orderbooks are lists; a missing/malformed response is not
+            # proof of cancellation or of a fill (also protects mock adapters).
+            if not isinstance(orders, (list, tuple)):
+                return result
+            for order in orders:
                 if not isinstance(order, Mapping):
                     continue
                 if str(order.get("order_id") or order.get("id") or "") != str(order_id):
