@@ -3105,9 +3105,7 @@ class BracketManager:
             or not bracket.entry_confirmed
             or bracket.entry_status != "ACTIVE"
         ):
-            if trail_changed:
-            self._sync_exchange_protective_stop(bracket)
-        return trail_changed
+            return False
 
         ltp = bracket.last_ltp
         if not ltp or ltp <= 0:
@@ -3267,7 +3265,9 @@ class BracketManager:
                     )
                     self.save_state()
                     trail_changed = True
-        return False
+        if trail_changed:
+            self._sync_exchange_protective_stop(bracket)
+        return trail_changed
 
     def _breakeven_cost_per_unit(self, bracket: BracketState) -> float:
         """Round-trip cost of this position expressed in premium points/unit."""
