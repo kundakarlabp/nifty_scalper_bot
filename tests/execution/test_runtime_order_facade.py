@@ -539,9 +539,32 @@ def test_open_live_entry_reprices_same_order_within_small_budget(monkeypatch) ->
     monkeypatch.setenv("ENTRY_OPEN_REPRICE_MAX_DEVIATION_PCT", "0.75")
     manager = _manager(None)
     manager.is_live_mode = lambda: True
-    quote = {"bid": 100.8, "ask": 101.0, "age_ms": 10.0}
+    quote = {
+        "bid": 100.8,
+        "ask": 101.0,
+        "bid_qty": 130,
+        "ask_qty": 130,
+        "age_ms": 10.0,
+        "source": "ws_full",
+        "depth_available": True,
+        "tradable_quote": True,
+        "source_timestamp_valid": True,
+    }
     manager._get_latest_quote_safe = lambda _symbol: dict(quote)
-    manager._extract_quote_diagnostics = lambda payload: dict(payload)
+    manager._extract_quote_diagnostics = lambda payload: {
+        **dict(payload),
+        "spread_pct": (payload["ask"] - payload["bid"]) / payload["bid"] * 100.0,
+    }
+    manager._validate_trade_plan = lambda _plan: order_manager_core.OrderPreflightResult(
+        True, "allowed", {}
+    )
+    manager._apply_entry_margin_gate = lambda plan, _price: (plan, None)
+    manager._reanchor_bracket_to_price = lambda plan, price: (
+        order_manager_core.OrderManager._reanchor_bracket_to_price(
+            manager, plan, price
+        )
+    )
+    manager._persist_order_snapshot = lambda _order: None
     manager._lock = threading.RLock()
     entry = order_manager_core.OrderDetails(
         order_id="ENTRY-REPRICE",
@@ -551,8 +574,25 @@ def test_open_live_entry_reprices_same_order_within_small_budget(monkeypatch) ->
         order_type=order_manager_core.OrderType.LIMIT,
         status=order_manager_core.OrderStatus.SUBMITTED,
         price=100.5,
+        stop_loss=95.5,
+        take_profit=110.5,
         intent="ENTRY",
+        signal_id="sig-reprice",
+        client_order_id="client-reprice",
+        trade_lifecycle_id="TRD_sig-reprice",
+        requested_lots=1,
         resolved_lot_size=65,
+        instrument_token=12345,
+        trade_provenance={
+            "bracket_anchor_mode": "distance",
+            "entry_reprice_guard": {
+                "max_quote_age_ms": 1000,
+                "max_spread_pct": 1.0,
+                "min_depth_qty": 65,
+                "max_signal_age_seconds": 0.0,
+                "max_entry_drift_pct": 0.0,
+            },
+        },
     )
     manager._orders = {entry.order_id: entry}
     manager._positions = SimpleNamespace(
@@ -561,7 +601,8 @@ def test_open_live_entry_reprices_same_order_within_small_budget(monkeypatch) ->
     manager._register_virtual_bracket_for_fill = lambda *_args, **_kwargs: None
     manager._confirm_position_protection_for_fill = lambda *_args, **_kwargs: None
     manager._notify_failed_entry_terminal = lambda *_args, **_kwargs: None
-    manager.save_orders = lambda: None
+    save_calls: list[str] = []
+    manager.save_orders = lambda: save_calls.append("saved")
     modified: list[tuple[str, dict[str, Any]]] = []
 
     monkeypatch.setattr(
@@ -582,6 +623,9 @@ def test_open_live_entry_reprices_same_order_within_small_budget(monkeypatch) ->
     RuntimeOrderManager._apply_broker_order_update(manager, payload)
     assert modified == [("ENTRY-REPRICE", {"price": 101.0})]
     assert entry.price == 101.0
+    assert entry.stop_loss == 96.0
+    assert entry.take_profit == 111.0
+    assert save_calls == ["saved"]
 
     quote.update({"bid": 101.15, "ask": 101.25})
     RuntimeOrderManager._apply_broker_order_update(manager, payload)
@@ -705,3 +749,294 @@ def test_partially_filled_entry_is_never_repriced(monkeypatch) -> None:
     )
 
     assert modified == []
+
+
+def test_open_entry_reprice_rejects_non_ws_or_non_tradable_quote(monkeypatch) -> None:
+    monkeypatch.setenv("ENTRY_OPEN_REPRICE_ENABLED", "true")
+    monkeypatch.setenv("ENTRY_OPEN_REPRICE_MIN_INTERVAL_SECONDS", "0")
+    manager = _manager(None)
+    manager.is_live_mode = lambda: True
+    manager._lock = threading.RLock()
+    manager._validate_trade_plan = lambda _plan: order_manager_core.OrderPreflightResult(
+        True, "allowed", {}
+    )
+    manager._apply_entry_margin_gate = lambda plan, _price: (plan, None)
+    manager._reanchor_bracket_to_price = lambda plan, price: (
+        order_manager_core.OrderManager._reanchor_bracket_to_price(
+            manager, plan, price
+        )
+    )
+    manager._positions = SimpleNamespace(
+        apply_broker_order_update=lambda *_args, **_kwargs: None
+    )
+    manager._register_virtual_bracket_for_fill = lambda *_args, **_kwargs: None
+    manager._confirm_position_protection_for_fill = lambda *_args, **_kwargs: None
+    manager._notify_failed_entry_terminal = lambda *_args, **_kwargs: None
+    manager._persist_order_snapshot = lambda _order: None
+    manager.save_orders = lambda: None
+    entry = order_manager_core.OrderDetails(
+        order_id="ENTRY-DEGRADED",
+        symbol="NFO:NIFTY2681124500CE",
+        side="BUY",
+        quantity=65,
+        order_type=order_manager_core.OrderType.LIMIT,
+        status=order_manager_core.OrderStatus.SUBMITTED,
+        price=100.5,
+        stop_loss=95.5,
+        take_profit=110.5,
+        intent="ENTRY",
+        signal_id="sig-degraded",
+        client_order_id="client-degraded",
+        trade_lifecycle_id="TRD_sig-degraded",
+        requested_lots=1,
+        resolved_lot_size=65,
+        instrument_token=12345,
+        trade_provenance={
+            "bracket_anchor_mode": "distance",
+            "entry_reprice_guard": {
+                "max_quote_age_ms": 1000,
+                "max_spread_pct": 1.0,
+                "min_depth_qty": 65,
+            },
+        },
+    )
+    manager._orders = {entry.order_id: entry}
+    quote = {
+        "bid": 100.8,
+        "ask": 101.0,
+        "bid_qty": 130,
+        "ask_qty": 130,
+        "age_ms": 10.0,
+        "source": "rest_poll",
+        "depth_available": True,
+        "tradable_quote": True,
+        "source_timestamp_valid": True,
+    }
+    manager._get_latest_quote_safe = lambda _symbol: dict(quote)
+    manager._extract_quote_diagnostics = lambda payload: {
+        **dict(payload),
+        "spread_pct": (payload["ask"] - payload["bid"]) / payload["bid"] * 100.0,
+    }
+    modified: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(
+        order_manager_core.OrderManager,
+        "modify_order",
+        lambda _self, order_id, **changes: modified.append(
+            (str(order_id), dict(changes))
+        )
+        or True,
+    )
+    payload = {
+        "order_id": entry.order_id,
+        "status": "OPEN",
+        "filled_quantity": 0,
+        "pending_quantity": 65,
+    }
+
+    RuntimeOrderManager._apply_broker_order_update(manager, payload)
+    assert modified == []
+
+    quote["source"] = "ws_full"
+    quote["tradable_quote"] = False
+    RuntimeOrderManager._apply_broker_order_update(manager, payload)
+    assert modified == []
+
+    quote["tradable_quote"] = True
+    quote["depth_available"] = False
+    RuntimeOrderManager._apply_broker_order_update(manager, payload)
+    assert modified == []
+
+
+def test_open_entry_reprice_reapplies_spread_depth_and_risk_gates(monkeypatch) -> None:
+    monkeypatch.setenv("ENTRY_OPEN_REPRICE_ENABLED", "true")
+    monkeypatch.setenv("ENTRY_OPEN_REPRICE_MIN_INTERVAL_SECONDS", "0")
+    manager = _manager(None)
+    manager.is_live_mode = lambda: True
+    manager._lock = threading.RLock()
+    manager._positions = SimpleNamespace(
+        apply_broker_order_update=lambda *_args, **_kwargs: None
+    )
+    manager._register_virtual_bracket_for_fill = lambda *_args, **_kwargs: None
+    manager._confirm_position_protection_for_fill = lambda *_args, **_kwargs: None
+    manager._notify_failed_entry_terminal = lambda *_args, **_kwargs: None
+    manager._persist_order_snapshot = lambda _order: None
+    manager.save_orders = lambda: None
+    entry = order_manager_core.OrderDetails(
+        order_id="ENTRY-GATED",
+        symbol="NFO:NIFTY2681124500CE",
+        side="BUY",
+        quantity=65,
+        order_type=order_manager_core.OrderType.LIMIT,
+        status=order_manager_core.OrderStatus.SUBMITTED,
+        price=100.5,
+        stop_loss=95.5,
+        take_profit=110.5,
+        intent="ENTRY",
+        signal_id="sig-gated",
+        client_order_id="client-gated",
+        trade_lifecycle_id="TRD_sig-gated",
+        requested_lots=1,
+        resolved_lot_size=65,
+        instrument_token=12345,
+        trade_provenance={
+            "bracket_anchor_mode": "distance",
+            "entry_reprice_guard": {
+                "max_quote_age_ms": 1000,
+                "max_spread_pct": 0.50,
+                "min_depth_qty": 65,
+            },
+        },
+    )
+    manager._orders = {entry.order_id: entry}
+    quote = {
+        "bid": 100.0,
+        "ask": 101.0,
+        "bid_qty": 130,
+        "ask_qty": 130,
+        "age_ms": 10.0,
+        "source": "ws_full",
+        "depth_available": True,
+        "tradable_quote": True,
+        "source_timestamp_valid": True,
+    }
+    manager._get_latest_quote_safe = lambda _symbol: dict(quote)
+    manager._extract_quote_diagnostics = lambda payload: {
+        **dict(payload),
+        "spread_pct": (payload["ask"] - payload["bid"]) / payload["bid"] * 100.0,
+    }
+    manager._validate_trade_plan = lambda _plan: order_manager_core.OrderPreflightResult(
+        True, "allowed", {}
+    )
+    manager._reanchor_bracket_to_price = lambda plan, price: (
+        order_manager_core.OrderManager._reanchor_bracket_to_price(
+            manager, plan, price
+        )
+    )
+    manager._apply_entry_margin_gate = lambda plan, _price: (plan, None)
+    modified: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(
+        order_manager_core.OrderManager,
+        "modify_order",
+        lambda _self, order_id, **changes: modified.append(
+            (str(order_id), dict(changes))
+        )
+        or True,
+    )
+    payload = {
+        "order_id": entry.order_id,
+        "status": "OPEN",
+        "filled_quantity": 0,
+        "pending_quantity": 65,
+    }
+
+    RuntimeOrderManager._apply_broker_order_update(manager, payload)
+    assert modified == []
+
+    quote.update({"bid": 100.8, "ask": 101.0, "ask_qty": 10})
+    RuntimeOrderManager._apply_broker_order_update(manager, payload)
+    assert modified == []
+
+    quote["ask_qty"] = 130
+    manager._apply_entry_margin_gate = lambda _plan, _price: (
+        None,
+        order_manager_core.TradePlanSubmitResult(
+            False,
+            reason="risk_budget_unavailable",
+            broker_attempted=False,
+        ),
+    )
+    RuntimeOrderManager._apply_broker_order_update(manager, payload)
+    assert modified == []
+
+
+def test_open_entry_reprice_persists_budget_after_modify(monkeypatch) -> None:
+    monkeypatch.setenv("ENTRY_OPEN_REPRICE_ENABLED", "true")
+    monkeypatch.setenv("ENTRY_OPEN_REPRICE_MIN_INTERVAL_SECONDS", "0")
+    manager = _manager(None)
+    manager.is_live_mode = lambda: True
+    manager._lock = threading.RLock()
+    quote = {
+        "bid": 100.8,
+        "ask": 101.0,
+        "bid_qty": 130,
+        "ask_qty": 130,
+        "age_ms": 10.0,
+        "source": "ws_full",
+        "depth_available": True,
+        "tradable_quote": True,
+        "source_timestamp_valid": True,
+    }
+    manager._get_latest_quote_safe = lambda _symbol: dict(quote)
+    manager._extract_quote_diagnostics = lambda payload: {
+        **dict(payload),
+        "spread_pct": (payload["ask"] - payload["bid"]) / payload["bid"] * 100.0,
+    }
+    manager._validate_trade_plan = lambda _plan: order_manager_core.OrderPreflightResult(
+        True, "allowed", {}
+    )
+    manager._apply_entry_margin_gate = lambda plan, _price: (plan, None)
+    manager._reanchor_bracket_to_price = lambda plan, price: (
+        order_manager_core.OrderManager._reanchor_bracket_to_price(
+            manager, plan, price
+        )
+    )
+    persisted: list[dict[str, Any]] = []
+    saves: list[bool] = []
+    manager._persist_order_snapshot = lambda order: persisted.append(
+        order_manager_core.OrderManager._serialize(manager, order)
+    )
+    manager.save_orders = lambda: saves.append(True)
+    manager._positions = SimpleNamespace(
+        apply_broker_order_update=lambda *_args, **_kwargs: None
+    )
+    manager._register_virtual_bracket_for_fill = lambda *_args, **_kwargs: None
+    manager._confirm_position_protection_for_fill = lambda *_args, **_kwargs: None
+    manager._notify_failed_entry_terminal = lambda *_args, **_kwargs: None
+    entry = order_manager_core.OrderDetails(
+        order_id="ENTRY-PERSIST-REPRICE",
+        symbol="NFO:NIFTY2681124500CE",
+        side="BUY",
+        quantity=65,
+        order_type=order_manager_core.OrderType.LIMIT,
+        status=order_manager_core.OrderStatus.SUBMITTED,
+        price=100.5,
+        stop_loss=95.5,
+        take_profit=110.5,
+        intent="ENTRY",
+        signal_id="sig-persist",
+        client_order_id="client-persist",
+        trade_lifecycle_id="TRD_sig-persist",
+        requested_lots=1,
+        resolved_lot_size=65,
+        instrument_token=12345,
+        trade_provenance={
+            "bracket_anchor_mode": "distance",
+            "entry_reprice_guard": {
+                "max_quote_age_ms": 1000,
+                "max_spread_pct": 1.0,
+                "min_depth_qty": 65,
+            },
+        },
+    )
+    manager._orders = {entry.order_id: entry}
+    monkeypatch.setattr(
+        order_manager_core.OrderManager,
+        "modify_order",
+        lambda _self, _order_id, **_changes: True,
+    )
+
+    RuntimeOrderManager._apply_broker_order_update(
+        manager,
+        {
+            "order_id": entry.order_id,
+            "status": "OPEN",
+            "filled_quantity": 0,
+            "pending_quantity": 65,
+        },
+    )
+
+    assert saves == [True]
+    assert len(persisted) == 1
+    restored = order_manager_core.OrderManager._order_from_dict(manager, persisted[0])
+    assert restored.trade_provenance["entry_open_reprice_count"] == 1
+    assert restored.trade_provenance["entry_open_reprice_anchor_price"] == 100.5
