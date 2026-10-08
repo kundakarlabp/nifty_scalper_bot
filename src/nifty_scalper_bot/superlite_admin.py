@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse, RedirectResponse
 
 from nifty_scalper_bot import admin_dashboard as dashboard
 from nifty_scalper_bot.admin_install_proof_display import install_proof_display
-from nifty_scalper_bot.ops.service_control import memory_snapshot
+from nifty_scalper_bot.ops.service_control import memory_snapshot, restart_deployer
 from nifty_scalper_bot.superlite_admin_core import (
     APP_DIR,
     ENGINE_SERVICE,
@@ -64,13 +64,8 @@ def _guard(request: Request) -> None:
 
 
 def _validated_update() -> tuple[bool, str]:
-    subprocess.Popen(
-        ["git", "-C", str(APP_DIR), "fetch", "--quiet", "origin", "main"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
-    return True, "remote revision refreshed; validated updater runs within two minutes"
+    result = restart_deployer()
+    return result.ok, result.message
 
 
 def _flash(request: Request) -> str:
