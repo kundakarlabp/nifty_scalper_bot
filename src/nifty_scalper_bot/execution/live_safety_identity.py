@@ -74,6 +74,21 @@ def _patch_bracket_manager() -> None:
         """Submit an EXIT order with immutable lifecycle metadata."""
         normalized_symbol = normalize_symbol(symbol)
         bracket = self.get_bracket(bracket_id)
+        # Legacy compatibility exit wrapper must obey the native terminal guard.
+        # A filled exchange stop owns the close even if another exit was queued.
+        if bracket is not None:
+            with self._lock:
+                already_closed = (
+                    bracket.exit_executed
+                    or bracket.remaining_quantity <= 0
+                    or bracket.exit_state
+                    == _bracket_core.BracketExitLifecycle.CLOSED.value
+                )
+            if already_closed:
+                return _bracket_core.SubmitExitOrderResult(
+                    False, None, "already_closed", "already_closed",
+                    "broker position already closed", False, {},
+                )
         side = "SELL" if (bracket and bracket.side == "BUY") else "BUY"
         order_type, price, pricing_meta = self._price_exit_order(
             bracket=bracket,
