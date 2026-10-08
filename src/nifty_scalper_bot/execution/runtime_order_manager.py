@@ -37,7 +37,10 @@ from nifty_scalper_bot.execution.native_entry_gate import (
     block_result,
     configure_provider,
 )
-from nifty_scalper_bot.risk.cost_model import estimate_round_trip_cost
+from nifty_scalper_bot.risk.cost_model import (
+    estimate_round_trip_cost,
+    evaluate_net_reward_risk,
+)
 from nifty_scalper_bot.risk.net_rr_gate import minimum_target_for_net_rr
 from nifty_scalper_bot.strategies.signal_identity import order_setup_context
 
@@ -404,6 +407,41 @@ def _maybe_reprice_open_entry(
     except ValueError:
         min_ticks = 1
     if new_price - current_price < 0.05 * min_ticks - 1e-9:
+        return False
+
+    # A repriced limit is a new economic decision, not permission to chase
+    # a quote merely because it is within the price-deviation budget.
+    # For distance-anchored brackets, evaluate the planned stop and target
+    # after preserving their initial distances around the new fill price.
+    stop_price = _positive_float(getattr(order, "stop_loss", None))
+    target_price = _positive_float(getattr(order, "take_profit", None))
+    quantity = _positive_int(getattr(order, "quantity", 0))
+    if (
+        stop_price is None
+        or target_price is None
+        or quantity <= 0
+        or not (stop_price < anchor_price < target_price)
+    ):
+        return False
+    delta = new_price - anchor_price
+    economics = evaluate_net_reward_risk(
+        entry_price=new_price,
+        stop_price=stop_price + delta,
+        target_price=target_price + delta,
+        quantity=quantity,
+    )
+    if not economics.allowed:
+        logger = getattr(manager, "_logger", None)
+        log = getattr(logger, "info", None)
+        if callable(log):
+            log(
+                "ENTRY_OPEN_REPRICE_NET_RR_BLOCKED order_id=%s symbol=%s "
+                "net_rr=%.3f minimum=%.3f",
+                order_id,
+                symbol,
+                economics.net_rr,
+                economics.minimum,
+            )
         return False
 
     modifier = getattr(manager, "modify_order", None)
