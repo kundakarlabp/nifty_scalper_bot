@@ -1010,6 +1010,7 @@ class SMCStrategy(EliteStrategy):
                 )
                 if max(confirmation_age, runtime_age) > retry_window_seconds:
                     self._events.pop(event_key, None)
+                    self._last_emitted_bar[event_key] = current_ts
                     self._no_vote("smc_confirmed_vote_expired")
                     return None
 
@@ -1025,6 +1026,7 @@ class SMCStrategy(EliteStrategy):
                     first_risk = float(event.get("first_vote_risk_points") or 0.0)
                     if first_risk > 0 and current_price <= first_premium - first_risk:
                         self._events.pop(event_key, None)
+                        self._last_emitted_bar[event_key] = current_ts
                         self._no_vote("smc_pre_entry_premium_invalidated")
                         return None
 
