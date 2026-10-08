@@ -1001,7 +1001,6 @@ def test_bracket_flat_nonterminal_timing_round_trips_without_monotonic(tmp_path)
     assert restored.flat_nonterminal_since_monotonic is None
 
 
-
 def test_closed_exchange_filled_bracket_never_submits_second_exit() -> None:
     manager, order_manager, _broker = _manager()
     bracket = manager.get_bracket("entry-1")
