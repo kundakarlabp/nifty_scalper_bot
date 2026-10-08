@@ -787,6 +787,9 @@ class BracketManager:
             except Exception as exc:  # noqa: BLE001
                 self._mark_persistence_degraded("startup_restore_failed", exc)
 
+        # Serialize broker-side SL modifications: multiple trailing owners can
+        # otherwise acknowledge out of order and weaken the resting exchange stop.
+        self._exchange_stop_modify_mutex = threading.RLock()
         self._watchdog_thread = threading.Thread(
             target=self._watchdog_exit_loop,
             name="bracket-watchdog",
@@ -3958,6 +3961,25 @@ class BracketManager:
         """Submit one broker exit order and return a sanitized structured result."""
         normalized_symbol = normalize_symbol(symbol)
         bracket = self.get_bracket(bracket_id)
+        # An exchange SL can fill while a deferred virtual exit is queued.
+        # A closed/flat bracket must never submit a second reducing order.
+        if bracket is not None:
+            with self._lock:
+                already_closed = (
+                    bracket.exit_executed
+                    or bracket.remaining_quantity <= 0
+                    or bracket.exit_state == BracketExitLifecycle.CLOSED.value
+                )
+            if already_closed:
+                LOGGER.info(
+                    "EXIT_SUBMISSION_SKIPPED_CLOSED bracket_id=%s symbol=%s",
+                    bracket_id,
+                    normalized_symbol,
+                )
+                return SubmitExitOrderResult(
+                    False, None, "already_closed", "already_closed",
+                    "broker position already closed", False, {},
+                )
         side = "SELL" if (bracket and bracket.side == "BUY") else "BUY"
         order_type, price, pricing_meta = self._price_exit_order(
             bracket=bracket,
@@ -5297,7 +5319,14 @@ class BracketManager:
         return True
 
     def _sync_exchange_protective_stop(self, bracket: BracketState) -> bool:
-        """Coalesce broker SL ratchets and preserve a modification reserve."""
+        """Serialize canonical exchange-stop ratchets across trailing callbacks."""
+        with self._exchange_stop_modify_mutex:
+            return self._sync_exchange_protective_stop_serialized(bracket)
+
+    def _sync_exchange_protective_stop_serialized(
+        self, bracket: BracketState
+    ) -> bool:
+        """Coalesce monotonic broker SL ratchets and preserve modification budget."""
         with self._lock:
             if (
                 not bracket.active
@@ -5322,6 +5351,13 @@ class BracketManager:
                 * self._exchange_protective_stop_min_ratchet_pct
                 / 100.0,
             )
+            # Once acknowledged, the exchange stop must never be loosened,
+            # even if a concurrent or restored virtual state is behind it.
+            if current_trigger > 0.0 and (
+                (bracket.side == "BUY" and trigger <= current_trigger)
+                or (bracket.side == "SELL" and trigger >= current_trigger)
+            ):
+                return False
             delta = abs(trigger - current_trigger)
 
             if current_trigger > 0.0 and delta + 1e-9 < min_delta:
