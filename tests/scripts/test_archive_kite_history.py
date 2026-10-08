@@ -202,6 +202,7 @@ def test_shared_history_cache_reuses_valid_bytes_between_jobs(tmp_path):
         == next((tmp_path / "two/candles").glob("*.json")).read_bytes()
     )
 
+
 def test_history_universe_matches_canonical_active_expiry_and_option_cap(monkeypatch):
     from scripts.archive_kite_history import history_universe
 
