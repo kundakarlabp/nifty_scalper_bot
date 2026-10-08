@@ -530,3 +530,123 @@ def test_entry_fill_journal_uses_actual_broker_fill_values() -> None:
     assert events[0]["qty"] == 65
     assert events[0]["price"] == 101.5
     assert events[0]["meta"]["broker_confirmed_fill"] is True
+
+
+def test_open_live_entry_reprices_same_order_within_small_budget(monkeypatch) -> None:
+    monkeypatch.setenv("ENTRY_OPEN_REPRICE_ENABLED", "true")
+    monkeypatch.setenv("ENTRY_OPEN_REPRICE_MAX_MODIFICATIONS", "2")
+    monkeypatch.setenv("ENTRY_OPEN_REPRICE_MIN_INTERVAL_SECONDS", "0")
+    monkeypatch.setenv("ENTRY_OPEN_REPRICE_MAX_DEVIATION_PCT", "0.75")
+    manager = _manager(None)
+    manager.is_live_mode = lambda: True
+    quote = {"bid": 100.8, "ask": 101.0, "age_ms": 10.0}
+    manager._get_latest_quote_safe = lambda _symbol: dict(quote)
+    manager._extract_quote_diagnostics = lambda payload: dict(payload)
+    manager._lock = threading.RLock()
+    entry = order_manager_core.OrderDetails(
+        order_id="ENTRY-REPRICE",
+        symbol="NFO:NIFTY2681124500CE",
+        side="BUY",
+        quantity=65,
+        order_type=order_manager_core.OrderType.LIMIT,
+        status=order_manager_core.OrderStatus.SUBMITTED,
+        price=100.5,
+        intent="ENTRY",
+        resolved_lot_size=65,
+    )
+    manager._orders = {entry.order_id: entry}
+    manager._positions = SimpleNamespace(
+        apply_broker_order_update=lambda *_args, **_kwargs: None
+    )
+    manager._register_virtual_bracket_for_fill = lambda *_args, **_kwargs: None
+    manager._confirm_position_protection_for_fill = lambda *_args, **_kwargs: None
+    manager._notify_failed_entry_terminal = lambda *_args, **_kwargs: None
+    manager.save_orders = lambda: None
+    modified: list[tuple[str, dict[str, Any]]] = []
+
+    monkeypatch.setattr(
+        order_manager_core.OrderManager,
+        "modify_order",
+        lambda _self, order_id, **changes: modified.append(
+            (str(order_id), dict(changes))
+        )
+        or True,
+    )
+
+    payload = {
+        "order_id": entry.order_id,
+        "status": "OPEN",
+        "filled_quantity": 0,
+        "pending_quantity": 65,
+    }
+    RuntimeOrderManager._apply_broker_order_update(manager, payload)
+    assert modified == [("ENTRY-REPRICE", {"price": 101.0})]
+    assert entry.price == 101.0
+
+    quote.update({"bid": 101.15, "ask": 101.25})
+    RuntimeOrderManager._apply_broker_order_update(manager, payload)
+    assert modified[-1] == ("ENTRY-REPRICE", {"price": 101.25})
+
+    quote.update({"bid": 101.35, "ask": 101.45})
+    RuntimeOrderManager._apply_broker_order_update(manager, payload)
+    assert len(modified) == 2
+    assert entry.trade_provenance["entry_open_reprice_count"] == 2
+    assert entry.trade_provenance["entry_open_reprice_anchor_price"] == 100.5
+
+
+def test_partially_filled_entry_is_never_repriced(monkeypatch) -> None:
+    monkeypatch.setenv("ENTRY_OPEN_REPRICE_ENABLED", "true")
+    monkeypatch.setenv("ENTRY_OPEN_REPRICE_MIN_INTERVAL_SECONDS", "0")
+    manager = _manager(None)
+    manager.is_live_mode = lambda: True
+    manager._get_latest_quote_safe = lambda _symbol: {
+        "bid": 101.0,
+        "ask": 101.2,
+        "age_ms": 10.0,
+    }
+    manager._extract_quote_diagnostics = lambda payload: dict(payload)
+    manager._lock = threading.RLock()
+    entry = order_manager_core.OrderDetails(
+        order_id="ENTRY-PARTIAL-NO-CHASE",
+        symbol="NFO:NIFTY2681124500CE",
+        side="BUY",
+        quantity=130,
+        order_type=order_manager_core.OrderType.LIMIT,
+        status=order_manager_core.OrderStatus.SUBMITTED,
+        price=100.5,
+        intent="ENTRY",
+        resolved_lot_size=65,
+    )
+    manager._orders = {entry.order_id: entry}
+    manager._positions = SimpleNamespace(
+        apply_broker_order_update=lambda *_args, **_kwargs: None
+    )
+    manager._register_virtual_bracket_for_fill = lambda *_args, **_kwargs: None
+    manager._confirm_position_protection_for_fill = lambda *_args, **_kwargs: None
+    manager._notify_failed_entry_terminal = lambda *_args, **_kwargs: None
+    manager.save_orders = lambda: None
+    modified: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(
+        "nifty_scalper_bot.execution.runtime_order_manager._finalize_partial_entry",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        order_manager_core.OrderManager,
+        "modify_order",
+        lambda _self, order_id, **changes: modified.append(
+            (str(order_id), dict(changes))
+        )
+        or True,
+    )
+
+    RuntimeOrderManager._apply_broker_order_update(
+        manager,
+        {
+            "order_id": entry.order_id,
+            "status": "PARTIALLY FILLED",
+            "filled_quantity": 65,
+            "pending_quantity": 65,
+        },
+    )
+
+    assert modified == []
