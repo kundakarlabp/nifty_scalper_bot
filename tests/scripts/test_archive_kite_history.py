@@ -239,5 +239,4 @@ def test_history_universe_matches_canonical_active_expiry_and_option_cap(monkeyp
     assert selected["pe"] in option_symbols
     assert len(option_symbols) == 8
     assert all("NIFTY26O13" in symbol for symbol in option_symbols)
-    assert not any("NIFTY26O20" in symbol for symbol in option_symbols)
-
+    assert not any("NIFTY26O20" in symbol for symbol in option_symbols)\n
