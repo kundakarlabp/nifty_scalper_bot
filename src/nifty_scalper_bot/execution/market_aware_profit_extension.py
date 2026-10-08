@@ -858,9 +858,7 @@ def _protected_profit_floor(manager: Any, bracket: Any) -> bool:
     # Extending the profit target must not rely on a virtual-only lock while
     # a looser exchange order still owns the actual emergency protection.
     if getattr(bracket, "exchange_stop_order_id", None):
-        broker_stop = _positive(
-            getattr(bracket, "exchange_stop_trigger_price", None)
-        )
+        broker_stop = _positive(getattr(bracket, "exchange_stop_trigger_price", None))
         if broker_stop is None:
             return False
         return (
