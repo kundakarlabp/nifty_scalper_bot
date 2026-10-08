@@ -551,6 +551,8 @@ def test_open_live_entry_reprices_same_order_within_small_budget(monkeypatch) ->
         order_type=order_manager_core.OrderType.LIMIT,
         status=order_manager_core.OrderStatus.SUBMITTED,
         price=100.5,
+        stop_loss=95.0,
+        take_profit=112.0,
         intent="ENTRY",
         resolved_lot_size=65,
     )
