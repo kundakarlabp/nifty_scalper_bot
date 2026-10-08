@@ -1087,6 +1087,14 @@ class SMCStrategy(EliteStrategy):
                 balanced_sweep_depth = 0.12 <= depth_atr <= 0.50
                 if balanced_sweep_depth:
                     reasons.append("balanced_sweep_depth")
+                # Weak sweeps need an independently meaningful structural
+                # or volume corroboration; a simple retest/premium feature
+                # alone is insufficient to validate a shallow liquidity grab.
+                if depth_atr < 0.12 and not (
+                    structure_confirmed or bool(event["volume_confirmation"])
+                ):
+                    self._no_vote("smc_shallow_sweep_unconfirmed")
+                    return None
 
                 local_support_sources = [
                     name
