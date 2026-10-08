@@ -827,3 +827,16 @@ def test_live_strategy_manager_production_wired_fresh_runtime_invokes_once(
     assert strategy.calls == 1
     assert mdm.get_active_contract_basket()["selected_ce"] == "NFO:NIFTY2662324050CE"
     assert set(manager._latest_context_snapshots) >= {"spot_context", "futures_context"}
+
+
+def test_live_option_freshness_resolves_runner_market_data_owner() -> None:
+    class _LiveMdm:
+        @staticmethod
+        def time_since_last_live_ws_tick(_symbol: str) -> float:
+            return 0.25
+
+    mdm = _LiveMdm()
+    manager = SimpleNamespace(_market_data=mdm, _data_hub=None)
+
+    assert guard._market_data_manager(manager) is mdm
+    assert guard._live_option_tick_block(manager, "NFO:NIFTY26JUL25000CE") is None

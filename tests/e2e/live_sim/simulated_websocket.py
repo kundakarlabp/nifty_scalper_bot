@@ -104,8 +104,7 @@ class SimulatedWebSocket:
     def activate(self, symbol: str, token: int) -> SubscriptionProof:
         self.request(symbol, token)
         self.dispatch(symbol, token)
-        self.confirm(symbol, token)
-        return self.mark_first_current_generation_tick(symbol, token)
+        return self.confirm(symbol, token)
 
     def _record(self, symbol: str, token: int, state: str) -> SubscriptionProof:
         generation = getattr(

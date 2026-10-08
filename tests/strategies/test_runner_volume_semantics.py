@@ -57,3 +57,45 @@ def test_runner_falls_back_to_cumulative_when_needed() -> None:
     tick2 = {'volume_traded_today': 1040}
     assert _volume_from_tick(runner, symbol, tick1) == 0
     assert _volume_from_tick(runner, symbol, tick2) == 40
+
+
+def test_intrabar_eval_uses_canonical_interval_volume_delta(monkeypatch) -> None:
+    from nifty_scalper_bot.strategies.runner import StrategyRunner
+
+    runner = StrategyRunner.__new__(StrategyRunner)
+    symbol = "NFO:NIFTY26MAY23500CE"
+    runner._data_phase = {symbol: "LIVE"}
+    runner._active_selected_ce = symbol
+    runner._active_selected_pe = "NFO:NIFTY26MAY23500PE"
+    runner._last_same_bar_eval_ts_by_symbol = {symbol: 100.0}
+    runner._last_eval_price_by_symbol = {symbol: 100.0}
+    runner._last_same_bar_eval_block_reason_by_symbol = {}
+    runner._last_same_bar_eval_block_detail_by_symbol = {
+        symbol: {
+            "spread_now": 1.0,
+            "quote_marker": 7,
+            "volume_now": 100.0,
+        }
+    }
+    runner._required_bars_for_symbol = lambda _symbol: 30
+
+    monkeypatch.setenv("RUNNER_INTRABAR_EVAL_SELECTED_SECONDS", "10")
+    monkeypatch.setenv("RUNNER_INTRABAR_EVAL_MIN_PRICE_MOVE_PCT", "99")
+    monkeypatch.setenv("RUNNER_INTRABAR_SPREAD_DELTA_MIN", "99")
+    monkeypatch.setenv("RUNNER_INTRABAR_VOLUME_DELTA_MIN", "50")
+
+    reason = runner._same_bar_eval_reason(
+        symbol=symbol,
+        price=100.0,
+        tick={
+            "bid": 99.5,
+            "ask": 100.5,
+            "volume_delta": 80,
+            "volume": 80,
+            "quote_update_version": 7,
+        },
+        candle_count=30,
+        now_ts=101.0,
+    )
+
+    assert reason == "same_bar_market_update_eval"

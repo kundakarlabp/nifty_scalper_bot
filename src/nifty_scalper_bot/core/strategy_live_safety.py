@@ -292,9 +292,11 @@ def _latest_underlying_bar_fresh_block(
 
 
 def _market_data_manager(manager: Any) -> Any | None:
-    direct = getattr(manager, "_market_data_manager", None)
-    if direct is not None:
-        return direct
+    """Resolve the canonical MDM from supported runtime owners."""
+    for attr in ("_market_data_manager", "_market_data"):
+        direct = getattr(manager, attr, None)
+        if direct is not None:
+            return direct
     hub = getattr(manager, "_data_hub", None)
     return getattr(hub, "_mdm", None)
 

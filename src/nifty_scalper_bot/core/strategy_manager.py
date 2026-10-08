@@ -2833,6 +2833,15 @@ class StrategyManager(_BaseStrategyManager):
                         # live tick can be evaluated using stale bar direction.
                         for microstructure_key in (
                             "depth",
+                            "depth_available",
+                            "depth_two_sided",
+                            "depth_complete_5x5",
+                            "bid_depth_levels",
+                            "ask_depth_levels",
+                            "bid_depth_qty_5",
+                            "ask_depth_qty_5",
+                            "depth_imbalance_5",
+                            "microprice",
                             "tick_direction",
                             "quote_update_version",
                             "update_version",

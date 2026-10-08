@@ -459,6 +459,13 @@ class OrderFlowStrategy(EliteStrategy):
                 "quote_readiness_allowed": quote_readiness.allowed,
                 "quote_readiness_reason": quote_readiness.reason,
                 "depth_imbalance": round(depth_imbalance, 4),
+                "depth_imbalance_5": _safe_float_value(
+                    indicators.get("depth_imbalance_5")
+                ),
+                "microprice": _safe_float_value(indicators.get("microprice")),
+                "depth_complete_5x5": bool(indicators.get("depth_complete_5x5", False)),
+                "bid_depth_qty_5": _safe_float_value(indicators.get("bid_depth_qty_5")),
+                "ask_depth_qty_5": _safe_float_value(indicators.get("ask_depth_qty_5")),
                 "depth_supports_side": depth_supports_side,
                 "strong_depth_supports_side": strong_depth_supports_side,
                 "depth_conflicts_side": depth_conflicts_side,

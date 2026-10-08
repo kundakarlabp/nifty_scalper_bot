@@ -17,6 +17,11 @@ def test_orderflow_no_missing_depth_when_bid_ask_and_depth_exist() -> None:
         "ask": 101.0,
         "spread_pct": 0.99,
         "depth": {"buy": [{"quantity": 200}], "sell": [{"quantity": 100}]},
+        "depth_imbalance_5": 0.25,
+        "microprice": 100.4,
+        "depth_complete_5x5": False,
+        "bid_depth_qty_5": 500,
+        "ask_depth_qty_5": 300,
         "tick_direction": "UP",
         "direction_bias": "CE",
         "atr": 2.0,
@@ -28,6 +33,10 @@ def test_orderflow_no_missing_depth_when_bid_ask_and_depth_exist() -> None:
     assert signal is not None
     assert getattr(strategy, "last_no_vote_reason", None) != "missing_depth"
     assert signal.metadata["depth_supports_side"] is True
+    assert signal.metadata["depth_imbalance_5"] == 0.25
+    assert signal.metadata["microprice"] == 100.4
+    assert signal.metadata["bid_depth_qty_5"] == 500.0
+    assert signal.metadata["ask_depth_qty_5"] == 300.0
 
 
 def test_option_book_ask_pressure_does_not_earn_depth_confirmation() -> None:
