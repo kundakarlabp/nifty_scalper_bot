@@ -186,8 +186,10 @@ def test_recovery_submit_enriches_rebuilt_plan(monkeypatch) -> None:
     assert result.order_id == "OID-3"
     assert captured["manager"] is manager
     assert captured["plan"] is rebuilt
-    assert rebuilt.trade_provenance["tp1_price"] == 110.0
-    assert rebuilt.trade_provenance["tp1_qty"] == 65
+    assert "tp1_price" not in rebuilt.trade_provenance
+    assert "tp1_qty" not in rebuilt.trade_provenance
+    assert rebuilt.trade_provenance["tp1_status"] == "pending_reanchor"
+    assert rebuilt.trade_provenance["tp1_skip_reason"] == "pending_final_entry"
 
 
 def test_runtime_tp1_cost_gate_uses_final_reanchored_entry(monkeypatch) -> None:
