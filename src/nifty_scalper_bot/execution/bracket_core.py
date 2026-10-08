@@ -345,6 +345,7 @@ class BracketState:
     exchange_stop_limit_price: float | None = None
     exchange_stop_triggered_at: float | None = None
     exchange_stop_degraded_reason: str | None = None
+    exchange_stop_modify_count: int = 0
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
     exit_executed: bool = False
@@ -495,6 +496,7 @@ class BracketState:
             "exchange_stop_limit_price": self.exchange_stop_limit_price,
             "exchange_stop_triggered_at": self.exchange_stop_triggered_at,
             "exchange_stop_degraded_reason": self.exchange_stop_degraded_reason,
+            "exchange_stop_modify_count": self.exchange_stop_modify_count,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "exit_executed": self.exit_executed,
@@ -752,6 +754,30 @@ class BracketManager:
             parse_float_env(
                 os.getenv("EXCHANGE_PROTECTIVE_STOP_GRACE_SECONDS"),
                 1.0,
+            ),
+        )
+        self._exchange_protective_stop_min_ratchet_points = max(
+            0.05,
+            parse_float_env(
+                os.getenv("EXCHANGE_PROTECTIVE_STOP_MIN_RATCHET_POINTS"),
+                0.50,
+            ),
+        )
+        self._exchange_protective_stop_min_ratchet_pct = max(
+            0.0,
+            parse_float_env(
+                os.getenv("EXCHANGE_PROTECTIVE_STOP_MIN_RATCHET_PCT"),
+                0.25,
+            ),
+        )
+        self._exchange_protective_stop_max_modifications = min(
+            20,
+            max(
+                1,
+                parse_int_env(
+                    os.getenv("EXCHANGE_PROTECTIVE_STOP_MAX_MODIFICATIONS"),
+                    20,
+                ),
             ),
         )
 
@@ -5102,6 +5128,7 @@ class BracketManager:
         bracket.exchange_stop_limit_price = None
         bracket.exchange_stop_triggered_at = None
         bracket.exchange_stop_degraded_reason = None
+        bracket.exchange_stop_modify_count = 0
 
     def _ensure_exchange_protective_stop(self, bracket: BracketState) -> bool:
         """Arm exactly one exchange-resident SL-limit for a confirmed live position."""
@@ -5191,6 +5218,7 @@ class BracketManager:
             bracket.exchange_stop_limit_price = limit_price
             bracket.exchange_stop_triggered_at = None
             bracket.exchange_stop_degraded_reason = None
+            bracket.exchange_stop_modify_count = 0
             if stop_id not in bracket.linked_exit_order_ids:
                 bracket.linked_exit_order_ids.append(stop_id)
             self._order_to_entry[stop_id] = bracket.entry_order_id
@@ -5221,15 +5249,77 @@ class BracketManager:
         return True
 
     def _sync_exchange_protective_stop(self, bracket: BracketState) -> bool:
-        """Ratchet the resting broker SL to the canonical virtual stop."""
+        """Coalesce broker SL ratchets and preserve a modification reserve."""
         with self._lock:
             order_id = str(bracket.exchange_stop_order_id or "").strip()
             if not order_id:
                 return False
+            current_trigger = float(bracket.exchange_stop_trigger_price or 0.0)
             trigger, limit_price = self._exchange_stop_prices(
                 bracket,
                 bracket.sl_trigger_price,
             )
+            modify_count = max(0, int(bracket.exchange_stop_modify_count or 0))
+            max_modifications = self._exchange_protective_stop_max_modifications
+            min_delta = max(
+                self._exchange_protective_stop_min_ratchet_points,
+                abs(current_trigger)
+                * self._exchange_protective_stop_min_ratchet_pct
+                / 100.0,
+            )
+            delta = abs(trigger - current_trigger)
+
+            if current_trigger > 0.0 and delta + 1e-9 < min_delta:
+                LOGGER.debug(
+                    "EXCHANGE_PROTECTIVE_STOP_COALESCED order_id=%s symbol=%s "
+                    "current_trigger=%s desired_trigger=%s delta=%.4f min_delta=%.4f",
+                    order_id,
+                    bracket.symbol,
+                    current_trigger,
+                    trigger,
+                    delta,
+                    min_delta,
+                    extra={
+                        "event": "EXCHANGE_PROTECTIVE_STOP_COALESCED",
+                        "order_id": order_id,
+                        "symbol": bracket.symbol,
+                        "current_trigger_price": current_trigger,
+                        "desired_trigger_price": trigger,
+                        "delta": delta,
+                        "min_delta": min_delta,
+                        "modify_count": modify_count,
+                        "max_modifications": max_modifications,
+                    },
+                )
+                return False
+
+            if modify_count >= max_modifications:
+                bracket.exchange_stop_degraded_reason = "modify_budget_exhausted"
+                bracket.updated_at = time.time()
+                LOGGER.warning(
+                    "EXCHANGE_PROTECTIVE_STOP_MODIFY_BUDGET_EXHAUSTED "
+                    "order_id=%s symbol=%s count=%s max=%s "
+                    "current_trigger=%s desired_trigger=%s",
+                    order_id,
+                    bracket.symbol,
+                    modify_count,
+                    max_modifications,
+                    current_trigger,
+                    trigger,
+                    extra={
+                        "event": "EXCHANGE_PROTECTIVE_STOP_MODIFY_BUDGET_EXHAUSTED",
+                        "order_id": order_id,
+                        "symbol": bracket.symbol,
+                        "modify_count": modify_count,
+                        "max_modifications": max_modifications,
+                        "current_trigger_price": current_trigger,
+                        "desired_trigger_price": trigger,
+                    },
+                )
+                with suppress(Exception):
+                    self.save_state()
+                return False
+
         modifier = getattr(self.order_manager, "modify_order", None)
         if not callable(modifier):
             with self._lock:
@@ -5256,6 +5346,7 @@ class BracketManager:
             if modified:
                 bracket.exchange_stop_trigger_price = trigger
                 bracket.exchange_stop_limit_price = limit_price
+                bracket.exchange_stop_modify_count = modify_count + 1
                 bracket.exchange_stop_degraded_reason = None
             else:
                 bracket.exchange_stop_degraded_reason = "modify_failed"
@@ -5263,17 +5354,21 @@ class BracketManager:
         if modified:
             LOGGER.info(
                 "EXCHANGE_PROTECTIVE_STOP_RATCHETED order_id=%s symbol=%s "
-                "trigger=%s limit=%s",
+                "trigger=%s limit=%s count=%s/%s",
                 order_id,
                 bracket.symbol,
                 trigger,
                 limit_price,
+                modify_count + 1,
+                max_modifications,
                 extra={
                     "event": "EXCHANGE_PROTECTIVE_STOP_RATCHETED",
                     "order_id": order_id,
                     "symbol": bracket.symbol,
                     "trigger_price": trigger,
                     "limit_price": limit_price,
+                    "modify_count": modify_count + 1,
+                    "max_modifications": max_modifications,
                 },
             )
         with suppress(Exception):
@@ -5641,6 +5736,9 @@ class BracketManager:
             exchange_stop_degraded_reason=(
                 str(payload.get("exchange_stop_degraded_reason") or "").strip()
                 or None
+            ),
+            exchange_stop_modify_count=max(
+                0, int(payload.get("exchange_stop_modify_count") or 0)
             ),
             created_at=finite_float(
                 "created at", payload.get("created_at", time.time())
