@@ -363,8 +363,10 @@ class OrderFlowStrategy(EliteStrategy):
                     "quote_update_version"
                 )
                 try:
-                    quote_version = int(float(raw_version))
-                except (TypeError, ValueError):
+                    quote_version = (
+                        int(float(raw_version)) if raw_version is not None else 0
+                    )
+                except (TypeError, ValueError, OverflowError):
                     quote_version = 0
                 now = time.monotonic()
                 previous = self._last_live_depth_support.get(symbol)
