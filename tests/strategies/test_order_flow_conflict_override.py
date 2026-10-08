@@ -6,6 +6,7 @@ microstructure independently confirms the candidate option side.
 
 import pytest
 
+import nifty_scalper_bot.strategies.elite_strategies.order_flow as order_flow_module
 from nifty_scalper_bot.strategies.elite_strategies.config_models import (
     OrderFlowStrategyConfig,
 )
@@ -85,7 +86,20 @@ def test_persistent_microstructure_cannot_override_underlying_direction(
 
 def test_aligned_direction_and_microstructure_publish_confirmation(monkeypatch, strat):
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
-    sig = _eval(strat, "NFO:NIFTY26MAY24000CE", _ind("CE", "UP", buy=400, sell=80))
+    now = [100.0]
+    monkeypatch.setattr(order_flow_module.time, "monotonic", lambda: now[0])
+    first = _eval(
+        strat,
+        "NFO:NIFTY26MAY24000CE",
+        _ind("CE", "UP", buy=400, sell=80, quote_update_version=1),
+    )
+    assert first.metadata["effective_context_alignment"] is False
+    now[0] = 101.1
+    sig = _eval(
+        strat,
+        "NFO:NIFTY26MAY24000CE",
+        _ind("CE", "UP", buy=400, sell=80, quote_update_version=2),
+    )
 
     assert sig.metadata["trigger_conditions_met"] is False
     assert sig.metadata["trigger_block_reason"] == "context_only_role"
