@@ -903,6 +903,12 @@ def _ratchet_stop(
             "reason": reason,
         },
     )
+    # The virtual stop is not the broker's resting stop. Commit the virtual
+    # ratchet first, then synchronize through BracketManager's single broker
+    # modification authority without holding its state lock over network I/O.
+    synchronizer = getattr(manager, "_sync_exchange_protective_stop", None)
+    if callable(synchronizer):
+        synchronizer(bracket)
     return True
 
 
