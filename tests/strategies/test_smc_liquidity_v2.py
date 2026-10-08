@@ -633,3 +633,69 @@ def test_same_confirmation_bar_reuses_identity_until_entry_is_accepted(
 
     assert strategy.generate_signal(CE, indicators, 103.0) is None
     assert strategy.last_no_vote_reason == "smc_duplicate_confirmation_bar"
+
+
+def test_live_smc_rejects_stale_confirmed_setup_after_multiple_bars(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("SMC_CONFIRMED_VOTE_MAX_SECONDS", "120")
+    rows = _base_rows()
+    strategy = _strategy(rows)
+    rows.append(_bar(30, open_=23988, high=23991, low=23974, close=23984, volume=2500))
+    assert (
+        strategy.generate_signal(
+            CE, _indicators(latest_bar_ts=rows[-1]["timestamp"]), 138.60
+        )
+        is None
+    )
+    rows.append(_bar(31, open_=23984, high=24000, low=23982, close=23998, volume=2200))
+    first = strategy.generate_signal(
+        CE, _indicators(latest_bar_ts=rows[-1]["timestamp"]), 138.60
+    )
+    assert first is not None
+
+    rows.append(_bar(32, open_=23994, high=24005, low=23992, close=24002, volume=2100))
+    within_window = strategy.generate_signal(
+        CE, _indicators(latest_bar_ts=rows[-1]["timestamp"]), 137.0
+    )
+    assert within_window is not None
+    assert within_window.metadata["setup_id"] == first.metadata["setup_id"]
+
+    rows.extend(
+        [
+            _bar(33, open_=23995, high=24006, low=23993, close=24003),
+            _bar(34, open_=23996, high=24007, low=23994, close=24004),
+        ]
+    )
+    assert (
+        strategy.generate_signal(
+            CE, _indicators(latest_bar_ts=rows[-1]["timestamp"]), 136.0
+        )
+        is None
+    )
+    assert strategy.last_no_vote_reason == "smc_confirmed_vote_expired"
+
+
+def test_live_smc_declining_premium_past_initial_risk_invalidates_setup(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    rows = _base_rows()
+    rows.append(_bar(30, open_=24012, high=24027, low=24009, close=24017, volume=2400))
+    strategy = _strategy(rows)
+    assert (
+        strategy.generate_signal(
+            PE, _indicators("PE", latest_bar_ts=rows[-1]["timestamp"]), 138.60
+        )
+        is None
+    )
+    rows.append(_bar(31, open_=24017, high=24019, low=23999, close=24001, volume=2200))
+    context = _indicators("PE", latest_bar_ts=rows[-1]["timestamp"])
+    signal = strategy.generate_signal(PE, context, 138.60)
+    assert signal is not None
+    assert strategy.generate_signal(PE, context, 134.65) is not None
+    assert strategy.generate_signal(PE, context, 131.55) is None
+    assert strategy.last_no_vote_reason == "smc_pre_entry_premium_invalidated"
+    # The same underlying confirmation cannot be silently re-armed.
+    assert strategy.generate_signal(PE, context, 131.55) is None
