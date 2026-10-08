@@ -149,9 +149,7 @@ def test_live_tick_only_depth_confirmation_needs_two_distinct_fresh_snapshots(
     clock = [100.0]
     monkeypatch.setattr(order_flow_module.time, "monotonic", lambda: clock[0])
     strategy = _strategy()
-    indicators = _indicators(
-        buy=250.0, sell=100.0, ofi_value=0.0, supports=True
-    )
+    indicators = _indicators(buy=250.0, sell=100.0, ofi_value=0.0, supports=True)
     indicators.pop("_expected_support")
     indicators["ofi_ready"] = False
 
