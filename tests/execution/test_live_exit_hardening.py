@@ -1001,6 +1001,45 @@ def test_bracket_flat_nonterminal_timing_round_trips_without_monotonic(tmp_path)
     assert restored.flat_nonterminal_since_monotonic is None
 
 
+def test_simultaneous_entry_callbacks_arm_only_one_exchange_stop(monkeypatch) -> None:
+    from threading import Event, Thread
+
+    manager, order_manager, _broker = _manager()
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    bracket.entry_confirmed = True
+    bracket.active = True
+    manager._exchange_protective_stop_enabled = True
+    monkeypatch.setattr(manager, "_is_live_execution", lambda: True)
+    entered = Event()
+    release = Event()
+    submitted: list[str] = []
+
+    def slow_place(**kwargs: Any) -> str:
+        entered.set()
+        assert release.wait(2.0)
+        submitted.append(kwargs["order_type"])
+        return f"broker-stop-{len(submitted)}"
+
+    monkeypatch.setattr(order_manager, "place_order", slow_place)
+    first = Thread(target=manager._ensure_exchange_protective_stop, args=(bracket,))
+    first.start()
+    try:
+        assert entered.wait(1.0)
+        second = Thread(target=manager._ensure_exchange_protective_stop, args=(bracket,))
+        second.start()
+        time.sleep(0.05)
+    finally:
+        release.set()
+    first.join(timeout=2.0)
+    second.join(timeout=2.0)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert submitted == ["SL"]
+    assert bracket.exchange_stop_order_id == "broker-stop-1"
+
+
 def test_escalation_never_sends_second_market_order_without_confirmed_cancel() -> None:
     manager, order_manager, broker = _manager(cancel_confirms=False)
     bracket = manager.get_bracket("entry-1")
