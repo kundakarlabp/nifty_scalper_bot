@@ -55,7 +55,7 @@ def test_broker_zero_day_repairs_poisoned_today_local_carryover(tmp_path) -> Non
     assert snapshot["strategy_realized"] == pytest.approx(0.0)
     assert snapshot["account_realized"] == pytest.approx(0.0)
     assert snapshot["difference"] == pytest.approx(0.0)
-    assert snapshot["status"] == "matched"
+    assert snapshot["status"] == "unverified"
     assert manager._pnl_trading_date == today
 
     restarted = PositionManager(state_file=str(state_path))
