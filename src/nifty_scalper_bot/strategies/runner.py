@@ -176,6 +176,8 @@ from nifty_scalper_bot.utils.log_throttle import (
 )
 from nifty_scalper_bot.utils.logging import LogThrottle, get_logger, log_throttled
 from nifty_scalper_bot.utils.market_hours import (
+    SAFE_END,
+    SAFE_START,
     MarketState,
     allow_offhours_testing_safe,
     get_market_state,
@@ -212,6 +214,19 @@ _CONTEXT_HISTORY_PROBE_INTERVAL_SECONDS = 5.0
 _CONTEXT_TARGET_REQUEST_INTERVAL_SECONDS = 30.0
 _CANDIDATE_RANK_MISSING_TICK_AGE_MS = 999000.0
 _IST = ZoneInfo("Asia/Kolkata")
+
+
+def _signal_frequency_window_elapsed(now_ts: float) -> bool:
+    """Alert only after a full canonical entry hour, never in premarket."""
+    now_ist = datetime.fromtimestamp(now_ts, _IST)
+    session_start = now_ist.replace(
+        hour=SAFE_START.hour, minute=SAFE_START.minute, second=0, microsecond=0
+    )
+    return (
+        SAFE_START <= now_ist.time() <= SAFE_END
+        and now_ts - session_start.timestamp() >= 3600.0
+    )
+
 
 _TRUE_VALUES = {"1", "true", "yes", "y", "on", "enable", "enabled"}
 _FALSE_VALUES = {"0", "false", "no", "n", "off", "disable", "disabled"}
@@ -16375,7 +16390,10 @@ class StrategyRunner:
                             for signal_ts in self._signals_last_hour
                             if now_ts - signal_ts <= 3600
                         )
-                        if signals_last_60m < 2:
+                        if (
+                            signals_last_60m < 2
+                            and _signal_frequency_window_elapsed(now_ts)
+                        ):
                             self._logger.warning(
                                 "Low signal frequency detected (%s in last hour)",
                                 signals_last_60m,
