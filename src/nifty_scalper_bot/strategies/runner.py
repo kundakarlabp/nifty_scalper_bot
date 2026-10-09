@@ -11010,6 +11010,15 @@ class StrategyRunner:
         if fut_ctx:
             output["futures_context"] = fut_ctx
             output["futures_fresh"] = fut_fresh
+        if spot_ctx or fut_ctx:
+            # Clear any earlier option/runtime directional conclusion when the
+            # current authoritative snapshots cannot resolve a direction.
+            output.update(
+                direction_bias=None,
+                underlying_direction_bias=None,
+                underlying_direction_confidence=None,
+                context_fresh=spot_fresh or fut_fresh,
+            )
         if (
             spot_fresh
             and fut_fresh
