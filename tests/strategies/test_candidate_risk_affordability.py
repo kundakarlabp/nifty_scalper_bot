@@ -328,3 +328,53 @@ def test_trade_selector_exposes_cost_floor_as_diagnostic_metadata(
     assert ranked
     assert snapshot["candidate_min_risk_distance"] > 0.0
     assert snapshot["candidate_gross_rr"] == pytest.approx(2.0)
+
+
+def test_runner_reuses_current_net_day_loss_across_ranked_candidates() -> None:
+    """Live candidate selection refreshes P&L once, not once per fallback."""
+    runner = object.__new__(StrategyRunner)
+    runner._logger = _Logger()
+    runner._order_manager = _order_manager(balance=11_000.65)
+    risk = runner._order_manager._risk_manager
+    risk._switches.max_day_loss = 558.645
+    calls: list[int] = []
+
+    def refresh_risk():
+        calls.append(1)
+        return SimpleNamespace(max_day_loss=558.645, day_loss=241.527189)
+
+    risk.snapshot = refresh_risk
+    runner._data_hub = SimpleNamespace(
+        get_available_balance=lambda force=False: 11_000.65
+    )
+    runner._risk_manager = SimpleNamespace(available_balance=11_000.65)
+    runner._is_symbol_execution_ready = lambda _symbol: True
+    runner._ensure_symbol_execution_ready_for_order = lambda _symbol, trace_id=None: (
+        True
+    )
+    primary = SimpleNamespace(
+        symbol="NFO:NIFTY2691523500CE", entry_price=134.55, stop_loss=130.10
+    )
+    fallback = SimpleNamespace(
+        symbol="NFO:NIFTY2691523450CE", entry_price=134.25, stop_loss=129.80
+    )
+    selected, decisions = runner._select_capital_eligible_candidate(
+        ranked_candidates=[fallback, primary],
+        candidate_snapshots=[
+            {"symbol": primary.symbol, "bid": 134.45, "ask": 134.55},
+            {"symbol": fallback.symbol, "bid": 134.15, "ask": 134.25},
+        ],
+        is_live_mode=True,
+        trace_id="stale-day-budget-20261009",
+        preferred_symbol=primary.symbol,
+        preferred_entry_price=134.55,
+        preferred_stop_loss=130.10,
+    )
+
+    assert calls == [1]
+    assert selected is None
+    assert all(item["capacity_blocker"] == "risk" for item in decisions.values())
+    assert all(
+        item["remaining_daily_risk_budget"] == pytest.approx(317.117811)
+        for item in decisions.values()
+    )
