@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from nifty_scalper_bot.execution.order_manager_core import OrderManager
@@ -11,7 +10,7 @@ from nifty_scalper_bot.execution.order_manager_core import OrderManager
 SYMBOL = "NFO:NIFTY26O1322450CE"
 
 
-def _guard_fixture() -> tuple[SimpleNamespace, MagicMock]:
+def _guard_fixture() -> tuple[MagicMock, MagicMock]:
     bracket = MagicMock()
     bracket.is_symbol_managed.return_value = False
     bracket.get_bracket.return_value = None
@@ -19,7 +18,7 @@ def _guard_fixture() -> tuple[SimpleNamespace, MagicMock]:
     broker.get_positions.return_value = [
         {"symbol": SYMBOL, "quantity": 65, "average_price": 144.15}
     ]
-    manager = SimpleNamespace(
+    manager = MagicMock(
         _bracket_manager=bracket,
         _market_data=None,
         _data_hub=None,
@@ -68,7 +67,7 @@ def test_concurrent_canonical_owner_wins_without_phantom_guard() -> None:
 
 def test_guard_reports_attached_only_after_confirmed_activation() -> None:
     manager, bracket = _guard_fixture()
-    bracket.get_bracket.return_value = SimpleNamespace(entry_confirmed=True)
+    bracket.get_bracket.return_value = MagicMock(entry_confirmed=True)
 
     assert OrderManager.guard_orphan_position(manager, SYMBOL, 65, 144.15) is True
     bracket.confirm_entry_fill.assert_called_once()
