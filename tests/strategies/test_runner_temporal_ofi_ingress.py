@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from types import SimpleNamespace
 
 import pytest
 
@@ -55,6 +56,86 @@ def test_runner_tick_ingress_builds_one_second_ofi_before_strategy_eval() -> Non
     assert snapshot["ofi_update_count_1s"] == 2
     assert snapshot["ofi_1s_normalized"] > 0.0
     assert snapshot["ofi_source"] == "runner_datahub_tick_updates"
+
+
+def test_runner_uses_same_tick_ws_quote_book_for_temporal_ofi() -> None:
+    """Sparse callbacks may borrow ONLY the matching authoritative FULL book."""
+    runner = object.__new__(StrategyRunner)
+    runner._temporal_ofi = TemporalOfiAccumulator()
+    runner._logger = logging.getLogger("test_runner_temporal_ofi")
+    live_quote: dict[str, object] = {}
+    runner._data_hub = SimpleNamespace(
+        get_quote=lambda symbol, allow_pull=False: (
+            dict(live_quote) if symbol == SYMBOL and not allow_pull else None
+        )
+    )
+    snapshot: dict[str, object] = {}
+    for version, buy_qty in ((1, 100.0), (2, 140.0), (3, 160.0)):
+        ts_ms = 1791500000000 + version * 200
+        live_quote.clear()
+        live_quote.update(
+            {
+                **_tick(version=version, buy=buy_qty, sell=100.0),
+                "source": "ws",
+                "instrument_token": 123,
+                "timestamp_ms": ts_ms,
+            }
+        )
+        snapshot = runner._with_temporal_ofi(
+            SYMBOL,
+            {
+                "symbol": SYMBOL,
+                "source": "ws",
+                "instrument_token": 123,
+                "quote_update_version": version,
+                "timestamp_ms": ts_ms,
+                "ltp": 100.0,
+            },
+            observed_at=10.0 + version * 0.2,
+        )
+
+    assert snapshot["ofi_ready"] is True
+    assert snapshot["ofi_update_count_1s"] == 2
+    assert snapshot["ofi_1s"] == pytest.approx(60.0)
+    assert "depth" not in snapshot
+
+
+@pytest.mark.parametrize("invalid", ["version", "timestamp", "source", "token"])
+def test_runner_rejects_mismatched_quote_book_for_temporal_ofi(invalid: str) -> None:
+    """A later, stale, polling or foreign-token quote cannot supply live OFI."""
+    runner = object.__new__(StrategyRunner)
+    runner._temporal_ofi = TemporalOfiAccumulator()
+    runner._logger = logging.getLogger("test_runner_temporal_ofi")
+    live_quote: dict[str, object] = {}
+    runner._data_hub = SimpleNamespace(
+        get_quote=lambda symbol, allow_pull=False: dict(live_quote)
+    )
+    for version, buy_qty in ((1, 100.0), (2, 140.0), (3, 160.0)):
+        ts_ms = 1791500000000 + version * 200
+        live_quote.clear()
+        live_quote.update(
+            {
+                **_tick(version=version, buy=buy_qty, sell=100.0),
+                "source": "rest" if invalid == "source" else "ws",
+                "instrument_token": 456 if invalid == "token" else 123,
+                "timestamp_ms": ts_ms + (2000 if invalid == "timestamp" else 0),
+                "quote_update_version": version + (1 if invalid == "version" else 0),
+            }
+        )
+        snapshot = runner._with_temporal_ofi(
+            SYMBOL,
+            {
+                "symbol": SYMBOL,
+                "source": "ws",
+                "instrument_token": 123,
+                "quote_update_version": version,
+                "timestamp_ms": ts_ms,
+                "ltp": 100.0,
+            },
+            observed_at=10.0 + version * 0.2,
+        )
+        assert snapshot["ofi_ready"] is False
+        assert snapshot["ofi_update_count_1s"] == 0
 
 
 def test_runner_ofi_deduplicates_versions_and_resets_after_gap() -> None:
