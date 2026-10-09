@@ -4694,6 +4694,8 @@ class StrategyRunner:
         if is_live_mode and has_materialized_plan and callable(snapshot_reader):
             try:
                 risk_snapshot = snapshot_reader()
+                if risk_snapshot is None:
+                    risk_snapshot = object()
             except Exception:
                 # A missing authoritative risk read blocks planned candidates.
                 # Never silently fall back to switches that may lag broker P&L.
