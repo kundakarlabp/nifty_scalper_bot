@@ -7883,6 +7883,29 @@ class StrategyRunner:
                     observed_at=observed_at,
                 )
             )
+            if payload.get("ofi_update_count_1s") == 0 and symbol.endswith(("CE", "PE")):
+                book_depth = book_tick.get("depth")
+                two_sided_book = bool(
+                    isinstance(book_depth, Mapping)
+                    and book_depth.get("buy")
+                    and book_depth.get("sell")
+                )
+                log_throttled(
+                    self._logger,
+                    f"temporal_ofi_book_input:{symbol}",
+                    "TEMPORAL_OFI_INPUT symbol=%s source=%s two_sided_book=%s "
+                    "bid_ask=%s quote_version=%s updates_1s=0",
+                    symbol,
+                    book_tick.get("source"),
+                    two_sided_book,
+                    bool(
+                        (book_tick.get("bid") or book_tick.get("best_bid"))
+                        and (book_tick.get("ask") or book_tick.get("best_ask"))
+                    ),
+                    payload.get("quote_update_version"),
+                    interval_sec=60.0,
+                    level=logging.INFO,
+                )
         except Exception as exc:
             self._logger.debug(
                 "TEMPORAL_OFI_UPDATE_FAILED symbol=%s error=%s",
