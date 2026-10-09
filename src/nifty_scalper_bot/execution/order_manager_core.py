@@ -12456,9 +12456,7 @@ class OrderManager:
         return OrderStatus.SUBMITTED
 
     @staticmethod
-    def _parse_order_type_token(
-        raw_type: Any, *, strict: bool = False
-    ) -> OrderType:
+    def _parse_order_type_token(raw_type: Any, *, strict: bool = False) -> OrderType:
         if isinstance(raw_type, OrderType):
             return raw_type
         if raw_type is None:
