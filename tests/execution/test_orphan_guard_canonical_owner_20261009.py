@@ -1,6 +1,5 @@
 """Guard must not invent a second bracket while a real owner exists."""
 
-
 SYMBOL = "NFO:NIFTY26O1322450CE"
 
 
