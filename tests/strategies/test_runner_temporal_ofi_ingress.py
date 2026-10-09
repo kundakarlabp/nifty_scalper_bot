@@ -342,6 +342,7 @@ def test_late_update_does_not_replace_fresher_ofi_baseline() -> None:
     assert current["ofi_event"] == 20.0
     assert current["ofi_1s"] == 60.0
 
+
 def test_sparse_ws_book_does_not_destroy_recent_verified_ofi_history() -> None:
     """Interleaved LTP-only ticks must not erase verified FULL book transitions."""
     accumulator = TemporalOfiAccumulator()
