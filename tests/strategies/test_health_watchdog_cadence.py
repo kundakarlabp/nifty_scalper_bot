@@ -208,9 +208,7 @@ def test_zero_signal_alert_requires_full_live_entry_hour() -> None:
     assert not _signal_frequency_window_elapsed(
         (start + timedelta(minutes=59, seconds=59)).timestamp()
     )
-    assert _signal_frequency_window_elapsed(
-        (start + timedelta(hours=1)).timestamp()
-    )
+    assert _signal_frequency_window_elapsed((start + timedelta(hours=1)).timestamp())
     assert not _signal_frequency_window_elapsed(
         (end + timedelta(seconds=1)).timestamp()
     )
