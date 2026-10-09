@@ -7685,42 +7685,31 @@ class MarketDataManager:
             instance_nonce = time.monotonic_ns()
             self._slow_tick_log_instance_nonce = instance_nonce
         key = f"tick_stage_slow:{instance_nonce}:{metric_key}"
+        oldest_ms = (
+            None if oldest_pending_age_ms is None else round(oldest_pending_age_ms, 3)
+        )
+        loop_thread = "unknown" if event_loop_thread is None else event_loop_thread
+        awaited_ms = None if worker_wait_ms is None else round(worker_wait_ms, 3)
+        other_ms = (
+            None
+            if worker_wait_ms is None
+            else round(max(0.0, duration_ms - worker_wait_ms), 3)
+        )
+        message = (
+            f"TICK_STAGE_SLOW stage={stage} callback={callback_name} "
+            f"symbol={symbol} duration_ms={duration_ms:.3f} "
+            f"occurrence_count={occurrence_count} "
+            f"max_duration_ms={max_duration_ms:.3f} "
+            f"worst_symbol={worst_symbol} pending_ticks={pending_ticks} "
+            f"oldest_pending_age_ms={oldest_ms} drain_active={drain_active} "
+            f"source={source} thread_id={thread_id} "
+            f"event_loop_thread={loop_thread} awaited_worker_ms={awaited_ms} "
+            f"loop_overhead_ms={other_ms} ticks_processed={ticks_processed}"
+        )
         log_throttled(
             self._logger,
             key,
-            (
-                "TICK_STAGE_SLOW stage=%s callback=%s symbol=%s "
-                "duration_ms=%.3f occurrence_count=%d max_duration_ms=%.3f "
-                "worst_symbol=%s pending_ticks=%d oldest_pending_age_ms=%s "
-                "drain_active=%d source=%s thread_id=%s "
-                "event_loop_thread=%s awaited_worker_ms=%s "
-                "loop_overhead_ms=%s ticks_processed=%s"
-            ) % (
-                stage,
-                callback_name,
-                symbol,
-                duration_ms,
-                occurrence_count,
-                max_duration_ms,
-                worst_symbol,
-                pending_ticks,
-                (
-                    None
-                    if oldest_pending_age_ms is None
-                    else round(oldest_pending_age_ms, 3)
-                ),
-                drain_active,
-                source,
-                thread_id,
-                "unknown" if event_loop_thread is None else event_loop_thread,
-                None if worker_wait_ms is None else round(worker_wait_ms, 3),
-                (
-                    None
-                    if worker_wait_ms is None
-                    else round(max(0.0, duration_ms - worker_wait_ms), 3)
-                ),
-                ticks_processed,
-            ),
+            message,
             interval_sec=60.0,
             level=logging.WARNING,
             extra={
