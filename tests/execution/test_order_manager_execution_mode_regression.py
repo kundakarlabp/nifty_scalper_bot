@@ -767,16 +767,18 @@ def test_unknown_persisted_order_type_is_not_reinterpreted_as_market(tmp_path) -
     path = tmp_path / "order_history.json"
     path.write_text(
         json.dumps(
-            [{
-                "order_id": "unknown-123",
-                "symbol": "NFO:NIFTY26O1322450CE",
-                "side": "SELL",
-                "order_type": "UNRECOGNISED_BROKER_TYPE",
-                "quantity": 65,
-                "price": 95.0,
-                "status": "submitted",
-                "timestamp": "2026-10-09T07:00:00+00:00",
-            }]
+            [
+                {
+                    "order_id": "unknown-123",
+                    "symbol": "NFO:NIFTY26O1322450CE",
+                    "side": "SELL",
+                    "order_type": "UNRECOGNISED_BROKER_TYPE",
+                    "quantity": 65,
+                    "price": 95.0,
+                    "status": "submitted",
+                    "timestamp": "2026-10-09T07:00:00+00:00",
+                }
+            ]
         ),
         encoding="utf-8",
     )
