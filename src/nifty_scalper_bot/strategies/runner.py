@@ -11010,6 +11010,17 @@ class StrategyRunner:
         if fut_ctx:
             output["futures_context"] = fut_ctx
             output["futures_fresh"] = fut_fresh
+        if (
+            spot_fresh
+            and fut_fresh
+            and spot_bias in {"CE", "PE"}
+            and fut_bias in {"CE", "PE"}
+            and spot_bias != fut_bias
+        ):
+            # Both live underlying authorities disagree. The downstream
+            # arbitrator must see the conflict, never a spot-first bias.
+            output["direction_context_conflict"] = True
+            return output
         if spot_fresh and spot_bias in {"CE", "PE"}:
             selected_ctx, selected_bias, selected_age = spot_ctx, spot_bias, spot_age
         elif fut_fresh and fut_bias in {"CE", "PE"}:
