@@ -58,7 +58,8 @@ def test_runner_tick_ingress_builds_one_second_ofi_before_strategy_eval() -> Non
     assert snapshot["ofi_source"] == "runner_datahub_tick_updates"
 
 
-def test_runner_uses_same_tick_ws_quote_book_for_temporal_ofi() -> None:
+@pytest.mark.parametrize("source", ["ws", "ws_full"])
+def test_runner_uses_same_tick_ws_quote_book_for_temporal_ofi(source: str) -> None:
     """Sparse callbacks may borrow ONLY the matching authoritative FULL book."""
     runner = object.__new__(StrategyRunner)
     runner._temporal_ofi = TemporalOfiAccumulator()
@@ -76,7 +77,7 @@ def test_runner_uses_same_tick_ws_quote_book_for_temporal_ofi() -> None:
         live_quote.update(
             {
                 **_tick(version=version, buy=buy_qty, sell=100.0),
-                "source": "ws",
+                "source": source,
                 "instrument_token": 123,
                 "timestamp_ms": ts_ms,
             }
@@ -85,7 +86,7 @@ def test_runner_uses_same_tick_ws_quote_book_for_temporal_ofi() -> None:
             SYMBOL,
             {
                 "symbol": SYMBOL,
-                "source": "ws",
+                "source": source,
                 "instrument_token": 123,
                 "quote_update_version": version,
                 "timestamp_ms": ts_ms,
