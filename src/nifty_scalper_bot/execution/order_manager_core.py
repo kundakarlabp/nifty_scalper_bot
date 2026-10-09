@@ -12460,9 +12460,7 @@ class OrderManager:
         return OrderStatus.SUBMITTED
 
     @staticmethod
-    def _parse_order_type_token(
-        raw_type: Any, *, strict: bool = False
-    ) -> OrderType:
+    def _parse_order_type_token(raw_type: Any, *, strict: bool = False) -> OrderType:
         """Normalize internal and Zerodha order types without downgrading stops."""
         if isinstance(raw_type, OrderType):
             return raw_type
