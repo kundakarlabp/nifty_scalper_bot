@@ -212,3 +212,21 @@ def test_zero_signal_alert_requires_full_live_entry_hour() -> None:
     assert not _signal_frequency_window_elapsed(
         (end + timedelta(seconds=1)).timestamp()
     )
+
+
+def test_zero_signal_alert_waits_for_full_post_restart_observation_hour() -> None:
+    """A midday restart cannot report one full observed hour of zero signals."""
+    entry_start = datetime.combine(date(2026, 10, 9), SAFE_START, tzinfo=IST)
+    restarted_at = entry_start + timedelta(hours=3)
+    assert not _signal_frequency_window_elapsed(
+        (restarted_at + timedelta(minutes=20)).timestamp(),
+        observation_started_at=restarted_at.timestamp(),
+    )
+    assert not _signal_frequency_window_elapsed(
+        (restarted_at + timedelta(minutes=59, seconds=59)).timestamp(),
+        observation_started_at=restarted_at.timestamp(),
+    )
+    assert _signal_frequency_window_elapsed(
+        (restarted_at + timedelta(hours=1)).timestamp(),
+        observation_started_at=restarted_at.timestamp(),
+    )
