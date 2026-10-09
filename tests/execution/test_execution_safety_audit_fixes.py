@@ -1853,4 +1853,3 @@ def test_restart_order_and_broker_open_order_keep_sl_semantics() -> None:
                     "status": "submitted",
                 }
             )
-
