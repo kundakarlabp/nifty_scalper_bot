@@ -207,6 +207,20 @@ Use `diagnosing-trading-bugs` plus `tdd-trading-changes`.
 
 Typical fingerprint: acknowledgement/request quantity is interpreted as a fill, partial/rejected/cancelled state becomes success, or bracket state diverges from reconciled position state.
 
+### LIFE-001 — Strategy stop prematurely tears down shared market data
+
+**Failure signature:** `MDM_TICK_TASK_CANCEL_DEFERRED_RUNNING_LOOP` and
+`MDM_TICK_TASK_SHUTDOWN_UNSETTLED` on graceful production redeploy.
+
+**Root mechanism:** The runner previously called synchronous `MDM.stop()`
+before the application lifecycle could await `MDM.async_stop()`.
+
+**Prevention:** The runner unsubscribes and stops its own workers only.
+The application shutdown owns and awaits the shared MDM exactly once.
+Keep `test_runner_stop_leaves_shared_mdm_for_async_lifecycle_owner` green.
+
+**Earliest detector:** Focused strategy lifecycle test and broker-free CI.
+
 ### OBS-001 — Vague diagnostics cause speculative fixes
 
 Use `live-runtime-diagnosis`.

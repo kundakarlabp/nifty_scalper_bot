@@ -1643,7 +1643,8 @@ class StrategyRunner:
             else:
                 self._market_data.unsubscribe(symbol, callback)
 
-        self._market_data.stop()
+        # Application shutdown owns and awaits the shared MDM's async_stop().
+        # Stopping it here strands its consumer task on the running event loop.
         self._shutdown_entry_eval_worker()
         self._logger.info("Strategy runner stopped")
 
@@ -7839,7 +7840,7 @@ class StrategyRunner:
             book_tick = payload
             depth = payload.get("depth")
             if (
-                str(payload.get("source") or "").lower() in {"ws", "websocket", "stream"}
+                str(payload.get("source") or "").lower() in {"ws", "ws_full", "full", "websocket", "stream"}
                 and payload.get("quote_update_version") not in (None, "", 0)
                 and (
                     not isinstance(depth, Mapping)
@@ -7859,7 +7860,7 @@ class StrategyRunner:
                     tick_token = payload.get("instrument_token") or payload.get("token")
                     quote_token = quote.get("instrument_token") or quote.get("token")
                     if (
-                        str(quote.get("source") or "").lower() in {"ws", "websocket", "stream"}
+                        str(quote.get("source") or "").lower() in {"ws", "ws_full", "full", "websocket", "stream"}
                         and quote.get("symbol") == symbol
                         and quote.get("quote_update_version") == payload["quote_update_version"]
                         and tick_token is not None
@@ -7882,6 +7883,29 @@ class StrategyRunner:
                     observed_at=observed_at,
                 )
             )
+            if payload.get("ofi_update_count_1s") == 0 and symbol.endswith(("CE", "PE")):
+                book_depth = book_tick.get("depth")
+                two_sided_book = bool(
+                    isinstance(book_depth, Mapping)
+                    and book_depth.get("buy")
+                    and book_depth.get("sell")
+                )
+                log_throttled(
+                    self._logger,
+                    f"temporal_ofi_book_input:{symbol}",
+                    "TEMPORAL_OFI_INPUT symbol=%s source=%s two_sided_book=%s "
+                    "bid_ask=%s quote_version=%s updates_1s=0",
+                    symbol,
+                    book_tick.get("source"),
+                    two_sided_book,
+                    bool(
+                        (book_tick.get("bid") or book_tick.get("best_bid"))
+                        and (book_tick.get("ask") or book_tick.get("best_ask"))
+                    ),
+                    payload.get("quote_update_version"),
+                    interval_sec=60.0,
+                    level=logging.INFO,
+                )
         except Exception as exc:
             self._logger.debug(
                 "TEMPORAL_OFI_UPDATE_FAILED symbol=%s error=%s",

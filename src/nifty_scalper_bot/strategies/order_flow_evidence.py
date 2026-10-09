@@ -122,11 +122,30 @@ class TemporalOfiAccumulator:
         observed_at: float,
     ) -> dict[str, object]:
         """Return latest OFI snapshot after one accepted canonical tick."""
+        source = str(quote.get("source") or "").strip().lower()
+        ws_sources = {"ws", "ws_full", "full", "websocket", "stream"}
+        # A REST/polling snapshot cannot establish temporal exchange book flow.
+        if source and source not in ws_sources:
+            return self._baseline_snapshot(0.0, 0.0)
         book = self._best_book(quote)
         now = self._float(observed_at)
         if book is None or now is None or now <= 0.0:
-            with self._lock:
-                self._state.pop(symbol, None)
+            depth = quote.get("depth")
+            sparse_ws = (
+                source in ws_sources
+                and now is not None
+                and now > 0.0
+                and (
+                    not isinstance(depth, Mapping)
+                    or not depth.get("buy")
+                    or not depth.get("sell")
+                )
+            )
+            # Incomplete WS packets are not usable OFI, but must not erase
+            # recent FULL-book history. Malformed FULL books/clocks still reset.
+            if not sparse_ws:
+                with self._lock:
+                    self._state.pop(symbol, None)
             return self._baseline_snapshot(0.0, 0.0)
         bid, ask, bid_qty, ask_qty = book
         version: object = update_version
