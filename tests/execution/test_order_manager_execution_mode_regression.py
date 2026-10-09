@@ -1,3 +1,7 @@
+import json
+import logging
+from collections import deque
+
 import pytest
 
 from nifty_scalper_bot.execution.order_manager import OrderManager
@@ -719,12 +723,6 @@ def test_persisted_broker_order_type_roundtrip_preserves_stop_order(
     tmp_path, raw_type, expected
 ) -> None:
     """Valid broker SL children survive order-history reload, not coerced to MARKET."""
-    import json
-    import logging
-    from collections import deque
-
-    from nifty_scalper_bot.execution.order_manager_core import OrderManager as CoreOrderManager
-
     path = tmp_path / "order_history.json"
     path.write_text(
         json.dumps(
@@ -744,7 +742,7 @@ def test_persisted_broker_order_type_roundtrip_preserves_stop_order(
         ),
         encoding="utf-8",
     )
-    manager = object.__new__(CoreOrderManager)
+    manager = object.__new__(OrderManager)
     manager._history_path = path
     manager._history = deque(maxlen=1000)
     manager._history_index = {}
@@ -766,12 +764,6 @@ def test_persisted_broker_order_type_roundtrip_preserves_stop_order(
 
 def test_unknown_persisted_order_type_is_not_reinterpreted_as_market(tmp_path) -> None:
     """An unknown broker type is explicitly rejected rather than misclassified."""
-    import json
-    import logging
-    from collections import deque
-
-    from nifty_scalper_bot.execution.order_manager_core import OrderManager as CoreOrderManager
-
     path = tmp_path / "order_history.json"
     path.write_text(
         json.dumps(
@@ -788,7 +780,7 @@ def test_unknown_persisted_order_type_is_not_reinterpreted_as_market(tmp_path) -
         ),
         encoding="utf-8",
     )
-    manager = object.__new__(CoreOrderManager)
+    manager = object.__new__(OrderManager)
     manager._history_path = path
     manager._history = deque(maxlen=1000)
     manager._history_index = {}
