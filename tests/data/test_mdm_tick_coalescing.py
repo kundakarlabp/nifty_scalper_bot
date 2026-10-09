@@ -2209,7 +2209,9 @@ def test_replay_capture_skips_repeated_basket_serialization(monkeypatch) -> None
 
 
 @pytest.mark.asyncio
-async def test_drain_telemetry_identifies_awaited_worker_turnaround(monkeypatch, caplog):
+async def test_drain_telemetry_identifies_awaited_worker_turnaround(
+    monkeypatch, caplog
+):
     """A slow off-thread tick is not evidence of event-loop starvation."""
     mdm = _make_mdm()
     mdm.set_event_loop(asyncio.get_running_loop())
