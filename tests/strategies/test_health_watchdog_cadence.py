@@ -19,9 +19,14 @@ from __future__ import annotations
 
 import threading
 import time
+from datetime import date, datetime, timedelta
 from unittest.mock import MagicMock
 
-from nifty_scalper_bot.strategies.runner import StrategyRunner
+from nifty_scalper_bot.strategies.runner import (
+    StrategyRunner,
+    _signal_frequency_window_elapsed,
+)
+from nifty_scalper_bot.utils.market_hours import IST, SAFE_END, SAFE_START
 
 
 def _runner(interval: float = 5.0) -> StrategyRunner:
@@ -193,3 +198,17 @@ def test_tick_path_calls_the_cadence_wrapper_not_the_scan_directly() -> None:
     src = inspect.getsource(StrategyRunner._on_tick_safe)
     assert "_run_health_watchdog_on_cadence()" in src
     assert "self._health_watchdog()" not in src
+
+
+def test_zero_signal_alert_requires_full_live_entry_hour() -> None:
+    """Premarket and the opening hour are not a complete one-hour sample."""
+    start = datetime.combine(date(2026, 10, 9), SAFE_START, tzinfo=IST)
+    end = datetime.combine(date(2026, 10, 9), SAFE_END, tzinfo=IST)
+
+    assert not _signal_frequency_window_elapsed(
+        (start + timedelta(minutes=59, seconds=59)).timestamp()
+    )
+    assert _signal_frequency_window_elapsed((start + timedelta(hours=1)).timestamp())
+    assert not _signal_frequency_window_elapsed(
+        (end + timedelta(seconds=1)).timestamp()
+    )

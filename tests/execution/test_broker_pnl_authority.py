@@ -176,6 +176,36 @@ def test_dedicated_broker_pnl_never_overwrites_strategy_ledger(tmp_path) -> None
     assert manager.current_pnl_reconciliation_blocker() is None
 
 
+def test_account_margin_zero_is_not_proof_of_strategy_reconciliation(tmp_path) -> None:
+    """Account-level M2M alone must not certify strategy-specific P&L."""
+    from nifty_scalper_bot.risk.risk_manager import _resolve_broker_realized_pnl
+
+    manager = PositionManager(state_file=str(tmp_path / "positions.json"))
+    manager.set_broker_client(
+        SimpleNamespace(
+            get_pnl_snapshot=lambda: {
+                "account_realized": 0.0,
+                "account_unrealized": 0.0,
+                "strategy_tradebook_realized_gross": None,
+                "strategy_tradebook_fill_count": 0,
+                "strategy_day_marked_gross": None,
+                "strategy_day_closed_gross": None,
+                "strategy_day_rows": 0,
+                "source": "zerodha_margins_m2m",
+            }
+        )
+    )
+
+    snapshot = manager.refresh_broker_pnl_diagnostic(force=True)
+
+    assert snapshot["broker_realized_evidence"] == pytest.approx(0.0)
+    assert snapshot["broker_realized_evidence_source"] == "zerodha_margins_m2m"
+    assert snapshot["status"] == "unverified"
+    assert snapshot["difference"] == pytest.approx(0.0)
+    assert _resolve_broker_realized_pnl(manager) is None
+    assert manager.get_realized_pnl() == pytest.approx(0.0)
+
+
 def test_broker_pnl_failure_preserves_local_strategy_accounting(tmp_path) -> None:
     manager = PositionManager(state_file=str(tmp_path / "positions.json"))
     with manager._lock:

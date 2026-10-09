@@ -475,6 +475,12 @@ def refresh_broker_pnl_diagnostic(
         )
         if difference is None:
             status = "unavailable"
+        elif (
+            evidence_source == "zerodha_margins_m2m"
+            and abs(difference) <= _MATCH_TOLERANCE_RUPEES
+        ):
+            # Account M2M is not independent evidence of strategy fills.
+            status = "unverified"
         elif abs(difference) <= _MATCH_TOLERANCE_RUPEES:
             status = "matched"
         else:
