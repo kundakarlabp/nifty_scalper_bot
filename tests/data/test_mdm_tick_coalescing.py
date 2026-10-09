@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -146,6 +147,38 @@ async def test_direct_push_tick_uses_bounded_drain(monkeypatch):
     await mdm.drain_pending_ticks(timeout=2.0)
     assert processed == [10]
     await _stop_mdm(mdm)
+
+
+@pytest.mark.asyncio
+async def test_tick_drain_does_not_wait_on_shared_executor_broker_work() -> None:
+    """Tick callbacks must not queue behind unrelated blocking REST/background work."""
+    mdm = _make_mdm()
+    generic_worker_started = threading.Event()
+    generic_worker_release = threading.Event()
+    tick_processed = threading.Event()
+    loop = asyncio.get_running_loop()
+    loop.set_default_executor(ThreadPoolExecutor(max_workers=1))
+
+    def _blocked_fetch() -> None:
+        generic_worker_started.set()
+        generic_worker_release.wait(timeout=3.0)
+
+    held_fetch = loop.run_in_executor(None, _blocked_fetch)
+    try:
+        while not generic_worker_started.is_set():
+            await asyncio.sleep(0)
+        mdm._process_queued_tick = lambda raw: tick_processed.set()
+        mdm.set_event_loop(loop)
+        mdm._enqueue_tick_threadsafe(
+            {"instrument_token": 1, "last_price": 101.0, "timestamp": 1}
+        )
+        await asyncio.wait_for(mdm.drain_pending_ticks(timeout=0.5), timeout=0.7)
+        assert tick_processed.is_set()
+        assert mdm.get_tick_pressure_stats()["unexplained_loss"] == 0
+    finally:
+        generic_worker_release.set()
+        await held_fetch
+        await _stop_mdm(mdm)
 
 
 @pytest.mark.asyncio
