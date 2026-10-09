@@ -384,3 +384,35 @@ def test_poll_quote_never_counts_as_temporal_ws_order_flow() -> None:
     assert result["ofi_ready"] is True
     assert result["ofi_update_count_1s"] == 2
     assert result["ofi_1s"] == pytest.approx(60.0)
+
+def test_live_underlying_context_does_not_pick_a_side_from_conflicting_sources(
+    monkeypatch,
+) -> None:
+    """A fresh spot/future disagreement must not be reduced to spot-first bias."""
+    from nifty_scalper_bot.strategies.runner import StrategyRunner
+    from types import SimpleNamespace
+
+    monkeypatch.setattr("nifty_scalper_bot.strategies.runner.time.time", lambda: 1000.0)
+    runner = object.__new__(StrategyRunner)
+    runner._strategy_manager = SimpleNamespace(
+        _latest_context_snapshots={
+            "spot_context": {
+                "role": "spot_context",
+                "timestamp": 999.9,
+                "direction_bias": "CE",
+                "underlying_direction_confidence": 0.8,
+            },
+            "futures_context": {
+                "role": "futures_context",
+                "timestamp": 999.9,
+                "direction_bias": "PE",
+                "underlying_direction_confidence": 0.8,
+            },
+        },
+        _live_context_max_age_seconds=lambda: 5.0,
+    )
+    result = runner._underlying_context_from_strategy_manager()
+    assert result["spot_fresh"] is True
+    assert result["futures_fresh"] is True
+    assert result["direction_context_conflict"] is True
+    assert result.get("underlying_direction_bias") not in {"CE", "PE"}
