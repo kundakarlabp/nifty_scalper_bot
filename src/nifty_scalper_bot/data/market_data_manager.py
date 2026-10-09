@@ -7643,6 +7643,8 @@ class MarketDataManager:
         duration_ms: float,
         source: str | None = None,
         callback: Callable[..., Any] | str | None = None,
+        worker_wait_ms: float | None = None,
+        ticks_processed: int | None = None,
     ) -> None:
         callback_name = (
             self._tick_callback_identity(callback)
@@ -7686,7 +7688,7 @@ class MarketDataManager:
         log_throttled(
             self._logger,
             key,
-            "TICK_STAGE_SLOW stage=%s callback=%s symbol=%s duration_ms=%.3f occurrence_count=%d max_duration_ms=%.3f worst_symbol=%s pending_ticks=%d oldest_pending_age_ms=%s drain_active=%d source=%s thread_id=%s event_loop_thread=%s"
+            "TICK_STAGE_SLOW stage=%s callback=%s symbol=%s duration_ms=%.3f occurrence_count=%d max_duration_ms=%.3f worst_symbol=%s pending_ticks=%d oldest_pending_age_ms=%s drain_active=%d source=%s thread_id=%s event_loop_thread=%s awaited_worker_ms=%s loop_overhead_ms=%s ticks_processed=%s"
             % (
                 stage,
                 callback_name,
@@ -7705,6 +7707,13 @@ class MarketDataManager:
                 source,
                 thread_id,
                 "unknown" if event_loop_thread is None else event_loop_thread,
+                None if worker_wait_ms is None else round(worker_wait_ms, 3),
+                (
+                    None
+                    if worker_wait_ms is None
+                    else round(max(0.0, duration_ms - worker_wait_ms), 3)
+                ),
+                ticks_processed,
             ),
             interval_sec=60.0,
             level=logging.WARNING,
@@ -7723,11 +7732,20 @@ class MarketDataManager:
                 "source": source,
                 "thread_id": thread_id,
                 "event_loop_thread": event_loop_thread,
+                "awaited_worker_ms": worker_wait_ms,
+                "loop_overhead_ms": (
+                    max(0.0, duration_ms - worker_wait_ms)
+                    if worker_wait_ms is not None
+                    else None
+                ),
+                "ticks_processed": ticks_processed,
             },
         )
 
     async def _drain_latest_ticks(self) -> None:
         drain_started = time.monotonic()
+        awaited_worker_s = 0.0
+        processed_in_invocation = 0
         with self._pending_tick_lock:
             self._tick_active_drains += 1
             self._tick_max_active_drains = max(
@@ -7744,8 +7762,15 @@ class MarketDataManager:
                         # A tick can synchronously finalize a candle and fan
                         # out through DataHub/Runner. Keep strict serial order,
                         # but move that indivisible work off the asyncio owner.
-                        await asyncio.to_thread(self._process_queued_tick, raw)
+                        worker_started = time.monotonic()
+                        try:
+                            await asyncio.to_thread(self._process_queued_tick, raw)
+                        finally:
+                            # This is time suspended awaiting a worker, NOT
+                            # proof that the owner event loop was blocked.
+                            awaited_worker_s += time.monotonic() - worker_started
                         self._tick_processed_total += 1
+                        processed_in_invocation += 1
                     except asyncio.CancelledError:
                         # A running worker cannot be cancelled. Requeueing raw
                         # here could therefore apply the same tick twice.
@@ -7800,6 +7825,8 @@ class MarketDataManager:
                     symbol=None,
                     duration_ms=drain_duration_ms,
                     source=None,
+                    worker_wait_ms=awaited_worker_s * 1000.0,
+                    ticks_processed=processed_in_invocation,
                 )
 
     async def drain_pending_ticks(self, *, timeout: float = 5.0) -> None:
