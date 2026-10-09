@@ -341,3 +341,50 @@ def test_late_update_does_not_replace_fresher_ofi_baseline() -> None:
     assert late["ofi_ready"] is False
     assert current["ofi_event"] == 20.0
     assert current["ofi_1s"] == 60.0
+
+def test_sparse_ws_book_does_not_destroy_recent_verified_ofi_history() -> None:
+    """Interleaved LTP-only ticks must not erase verified FULL book transitions."""
+    accumulator = TemporalOfiAccumulator()
+    baseline = _tick(version=1, buy=100, sell=100)
+    baseline["source"] = "ws"
+    accumulator.update(SYMBOL, baseline, update_version=1, observed_at=10.0)
+    sparse = {"source": "ws", "ltp": 100.1}
+    unavailable = accumulator.update(
+        SYMBOL, sparse, update_version=2, observed_at=10.1
+    )
+    assert unavailable["ofi_ready"] is False
+    assert unavailable["ofi_update_count_1s"] == 0
+    for version, ts, quantity in ((3, 10.2, 140), (4, 10.4, 160)):
+        book = _tick(version=version, buy=quantity, sell=100)
+        book["source"] = "ws"
+        result = accumulator.update(
+            SYMBOL, book, update_version=version, observed_at=ts
+        )
+    assert result["ofi_ready"] is True
+    assert result["ofi_update_count_1s"] == 2
+    assert result["ofi_1s"] == pytest.approx(60.0)
+
+
+def test_poll_quote_never_counts_as_temporal_ws_order_flow() -> None:
+    accumulator = TemporalOfiAccumulator()
+    first = _tick(version=1, buy=100, sell=100)
+    first["source"] = "ws"
+    accumulator.update(SYMBOL, first, update_version=1, observed_at=10.0)
+    poll = _tick(version=2, buy=500, sell=100)
+    poll["source"] = "poll"
+    untrusted = accumulator.update(
+        SYMBOL, poll, update_version=2, observed_at=10.1
+    )
+    assert untrusted["ofi_ready"] is False
+    assert untrusted["ofi_update_count_1s"] == 0
+    for version, ts, quantity in ((3, 10.2, 140), (4, 10.4, 160)):
+        book = _tick(version=version, buy=quantity, sell=100)
+        book["source"] = "ws"
+        result = accumulator.update(
+            SYMBOL, book, update_version=version, observed_at=ts
+        )
+    assert result["ofi_ready"] is True
+    assert result["ofi_update_count_1s"] == 2
+    assert result["ofi_1s"] == pytest.approx(60.0)
+
+
