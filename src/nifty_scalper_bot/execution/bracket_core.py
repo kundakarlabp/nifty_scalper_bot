@@ -4890,9 +4890,12 @@ class BracketManager:
             BracketExitLifecycle.EXIT_RECONCILED_FLAT.value,
         }
         with self._lock:
-            for entry_id in self._symbol_map.get(symbol_key, []):
-                bracket = self._brackets.get(entry_id)
-                if bracket is None or bracket.remaining_quantity <= 0:
+            # The bracket dictionary is authoritative. A delayed/failed reverse
+            # index update must never classify a live protected trade as an orphan.
+            for bracket in self._brackets.values():
+                if normalize_symbol(str(bracket.symbol or "")) != symbol_key:
+                    continue
+                if bracket.remaining_quantity <= 0:
                     continue
                 if bracket.monitoring_only or bracket.position_flat_confirmed:
                     continue
@@ -4918,14 +4921,13 @@ class BracketManager:
         has_valid_stop = False
         all_closed = True
         with self._lock:
-            for entry_id in list(self._symbol_map.get(symbol_key, [])):
-                bracket = self._brackets.get(entry_id)
-                if bracket is None:
-                    continue
-                bracket_ids.append(entry_id)
+            # Use the same authoritative owners as is_symbol_managed().
+            # _symbol_map is an optimization, never the source of safety truth.
+            for entry_id, bracket in self._brackets.items():
                 bracket_symbol = normalize_symbol(getattr(bracket, "symbol", ""))
                 if bracket_symbol != symbol_key:
                     continue
+                bracket_ids.append(entry_id)
                 remaining = int(getattr(bracket, "remaining_quantity", 0) or 0)
                 quantity = int(getattr(bracket, "quantity", 0) or 0)
                 qty = remaining if remaining > 0 else quantity
