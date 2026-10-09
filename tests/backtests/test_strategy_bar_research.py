@@ -476,6 +476,42 @@ def test_vwap_comparison_is_bounded_restores_environment_and_never_auto_promotes
     assert report["selection"]["development_ranking"] == []
 
 
+def test_orb_comparison_uses_compact_orb_replay_for_all_fixed_scenarios(
+    tmp_path, monkeypatch
+):
+    from nifty_scalper_bot.backtesting.strategy_research import run_orb_comparison
+
+    archive(tmp_path)
+    calls = []
+
+    def replay(*args, **kwargs):
+        calls.append(dict(kwargs))
+        return {
+            "strategies": {
+                "ORBPro": {
+                    "metrics": {"trade_count": 0, "expectancy": None},
+                    "development_metrics": {"trade_count": 0, "expectancy": None},
+                    "data_quality": {"development_unresolved_exit_count": 0},
+                    "trades": [],
+                    "setup_metrics": {},
+                }
+            }
+        }
+
+    monkeypatch.setattr(
+        "nifty_scalper_bot.backtesting.strategy_research._scenario",
+        replay,
+    )
+
+    report = run_orb_comparison(tmp_path)
+
+    assert report["candidate_count"] == 9
+    assert report["slippage_scenario_count"] == 3
+    assert len(calls) == 27
+    assert all(call["components"] == {"ORBPro"} for call in calls)
+    assert all(call["compact_orb_context"] is True for call in calls)
+
+
 def test_bounded_comparison_restores_environment_and_never_promotes_small_sample(
     tmp_path, monkeypatch
 ):
