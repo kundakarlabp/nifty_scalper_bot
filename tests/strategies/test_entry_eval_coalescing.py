@@ -1025,6 +1025,7 @@ def test_attach_runtime_loop_recovers_existing_pending_entry_eval(monkeypatch):
     finally:
         _stop_loop(loop_b, thread_b)
 
+
 def test_runner_stop_leaves_shared_mdm_for_async_lifecycle_owner() -> None:
     """Runner stop must not cancel the shared MDM consumer before async_stop."""
     from nifty_scalper_bot.strategies.runner import StrategyRunner
@@ -1044,5 +1045,3 @@ def test_runner_stop_leaves_shared_mdm_for_async_lifecycle_owner() -> None:
     assert runner._market_data.unsubscribe.call_args.args[0] == UNDERLYING_SYMBOL
     runner._market_data.stop.assert_not_called()
     assert runner._running is False
-
-
