@@ -1811,3 +1811,46 @@ def test_persisted_broker_stop_order_aliases_restore_without_loss(tmp_path) -> N
     assert set(manager._history_persisted_ids) == set(manager._orders)
     manager._logger.error.assert_called_once()
 
+
+def test_restart_order_and_broker_open_order_keep_sl_semantics() -> None:
+    """An open broker stop and an order snapshot cannot become MARKET on reload."""
+    from unittest.mock import Mock
+
+    from nifty_scalper_bot.execution.order_manager_core import OrderManager, OrderType
+
+    manager = object.__new__(OrderManager)
+    manager._logger = Mock()
+    for raw_type, expected in (
+        ("SL", OrderType.STOP_LOSS),
+        ("SL-M", OrderType.STOP_LOSS_MARKET),
+        ("STOP_LOSS", OrderType.STOP_LOSS),
+        ("STOP_LOSS_MARKET", OrderType.STOP_LOSS_MARKET),
+    ):
+        payload = {
+            "order_id": "OID-PROTECT",
+            "symbol": "NFO:NIFTY26O1322500CE",
+            "side": "SELL",
+            "order_type": raw_type,
+            "quantity": 65,
+            "price": 95.0,
+            "status": "submitted",
+        }
+        restored = manager._order_from_dict(payload)
+        assert restored.order_type is expected
+        broker_open = manager._coerce_broker_open_order(payload)
+        assert broker_open is not None
+        assert broker_open.order_type is expected
+
+    for bad_type in ("NOT_A_BROKER_TYPE", "", None):
+        with pytest.raises(ValueError, match="Invalid order payload"):
+            manager._order_from_dict(
+                {
+                    "order_id": "OID-UNKNOWN",
+                    "symbol": "NFO:NIFTY26O1322500CE",
+                    "side": "SELL",
+                    "order_type": bad_type,
+                    "quantity": 65,
+                    "status": "submitted",
+                }
+            )
+
