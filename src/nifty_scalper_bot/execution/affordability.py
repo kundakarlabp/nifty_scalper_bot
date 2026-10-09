@@ -150,6 +150,8 @@ def _risk_budget_snapshot(
         try:
             authoritative = reader()
         except Exception:
+            authoritative = None
+        if authoritative is None:
             authoritative = object()  # fail closed; no stale switch fallback
     if refresh_risk and authoritative is not None:
         max_day_loss = _finite_float(
