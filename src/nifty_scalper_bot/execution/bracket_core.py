@@ -1017,22 +1017,28 @@ class BracketManager:
                             exec_px, exec_src = self._executable_exit_price(
                                 bracket, ltp
                             )
-                            pending.append(
-                                (
-                                    bracket,
-                                    {
-                                        "type": "SL",
-                                        "price": ltp,
-                                        "qty": bracket.remaining_quantity,
-                                        "trigger_price": exec_px,
-                                        "trigger_price_source": exec_src,
-                                        "reason": (
-                                            f"WATCHDOG_HARD_SL trigger={exec_px:.2f} "
-                                            f"src={exec_src}"
-                                        ),
-                                    },
-                                )
-                            )
+                            action = {
+                                "type": "SL",
+                                "price": ltp,
+                                "qty": bracket.remaining_quantity,
+                                "trigger_price": exec_px,
+                                "trigger_price_source": exec_src,
+                                "reason": (
+                                    f"WATCHDOG_HARD_SL trigger={exec_px:.2f} "
+                                    f"src={exec_src}"
+                                ),
+                            }
+                            if exec_src in {"bid", "ask"}:
+                                # Cached quote receipt time, not an exchange tick timestamp.
+                                quote = self._exit_quotes.get(bracket.symbol)
+                                if quote is not None:
+                                    action["bid"] = quote[0]
+                                    action["ask"] = quote[1]
+                                    action["quote_received_at"] = quote[2]
+                                    action["quote_age_ms"] = round(
+                                        max(0.0, time.time() - quote[2]) * 1000, 1
+                                    )
+                            pending.append((bracket, action))
                 for bracket in reconcile_candidates:
                     self._reconcile_pending_entry(bracket)
                 if pending:
@@ -2464,7 +2470,7 @@ class BracketManager:
                         )
                     )
                     LOGGER.warning(
-                        "%s trade_lifecycle_id=%s entry_order_id=%s symbol=%s quantity=%s entry_price=%s ltp=%s bid=%s ask=%s old_sl=%s new_sl=%s tp=%s exit_reason=%s exit_state=%s tick_timestamp=%s",
+                        "%s trade_lifecycle_id=%s entry_order_id=%s symbol=%s quantity=%s entry_price=%s ltp=%s bid=%s ask=%s old_sl=%s new_sl=%s tp=%s exit_reason=%s exit_state=%s tick_timestamp=%s quote_received_at=%s quote_age_ms=%s",
                         event,
                         bracket.trade_lifecycle_id,
                         bracket.entry_order_id,
@@ -2485,6 +2491,8 @@ class BracketManager:
                             else bracket.exit_state
                         ),
                         action.get("tick_timestamp"),
+                        action.get("quote_received_at"),
+                        action.get("quote_age_ms"),
                         extra={
                             "event": event,
                             "trade_lifecycle_id": bracket.trade_lifecycle_id,
@@ -2508,6 +2516,8 @@ class BracketManager:
                                 else bracket.exit_state
                             ),
                             "tick_timestamp": action.get("tick_timestamp"),
+                            "quote_received_at": action.get("quote_received_at"),
+                            "quote_age_ms": action.get("quote_age_ms"),
                         },
                     )
 
@@ -4890,9 +4900,12 @@ class BracketManager:
             BracketExitLifecycle.EXIT_RECONCILED_FLAT.value,
         }
         with self._lock:
-            for entry_id in self._symbol_map.get(symbol_key, []):
-                bracket = self._brackets.get(entry_id)
-                if bracket is None or bracket.remaining_quantity <= 0:
+            # The bracket dictionary is authoritative. A delayed/failed reverse
+            # index update must never classify a live protected trade as an orphan.
+            for bracket in self._brackets.values():
+                if normalize_symbol(str(bracket.symbol or "")) != symbol_key:
+                    continue
+                if bracket.remaining_quantity <= 0:
                     continue
                 if bracket.monitoring_only or bracket.position_flat_confirmed:
                     continue
@@ -4918,14 +4931,13 @@ class BracketManager:
         has_valid_stop = False
         all_closed = True
         with self._lock:
-            for entry_id in list(self._symbol_map.get(symbol_key, [])):
-                bracket = self._brackets.get(entry_id)
-                if bracket is None:
-                    continue
-                bracket_ids.append(entry_id)
+            # Use the same authoritative owners as is_symbol_managed().
+            # _symbol_map is an optimization, never the source of safety truth.
+            for entry_id, bracket in self._brackets.items():
                 bracket_symbol = normalize_symbol(getattr(bracket, "symbol", ""))
                 if bracket_symbol != symbol_key:
                     continue
+                bracket_ids.append(entry_id)
                 remaining = int(getattr(bracket, "remaining_quantity", 0) or 0)
                 quantity = int(getattr(bracket, "quantity", 0) or 0)
                 qty = remaining if remaining > 0 else quantity
