@@ -636,7 +636,7 @@ def test_updater_records_worker_timeout_or_unexpected_exit(
     assert bool(killed) is timeout
     if timeout:
         assert result["timed_out_stage"] == "runtime_replay"
-        assert result["worker_timeout_seconds"] == 3600
+        assert result["worker_timeout_seconds"] == 5400
         assert result["completed_trade_analysis"] == "completed_trade_analysis.json"
 
 
