@@ -201,3 +201,72 @@ def test_live_risk_envelope_admits_observed_stop_but_preserves_daily_cap(
     assert decision.remaining_daily_risk_budget == pytest.approx(741.465 - day_loss)
     assert decision.plan_cost_inclusive_risk > 4.55 * 65
     assert decision.affordable is affordable
+
+
+def test_materialized_entry_refreshes_daily_loss_before_approving_candidate() -> None:
+    """The 13:40 candidate must see net losses before the final broker gate."""
+    manager = _order_manager(max_day_loss=558.645, day_loss=0.0)
+    risk = manager._risk_manager
+    calls = []
+
+    def refreshed_snapshot():
+        calls.append(1)
+        risk._switches._day_loss = 241.527189
+        return SimpleNamespace(day_loss=241.527189, max_day_loss=558.645)
+
+    risk.snapshot = refreshed_snapshot
+    decision = evaluate_minimum_lot_affordability(
+        symbol="NFO:NIFTY2690124050PE",
+        quote={"bid": 134.45, "ask": 134.55},
+        order_manager=manager,
+        fallback_balance=11_000.65,
+        plan_entry_price=134.55,
+        plan_stop_loss=130.10,
+    )
+
+    assert calls == [1]
+    assert decision.current_day_loss == pytest.approx(241.527189)
+    assert decision.remaining_daily_risk_budget == pytest.approx(317.117811)
+    assert decision.plan_cost_inclusive_risk > 317.117811
+    assert decision.affordable is False
+    assert decision.reason == "minimum_lot_risk_unaffordable"
+
+
+def test_cash_only_readiness_does_not_refresh_live_risk_snapshot() -> None:
+    """Periodic readiness checks must not add broker P&L work."""
+    manager = _order_manager(max_day_loss=558.645)
+
+    def unexpected_snapshot():
+        raise AssertionError("cash readiness must not refresh realized P&L")
+
+    manager._risk_manager.snapshot = unexpected_snapshot
+    decision = evaluate_minimum_lot_affordability(
+        symbol="NFO:NIFTY2690124050PE",
+        quote={"ask": 134.55},
+        order_manager=manager,
+        fallback_balance=11_000.65,
+    )
+    assert decision.cash_affordable is True
+    assert decision.affordable is True
+
+
+def test_materialized_entry_blocks_if_authoritative_snapshot_fails() -> None:
+    """Snapshot errors cannot silently reuse a stale full-day risk allowance."""
+    manager = _order_manager(max_day_loss=558.645, day_loss=0.0)
+
+    def failed_snapshot():
+        raise RuntimeError("risk ledger cannot be refreshed")
+
+    manager._risk_manager.snapshot = failed_snapshot
+    decision = evaluate_minimum_lot_affordability(
+        symbol="NFO:NIFTY2690124050PE",
+        quote={"bid": 134.45, "ask": 134.55},
+        order_manager=manager,
+        fallback_balance=11_000.65,
+        plan_entry_price=134.55,
+        plan_stop_loss=130.10,
+    )
+    assert decision.affordable is False
+    assert decision.capacity_blocker == "risk"
+    assert decision.reason == "risk_budget_unavailable"
+    assert decision.day_loss_source == "risk_snapshot_unavailable"
