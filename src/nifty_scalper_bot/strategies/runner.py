@@ -7833,13 +7833,51 @@ class StrategyRunner:
         *,
         observed_at: float,
     ) -> dict[str, Any]:
-        """Attach derived OFI evidence without mutating canonical market data."""
+        """Attach OFI from this tick's canonical WS book without changing tick truth."""
         payload = dict(tick)
         try:
+            book_tick = payload
+            depth = payload.get("depth")
+            if (
+                str(payload.get("source") or "").lower() in {"ws", "websocket", "stream"}
+                and payload.get("quote_update_version") not in (None, "", 0)
+                and (
+                    not isinstance(depth, Mapping)
+                    or not depth.get("buy")
+                    or not depth.get("sell")
+                    or not (payload.get("bid") or payload.get("best_bid"))
+                    or not (payload.get("ask") or payload.get("best_ask"))
+                )
+            ):
+                # The callback may be LTP-only while DataHub already holds the
+                # same tick's FULL book. Never combine distinct ticks or poll data.
+                read_quote = getattr(getattr(self, "_data_hub", None), "get_quote", None)
+                quote = read_quote(symbol, allow_pull=False) if callable(read_quote) else None
+                if isinstance(quote, Mapping):
+                    tick_ms = _extract_float(payload, "timestamp_ms")
+                    quote_ms = _extract_float(quote, "timestamp_ms")
+                    tick_token = payload.get("instrument_token") or payload.get("token")
+                    quote_token = quote.get("instrument_token") or quote.get("token")
+                    if (
+                        str(quote.get("source") or "").lower() in {"ws", "websocket", "stream"}
+                        and quote.get("symbol") == symbol
+                        and quote.get("quote_update_version") == payload["quote_update_version"]
+                        and tick_token is not None
+                        and str(tick_token) == str(quote_token)
+                        and tick_ms is not None
+                        and quote_ms is not None
+                        and 0.0 <= tick_ms - quote_ms <= 100.0
+                    ):
+                        book_tick = {
+                            **payload,
+                            "bid": quote.get("bid") or quote.get("best_bid"),
+                            "ask": quote.get("ask") or quote.get("best_ask"),
+                            "depth": quote.get("depth"),
+                        }
             payload.update(
                 self._temporal_ofi.update(
                     symbol,
-                    payload,
+                    book_tick,
                     update_version=payload.get("quote_update_version"),
                     observed_at=observed_at,
                 )
