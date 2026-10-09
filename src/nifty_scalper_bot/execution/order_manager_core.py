@@ -12460,15 +12460,32 @@ class OrderManager:
         return OrderStatus.SUBMITTED
 
     @staticmethod
-    def _parse_order_type_token(raw_type: Any) -> OrderType:
+    def _parse_order_type_token(
+        raw_type: Any, *, strict: bool = False
+    ) -> OrderType:
         if isinstance(raw_type, OrderType):
             return raw_type
         if raw_type is None:
+            if strict:
+                raise ValueError("missing persisted order type")
             return OrderType.MARKET
         token = str(raw_type).strip().lower()
         for candidate in OrderType:
             if token in {candidate.value, candidate.name.lower()}:
                 return candidate
+        # The broker and older history files use Zerodha's wire codes.
+        # SL is a limit stop; SL-M is a market stop, never an entry MARKET.
+        aliases = {
+            "sl": OrderType.STOP_LOSS,
+            "sl-m": OrderType.STOP_LOSS_MARKET,
+            "stop_loss_limit": OrderType.STOP_LOSS,
+            "stoploss": OrderType.STOP_LOSS,
+            "stoplossmarket": OrderType.STOP_LOSS_MARKET,
+        }
+        if token in aliases:
+            return aliases[token]
+        if strict:
+            raise ValueError(f"unknown persisted order type: {raw_type!r}")
         return OrderType.MARKET
 
     def _is_force_exit(
@@ -14283,7 +14300,9 @@ class OrderManager:
                     order_id=str(entry["order_id"]),
                     symbol=str(entry["symbol"]).upper(),
                     side=str(entry["side"]),
-                    order_type=OrderType(entry["order_type"]),
+                    order_type=self._parse_order_type_token(
+                        entry["order_type"], strict=True
+                    ),
                     quantity=int(entry["quantity"]),
                     price=float(entry["price"]),
                     status=OrderStatus(entry["status"]),
