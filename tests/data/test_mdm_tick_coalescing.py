@@ -2206,4 +2206,3 @@ def test_replay_capture_skips_repeated_basket_serialization(monkeypatch) -> None
     monkeypatch.setattr(mdm_module, "to_json_safe", _unexpected_serialize)
     mdm._capture_replay_tick({"symbol": "NFO:NIFTY26O1322500CE"})
     assert events == ["snapshot", "tick", "tick"]
-
