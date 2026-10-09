@@ -14975,7 +14975,9 @@ class OrderManager:
                 return False
             self._bracket_manager.confirm_entry_fill(synthetic_id, base_price)
             confirmed = self._bracket_manager.get_bracket(synthetic_id)
-            if confirmed is None or not bool(getattr(confirmed, "entry_confirmed", False)):
+            if confirmed is None or not bool(
+                getattr(confirmed, "entry_confirmed", False)
+            ):
                 self._logger.error(
                     "ORPHAN_GUARD_ACTIVATION_NOT_CONFIRMED symbol=%s guard_id=%s",
                     symbol,
