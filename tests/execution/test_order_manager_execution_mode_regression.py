@@ -794,3 +794,63 @@ def test_unknown_persisted_order_type_is_not_reinterpreted_as_market(tmp_path) -
     assert not manager._history
     assert "unknown-123" not in manager._orders
 
+
+@pytest.mark.parametrize(
+    ("raw_type", "expected"),
+    [
+        ("SL", "STOP_LOSS"),
+        ("SL-M", "STOP_LOSS_MARKET"),
+        ("STOP_LOSS", "STOP_LOSS"),
+        ("stop_loss_market", "STOP_LOSS_MARKET"),
+    ],
+)
+def test_all_persisted_order_readers_keep_broker_stop_type(
+    monkeypatch, tmp_path, raw_type, expected
+) -> None:
+    """Runtime snapshots and orders.json must agree with history restoration."""
+    import threading
+
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    manager = object.__new__(OrderManager)
+    manager._logger = logging.getLogger("test_stop_type_all_readers")
+    manager._lock = threading.RLock()
+    manager._orders = {}
+    record = {
+        "order_id": "SL-123",
+        "symbol": "NFO:NIFTY26O1322450CE",
+        "side": "SELL",
+        "order_type": raw_type,
+        "quantity": 65,
+        "price": 95.0,
+        "status": "FILLED",
+        "timestamp": "2026-10-09T07:00:00+00:00",
+    }
+
+    decoded = manager._order_from_dict(record)
+    assert decoded.order_type.name == expected
+    assert decoded.status.name == "FILLED"
+
+    (tmp_path / "orders.json").write_text(
+        json.dumps({"SL-123": record}), encoding="utf-8"
+    )
+    manager._load_orders()
+    restored = manager._orders["SL-123"]
+    assert restored.order_type.name == expected
+    assert restored.status.name == "FILLED"
+
+
+def test_unknown_order_snapshot_type_does_not_become_market() -> None:
+    manager = object.__new__(OrderManager)
+    manager._logger = logging.getLogger("test_stop_type_unknown")
+    with pytest.raises(ValueError, match="Invalid order payload"):
+        manager._order_from_dict(
+            {
+                "order_id": "unknown",
+                "symbol": "NFO:NIFTY26O1322450CE",
+                "side": "SELL",
+                "order_type": "UNKNOWN_BROKER_ORDER",
+                "quantity": 65,
+                "price": 95.0,
+            }
+        )
+
