@@ -385,6 +385,7 @@ def test_poll_quote_never_counts_as_temporal_ws_order_flow() -> None:
     assert result["ofi_update_count_1s"] == 2
     assert result["ofi_1s"] == pytest.approx(60.0)
 
+
 def test_live_underlying_context_does_not_pick_a_side_from_conflicting_sources(
     monkeypatch,
 ) -> None:
