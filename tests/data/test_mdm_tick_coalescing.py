@@ -2174,6 +2174,7 @@ def test_optional_context_option_is_not_recovery_critical():
     assert selected_pe in required
     assert optional_ce not in required
 
+
 def test_replay_capture_skips_repeated_basket_serialization(monkeypatch) -> None:
     """Every tick is archived, but an unchanged version needs no basket encoding."""
     from nifty_scalper_bot.data import market_data_manager as mdm_module
