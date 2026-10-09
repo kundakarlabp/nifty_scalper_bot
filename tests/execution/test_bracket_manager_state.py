@@ -178,3 +178,28 @@ def test_recent_absent_entry_is_preserved_during_fill_grace():
     bm._reconcile_pending_entry(bracket)
 
     assert bm.get_bracket("E8") is bracket
+
+
+def test_authoritative_bracket_survives_missing_reverse_symbol_index() -> None:
+    """A corrupted reverse index must not cause a second orphan guardian owner."""
+    bm = _mk_bm_with_broker(SimpleNamespace())
+    state = BracketState(
+        "entry-managed",
+        "NFO:NIFTYCE",
+        "BUY",
+        65,
+        144.15,
+        139.25,
+        155.05,
+        active=True,
+        entry_confirmed=True,
+    )
+    bm._brackets["entry-managed"] = state
+    bm._symbol_map.clear()  # Reproduces the 9 Oct recovery disagreement.
+
+    assert bm.is_symbol_managed("NFO:NIFTYCE") is True
+    snapshot = bm.get_symbol_lifecycle_snapshot("NFO:NIFTYCE")
+    assert snapshot["managed"] is True
+    assert snapshot["active_bracket_ids"] == ("entry-managed",)
+    assert snapshot["protected_quantity"] == 65
+    assert snapshot["has_valid_stop"] is True
