@@ -7688,8 +7688,14 @@ class MarketDataManager:
         log_throttled(
             self._logger,
             key,
-            "TICK_STAGE_SLOW stage=%s callback=%s symbol=%s duration_ms=%.3f occurrence_count=%d max_duration_ms=%.3f worst_symbol=%s pending_ticks=%d oldest_pending_age_ms=%s drain_active=%d source=%s thread_id=%s event_loop_thread=%s awaited_worker_ms=%s loop_overhead_ms=%s ticks_processed=%s"
-            % (
+            (
+                "TICK_STAGE_SLOW stage=%s callback=%s symbol=%s "
+                "duration_ms=%.3f occurrence_count=%d max_duration_ms=%.3f "
+                "worst_symbol=%s pending_ticks=%d oldest_pending_age_ms=%s "
+                "drain_active=%d source=%s thread_id=%s "
+                "event_loop_thread=%s awaited_worker_ms=%s "
+                "loop_overhead_ms=%s ticks_processed=%s"
+            ) % (
                 stage,
                 callback_name,
                 symbol,
