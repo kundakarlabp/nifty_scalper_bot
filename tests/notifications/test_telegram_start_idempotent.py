@@ -156,3 +156,37 @@ async def test_start_retries_on_transient_timeout(monkeypatch) -> None:
     await bot.start()
     assert scheduled["n"] == 1, "transient timeout must schedule a retry, not give up"
     assert bot._started is False  # reset so the retry can re-enter
+
+async def test_shutdown_stops_updater_before_closing_telegram_application(monkeypatch) -> None:
+    """Stop long polling before application shutdown; do not stop it twice."""
+    from unittest.mock import AsyncMock
+
+    from nifty_scalper_bot.notifications import telegram_controller
+
+    deps = TelegramDeps(token="dummy", chat_id=12345, app_version="test")
+    bot = TelegramBot(deps)
+    bot._running = True
+    bot._started = True
+    events: list[str] = []
+
+    async def stop_updater() -> None:
+        events.append("updater")
+
+    async def shutdown_bot() -> None:
+        events.append("shutdown")
+
+    bot.application.updater.stop = AsyncMock(side_effect=stop_updater)
+    bot.application.stop = AsyncMock()
+    bot.application.shutdown = AsyncMock()
+    bot.shutdown = AsyncMock(side_effect=shutdown_bot)
+    monkeypatch.setattr(
+        telegram_controller, "release_polling_owner", lambda **_kwargs: None
+    )
+
+    await bot.stop()
+
+    assert events == ["updater", "shutdown"]
+    bot.application.stop.assert_not_awaited()
+    bot.application.shutdown.assert_not_awaited()
+    assert bot._started is False
+
