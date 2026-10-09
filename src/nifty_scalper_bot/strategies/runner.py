@@ -216,15 +216,23 @@ _CANDIDATE_RANK_MISSING_TICK_AGE_MS = 999000.0
 _IST = ZoneInfo("Asia/Kolkata")
 
 
-def _signal_frequency_window_elapsed(now_ts: float) -> bool:
-    """Alert only after a full canonical entry hour, never in premarket."""
+def _signal_frequency_window_elapsed(
+    now_ts: float, *, observation_started_at: float | None = None
+) -> bool:
+    """Require a full live-entry-hour sample since both session and startup."""
     now_ist = datetime.fromtimestamp(now_ts, _IST)
     session_start = now_ist.replace(
         hour=SAFE_START.hour, minute=SAFE_START.minute, second=0, microsecond=0
     )
+    observation_start = max(
+        session_start.timestamp(),
+        observation_started_at
+        if observation_started_at is not None
+        else session_start.timestamp(),
+    )
     return (
         SAFE_START <= now_ist.time() <= SAFE_END
-        and now_ts - session_start.timestamp() >= 3600.0
+        and now_ts - observation_start >= 3600.0
     )
 
 
@@ -1210,6 +1218,8 @@ class StrategyRunner:
         self._orphan_retry_count: dict[str, int] = {}
         self._orphan_retry_last_attempt: dict[str, float] = {}
         self._signals_last_hour: Deque[float] = deque(maxlen=1000)
+        # The deque resets on restart, so the observed-hour clock must too.
+        self._signal_frequency_monitor_started_at: float = time.time()
         self._last_signal_frequency_check_ts: float = 0.0
         self._last_eval_queue_log_ts: float = 0.0
         self._eval_queue_depth = 0
@@ -16522,10 +16532,15 @@ class StrategyRunner:
                         )
                         if (
                             signals_last_60m < 2
-                            and _signal_frequency_window_elapsed(now_ts)
+                            and _signal_frequency_window_elapsed(
+                                now_ts,
+                                observation_started_at=getattr(
+                                    self, "_signal_frequency_monitor_started_at", now_ts
+                                ),
+                            )
                         ):
                             self._logger.warning(
-                                "Low signal frequency detected (%s in last hour)",
+                                "Low signal frequency detected (%s in observed hour)",
                                 signals_last_60m,
                                 extra={"event": "low_signal_frequency"},
                             )
