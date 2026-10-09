@@ -1,12 +1,12 @@
-from unittest.mock import MagicMock
-
-from nifty_scalper_bot.execution.order_manager_core import OrderManager
+"""Guard must not invent a second bracket while a real owner exists."""
 
 
 SYMBOL = "NFO:NIFTY26O1322450CE"
 
 
-def _guard_fixture() -> tuple[MagicMock, MagicMock]:
+def _guard_fixture():
+    from unittest.mock import MagicMock
+
     bracket = MagicMock()
     bracket.is_symbol_managed.return_value = False
     bracket.get_bracket.return_value = None
@@ -26,11 +26,19 @@ def _guard_fixture() -> tuple[MagicMock, MagicMock]:
     return manager, bracket
 
 
+def _guard(manager) -> bool:
+    # Import the actual production owner without importing broker modules at
+    # pytest collection time.
+    from nifty_scalper_bot.execution.order_manager_core import OrderManager
+
+    return OrderManager.guard_orphan_position(manager, SYMBOL, 65, 144.15)
+
+
 def test_managed_symbol_never_creates_a_synthetic_guard() -> None:
     manager, bracket = _guard_fixture()
     bracket.is_symbol_managed.return_value = True
 
-    assert OrderManager.guard_orphan_position(manager, SYMBOL, 65, 144.15) is True
+    assert _guard(manager) is True
     bracket.register_virtual_bracket.assert_not_called()
     bracket.confirm_entry_fill.assert_not_called()
     manager._adopt_orphan_position.assert_not_called()
@@ -39,7 +47,7 @@ def test_managed_symbol_never_creates_a_synthetic_guard() -> None:
 def test_rejected_orphan_registration_does_not_claim_attachment() -> None:
     manager, bracket = _guard_fixture()
 
-    assert OrderManager.guard_orphan_position(manager, SYMBOL, 65, 144.15) is False
+    assert _guard(manager) is False
     bracket.register_virtual_bracket.assert_called_once()
     bracket.confirm_entry_fill.assert_not_called()
     manager._log_trade_event.assert_not_called()
@@ -51,11 +59,9 @@ def test_rejected_orphan_registration_does_not_claim_attachment() -> None:
 
 def test_concurrent_canonical_owner_wins_without_phantom_guard() -> None:
     manager, bracket = _guard_fixture()
-    # Prechecks say orphan; the competing fill registers its real owner
-    # before the synthetic guard can be installed.
     bracket.is_symbol_managed.side_effect = [False, False, True]
 
-    assert OrderManager.guard_orphan_position(manager, SYMBOL, 65, 144.15) is True
+    assert _guard(manager) is True
     bracket.register_virtual_bracket.assert_called_once()
     bracket.confirm_entry_fill.assert_not_called()
     manager._log_trade_event.assert_not_called()
@@ -63,9 +69,10 @@ def test_concurrent_canonical_owner_wins_without_phantom_guard() -> None:
 
 def test_guard_reports_attached_only_after_confirmed_activation() -> None:
     manager, bracket = _guard_fixture()
-    bracket.get_bracket.return_value = MagicMock(entry_confirmed=True)
+    bracket.get_bracket.return_value = bracket
+    bracket.entry_confirmed = True
 
-    assert OrderManager.guard_orphan_position(manager, SYMBOL, 65, 144.15) is True
+    assert _guard(manager) is True
     bracket.confirm_entry_fill.assert_called_once()
     manager._log_trade_event.assert_called_once()
     assert any(
