@@ -312,6 +312,23 @@ class IndicatorEngine:
                 "bid_ask_source",
                 "tick_direction",
                 "data_age_seconds",
+                "quote_update_version",
+                "quote_update_version_source",
+                # Preserve the authoritative runner's short-window WS order flow.
+                # Dropping these fields here previously made every context
+                # evaluation report ofi_ready=False despite live book updates.
+                "ofi_ready",
+                "ofi_event",
+                "ofi_1s",
+                "ofi_3s",
+                "ofi_1s_normalized",
+                "ofi_3s_normalized",
+                "ofi_update_count_1s",
+                "ofi_update_count_3s",
+                "ofi_1s_complete",
+                "ofi_3s_complete",
+                "ofi_source",
+                "queue_imbalance_top",
                 "selected_ce",
                 "selected_pe",
                 "atm_strike",
