@@ -1,7 +1,3 @@
-"""Regression tests for 9 Oct managed-position/orphan-guard false positives."""
-
-from __future__ import annotations
-
 from unittest.mock import MagicMock
 
 from nifty_scalper_bot.execution.order_manager_core import OrderManager
