@@ -14723,6 +14723,10 @@ class OrderManager:
 
         if not self._bracket_manager or quantity == 0:
             return False
+        # A broker position with an existing canonical bracket is not orphaned.
+        # Checking before any subscription/accounting avoids phantom guard orders.
+        if self._bracket_manager.is_symbol_managed(symbol):
+            return True
 
         # ✅ Use explicit side if provided, else infer from quantity
         if position_side:
@@ -14811,6 +14815,11 @@ class OrderManager:
                 except ValueError as exc:
                     self._logger.error("Failure in guard_orphan_position: %s", exc)
                     return False
+
+        # Recheck after fetching the quote: a concurrent fill callback may
+        # have registered its bracket while the orphan guard was preparing.
+        if self._bracket_manager.is_symbol_managed(symbol):
+            return True
 
         # --- STEP 2: Fix Accounting ---
         if not consume_existing:
@@ -14948,6 +14957,31 @@ class OrderManager:
                 tag=strategy_tag,
                 activate_immediately=True,
             )
+            # register_virtual_bracket rejects a competing owner without raising.
+            # Never record a phantom adoption or confirm a nonexistent guard ID.
+            registered = self._bracket_manager.get_bracket(synthetic_id)
+            if registered is None:
+                if self._bracket_manager.is_symbol_managed(symbol):
+                    self._logger.info(
+                        "ORPHAN_GUARD_RACE_LOST_TO_CANONICAL_OWNER symbol=%s",
+                        symbol,
+                    )
+                    return True
+                self._logger.error(
+                    "ORPHAN_GUARD_REGISTRATION_NOT_CONFIRMED symbol=%s guard_id=%s",
+                    symbol,
+                    synthetic_id,
+                )
+                return False
+            self._bracket_manager.confirm_entry_fill(synthetic_id, base_price)
+            confirmed = self._bracket_manager.get_bracket(synthetic_id)
+            if confirmed is None or not bool(getattr(confirmed, "entry_confirmed", False)):
+                self._logger.error(
+                    "ORPHAN_GUARD_ACTIVATION_NOT_CONFIRMED symbol=%s guard_id=%s",
+                    symbol,
+                    synthetic_id,
+                )
+                return False
             self._logger.info(
                 "ORPHAN_POSITION_BRACKET_ATTACHED symbol=%s qty=%s base_price=%s",
                 symbol,
@@ -14978,7 +15012,6 @@ class OrderManager:
                 },
             )
 
-            self._bracket_manager.confirm_entry_fill(synthetic_id, base_price)
             return True
 
         except Exception as e:
