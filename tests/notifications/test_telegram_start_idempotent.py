@@ -157,6 +157,7 @@ async def test_start_retries_on_transient_timeout(monkeypatch) -> None:
     assert scheduled["n"] == 1, "transient timeout must schedule a retry, not give up"
     assert bot._started is False  # reset so the retry can re-enter
 
+
 async def test_updater_stops_before_telegram_app_shutdown(monkeypatch) -> None:
     """Stop long polling before application shutdown; do not stop it twice."""
     from unittest.mock import AsyncMock
@@ -189,4 +190,3 @@ async def test_updater_stops_before_telegram_app_shutdown(monkeypatch) -> None:
     bot.application.stop.assert_not_awaited()
     bot.application.shutdown.assert_not_awaited()
     assert bot._started is False
-
