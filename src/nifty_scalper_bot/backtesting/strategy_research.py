@@ -1172,6 +1172,7 @@ def run_orb_comparison(directory: Path) -> dict[str, Any]:
                     components={"ORBPro"},
                     minimum_net_rr=minimum_rr,
                     minimum_opening_rvol=rvol,
+                    compact_orb_context=True,
                 )["strategies"]["ORBPro"]
                 scenarios.append({"slippage_bps_per_side": slippage, **result})
             candidates.append(

@@ -135,7 +135,7 @@ def test_systemd_launcher_uses_independent_transient_service(tmp_path, monkeypat
     assert "--unit=niftybot-research-worker.service" in launch
     assert "--collect" in launch
     assert "--service-type=exec" in launch
-    assert "--property=RuntimeMaxSec=2100s" in launch
+    assert "--property=RuntimeMaxSec=3900s" in launch
     assert "--property=CPUWeight=5" in launch
     assert "--property=IOWeight=10" in launch
     assert "--property=OOMScoreAdjust=500" in launch
@@ -556,7 +556,7 @@ def test_worker_completes_component_research_without_claiming_live_parity(
 
 @pytest.mark.parametrize(
     ("mode", "expected_timeout"),
-    [("all", 3600), ("components", 2100), ("runtime", 1800)],
+    [("all", 5400), ("components", 3900), ("runtime", 1800)],
 )
 def test_updater_waits_with_mode_aware_budget(
     tmp_path, monkeypatch, mode, expected_timeout
@@ -636,7 +636,7 @@ def test_updater_records_worker_timeout_or_unexpected_exit(
     assert bool(killed) is timeout
     if timeout:
         assert result["timed_out_stage"] == "runtime_replay"
-        assert result["worker_timeout_seconds"] == 3600
+        assert result["worker_timeout_seconds"] == 5400
         assert result["completed_trade_analysis"] == "completed_trade_analysis.json"
 
 
