@@ -38,6 +38,7 @@ import re
 import threading
 import time
 from collections import defaultdict, deque
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
@@ -575,6 +576,9 @@ class MarketDataManager:
         self._tick_drain_invocation_budget_s = self._parse_float_env(
             "MDM_TICK_DRAIN_INVOCATION_BUDGET_SECONDS", default=0.05, minimum=0.005
         )
+        # Isolate market ticks from the default executor used by historical
+        # REST calls and slower application/background tasks.
+        self._tick_drain_executor: ThreadPoolExecutor | None = None
         self._tick_drain_callbacks_scheduled = 0
         self._tick_drain_callbacks_completed = 0
         self._tick_drain_callbacks_cancelled = 0
@@ -1999,6 +2003,12 @@ class MarketDataManager:
                     task.result()
         self._tick_drain_task = None
         self._tick_consumer_task = None
+        executor = self._tick_drain_executor
+        self._tick_drain_executor = None
+        if executor is not None:
+            # Running tick jobs cannot be cancelled, so keep pending work
+            # intact while allowing the dedicated worker to exit naturally.
+            executor.shutdown(wait=False, cancel_futures=False)
         if hasattr(self, "_candle_flush_task"):
             self._candle_flush_task = None
         self._event_loop_thread_id = None
@@ -2080,6 +2090,10 @@ class MarketDataManager:
             )
         self._tick_drain_task = None
         self._tick_consumer_task = None
+        executor = self._tick_drain_executor
+        self._tick_drain_executor = None
+        if executor is not None:
+            executor.shutdown(wait=False, cancel_futures=False)
         self._event_loop_thread_id = None
         self._main_loop = None
         if should_stop:
@@ -7744,7 +7758,15 @@ class MarketDataManager:
                         # A tick can synchronously finalize a candle and fan
                         # out through DataHub/Runner. Keep strict serial order,
                         # but move that indivisible work off the asyncio owner.
-                        await asyncio.to_thread(self._process_queued_tick, raw)
+                        executor = self._tick_drain_executor
+                        if executor is None:
+                            executor = ThreadPoolExecutor(
+                                max_workers=1, thread_name_prefix="mdm-tick-drain"
+                            )
+                            self._tick_drain_executor = executor
+                        await asyncio.get_running_loop().run_in_executor(
+                            executor, self._process_queued_tick, raw
+                        )
                         self._tick_processed_total += 1
                     except asyncio.CancelledError:
                         # A running worker cannot be cancelled. Requeueing raw

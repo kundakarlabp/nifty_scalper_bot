@@ -1,3 +1,7 @@
+import json
+import logging
+from collections import deque
+
 import pytest
 
 from nifty_scalper_bot.execution.order_manager import OrderManager
@@ -700,3 +704,155 @@ def test_exit_order_raw_broker_receives_only_zerodha_supported_tag(
     assert order_id == "strict-exit-1"
     assert broker.payload is not None
     assert broker.payload["tag"] == "EXIT_abcd1234_1"
+
+
+@pytest.mark.parametrize(
+    ("raw_type", "expected"),
+    [
+        ("SL", "STOP_LOSS"),
+        ("SL-M", "STOP_LOSS_MARKET"),
+        ("STOP_LOSS", "STOP_LOSS"),
+        ("stop_loss", "STOP_LOSS"),
+        ("STOP_LOSS_MARKET", "STOP_LOSS_MARKET"),
+        ("stop_loss_market", "STOP_LOSS_MARKET"),
+        ("MARKET", "MARKET"),
+        ("limit", "LIMIT"),
+    ],
+)
+def test_persisted_broker_order_type_roundtrip_preserves_stop_order(
+    tmp_path, raw_type, expected
+) -> None:
+    """Valid broker SL children survive order-history reload, not coerced to MARKET."""
+    path = tmp_path / "order_history.json"
+    path.write_text(
+        json.dumps(
+            [
+                {
+                    "order_id": "protected-sl-123",
+                    "symbol": "NFO:NIFTY26O1322450CE",
+                    "side": "SELL",
+                    "order_type": raw_type,
+                    "quantity": 65,
+                    "price": 95.0,
+                    "status": "submitted",
+                    "timestamp": "2026-10-09T07:00:00+00:00",
+                    "client_order_id": "stop:entry-1",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    manager = object.__new__(OrderManager)
+    manager._history_path = path
+    manager._history = deque(maxlen=1000)
+    manager._history_index = {}
+    manager._history_base_index = 0
+    manager._history_persisted_ids = set()
+    manager._orders = {}
+    manager._client_order_index = {}
+    manager._logger = logging.getLogger("test_stop_history_recovery")
+
+    manager._load_history()
+
+    assert len(manager._history) == 1
+    order = manager._orders["protected-sl-123"]
+    assert order.order_type.name == expected
+    assert order.status.name == "SUBMITTED"
+    assert order.side == "SELL"
+    assert manager._client_order_index["stop:entry-1"] == "protected-sl-123"
+
+
+def test_unknown_persisted_order_type_is_not_reinterpreted_as_market(tmp_path) -> None:
+    """An unknown broker type is explicitly rejected rather than misclassified."""
+    path = tmp_path / "order_history.json"
+    path.write_text(
+        json.dumps(
+            [
+                {
+                    "order_id": "unknown-123",
+                    "symbol": "NFO:NIFTY26O1322450CE",
+                    "side": "SELL",
+                    "order_type": "UNRECOGNISED_BROKER_TYPE",
+                    "quantity": 65,
+                    "price": 95.0,
+                    "status": "submitted",
+                    "timestamp": "2026-10-09T07:00:00+00:00",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    manager = object.__new__(OrderManager)
+    manager._history_path = path
+    manager._history = deque(maxlen=1000)
+    manager._history_index = {}
+    manager._history_base_index = 0
+    manager._history_persisted_ids = set()
+    manager._orders = {}
+    manager._client_order_index = {}
+    manager._logger = logging.getLogger("test_unknown_stop_history")
+
+    manager._load_history()
+    assert not manager._history
+    assert "unknown-123" not in manager._orders
+
+
+@pytest.mark.parametrize(
+    ("raw_type", "expected"),
+    [
+        ("SL", "STOP_LOSS"),
+        ("SL-M", "STOP_LOSS_MARKET"),
+        ("STOP_LOSS", "STOP_LOSS"),
+        ("stop_loss_market", "STOP_LOSS_MARKET"),
+    ],
+)
+def test_all_persisted_order_readers_keep_broker_stop_type(
+    monkeypatch, tmp_path, raw_type, expected
+) -> None:
+    """Runtime snapshots and orders.json must agree with history restoration."""
+    import threading
+
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    manager = object.__new__(OrderManager)
+    manager._logger = logging.getLogger("test_stop_type_all_readers")
+    manager._lock = threading.RLock()
+    manager._orders = {}
+    record = {
+        "order_id": "SL-123",
+        "symbol": "NFO:NIFTY26O1322450CE",
+        "side": "SELL",
+        "order_type": raw_type,
+        "quantity": 65,
+        "price": 95.0,
+        "status": "FILLED",
+        "timestamp": "2026-10-09T07:00:00+00:00",
+    }
+
+    decoded = manager._order_from_dict(record)
+    assert decoded.order_type.name == expected
+    assert decoded.status.name == "FILLED"
+
+    (tmp_path / "orders.json").write_text(
+        json.dumps({"SL-123": record}), encoding="utf-8"
+    )
+    manager._load_orders()
+    restored = manager._orders["SL-123"]
+    assert restored.order_type.name == expected
+    assert restored.status.name == "FILLED"
+
+
+def test_unknown_order_snapshot_type_does_not_become_market() -> None:
+    manager = object.__new__(OrderManager)
+    manager._logger = logging.getLogger("test_stop_type_unknown")
+    with pytest.raises(ValueError, match="Invalid order payload"):
+        manager._order_from_dict(
+            {
+                "order_id": "unknown",
+                "symbol": "NFO:NIFTY26O1322450CE",
+                "side": "SELL",
+                "order_type": "UNKNOWN_BROKER_ORDER",
+                "quantity": 65,
+                "price": 95.0,
+            }
+        )
+
