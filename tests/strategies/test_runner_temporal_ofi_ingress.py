@@ -389,9 +389,6 @@ def test_live_underlying_context_does_not_pick_a_side_from_conflicting_sources(
     monkeypatch,
 ) -> None:
     """A fresh spot/future disagreement must not be reduced to spot-first bias."""
-    from nifty_scalper_bot.strategies.runner import StrategyRunner
-    from types import SimpleNamespace
-
     monkeypatch.setattr("nifty_scalper_bot.strategies.runner.time.time", lambda: 1000.0)
     runner = object.__new__(StrategyRunner)
     runner._strategy_manager = SimpleNamespace(
