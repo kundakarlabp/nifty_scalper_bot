@@ -2206,3 +2206,34 @@ def test_replay_capture_skips_repeated_basket_serialization(monkeypatch) -> None
     monkeypatch.setattr(mdm_module, "to_json_safe", _unexpected_serialize)
     mdm._capture_replay_tick({"symbol": "NFO:NIFTY26O1322500CE"})
     assert events == ["snapshot", "tick", "tick"]
+
+
+@pytest.mark.asyncio
+async def test_drain_telemetry_identifies_awaited_worker_turnaround(
+    monkeypatch, caplog
+):
+    """A slow off-thread tick is not evidence of event-loop starvation."""
+    mdm = _make_mdm()
+    mdm.set_event_loop(asyncio.get_running_loop())
+    monkeypatch.setattr(mdm, "_process_queued_tick", lambda _raw: time.sleep(0.12))
+
+    with caplog.at_level("WARNING"):
+        mdm._enqueue_tick_threadsafe(
+            {"instrument_token": 1, "last_price": 100, "timestamp": 1}
+        )
+        await mdm.drain_pending_ticks(timeout=2.0)
+
+    records = [
+        record
+        for record in caplog.records
+        if getattr(record, "event", "") == "TICK_STAGE_SLOW"
+        and getattr(record, "stage", "") == "drain_invocation"
+    ]
+    assert records
+    sample = records[-1]
+    assert sample.awaited_worker_ms >= 100.0
+    assert sample.ticks_processed == 1
+    assert sample.loop_overhead_ms < sample.duration_ms
+    assert "awaited_worker_ms=" in sample.getMessage()
+    assert mdm.get_tick_pressure_stats()["dropped_total"] == 0
+    await _stop_mdm(mdm)

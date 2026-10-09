@@ -12460,15 +12460,22 @@ class OrderManager:
         return OrderStatus.SUBMITTED
 
     @staticmethod
-    def _parse_order_type_token(raw_type: Any) -> OrderType:
+    def _parse_order_type_token(raw_type: Any, *, strict: bool = False) -> OrderType:
+        """Normalize internal and Zerodha order types without downgrading stops."""
         if isinstance(raw_type, OrderType):
             return raw_type
-        if raw_type is None:
-            return OrderType.MARKET
-        token = str(raw_type).strip().lower()
+        token = str(raw_type).strip().lower() if raw_type is not None else ""
+        broker_types = {
+            "sl": OrderType.STOP_LOSS,
+            "sl-m": OrderType.STOP_LOSS_MARKET,
+        }
+        if token in broker_types:
+            return broker_types[token]
         for candidate in OrderType:
             if token in {candidate.value, candidate.name.lower()}:
                 return candidate
+        if strict:
+            raise ValueError(f"unsupported_order_type:{token or 'missing'}")
         return OrderType.MARKET
 
     def _is_force_exit(
@@ -13285,13 +13292,10 @@ class OrderManager:
             quantity = int(payload.get("quantity", 0))
             price = float(payload.get("price", 0.0) or 0.0)
 
-            # Enums with Fallback
-            try:
-                order_type = OrderType(
-                    payload.get("order_type", OrderType.MARKET.value)
-                )
-            except (TypeError, ValueError):
-                order_type = OrderType.MARKET
+            # Unknown persisted order types must never become MARKET exits.
+            order_type = self._parse_order_type_token(
+                payload.get("order_type"), strict=True
+            )
 
             try:
                 status = OrderStatus(payload.get("status", OrderStatus.SUBMITTED.value))
@@ -13384,8 +13388,9 @@ class OrderManager:
             stop_price_raw = self._coerce_float(payload.get("stop_price"))
             stop_price = float(stop_price_raw) if stop_price_raw is not None else 0.0
             stop_order_id = str(payload.get("stop_order_id", "")).strip()
-            stop_order_type = OrderType(
-                payload.get("stop_order_type", OrderType.STOP_LOSS.value)
+            stop_order_type = self._parse_order_type_token(
+                payload.get("stop_order_type", OrderType.STOP_LOSS.value),
+                strict=True,
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError("Invalid bracket payload") from exc
@@ -14283,7 +14288,9 @@ class OrderManager:
                     order_id=str(entry["order_id"]),
                     symbol=str(entry["symbol"]).upper(),
                     side=str(entry["side"]),
-                    order_type=OrderType(entry["order_type"]),
+                    order_type=self._parse_order_type_token(
+                        entry["order_type"], strict=True
+                    ),
                     quantity=int(entry["quantity"]),
                     price=float(entry["price"]),
                     status=OrderStatus(entry["status"]),

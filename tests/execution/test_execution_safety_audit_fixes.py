@@ -1753,3 +1753,103 @@ def test_order_details_applied_fill_persists_across_restart_and_replay(
 
     assert positions.calls == 1
     assert restored.applied_filled_quantity == 130
+
+
+def test_persisted_broker_stop_order_aliases_restore_without_loss(tmp_path) -> None:
+    """Broker SL / SL-M history must survive restart without MARKET substitution."""
+    import json
+    from collections import deque
+    from unittest.mock import Mock
+
+    from nifty_scalper_bot.execution.order_manager_core import (
+        OrderManager,
+        OrderStatus,
+        OrderType,
+    )
+
+    entries = []
+    for order_id, broker_type in (
+        ("OID-SL", "SL"),
+        ("OID-SLM", "SL-M"),
+        ("OID-STOP", "stop_loss"),
+        ("OID-MARKET", "MARKET"),
+        ("OID-UNKNOWN", "NOT_A_BROKER_TYPE"),
+    ):
+        entries.append(
+            {
+                "order_id": order_id,
+                "symbol": "NFO:NIFTY26O1322500CE",
+                "side": "SELL",
+                "order_type": broker_type,
+                "quantity": 65,
+                "price": 95.0,
+                "status": "submitted",
+                "timestamp": "2026-10-09T08:25:00+00:00",
+            }
+        )
+    path = tmp_path / "order_history.json"
+    path.write_text(json.dumps(entries), encoding="utf-8")
+    manager = object.__new__(OrderManager)
+    manager._history_path = path
+    manager._history = deque(maxlen=1000)
+    manager._history_index = {}
+    manager._history_base_index = 0
+    manager._history_persisted_ids = set()
+    manager._orders = {}
+    manager._client_order_index = {}
+    manager._logger = Mock()
+
+    manager._load_history()
+
+    assert len(manager._history) == 4
+    assert manager._orders["OID-SL"].order_type is OrderType.STOP_LOSS
+    assert manager._orders["OID-SLM"].order_type is OrderType.STOP_LOSS_MARKET
+    assert manager._orders["OID-STOP"].order_type is OrderType.STOP_LOSS
+    assert manager._orders["OID-MARKET"].order_type is OrderType.MARKET
+    assert "OID-UNKNOWN" not in manager._orders
+    assert manager._orders["OID-SL"].status is OrderStatus.SUBMITTED
+    assert set(manager._history_persisted_ids) == set(manager._orders)
+    manager._logger.error.assert_called_once()
+
+
+def test_restart_order_and_broker_open_order_keep_sl_semantics() -> None:
+    """An open broker stop and an order snapshot cannot become MARKET on reload."""
+    from unittest.mock import Mock
+
+    from nifty_scalper_bot.execution.order_manager_core import OrderManager, OrderType
+
+    manager = object.__new__(OrderManager)
+    manager._logger = Mock()
+    for raw_type, expected in (
+        ("SL", OrderType.STOP_LOSS),
+        ("SL-M", OrderType.STOP_LOSS_MARKET),
+        ("STOP_LOSS", OrderType.STOP_LOSS),
+        ("STOP_LOSS_MARKET", OrderType.STOP_LOSS_MARKET),
+    ):
+        payload = {
+            "order_id": "OID-PROTECT",
+            "symbol": "NFO:NIFTY26O1322500CE",
+            "side": "SELL",
+            "order_type": raw_type,
+            "quantity": 65,
+            "price": 95.0,
+            "status": "submitted",
+        }
+        restored = manager._order_from_dict(payload)
+        assert restored.order_type is expected
+        broker_open = manager._coerce_broker_open_order(payload)
+        assert broker_open is not None
+        assert broker_open.order_type is expected
+
+    for bad_type in ("NOT_A_BROKER_TYPE", "", None):
+        with pytest.raises(ValueError, match="Invalid order payload"):
+            manager._order_from_dict(
+                {
+                    "order_id": "OID-UNKNOWN",
+                    "symbol": "NFO:NIFTY26O1322500CE",
+                    "side": "SELL",
+                    "order_type": bad_type,
+                    "quantity": 65,
+                    "status": "submitted",
+                }
+            )
