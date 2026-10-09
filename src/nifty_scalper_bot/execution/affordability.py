@@ -98,6 +98,8 @@ def _risk_budget_snapshot(
     lot_size: int,
     *,
     available_balance: float | None = None,
+    refresh_risk: bool = False,
+    risk_snapshot: Any | None = None,
 ) -> tuple[
     float | None,
     float | None,
@@ -137,8 +139,35 @@ def _risk_budget_snapshot(
         getattr(manager, "_completed_trade_costs_today", None), minimum=0.0
     )
     day_loss_source = "risk_switches"
+
+    # The final order gate refreshes realised P&L before checking daily risk.
+    # Refresh only for a materialised stop/entry, not periodic cash readiness.
+    # Otherwise a recent losing trade can leave selection with yesterday's
+    # (or pre-fill) allowance while the final gate correctly rejects it.
+    authoritative = risk_snapshot
+    reader = getattr(manager, "snapshot", None)
+    if refresh_risk and authoritative is None and callable(reader):
+        try:
+            authoritative = reader()
+        except Exception:
+            authoritative = None
+        if authoritative is None:
+            authoritative = object()  # fail closed; no stale switch fallback
+    if refresh_risk and authoritative is not None:
+        max_day_loss = _finite_float(
+            getattr(authoritative, "max_day_loss", None), minimum=0.0
+        )
+        current_day_loss = _finite_float(
+            getattr(authoritative, "day_loss", None), minimum=0.0
+        )
+        if max_day_loss is None or current_day_loss is None:
+            day_loss_source = "risk_snapshot_unavailable"
+        else:
+            day_loss_source = "risk_snapshot"
+            if max_day_loss > 0.0:
+                remaining = max(max_day_loss - current_day_loss, 0.0)
     switches = getattr(manager, "_switches", None)
-    if switches is not None:
+    if day_loss_source == "risk_switches" and switches is not None:
         max_day_loss = _finite_float(
             getattr(switches, "max_day_loss", None), minimum=0.0
         )
@@ -155,7 +184,11 @@ def _risk_budget_snapshot(
                 remaining = 0.0
 
     budgets = [value for value in (per_trade, remaining) if value is not None]
-    effective = min(budgets) if budgets else None
+    effective = (
+        None
+        if day_loss_source == "risk_snapshot_unavailable"
+        else min(budgets) if budgets else None
+    )
     max_stop_distance = (
         effective / float(lot_size) if effective is not None and lot_size > 0 else None
     )
@@ -180,6 +213,7 @@ def evaluate_minimum_lot_affordability(
     fallback_balance: Any | None = None,
     plan_entry_price: Any | None = None,
     plan_stop_loss: Any | None = None,
+    risk_snapshot: Any | None = None,
 ) -> MinimumLotAffordability:
     """Evaluate whether one supplied BUY option lot is cash executable.
 
@@ -284,6 +318,8 @@ def evaluate_minimum_lot_affordability(
         order_manager,
         lot_size,
         available_balance=available,
+        refresh_risk=plan_entry_price is not None or plan_stop_loss is not None,
+        risk_snapshot=risk_snapshot,
     )
 
     # Keep the historical floor fields for observability/API compatibility, but

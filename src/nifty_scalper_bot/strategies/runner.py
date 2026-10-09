@@ -4673,6 +4673,38 @@ class StrategyRunner:
             ordered_candidates.sort(
                 key=lambda ranked: normalize_symbol(str(ranked.symbol)) != preferred
             )
+
+        # Refresh realised P&L once for the entire materialised candidate batch.
+        # Reusing this RiskManager snapshot prevents both stale prefilters and
+        # repeated broker-diagnostic refreshes for ranked fallback contracts.
+        risk_snapshot = None
+        risk_manager = getattr(
+            getattr(self, "_order_manager", None), "_risk_manager", None
+        )
+        snapshot_reader = getattr(risk_manager, "snapshot", None)
+        has_materialized_plan = (
+            preferred_entry_price is not None
+            or preferred_stop_loss is not None
+            or any(
+                getattr(ranked, "entry_price", None) is not None
+                or getattr(ranked, "stop_loss", None) is not None
+                for ranked in ordered_candidates
+            )
+        )
+        if is_live_mode and has_materialized_plan and callable(snapshot_reader):
+            try:
+                risk_snapshot = snapshot_reader()
+                if risk_snapshot is None:
+                    risk_snapshot = object()
+            except Exception:
+                # A missing authoritative risk read blocks planned candidates.
+                # Never silently fall back to switches that may lag broker P&L.
+                risk_snapshot = object()
+                self._logger.warning(
+                    "CANDIDATE_RISK_SNAPSHOT_UNAVAILABLE trace_id=%s",
+                    trace_id,
+                )
+
         for ranked in ordered_candidates:
             ranked_symbol = normalize_symbol(str(ranked.symbol))
             ready_before = self._is_symbol_execution_ready(ranked_symbol)
@@ -4708,6 +4740,7 @@ class StrategyRunner:
                 order_manager=getattr(self, "_order_manager", None),
                 data_hub=getattr(self, "_data_hub", None),
                 fallback_balance=fallback_balance,
+                risk_snapshot=risk_snapshot,
                 plan_entry_price=(
                     preferred_entry_price
                     if ranked_symbol == preferred
