@@ -109,6 +109,7 @@ def test_runtime_context_depth_keys_are_preserved() -> None:
     assert ctx["depth_available"] is True
     assert ctx["depth"]["buy"][0]["price"] == 10.0
 
+
 def test_temporal_ofi_survives_indicator_context_handoff_to_orderflow() -> None:
     """Real runner temporal book evidence must survive IndicatorEngine's allowlist."""
     from nifty_scalper_bot.strategies.indicators import IndicatorEngine
@@ -161,9 +162,7 @@ def test_temporal_ofi_survives_indicator_context_handoff_to_orderflow() -> None:
     assert indicators["ofi_update_count_1s"] == 2
     assert indicators["ofi_1s"] == 60.0
     assert indicators["ofi_source"] == "runner_datahub_tick_updates"
-    evidence = _strategy()._evaluate_signal(
-        symbol, indicators, current_price=100.25
-    )
+    evidence = _strategy()._evaluate_signal(symbol, indicators, current_price=100.25)
     assert evidence is not None
     assert evidence.metadata["ofi_ready"] is True
     assert evidence.metadata["flow_confirmation_source"] == "temporal_ofi"
