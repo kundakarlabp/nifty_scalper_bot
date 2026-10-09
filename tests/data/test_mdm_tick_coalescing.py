@@ -2173,3 +2173,36 @@ def test_optional_context_option_is_not_recovery_critical():
     assert selected_ce in required
     assert selected_pe in required
     assert optional_ce not in required
+
+
+def test_replay_capture_skips_repeated_basket_serialization(monkeypatch) -> None:
+    """Every tick is archived, but an unchanged version needs no basket encoding."""
+    from nifty_scalper_bot.data import market_data_manager as mdm_module
+
+    mdm = MarketDataManager.__new__(MarketDataManager)
+    mdm._replay_capture_lock = threading.Lock()
+    mdm._replay_snapshot_key = None
+    mdm._active_contract_basket = {
+        "basket_version": "v1",
+        "option_symbols": ["NFO:NIFTY26O1322500CE"],
+        "token_by_symbol": {"NFO:NIFTY26O1322500CE": 42},
+    }
+    mdm.replay_metadata_provider = lambda: {"release": "test"}
+    mdm.get_ohlc_bars = lambda _sym, *, limit: []
+    events: list[str] = []
+
+    class _Archive:
+        def record(self, kind, payload, _at):
+            events.append(kind)
+
+    mdm._replay_archive = _Archive()
+    monkeypatch.setenv("REPLAY_CAPTURE_ENABLED", "true")
+    mdm._capture_replay_tick({"symbol": "NFO:NIFTY26O1322500CE"})
+    assert events == ["snapshot", "tick"]
+
+    def _unexpected_serialize(_value):
+        raise AssertionError("identical basket must not be reserialized")
+
+    monkeypatch.setattr(mdm_module, "to_json_safe", _unexpected_serialize)
+    mdm._capture_replay_tick({"symbol": "NFO:NIFTY26O1322500CE"})
+    assert events == ["snapshot", "tick", "tick"]

@@ -108,3 +108,61 @@ def test_runtime_context_depth_keys_are_preserved() -> None:
     ctx = engine.get_runtime_context("NFO:NIFTY26MAY24000CE")
     assert ctx["depth_available"] is True
     assert ctx["depth"]["buy"][0]["price"] == 10.0
+
+
+def test_temporal_ofi_survives_indicator_context_handoff_to_orderflow() -> None:
+    """Real runner temporal book evidence must survive IndicatorEngine's allowlist."""
+    from nifty_scalper_bot.strategies.indicators import IndicatorEngine
+    from nifty_scalper_bot.strategies.order_flow_evidence import TemporalOfiAccumulator
+
+    symbol = "NFO:NIFTY26MAY24000CE"
+    acc = TemporalOfiAccumulator()
+    payload = {}
+    for version, quantity, at in (
+        (1, 100.0, 10.0),
+        (2, 140.0, 10.2),
+        (3, 160.0, 10.4),
+    ):
+        payload = acc.update(
+            symbol,
+            {
+                "source": "ws",
+                "bid": 100.0,
+                "ask": 100.5,
+                "depth": {
+                    "buy": [{"quantity": quantity}],
+                    "sell": [{"quantity": 100.0}],
+                },
+            },
+            update_version=version,
+            observed_at=at,
+        )
+    assert payload["ofi_ready"] is True
+    engine = IndicatorEngine()
+    engine.set_runtime_context(
+        symbol,
+        {
+            **payload,
+            "bid": 100.0,
+            "ask": 100.5,
+            "spread_pct": 0.5,
+            "quote_age_s": 0.1,
+            "context_age_seconds": 0.1,
+            "depth": {
+                "buy": [{"quantity": 160.0}],
+                "sell": [{"quantity": 100.0}],
+            },
+            "direction_bias": "CE",
+            "underlying_direction_bias": "CE",
+            "tradable_quote": True,
+        },
+    )
+    indicators = engine.get_indicators(symbol)
+    assert indicators["ofi_ready"] is True
+    assert indicators["ofi_update_count_1s"] == 2
+    assert indicators["ofi_1s"] == 60.0
+    assert indicators["ofi_source"] == "runner_datahub_tick_updates"
+    evidence = _strategy()._evaluate_signal(symbol, indicators, current_price=100.25)
+    assert evidence is not None
+    assert evidence.metadata["ofi_ready"] is True
+    assert evidence.metadata["flow_confirmation_source"] == "temporal_ofi"

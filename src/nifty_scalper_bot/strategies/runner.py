@@ -11010,6 +11010,26 @@ class StrategyRunner:
         if fut_ctx:
             output["futures_context"] = fut_ctx
             output["futures_fresh"] = fut_fresh
+        if spot_ctx or fut_ctx:
+            # Clear any earlier option/runtime directional conclusion when the
+            # current authoritative snapshots cannot resolve a direction.
+            output.update(
+                direction_bias=None,
+                underlying_direction_bias=None,
+                underlying_direction_confidence=None,
+                context_fresh=spot_fresh or fut_fresh,
+            )
+        if (
+            spot_fresh
+            and fut_fresh
+            and spot_bias in {"CE", "PE"}
+            and fut_bias in {"CE", "PE"}
+            and spot_bias != fut_bias
+        ):
+            # Both live underlying authorities disagree. The downstream
+            # arbitrator must see the conflict, never a spot-first bias.
+            output["direction_context_conflict"] = True
+            return output
         if spot_fresh and spot_bias in {"CE", "PE"}:
             selected_ctx, selected_bias, selected_age = spot_ctx, spot_bias, spot_age
         elif fut_fresh and fut_bias in {"CE", "PE"}:
@@ -11877,6 +11897,8 @@ class StrategyRunner:
             "underlying_direction_conflict",
             "underlying_direction_unresolved",
             "direction_context_missing_live",
+            "direction_context_conflict_live",
+            "direction_context_unresolved_live",
             "direction_context_not_ready",
         }:
             return details
@@ -16238,18 +16260,31 @@ class StrategyRunner:
                                     symbol
                                 ]
                             else:
+                                # Fresh price updates do not imply a conclusive
+                                # structural direction. Report the actual cause
+                                # without weakening the required direction gate.
+                                direction_reason = (
+                                    "direction_context_conflict_live"
+                                    if refreshed_context.get("direction_context_conflict")
+                                    else (
+                                        "direction_context_unresolved_live"
+                                        if spot_fresh or fut_fresh
+                                        else "direction_context_missing_live"
+                                    )
+                                )
                                 log_throttled(
                                     self._logger,
-                                    f"direction_context_missing_live:{symbol}",
-                                    "TRIGGER_EVAL_SKIPPED symbol=%s reason=direction_context_missing_live spot_fresh=%s fut_fresh=%s",
+                                    f"direction_context_blocked:{symbol}:{direction_reason}",
+                                    "TRIGGER_EVAL_SKIPPED symbol=%s reason=%s spot_fresh=%s fut_fresh=%s",
                                     symbol,
+                                    direction_reason,
                                     spot_fresh,
                                     fut_fresh,
                                     interval_sec=30.0,
                                     level=logging.WARNING,
                                     extra={
                                         "event": "trigger_eval_skipped",
-                                        "reason": "direction_context_missing_live",
+                                        "reason": direction_reason,
                                         "symbol": symbol,
                                         "spot_fresh": spot_fresh,
                                         "fut_fresh": fut_fresh,
@@ -16258,7 +16293,7 @@ class StrategyRunner:
                                 self._emit_runner_eval_decision(
                                     symbol=symbol,
                                     stage="phase9",
-                                    reason="direction_context_missing_live",
+                                    reason=direction_reason,
                                     allowed=False,
                                     trace_id=trace_id,
                                 )

@@ -9815,6 +9815,23 @@ class MarketDataManager:
                         get_data_dir() / "replay_archive"
                     )
                 basket = getattr(self, "_active_contract_basket", None)
+                # A versioned active basket is immutable until its next commit.
+                # Keep recording every tick, but avoid serializing the entire
+                # basket/history on each high-frequency tick in that version.
+                raw_version = (
+                    basket.get("basket_version") or basket.get("version")
+                    if isinstance(basket, Mapping)
+                    else getattr(basket, "basket_version", None)
+                    or getattr(basket, "version", None)
+                )
+                if isinstance(raw_version, (str, int, float)) and raw_version:
+                    fast_key = (
+                        now.astimezone(ZoneInfo("Asia/Kolkata")).date().isoformat(),
+                        str(raw_version),
+                    )
+                    if fast_key == self._replay_snapshot_key:
+                        self._replay_archive.record("tick", tick, now)
+                        return
                 basket_payload = to_json_safe(basket) if basket is not None else {}
                 if not isinstance(basket_payload, dict) or not basket_payload:
                     return
