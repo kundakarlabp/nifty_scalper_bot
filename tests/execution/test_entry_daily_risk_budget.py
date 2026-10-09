@@ -270,3 +270,19 @@ def test_materialized_entry_blocks_if_authoritative_snapshot_fails() -> None:
     assert decision.capacity_blocker == "risk"
     assert decision.reason == "risk_budget_unavailable"
     assert decision.day_loss_source == "risk_snapshot_unavailable"
+
+
+def test_null_risk_snapshot_is_not_accepted_as_fresh_budget() -> None:
+    """A falsey but successful risk read cannot resurrect consumed day budget."""
+    manager = _order_manager(max_day_loss=558.645, day_loss=0.0)
+    manager._risk_manager.snapshot = lambda: None
+    decision = evaluate_minimum_lot_affordability(
+        symbol="NFO:NIFTY2690124050PE",
+        quote={"bid": 134.45, "ask": 134.55},
+        order_manager=manager,
+        fallback_balance=11_000.65,
+        plan_entry_price=134.55,
+        plan_stop_loss=130.10,
+    )
+    assert decision.affordable is False
+    assert decision.reason == "risk_budget_unavailable"
