@@ -49,9 +49,6 @@ else:  # pragma: no cover - fallback type when kiteconnect missing
 # InstrumentManager is used as the resolver at runtime (typed as Any).
 InstrumentResolver = Any  # type: ignore[misc]
 
-from nifty_scalper_bot.data.rest.broker_pnl_snapshot import (
-    _zerodha_get_pnl_snapshot,
-)
 from nifty_scalper_bot.data.rest.client import BaseBrokerClient
 from nifty_scalper_bot.data.market_data_policy import MarketDataPolicy
 from nifty_scalper_bot.utils.env import get_float, get_int, get_str
@@ -1392,6 +1389,10 @@ class ZerodhaKiteClient(BaseBrokerClient):
 
     def get_pnl_snapshot(self) -> dict[str, Any]:
         """Return native broker account/tradebook P&L evidence (diagnostic)."""
+        from nifty_scalper_bot.data.rest.broker_pnl_snapshot import (
+            _zerodha_get_pnl_snapshot,
+        )
+
         return _zerodha_get_pnl_snapshot(self)
 
     def get_positions(self) -> list[dict[str, Any]]:
