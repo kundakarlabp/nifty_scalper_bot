@@ -47,6 +47,19 @@ from nifty_scalper_bot.execution.position_snapshot import (
     PositionSnapshotError,
     decode_position_snapshot,
 )
+from nifty_scalper_bot.execution.broker_pnl_authority_patch import (
+    _broker_supports_dedicated_pnl,
+    _finite_float as _broker_pnl_finite_float,
+    _materialize_positions as _materialize_broker_pnl_positions,
+    _max_age_seconds as _broker_pnl_max_age_seconds,
+    _strip_legacy_position_pnl,
+    enrich_pnl_reconciliation_snapshot,
+    refresh_broker_pnl_diagnostic as _refresh_broker_pnl_base,
+)
+from nifty_scalper_bot.execution.pnl_session_rollover_patch import (
+    _broker_proves_no_current_day_trading,
+    _reset_local_session_state,
+)
 from nifty_scalper_bot.options.strike_selector import SelectedContract
 from nifty_scalper_bot.utils.logging import get_logger
 from nifty_scalper_bot.utils.metrics import Counter
@@ -1526,6 +1539,8 @@ class ActiveContract:
 
 
 class PositionManager:
+    _native_broker_pnl_diagnostics = True
+    _native_pnl_session_rollover = True
     _canonical_position_identity_native = True
     _canonical_registry_state_native = True
     _manual_quarantine_native = True
@@ -1630,6 +1645,15 @@ class PositionManager:
         self._last_persistence_check = 0.0
         self.load_state()
         self._last_reconciled_state = copy.deepcopy(self._positions)
+        self._broker_account_pnl_snapshot: dict[str, Any] = {}
+        self._broker_pnl_last_fetch_mono = 0.0
+        self._broker_pnl_fetch_error: str | None = None
+        self._broker_pnl_last_log_mono = 0.0
+        self._broker_pnl_last_log_fingerprint: object | None = None
+        # Legacy position-row realised is not a strategy P&L authority.
+        with self._lock:
+            self._broker_realized_pnl = None
+            self._refresh_realized_pnl_locked()
 
     def set_on_symbols_flat(self, hook: Any | None) -> None:
         """Attach a callback invoked with symbols pruned during broker sync.
@@ -2768,11 +2792,72 @@ class PositionManager:
         with self._lock:
             return float(self._daily_realized_pnl)
 
+    def refresh_broker_pnl_diagnostic(
+        self, *, force: bool = False
+    ) -> dict[str, Any]:
+        """Native broker diagnostic with conservative IST rollover handling."""
+        today = str(self._trading_date_ist())
+        with self._lock:
+            previous_day = self._pnl_trading_date
+            previous_confirmed = float(self._local_realized_pnl or 0.0)
+            previous_provisional = float(self._local_provisional_realized_pnl or 0.0)
+        snapshot = _refresh_broker_pnl_base(self, force=force)
+        if _broker_pnl_finite_float(snapshot.get("account_realized")) is None:
+            return dict(snapshot)
+        has_carryover = (
+            abs(previous_confirmed) > 1e-6
+            or abs(previous_provisional) > 1e-6
+        )
+        reset_reason = None
+        if has_carryover and previous_day not in (None, today):
+            reset_reason = "trading_date_rollover"
+        elif has_carryover and _broker_proves_no_current_day_trading(snapshot):
+            reset_reason = (
+                "broker_zero_day_unverified_local"
+                if previous_day is None
+                else "broker_zero_day_stale_local"
+            )
+        if reset_reason and _reset_local_session_state(
+            self, today=today, reason=reset_reason
+        ):
+            return dict(_refresh_broker_pnl_base(self, force=True))
+        return dict(snapshot)
+
+    def get_broker_account_pnl_snapshot(
+        self, *, force: bool = False
+    ) -> dict[str, Any]:
+        return self.refresh_broker_pnl_diagnostic(force=force)
+
+    def get_broker_account_realized_pnl(
+        self, *, force: bool = False, max_age_s: float | None = None
+    ) -> float | None:
+        snapshot = self.refresh_broker_pnl_diagnostic(force=force)
+        realized = _broker_pnl_finite_float(
+            snapshot.get("broker_realized_evidence")
+        )
+        fetched = _broker_pnl_finite_float(snapshot.get("fetched_monotonic"))
+        if realized is None or fetched is None:
+            return None
+        age_limit = (
+            _broker_pnl_max_age_seconds()
+            if max_age_s is None
+            else max(0.0, float(max_age_s))
+        )
+        return (
+            float(realized)
+            if time.monotonic() - fetched <= age_limit
+            else None
+        )
+
+    def get_strategy_realized_pnl(self) -> float:
+        with self._lock:
+            return float(self._local_realized_pnl or 0.0)
+
     def pnl_reconciliation_snapshot(self) -> dict[str, object]:
-        """Return current confirmed P&L authority and mismatch details."""
+        """Return local ledger authority plus diagnostic broker/account evidence."""
 
         with self._lock:
-            return {
+            base = {
                 "local_confirmed_realized": float(self._local_realized_pnl),
                 "local_provisional_realized": float(
                     self._local_provisional_realized_pnl
@@ -2804,6 +2889,7 @@ class PositionManager:
                     self._pnl_snapshot_at.isoformat() if self._pnl_snapshot_at else None
                 ),
             }
+        return enrich_pnl_reconciliation_snapshot(self, base)
 
     def current_pnl_reconciliation_blocker(self) -> str | None:
         """Block new entries when confirmed local and broker P&L disagree."""
@@ -3937,6 +4023,10 @@ class PositionManager:
     def synchronize_with_broker(self, broker_positions: Any) -> None:
         """Canonicalize broker truth and reconcile restart-safe session P&L state."""
 
+        broker_positions = _materialize_broker_pnl_positions(broker_positions)
+        dedicated_broker_pnl = _broker_supports_dedicated_pnl(self)
+        if dedicated_broker_pnl:
+            broker_positions = _strip_legacy_position_pnl(broker_positions)
         broker_positions = _materialize_broker_positions(broker_positions)
         broker_realized_authoritative = _snapshot_has_authoritative_realized(
             broker_positions
@@ -3976,6 +4066,8 @@ class PositionManager:
                 registry_write = self._registry_state_write_generation
             if registry_write == before_registry_write:
                 self.save_state()
+        if dedicated_broker_pnl:
+            self.refresh_broker_pnl_diagnostic()
 
     def _maybe_seed_pnl_session_baseline(self, payload: Any) -> bool:
         """Initialize today's baseline only from authoritative broker evidence."""

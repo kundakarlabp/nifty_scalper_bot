@@ -629,9 +629,12 @@ def _patched_synchronize_with_broker(self: Any, broker_positions: Any) -> Any:
     return result
 
 
-def _patched_pnl_reconciliation_snapshot(self: Any) -> dict[str, object]:
-    base = dict(_ORIGINAL_PNL_RECONCILIATION_SNAPSHOT(self))
-    diagnostic = refresh_broker_pnl_diagnostic(self)
+def enrich_pnl_reconciliation_snapshot(
+    self: Any, original: Mapping[str, object]
+) -> dict[str, object]:
+    """Add broker-account diagnostics to the native local-ledger snapshot."""
+    base = dict(original)
+    diagnostic = self.refresh_broker_pnl_diagnostic()
     with getattr(self, "_lock"):
         error = getattr(self, "_broker_pnl_fetch_error", None)
     base.update(
@@ -678,6 +681,12 @@ def _patched_pnl_reconciliation_snapshot(self: Any) -> dict[str, object]:
     return base
 
 
+def _patched_pnl_reconciliation_snapshot(self: Any) -> dict[str, object]:
+    return enrich_pnl_reconciliation_snapshot(
+        self, _ORIGINAL_PNL_RECONCILIATION_SNAPSHOT(self)
+    )
+
+
 def apply_patches() -> None:
     """Install dedicated broker P&L authority after existing position patches."""
 
@@ -694,6 +703,9 @@ def apply_patches() -> None:
     if not callable(getattr(ZerodhaKiteClient, "get_pnl_snapshot", None)):
         ZerodhaKiteClient.get_pnl_snapshot = _zerodha_get_pnl_snapshot
 
+    if getattr(PositionManager, "_native_broker_pnl_diagnostics", False):
+        _PATCH_APPLIED = True
+        return
     if getattr(PositionManager, "_broker_pnl_authority_patch", False):
         _PATCH_APPLIED = True
         return

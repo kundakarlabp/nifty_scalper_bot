@@ -167,6 +167,9 @@ def apply_patches() -> None:
 
     from nifty_scalper_bot.execution.position_manager import PositionManager
 
+    if getattr(PositionManager, "_native_pnl_session_rollover", False):
+        _PATCH_APPLIED = True
+        return
     if getattr(PositionManager, "_pnl_session_rollover_patch", False):
         _PATCH_APPLIED = True
         return
