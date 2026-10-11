@@ -378,3 +378,18 @@ def test_tradebook_snapshot_survives_margin_endpoint_failure() -> None:
     assert snapshot["margins_error"] is not None
     assert snapshot["strategy_tradebook_realized_gross"] == pytest.approx(-65.0)
     assert snapshot["strategy_tradebook_fill_count"] == 2
+
+
+def test_broker_pnl_and_rollover_are_owned_by_native_position_manager() -> None:
+    """Importing execution must not replace PositionManager methods at runtime."""
+    native = "nifty_scalper_bot.execution.position_manager"
+    for name in (
+        "refresh_broker_pnl_diagnostic",
+        "pnl_reconciliation_snapshot",
+        "synchronize_with_broker",
+        "get_broker_account_realized_pnl",
+        "get_strategy_realized_pnl",
+    ):
+        assert PositionManager.__dict__[name].__module__ == native
+    assert PositionManager._native_broker_pnl_diagnostics
+    assert PositionManager._native_pnl_session_rollover
