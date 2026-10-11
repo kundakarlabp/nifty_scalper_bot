@@ -2,7 +2,7 @@
 
 Zerodha ``data.net`` position rows are authoritative for quantity/exposure, but
 their ``realised`` field is legacy and must not be used as the live account P&L
-authority.  This patch keeps position reconciliation unchanged while sourcing broker P&L
+authority.  Native diagnostics retain position reconciliation while sourcing P&L
 evidence from Zerodha trades/positions, with margins M2M retained as diagnostic
 fallback rather than strategy realised-P&L authority.
 
@@ -19,17 +19,17 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from typing import Any
 
-from nifty_scalper_bot.utils.market_hours import (
-    get_runtime_market_mode,
-    post_market_broker_refresh_seconds,
-    post_market_quiet_mode_enabled,
-)
 from nifty_scalper_bot.data.rest.broker_pnl_snapshot import (
     _extract_account_m2m,
     _finite_float,
     _strategy_day_marked_pnl,
     _strategy_tradebook_realized_pnl,
     _zerodha_get_pnl_snapshot,
+)
+from nifty_scalper_bot.utils.market_hours import (
+    get_runtime_market_mode,
+    post_market_broker_refresh_seconds,
+    post_market_quiet_mode_enabled,
 )
 
 
