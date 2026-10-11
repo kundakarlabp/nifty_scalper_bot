@@ -6293,6 +6293,28 @@ class BracketManager:
                     self._exit_order_open_since = parsed_open_since
             self._clear_persistence_degraded()
             self._recovery_degraded_reason = None
+            if self._exchange_protective_stop_enabled and self._is_live_execution():
+                for restored in temp_brackets.values():
+                    if (
+                        not restored.active
+                        or not restored.entry_confirmed
+                        or restored.remaining_quantity <= 0
+                    ):
+                        continue
+                    if not restored.exchange_stop_order_id:
+                        restored.exchange_stop_degraded_reason = (
+                            "restore_missing_exchange_stop"
+                        )
+                        LOGGER.critical(
+                            "BRACKET_RESTORE_STOP_UNVERIFIED entry_id=%s "
+                            "symbol=%s reason=restore_missing_exchange_stop",
+                            restored.entry_order_id,
+                            restored.symbol,
+                        )
+                    else:
+                        # Do not trust persisted order IDs/quantities. Read back
+                        # broker order status; never place another SELL on restart.
+                        self._confirm_exchange_protective_stop(restored)
             LOGGER.info(
                 "BRACKET_STATE_RESTORED count=%s path=%s",
                 len(temp_brackets),
