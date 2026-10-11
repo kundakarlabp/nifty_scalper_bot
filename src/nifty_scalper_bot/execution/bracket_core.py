@@ -811,6 +811,30 @@ class BracketManager:
                 values.append(value)
         return values or [1.0, 2.0, 5.0]
 
+    def _exchange_stop_protection_degraded(self, bracket: BracketState) -> bool:
+        """Block new live exposure only when protective broker truth is uncertain."""
+        reason = str(bracket.exchange_stop_degraded_reason or "")
+        requires_reconciliation = reason.startswith(
+            (
+                "placement_",
+                "broker_stop_",
+                "quantity_unknown",
+                "invalid_stop_limit_prices",
+                "modify_failed",
+                "modify_unavailable",
+                "cancel_unconfirmed",
+                "cancel_unavailable",
+            )
+        )
+        return bool(
+            requires_reconciliation
+            and self._exchange_protective_stop_enabled
+            and self._is_live_execution()
+            and bracket.active
+            and bracket.entry_confirmed
+            and bracket.remaining_quantity > 0
+        )
+
     def has_unresolved_exit(self) -> bool:
         """Return whether persistence, recovery, or an exit lifecycle blocks entries."""
         if self._persistence_degraded_reason or self._recovery_degraded_reason:
@@ -825,7 +849,11 @@ class BracketManager:
         with self._lock:
             return any(
                 bracket.remaining_quantity > 0
-                and (bracket.exit_pending or bracket.exit_state in unresolved)
+                and (
+                    bracket.exit_pending
+                    or bracket.exit_state in unresolved
+                    or self._exchange_stop_protection_degraded(bracket)
+                )
                 for bracket in self._brackets.values()
             )
 
@@ -839,6 +867,8 @@ class BracketManager:
             for bracket in self._brackets.values():
                 if bracket.remaining_quantity <= 0:
                     continue
+                if self._exchange_stop_protection_degraded(bracket):
+                    return bracket.bracket_id
                 if bracket.exit_pending or bracket.exit_state.startswith("EXIT_"):
                     if bracket.exit_state not in {
                         BracketExitLifecycle.EXIT_FILLED.value,
