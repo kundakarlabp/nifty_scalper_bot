@@ -196,6 +196,11 @@ class CanonicalBracketManager(HardenedBracketManager):
             self._clear_fill_sync_state(bracket)
 
         self._move_sl_to_breakeven(bracket)
+        # TP1 retires the old full-quantity exchange stop before the partial
+        # exit. Synchronising the virtual SL alone cannot recreate that order:
+        # arm one fresh stop for the broker-confirmed residual position.
+        if self._is_live_execution():
+            self._ensure_exchange_protective_stop(bracket)
         with suppress(Exception):
             self.save_state()
         _core.LOGGER.info(
