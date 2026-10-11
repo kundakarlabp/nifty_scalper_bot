@@ -12,10 +12,13 @@ from nifty_scalper_bot.utils.pricing import (
 )
 
 
-@pytest.mark.parametrize("side, expected", [
-    ("SELL", 95.0),
-    ("BUY", 105.0),
-])
+@pytest.mark.parametrize(
+    "side, expected",
+    [
+        ("SELL", 95.0),
+        ("BUY", 105.0),
+    ],
+)
 def test_default_stop_limit_has_single_five_percent_buffer(
     monkeypatch, side: str, expected: float
 ) -> None:
@@ -57,7 +60,10 @@ def test_lowest_positive_sell_trigger_cannot_form_valid_stop_limit() -> None:
     assert trigger == limit == 0.05  # caller must reject this invalid geometry
 
 
-@pytest.mark.parametrize("price, side", [(0.0, "SELL"), (math.nan, "BUY"), (100, "OTHER")])
+@pytest.mark.parametrize(
+    "price, side",
+    [(0.0, "SELL"), (math.nan, "BUY"), (100, "OTHER")],
+)
 def test_invalid_order_inputs_are_rejected(price: float, side: str) -> None:
     with pytest.raises(ValueError):
         canonical_stop_limit_prices(price, side)
