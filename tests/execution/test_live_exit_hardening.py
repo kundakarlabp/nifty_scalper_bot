@@ -309,6 +309,9 @@ def test_degraded_live_exchange_stop_blocks_entries_but_allows_psl_recovery(
     assert protective_id == "rescue-1"
     assert len(order_manager.place_calls) == 1
 
+    bracket.exchange_stop_degraded_reason = "modify_budget_exhausted"
+    assert manager.has_unresolved_exit() is False
+
     bracket.exchange_stop_degraded_reason = None
     assert manager.has_unresolved_exit() is False
 
