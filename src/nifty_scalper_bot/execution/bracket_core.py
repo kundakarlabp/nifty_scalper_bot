@@ -812,14 +812,27 @@ class BracketManager:
         return values or [1.0, 2.0, 5.0]
 
     def _exchange_stop_protection_degraded(self, bracket: BracketState) -> bool:
-        """Only unresolved live broker protection blocks fresh exposure."""
+        """Block new live exposure only when protective broker truth is uncertain."""
+        reason = str(bracket.exchange_stop_degraded_reason or "")
+        requires_reconciliation = reason.startswith(
+            (
+                "placement_",
+                "broker_stop_",
+                "quantity_unknown",
+                "invalid_stop_limit_prices",
+                "modify_failed",
+                "modify_unavailable",
+                "cancel_unconfirmed",
+                "cancel_unavailable",
+            )
+        )
         return bool(
-            self._exchange_protective_stop_enabled
+            requires_reconciliation
+            and self._exchange_protective_stop_enabled
             and self._is_live_execution()
             and bracket.active
             and bracket.entry_confirmed
             and bracket.remaining_quantity > 0
-            and bracket.exchange_stop_degraded_reason
         )
 
     def has_unresolved_exit(self) -> bool:
