@@ -119,7 +119,11 @@ def canonical_stop_limit_prices(
         raise ValueError("stop trigger must be positive and finite")
     if side_key not in {"BUY", "SELL"}:
         raise ValueError("stop side must be BUY or SELL")
-    pct = configured_stop_limit_buffer_pct() if buffer_pct is None else float(buffer_pct)
+    pct = (
+        configured_stop_limit_buffer_pct()
+        if buffer_pct is None
+        else float(buffer_pct)
+    )
     if not math.isfinite(pct) or pct < 0.0 or pct >= 100.0:
         raise ValueError("invalid stop-limit buffer percentage")
     tick = 0.05
