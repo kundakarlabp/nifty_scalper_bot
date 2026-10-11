@@ -259,6 +259,73 @@ def test_restart_with_already_protected_position_no_duplicate_bracket(
     assert brackets[0].active and brackets[0].entry_confirmed
 
 
+@pytest.mark.parametrize(
+    "stop_id, broker_status, broker_quantity, expected_reason",
+    [
+        (None, None, None, "restore_missing_exchange_stop"),
+        ("restored-stop", "CANCELLED", 65, "broker_stop_status_unverified:CANCELLED"),
+        ("restored-stop", "TRIGGER PENDING", 30, "broker_stop_quantity_mismatch"),
+        ("restored-stop", "TRIGGER PENDING", 65, None),
+    ],
+)
+def test_live_restart_validates_saved_exchange_stop_without_new_orders(
+    tmp_path, monkeypatch, stop_id, broker_status, broker_quantity, expected_reason
+) -> None:
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("BRACKET_AUTO_RESTORE", "true")
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    initial = BracketManager(order_manager=SimpleNamespace())
+    stop(initial)
+    initial.register_virtual_bracket(
+        order_id="entry-restart",
+        symbol=SYMBOL,
+        side="BUY",
+        qty=65,
+        price=150.0,
+        sl=140.0,
+        tp=175.0,
+        activate_immediately=False,
+    )
+    initial.confirm_entry_fill("entry-restart", 150.0, 65)
+    bracket = initial.get_bracket("entry-restart")
+    assert bracket is not None
+    bracket.exchange_stop_order_id = stop_id
+    bracket.exchange_stop_quantity = 65 if stop_id else 0
+    initial.save_state()
+
+    status_calls: list[str] = []
+    placed: list[dict] = []
+
+    def read_order_status(order_id: str) -> dict:
+        status_calls.append(order_id)
+        if not broker_status:
+            return {}
+        return {"status": broker_status, "quantity": broker_quantity}
+
+    broker = SimpleNamespace(get_order_status=read_order_status, get_orders=lambda: [])
+    order_manager = SimpleNamespace(
+        _broker=broker, place_order=lambda **kwargs: placed.append(kwargs)
+    )
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    restored = BracketManager(order_manager=order_manager)
+    stop(restored)
+    # BoundBracketManager intentionally disables LIVE inside pytest; exercise
+    # the production restoration predicate explicitly without placing orders.
+    monkeypatch.setattr(restored, "_is_live_execution", lambda: True)
+    monkeypatch.setattr(
+        restored, "_get_storage_path", lambda: tmp_path / "virtual_brackets.json"
+    )
+    assert restored.load_state() is True
+    recovered = restored.get_bracket("entry-restart")
+    assert recovered is not None
+    assert recovered.exchange_stop_order_id == stop_id
+    assert recovered.exchange_stop_degraded_reason == expected_reason
+    assert restored.has_unresolved_exit() is (expected_reason is not None)
+    assert status_calls == (["restored-stop"] if stop_id else [])
+    assert placed == []
+
+
 def test_broker_exposure_states_distinguish_flat_absent_nonzero_and_unknown(tmp_path):
     from nifty_scalper_bot.execution.position_snapshot import BrokerExposureState
 
