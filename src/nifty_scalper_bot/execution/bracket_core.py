@@ -5234,6 +5234,71 @@ class BracketManager:
         bracket.exchange_stop_degraded_reason = None
         bracket.exchange_stop_modify_count = 0
 
+    def _confirm_exchange_protective_stop(self, bracket: BracketState) -> bool:
+        """Broker orderbook, not the placement ID, confirms resident protection."""
+        with self._lock:
+            order_id = str(bracket.exchange_stop_order_id or "").strip()
+            requested_qty = int(bracket.exchange_stop_quantity or 0)
+        if not order_id:
+            return False
+        try:
+            evidence = self._get_broker_order_status(order_id)
+        except Exception as exc:  # noqa: BLE001 - broker evidence can be delayed
+            LOGGER.warning(
+                "EXCHANGE_PROTECTIVE_STOP_STATUS_ERROR order_id=%s error=%s",
+                order_id,
+                type(exc).__name__,
+            )
+            evidence = {}
+        status = str(evidence.get("status") or "").strip().upper()
+        try:
+            broker_qty = int(evidence["quantity"])
+        except (KeyError, TypeError, ValueError, OverflowError):
+            broker_qty = None
+        confirmed = (
+            status in {"OPEN", "TRIGGER PENDING"}
+            and broker_qty is not None
+            and broker_qty == requested_qty
+            and requested_qty > 0
+        )
+        reason = (
+            None
+            if confirmed
+            else (
+                "broker_stop_quantity_unverified"
+                if broker_qty is None and status in {"OPEN", "TRIGGER PENDING"}
+                else "broker_stop_quantity_mismatch"
+                if status in {"OPEN", "TRIGGER PENDING"}
+                else f"broker_stop_status_unverified:{status or 'UNKNOWN'}"
+            )
+        )
+        with self._lock:
+            if str(bracket.exchange_stop_order_id or "") != order_id:
+                return False
+            bracket.exchange_stop_degraded_reason = reason
+            bracket.updated_at = time.time()
+        if not confirmed:
+            LOGGER.critical(
+                "EXCHANGE_PROTECTIVE_STOP_UNVERIFIED order_id=%s symbol=%s "
+                "status=%s expected_qty=%s broker_qty=%s reason=%s",
+                order_id,
+                bracket.symbol,
+                status or "UNKNOWN",
+                requested_qty,
+                broker_qty,
+                reason,
+                extra={
+                    "event": "EXCHANGE_PROTECTIVE_STOP_UNVERIFIED",
+                    "order_id": order_id,
+                    "symbol": bracket.symbol,
+                    "status": status or "UNKNOWN",
+                    "expected_qty": requested_qty,
+                    "broker_qty": broker_qty,
+                    "reason": reason,
+                },
+            )
+        return confirmed
+
     def _ensure_exchange_protective_stop(self, bracket: BracketState) -> bool:
         """Prevent concurrent entry-fill callbacks from placing duplicate broker SLs."""
         with self._exchange_stop_modify_mutex:
@@ -5261,6 +5326,18 @@ class BracketManager:
                     bracket.sl_trigger_price,
                 )
                 side = "SELL" if bracket.side == "BUY" else "BUY"
+                if (side == "SELL" and limit_price >= trigger) or (
+                    side == "BUY" and limit_price <= trigger
+                ):
+                    bracket.exchange_stop_degraded_reason = "invalid_stop_limit_prices"
+                    LOGGER.critical(
+                        "EXCHANGE_PROTECTIVE_STOP_INVALID_PRICES symbol=%s "
+                        "trigger=%s limit=%s",
+                        bracket.symbol,
+                        trigger,
+                        limit_price,
+                    )
+                    return False
         if existing_stop:
             recorded_qty = int(bracket.exchange_stop_quantity or 0)
             if recorded_qty <= 0:
@@ -5271,7 +5348,7 @@ class BracketManager:
                     bracket.exchange_stop_degraded_reason = "quantity_unknown"
                 return False
             if recorded_qty == qty:
-                return True
+                return self._confirm_exchange_protective_stop(bracket)
             return self._sync_exchange_protective_stop_serialized(bracket)
         try:
             order_id = self.order_manager.place_order(
@@ -5347,8 +5424,12 @@ class BracketManager:
                 bracket.linked_exit_order_ids.append(stop_id)
             self._order_to_entry[stop_id] = bracket.entry_order_id
             bracket.updated_at = time.time()
-        LOGGER.info(
-            "EXCHANGE_PROTECTIVE_STOP_ARMED bracket_id=%s order_id=%s "
+        confirmed = self._confirm_exchange_protective_stop(bracket)
+        LOGGER.log(
+            logging.INFO if confirmed else logging.CRITICAL,
+            ("EXCHANGE_PROTECTIVE_STOP_ARMED" if confirmed
+             else "EXCHANGE_PROTECTIVE_STOP_SUBMITTED_UNVERIFIED")
+            + " bracket_id=%s order_id=%s "
             "symbol=%s side=%s qty=%s trigger=%s limit=%s",
             bracket.bracket_id,
             stop_id,
@@ -5358,7 +5439,11 @@ class BracketManager:
             trigger,
             limit_price,
             extra={
-                "event": "EXCHANGE_PROTECTIVE_STOP_ARMED",
+                "event": (
+                    "EXCHANGE_PROTECTIVE_STOP_ARMED"
+                    if confirmed
+                    else "EXCHANGE_PROTECTIVE_STOP_SUBMITTED_UNVERIFIED"
+                ),
                 "bracket_id": bracket.bracket_id,
                 "order_id": stop_id,
                 "symbol": bracket.symbol,
@@ -5370,7 +5455,7 @@ class BracketManager:
         )
         with suppress(Exception):
             self.save_state()
-        return True
+        return confirmed
 
     def _sync_exchange_protective_stop(self, bracket: BracketState) -> bool:
         """Serialize canonical exchange-stop ratchets across trailing callbacks."""
@@ -5528,9 +5613,10 @@ class BracketManager:
                     "max_modifications": max_modifications,
                 },
             )
+        confirmed = self._confirm_exchange_protective_stop(bracket) if modified else False
         with suppress(Exception):
             self.save_state()
-        return modified
+        return confirmed
 
     def _retire_exchange_protective_stop(
         self,

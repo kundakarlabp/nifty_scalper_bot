@@ -37,12 +37,16 @@ class _Broker:
     def __init__(self, *, cancel_confirms: bool = True) -> None:
         self.cancel_confirms = cancel_confirms
         self.statuses: dict[str, str] = {"old-exit": "OPEN PENDING"}
+        self.quantities: dict[str, int] = {}
         self.positions: list[dict[str, Any]] = [{"symbol": SYMBOL, "quantity": 65}]
         self.cancel_calls: list[str] = []
         self.modify_calls: list[tuple[str, dict[str, Any]]] = []
 
     def get_order_status(self, order_id: str) -> dict[str, Any]:
-        return {"status": self.statuses.get(order_id, "")}
+        result: dict[str, Any] = {"status": self.statuses.get(order_id, "")}
+        if order_id in self.quantities:
+            result["quantity"] = self.quantities[order_id]
+        return result
 
     def get_positions(self) -> list[dict[str, Any]]:
         return list(self.positions)
@@ -86,6 +90,7 @@ class _OrderManager:
         order_id = f"rescue-{self._next_id}"
         self._next_id += 1
         self._broker.statuses[order_id] = "OPEN"
+        self._broker.quantities[order_id] = int(kwargs["quantity"])
         return order_id
 
     def cancel_order(self, order_id: str, *args: Any, **kwargs: Any) -> bool:
@@ -93,6 +98,8 @@ class _OrderManager:
 
     def modify_order(self, order_id: str, **kwargs: Any) -> bool:
         self.modify_calls.append((str(order_id), dict(kwargs)))
+        if "quantity" in kwargs:
+            self._broker.quantities[str(order_id)] = int(kwargs["quantity"])
         return True
 
     def submit_trade_plan_result(self, _plan: Any) -> str:
@@ -316,6 +323,72 @@ def test_live_entry_arms_one_canonical_exchange_stop(monkeypatch) -> None:
     assert stop["bracket_id"] == "entry-protected"
     assert bracket.exchange_stop_order_id == "rescue-1"
     assert "rescue-1" in bracket.linked_exit_order_ids
+
+
+
+@pytest.mark.parametrize("reported_status", ["REJECTED", "UNKNOWN", "OPEN PENDING"])
+def test_exchange_stop_order_id_without_acceptance_is_not_armed(
+    monkeypatch, reported_status: str
+) -> None:
+    manager, order_manager, broker = _manager()
+    manager._exchange_protective_stop_enabled = True
+    monkeypatch.setattr(manager, "_is_live_execution", lambda: True)
+    monkeypatch.setattr(manager, "save_state", lambda: None)
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+
+    place = order_manager.place_order
+
+    def broker_not_accepted(**kwargs: Any) -> str:
+        order_id = place(**kwargs)
+        broker.statuses[order_id] = reported_status
+        return order_id
+
+    monkeypatch.setattr(order_manager, "place_order", broker_not_accepted)
+    assert manager._ensure_exchange_protective_stop(bracket) is False
+    assert bracket.exchange_stop_order_id == "rescue-1"
+    assert bracket.exchange_stop_degraded_reason is not None
+    assert manager._ensure_exchange_protective_stop(bracket) is False
+    assert len(order_manager.place_calls) == 1
+
+
+def test_exchange_stop_checks_broker_quantity_before_arm(monkeypatch) -> None:
+    manager, order_manager, broker = _manager()
+    manager._exchange_protective_stop_enabled = True
+    monkeypatch.setattr(manager, "_is_live_execution", lambda: True)
+    monkeypatch.setattr(manager, "save_state", lambda: None)
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+
+    place = order_manager.place_order
+
+    def broker_wrong_quantity(**kwargs: Any) -> str:
+        order_id = place(**kwargs)
+        broker.quantities[order_id] = 30
+        return order_id
+
+    monkeypatch.setattr(order_manager, "place_order", broker_wrong_quantity)
+    assert manager._ensure_exchange_protective_stop(bracket) is False
+    assert bracket.exchange_stop_degraded_reason == "broker_stop_quantity_mismatch"
+    assert bracket.exchange_stop_order_id == "rescue-1"
+    assert len(order_manager.place_calls) == 1
+    broker.quantities["rescue-1"] = 65
+    assert manager._ensure_exchange_protective_stop(bracket) is True
+    assert bracket.exchange_stop_degraded_reason is None
+
+
+def test_unrepresentable_low_premium_sl_does_not_submit_invalid_order(
+    monkeypatch,
+) -> None:
+    manager, order_manager, _broker = _manager()
+    manager._exchange_protective_stop_enabled = True
+    monkeypatch.setattr(manager, "_is_live_execution", lambda: True)
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    bracket.sl_trigger_price = 0.05
+    assert manager._ensure_exchange_protective_stop(bracket) is False
+    assert bracket.exchange_stop_degraded_reason == "invalid_stop_limit_prices"
+    assert order_manager.place_calls == []
 
 
 def test_partial_tp1_rearms_exchange_stop_for_confirmed_residual(monkeypatch) -> None:
