@@ -703,10 +703,10 @@ def apply_patches() -> None:
     if not callable(getattr(ZerodhaKiteClient, "get_pnl_snapshot", None)):
         ZerodhaKiteClient.get_pnl_snapshot = _zerodha_get_pnl_snapshot
 
-    if (
-        getattr(PositionManager, "_native_broker_pnl_diagnostics", False)
-        or getattr(PositionManager, "_broker_pnl_authority_patch", False)
-    ):
+    if getattr(PositionManager, "_native_broker_pnl_diagnostics", False):
+        _PATCH_APPLIED = True
+        return
+    if getattr(PositionManager, "_broker_pnl_authority_patch", False):
         _PATCH_APPLIED = True
         return
 
