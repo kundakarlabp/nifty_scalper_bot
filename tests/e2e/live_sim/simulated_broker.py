@@ -48,6 +48,7 @@ class SimulatedOrder:
     average_price: float = 0.0
     tag: str | None = None
     intent: str | None = None
+    stop_triggered: bool = False
 
     @property
     def remaining_quantity(self) -> int:
@@ -260,21 +261,40 @@ class SimulatedBroker:
             return ask <= float(order.price)
         if order.side == "SELL" and order.order_type == "LIMIT":
             return bid >= float(order.price)
-        if order.side == "SELL" and order.order_type in {"SL", "SL-M"}:
-            stop = float(
-                order.trigger_price if order.trigger_price is not None else order.price
+        if order.order_type in {"SL", "SL-M"}:
+            if order.trigger_price is None or float(order.trigger_price) <= 0:
+                return False
+            stop = float(order.trigger_price)
+            crossed = (
+                (bid <= stop or ltp <= stop)
+                if order.side == "SELL"
+                else (ask >= stop or ltp >= stop)
             )
-            return bid <= stop or ltp <= stop
+            if crossed and not order.stop_triggered:
+                order.stop_triggered = True
+                order.status = "OPEN"
+                self._emit(order, stop_triggered=True)
+            if not order.stop_triggered:
+                return False
+            if order.order_type == "SL-M":
+                return True
+            # Activation converts an SL into a resting LIMIT; a gap past the
+            # limit MUST NOT fabricate a fill at the old stop price.
+            if order.price is None or float(order.price) <= 0:
+                return False
+            return (
+                bid >= float(order.price)
+                if order.side == "SELL"
+                else ask <= float(order.price)
+            )
         return False
 
     def _fill_price(
         self, order: SimulatedOrder, bid: float, ask: float, ltp: float
     ) -> float:
-        return (
-            ask
-            if order.side == "BUY" and order.order_type == "MARKET"
-            else float(order.price or bid)
-        )
+        if order.order_type in {"MARKET", "SL", "SL-M"}:
+            return ask if order.side == "BUY" else bid
+        return float(order.price or (ask if order.side == "BUY" else bid))
 
     def _emit(self, order: SimulatedOrder, **payload: Any) -> None:
         update = {
