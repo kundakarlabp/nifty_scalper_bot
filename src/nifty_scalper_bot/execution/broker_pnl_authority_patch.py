@@ -32,7 +32,6 @@ from nifty_scalper_bot.utils.market_hours import (
     post_market_quiet_mode_enabled,
 )
 
-
 _DEFAULT_REFRESH_SECONDS = 15.0
 _DEFAULT_MAX_AGE_SECONDS = 120.0
 _MATCH_TOLERANCE_RUPEES = 1.0
