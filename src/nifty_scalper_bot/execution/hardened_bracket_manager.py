@@ -107,6 +107,7 @@ class HardenedBracketManager(_CoreBracketManager):
             protective_prefixes = (
                 "EXIT_",
                 "SL_",
+                "PSL_",
                 "TP_",
                 "EOD_",
                 "PANIC",
