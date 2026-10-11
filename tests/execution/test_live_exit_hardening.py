@@ -663,6 +663,129 @@ def test_hard_stop_waits_for_exchange_stop_before_market_fallback(monkeypatch) -
     assert bracket.exchange_stop_order_id is None
 
 
+
+
+def test_gap_through_stop_filled_during_grace_never_submits_competing_market_exit(
+    monkeypatch,
+) -> None:
+    """A late broker SL fill wins over the virtual watchdog's market rescue."""
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    monkeypatch.setenv("EXCHANGE_PROTECTIVE_STOP_ENABLED", "true")
+    monkeypatch.setenv("EXCHANGE_PROTECTIVE_STOP_GRACE_SECONDS", "0.5")
+    broker = _Broker()
+    order_manager = _OrderManager(broker)
+    manager = BracketManager(order_manager=order_manager)
+    monkeypatch.setattr(manager, "_is_live_execution", lambda: True)
+    monkeypatch.setattr(manager, "save_state", lambda: None)
+    manager._running = False
+    manager._watchdog_thread.join(timeout=1.0)
+    manager.register_virtual_bracket(
+        order_id="entry-gap-stop",
+        symbol=SYMBOL,
+        side="BUY",
+        qty=65,
+        price=150.0,
+        sl=140.0,
+        tp=175.0,
+        activate_immediately=False,
+    )
+    manager.confirm_entry_fill("entry-gap-stop", 150.0, 65)
+    bracket = manager.get_bracket("entry-gap-stop")
+    assert bracket is not None
+
+    manager._fire_exits_batch(
+        [
+            (
+                bracket,
+                {
+                    "qty": 65,
+                    "price": 125.0,
+                    "reason": "HARD_SL_BREACH gap_through_trigger",
+                },
+            )
+        ]
+    )
+    assert len(order_manager.place_calls) == 1
+    assert broker.cancel_calls == []
+    triggered_at = bracket.exchange_stop_triggered_at
+    assert triggered_at is not None
+
+    original_status = broker.get_order_status
+
+    def broker_order_status(order_id: str) -> dict[str, Any]:
+        if order_id == "rescue-1" and broker.statuses[order_id] == "COMPLETE":
+            return {
+                "status": "COMPLETE",
+                "quantity": 65,
+                "filled_quantity": 65,
+                "average_price": 132.0,
+            }
+        return original_status(order_id)
+
+    monkeypatch.setattr(broker, "get_order_status", broker_order_status)
+    broker.statuses["rescue-1"] = "COMPLETE"
+    broker.positions = []
+    manager._process_exit_state(
+        bracket,
+        {"qty": 65, "reason": bracket.exit_reason},
+        now=float(triggered_at) + 1.0,
+    )
+
+    assert len(order_manager.place_calls) == 1
+    assert broker.cancel_calls == []
+    assert bracket.exit_order_id == "rescue-1"
+
+
+def test_gap_through_unconfirmed_cancel_never_submits_second_sell(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    monkeypatch.setenv("EXCHANGE_PROTECTIVE_STOP_ENABLED", "true")
+    broker = _Broker(cancel_confirms=False)
+    order_manager = _OrderManager(broker)
+    manager = BracketManager(order_manager=order_manager)
+    monkeypatch.setattr(manager, "_is_live_execution", lambda: True)
+    monkeypatch.setattr(manager, "save_state", lambda: None)
+    manager._running = False
+    manager._watchdog_thread.join(timeout=1.0)
+    manager.register_virtual_bracket(
+        order_id="entry-gap-cancel",
+        symbol=SYMBOL,
+        side="BUY",
+        qty=65,
+        price=150.0,
+        sl=140.0,
+        tp=175.0,
+        activate_immediately=False,
+    )
+    manager.confirm_entry_fill("entry-gap-cancel", 150.0, 65)
+    bracket = manager.get_bracket("entry-gap-cancel")
+    assert bracket is not None
+
+    manager._fire_exits_batch(
+        [
+            (
+                bracket,
+                {"qty": 65, "price": 125.0, "reason": "HARD_SL_BREACH gap"},
+            )
+        ]
+    )
+    triggered_at = bracket.exchange_stop_triggered_at
+    assert triggered_at is not None
+    manager._process_exit_state(
+        bracket,
+        {"qty": 65, "reason": bracket.exit_reason},
+        now=float(triggered_at) + 10.0,
+    )
+
+    assert broker.cancel_calls == ["rescue-1"]
+    assert len(order_manager.place_calls) == 1
+    assert bracket.exchange_stop_order_id == "rescue-1"
+    assert bracket.exchange_stop_degraded_reason is not None
+
+
 def test_flat_reconcile_cancels_exchange_stop_before_unregister(monkeypatch) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     monkeypatch.setenv("ENABLE_LIVE", "true")
