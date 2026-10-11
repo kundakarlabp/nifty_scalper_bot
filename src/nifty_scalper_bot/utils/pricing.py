@@ -88,7 +88,6 @@ def canonical_price_source(source: object) -> str:
 
 
 
-
 def configured_stop_limit_buffer_pct() -> float:
     """One configurable limit tolerance for protective and SL-M fallback orders."""
     raw = os.getenv(
@@ -120,9 +119,7 @@ def canonical_stop_limit_prices(
     if side_key not in {"BUY", "SELL"}:
         raise ValueError("stop side must be BUY or SELL")
     pct = (
-        configured_stop_limit_buffer_pct()
-        if buffer_pct is None
-        else float(buffer_pct)
+        configured_stop_limit_buffer_pct() if buffer_pct is None else float(buffer_pct)
     )
     if not math.isfinite(pct) or pct < 0.0 or pct >= 100.0:
         raise ValueError("invalid stop-limit buffer percentage")
@@ -136,6 +133,7 @@ def canonical_stop_limit_prices(
     else:
         limit = max(tick, min(round(trigger - tick, 2), limit))
     return trigger, limit
+
 
 __all__ = [
     "CANONICAL_PRICE_SOURCES",
