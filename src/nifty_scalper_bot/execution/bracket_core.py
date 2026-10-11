@@ -818,6 +818,7 @@ class BracketManager:
             (
                 "placement_",
                 "broker_stop_",
+                "restore_",
                 "quantity_unknown",
                 "invalid_stop_limit_prices",
                 "modify_failed",
