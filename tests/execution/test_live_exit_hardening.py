@@ -318,7 +318,6 @@ def test_live_entry_arms_one_canonical_exchange_stop(monkeypatch) -> None:
     assert "rescue-1" in bracket.linked_exit_order_ids
 
 
-
 def test_partial_tp1_rearms_exchange_stop_for_confirmed_residual(monkeypatch) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     monkeypatch.setenv("ENABLE_LIVE", "true")
