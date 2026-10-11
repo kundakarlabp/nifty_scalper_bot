@@ -5,6 +5,8 @@ from types import SimpleNamespace
 import pytest
 
 import nifty_scalper_bot.execution.broker_pnl_authority_patch as pnl_patch
+import nifty_scalper_bot.execution.pnl_session_rollover_patch as rollover_helpers
+from nifty_scalper_bot.data.rest.zerodha_client import ZerodhaKiteClient
 from nifty_scalper_bot.execution.broker_pnl_authority_patch import (
     _effective_refresh_seconds,
     _extract_account_m2m,
@@ -393,3 +395,18 @@ def test_broker_pnl_and_rollover_are_owned_by_native_position_manager() -> None:
         assert PositionManager.__dict__[name].__module__ == native
     assert PositionManager._native_broker_pnl_diagnostics
     assert PositionManager._native_pnl_session_rollover
+
+
+def test_broker_snapshot_is_native_and_importing_execution_has_no_pnl_patches() -> None:
+    import nifty_scalper_bot.execution as execution
+
+    assert (
+        ZerodhaKiteClient.__dict__["get_pnl_snapshot"].__module__
+        == "nifty_scalper_bot.data.rest.zerodha_client"
+    )
+    assert not hasattr(execution, "_apply_broker_pnl_authority_patches")
+    assert not hasattr(execution, "_apply_pnl_session_rollover_patches")
+    assert not hasattr(pnl_patch, "apply_patches")
+    assert not hasattr(rollover_helpers, "apply_patches")
+    assert not hasattr(PositionManager, "_broker_pnl_authority_patch")
+    assert not hasattr(PositionManager, "_pnl_session_rollover_patch")
