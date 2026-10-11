@@ -663,8 +663,6 @@ def test_hard_stop_waits_for_exchange_stop_before_market_fallback(monkeypatch) -
     assert bracket.exchange_stop_order_id is None
 
 
-
-
 def test_gap_through_stop_filled_during_grace_never_submits_competing_market_exit(
     monkeypatch,
 ) -> None:
