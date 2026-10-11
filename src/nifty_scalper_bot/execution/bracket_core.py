@@ -341,6 +341,7 @@ class BracketState:
     trade_lifecycle_id: str | None = None
     linked_exit_order_ids: list[str] = field(default_factory=list)
     exchange_stop_order_id: str | None = None
+    exchange_stop_quantity: int = 0
     exchange_stop_trigger_price: float | None = None
     exchange_stop_limit_price: float | None = None
     exchange_stop_triggered_at: float | None = None
@@ -492,6 +493,7 @@ class BracketState:
             "trade_provenance": dict(self.trade_provenance),
             "linked_exit_order_ids": list(self.linked_exit_order_ids),
             "exchange_stop_order_id": self.exchange_stop_order_id,
+            "exchange_stop_quantity": self.exchange_stop_quantity,
             "exchange_stop_trigger_price": self.exchange_stop_trigger_price,
             "exchange_stop_limit_price": self.exchange_stop_limit_price,
             "exchange_stop_triggered_at": self.exchange_stop_triggered_at,
@@ -5225,6 +5227,7 @@ class BracketManager:
 
     def _clear_exchange_stop_locked(self, bracket: BracketState) -> None:
         bracket.exchange_stop_order_id = None
+        bracket.exchange_stop_quantity = 0
         bracket.exchange_stop_trigger_price = None
         bracket.exchange_stop_limit_price = None
         bracket.exchange_stop_triggered_at = None
@@ -5250,14 +5253,26 @@ class BracketManager:
         ):
             return False
         with self._lock:
-            if bracket.exchange_stop_order_id:
-                return True
-            trigger, limit_price = self._exchange_stop_prices(
-                bracket,
-                bracket.sl_trigger_price,
-            )
+            existing_stop = bool(bracket.exchange_stop_order_id)
             qty = int(bracket.remaining_quantity)
-            side = "SELL" if bracket.side == "BUY" else "BUY"
+            if not existing_stop:
+                trigger, limit_price = self._exchange_stop_prices(
+                    bracket,
+                    bracket.sl_trigger_price,
+                )
+                side = "SELL" if bracket.side == "BUY" else "BUY"
+        if existing_stop:
+            recorded_qty = int(bracket.exchange_stop_quantity or 0)
+            if recorded_qty <= 0:
+                # Legacy restored stops lack quantity provenance. Retain the
+                # existing order and require broker reconciliation; do not
+                # guess its size or place a duplicate.
+                with self._lock:
+                    bracket.exchange_stop_degraded_reason = "quantity_unknown"
+                return False
+            if recorded_qty == qty:
+                return True
+            return self._sync_exchange_protective_stop_serialized(bracket)
         try:
             order_id = self.order_manager.place_order(
                 symbol=bracket.symbol,
@@ -5322,6 +5337,7 @@ class BracketManager:
         stop_id = str(order_id)
         with self._lock:
             bracket.exchange_stop_order_id = stop_id
+            bracket.exchange_stop_quantity = qty
             bracket.exchange_stop_trigger_price = trigger
             bracket.exchange_stop_limit_price = limit_price
             bracket.exchange_stop_triggered_at = None
@@ -5382,6 +5398,11 @@ class BracketManager:
                 bracket.sl_trigger_price,
             )
             modify_count = max(0, int(bracket.exchange_stop_modify_count or 0))
+            desired_quantity = int(bracket.remaining_quantity)
+            recorded_quantity = int(bracket.exchange_stop_quantity or 0)
+            quantity_changed = (
+                recorded_quantity > 0 and desired_quantity != recorded_quantity
+            )
             max_modifications = self._exchange_protective_stop_max_modifications
             min_delta = max(
                 self._exchange_protective_stop_min_ratchet_points,
@@ -5395,10 +5416,19 @@ class BracketManager:
                 (bracket.side == "BUY" and trigger <= current_trigger)
                 or (bracket.side == "SELL" and trigger >= current_trigger)
             ):
-                return False
+                if not quantity_changed:
+                    return False
+                # A quantity-only modification must never loosen broker SL.
+                trigger, limit_price = self._exchange_stop_prices(
+                    bracket, current_trigger
+                )
             delta = abs(trigger - current_trigger)
 
-            if current_trigger > 0.0 and delta + 1e-9 < min_delta:
+            if (
+                current_trigger > 0.0
+                and delta + 1e-9 < min_delta
+                and not quantity_changed
+            ):
                 LOGGER.debug(
                     "EXCHANGE_PROTECTIVE_STOP_COALESCED order_id=%s symbol=%s "
                     "current_trigger=%s desired_trigger=%s delta=%.4f min_delta=%.4f",
@@ -5422,7 +5452,7 @@ class BracketManager:
                 )
                 return False
 
-            if modify_count >= max_modifications:
+            if modify_count >= max_modifications and not quantity_changed:
                 bracket.exchange_stop_degraded_reason = "modify_budget_exhausted"
                 bracket.updated_at = time.time()
                 LOGGER.warning(
@@ -5455,13 +5485,10 @@ class BracketManager:
                 bracket.exchange_stop_degraded_reason = "modify_unavailable"
             return False
         try:
-            modified = bool(
-                modifier(
-                    order_id,
-                    trigger_price=trigger,
-                    price=limit_price,
-                )
-            )
+            changes = {"trigger_price": trigger, "price": limit_price}
+            if quantity_changed:
+                changes["quantity"] = desired_quantity
+            modified = bool(modifier(order_id, **changes))
         except Exception as exc:  # noqa: BLE001
             modified = False
             LOGGER.error(
@@ -5473,6 +5500,7 @@ class BracketManager:
             )
         with self._lock:
             if modified:
+                bracket.exchange_stop_quantity = desired_quantity
                 bracket.exchange_stop_trigger_price = trigger
                 bracket.exchange_stop_limit_price = limit_price
                 bracket.exchange_stop_modify_count = modify_count + 1
@@ -5866,6 +5894,9 @@ class BracketManager:
             ],
             exchange_stop_order_id=(
                 str(payload.get("exchange_stop_order_id") or "").strip() or None
+            ),
+            exchange_stop_quantity=max(
+                0, int(payload.get("exchange_stop_quantity") or 0)
             ),
             exchange_stop_trigger_price=(
                 finite_float(

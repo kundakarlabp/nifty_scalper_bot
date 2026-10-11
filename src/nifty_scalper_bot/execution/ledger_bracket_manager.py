@@ -385,6 +385,10 @@ class LedgerBracketManager(CanonicalBracketManager):
                     "filled_qty": self._positive_filled_quantity(filled_qty),
                 },
             )
+            if quantity_reconciled and bracket is not None:
+                # A later cumulative fill changes actual exposure without
+                # reactivating the bracket. Reconcile its existing broker SL.
+                self._ensure_exchange_protective_stop(bracket)
             return True  # type: ignore[return-value]
 
         ledger_ok = True
