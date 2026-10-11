@@ -70,6 +70,10 @@ from nifty_scalper_bot.execution.position_snapshot import (
 )
 
 from nifty_scalper_bot.execution.readiness import resolve_quote_bid_ask_spread
+from nifty_scalper_bot.utils.pricing import (
+    canonical_stop_limit_prices,
+    configured_stop_limit_buffer_pct,
+)
 
 try:
     from nifty_scalper_bot.risk.cost_model import (
@@ -744,12 +748,8 @@ class BracketManager:
         self._exchange_protective_stop_enabled = _env_bool(
             "EXCHANGE_PROTECTIVE_STOP_ENABLED", True
         )
-        self._exchange_protective_stop_limit_buffer_pct = max(
-            0.1,
-            parse_float_env(
-                os.getenv("EXCHANGE_PROTECTIVE_STOP_LIMIT_BUFFER_PCT"),
-                5.0,
-            ),
+        self._exchange_protective_stop_limit_buffer_pct = (
+            configured_stop_limit_buffer_pct()
         )
         self._exchange_protective_stop_grace_seconds = max(
             0.25,
@@ -5213,17 +5213,11 @@ class BracketManager:
         trigger_price: float,
     ) -> tuple[float, float]:
         """Return broker-compatible trigger/limit prices for one protective SL."""
-        trigger = _round_to_tick(max(float(trigger_price), 0.05))
-        buffer = self._exchange_protective_stop_limit_buffer_pct / 100.0
-        if bracket.side == "BUY":
-            limit_price = _round_to_tick(max(0.05, trigger * (1.0 - buffer)))
-            if limit_price >= trigger:
-                limit_price = _round_to_tick(max(0.05, trigger - 0.05))
-        else:
-            limit_price = _round_to_tick(trigger * (1.0 + buffer))
-            if limit_price <= trigger:
-                limit_price = _round_to_tick(trigger + 0.05)
-        return trigger, limit_price
+        return canonical_stop_limit_prices(
+            trigger_price,
+            "SELL" if bracket.side == "BUY" else "BUY",
+            buffer_pct=self._exchange_protective_stop_limit_buffer_pct,
+        )
 
     def _clear_exchange_stop_locked(self, bracket: BracketState) -> None:
         bracket.exchange_stop_order_id = None

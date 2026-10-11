@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import math
+import os
+
 from nifty_scalper_bot.utils.logging import get_logger
 
 LOGGER = get_logger(__name__).getChild("pricing")
@@ -84,4 +87,57 @@ def canonical_price_source(source: object) -> str:
         return "mdm"
 
 
-__all__ = ["CANONICAL_PRICE_SOURCES", "canonical_price_source"]
+
+def configured_stop_limit_buffer_pct() -> float:
+    """One configurable limit tolerance for protective and SL-M fallback orders."""
+    raw = os.getenv(
+        "STOP_LIMIT_BUFFER_PCT",
+        os.getenv("EXCHANGE_PROTECTIVE_STOP_LIMIT_BUFFER_PCT", "5.0"),
+    )
+    try:
+        pct = float(raw)
+    except (TypeError, ValueError):
+        pct = 5.0
+    return max(0.1, min(pct, 99.0)) if math.isfinite(pct) else 5.0
+
+
+def canonical_stop_limit_prices(
+    trigger_price: float,
+    side: str,
+    *,
+    buffer_pct: float | None = None,
+) -> tuple[float, float]:
+    """Return tick-aligned (trigger, limit), direction-correct for NSE SL orders.
+
+    A ₹0.05 SELL trigger cannot have a lower positive tick-aligned limit;
+    callers must reject an equal-priced pair instead of sending it to the broker.
+    """
+    trigger_raw = float(trigger_price)
+    side_key = str(side).strip().upper()
+    if not math.isfinite(trigger_raw) or trigger_raw <= 0:
+        raise ValueError("stop trigger must be positive and finite")
+    if side_key not in {"BUY", "SELL"}:
+        raise ValueError("stop side must be BUY or SELL")
+    pct = (
+        configured_stop_limit_buffer_pct() if buffer_pct is None else float(buffer_pct)
+    )
+    if not math.isfinite(pct) or pct < 0.0 or pct >= 100.0:
+        raise ValueError("invalid stop-limit buffer percentage")
+    tick = 0.05
+    trigger = round(round(trigger_raw / tick) * tick, 2)
+    trigger = max(tick, trigger)
+    multiplier = 1 + pct / 100.0 if side_key == "BUY" else 1 - pct / 100.0
+    limit = round(round(trigger * multiplier / tick) * tick, 2)
+    if side_key == "BUY":
+        limit = max(round(trigger + tick, 2), limit)
+    else:
+        limit = max(tick, min(round(trigger - tick, 2), limit))
+    return trigger, limit
+
+
+__all__ = [
+    "CANONICAL_PRICE_SOURCES",
+    "canonical_price_source",
+    "canonical_stop_limit_prices",
+    "configured_stop_limit_buffer_pct",
+]

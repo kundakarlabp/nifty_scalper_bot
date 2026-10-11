@@ -88,14 +88,6 @@ from nifty_scalper_bot.execution.position_manager import (
     normalize_broker_order_status,
 )
 
-# Consumed deterministic signal ids are persisted inside the existing position
-# ledger file so a process restart cannot re-trade an already-consumed setup.
-_CONSUMED_SIGNALS_STATE_KEY = "_consumed_signal_ids"
-_CONSUMED_SIGNALS_MAX_PERSISTED = 500
-
-# Reducing intents must never be vetoed by the risk manager: these orders are
-# what flattens exposure after a breaker trip.
-_REDUCING_ORDER_INTENTS = {"EXIT", "REDUCE", "FLATTEN", "SQUARE_OFF", "SQUAREOFF"}
 from nifty_scalper_bot.execution.trailing_stop import (
     TrailingSpec,
     TrailingStopController,
@@ -119,10 +111,23 @@ from nifty_scalper_bot.utils.lot_size import (
 )
 from nifty_scalper_bot.utils.market_hours import get_time_status
 from nifty_scalper_bot.utils.metrics import Counter, Gauge
-from nifty_scalper_bot.utils.pricing import canonical_price_source
+from nifty_scalper_bot.utils.pricing import (
+    canonical_price_source,
+    canonical_stop_limit_prices,
+)
+
 from nifty_scalper_bot.utils.rate_limiter import RateLimiter
 from nifty_scalper_bot.utils.reasons import canonical
 from nifty_scalper_bot.utils.symbols import is_strategy_instrument, normalize_symbol
+
+# Consumed deterministic signal ids are persisted inside the existing position
+# ledger file so a process restart cannot re-trade an already-consumed setup.
+_CONSUMED_SIGNALS_STATE_KEY = "_consumed_signal_ids"
+_CONSUMED_SIGNALS_MAX_PERSISTED = 500
+
+# Reducing intents must never be vetoed by the risk manager: these orders are
+# what flattens exposure after a breaker trip.
+_REDUCING_ORDER_INTENTS = {"EXIT", "REDUCE", "FLATTEN", "SQUARE_OFF", "SQUAREOFF"}
 
 SOFT_BLOCK_CODES: set[str] = {
     "STALE",
@@ -3678,11 +3683,9 @@ class OrderManager:
             and (price is None or price <= 0.0)
             and trigger_price
         ):
-            buffer_pct = 0.03  # 3% Buffer
-            if normalized_side == "BUY":  # Short Exit -> Buy higher
-                price = round(trigger_price * (1 + buffer_pct), 2)
-            else:  # Long Exit -> Sell lower
-                price = round(trigger_price * (1 - buffer_pct), 2)
+            trigger_price, price = canonical_stop_limit_prices(
+                float(trigger_price), normalized_side
+            )
 
             self._logger.info(
                 f"🛡️ Converted SL-M to SL Limit. Trigger: {trigger_price}, Limit: {price}",
@@ -8419,11 +8422,9 @@ class OrderManager:
                 and trigger_price > 0
                 and price is None
             ):
-                buffer = 0.05  # 5%
-                if order.side == "SELL":  # Long SL
-                    price = round(trigger_price * (1 - buffer), 1)
-                else:  # Short SL
-                    price = round(trigger_price * (1 + buffer), 1)
+                trigger_price, price = canonical_stop_limit_prices(
+                    trigger_price, order.side
+                )
                 self._logger.info(
                     f"🔄 Auto-adjusting Limit Price to {price} for Trigger {trigger_price}"
                 )
@@ -11988,14 +11989,11 @@ class OrderManager:
             )
             kite_type = "SL"  # Force Limit
 
-            # Calculate Safe Limit Buffer (5%)
-            # BUY SL (Exit Short): Trigger 100 -> Limit 105 (Guarantees fill)
-            # SELL SL (Exit Long): Trigger 100 -> Limit 95 (Guarantees fill)
-            buffer = 0.05
-            if side == "BUY":
-                final_price = round(trigger_price * (1 + buffer), 1)
-            else:
-                final_price = max(0.05, round(trigger_price * (1 - buffer), 1))
+            # The same tick-aligned policy as the exchange protective stop.
+            # An SL-limit is price bounded; it cannot guarantee execution.
+            trigger_price, final_price = canonical_stop_limit_prices(
+                trigger_price, side
+            )
 
         elif kite_type == "SL":
             # Standard SL: ensure trigger and price are set
