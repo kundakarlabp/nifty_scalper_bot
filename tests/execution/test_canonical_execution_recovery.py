@@ -310,6 +310,10 @@ def test_live_restart_validates_saved_exchange_stop_without_new_orders(
     monkeypatch.setenv("ENABLE_LIVE", "true")
     restored = BracketManager(order_manager=order_manager)
     stop(restored)
+    # BoundBracketManager intentionally disables LIVE inside pytest; exercise
+    # the production restoration predicate explicitly without placing orders.
+    monkeypatch.setattr(restored, "_is_live_execution", lambda: True)
+    assert restored.load_state() is True
     recovered = restored.get_bracket("entry-restart")
     assert recovered is not None
     assert recovered.exchange_stop_order_id == stop_id
