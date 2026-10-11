@@ -87,19 +87,7 @@ from nifty_scalper_bot.execution.position_manager import (
     _atomic_write_json,
     normalize_broker_order_status,
 )
-from nifty_scalper_bot.utils.pricing import (
-    canonical_price_source,
-    canonical_stop_limit_prices,
-)
 
-# Consumed deterministic signal ids are persisted inside the existing position
-# ledger file so a process restart cannot re-trade an already-consumed setup.
-_CONSUMED_SIGNALS_STATE_KEY = "_consumed_signal_ids"
-_CONSUMED_SIGNALS_MAX_PERSISTED = 500
-
-# Reducing intents must never be vetoed by the risk manager: these orders are
-# what flattens exposure after a breaker trip.
-_REDUCING_ORDER_INTENTS = {"EXIT", "REDUCE", "FLATTEN", "SQUARE_OFF", "SQUAREOFF"}
 from nifty_scalper_bot.execution.trailing_stop import (
     TrailingSpec,
     TrailingStopController,
@@ -123,10 +111,23 @@ from nifty_scalper_bot.utils.lot_size import (
 )
 from nifty_scalper_bot.utils.market_hours import get_time_status
 from nifty_scalper_bot.utils.metrics import Counter, Gauge
+from nifty_scalper_bot.utils.pricing import (
+    canonical_price_source,
+    canonical_stop_limit_prices,
+)
 
 from nifty_scalper_bot.utils.rate_limiter import RateLimiter
 from nifty_scalper_bot.utils.reasons import canonical
 from nifty_scalper_bot.utils.symbols import is_strategy_instrument, normalize_symbol
+
+# Consumed deterministic signal ids are persisted inside the existing position
+# ledger file so a process restart cannot re-trade an already-consumed setup.
+_CONSUMED_SIGNALS_STATE_KEY = "_consumed_signal_ids"
+_CONSUMED_SIGNALS_MAX_PERSISTED = 500
+
+# Reducing intents must never be vetoed by the risk manager: these orders are
+# what flattens exposure after a breaker trip.
+_REDUCING_ORDER_INTENTS = {"EXIT", "REDUCE", "FLATTEN", "SQUARE_OFF", "SQUAREOFF"}
 
 SOFT_BLOCK_CODES: set[str] = {
     "STALE",
