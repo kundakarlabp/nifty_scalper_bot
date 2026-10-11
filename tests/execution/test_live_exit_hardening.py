@@ -271,6 +271,57 @@ def test_unresolved_exit_blocks_entries_but_never_blocks_protective_exit() -> No
     assert len(order_manager.place_calls) == 1
 
 
+def test_degraded_live_exchange_stop_blocks_entries_but_allows_psl_recovery(
+    monkeypatch,
+) -> None:
+    manager, order_manager, _broker = _manager()
+    monkeypatch.setattr(manager, "_is_live_execution", lambda: True)
+    manager._exchange_protective_stop_enabled = True
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    bracket.exchange_stop_degraded_reason = "broker_stop_status_unverified:UNKNOWN"
+
+    assert manager.has_unresolved_exit()
+    assert manager.get_first_unresolved_exit_bracket_id() == bracket.bracket_id
+
+    # Fresh exposure fails closed before reaching the broker adapter.
+    assert order_manager.place_order(
+        symbol=SYMBOL,
+        side="BUY",
+        quantity=65,
+        order_type="MARKET",
+        tag="entry_new",
+    ) is None
+    assert order_manager.place_calls == []
+    assert order_manager.submit_trade_plan(None) is None
+    assert order_manager.submit_plan_calls == 0
+
+    # The existing live bracket must still be able to restore broker protection.
+    protective_id = order_manager.place_order(
+        symbol=SYMBOL,
+        side="SELL",
+        quantity=65,
+        order_type="SL",
+        tag="psl_entry",
+        intent="EXIT",
+    )
+    assert protective_id == "rescue-1"
+    assert len(order_manager.place_calls) == 1
+
+    bracket.exchange_stop_degraded_reason = None
+    assert manager.has_unresolved_exit() is False
+
+
+def test_paper_bracket_stop_diagnostics_do_not_block_entries(monkeypatch) -> None:
+    manager, _order_manager, _broker = _manager()
+    monkeypatch.setattr(manager, "_is_live_execution", lambda: False)
+    manager._exchange_protective_stop_enabled = True
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    bracket.exchange_stop_degraded_reason = "broker_stop_status_unverified:UNKNOWN"
+    assert manager.has_unresolved_exit() is False
+
+
 def test_virtual_trailing_stop_is_monotonic_and_stays_below_market_for_long() -> None:
     manager, _order_manager, _broker = _manager()
     bracket = manager.get_bracket("entry-1")
