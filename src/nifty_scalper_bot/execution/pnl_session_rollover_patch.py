@@ -5,8 +5,9 @@ its first version could stamp a stale persisted local realised P&L with today's
 trading date without clearing it.  That made historical carryover look like
 current-session P&L.
 
-The native PositionManager keeps broker daily P&L authoritative for the current trading day and
-resets only stale/unverified local session accounting.  It does not alter
+The native PositionManager keeps broker daily P&L authoritative for the
+current trading day and resets only stale/unverified local session accounting.
+It does not alter
 position, orphan, protection, exit-lifecycle or readiness safety gates.
 """
 
