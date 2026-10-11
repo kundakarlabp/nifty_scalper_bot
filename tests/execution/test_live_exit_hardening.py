@@ -318,6 +318,64 @@ def test_live_entry_arms_one_canonical_exchange_stop(monkeypatch) -> None:
     assert "rescue-1" in bracket.linked_exit_order_ids
 
 
+def test_partial_tp1_rearms_exchange_stop_for_confirmed_residual(monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    monkeypatch.setenv("EXCHANGE_PROTECTIVE_STOP_ENABLED", "true")
+    broker = _Broker()
+    order_manager = _OrderManager(broker)
+    manager = BracketManager(order_manager=order_manager)
+    monkeypatch.setattr(manager, "_is_live_execution", lambda: True)
+    monkeypatch.setattr(manager, "save_state", lambda: None)
+    manager._running = False
+    manager._watchdog_thread.join(timeout=1.0)
+    manager.register_virtual_bracket(
+        order_id="entry-tp1",
+        symbol=SYMBOL,
+        side="BUY",
+        qty=65,
+        price=150.0,
+        sl=140.0,
+        tp=175.0,
+        activate_immediately=False,
+    )
+    manager.confirm_entry_fill("entry-tp1", 150.0, 65)
+    bracket = manager.get_bracket("entry-tp1")
+    assert bracket is not None
+    assert bracket.exchange_stop_order_id == "rescue-1"
+
+    # TP1 cancels the full-size resting SL before submitting the partial exit.
+    broker.statuses["rescue-1"] = "CANCELLED"
+    outcome = manager._retire_exchange_protective_stop(bracket, reason="TP1")
+    assert outcome == "cancelled"
+    broker.positions = [{"symbol": SYMBOL, "quantity": 35}]
+    target = SimpleNamespace(name="TP1", quantity=30, executed=False)
+
+    assert manager._resume_after_partial_target(
+        bracket,
+        target=target,
+        residual_quantity=35,
+        order_id="tp1-filled",
+        status_payload={
+            "status": "COMPLETE",
+            "filled_quantity": 30,
+            "average_price": 160.0,
+        },
+        requested_by="test",
+    )
+    assert bracket.remaining_quantity == 35
+    assert target.executed
+    assert bracket.exchange_stop_order_id == "rescue-2"
+    assert len(order_manager.place_calls) == 2
+    replacement = order_manager.place_calls[-1]
+    assert replacement["order_type"] == "SL"
+    assert replacement["quantity"] == 35
+    assert replacement["side"] == "SELL"
+    assert replacement["trigger_price"] == pytest.approx(150.0)
+    assert manager._ensure_exchange_protective_stop(bracket)
+    assert len(order_manager.place_calls) == 2
+
+
 def test_exchange_stop_is_tightened_with_canonical_trailing_stop(monkeypatch) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     monkeypatch.setenv("ENABLE_LIVE", "true")
