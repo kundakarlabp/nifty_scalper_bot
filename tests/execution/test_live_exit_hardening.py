@@ -346,10 +346,8 @@ def test_partial_tp1_rearms_exchange_stop_for_confirmed_residual(monkeypatch) ->
 
     # TP1 cancels the full-size resting SL before submitting the partial exit.
     broker.statuses["rescue-1"] = "CANCELLED"
-    assert (
-        manager._retire_exchange_protective_stop(bracket, reason="TP1")
-        == "cancelled"
-    )
+    outcome = manager._retire_exchange_protective_stop(bracket, reason="TP1")
+    assert outcome == "cancelled"
     broker.positions = [{"symbol": SYMBOL, "quantity": 35}]
     target = SimpleNamespace(name="TP1", quantity=30, executed=False)
 
