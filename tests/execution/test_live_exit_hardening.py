@@ -285,13 +285,14 @@ def test_degraded_live_exchange_stop_blocks_entries_but_allows_psl_recovery(
     assert manager.get_first_unresolved_exit_bracket_id() == bracket.bracket_id
 
     # Fresh exposure fails closed before reaching the broker adapter.
-    assert order_manager.place_order(
+    blocked_order_id = order_manager.place_order(
         symbol=SYMBOL,
         side="BUY",
         quantity=65,
         order_type="MARKET",
         tag="entry_new",
-    ) is None
+    )
+    assert blocked_order_id is None
     assert order_manager.place_calls == []
     assert order_manager.submit_trade_plan(None) is None
     assert order_manager.submit_plan_calls == 0
