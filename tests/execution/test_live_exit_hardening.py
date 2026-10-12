@@ -377,6 +377,7 @@ def test_live_entry_arms_one_canonical_exchange_stop(monkeypatch) -> None:
     assert stop["linked_entry_order_id"] == "entry-protected"
     assert stop["bracket_id"] == "entry-protected"
     assert bracket.exchange_stop_order_id == "rescue-1"
+    assert bracket.exit_order_type == "SL"
     assert "rescue-1" in bracket.linked_exit_order_ids
 
 
