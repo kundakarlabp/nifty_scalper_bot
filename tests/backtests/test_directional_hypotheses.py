@@ -265,9 +265,7 @@ def test_fixed_hypothesis_summary_preserves_costs_periods_and_missing_exits() ->
                     "worst_case_stress_trades": [trade(day)] if is_reference else [],
                     "no_vote_reasons": {"no_setup": 3},
                 }
-            scenarios.append(
-                {"slippage_bps_per_side": bps, "strategies": strategies}
-            )
+            scenarios.append({"slippage_bps_per_side": bps, "strategies": strategies})
         sessions.append({"day": day, "scenarios": scenarios})
 
     results = summarize_fixed_hypothesis_days(sessions)
@@ -297,11 +295,18 @@ def test_fixed_hypothesis_summary_preserves_costs_periods_and_missing_exits() ->
     with pytest.raises(ValueError, match="hypothesis_duplicate_session"):
         summarize_fixed_hypothesis_days(sessions + [sessions[0]])
     corrupted = [
-        row if row["day"] != "2020-10-02" else {
-            **row,
-            "scenarios": [scenario for scenario in row["scenarios"] if
-                          scenario["slippage_bps_per_side"] != 50.0],
-        }
+        (
+            row
+            if row["day"] != "2020-10-02"
+            else {
+                **row,
+                "scenarios": [
+                    scenario
+                    for scenario in row["scenarios"]
+                    if scenario["slippage_bps_per_side"] != 50.0
+                ],
+            }
+        )
         for row in sessions
     ]
     with pytest.raises(ValueError, match="hypothesis_scenario_incomplete"):
