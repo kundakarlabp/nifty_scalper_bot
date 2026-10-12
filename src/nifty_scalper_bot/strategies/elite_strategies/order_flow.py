@@ -373,13 +373,10 @@ class OrderFlowStrategy(EliteStrategy):
                     last_adverse = self._last_live_adverse_ofi.get(symbol)
                     holdoff = max(
                         0.0,
-                        safe_float_env(
-                            "ORDERFLOW_OFI_REVERSAL_HOLDOFF_SECONDS", 15.0
-                        ),
+                        safe_float_env("ORDERFLOW_OFI_REVERSAL_HOLDOFF_SECONDS", 15.0),
                     )
                     ofi_reversal_holdoff_active = bool(
-                        last_adverse is not None
-                        and 0.0 <= now - last_adverse < holdoff
+                        last_adverse is not None and 0.0 <= now - last_adverse < holdoff
                     )
                     if ofi_reversal_holdoff_active:
                         context_alignment_source = None
