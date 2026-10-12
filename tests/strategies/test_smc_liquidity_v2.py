@@ -745,7 +745,10 @@ def test_regime_aware_smc_requires_corroboration_in_ranges(
         assert strategy.last_no_vote_reason == "smc_range_corroboration_missing"
 
 
-@pytest.mark.parametrize(("quote_age_seconds", "should_vote"), [(290, True), (315, False)])
+@pytest.mark.parametrize(
+    ("quote_age_seconds", "should_vote"),
+    [(290, True), (315, False)],
+)
 def test_smc_live_sweep_expires_by_quote_time_not_stale_bar_clock(
     monkeypatch, quote_age_seconds: int, should_vote: bool
 ) -> None:
