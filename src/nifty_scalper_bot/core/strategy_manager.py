@@ -2815,6 +2815,8 @@ class StrategyManager(_BaseStrategyManager):
             },
         )
         indicators = dict(indicators)
+        if regime_name is not None:
+            indicators["regime"] = regime_name
         indicators.setdefault("ltp", current_price)
         indicators.setdefault("price", current_price)
         indicators.setdefault("close", current_price)
