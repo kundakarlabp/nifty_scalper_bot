@@ -5439,6 +5439,10 @@ class BracketManager:
         stop_id = str(order_id)
         with self._lock:
             bracket.exchange_stop_order_id = stop_id
+            # The exchange-resident order is already the actual exit order
+            # if its SL trigger fills. Preserve its type for closeout quality.
+            # Any later software fallback replaces this through submit_exit_order.
+            bracket.exit_order_type = "SL"
             bracket.exchange_stop_quantity = qty
             bracket.exchange_stop_trigger_price = trigger
             bracket.exchange_stop_limit_price = limit_price
