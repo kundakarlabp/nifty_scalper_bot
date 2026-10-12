@@ -226,6 +226,7 @@ def test_live_depth_persistence_survives_multiple_fast_quote_versions(
     assert confirmed is not None
     assert confirmed.metadata["effective_context_alignment"] is True
 
+
 def test_recent_opposing_live_ofi_cannot_instantly_confirm_smc_context(
     monkeypatch,
 ) -> None:
@@ -235,9 +236,7 @@ def test_recent_opposing_live_ofi_cannot_instantly_confirm_smc_context(
     clock = [100.0]
     monkeypatch.setattr(order_flow_module.time, "monotonic", lambda: clock[0])
     strategy = _strategy()
-    indicators = _indicators(
-        buy=105.0, sell=100.0, ofi_value=-3.43, supports=False
-    )
+    indicators = _indicators(buy=105.0, sell=100.0, ofi_value=-3.43, supports=False)
     indicators.pop("_expected_support")
 
     opposing = strategy._evaluate_signal(SYMBOL, indicators, current_price=100.25)
@@ -268,9 +267,7 @@ def test_ofi_reversal_holdoff_does_not_modify_nonlive_confirmation(
 ) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
     strategy = _strategy()
-    indicators = _indicators(
-        buy=105.0, sell=100.0, ofi_value=-0.50, supports=False
-    )
+    indicators = _indicators(buy=105.0, sell=100.0, ofi_value=-0.50, supports=False)
     indicators.pop("_expected_support")
     assert strategy._evaluate_signal(SYMBOL, indicators, 100.25) is not None
     indicators["ofi_1s_normalized"] = 0.50
