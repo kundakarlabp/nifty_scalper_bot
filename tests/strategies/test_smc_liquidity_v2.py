@@ -699,3 +699,79 @@ def test_live_smc_declining_premium_past_initial_risk_invalidates_setup(
     assert strategy.last_no_vote_reason == "smc_pre_entry_premium_invalidated"
     # The same underlying confirmation cannot be silently re-armed.
     assert strategy.generate_signal(PE, context, 131.55) is None
+
+
+@pytest.mark.parametrize(
+    ("regime", "structure", "should_vote"),
+    [
+        ("RANGE", False, False),
+        ("CHOPPY", False, False),
+        ("RANGE", True, True),
+        ("TREND", False, True),
+    ],
+)
+def test_regime_aware_smc_requires_corroboration_in_ranges(
+    monkeypatch, regime: str, structure: bool, should_vote: bool
+) -> None:
+    """A naked range-market sweep must not become an option entry vote."""
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    rows = _base_rows()
+    strategy = _strategy(rows, volume_spike_mult=10.0)
+    sweep = _bar(
+        30, open_=23988, high=23991, low=23974, close=23984, volume=1000
+    )
+    rows.append(sweep)
+    indicators = _indicators(
+        latest_bar_ts=sweep["timestamp"],
+        regime=regime,
+        bos_confirmed=structure,
+        choch_confirmed=False,
+        retest_confirmed=False,
+        premium_reclaim=False,
+    )
+    assert strategy.generate_signal(CE, indicators, 102.0) is None
+    rows.append(
+        _bar(31, open_=23984, high=23999, low=23982, close=23997, volume=1000)
+    )
+    indicators["latest_bar_ts"] = rows[-1]["timestamp"]
+    signal = strategy.generate_signal(CE, indicators, 103.0)
+
+    if should_vote:
+        assert signal is not None
+        assert signal.metadata["smc_regime"] in {"RANGE", "TREND"}
+        assert signal.metadata["smc_quality_corroborated"] is structure
+    else:
+        assert signal is None
+        assert strategy.last_no_vote_reason == "smc_range_corroboration_missing"
+
+
+@pytest.mark.parametrize(("quote_age_seconds", "should_vote"), [(290, True), (315, False)])
+def test_smc_live_sweep_expires_by_quote_time_not_stale_bar_clock(
+    monkeypatch, quote_age_seconds: int, should_vote: bool
+) -> None:
+    """Do not extend five-minute setups using a lagging completed candle."""
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("SMC_CONFIRMATION_MAX_MINUTES", "5")
+    rows = _base_rows()
+    strategy = _strategy(rows)
+    sweep = _bar(
+        30, open_=23988, high=23991, low=23974, close=23984, volume=2400
+    )
+    rows.append(sweep)
+    indicators = _indicators(latest_bar_ts=sweep["timestamp"])
+    assert strategy.generate_signal(CE, indicators, 102.0) is None
+    rows.append(
+        _bar(31, open_=23984, high=23999, low=23982, close=23997, volume=2100)
+    )
+    indicators["latest_bar_ts"] = rows[-1]["timestamp"]
+    quote_time = sweep["timestamp"] + timedelta(seconds=quote_age_seconds)
+    indicators["last_tick_ts_ms"] = int(quote_time.timestamp() * 1000)
+    signal = strategy.generate_signal(CE, indicators, 103.0)
+    if should_vote:
+        assert signal is not None
+        assert signal.metadata["sweep_age_minutes"] == pytest.approx(
+            quote_age_seconds / 60.0
+        )
+    else:
+        assert signal is None
+        assert strategy.last_no_vote_reason == "smc_sweep_expired"
