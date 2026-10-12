@@ -9,7 +9,7 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, cast
 
 from nifty_scalper_bot.utils.symbols import is_strategy_instrument
 
@@ -18,7 +18,7 @@ def _finite_float(value: object) -> float | None:
     if value is None or isinstance(value, bool):
         return None
     try:
-        numeric = float(value)
+        numeric = float(cast(Any, value))
     except (TypeError, ValueError):
         return None
     return numeric if math.isfinite(numeric) else None
