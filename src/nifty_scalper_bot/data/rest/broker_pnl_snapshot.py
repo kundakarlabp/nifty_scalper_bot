@@ -62,9 +62,7 @@ def _strategy_symbol(record: Mapping[str, Any]) -> str:
     return text
 
 
-def _strategy_day_marked_pnl(
-    rows: object,
-) -> tuple[float | None, float | None, int]:
+def _strategy_day_marked_pnl(rows: object) -> tuple[float | None, float | None, int]:
     """Calculate marked and closed gross P&L from Zerodha ``data.day`` rows.
 
     Formula follows Zerodha's position economics:
@@ -101,9 +99,7 @@ def _strategy_day_marked_pnl(
             if abs(quantity) > 1e-9:
                 continue
             last_price = 0.0
-        marked_total += (
-            sell_value - buy_value + quantity * last_price * multiplier
-        )
+        marked_total += sell_value - buy_value + quantity * last_price * multiplier
         if abs(quantity) <= 1e-9:
             closed_total += sell_value - buy_value
         seen += 1
@@ -112,9 +108,7 @@ def _strategy_day_marked_pnl(
     return marked_total, closed_total, seen
 
 
-def _strategy_tradebook_realized_pnl(
-    rows: object,
-) -> tuple[float | None, int]:
+def _strategy_tradebook_realized_pnl(rows: object) -> tuple[float | None, int]:
     """Calculate realized gross P&L from current-day Zerodha trade fills."""
 
     if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes)):
