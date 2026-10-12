@@ -562,10 +562,183 @@ def run_phase(output: Path, phase: str, workers: int) -> None:
         )
 
 
+
+def run_fixed_hypothesis_day(task: tuple[str, str]) -> dict[str, Any]:
+    """Evaluate research-only signals and cost-gated ORB on one fixed daily basket."""
+    from nifty_scalper_bot.backtesting.directional_hypotheses import (
+        run_directional_hypothesis_research,
+    )
+
+    root, day = task
+    os.environ.update(
+        EXECUTION_MODE="SHADOW",
+        STRATEGY_MODE="directional_scalp",
+        ORB_ENABLED="true",
+        BROKER_API_KEY="offline_research_unused",
+        BROKER_API_SECRET="offline_research_unused",
+    )
+    logging.disable(logging.CRITICAL)
+    directory = Path(root) / "sessions" / day
+    research = run_directional_hypothesis_research(directory)
+    for scenario in research["scenarios"]:
+        slippage = scenario["slippage_bps_per_side"]
+        baseline = run_orb_session_research(
+            directory,
+            overrides={},
+            slippage_bps=slippage,
+            minimum_net_rr=1.5,
+            lifecycle_proxy=True,
+        )
+        scenario["strategies"]["ORBNetGateBaseline"] = baseline
+    return {"day": day, "scenarios": research["scenarios"]}
+
+
+def summarize_fixed_hypothesis_days(
+    daily: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Keep each chronological period distinct; never select on later years."""
+    names = (
+        "ORBNetGateBaseline",
+        "PullbackResearch",
+        "CompressionResearch",
+        "MomentumResearch",
+    )
+    years = {
+        "development": {"2017", "2018"},
+        "validation": {"2019"},
+        "final": {"2020"},
+    }
+    if len({row["day"] for row in daily}) != len(daily):
+        raise ValueError("hypothesis_duplicate_session")
+    results: list[dict[str, Any]] = []
+    for phase, years_in_phase in years.items():
+        sessions = [row for row in daily if row["day"][:4] in years_in_phase]
+        for slippage in SLIPPAGE:
+            for name in names:
+                trades: list[dict[str, Any]] = []
+                unresolved: list[dict[str, Any]] = []
+                stressed: list[dict[str, Any]] = []
+                rejections: Counter[str] = Counter()
+                for session in sessions:
+                    matches = [
+                        row
+                        for row in session["scenarios"]
+                        if row["slippage_bps_per_side"] == slippage
+                    ]
+                    if len(matches) != 1 or set(matches[0]["strategies"]) != set(names):
+                        raise ValueError("hypothesis_scenario_incomplete")
+                    observed = matches[0]["strategies"][name]
+                    trades.extend(observed["trades"])
+                    unresolved.extend(observed["unresolved_trades"])
+                    stressed.extend(observed["worst_case_stress_trades"])
+                    rejections.update(observed["no_vote_reasons"])
+                results.append(
+                    {
+                        "phase": phase,
+                        "candidate": name,
+                        "slippage_bps_per_side": slippage,
+                        "session_count": len(sessions),
+                        "metrics": summarize(trades),
+                        "worst_case_stress_metrics": summarize(stressed),
+                        "data_quality": {
+                            "resolved_exit_count": len(trades),
+                            "unresolved_exit_count": len(unresolved),
+                            "primary_metrics_complete": not unresolved,
+                            "primary_metrics_exclude_unresolved": True,
+                        },
+                        "no_vote_reasons": dict(rejections),
+                        "exit_reasons": dict(
+                            Counter(trade["exit_reason"] for trade in trades)
+                        ),
+                        "unresolved_trades": unresolved,
+                        "trades": trades,
+                        "worst_case_stress_trades": stressed,
+                    }
+                )
+    return results
+
+
+def run_fixed_hypothesis_study(output: Path, workers: int) -> None:
+    """Run prespecified comparative research without altering ORB's protocol."""
+    if os.getenv("EXECUTION_MODE", "SHADOW").upper() != "SHADOW":
+        raise ValueError("research_requires_shadow_process")
+    manifest_path = output / "data_manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    days = sorted(row["day"] for row in manifest["sessions"])
+    if not days:
+        raise ValueError("research_history_unavailable")
+    directory = output / "fixed_hypotheses"
+    pending = [
+        (str(output), day)
+        for day in days
+        if not (directory / f"{day}.json").exists()
+    ]
+    with ProcessPoolExecutor(max_workers=workers) as pool:
+        futures = {
+            pool.submit(run_fixed_hypothesis_day, task): task for task in pending
+        }
+        for future in as_completed(futures):
+            row = future.result()
+            if row["day"] != futures[future][1]:
+                raise ValueError("hypothesis_session_identity_conflict")
+            write_json(directory / f"{row['day']}.json", row)
+    daily = [
+        json.loads((directory / f"{day}.json").read_text()) for day in days
+    ]
+    results = summarize_fixed_hypothesis_days(daily)
+    write_json(
+        output / "fixed_hypothesis_results.json",
+        {
+            "scope": "fixed_monthly_option_research_hypotheses",
+            "evidence_label": "RESEARCH_CANDIDATE",
+            "live_equivalent": False,
+            "promotion_eligible": False,
+            "selected_for_live": None,
+            "data_manifest_sha256": hashlib.sha256(
+                manifest_path.read_bytes()
+            ).hexdigest(),
+            "coverage": {
+                "session_count": len(days),
+                "first_session": days[0],
+                "last_session": days[-1],
+            },
+            "assumptions": {
+                "families": [
+                    "ORBNetGateBaseline",
+                    "PullbackResearch",
+                    "CompressionResearch",
+                    "MomentumResearch",
+                ],
+                "basket": "fixed_session_open_ATM_monthly_options",
+                "direction": "closed_NIFTY_continuous_futures_bars",
+                "selection": "fixed_rules_no_parameter_search",
+                "execution": "next_minute_open_canonical_costs_and_slippage",
+                "comparisons": "1.5_net_rr_gate_and_causal_bar_lifecycle_proxy",
+                "periods": {
+                    "development": ["2017", "2018"],
+                    "validation": ["2019"],
+                    "final": ["2020"],
+                },
+            },
+            "limitations": [
+                "Retrospective archive, including previously examined years",
+                "Publisher-unverified early timestamp conventions",
+                "Continuous futures roll identity is not reconstructed",
+                "Monthly options differ from current weekly products",
+                "No bid/ask depth or execution queue; modeled fills only",
+                "No production basket selection, arbitration or broker parity",
+                "Unresolved exits excluded from primary and shown separately",
+                "No setting selected or authorized for live trading",
+            ],
+            "results": results,
+        },
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "action", choices=("prepare", "development", "validation", "final")
+        "action", choices=("prepare", "development", "validation", "final", "hypotheses")
     )
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -579,6 +752,8 @@ def main() -> None:
             f"Prepared {len(manifest['sessions'])} sessions; "
             f"exclusions {manifest['excluded_sessions']}"
         )
+    elif args.action == "hypotheses":
+        run_fixed_hypothesis_study(args.output, args.workers)
     else:
         run_phase(args.output, args.action, args.workers)
 
