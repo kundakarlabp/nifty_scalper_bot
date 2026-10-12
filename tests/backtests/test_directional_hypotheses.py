@@ -93,14 +93,19 @@ def test_disconnected_or_ambiguous_history_fails_closed() -> None:
 
 
 class _HistoryEngine:
-    def __init__(self, bars: list[dict[str, Any]]) -> None:
+    def __init__(
+        self,
+        bars: list[dict[str, Any]],
+        future_symbol: str = _FUTURE,
+    ) -> None:
         self.bars = bars
+        self.future_symbol = future_symbol
 
     def get_history(
         self, symbol: str, count: int, *, field: str
     ) -> list[dict[str, Any]]:
         assert field == "bars"
-        return self.bars[-count:] if symbol == _FUTURE else []
+        return self.bars[-count:] if symbol == self.future_symbol else []
 
     def get_atr(self, symbol: str) -> float | None:
         return 2.0 if symbol in {_CE, _PE} else None
@@ -195,3 +200,24 @@ def test_hypothesis_research_reuses_canonical_costed_scenarios(
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     with pytest.raises(ValueError, match="research_requires_shadow_process"):
         run_directional_hypothesis_research(tmp_path)
+
+
+def test_exact_public_archive_future_context_is_research_only() -> None:
+    """Monthly public archives use a continuous context future identifier."""
+    rows = _momentum_bars()
+    historical_symbol = "NFO:NIFTY_F1_CONTEXT"
+    candidate = ArchivedDirectionalHypothesis(
+        "momentum_acceleration",
+        _HistoryEngine(rows, future_symbol=historical_symbol),
+    )
+    context = {
+        "futures_symbol": historical_symbol,
+        "bar_timestamp": rows[-1]["timestamp"],
+    }
+    assert candidate.generate_signal(_CE, context, 60.0) is not None
+    assert (
+        candidate.generate_signal(
+            _CE, {**context, "futures_symbol": "NFO:NIFTY_OTHER_CONTEXT"}, 60.0
+        )
+        is None
+    )
