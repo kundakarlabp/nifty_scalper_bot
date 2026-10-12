@@ -6,6 +6,7 @@ import os
 import time
 from typing import Any, Mapping
 
+from nifty_scalper_bot.config.regime_ontology import MarketRegime, normalize_regime
 from nifty_scalper_bot.execution.readiness import HistoryReadinessPolicy
 from nifty_scalper_bot.strategies.elite_strategies.base_elite import (
     EliteSignal,
@@ -110,6 +111,8 @@ class SMCStrategy(EliteStrategy):
             "atr",
             "direction_bias",
             "underlying_direction_bias",
+            "regime",
+            "market_regime",
             "bos_confirmed",
             "choch_confirmed",
             "retest_confirmed",
@@ -980,9 +983,18 @@ class SMCStrategy(EliteStrategy):
                     1.0,
                     safe_float_env("SMC_CONFIRMATION_MAX_MINUTES", 5.0),
                 )
+                # A completed candle can lag a live option quote by minutes.
+                # Use the canonical quote timestamp if present; never let an
+                # older quote make a sweep appear younger than its latest bar.
+                quote_ts = _coerce_datetime(
+                    indicators.get("last_tick_ts_ms")
+                    or indicators.get("timestamp_ms")
+                    or indicators.get("last_tick_timestamp")
+                )
+                observation_ts = max(current_ts, quote_ts) if quote_ts else current_ts
                 age_minutes = max(
                     0.0,
-                    (current_ts - event["sweep_ts"]).total_seconds() / 60.0,
+                    (observation_ts - event["sweep_ts"]).total_seconds() / 60.0,
                 )
 
                 if age_minutes > max_age_minutes:
@@ -1149,6 +1161,21 @@ class SMCStrategy(EliteStrategy):
                     if present
                 ]
                 local_support_present = bool(local_support_sources)
+                regime = normalize_regime(
+                    indicators.get("regime") or indicators.get("market_regime")
+                )
+                quality_corroborated = bool(
+                    structure_confirmed
+                    or event["volume_confirmation"]
+                    or (retest_confirmed and premium_reclaim)
+                )
+                # In range conditions a naked sweep/displacement is an
+                # unconfirmed reversal thesis, not an executable SMC trigger.
+                # Continue using the same canonical adaptive regime and
+                # leave independent OrderFlow confirmation to StrategyManager.
+                if regime == MarketRegime.RANGE and not quality_corroborated:
+                    self._no_vote("smc_range_corroboration_missing")
+                    return None
                 # SMC owns the structural setup. StrategyManager already owns
                 # independent confirmation (fresh OrderFlow or another trigger);
                 # do not duplicate that gate with correlated option features here.
@@ -1283,6 +1310,9 @@ class SMCStrategy(EliteStrategy):
                     "feature_completeness": feature_completeness,
                     "smc_local_support_present": local_support_present,
                     "smc_local_support_sources": local_support_sources,
+                    "smc_regime": regime.value,
+                    "smc_quality_corroborated": quality_corroborated,
+                    "sweep_age_minutes": round(age_minutes, 4),
                     "smc_block_reason": "",
                     "latest_bar_ts": current_ts,
                     "setup_candle_timestamp": current_ts,
