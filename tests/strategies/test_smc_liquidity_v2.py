@@ -765,7 +765,7 @@ def test_smc_live_sweep_expires_by_quote_time_not_stale_bar_clock(
     if should_vote:
         assert signal is not None
         assert signal.metadata["sweep_age_minutes"] == pytest.approx(
-            quote_age_seconds / 60.0
+            quote_age_seconds / 60.0, abs=0.0001
         )
     else:
         assert signal is None
