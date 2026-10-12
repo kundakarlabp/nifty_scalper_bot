@@ -717,9 +717,7 @@ def test_regime_aware_smc_requires_corroboration_in_ranges(
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     rows = _base_rows()
     strategy = _strategy(rows, volume_spike_mult=10.0)
-    sweep = _bar(
-        30, open_=23988, high=23991, low=23974, close=23984, volume=1000
-    )
+    sweep = _bar(30, open_=23988, high=23991, low=23974, close=23984, volume=1000)
     rows.append(sweep)
     indicators = _indicators(
         latest_bar_ts=sweep["timestamp"],
@@ -730,9 +728,7 @@ def test_regime_aware_smc_requires_corroboration_in_ranges(
         premium_reclaim=False,
     )
     assert strategy.generate_signal(CE, indicators, 102.0) is None
-    rows.append(
-        _bar(31, open_=23984, high=23999, low=23982, close=23997, volume=1000)
-    )
+    rows.append(_bar(31, open_=23984, high=23999, low=23982, close=23997, volume=1000))
     indicators["latest_bar_ts"] = rows[-1]["timestamp"]
     signal = strategy.generate_signal(CE, indicators, 103.0)
 
@@ -757,15 +753,11 @@ def test_smc_live_sweep_expires_by_quote_time_not_stale_bar_clock(
     monkeypatch.setenv("SMC_CONFIRMATION_MAX_MINUTES", "5")
     rows = _base_rows()
     strategy = _strategy(rows)
-    sweep = _bar(
-        30, open_=23988, high=23991, low=23974, close=23984, volume=2400
-    )
+    sweep = _bar(30, open_=23988, high=23991, low=23974, close=23984, volume=2400)
     rows.append(sweep)
     indicators = _indicators(latest_bar_ts=sweep["timestamp"])
     assert strategy.generate_signal(CE, indicators, 102.0) is None
-    rows.append(
-        _bar(31, open_=23984, high=23999, low=23982, close=23997, volume=2100)
-    )
+    rows.append(_bar(31, open_=23984, high=23999, low=23982, close=23997, volume=2100))
     indicators["latest_bar_ts"] = rows[-1]["timestamp"]
     quote_time = sweep["timestamp"] + timedelta(seconds=quote_age_seconds)
     indicators["last_tick_ts_ms"] = int(quote_time.timestamp() * 1000)
