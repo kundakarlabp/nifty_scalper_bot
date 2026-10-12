@@ -115,9 +115,12 @@ def test_archived_adapter_only_generates_option_buy_with_next_bar_proxy() -> Non
 
     assert candidate.generate_signal(_PE, context, 60.0) is None
     assert candidate.generate_signal("NSE:NIFTY 50", context, 60.0) is None
-    assert candidate.generate_signal(
-        _CE, {**context, "bar_timestamp": rows[-2]["timestamp"]}, 60.0
-    ) is None
+    assert (
+        candidate.generate_signal(
+            _CE, {**context, "bar_timestamp": rows[-2]["timestamp"]}, 60.0
+        )
+        is None
+    )
 
     signal = candidate.generate_signal(_CE, context, 60.0)
     assert signal is not None
@@ -175,7 +178,9 @@ def test_hypothesis_research_reuses_canonical_costed_scenarios(
     assert result["evidence_label"] == "RESEARCH_CANDIDATE"
     assert len(result["scenarios"]) == 3
     assert [row["slippage_bps_per_side"] for row in result["scenarios"]] == [
-        10.0, 25.0, 50.0
+        10.0,
+        25.0,
+        50.0,
     ]
     for row in result["scenarios"]:
         assert set(row["strategies"]) == {
@@ -184,8 +189,7 @@ def test_hypothesis_research_reuses_canonical_costed_scenarios(
             "MomentumResearch",
         }
         assert all(
-            value["metrics"]["trade_count"] == 0
-            for value in row["strategies"].values()
+            value["metrics"]["trade_count"] == 0 for value in row["strategies"].values()
         )
 
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
