@@ -388,7 +388,7 @@ jobs:
       github.event.issue.user.login == github.repository_owner &&
       startsWith(github.event.issue.title, '[Backtest] Hypotheses')
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 120
     env:
       EXECUTION_MODE: SHADOW
       LIVE_TRADING_ENABLED: "false"
@@ -419,7 +419,7 @@ jobs:
       - name: Execute fixed hypotheses with cost-matched ORB baseline
         run: >-
           python scripts/research_orb_multiyear.py hypotheses
-          --source "$SOURCE_DIR" --output "$STUDY_DIR" --workers 2
+          --source "$SOURCE_DIR" --output "$STUDY_DIR" --workers 4
       - name: Summarize fixed results without automatic promotion
         run: |
           python - <<'PY'
