@@ -146,6 +146,7 @@ class OrderFlowStrategy(EliteStrategy):
         # Only one owner tracks whether a live tick-only confirmation persists.
         # Temporal OFI already measures persistence upstream.
         self._last_live_depth_support: dict[str, tuple[int, float]] = {}
+        self._last_live_adverse_ofi: dict[str, float] = {}
 
     def get_required_indicators(self) -> set[str]:
         """Args: none. Returns: indicator keys. Raises: Exception."""
@@ -360,6 +361,28 @@ class OrderFlowStrategy(EliteStrategy):
                 context_alignment_source = "depth_plus_flow"
             elif strong_depth_supports_side and not flow_conflicts_side:
                 context_alignment_source = "strong_depth"
+            # Temporal OFI covers one second, not a recent adverse-to-positive
+            # reversal. Keep the existing context authority, but avoid approving
+            # a live entry on the first brief positive window after opposition.
+            ofi_reversal_holdoff_active = False
+            if is_live and context_quality_eligible and side_aligns:
+                now = time.monotonic()
+                if ofi_directional and ofi_conflicts_side:
+                    self._last_live_adverse_ofi[symbol] = now
+                else:
+                    last_adverse = self._last_live_adverse_ofi.get(symbol)
+                    holdoff = max(
+                        0.0,
+                        safe_float_env(
+                            "ORDERFLOW_OFI_REVERSAL_HOLDOFF_SECONDS", 15.0
+                        ),
+                    )
+                    ofi_reversal_holdoff_active = bool(
+                        last_adverse is not None
+                        and 0.0 <= now - last_adverse < holdoff
+                    )
+                    if ofi_reversal_holdoff_active:
+                        context_alignment_source = None
             alignment_candidate_source = context_alignment_source
             # A single order-book imbalance plus the last tick can flip on
             # one quote update. In LIVE mode require two distinct, fresh
@@ -488,6 +511,7 @@ class OrderFlowStrategy(EliteStrategy):
                 "context_fresh": context_fresh,
                 "context_quality_eligible": context_quality_eligible,
                 "effective_context_alignment": effective_context_alignment,
+                "ofi_reversal_holdoff_active": ofi_reversal_holdoff_active,
                 "effective_context_conflict": effective_context_conflict,
                 "context_role": "confirmation",
                 "vote_timestamp": time.time(),
@@ -523,7 +547,8 @@ class OrderFlowStrategy(EliteStrategy):
                 "ORDERFLOW_CONTEXT_EVIDENCE symbol=%s side=%s eligible=%s "
                 "aligned=%s conflict=%s source=%s ofi_ready=%s ofi_norm=%s "
                 "depth=%.3f strong_depth_conflict=%s spread_pct=%.3f age_s=%.3f "
-                "ofi_updates_1s=%s ofi_unavailable=%s quote_version=%s",
+                "ofi_updates_1s=%s ofi_unavailable=%s quote_version=%s "
+                "ofi_reversal_holdoff=%s",
                 symbol,
                 side,
                 context_quality_eligible,
@@ -539,6 +564,7 @@ class OrderFlowStrategy(EliteStrategy):
                 ofi_updates,
                 ofi_unavailable_reason,
                 quote_readiness.quote_update_version,
+                ofi_reversal_holdoff_active,
                 extra={
                     "event": "ORDERFLOW_CONTEXT_EVIDENCE",
                     "symbol": symbol,
@@ -550,6 +576,7 @@ class OrderFlowStrategy(EliteStrategy):
                     "ofi_ready": ofi_ready,
                     "ofi_1s_normalized": ofi_value,
                     "ofi_update_count_1s": ofi_updates,
+                    "ofi_reversal_holdoff_active": ofi_reversal_holdoff_active,
                     "ofi_unavailable_reason": ofi_unavailable_reason,
                     "depth_imbalance": round(depth_imbalance, 4),
                     "strong_depth_conflicts_side": strong_depth_conflicts_side,
