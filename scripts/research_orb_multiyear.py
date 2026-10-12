@@ -562,7 +562,6 @@ def run_phase(output: Path, phase: str, workers: int) -> None:
         )
 
 
-
 def run_fixed_hypothesis_day(task: tuple[str, str]) -> dict[str, Any]:
     """Evaluate research-only signals and cost-gated ORB on one fixed daily basket."""
     from nifty_scalper_bot.backtesting.directional_hypotheses import (
@@ -669,9 +668,7 @@ def run_fixed_hypothesis_study(output: Path, workers: int) -> None:
         raise ValueError("research_history_unavailable")
     directory = output / "fixed_hypotheses"
     pending = [
-        (str(output), day)
-        for day in days
-        if not (directory / f"{day}.json").exists()
+        (str(output), day) for day in days if not (directory / f"{day}.json").exists()
     ]
     with ProcessPoolExecutor(max_workers=workers) as pool:
         futures = {
@@ -682,9 +679,7 @@ def run_fixed_hypothesis_study(output: Path, workers: int) -> None:
             if row["day"] != futures[future][1]:
                 raise ValueError("hypothesis_session_identity_conflict")
             write_json(directory / f"{row['day']}.json", row)
-    daily = [
-        json.loads((directory / f"{day}.json").read_text()) for day in days
-    ]
+    daily = [json.loads((directory / f"{day}.json").read_text()) for day in days]
     results = summarize_fixed_hypothesis_days(daily)
     write_json(
         output / "fixed_hypothesis_results.json",
