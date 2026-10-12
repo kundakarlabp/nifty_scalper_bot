@@ -38,8 +38,10 @@ def _ema(values: Sequence[float], period: int) -> float:
 def _band(values: Sequence[float]) -> tuple[float, float, float]:
     centre = sum(values) / len(values)
     deviation = pstdev(values)
-    return centre - 2.0 * deviation, centre + 2.0 * deviation, (
-        (4.0 * deviation / centre) if centre > 0 else math.inf
+    return (
+        centre - 2.0 * deviation,
+        centre + 2.0 * deviation,
+        ((4.0 * deviation / centre) if centre > 0 else math.inf),
     )
 
 
@@ -63,9 +65,10 @@ def classify_completed_futures_bars(
                 return {}
             if row.get("is_complete") is not True or row.get("is_provisional"):
                 return {}
-            numbers = [float(row[field]) for field in (
-                "open", "high", "low", "close", "volume"
-            )]
+            numbers = [
+                float(row[field])
+                for field in ("open", "high", "low", "close", "volume")
+            ]
             opn, high, low, close, volume = numbers
             if (
                 not all(math.isfinite(value) for value in numbers)
@@ -197,8 +200,10 @@ class ArchivedDirectionalHypothesis:
     ) -> SimpleNamespace | None:
         del position
         self.last_no_vote_reason = "research_conditions_absent"
-        side = "CE" if symbol.upper().endswith("CE") else (
-            "PE" if symbol.upper().endswith("PE") else None
+        side = (
+            "CE"
+            if symbol.upper().endswith("CE")
+            else ("PE" if symbol.upper().endswith("PE") else None)
         )
         future = str(indicators.get("futures_symbol") or "")
         stamp = indicators.get("bar_timestamp")
@@ -247,9 +252,7 @@ class ArchivedDirectionalHypothesis:
             },
         )
 
-    def notify_entry_accepted(
-        self, side: str, *, setup_id: str | None = None
-    ) -> None:
+    def notify_entry_accepted(self, side: str, *, setup_id: str | None = None) -> None:
         """Research callbacks never touch live positions or brokers."""
         del side, setup_id
 
