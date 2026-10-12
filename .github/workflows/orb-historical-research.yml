@@ -380,3 +380,77 @@ jobs:
             ${{ env.STUDY_DIR }}/data_manifest.json
             ${{ env.STUDY_DIR }}/iterative_protocol.json
             ${{ env.STUDY_DIR }}/iterative_*.json
+
+
+  fixed-intraday-hypotheses-study:
+    if: >-
+      github.event_name == 'issues' &&
+      github.event.issue.user.login == github.repository_owner &&
+      startsWith(github.event.issue.title, '[Backtest] Hypotheses')
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      EXECUTION_MODE: SHADOW
+      LIVE_TRADING_ENABLED: "false"
+      PAPER_TRADING: "true"
+      BROKER_API_KEY: offline_research_unused
+      BROKER_API_SECRET: offline_research_unused
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set isolated fixed-hypothesis paths
+        run: |
+          printf 'SOURCE_DIR=%s/orb-public-source\nSTUDY_DIR=%s/fixed-hypotheses-study\n' \
+            "$RUNNER_TEMP" "$RUNNER_TEMP" >> "$GITHUB_ENV"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install research dependencies
+        run: python -m pip install -e '.[research]'
+      - name: Cache checksum-verified public archive
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.SOURCE_DIR }}
+          key: zenodo-10899828-717d15361af52d1d654b4909d998967e
+      - name: Prepare non-hindsight historical option baskets
+        run: >-
+          python scripts/research_orb_multiyear.py prepare
+          --source "$SOURCE_DIR" --output "$STUDY_DIR"
+      - name: Execute fixed hypotheses with cost-matched ORB baseline
+        run: >-
+          python scripts/research_orb_multiyear.py hypotheses
+          --source "$SOURCE_DIR" --output "$STUDY_DIR" --workers 2
+      - name: Summarize fixed results without automatic promotion
+        run: |
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          report = json.loads(
+              (Path(os.environ["STUDY_DIR"]) / "fixed_hypothesis_results.json").read_text()
+          )
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as stream:
+              stream.write("## Intraday hypothesis research (not live-validated)\n\n")
+              stream.write("Retrospective monthly-option bar simulations; no live change.\n\n")
+              stream.write("| Period | Strategy | Slippage/side | Trades | Net P&L | "
+                           "Net expectancy | Unresolved |\n")
+              stream.write("|---|---|---:|---:|---:|---:|---:|\n")
+              for row in report["results"]:
+                  m = row["metrics"]
+                  stream.write(
+                      f"| {row['phase']} | {row['candidate']} | "
+                      f"{row['slippage_bps_per_side']} bps | "
+                      f"{m['trade_count']} | {m['net_pnl']:.2f} | "
+                      f"{'—' if m['expectancy'] is None else f'{m[\x22expectancy\x22]:.2f}'} | "
+                      f"{row['data_quality']['unresolved_exit_count']} |\n"
+                  )
+          PY
+      - name: Save auditable fixed-hypothesis results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: intraday-fixed-hypotheses-${{ github.sha }}
+          if-no-files-found: warn
+          retention-days: 30
+          path: |
+            ${{ env.STUDY_DIR }}/data_manifest.json
+            ${{ env.STUDY_DIR }}/fixed_hypothesis_results.json
