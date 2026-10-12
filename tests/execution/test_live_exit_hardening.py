@@ -377,8 +377,18 @@ def test_live_entry_arms_one_canonical_exchange_stop(monkeypatch) -> None:
     assert stop["linked_entry_order_id"] == "entry-protected"
     assert stop["bracket_id"] == "entry-protected"
     assert bracket.exchange_stop_order_id == "rescue-1"
-    assert bracket.exit_order_type == "SL"
+    assert bracket.exit_order_type is None  # submitted, not yet a filled exit
     assert "rescue-1" in bracket.linked_exit_order_ids
+
+    broker.statuses["rescue-1"] = "COMPLETE"
+    monkeypatch.setattr(
+        manager, "_reconcile_exit_state", lambda *_args, **_kwargs: True
+    )
+    assert manager._prepare_exchange_stop_for_exit(
+        bracket, reason="HARD_SL_BREACH", now=time.time()
+    )
+    assert bracket.exit_order_id == "rescue-1"
+    assert bracket.exit_order_type == "SL"
 
 
 
