@@ -738,7 +738,8 @@ def run_fixed_hypothesis_study(output: Path, workers: int) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "action", choices=("prepare", "development", "validation", "final", "hypotheses")
+        "action",
+        choices=("prepare", "development", "validation", "final", "hypotheses"),
     )
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
