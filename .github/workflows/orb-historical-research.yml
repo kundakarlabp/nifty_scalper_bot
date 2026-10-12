@@ -436,12 +436,14 @@ jobs:
               stream.write("|---|---|---:|---:|---:|---:|---:|\n")
               for row in report["results"]:
                   m = row["metrics"]
+                  edge = m["expectancy"]
+                  edge_text = "—" if edge is None else f"{edge:.2f}"
                   stream.write(
                       f"| {row['phase']} | {row['candidate']} | "
                       f"{row['slippage_bps_per_side']} bps | "
                       f"{m['trade_count']} | {m['net_pnl']:.2f} | "
-                      f"{'—' if m['expectancy'] is None else f'{m[\x22expectancy\x22]:.2f}'} | "
-                      f"{row['data_quality']['unresolved_exit_count']} |\n"
+                      f"{edge_text} | "
+                      f"{row['data_quality']['unresolved_exit_count']} |\\n"
                   )
           PY
       - name: Save auditable fixed-hypothesis results
