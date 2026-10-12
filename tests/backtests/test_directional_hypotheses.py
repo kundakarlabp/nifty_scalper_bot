@@ -221,3 +221,88 @@ def test_exact_public_archive_future_context_is_research_only() -> None:
         )
         is None
     )
+
+
+def test_fixed_hypothesis_summary_preserves_costs_periods_and_missing_exits() -> None:
+    from scripts.research_orb_multiyear import summarize_fixed_hypothesis_days
+
+    names = (
+        "ORBNetGateBaseline",
+        "PullbackResearch",
+        "CompressionResearch",
+        "MomentumResearch",
+    )
+
+    def trade(day: str) -> dict[str, Any]:
+        return {
+            "entry_time": day + "T09:40:00+05:30",
+            "exit_time": day + "T09:45:00+05:30",
+            "entry_price": 100.0,
+            "exit_price": 105.0,
+            "quantity": 75,
+            "gross_pnl": 375.0,
+            "fees": 75.0,
+            "net_pnl": 300.0,
+            "duration_minutes": 5.0,
+            "exit_reason": "target",
+        }
+
+    sessions = []
+    for day in ("2017-10-02", "2018-10-02", "2019-10-02", "2020-10-02"):
+        scenarios = []
+        for bps in (10.0, 25.0, 50.0):
+            strategies = {}
+            for name in names:
+                is_reference = name == "ORBNetGateBaseline"
+                unresolved = (
+                    [{"entry_time": day, "reason": "missing_exit"}]
+                    if name == "MomentumResearch" and day.startswith("2020")
+                    else []
+                )
+                strategies[name] = {
+                    "trades": [trade(day)] if is_reference else [],
+                    "unresolved_trades": unresolved,
+                    "worst_case_stress_trades": [trade(day)] if is_reference else [],
+                    "no_vote_reasons": {"no_setup": 3},
+                }
+            scenarios.append(
+                {"slippage_bps_per_side": bps, "strategies": strategies}
+            )
+        sessions.append({"day": day, "scenarios": scenarios})
+
+    results = summarize_fixed_hypothesis_days(sessions)
+    assert len(results) == 36
+    development = next(
+        row
+        for row in results
+        if row["phase"] == "development"
+        and row["candidate"] == "ORBNetGateBaseline"
+        and row["slippage_bps_per_side"] == 10.0
+    )
+    assert development["session_count"] == 2
+    assert development["metrics"]["trade_count"] == 2
+    assert development["metrics"]["gross_pnl"] == 750.0
+    assert development["metrics"]["fees"] == 150.0
+    assert development["metrics"]["net_pnl"] == 600.0
+    holdout = next(
+        row
+        for row in results
+        if row["phase"] == "final"
+        and row["candidate"] == "MomentumResearch"
+        and row["slippage_bps_per_side"] == 10.0
+    )
+    assert holdout["metrics"]["trade_count"] == 0
+    assert holdout["data_quality"]["unresolved_exit_count"] == 1
+    assert holdout["data_quality"]["primary_metrics_complete"] is False
+    with pytest.raises(ValueError, match="hypothesis_duplicate_session"):
+        summarize_fixed_hypothesis_days(sessions + [sessions[0]])
+    corrupted = [
+        row if row["day"] != "2020-10-02" else {
+            **row,
+            "scenarios": [scenario for scenario in row["scenarios"] if
+                          scenario["slippage_bps_per_side"] != 50.0],
+        }
+        for row in sessions
+    ]
+    with pytest.raises(ValueError, match="hypothesis_scenario_incomplete"):
+        summarize_fixed_hypothesis_days(corrupted)
