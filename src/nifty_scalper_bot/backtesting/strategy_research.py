@@ -15,7 +15,7 @@ from collections import Counter
 from dataclasses import asdict, replace
 from datetime import datetime, time, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 from nifty_scalper_bot.config.settings import get_settings
@@ -439,6 +439,7 @@ def _scenario(
     compact_orb_context: bool = False,
     strict_liquidity: bool = False,
     lifecycle_proxy: bool = False,
+    strategy_factory: Callable[[IndicatorEngine], list[Any]] | None = None,
 ) -> dict[str, Any]:
     if compact_orb_context and components != {"ORBPro"}:
         raise ValueError("research_compact_context_requires_orb_only")
@@ -549,9 +550,14 @@ def _scenario(
                 )
             pending.clear()
             engine = IndicatorEngine()
+            available_strategies = (
+                strategy_factory(engine)
+                if strategy_factory is not None
+                else build_elite_strategies(settings, engine)
+            )
             strategies = [
                 strategy
-                for strategy in build_elite_strategies(settings, engine)
+                for strategy in available_strategies
                 if strategy.name
                 in (components if components is not None else COMPONENTS)
             ]
