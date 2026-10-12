@@ -5770,6 +5770,7 @@ class BracketManager:
                 return False
             bracket.exit_order_id = order_id
             bracket.pending_exit_order_id = order_id
+            bracket.exit_order_type = "SL"
             bracket.exit_reason = reason
             bracket.exit_pending = True
             bracket.exit_in_progress = False
