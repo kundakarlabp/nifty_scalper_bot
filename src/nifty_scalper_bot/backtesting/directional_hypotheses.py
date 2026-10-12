@@ -210,7 +210,7 @@ class ArchivedDirectionalHypothesis:
         if (
             side is None
             or not future.startswith("NFO:NIFTY")
-            or not future.upper().endswith("FUT")
+            or not (future.upper().endswith("FUT") or future == "NFO:NIFTY_F1_CONTEXT")
             or not isinstance(stamp, datetime)
             or stamp.tzinfo is None
         ):
