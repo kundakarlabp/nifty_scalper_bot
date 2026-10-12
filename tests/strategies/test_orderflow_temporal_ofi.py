@@ -225,3 +225,53 @@ def test_live_depth_persistence_survives_multiple_fast_quote_versions(
     confirmed = strategy._evaluate_signal(SYMBOL, indicators, current_price=100.25)
     assert confirmed is not None
     assert confirmed.metadata["effective_context_alignment"] is True
+
+
+def test_recent_opposing_live_ofi_cannot_instantly_confirm_smc_context(
+    monkeypatch,
+) -> None:
+    """A one-second favourable OFI flip cannot erase a recent adverse book."""
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ORDERFLOW_OFI_REVERSAL_HOLDOFF_SECONDS", "15")
+    clock = [100.0]
+    monkeypatch.setattr(order_flow_module.time, "monotonic", lambda: clock[0])
+    strategy = _strategy()
+    indicators = _indicators(buy=105.0, sell=100.0, ofi_value=-3.43, supports=False)
+    indicators.pop("_expected_support")
+
+    opposing = strategy._evaluate_signal(SYMBOL, indicators, current_price=100.25)
+    assert opposing is not None
+    assert opposing.metadata["effective_context_conflict"] is True
+
+    # Reproduce the observed Oct 12 transition: -3.43 at 14:15:17,
+    # then +0.47 at 14:15:29 (only 12 seconds later).
+    clock[0] = 112.0
+    indicators["ofi_1s_normalized"] = 0.47
+    indicators["quote_update_version"] = 4
+    premature = strategy._evaluate_signal(SYMBOL, indicators, current_price=100.25)
+    assert premature is not None
+    assert premature.metadata["ofi_supports_side"] is True
+    assert premature.metadata["ofi_reversal_holdoff_active"] is True
+    assert premature.metadata["effective_context_alignment"] is False
+
+    clock[0] = 115.1
+    indicators["quote_update_version"] = 5
+    recovered = strategy._evaluate_signal(SYMBOL, indicators, current_price=100.25)
+    assert recovered is not None
+    assert recovered.metadata["ofi_reversal_holdoff_active"] is False
+    assert recovered.metadata["effective_context_alignment"] is True
+
+
+def test_ofi_reversal_holdoff_does_not_modify_nonlive_confirmation(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    strategy = _strategy()
+    indicators = _indicators(buy=105.0, sell=100.0, ofi_value=-0.50, supports=False)
+    indicators.pop("_expected_support")
+    assert strategy._evaluate_signal(SYMBOL, indicators, 100.25) is not None
+    indicators["ofi_1s_normalized"] = 0.50
+    recovered = strategy._evaluate_signal(SYMBOL, indicators, 100.25)
+    assert recovered is not None
+    assert recovered.metadata["ofi_reversal_holdoff_active"] is False
+    assert recovered.metadata["effective_context_alignment"] is True
