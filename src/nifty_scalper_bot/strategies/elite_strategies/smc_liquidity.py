@@ -111,6 +111,8 @@ class SMCStrategy(EliteStrategy):
             "atr",
             "direction_bias",
             "underlying_direction_bias",
+            "regime",
+            "market_regime",
             "bos_confirmed",
             "choch_confirmed",
             "retest_confirmed",
