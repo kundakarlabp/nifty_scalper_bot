@@ -254,7 +254,9 @@ class ArchivedDirectionalHypothesis:
         del side, setup_id
 
 
-def _research_strategies(engine: IndicatorEngine) -> list[ArchivedDirectionalHypothesis]:
+def _research_strategies(
+    engine: IndicatorEngine,
+) -> list[ArchivedDirectionalHypothesis]:
     return [ArchivedDirectionalHypothesis(family, engine) for family in _FAMILIES]
 
 
@@ -284,7 +286,9 @@ def run_directional_hypothesis_research(
             lifecycle_proxy=True,
             strategy_factory=_research_strategies,
         )
-        for bps in sorted({slippage_bps, max(25.0, slippage_bps), max(50.0, slippage_bps)})
+        for bps in sorted(
+            {slippage_bps, max(25.0, slippage_bps), max(50.0, slippage_bps)}
+        )
     ]
     return {
         "scope": "research_only_intraday_directional_hypotheses",
