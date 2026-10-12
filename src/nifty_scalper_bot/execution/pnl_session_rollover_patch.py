@@ -5,8 +5,9 @@ its first version could stamp a stale persisted local realised P&L with today's
 trading date without clearing it.  That made historical carryover look like
 current-session P&L.
 
-This patch keeps broker daily P&L authoritative for the current trading day and
-resets only stale/unverified local session accounting.  It does not alter
+The native PositionManager keeps broker daily P&L authoritative for the
+current trading day and resets only stale/unverified local session accounting.
+It does not alter
 position, orphan, protection, exit-lifecycle or readiness safety gates.
 """
 
@@ -17,8 +18,6 @@ from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import Any
 
-_PATCH_APPLIED = False
-_ORIGINAL_REFRESH_BROKER_PNL: Any = None
 _EPS = 1e-6
 
 
@@ -107,86 +106,7 @@ def _reset_local_session_state(self: Any, *, today: str, reason: str) -> bool:
     return True
 
 
-def _patched_refresh_broker_pnl_diagnostic(
-    self: Any,
-    *,
-    force: bool = False,
-) -> dict[str, Any]:
-    """Normalize stale local session state around a successful broker refresh."""
-
-    today = str(self._trading_date_ist())
-    with getattr(self, "_lock"):
-        prior_date = getattr(self, "_pnl_trading_date", None)
-        prior_local = float(getattr(self, "_local_realized_pnl", 0.0) or 0.0)
-        prior_provisional = float(
-            getattr(self, "_local_provisional_realized_pnl", 0.0) or 0.0
-        )
-
-    snapshot = _ORIGINAL_REFRESH_BROKER_PNL(self, force=force)
-    if not isinstance(snapshot, Mapping):
-        return dict(snapshot or {})
-    if _finite_float(snapshot.get("account_realized")) is None:
-        return dict(snapshot)
-
-    stale_session = prior_date not in (None, today)
-    unverified_session = prior_date is None
-    broker_zero_day = _broker_proves_no_current_day_trading(snapshot)
-    has_local_carryover = abs(prior_local) > _EPS or abs(prior_provisional) > _EPS
-
-    reset_reason: str | None = None
-    if has_local_carryover and stale_session:
-        reset_reason = "trading_date_rollover"
-    elif has_local_carryover and broker_zero_day:
-        # This also repairs deployments already poisoned by the previous patch,
-        # where stale carryover was incorrectly stamped with today's date.
-        reset_reason = (
-            "broker_zero_day_unverified_local"
-            if unverified_session
-            else "broker_zero_day_stale_local"
-        )
-
-    if reset_reason and _reset_local_session_state(
-        self,
-        today=today,
-        reason=reset_reason,
-    ):
-        # Recompute the diagnostic from the corrected session state so callers
-        # immediately see 0-vs-0 rather than the pre-reset stale mismatch.
-        return dict(_ORIGINAL_REFRESH_BROKER_PNL(self, force=True))
-
-    return dict(snapshot)
-
-
-def apply_patches() -> None:
-    """Install the session-rollover correction after broker P&L authority."""
-
-    global _PATCH_APPLIED
-    global _ORIGINAL_REFRESH_BROKER_PNL
-    if _PATCH_APPLIED:
-        return
-
-    from nifty_scalper_bot.execution.position_manager import PositionManager
-
-    if getattr(PositionManager, "_native_pnl_session_rollover", False):
-        _PATCH_APPLIED = True
-        return
-    if getattr(PositionManager, "_pnl_session_rollover_patch", False):
-        _PATCH_APPLIED = True
-        return
-
-    refresh = getattr(PositionManager, "refresh_broker_pnl_diagnostic", None)
-    if not callable(refresh):
-        raise RuntimeError("broker P&L authority patch must be installed first")
-
-    _ORIGINAL_REFRESH_BROKER_PNL = refresh
-    PositionManager.refresh_broker_pnl_diagnostic = (
-        _patched_refresh_broker_pnl_diagnostic
-    )
-    PositionManager._pnl_session_rollover_patch = True
-    _PATCH_APPLIED = True
-
-
 __all__ = [
-    "apply_patches",
     "_broker_proves_no_current_day_trading",
+    "_reset_local_session_state",
 ]

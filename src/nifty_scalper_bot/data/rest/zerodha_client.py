@@ -1387,6 +1387,14 @@ class ZerodhaKiteClient(BaseBrokerClient):
                 return cast(list[dict], cached)
             raise
 
+    def get_pnl_snapshot(self) -> dict[str, Any]:
+        """Return native broker account/tradebook P&L evidence (diagnostic)."""
+        from nifty_scalper_bot.data.rest.broker_pnl_snapshot import (
+            _zerodha_get_pnl_snapshot,
+        )
+
+        return _zerodha_get_pnl_snapshot(self)
+
     def get_positions(self) -> list[dict[str, Any]]:
         """Return one authoritative Zerodha net-position snapshot.
 
