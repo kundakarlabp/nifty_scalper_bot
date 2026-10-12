@@ -391,7 +391,6 @@ def test_live_entry_arms_one_canonical_exchange_stop(monkeypatch) -> None:
     assert bracket.exit_order_type == "SL"
 
 
-
 @pytest.mark.parametrize("reported_status", ["REJECTED", "UNKNOWN", "OPEN PENDING"])
 def test_exchange_stop_order_id_without_acceptance_is_not_armed(
     monkeypatch, reported_status: str
