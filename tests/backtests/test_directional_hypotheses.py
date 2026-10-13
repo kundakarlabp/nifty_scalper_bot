@@ -481,7 +481,6 @@ def test_exit_lifecycle_ablation_preserves_original_and_paired_entries() -> None
         summarize_exit_lifecycle_ablation(corrupted)
 
 
-
 def test_orb_target_cost_feasibility_without_weakening_rr_gate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -543,10 +542,12 @@ def test_orb_target_sensitivity_distinguishes_cost_rejects_and_shared_trades() -
     }
     day = {
         "day": "2020-01-02",
-        "scenarios": [{
-            "slippage_bps_per_side": 10.0,
-            "strategies": {"ORBRangeScaledResearch": original},
-        }],
+        "scenarios": [
+            {
+                "slippage_bps_per_side": 10.0,
+                "strategies": {"ORBRangeScaledResearch": original},
+            }
+        ],
         "orb_target_2_2": changed,
     }
     result = summarize_orb_target_sensitivity([day])
@@ -563,9 +564,14 @@ def test_orb_target_sensitivity_distinguishes_cost_rejects_and_shared_trades() -
     with pytest.raises(ValueError, match="orb_target_sensitivity_incomplete"):
         summarize_orb_target_sensitivity([{**day, "orb_target_2_2": None}])
     with pytest.raises(ValueError, match="orb_target_duplicate_entry"):
-        summarize_orb_target_sensitivity([
-            {**day, "orb_target_2_2": {
-                **changed,
-                "trades": [changed_shared, changed_shared],
-            }}
-        ])
+        summarize_orb_target_sensitivity(
+            [
+                {
+                    **day,
+                    "orb_target_2_2": {
+                        **changed,
+                        "trades": [changed_shared, changed_shared],
+                    },
+                }
+            ]
+        )
