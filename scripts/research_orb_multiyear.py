@@ -632,11 +632,26 @@ def run_fixed_hypothesis_day(task: tuple[str, str]) -> dict[str, Any]:
         lifecycle_proxy=True,
         normalize_opening_range=True,
     )
+    # Fixed causal entry-eligibility hypothesis: completed option candle must
+    # confirm the underlying's directional BUY vote before next-minute entry.
+    premium_confirmed = _scenario(
+        histories,
+        instruments,
+        get_settings().elite,
+        10.0,
+        components={"PullbackResearch", "CompressionResearch", "MomentumResearch"},
+        minimum_net_rr=1.5,
+        strict_liquidity=True,
+        lifecycle_proxy=True,
+        strategy_factory=_research_strategies,
+        require_option_premium_confirmation=True,
+    )
     return {
         "day": day,
         "scenarios": research["scenarios"],
         "exit_ablation": no_trailing["strategies"],
         "orb_target_2_2": target_2_2,
+        "option_premium_confirmation": premium_confirmed["strategies"],
     }
 
 
@@ -859,6 +874,92 @@ def summarize_orb_target_sensitivity(
     return results
 
 
+def summarize_option_premium_confirmation(
+    daily: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Chronological entry-eligibility audit; only research signal rules change.
+
+    Both policies retain all economic and risk gates; original reference trades
+    and exact matched-entry cohorts are never silently reselected.
+    """
+    years = {
+        "development": {"2017", "2018"},
+        "validation": {"2019"},
+        "final": {"2020"},
+    }
+    families = ("PullbackResearch", "CompressionResearch", "MomentumResearch")
+    if len({row["day"] for row in daily}) != len(daily):
+        raise ValueError("hypothesis_duplicate_session")
+    result: list[dict[str, Any]] = []
+    for phase, period in years.items():
+        sessions = [row for row in daily if row["day"][:4] in period]
+        for family in families:
+            baseline: list[dict[str, Any]] = []
+            confirmed: list[dict[str, Any]] = []
+            unresolved = [0, 0]
+            rejects: Counter[str] = Counter()
+            for day in sessions:
+                matches = [
+                    scenario
+                    for scenario in day["scenarios"]
+                    if scenario["slippage_bps_per_side"] == 10.0
+                ]
+                alt = day.get("option_premium_confirmation")
+                if len(matches) != 1 or not isinstance(alt, dict) or family not in alt:
+                    raise ValueError("premium_confirmation_scenario_incomplete")
+                old = matches[0]["strategies"][family]
+                new = alt[family]
+                baseline.extend(old["trades"])
+                confirmed.extend(new["trades"])
+                unresolved[0] += len(old["unresolved_trades"])
+                unresolved[1] += len(new["unresolved_trades"])
+                rejects.update(new["no_vote_reasons"])
+
+            def by_identity(
+                trades: list[dict[str, Any]],
+            ) -> dict[tuple[str, str], dict[str, Any]]:
+                index = {(t["symbol"], t["entry_time"]): t for t in trades}
+                if len(index) != len(trades):
+                    raise ValueError("premium_confirmation_duplicate_entry")
+                return index
+
+            original, alternative = by_identity(baseline), by_identity(confirmed)
+            same_entries = sorted(original.keys() & alternative.keys())
+            result.append(
+                {
+                    "phase": phase,
+                    "candidate": family,
+                    "slippage_bps_per_side": 10.0,
+                    "method": "closed_option_premium_above_open_and_previous_close",
+                    "baseline": {
+                        "metrics": summarize(baseline),
+                        "unresolved_exit_count": unresolved[0],
+                    },
+                    "premium_confirmed": {
+                        "metrics": summarize(confirmed),
+                        "unresolved_exit_count": unresolved[1],
+                    },
+                    "entry_eligibility_rejections": {
+                        key: rejects.get(key, 0)
+                        for key in (
+                            "option_confirmation_history_unavailable",
+                            "option_premium_not_confirmed",
+                            "cost_net_rr_rejected",
+                        )
+                    },
+                    "identical_entry_count": len(same_entries),
+                    "identical_entry_baseline": summarize(
+                        [original[key] for key in same_entries]
+                    ),
+                    "identical_entry_premium_confirmed": summarize(
+                        [alternative[key] for key in same_entries]
+                    ),
+                    "caveat": "filter_changes_admission_and_position_occupancy",
+                }
+            )
+    return result
+
+
 def fixed_cohort_slippage_stress(
     results: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -947,6 +1048,7 @@ def run_fixed_hypothesis_study(output: Path, workers: int) -> None:
     cost_stress = fixed_cohort_slippage_stress(results)
     exit_ablation = summarize_exit_lifecycle_ablation(daily)
     target_sensitivity = summarize_orb_target_sensitivity(daily)
+    option_premium_confirmation = summarize_option_premium_confirmation(daily)
     write_json(
         output / "fixed_hypothesis_results.json",
         {
@@ -998,12 +1100,14 @@ def run_fixed_hypothesis_study(output: Path, workers: int) -> None:
                 "Opening-range normalization was proposed after earlier ORB results",
                 "No-trailing changes admission by keeping positions open longer",
                 "2.2R ORB target is post-hoc research, not an untouched holdout",
+                "Option-premium confirmation is a post-hoc entry hypothesis",
                 "No setting selected or authorized for live trading",
             ],
             "results": results,
             "fixed_10bps_cohort_slippage_stress": cost_stress,
             "fixed_10bps_exit_lifecycle_ablation": exit_ablation,
             "fixed_10bps_orb_target_sensitivity": target_sensitivity,
+            "fixed_10bps_option_premium_confirmation": option_premium_confirmation,
             "research_quality": {
                 "matched_orb_baseline_has_trades": any(
                     row["candidate"] == "ORBNetGateBaseline"
