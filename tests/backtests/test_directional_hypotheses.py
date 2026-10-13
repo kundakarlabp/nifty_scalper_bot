@@ -314,7 +314,6 @@ def test_fixed_hypothesis_summary_preserves_costs_periods_and_missing_exits() ->
         summarize_fixed_hypothesis_days(corrupted)
 
 
-
 def test_fixed_cohort_slippage_uses_identical_trades_without_reselection() -> None:
     """Stress realized 10-bps trades without re-running the entry RR gate."""
     from scripts.research_orb_multiyear import fixed_cohort_slippage_stress
