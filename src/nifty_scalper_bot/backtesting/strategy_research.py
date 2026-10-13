@@ -848,6 +848,15 @@ def _scenario(
                 ),
                 "evaluations": evaluated[name],
                 "no_vote_reasons": dict(rejections[name]),
+                "research_gate_counts": dict(
+                    getattr(
+                        next(
+                            strategy for strategy in strategies if strategy.name == name
+                        ),
+                        "research_gate_counts",
+                        {},
+                    )
+                ),
                 "unresolved_trades": unresolved_outcomes[name],
                 "trades": trades,
                 "worst_case_stress_trades": stress_outcomes[name],
@@ -864,6 +873,7 @@ def run_orb_session_research(
     slippage_bps: float,
     minimum_net_rr: float | None = 1.5,
     lifecycle_proxy: bool = False,
+    normalize_opening_range: bool = False,
 ) -> dict[str, Any]:
     """Replay a preselected historical basket in an isolated research process.
 
@@ -880,6 +890,17 @@ def run_orb_session_research(
     original = {key: os.environ.get(key) for key in overrides}
     try:
         os.environ.update(overrides)
+        research_factory: Callable[[IndicatorEngine], list[Any]] | None = None
+        if normalize_opening_range:
+            from nifty_scalper_bot.backtesting.directional_hypotheses import (
+                ORBRangeScaledResearch,
+            )
+
+            def _make_scaled(engine: IndicatorEngine) -> list[Any]:
+                return [ORBRangeScaledResearch(get_settings().elite.orb, engine)]
+
+            research_factory = _make_scaled
+
         result = _scenario(
             histories,
             instruments,
@@ -890,6 +911,7 @@ def run_orb_session_research(
             compact_orb_context=True,
             strict_liquidity=True,
             lifecycle_proxy=lifecycle_proxy,
+            strategy_factory=research_factory,
         )
         return result["strategies"]["ORBPro"]
     finally:
