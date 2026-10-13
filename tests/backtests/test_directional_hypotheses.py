@@ -394,9 +394,7 @@ def test_orb_15minute_range_scaling_research_only() -> None:
     assert research.research_gate_counts["raw_range_pass"] == 0
     assert research.research_gate_counts["scaled_range_pass"] == 1
 
-    blocked, *_ = research._structural_evidence(
-        **{**evidence, "volume_ratio": 0.4}
-    )
+    blocked, *_ = research._structural_evidence(**{**evidence, "volume_ratio": 0.4})
     assert blocked is False
     assert research.research_gate_counts["failed_underlying_volume_confirmation"] == 1
     assert research.name == "ORBPro"
