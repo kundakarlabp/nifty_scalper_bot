@@ -59,6 +59,29 @@ def test_momentum_acceleration_respects_futures_side_and_completed_bar() -> None
         assert classify_completed_futures_bars(rows) == {}
 
 
+def test_futures_atr_uses_14_preceding_bars_without_signal_bar() -> None:
+    """Bar 30 must affect the last 14-bar ATR; bars 29 and 44 must not."""
+    original = _momentum_bars()
+    assert classify_completed_futures_bars(original)["momentum_acceleration"] == "CE"
+
+    first_in_window = [dict(row) for row in original]
+    first_in_window[30]["high"] += 1000.0
+    assert "momentum_acceleration" not in classify_completed_futures_bars(
+        first_in_window
+    )
+
+    outside_window = [dict(row) for row in original]
+    outside_window[29]["high"] += 1000.0
+    assert (
+        classify_completed_futures_bars(outside_window)["momentum_acceleration"]
+        == "CE"
+    )
+
+    signal_bar = [dict(row) for row in original]
+    signal_bar[44]["high"] += 1000.0
+    assert classify_completed_futures_bars(signal_bar)["momentum_acceleration"] == "CE"
+
+
 def test_compression_is_based_on_prior_bands_not_breakout_candle() -> None:
     rows = [_bar(i, 24000.0) for i in range(45)]
     rows[-1] = _bar(44, 24005.0, volume=2000.0)
