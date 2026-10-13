@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import os
 from typing import Any, Mapping
 
+from nifty_scalper_bot.config.regime_ontology import MarketRegime, normalize_regime
 from nifty_scalper_bot.strategies.elite_strategies.base_elite import EliteSignal, EliteStrategy
 from nifty_scalper_bot.strategies.elite_strategies.config_models import VWAPProStrategyConfig
 from nifty_scalper_bot.strategies.setup_lifecycle import SetupStage, transition_setup
@@ -138,6 +139,14 @@ class VWAPProStrategy(EliteStrategy):
         )
         self._futures_volume_min_ratio = max(
             0.0, float(os.getenv("VWAP_FUTURES_VOLUME_MIN_RATIO", "1.0") or 1.0)
+        )
+        # Research-only admission profile. Do not silently change live VWAPPro.
+        self._trend_momentum_enabled = str(
+            os.getenv("VWAP_TREND_MOMENTUM_ENABLED", "false")
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        self._trend_momentum_option_rvol_min = max(
+            0.0,
+            float(os.getenv("VWAP_TREND_MOMENTUM_OPTION_RVOL_MIN", "1.5")),
         )
 
         # get_session_vwap_slope() returns percentage change over finalized
@@ -617,6 +626,28 @@ class VWAPProStrategy(EliteStrategy):
                 self._no_vote("underlying_direction_conflict")
                 return None
 
+            trend_momentum_regime = normalize_regime(
+                indicators.get("regime") or indicators.get("market_regime")
+            )
+            if self._trend_momentum_enabled:
+                if trend_momentum_regime != MarketRegime.TREND:
+                    self._no_vote("trend_momentum_regime_not_trend")
+                    return None
+                if underlying_direction != contract_side:
+                    self._no_vote("trend_momentum_underlying_not_confirmed")
+                    return None
+                if (bar_anchor is None or indicators.get("is_complete") is False
+                        or indicators.get("is_provisional") is True):
+                    self._no_vote("trend_momentum_bar_unconfirmed")
+                    return None
+                if not momentum_continuation_confirmed:
+                    self._no_vote("trend_momentum_premium_not_confirmed")
+                    return None
+                if (option_volume_ratio is None
+                        or option_volume_ratio < self._trend_momentum_option_rvol_min):
+                    self._no_vote("trend_momentum_option_volume_not_confirmed")
+                    return None
+
             setup_type: str | None = None
             if pullback_flag and continuation_confirmed:
                 setup_type = "vwap_reclaim_momentum"
@@ -803,6 +834,10 @@ class VWAPProStrategy(EliteStrategy):
                 "penetration_only_enabled": self._allow_penetration_only,
                 "vwap_penetration_atr": round(penetration_atr, 4),
                 "vwap_event_confirmed": event_confirmed,
+                "trend_momentum_enabled": self._trend_momentum_enabled,
+                "trend_momentum_regime": trend_momentum_regime.value,
+                "trend_momentum_option_rvol_min": self._trend_momentum_option_rvol_min,
+                "trend_momentum_premium_confirmed": momentum_continuation_confirmed,
                 "days_to_expiry": indicators.get("days_to_expiry"),
                 "strike_distance_from_atm": indicators.get("strike_distance_from_atm"),
                 "minutes_since_open": indicators.get("minutes_since_open"),
