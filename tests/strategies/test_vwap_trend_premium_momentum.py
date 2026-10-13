@@ -50,9 +50,7 @@ def _evaluate(monkeypatch, *, side="CE", enabled=True, **updates):
                     "high": indicators.get("history_high", indicators["high"]),
                     "low": indicators.get("history_low", indicators["low"]),
                     "close": indicators["close"],
-                    "volume": indicators.get(
-                        "history_volume", indicators["volume"]
-                    ),
+                    "volume": indicators.get("history_volume", indicators["volume"]),
                     "is_complete": indicators.get("is_complete", True),
                     "is_provisional": indicators.get("is_provisional", False),
                 }
@@ -164,8 +162,7 @@ def test_low_quality_underlying_context_rejected(monkeypatch, updates):
 
     assert signal is None
     assert (
-        strategy.last_no_vote_reason
-        == "trend_momentum_underlying_quality_unconfirmed"
+        strategy.last_no_vote_reason == "trend_momentum_underlying_quality_unconfirmed"
     )
 
 
