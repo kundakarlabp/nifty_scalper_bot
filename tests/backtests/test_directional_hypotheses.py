@@ -399,3 +399,80 @@ def test_orb_15minute_range_scaling_research_only() -> None:
     assert research.research_gate_counts["failed_underlying_volume_confirmation"] == 1
     assert research.name == "ORBPro"
     assert live_reference._structural_evidence(**evidence)[0] is False
+
+
+def test_exit_lifecycle_ablation_preserves_original_and_paired_entries() -> None:
+    """Different holding durations must not masquerade as matched trade counts."""
+    from scripts.research_orb_multiyear import summarize_exit_lifecycle_ablation
+
+    families = ("PullbackResearch", "CompressionResearch", "MomentumResearch")
+
+    def make_trade(entry: str, price: float) -> dict[str, Any]:
+        return {
+            "symbol": _CE,
+            "entry_time": entry,
+            "exit_time": "2020-01-02T11:01:00+05:30",
+            "entry_price": 100.0,
+            "exit_price": 101.0,
+            "quantity": 75,
+            "gross_pnl": price + 70.0,
+            "fees": 70.0,
+            "net_pnl": price,
+            "duration_minutes": 2.0,
+            "exit_reason": "stop",
+        }
+
+    first = make_trade("2020-01-02T10:00:00+05:30", -80.0)
+    second = make_trade("2020-01-02T10:30:00+05:30", 100.0)
+    longer = {**first, "net_pnl": 130.0, "gross_pnl": 200.0}
+    no_trailing = {
+        family: {
+            "trades": [longer],
+            "unresolved_trades": [{"reason": "history_gap_unresolved"}],
+        }
+        for family in families
+    }
+    daily = [
+        {
+            "day": "2020-01-02",
+            "scenarios": [
+                {
+                    "slippage_bps_per_side": 10.0,
+                    "strategies": {
+                        family: {"trades": [first, second], "unresolved_trades": []}
+                        for family in families
+                    },
+                }
+            ],
+            "exit_ablation": no_trailing,
+        }
+    ]
+    summary = summarize_exit_lifecycle_ablation(daily)
+    assert len(summary) == 9
+    final = next(
+        row
+        for row in summary
+        if row["phase"] == "final" and row["candidate"] == "PullbackResearch"
+    )
+    assert final["original"]["metrics"]["trade_count"] == 2
+    assert final["no_trailing"]["metrics"]["trade_count"] == 1
+    assert final["identical_entry_count"] == 1
+    assert final["identical_entry_original_metrics"]["net_pnl"] == -80.0
+    assert final["identical_entry_no_trailing_metrics"]["net_pnl"] == 130.0
+    assert final["no_trailing"]["unresolved_exit_count"] == 1
+    with pytest.raises(ValueError, match="exit_ablation_scenario_incomplete"):
+        summarize_exit_lifecycle_ablation([{**daily[0], "exit_ablation": {}}])
+    with pytest.raises(ValueError, match="exit_ablation_duplicate_trade_identity"):
+        corrupted = [
+            {
+                **daily[0],
+                "exit_ablation": {
+                    **no_trailing,
+                    "PullbackResearch": {
+                        "trades": [longer, longer],
+                        "unresolved_trades": [],
+                    },
+                },
+            }
+        ]
+        summarize_exit_lifecycle_ablation(corrupted)
