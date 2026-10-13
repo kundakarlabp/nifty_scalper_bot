@@ -590,3 +590,83 @@ def test_opening_relative_volume_requires_prior_complete_sessions_only():
     assert opening_relative_volume(history, now - timedelta(minutes=2), 5) is None
     del history[first + timedelta(minutes=1)]
     assert opening_relative_volume(history, now, 5) is None
+
+
+@pytest.mark.parametrize(
+    "instrument,spot,when,reason",
+    [
+        (
+            {"expiry": "2026-10-13", "strike": 22400.0},
+            22401.0,
+            "2026-09-15T10:01:00+05:30",
+            "archive_weekly_expiry_not_proven",
+        ),
+        (
+            {"expiry": "2026-10-13", "strike": 22400.0},
+            22401.0,
+            "2026-10-13T10:01:00+05:30",
+            None,
+        ),
+        (
+            {"expiry": "2026-10-13", "strike": 23000.0},
+            22401.0,
+            "2026-10-12T10:01:00+05:30",
+            "archive_strike_outside_atm_basket",
+        ),
+        (
+            {"expiry": "2026-10-13"},
+            22401.0,
+            "2026-10-12T10:01:00+05:30",
+            "archive_strike_missing",
+        ),
+        (
+            {"expiry": "2026-10-06", "strike": 22400.0},
+            22401.0,
+            "2026-10-12T10:01:00+05:30",
+            "archive_weekly_expiry_not_proven",
+        ),
+    ],
+)
+def test_archived_weekly_atm_proxy_eligibility(
+    instrument, spot, when, reason
+):
+    from nifty_scalper_bot.backtesting.strategy_research import (
+        _archived_weekly_atm_rejection,
+    )
+
+    assert (
+        _archived_weekly_atm_rejection(
+            instrument, datetime.fromisoformat(when), spot
+        )
+        == reason
+    )
+
+
+def test_vwap_research_requests_weekly_atm_scope_for_every_candidate(
+    tmp_path, monkeypatch
+):
+    from nifty_scalper_bot.backtesting.strategy_research import run_vwap_comparison
+
+    archive(tmp_path)
+    observed = []
+
+    def replay(*args, **kwargs):
+        observed.append(kwargs)
+        return {
+            "strategies": {
+                "VWAPPro": {
+                    "metrics": {"trade_count": 0, "expectancy": None},
+                    "development_metrics": {"trade_count": 0, "expectancy": None},
+                    "data_quality": {"development_unresolved_exit_count": 0},
+                    "trades": [],
+                    "setup_metrics": {},
+                }
+            }
+        }
+
+    monkeypatch.setattr(
+        "nifty_scalper_bot.backtesting.strategy_research._scenario", replay
+    )
+    run_vwap_comparison(tmp_path)
+    assert len(observed) == 24
+    assert all(call["require_archived_weekly_atm"] is True for call in observed)
