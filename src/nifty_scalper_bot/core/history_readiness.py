@@ -543,12 +543,19 @@ def build_symbol_hydration_status(
         if isinstance(history, Mapping):
             runner_bars = len(list(history.get(normalized, []) or []))
         indicator = getattr(runner, "_indicator_engine", None)
-        get_history = getattr(indicator, "get_history", None)
-        if callable(get_history):
+        count_history = getattr(indicator, "history_count", None)
+        if callable(count_history):
             try:
-                indicator_bars = len(list(get_history(normalized) or []))
+                indicator_bars = max(0, int(count_history(normalized)))
             except Exception:
                 indicator_bars = 0
+        else:
+            get_history = getattr(indicator, "get_history", None)
+            if callable(get_history):
+                try:
+                    indicator_bars = len(list(get_history(normalized) or []))
+                except Exception:
+                    indicator_bars = 0
         if runner_bars == 0 and indicator_bars > 0:
             runner_bars = indicator_bars
     evaluated_at_utc = now_utc or datetime.now(timezone.utc)
