@@ -722,7 +722,8 @@ def summarize_exit_lifecycle_ablation(
             unresolved = [0, 0]
             for session in sessions:
                 before = [
-                    item for item in session["scenarios"]
+                    item
+                    for item in session["scenarios"]
                     if item["slippage_bps_per_side"] == 10.0
                 ]
                 after = session.get("exit_ablation", {})
@@ -734,6 +735,7 @@ def summarize_exit_lifecycle_ablation(
                 alternate.extend(new["trades"])
                 unresolved[0] += len(old["unresolved_trades"])
                 unresolved[1] += len(new["unresolved_trades"])
+
             def by_entry(
                 trades: list[dict[str, Any]],
             ) -> dict[tuple[str, str], dict[str, Any]]:
@@ -741,28 +743,33 @@ def summarize_exit_lifecycle_ablation(
                 if len(keyed) != len(trades):
                     raise ValueError("exit_ablation_duplicate_trade_identity")
                 return keyed
+
             a, b = by_entry(original), by_entry(alternate)
             matched = sorted(a.keys() & b.keys())
-            summary.append({
-                "phase": phase,
-                "candidate": family,
-                "slippage_bps_per_side": 10.0,
-                "method": "one_policy_change_no_bar_lifecycle_proxy",
-                "original": {
-                    "metrics": summarize(original),
-                    "unresolved_exit_count": unresolved[0],
-                },
-                "no_trailing": {
-                    "metrics": summarize(alternate),
-                    "unresolved_exit_count": unresolved[1],
-                },
-                "identical_entry_count": len(matched),
-                "identical_entry_original_metrics": summarize([a[k] for k in matched]),
-                "identical_entry_no_trailing_metrics": summarize(
-                    [b[k] for k in matched]
-                ),
-                "caveat": "nonmatched_accepted_entries_change_with_holding_time",
-            })
+            summary.append(
+                {
+                    "phase": phase,
+                    "candidate": family,
+                    "slippage_bps_per_side": 10.0,
+                    "method": "one_policy_change_no_bar_lifecycle_proxy",
+                    "original": {
+                        "metrics": summarize(original),
+                        "unresolved_exit_count": unresolved[0],
+                    },
+                    "no_trailing": {
+                        "metrics": summarize(alternate),
+                        "unresolved_exit_count": unresolved[1],
+                    },
+                    "identical_entry_count": len(matched),
+                    "identical_entry_original_metrics": summarize(
+                        [a[k] for k in matched]
+                    ),
+                    "identical_entry_no_trailing_metrics": summarize(
+                        [b[k] for k in matched]
+                    ),
+                    "caveat": "nonmatched_accepted_entries_change_with_holding_time",
+                }
+            )
     return summary
 
 
