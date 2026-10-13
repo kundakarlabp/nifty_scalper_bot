@@ -888,14 +888,16 @@ def run_orb_session_research(
     original = {key: os.environ.get(key) for key in overrides}
     try:
         os.environ.update(overrides)
-        strategy_factory = None
+        research_factory: Callable[[IndicatorEngine], list[Any]] | None = None
         if normalize_opening_range:
             from nifty_scalper_bot.backtesting.directional_hypotheses import (
                 ORBRangeScaledResearch,
             )
 
-            def strategy_factory(engine: IndicatorEngine) -> list[Any]:
+            def _make_scaled(engine: IndicatorEngine) -> list[Any]:
                 return [ORBRangeScaledResearch(get_settings().elite.orb, engine)]
+
+            research_factory = _make_scaled
 
         result = _scenario(
             histories,
@@ -907,7 +909,7 @@ def run_orb_session_research(
             compact_orb_context=True,
             strict_liquidity=True,
             lifecycle_proxy=lifecycle_proxy,
-            strategy_factory=strategy_factory,
+            strategy_factory=research_factory,
         )
         return result["strategies"]["ORBPro"]
     finally:
