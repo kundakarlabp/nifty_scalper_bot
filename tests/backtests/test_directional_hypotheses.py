@@ -73,8 +73,7 @@ def test_futures_atr_uses_14_preceding_bars_without_signal_bar() -> None:
     outside_window = [dict(row) for row in original]
     outside_window[29]["high"] += 1000.0
     assert (
-        classify_completed_futures_bars(outside_window)["momentum_acceleration"]
-        == "CE"
+        classify_completed_futures_bars(outside_window)["momentum_acceleration"] == "CE"
     )
 
     signal_bar = [dict(row) for row in original]
