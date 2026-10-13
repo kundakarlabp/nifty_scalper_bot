@@ -47,10 +47,12 @@ def _evaluate(monkeypatch, *, side="CE", enabled=True, **updates):
                         "history_timestamp", indicators["latest_bar_ts"]
                     ),
                     "open": indicators["open"],
-                    "high": indicators["high"],
-                    "low": indicators["low"],
+                    "high": indicators.get("history_high", indicators["high"]),
+                    "low": indicators.get("history_low", indicators["low"]),
                     "close": indicators["close"],
-                    "volume": indicators["volume"],
+                    "volume": indicators.get(
+                        "history_volume", indicators["volume"]
+                    ),
                     "is_complete": indicators.get("is_complete", True),
                     "is_provisional": indicators.get("is_provisional", False),
                 }
@@ -73,6 +75,9 @@ def test_trending_underlying_and_confirmed_premium_generate_candidate(
     assert signal.metadata["trend_momentum_regime"] == "TREND"
     assert signal.metadata["trend_momentum_premium_confirmed"] is True
     assert signal.metadata["option_volume_ratio"] == 2.0
+    assert signal.metadata["trend_momentum_completed_option_rvol"] == 2.0
+    assert signal.metadata["trend_momentum_close_location"] > 0.8
+    assert signal.metadata["trend_momentum_underlying_quality_confirmed"] is True
     assert signal.metadata["setup_pass"] is True
 
 
@@ -142,6 +147,44 @@ def test_stale_or_mismatched_premium_bar_cannot_confirm_entry(monkeypatch):
     strategy, signal = _evaluate(
         monkeypatch, history_timestamp="2026-09-10T09:59:00+05:30"
     )
+
+    assert signal is None
+    assert strategy.last_no_vote_reason == "trend_momentum_bar_unconfirmed"
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"underlying_direction_confidence": 0.4},
+        {"context_age_seconds": 10.0},
+    ],
+)
+def test_low_quality_underlying_context_rejected(monkeypatch, updates):
+    strategy, signal = _evaluate(monkeypatch, **updates)
+
+    assert signal is None
+    assert (
+        strategy.last_no_vote_reason
+        == "trend_momentum_underlying_quality_unconfirmed"
+    )
+
+
+def test_upper_wick_reversal_not_mistaken_for_confirmed_entry(monkeypatch):
+    strategy, signal = _evaluate(monkeypatch, high=118.0, history_high=118.0)
+
+    assert signal is None
+    assert strategy.last_no_vote_reason == "trend_momentum_weak_close"
+
+
+def test_completed_premium_volume_overrules_mismatched_snapshot(monkeypatch):
+    strategy, signal = _evaluate(monkeypatch, history_volume=400.0)
+
+    assert signal is None
+    assert strategy.last_no_vote_reason == "trend_momentum_option_volume_not_confirmed"
+
+
+def test_invalid_completed_bar_geometry_never_authorizes_entry(monkeypatch):
+    strategy, signal = _evaluate(monkeypatch, history_high=101.0)
 
     assert signal is None
     assert strategy.last_no_vote_reason == "trend_momentum_bar_unconfirmed"
