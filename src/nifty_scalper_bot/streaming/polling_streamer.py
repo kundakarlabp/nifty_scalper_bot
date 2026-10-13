@@ -692,7 +692,6 @@ class PollingStreamer:
                     avg_price = quote.get("average_price") or quote.get("vwap")
                     volume = quote.get("volume")
                     oi = quote.get("oi")
-                    ohlc = quote.get("ohlc") or {}
 
                     # Convert to proper types with safe defaults
                     avg_price_float = float(avg_price) if avg_price is not None else 0.0
@@ -708,7 +707,7 @@ class PollingStreamer:
                         log_throttled(
                             LOGGER,
                             f"broker_vwap_unavailable_{key}",
-                            f"[POLL] Broker VWAP unavailable for {key}; no price fallback",
+                            f"[POLL] Missing broker VWAP for {key}; no close fallback",
                             interval_sec=300.0,
                             level=logging.DEBUG,
                         )
