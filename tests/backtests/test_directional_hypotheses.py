@@ -599,9 +599,7 @@ def test_causal_option_premium_confirmation_requires_closed_contiguous_bars() ->
         == "option_confirmation_history_unavailable"
     )
     assert (
-        _option_premium_confirmation_reason(
-            current, {**previous, "is_complete": False}
-        )
+        _option_premium_confirmation_reason(current, {**previous, "is_complete": False})
         == "option_confirmation_history_unavailable"
     )
     assert (
@@ -611,9 +609,7 @@ def test_causal_option_premium_confirmation_requires_closed_contiguous_bars() ->
         == "option_confirmation_history_unavailable"
     )
     assert (
-        _option_premium_confirmation_reason(
-            current, {**previous, "volume": 0.0}
-        )
+        _option_premium_confirmation_reason(current, {**previous, "volume": 0.0})
         == "option_confirmation_history_unavailable"
     )
     assert (
@@ -700,4 +696,3 @@ def test_premium_confirmation_entry_funnel_distinguishes_matched_cohorts() -> No
                 }
             ]
         )
-
