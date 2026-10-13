@@ -16,7 +16,10 @@ def test_spot_context_hydration_log_present():
 
 def test_runner_history_consistency_is_readiness_based():
     src = open("src/nifty_scalper_bot/core/app.py", encoding="utf-8").read()
-    assert "runner_history_count >= required_bars and mdm_history_count >= required_bars" in src
+    assert (
+        "runner_history_count >= required_bars and mdm_history_count >= required_bars"
+        in src
+    )
 
 
 def test_spot_required_falls_back_to_required_candles():
@@ -28,10 +31,11 @@ def test_spot_required_falls_back_to_required_candles():
 def test_hydration_diagnostics_use_canonical_symbol():
     src = open("src/nifty_scalper_bot/core/app.py", encoding="utf-8").read()
     assert "hydrated_counts[canonical_sym] = count" in src
-    assert (
-        '"RUNNER_MDM_HYDRATION_SYNC symbol=%s mdm_bars=%d runner_ingested=%d", canonical_sym'
-        in src
+    expected = (
+        '"RUNNER_MDM_HYDRATION_SYNC symbol=%s mdm_bars=%d '
+        'runner_ingested=%d", canonical_sym'
     )
+    assert expected in src
     assert '"event": "RUNNER_HISTORY_INGESTED"' in src
     assert '"symbol": canonical_sym' in src
 
