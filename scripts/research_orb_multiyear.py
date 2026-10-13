@@ -734,7 +734,9 @@ def summarize_exit_lifecycle_ablation(
                 alternate.extend(new["trades"])
                 unresolved[0] += len(old["unresolved_trades"])
                 unresolved[1] += len(new["unresolved_trades"])
-            def by_entry(trades: list[dict[str, Any]]) -> dict[tuple[str, str], dict[str, Any]]:
+            def by_entry(
+                trades: list[dict[str, Any]],
+            ) -> dict[tuple[str, str], dict[str, Any]]:
                 keyed = {(t["symbol"], t["entry_time"]): t for t in trades}
                 if len(keyed) != len(trades):
                     raise ValueError("exit_ablation_duplicate_trade_identity")
@@ -756,7 +758,9 @@ def summarize_exit_lifecycle_ablation(
                 },
                 "identical_entry_count": len(matched),
                 "identical_entry_original_metrics": summarize([a[k] for k in matched]),
-                "identical_entry_no_trailing_metrics": summarize([b[k] for k in matched]),
+                "identical_entry_no_trailing_metrics": summarize(
+                    [b[k] for k in matched]
+                ),
                 "caveat": "nonmatched_accepted_entries_change_with_holding_time",
             })
     return summary
@@ -897,7 +901,7 @@ def run_fixed_hypothesis_study(output: Path, workers: int) -> None:
                 "No production basket selection, arbitration or broker parity",
                 "Unresolved exits excluded from primary and shown separately",
                 "Opening-range normalization was proposed after earlier ORB results",
-                "No-trailing ablation differs in position occupancy; paired entries separately reported",
+                "No-trailing changes admission by keeping positions open longer",
                 "No setting selected or authorized for live trading",
             ],
             "results": results,
