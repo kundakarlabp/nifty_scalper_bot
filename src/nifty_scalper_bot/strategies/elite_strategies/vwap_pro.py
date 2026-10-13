@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import math
 import os
 from typing import Any, Mapping
 
+from nifty_scalper_bot.config.regime_ontology import MarketRegime, normalize_regime
 from nifty_scalper_bot.strategies.elite_strategies.base_elite import EliteSignal, EliteStrategy
 from nifty_scalper_bot.strategies.elite_strategies.config_models import VWAPProStrategyConfig
 from nifty_scalper_bot.strategies.setup_lifecycle import SetupStage, transition_setup
@@ -138,6 +140,14 @@ class VWAPProStrategy(EliteStrategy):
         )
         self._futures_volume_min_ratio = max(
             0.0, float(os.getenv("VWAP_FUTURES_VOLUME_MIN_RATIO", "1.0") or 1.0)
+        )
+        # Research-only admission profile. Do not silently change live VWAPPro.
+        self._trend_momentum_enabled = str(
+            os.getenv("VWAP_TREND_MOMENTUM_ENABLED", "false")
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        self._trend_momentum_option_rvol_min = max(
+            0.0,
+            float(os.getenv("VWAP_TREND_MOMENTUM_OPTION_RVOL_MIN", "1.5")),
         )
 
         # get_session_vwap_slope() returns percentage change over finalized
@@ -337,6 +347,13 @@ class VWAPProStrategy(EliteStrategy):
                 or spot_ctx.get("direction_bias")
                 or fut_ctx.get("underlying_direction_bias")
                 or fut_ctx.get("direction_bias")
+                or ""
+            ).upper()
+            # Never let generic option bias impersonate explicit underlying evidence.
+            explicit_underlying_direction = str(
+                indicators.get("underlying_direction_bias")
+                or spot_ctx.get("underlying_direction_bias")
+                or fut_ctx.get("underlying_direction_bias")
                 or ""
             ).upper()
             context_age_seconds = resolve_context_age_seconds(indicators)
@@ -617,6 +634,84 @@ class VWAPProStrategy(EliteStrategy):
                 self._no_vote("underlying_direction_conflict")
                 return None
 
+            trend_momentum_regime = normalize_regime(
+                indicators.get("regime") or indicators.get("market_regime")
+            )
+            trend_momentum_close_location: float | None = None
+            completed_option_rvol: float | None = None
+            if self._trend_momentum_enabled:
+                if trend_momentum_regime != MarketRegime.TREND:
+                    self._no_vote("trend_momentum_regime_not_trend")
+                    return None
+                if explicit_underlying_direction != contract_side:
+                    self._no_vote("trend_momentum_underlying_not_confirmed")
+                    return None
+                if not strong_fresh_trend_context:
+                    self._no_vote("trend_momentum_underlying_quality_unconfirmed")
+                    return None
+                # A live quote is not a completed premium momentum candle.
+                # Require the current option contract\u0027s completed bar, not tick OHLC.
+                bar_getter = getattr(self._indicator_engine, "get_history", None)
+                try:
+                    last_bars = (
+                        bar_getter(symbol, count=1, field="bars")
+                        if callable(bar_getter) else []
+                    )
+                    confirmed_bar = last_bars[-1] if last_bars else None
+                    bar_confirmed = bool(
+                        isinstance(confirmed_bar, Mapping)
+                        and confirmed_bar.get("is_complete") is True
+                        and confirmed_bar.get("is_provisional") is not True
+                        and bar_anchor is not None
+                        and _normalize_thesis_anchor(confirmed_bar.get("timestamp"))
+                        == _normalize_thesis_anchor(bar_anchor)
+                        and float(confirmed_bar.get("open")) == open_price
+                        and float(confirmed_bar.get("close")) == close
+                    )
+                except (TypeError, ValueError, AttributeError, IndexError):
+                    bar_confirmed = False
+                if not bar_confirmed:
+                    self._no_vote("trend_momentum_bar_unconfirmed")
+                    return None
+                # All premium acceptance evidence must come from the same
+                # finalized option bar, not a potentially newer tick snapshot.
+                try:
+                    confirmed_high = float(confirmed_bar["high"])
+                    confirmed_low = float(confirmed_bar["low"])
+                    confirmed_volume = float(confirmed_bar["volume"])
+                except (TypeError, ValueError, KeyError):
+                    self._no_vote("trend_momentum_bar_unconfirmed")
+                    return None
+                if not (
+                    all(math.isfinite(value) for value in (
+                        confirmed_high, confirmed_low, confirmed_volume
+                    ))
+                    and confirmed_low < confirmed_high
+                    and confirmed_low <= open_price <= confirmed_high
+                    and confirmed_low <= close <= confirmed_high
+                    and confirmed_volume >= 0
+                ):
+                    self._no_vote("trend_momentum_bar_unconfirmed")
+                    return None
+                if not momentum_continuation_confirmed:
+                    self._no_vote("trend_momentum_premium_not_confirmed")
+                    return None
+                trend_momentum_close_location = (
+                    (close - confirmed_low) / (confirmed_high - confirmed_low)
+                )
+                if trend_momentum_close_location < 0.70:
+                    self._no_vote("trend_momentum_weak_close")
+                    return None
+                completed_option_rvol = (
+                    confirmed_volume / avg_vol if avg_vol > 0 else None
+                )
+                if (
+                    completed_option_rvol is None
+                    or completed_option_rvol < self._trend_momentum_option_rvol_min
+                ):
+                    self._no_vote("trend_momentum_option_volume_not_confirmed")
+                    return None
+
             setup_type: str | None = None
             if pullback_flag and continuation_confirmed:
                 setup_type = "vwap_reclaim_momentum"
@@ -803,6 +898,13 @@ class VWAPProStrategy(EliteStrategy):
                 "penetration_only_enabled": self._allow_penetration_only,
                 "vwap_penetration_atr": round(penetration_atr, 4),
                 "vwap_event_confirmed": event_confirmed,
+                "trend_momentum_enabled": self._trend_momentum_enabled,
+                "trend_momentum_regime": trend_momentum_regime.value,
+                "trend_momentum_option_rvol_min": self._trend_momentum_option_rvol_min,
+                "trend_momentum_premium_confirmed": momentum_continuation_confirmed,
+                "trend_momentum_underlying_quality_confirmed": strong_fresh_trend_context,
+                "trend_momentum_close_location": trend_momentum_close_location,
+                "trend_momentum_completed_option_rvol": completed_option_rvol,
                 "days_to_expiry": indicators.get("days_to_expiry"),
                 "strike_distance_from_atm": indicators.get("strike_distance_from_atm"),
                 "minutes_since_open": indicators.get("minutes_since_open"),
