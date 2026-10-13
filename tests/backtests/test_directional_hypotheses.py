@@ -575,3 +575,124 @@ def test_orb_target_sensitivity_distinguishes_cost_rejects_and_shared_trades() -
                 }
             ]
         )
+
+
+def test_causal_option_premium_confirmation_requires_closed_contiguous_bars() -> None:
+    """Only already-completed premium strength can confirm a futures signal."""
+    from nifty_scalper_bot.backtesting.strategy_research import (
+        _option_premium_confirmation_reason,
+    )
+
+    previous = _bar(10, 100.0)
+    current = _bar(11, 103.0)
+    assert _option_premium_confirmation_reason(current, previous) is None
+    assert (
+        _option_premium_confirmation_reason(_bar(11, 99.0), previous)
+        == "option_premium_not_confirmed"
+    )
+    assert (
+        _option_premium_confirmation_reason(current, None)
+        == "option_confirmation_history_unavailable"
+    )
+    assert (
+        _option_premium_confirmation_reason(current, _bar(8, 100.0))
+        == "option_confirmation_history_unavailable"
+    )
+    assert (
+        _option_premium_confirmation_reason(current, {**previous, "is_complete": False})
+        == "option_confirmation_history_unavailable"
+    )
+    assert (
+        _option_premium_confirmation_reason(
+            {**current, "is_provisional": True}, previous
+        )
+        == "option_confirmation_history_unavailable"
+    )
+    assert (
+        _option_premium_confirmation_reason(current, {**previous, "volume": 0.0})
+        == "option_confirmation_history_unavailable"
+    )
+    assert (
+        _option_premium_confirmation_reason(
+            {**current, "open": current["close"]}, previous
+        )
+        == "option_premium_not_confirmed"
+    )
+
+
+def test_premium_confirmation_entry_funnel_distinguishes_matched_cohorts() -> None:
+    from scripts.research_orb_multiyear import summarize_option_premium_confirmation
+
+    families = ("PullbackResearch", "CompressionResearch", "MomentumResearch")
+
+    def trade(entry_time: str, pnl: float) -> dict[str, Any]:
+        return {
+            "symbol": _CE,
+            "entry_time": entry_time,
+            "exit_time": "2020-01-02T10:58:00+05:30",
+            "entry_price": 100.0,
+            "exit_price": 101.0,
+            "quantity": 75,
+            "gross_pnl": pnl + 70.0,
+            "fees": 70.0,
+            "net_pnl": pnl,
+            "duration_minutes": 2.0,
+            "exit_reason": "stop",
+        }
+
+    shared = trade("2020-01-02T10:01:00+05:30", -100.0)
+    replaced = trade("2020-01-02T10:30:00+05:30", 50.0)
+    qualified = {**shared, "net_pnl": 20.0, "gross_pnl": 90.0}
+    base = {"trades": [shared, replaced], "unresolved_trades": []}
+    alt = {
+        "trades": [qualified],
+        "unresolved_trades": [{"unresolved_reason": "history_gap_unresolved"}],
+        "no_vote_reasons": {
+            "option_premium_not_confirmed": 3,
+            "option_confirmation_history_unavailable": 1,
+            "cost_net_rr_rejected": 2,
+        },
+    }
+    day = {
+        "day": "2020-01-02",
+        "scenarios": [
+            {
+                "slippage_bps_per_side": 10.0,
+                "strategies": {family: base for family in families},
+            }
+        ],
+        "option_premium_confirmation": {family: alt for family in families},
+    }
+    rows = summarize_option_premium_confirmation([day])
+    assert len(rows) == 9
+    result = next(
+        row
+        for row in rows
+        if row["phase"] == "final" and row["candidate"] == "MomentumResearch"
+    )
+    assert result["baseline"]["metrics"]["trade_count"] == 2
+    assert result["premium_confirmed"]["metrics"]["trade_count"] == 1
+    assert result["premium_confirmed"]["unresolved_exit_count"] == 1
+    assert result["entry_eligibility_rejections"]["option_premium_not_confirmed"] == 3
+    assert result["identical_entry_count"] == 1
+    assert result["identical_entry_baseline"]["net_pnl"] == -100.0
+    assert result["identical_entry_premium_confirmed"]["net_pnl"] == 20.0
+    with pytest.raises(ValueError, match="premium_confirmation_scenario_incomplete"):
+        summarize_option_premium_confirmation(
+            [{**day, "option_premium_confirmation": {}}]
+        )
+    with pytest.raises(ValueError, match="premium_confirmation_duplicate_entry"):
+        summarize_option_premium_confirmation(
+            [
+                {
+                    **day,
+                    "option_premium_confirmation": {
+                        **day["option_premium_confirmation"],
+                        "MomentumResearch": {
+                            **alt,
+                            "trades": [qualified, qualified],
+                        },
+                    },
+                }
+            ]
+        )

@@ -427,6 +427,35 @@ def _bar_lifecycle_time_stop_due(
     return (prior_mfe / initial_risk) < 0.50
 
 
+def _option_premium_confirmation_reason(
+    current: dict[str, Any],
+    previous: dict[str, Any] | None,
+) -> str | None:
+    """Causal research-only option confirmation on a completed signal bar.
+
+    No intra-bar price, future bar, synthetic quote or trade outcome is used.
+    A missing or untraded preceding minute cannot become a positive vote.
+    """
+    stamp = current.get("timestamp")
+    if (
+        previous is None
+        or not isinstance(stamp, datetime)
+        or not isinstance(previous.get("timestamp"), datetime)
+        or previous["timestamp"] != stamp - timedelta(minutes=1)
+        or previous["timestamp"].date() != stamp.date()
+        or previous.get("is_complete") is not True
+        or current.get("is_complete") is not True
+        or previous.get("is_provisional")
+        or current.get("is_provisional")
+        or previous["volume"] <= 0
+        or current["volume"] <= 0
+    ):
+        return "option_confirmation_history_unavailable"
+    if current["close"] <= max(current["open"], previous["close"]):
+        return "option_premium_not_confirmed"
+    return None
+
+
 def _scenario(
     histories: dict[str, dict[datetime, dict[str, Any]]],
     instruments: dict[str, dict[str, Any]],
@@ -440,6 +469,7 @@ def _scenario(
     strict_liquidity: bool = False,
     lifecycle_proxy: bool = False,
     strategy_factory: Callable[[IndicatorEngine], list[Any]] | None = None,
+    require_option_premium_confirmation: bool = False,
 ) -> dict[str, Any]:
     if compact_orb_context and components != {"ORBPro"}:
         raise ValueError("research_compact_context_requires_orb_only")
@@ -736,6 +766,14 @@ def _scenario(
                 ):
                     rejections[strategy.name]["invalid_signal_geometry"] += 1
                     continue
+                if require_option_premium_confirmation:
+                    rejection = _option_premium_confirmation_reason(
+                        bar,
+                        histories[symbol].get(timestamp - timedelta(minutes=1)),
+                    )
+                    if rejection is not None:
+                        rejections[strategy.name][rejection] += 1
+                        continue
                 if minimum_opening_rvol is not None:
                     rvol = opening_relative_volume(
                         histories[future], timestamp, settings.orb.orb_minutes
