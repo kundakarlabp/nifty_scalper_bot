@@ -35,6 +35,8 @@ from nifty_scalper_bot.backtesting.strategy_research import (  # noqa: E402
     summarize,
 )
 
+from nifty_scalper_bot.risk.cost_model import estimate_round_trip_cost  # noqa: E402
+
 IST = ZoneInfo("Asia/Kolkata")
 SOURCES = (
     ("Nifty spot and futures data.zip", "240aecc77a7275ec2f05a092b976bf91"),
@@ -657,6 +659,67 @@ def summarize_fixed_hypothesis_days(
     return results
 
 
+def fixed_cohort_slippage_stress(
+    results: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Reprice one fixed 10-bps filled-trade cohort at higher adverse slippage.
+
+    This changes only execution prices and canonical fees, never accepted
+    trades, timestamps, stop/target path, or strategy signal decisions. It is
+    a cost-only counterfactual, not alternative executable fills.
+    """
+    stress: list[dict[str, Any]] = []
+    for row in results:
+        if row["slippage_bps_per_side"] != 10.0:
+            continue
+        trades = row["trades"]
+        if any(t.get("cost_source") != "canonical_model_estimate" for t in trades):
+            raise ValueError("research_cost_source_unverified")
+        for bps in SLIPPAGE:
+            repriced: list[dict[str, Any]] = []
+            for trade in trades:
+                entry = float(trade["entry_price"]) / 1.001
+                exit_price = float(trade["exit_price"]) / 0.999
+                qty = int(trade["quantity"])
+                if not (
+                    math.isfinite(entry)
+                    and math.isfinite(exit_price)
+                    and entry > 0
+                    and exit_price > 0
+                    and qty > 0
+                ):
+                    raise ValueError("research_trade_geometry_invalid")
+                adverse = bps / 10000.0
+                bought = entry * (1.0 + adverse)
+                sold = exit_price * (1.0 - adverse)
+                cost = estimate_round_trip_cost(
+                    entry_price=bought, exit_price=sold, quantity=qty
+                )
+                gross = (sold - bought) * qty
+                repriced.append(
+                    {
+                        **trade,
+                        "entry_price": bought,
+                        "exit_price": sold,
+                        "gross_pnl": gross,
+                        "fees": cost.total,
+                        "net_pnl": gross - cost.total,
+                    }
+                )
+            stress.append(
+                {
+                    "phase": row["phase"],
+                    "candidate": row["candidate"],
+                    "slippage_bps_per_side": bps,
+                    "method": "same_10bps_resolved_trade_cohort",
+                    "resolved_trade_count": len(trades),
+                    "unresolved_exit_count": len(row["unresolved_trades"]),
+                    "metrics": summarize(repriced),
+                }
+            )
+    return stress
+
+
 def run_fixed_hypothesis_study(output: Path, workers: int) -> None:
     """Run prespecified comparative research without altering ORB's protocol."""
     if os.getenv("EXECUTION_MODE", "SHADOW").upper() != "SHADOW":
@@ -681,6 +744,7 @@ def run_fixed_hypothesis_study(output: Path, workers: int) -> None:
             write_json(directory / f"{row['day']}.json", row)
     daily = [json.loads((directory / f"{day}.json").read_text()) for day in days]
     results = summarize_fixed_hypothesis_days(daily)
+    cost_stress = fixed_cohort_slippage_stress(results)
     write_json(
         output / "fixed_hypothesis_results.json",
         {
@@ -726,6 +790,17 @@ def run_fixed_hypothesis_study(output: Path, workers: int) -> None:
                 "No setting selected or authorized for live trading",
             ],
             "results": results,
+            "fixed_10bps_cohort_slippage_stress": cost_stress,
+            "research_quality": {
+                "matched_orb_baseline_has_trades": any(
+                    row["candidate"] == "ORBNetGateBaseline"
+                    and row["metrics"]["trade_count"] > 0
+                    for row in results
+                ),
+                "trade_cohorts_vary_across_replayed_slippage": True,
+                "fixed_cohort_stress_is_not_reexecuted_market_path": True,
+                "all_strategies_research_only": True,
+            },
         },
     )
 
