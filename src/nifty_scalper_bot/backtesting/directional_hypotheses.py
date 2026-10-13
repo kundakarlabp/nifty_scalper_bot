@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import math
 import os
+from collections import Counter
 from datetime import datetime, timedelta
 from pathlib import Path
 from statistics import median, pstdev
@@ -18,6 +19,7 @@ from typing import Any, Mapping, Sequence
 
 from nifty_scalper_bot.config.settings import get_settings
 from nifty_scalper_bot.strategies.indicators import IndicatorEngine
+from nifty_scalper_bot.strategies.elite_strategies.orb_pro import ORBProStrategy
 
 _FAMILIES = {
     "trend_pullback": "PullbackResearch",
@@ -257,6 +259,58 @@ class ArchivedDirectionalHypothesis:
         del side, setup_id
 
 
+class ORBRangeScaledResearch(ORBProStrategy):
+    """Research-only 15-minute range scaled to its 1-minute volatility horizon.
+
+    Does not change the production ORB class, thresholds, volume confirmation,
+    direction resolution, breakout logic, or broker execution behavior.
+    """
+
+    def __init__(self, config: Any, indicator_engine: IndicatorEngine) -> None:
+        super().__init__(config=config, indicator_engine=indicator_engine)
+        self.research_gate_counts: Counter[str] = Counter()
+
+    def _structural_evidence(
+        self,
+        *,
+        side: str,
+        direction: str,
+        penetration_atr: float,
+        volume_ratio: float,
+        opening_range_atr: float,
+        indicators: Mapping[str, Any],
+    ) -> tuple[bool, list[str], bool, float, float]:
+        inputs = {
+            "side": side,
+            "direction": direction,
+            "penetration_atr": penetration_atr,
+            "volume_ratio": volume_ratio,
+            "indicators": indicators,
+        }
+        raw = super()._structural_evidence(
+            **inputs, opening_range_atr=opening_range_atr
+        )
+        normalized = super()._structural_evidence(
+            **inputs,
+            opening_range_atr=opening_range_atr
+            / math.sqrt(max(1, int(self._cfg.orb_minutes))),
+        )
+        self.research_gate_counts["evaluated"] += 1
+        self.research_gate_counts["raw_all_pass"] += int(raw[0])
+        self.research_gate_counts["scaled_all_pass"] += int(normalized[0])
+        self.research_gate_counts["raw_range_pass"] += int(raw[2])
+        self.research_gate_counts["scaled_range_pass"] += int(normalized[2])
+        for condition in (
+            "underlying_direction_alignment",
+            "underlying_volume_confirmation",
+            "normalized_breakout_penetration",
+            "futures_vwap_slope_alignment",
+        ):
+            if condition not in normalized[1]:
+                self.research_gate_counts["failed_" + condition] += 1
+        return normalized
+
+
 def _research_strategies(
     engine: IndicatorEngine,
 ) -> list[ArchivedDirectionalHypothesis]:
@@ -324,6 +378,7 @@ def run_directional_hypothesis_research(
 
 __all__ = [
     "ArchivedDirectionalHypothesis",
+    "ORBRangeScaledResearch",
     "classify_completed_futures_bars",
     "run_directional_hypothesis_research",
 ]
