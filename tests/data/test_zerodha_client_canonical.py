@@ -100,6 +100,39 @@ def test_get_order_trades_is_exactly_order_scoped(
     client.close()
 
 
+def test_fresh_orderbook_proof_does_not_use_cached_orders(monkeypatch) -> None:
+    client = ZerodhaKiteClient(api_key="k", access_token="t")
+    monkeypatch.setattr(client, "_acquire_bucket", lambda _bucket: None)
+    seen = []
+
+    def request(method, endpoint, **kwargs):
+        seen.append((method, endpoint, kwargs))
+        return {"data": []}
+
+    monkeypatch.setattr(client, "_make_request", request)
+    monkeypatch.setattr(
+        client, "_load_rest_cache", lambda *_a, **_k: [_forbidden_cache_result()]
+    )
+    assert client.get_orders_fresh() == []
+    assert seen == [("GET", "/orders", {"operation_label": "orders.fresh"})]
+    client.close()
+
+
+def _forbidden_cache_result():
+    raise AssertionError("Fresh orderbook must not consult cached orders")
+
+
+def test_fresh_orderbook_rejects_malformed_response(monkeypatch) -> None:
+    from nifty_scalper_bot.utils.errors import BrokerError
+
+    client = ZerodhaKiteClient(api_key="k", access_token="t")
+    monkeypatch.setattr(client, "_acquire_bucket", lambda _bucket: None)
+    monkeypatch.setattr(client, "_make_request", lambda *_a, **_kw: {"data": None})
+    with pytest.raises(BrokerError, match="Malformed fresh Zerodha orderbook"):
+        client.get_orders_fresh()
+    client.close()
+
+
 def test_get_order_charges_posts_virtual_contract_note_json(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
