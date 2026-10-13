@@ -621,10 +621,22 @@ def run_fixed_hypothesis_day(task: tuple[str, str]) -> dict[str, Any]:
         lifecycle_proxy=False,
         strategy_factory=_research_strategies,
     )
+    # A fixed cost-economics hypothesis, not parameter searching: compare
+    # original 1.8R with 2.2R under the same ORB range-scaling experiment.
+    # The 1.5 net-RR gate and all structural confirmations remain intact.
+    target_2_2 = run_orb_session_research(
+        directory,
+        overrides={"ORB_TARGET_RR": "2.2"},
+        slippage_bps=10.0,
+        minimum_net_rr=1.5,
+        lifecycle_proxy=True,
+        normalize_opening_range=True,
+    )
     return {
         "day": day,
         "scenarios": research["scenarios"],
         "exit_ablation": no_trailing["strategies"],
+        "orb_target_2_2": target_2_2,
     }
 
 
@@ -773,6 +785,82 @@ def summarize_exit_lifecycle_ablation(
     return summary
 
 
+def summarize_orb_target_sensitivity(
+    daily: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Contrast the existing 1.8R and fixed 2.2R target after identical costs.
+
+    Changed targets alter which entries pass net-RR and subsequent position
+    occupancy; shared-entry outcomes are therefore reported separately.
+    """
+    years = {
+        "development": {"2017", "2018"},
+        "validation": {"2019"},
+        "final": {"2020"},
+    }
+    if len({row["day"] for row in daily}) != len(daily):
+        raise ValueError("hypothesis_duplicate_session")
+    results: list[dict[str, Any]] = []
+    for phase, period in years.items():
+        baseline: list[dict[str, Any]] = []
+        candidate: list[dict[str, Any]] = []
+        missing = [0, 0]
+        rejected = [0, 0]
+        for day in (row for row in daily if row["day"][:4] in period):
+            matched = [
+                row
+                for row in day["scenarios"]
+                if row["slippage_bps_per_side"] == 10.0
+            ]
+            if len(matched) != 1 or "orb_target_2_2" not in day:
+                raise ValueError("orb_target_sensitivity_incomplete")
+            base = matched[0]["strategies"]["ORBRangeScaledResearch"]
+            alt = day["orb_target_2_2"]
+            baseline.extend(base["trades"])
+            candidate.extend(alt["trades"])
+            missing[0] += len(base["unresolved_trades"])
+            missing[1] += len(alt["unresolved_trades"])
+            rejected[0] += base["no_vote_reasons"].get("cost_net_rr_rejected", 0)
+            rejected[1] += alt["no_vote_reasons"].get("cost_net_rr_rejected", 0)
+
+        def index_by_entry(
+            trades: list[dict[str, Any]],
+        ) -> dict[tuple[str, str], dict[str, Any]]:
+            indexed = {(t["symbol"], t["entry_time"]): t for t in trades}
+            if len(indexed) != len(trades):
+                raise ValueError("orb_target_duplicate_entry")
+            return indexed
+
+        original = index_by_entry(baseline)
+        changed = index_by_entry(candidate)
+        common = sorted(original.keys() & changed.keys())
+        results.append(
+            {
+                "phase": phase,
+                "method": "same_scaled_orb_structural_rules_1_8R_vs_2_2R",
+                "slippage_bps_per_side": 10.0,
+                "minimum_net_rr": 1.5,
+                "baseline_target_rr": 1.8,
+                "research_target_rr": 2.2,
+                "baseline": {
+                    "metrics": summarize(baseline),
+                    "unresolved_exit_count": missing[0],
+                    "cost_net_rr_rejections": rejected[0],
+                },
+                "target_2_2": {
+                    "metrics": summarize(candidate),
+                    "unresolved_exit_count": missing[1],
+                    "cost_net_rr_rejections": rejected[1],
+                },
+                "identical_entry_count": len(common),
+                "identical_entry_baseline": summarize([original[k] for k in common]),
+                "identical_entry_target_2_2": summarize([changed[k] for k in common]),
+                "caveat": "target_distance_changes_admission_and_realized_exits",
+            }
+        )
+    return results
+
+
 def fixed_cohort_slippage_stress(
     results: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -860,6 +948,7 @@ def run_fixed_hypothesis_study(output: Path, workers: int) -> None:
     results = summarize_fixed_hypothesis_days(daily)
     cost_stress = fixed_cohort_slippage_stress(results)
     exit_ablation = summarize_exit_lifecycle_ablation(daily)
+    target_sensitivity = summarize_orb_target_sensitivity(daily)
     write_json(
         output / "fixed_hypothesis_results.json",
         {
@@ -893,6 +982,7 @@ def run_fixed_hypothesis_study(output: Path, workers: int) -> None:
                 ),
                 "execution": "next_minute_open_canonical_costs_and_slippage",
                 "comparisons": "1.5_net_rr_gate_and_causal_bar_lifecycle_proxy",
+                "orb_target_sensitivity": "fixed_1.8R_vs_2.2R_10bps_scaled_ORB",
                 "periods": {
                     "development": ["2017", "2018"],
                     "validation": ["2019"],
@@ -909,11 +999,13 @@ def run_fixed_hypothesis_study(output: Path, workers: int) -> None:
                 "Unresolved exits excluded from primary and shown separately",
                 "Opening-range normalization was proposed after earlier ORB results",
                 "No-trailing changes admission by keeping positions open longer",
+                "2.2R ORB target is post-hoc research, not an untouched holdout",
                 "No setting selected or authorized for live trading",
             ],
             "results": results,
             "fixed_10bps_cohort_slippage_stress": cost_stress,
             "fixed_10bps_exit_lifecycle_ablation": exit_ablation,
+            "fixed_10bps_orb_target_sensitivity": target_sensitivity,
             "research_quality": {
                 "matched_orb_baseline_has_trades": any(
                     row["candidate"] == "ORBNetGateBaseline"
