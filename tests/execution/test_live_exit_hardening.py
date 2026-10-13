@@ -931,6 +931,78 @@ def test_flat_reconcile_checks_broker_orderbook_when_history_returns_unknown(
     assert broker.cancel_calls == []
 
 
+
+def test_flat_reconcile_recovers_stop_from_complete_broker_tradebook(
+    monkeypatch,
+) -> None:
+    """An exact same-order full fill is safe to retire when history is UNKNOWN."""
+    manager, _order_manager, broker = _manager(cancel_confirms=False)
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    bracket.exchange_stop_order_id = "filled-stop"
+    bracket.exchange_stop_quantity = 65
+    broker.statuses["filled-stop"] = "UNKNOWN"
+    monkeypatch.setattr(
+        broker,
+        "get_order_trades",
+        lambda _order_id: [
+            {"order_id": "filled-stop", "trade_id": "t1", "quantity": 30},
+            {"order_id": "filled-stop", "trade_id": "t2", "quantity": 35},
+        ],
+        raising=False,
+    )
+
+    assert manager.reconcile_symbol_flat(SYMBOL) == 1
+    assert manager.get_bracket("entry-1") is None
+    assert broker.cancel_calls == []
+
+
+@pytest.mark.parametrize("trade_quantity", [0, 30, 64])
+def test_flat_reconcile_never_assumes_partial_tradebook_fill(
+    monkeypatch, trade_quantity: int
+) -> None:
+    manager, _order_manager, broker = _manager(cancel_confirms=False)
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    bracket.exchange_stop_order_id = "partial-stop"
+    bracket.exchange_stop_quantity = 65
+    broker.statuses["partial-stop"] = "UNKNOWN"
+    monkeypatch.setattr(
+        broker,
+        "get_order_trades",
+        lambda _order_id: [
+            {"order_id": "partial-stop", "trade_id": "t1", "quantity": trade_quantity}
+        ],
+        raising=False,
+    )
+
+    assert manager.reconcile_symbol_flat(SYMBOL) == 0
+    assert manager.get_bracket("entry-1") is bracket
+
+
+def test_open_stop_status_takes_priority_over_tradebook(
+    monkeypatch,
+) -> None:
+    manager, _order_manager, broker = _manager(cancel_confirms=False)
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    bracket.exchange_stop_order_id = "open-stop"
+    bracket.exchange_stop_quantity = 65
+    broker.statuses["open-stop"] = "OPEN"
+    monkeypatch.setattr(
+        broker,
+        "get_order_trades",
+        lambda _order_id: [
+            {"order_id": "open-stop", "trade_id": "t1", "quantity": 65}
+        ],
+        raising=False,
+    )
+
+    assert manager.reconcile_symbol_flat(SYMBOL) == 0
+    assert manager.get_bracket("entry-1") is bracket
+
+
+
 def test_unknown_history_does_not_override_live_stop_in_orderbook(
     monkeypatch,
 ) -> None:
