@@ -591,6 +591,15 @@ def run_fixed_hypothesis_day(task: tuple[str, str]) -> dict[str, Any]:
             lifecycle_proxy=True,
         )
         scenario["strategies"]["ORBNetGateBaseline"] = baseline
+        scaled = run_orb_session_research(
+            directory,
+            overrides={},
+            slippage_bps=slippage,
+            minimum_net_rr=1.5,
+            lifecycle_proxy=True,
+            normalize_opening_range=True,
+        )
+        scenario["strategies"]["ORBRangeScaledResearch"] = scaled
     return {"day": day, "scenarios": research["scenarios"]}
 
 
@@ -600,6 +609,7 @@ def summarize_fixed_hypothesis_days(
     """Keep each chronological period distinct; never select on later years."""
     names = (
         "ORBNetGateBaseline",
+        "ORBRangeScaledResearch",
         "PullbackResearch",
         "CompressionResearch",
         "MomentumResearch",
@@ -620,6 +630,7 @@ def summarize_fixed_hypothesis_days(
                 unresolved: list[dict[str, Any]] = []
                 stressed: list[dict[str, Any]] = []
                 rejections: Counter[str] = Counter()
+                gate_counts: Counter[str] = Counter()
                 for session in sessions:
                     matches = [
                         row
@@ -633,6 +644,7 @@ def summarize_fixed_hypothesis_days(
                     unresolved.extend(observed["unresolved_trades"])
                     stressed.extend(observed["worst_case_stress_trades"])
                     rejections.update(observed["no_vote_reasons"])
+                    gate_counts.update(observed.get("research_gate_counts", {}))
                 results.append(
                     {
                         "phase": phase,
@@ -648,6 +660,7 @@ def summarize_fixed_hypothesis_days(
                             "primary_metrics_exclude_unresolved": True,
                         },
                         "no_vote_reasons": dict(rejections),
+                        "research_gate_counts": dict(gate_counts),
                         "exit_reasons": dict(
                             Counter(trade["exit_reason"] for trade in trades)
                         ),
@@ -764,6 +777,7 @@ def run_fixed_hypothesis_study(output: Path, workers: int) -> None:
             "assumptions": {
                 "families": [
                     "ORBNetGateBaseline",
+                    "ORBRangeScaledResearch",
                     "PullbackResearch",
                     "CompressionResearch",
                     "MomentumResearch",
@@ -771,6 +785,10 @@ def run_fixed_hypothesis_study(output: Path, workers: int) -> None:
                 "basket": "fixed_session_open_ATM_monthly_options",
                 "direction": "closed_NIFTY_continuous_futures_bars",
                 "selection": "fixed_rules_no_parameter_search",
+                "orb_range_normalization": (
+                    "research_only_15min_range_divided_by_sqrt_of_minutes_"
+                    "before_comparing_with_1min_ATR"
+                ),
                 "execution": "next_minute_open_canonical_costs_and_slippage",
                 "comparisons": "1.5_net_rr_gate_and_causal_bar_lifecycle_proxy",
                 "periods": {
@@ -787,6 +805,7 @@ def run_fixed_hypothesis_study(output: Path, workers: int) -> None:
                 "No bid/ask depth or execution queue; modeled fills only",
                 "No production basket selection, arbitration or broker parity",
                 "Unresolved exits excluded from primary and shown separately",
+                "Opening-range normalization was proposed after earlier ORB results",
                 "No setting selected or authorized for live trading",
             ],
             "results": results,
