@@ -19,6 +19,8 @@ from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 from nifty_scalper_bot.config.settings import get_settings
+from nifty_scalper_bot.core.market_regime import MarketRegimeDetector
+from nifty_scalper_bot.core.market_regime_manager import MarketRegimeManager
 from nifty_scalper_bot.core.strategy_manager import (
     StrategyManager as RuntimeStrategyManager,
 )
@@ -492,6 +494,8 @@ def _scenario(
     pending: dict[tuple[str, str], dict[str, Any]] = {}
     positions: dict[tuple[str, str], dict[str, Any]] = {}
     engine = IndicatorEngine()
+    regime_detector: MarketRegimeDetector | None = None
+    regime_manager: MarketRegimeManager | None = None
     strategies = []
     current_day = None
     last_bars: dict[str, dict[str, Any]] = {}
@@ -580,6 +584,17 @@ def _scenario(
                 )
             pending.clear()
             engine = IndicatorEngine()
+            if os.getenv("VWAP_TREND_MOMENTUM_ENABLED", "").lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }:
+                regime_detector = MarketRegimeDetector()
+                regime_manager = MarketRegimeManager(regime_detector)
+            else:
+                regime_detector = None
+                regime_manager = None
             available_strategies = (
                 strategy_factory(engine)
                 if strategy_factory is not None
@@ -711,6 +726,25 @@ def _scenario(
             spot_symbol="NSE:NIFTY 50",
             futures_symbol=future,
         )
+        if regime_detector is not None and regime_manager is not None:
+            # Recompute from *already ingested* completed futures bars only.
+            # Use the same detector and stable-state manager as production;
+            # historical minute bars remain a lower-fidelity regime proxy.
+            regime_detector.evaluate(
+                future,
+                {
+                    "price": bars[future]["close"],
+                    "price_series": engine.get_history(future, count=20),
+                    "ema_fast": engine.get_ema(future, 12),
+                    "ema_slow": engine.get_ema(future, 26),
+                    "adx": engine.get_adx(future),
+                    "atr": engine.get_atr(future),
+                    "volume_ratio": underlying_context.get("futures_volume_ratio"),
+                },
+            )
+            stable_regime = regime_manager.get_latest_snapshot()
+            if stable_regime is not None:
+                underlying_context["regime"] = stable_regime.regime
         for symbol in eligible_options:
             bar = bars[symbol]
             if strict_liquidity and bar["volume"] <= 0:
@@ -1075,18 +1109,30 @@ def run_vwap_comparison(directory: Path) -> dict[str, Any]:
         ("slope_floor_2bp", {"VWAP_FUTURES_SLOPE_MIN_BPS": "2.0"}),
         ("futures_rvol_1_2", {"VWAP_FUTURES_VOLUME_MIN_RATIO": "1.2"}),
         ("penetration_opt_in", {"VWAP_ALLOW_PENETRATION_ONLY_ENTRY": "true"}),
+        (
+            "trend_premium_rvol_1_5",
+            {
+                "VWAP_TREND_MOMENTUM_ENABLED": "true",
+                "VWAP_TREND_MOMENTUM_OPTION_RVOL_MIN": "1.5",
+            },
+        ),
     ]
     environment_keys = (
         "VWAP_TREND_QUALITY_MAX_DISTANCE_ATR",
         "VWAP_FUTURES_SLOPE_MIN_BPS",
         "VWAP_FUTURES_VOLUME_MIN_RATIO",
         "VWAP_ALLOW_PENETRATION_ONLY_ENTRY",
+        "VWAP_TREND_MOMENTUM_ENABLED",
+        "VWAP_TREND_MOMENTUM_OPTION_RVOL_MIN",
     )
     baseline_environment = {key: os.environ.get(key) for key in environment_keys}
     candidates: list[dict[str, Any]] = []
     for name, overrides in variants:
-        original = {key: os.environ.get(key) for key in overrides}
+        # Keep the baseline independent of any inherited experimental toggle.
+        keys = {"VWAP_TREND_MOMENTUM_ENABLED", *overrides}
+        original = {key: os.environ.get(key) for key in keys}
         try:
+            os.environ["VWAP_TREND_MOMENTUM_ENABLED"] = "false"
             os.environ.update(overrides)
             scenarios: list[dict[str, Any]] = []
             for slippage in (10.0, 25.0, 50.0):
