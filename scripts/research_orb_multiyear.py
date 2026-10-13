@@ -683,6 +683,7 @@ def summarize_fixed_hypothesis_days(
                 stressed: list[dict[str, Any]] = []
                 rejections: Counter[str] = Counter()
                 gate_counts: Counter[str] = Counter()
+                funnel_counts: Counter[str] = Counter()
                 for session in sessions:
                     matches = [
                         row
@@ -697,6 +698,7 @@ def summarize_fixed_hypothesis_days(
                     stressed.extend(observed["worst_case_stress_trades"])
                     rejections.update(observed["no_vote_reasons"])
                     gate_counts.update(observed.get("research_gate_counts", {}))
+                    funnel_counts.update(observed.get("entry_funnel", {}))
                 results.append(
                     {
                         "phase": phase,
@@ -713,6 +715,7 @@ def summarize_fixed_hypothesis_days(
                         },
                         "no_vote_reasons": dict(rejections),
                         "research_gate_counts": dict(gate_counts),
+                        "entry_funnel": dict(funnel_counts),
                         "exit_reasons": dict(
                             Counter(trade["exit_reason"] for trade in trades)
                         ),

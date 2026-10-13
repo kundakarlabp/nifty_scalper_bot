@@ -23,6 +23,9 @@ def _mdm() -> MarketDataManager:
     mdm._token_to_symbol = {1: "NFO:X"}
     mdm._desired_tokens = {1}
     mdm._candle_metrics = defaultdict(float)
+    # This __new__ fixture does not initialize queue state; optional slow-tick
+    # telemetry must not obscure the candle timestamp assertion under CI load.
+    mdm._log_slow_tick_stage = lambda **_kwargs: None
     return mdm
 
 
