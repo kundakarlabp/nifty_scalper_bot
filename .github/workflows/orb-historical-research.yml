@@ -445,6 +445,31 @@ jobs:
                       f"{edge_text} | "
                       f"{row['data_quality']['unresolved_exit_count']} |\\n"
                   )
+              if not report["research_quality"]["matched_orb_baseline_has_trades"]:
+                  stream.write(
+                      "\\n**Not a valid matched profitability benchmark:** "
+                      "ORB baseline recorded zero entries.\\n"
+                  )
+              stream.write(
+                  "\\n### Fixed 10-bps accepted trade cohort: cost-only stress\\n\\n"
+              )
+              stream.write(
+                  "| Period | Strategy | Slippage/side | Same trades | Net P&L | "
+                  "Unresolved omitted |\\n"
+              )
+              stream.write("|---|---|---:|---:|---:|---:|\\n")
+              for row in report["fixed_10bps_cohort_slippage_stress"]:
+                  stream.write(
+                      f"| {row['phase']} | {row['candidate']} | "
+                      f"{row['slippage_bps_per_side']} bps | "
+                      f"{row['resolved_trade_count']} | "
+                      f"{row['metrics']['net_pnl']:.2f} | "
+                      f"{row['unresolved_exit_count']} |\\n"
+                  )
+              stream.write(
+                  "\\nCost-only repricing holds signal and exit timestamps fixed; "
+                  "not an alternate executable order-path simulation.\\n"
+              )
           PY
       - name: Save auditable fixed-hypothesis results
         if: always()
