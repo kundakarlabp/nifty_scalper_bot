@@ -8880,11 +8880,23 @@ class OrderManager:
         zombies = []
         with self._lock:
             for oid, order in self._orders.items():
-                if order.status == OrderStatus.PENDING:
-                    # Check age
-                    age = now - order.timestamp.timestamp()
-                    if age > ZOMBIE_TIMEOUT:
-                        zombies.append(oid)
+                if order.status != OrderStatus.PENDING:
+                    continue
+                # Protective/reducing orders belong to the exit watchdog and
+                # broker reconciliation, never generic entry-order cleanup.
+                intent = getattr(order.intent, "value", order.intent)
+                order_type = getattr(order.order_type, "value", order.order_type)
+                if (
+                    str(intent or "").strip().upper()
+                    not in _TRADE_PLAN_IDENTITY_INTENTS
+                    or order.linked_entry_order_id
+                    or str(order_type or "").strip().upper()
+                    in {"SL", "SL-M", "STOP_LOSS", "STOP_LOSS_MARKET"}
+                ):
+                    continue
+                age = now - order.timestamp.timestamp()
+                if age > ZOMBIE_TIMEOUT:
+                    zombies.append(oid)
 
         if not zombies:
             return
