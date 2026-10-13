@@ -716,3 +716,64 @@ def test_research_weekly_atm_scope_applies_before_strategy_vote(
         assert result["evaluations"] == 0
         assert observations == []
         assert result["no_vote_reasons"]["archive_strike_missing"] == 8
+
+
+def test_weekly_atm_holdout_uses_only_valid_option_sessions(tmp_path):
+    from nifty_scalper_bot.backtesting.strategy_research import _scenario, load_archive
+    from nifty_scalper_bot.config.settings import get_settings
+
+    archive(tmp_path)
+    for path in (tmp_path / "candles").glob("*.json"):
+        payload = json.loads(path.read_text())
+        if payload["instrument"]["instrument_type"] in {"CE", "PE"}:
+            payload["instrument"]["strike"] = 100.0
+        baseline = payload["candles"]
+        extra_dates = [
+            "2026-09-15",
+            "2026-09-16",
+            "2026-09-17",
+            "2026-09-18",
+            "2026-10-02",
+        ]
+        payload["candles"] = [
+            [
+                f"{day}{row[0][10:]}",
+                *row[1:],
+            ]
+            for day in extra_dates
+            for row in baseline
+        ] + baseline
+        path.write_text(json.dumps(payload))
+
+    class NoEntry:
+        name = "VWAPPro"
+
+        def generate_signal(self, *args, **kwargs):
+            return None
+
+        @property
+        def evaluation_health(self):
+            return {"healthy": True}
+
+    histories, instruments, _ = load_archive(tmp_path)
+    kwargs = dict(
+        histories=histories,
+        instruments=instruments,
+        settings=get_settings().elite,
+        slippage_bps=10.0,
+        components={"VWAPPro"},
+        strategy_factory=lambda engine: [NoEntry()],
+    )
+    unfiltered = _scenario(**kwargs)["strategies"]["VWAPPro"]
+    scoped_report = _scenario(**kwargs, require_archived_weekly_atm=True)
+    scoped = scoped_report["strategies"]["VWAPPro"]
+
+    assert unfiltered["chronological_holdout_start"] == "2026-10-01"
+    assert scoped["chronological_holdout_start"] == "2026-10-02"
+    assert scoped["data_quality"]["source_option_session_count"] == 6
+    assert scoped["data_quality"]["eligible_session_count"] == 2
+    assert scoped["data_quality"]["eligible_option_bar_count"] == 16
+    assert scoped["data_quality"]["eligible_session_dates"] == [
+        "2026-10-01",
+        "2026-10-02",
+    ]
