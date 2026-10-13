@@ -851,9 +851,7 @@ def _scenario(
                 "research_gate_counts": dict(
                     getattr(
                         next(
-                            strategy
-                            for strategy in strategies
-                            if strategy.name == name
+                            strategy for strategy in strategies if strategy.name == name
                         ),
                         "research_gate_counts",
                         {},
