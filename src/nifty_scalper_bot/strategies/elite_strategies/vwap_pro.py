@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import math
 import os
 from typing import Any, Mapping
 
@@ -636,12 +637,17 @@ class VWAPProStrategy(EliteStrategy):
             trend_momentum_regime = normalize_regime(
                 indicators.get("regime") or indicators.get("market_regime")
             )
+            trend_momentum_close_location: float | None = None
+            completed_option_rvol: float | None = None
             if self._trend_momentum_enabled:
                 if trend_momentum_regime != MarketRegime.TREND:
                     self._no_vote("trend_momentum_regime_not_trend")
                     return None
                 if explicit_underlying_direction != contract_side:
                     self._no_vote("trend_momentum_underlying_not_confirmed")
+                    return None
+                if not strong_fresh_trend_context:
+                    self._no_vote("trend_momentum_underlying_quality_unconfirmed")
                     return None
                 # A live quote is not a completed premium momentum candle.
                 # Require the current option contract\u0027s completed bar, not tick OHLC.
@@ -667,11 +673,42 @@ class VWAPProStrategy(EliteStrategy):
                 if not bar_confirmed:
                     self._no_vote("trend_momentum_bar_unconfirmed")
                     return None
+                # All premium acceptance evidence must come from the same
+                # finalized option bar, not a potentially newer tick snapshot.
+                try:
+                    confirmed_high = float(confirmed_bar["high"])
+                    confirmed_low = float(confirmed_bar["low"])
+                    confirmed_volume = float(confirmed_bar["volume"])
+                except (TypeError, ValueError, KeyError):
+                    self._no_vote("trend_momentum_bar_unconfirmed")
+                    return None
+                if not (
+                    all(math.isfinite(value) for value in (
+                        confirmed_high, confirmed_low, confirmed_volume
+                    ))
+                    and confirmed_low < confirmed_high
+                    and confirmed_low <= open_price <= confirmed_high
+                    and confirmed_low <= close <= confirmed_high
+                    and confirmed_volume >= 0
+                ):
+                    self._no_vote("trend_momentum_bar_unconfirmed")
+                    return None
                 if not momentum_continuation_confirmed:
                     self._no_vote("trend_momentum_premium_not_confirmed")
                     return None
-                if (option_volume_ratio is None
-                        or option_volume_ratio < self._trend_momentum_option_rvol_min):
+                trend_momentum_close_location = (
+                    (close - confirmed_low) / (confirmed_high - confirmed_low)
+                )
+                if trend_momentum_close_location < 0.70:
+                    self._no_vote("trend_momentum_weak_close")
+                    return None
+                completed_option_rvol = (
+                    confirmed_volume / avg_vol if avg_vol > 0 else None
+                )
+                if (
+                    completed_option_rvol is None
+                    or completed_option_rvol < self._trend_momentum_option_rvol_min
+                ):
                     self._no_vote("trend_momentum_option_volume_not_confirmed")
                     return None
 
@@ -865,6 +902,9 @@ class VWAPProStrategy(EliteStrategy):
                 "trend_momentum_regime": trend_momentum_regime.value,
                 "trend_momentum_option_rvol_min": self._trend_momentum_option_rvol_min,
                 "trend_momentum_premium_confirmed": momentum_continuation_confirmed,
+                "trend_momentum_underlying_quality_confirmed": strong_fresh_trend_context,
+                "trend_momentum_close_location": trend_momentum_close_location,
+                "trend_momentum_completed_option_rvol": completed_option_rvol,
                 "days_to_expiry": indicators.get("days_to_expiry"),
                 "strike_distance_from_atm": indicators.get("strike_distance_from_atm"),
                 "minutes_since_open": indicators.get("minutes_since_open"),
