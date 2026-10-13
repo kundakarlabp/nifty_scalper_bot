@@ -521,6 +521,8 @@ def _scenario(
     rejections: dict[str, Counter[str]] = {}
     evaluated: Counter[str] = Counter()
     entry_funnels: dict[str, Counter[str]] = {}
+    eligible_option_days: set[str] = set()
+    eligible_option_bars = 0
     pending: dict[tuple[str, str], dict[str, Any]] = {}
     positions: dict[tuple[str, str], dict[str, Any]] = {}
     engine = IndicatorEngine()
@@ -793,6 +795,8 @@ def _scenario(
             bar = bars[symbol]
             if strict_liquidity and bar["volume"] <= 0:
                 continue
+            eligible_option_days.add(timestamp.date().isoformat())
+            eligible_option_bars += 1
             # ORB's only option-derived numeric feature is canonical ATR.
             # Underlying structure still comes from the production strategy's
             # completed-history interface. Other components require full context.
@@ -919,9 +923,12 @@ def _scenario(
             "session_data_end_unresolved",
             stress_reason="unpriced_session_end_stress",
         )
-    days = sorted(
+    source_days = sorted(
         {ts.date().isoformat() for symbol in options for ts in histories[symbol]}
     )
+    # Holdout sessions must come from the admitted historical option universe.
+    source_eligible_days = sorted(eligible_option_days)
+    days = source_eligible_days if require_archived_weekly_atm else source_days
     cutoff = days[max(0, int(len(days) * 0.8))] if days else ""
     for trades in outcomes.values():
         trades.sort(key=lambda trade: (trade["exit_time"], trade["symbol"]))
@@ -944,6 +951,16 @@ def _scenario(
                     Counter(trade["exit_reason"] for trade in stress_outcomes[name])
                 ),
                 "data_quality": {
+                    "source_option_session_count": len(source_days),
+                    "eligible_session_count": len(eligible_option_days),
+                    "eligible_session_dates": sorted(eligible_option_days),
+                    "eligible_option_bar_count": eligible_option_bars,
+                    "development_eligible_session_count": sum(
+                        day < cutoff for day in days
+                    ),
+                    "holdout_eligible_session_count": sum(
+                        day >= cutoff for day in days
+                    ),
                     "resolved_exit_count": len(trades),
                     "unresolved_exit_count": len(unresolved_outcomes[name]),
                     "unresolved_exit_rate": (
