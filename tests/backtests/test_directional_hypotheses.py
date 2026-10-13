@@ -311,3 +311,56 @@ def test_fixed_hypothesis_summary_preserves_costs_periods_and_missing_exits() ->
     ]
     with pytest.raises(ValueError, match="hypothesis_scenario_incomplete"):
         summarize_fixed_hypothesis_days(corrupted)
+
+
+
+def test_fixed_cohort_slippage_uses_identical_trades_without_reselection() -> None:
+    """Stress realized 10-bps trades without re-running the entry RR gate."""
+    from nifty_scalper_bot.risk.cost_model import estimate_round_trip_cost
+    from scripts.research_orb_multiyear import fixed_cohort_slippage_stress
+
+    base_entry = 100.0
+    base_exit = 104.0
+    entry = base_entry * 1.001
+    exit_price = base_exit * 0.999
+    qty = 75
+    costs = estimate_round_trip_cost(
+        entry_price=entry, exit_price=exit_price, quantity=qty
+    )
+    trade = {
+        "entry_time": "2020-01-02T10:01:00+05:30",
+        "exit_time": "2020-01-02T10:05:00+05:30",
+        "entry_price": entry,
+        "exit_price": exit_price,
+        "quantity": qty,
+        "gross_pnl": (exit_price - entry) * qty,
+        "fees": costs.total,
+        "net_pnl": (exit_price - entry) * qty - costs.total,
+        "duration_minutes": 4.0,
+        "cost_source": "canonical_model_estimate",
+        "exit_reason": "target",
+    }
+    base = {
+        "phase": "final",
+        "candidate": "CompressionResearch",
+        "slippage_bps_per_side": 10.0,
+        "trades": [trade],
+        "unresolved_trades": [{"unresolved_reason": "history_gap_unresolved"}],
+    }
+    stress = fixed_cohort_slippage_stress([base])
+    assert len(stress) == 3
+    assert [row["slippage_bps_per_side"] for row in stress] == [10.0, 25.0, 50.0]
+    assert all(row["metrics"]["trade_count"] == 1 for row in stress)
+    assert all(row["unresolved_exit_count"] == 1 for row in stress)
+    assert stress[0]["metrics"]["net_pnl"] == pytest.approx(trade["net_pnl"])
+    assert (
+        stress[0]["metrics"]["net_pnl"]
+        > stress[1]["metrics"]["net_pnl"]
+        > stress[2]["metrics"]["net_pnl"]
+    )
+    assert stress[1]["metrics"]["fees"] != pytest.approx(trade["fees"])
+    assert all(row["method"] == "same_10bps_resolved_trade_cohort" for row in stress)
+    with pytest.raises(ValueError, match="research_cost_source_unverified"):
+        fixed_cohort_slippage_stress(
+            [{**base, "trades": [{**trade, "cost_source": "unverified"}]}]
+        )
