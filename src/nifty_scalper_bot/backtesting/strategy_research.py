@@ -489,6 +489,7 @@ def _scenario(
     stress_outcomes: dict[str, list[dict[str, Any]]] = {}
     rejections: dict[str, Counter[str]] = {}
     evaluated: Counter[str] = Counter()
+    entry_funnels: dict[str, Counter[str]] = {}
     pending: dict[tuple[str, str], dict[str, Any]] = {}
     positions: dict[tuple[str, str], dict[str, Any]] = {}
     engine = IndicatorEngine()
@@ -598,6 +599,7 @@ def _scenario(
                 unresolved_outcomes.setdefault(strategy.name, [])
                 stress_outcomes.setdefault(strategy.name, [])
                 rejections.setdefault(strategy.name, Counter())
+                entry_funnels.setdefault(strategy.name, Counter())
             current_day = timestamp.date()
         bars = {
             symbol: history[timestamp]
@@ -629,6 +631,7 @@ def _scenario(
                 if economics.net_rr < minimum_net_rr:
                     rejections[key[0]]["cost_net_rr_rejected"] += 1
                     continue
+            entry_funnels[key[0]]["accepted_fills"] += 1
             positions[key] = {
                 "entry_time": timestamp,
                 "entry_price": entry,
@@ -754,6 +757,7 @@ def _scenario(
                         getattr(strategy, "last_no_vote_reason", "no_signal")
                     ] += 1
                     continue
+                entry_funnels[strategy.name]["signals_emitted"] += 1
                 metadata = dict(signal.metadata or {})
                 stop_loss, take_profit, geometry_source = (
                     _resolve_research_signal_geometry(signal, bar["close"])
@@ -774,6 +778,7 @@ def _scenario(
                     if rejection is not None:
                         rejections[strategy.name][rejection] += 1
                         continue
+                entry_funnels[strategy.name]["geometry_valid"] += 1
                 if minimum_opening_rvol is not None:
                     rvol = opening_relative_volume(
                         histories[future], timestamp, settings.orb.orb_minutes
@@ -787,6 +792,7 @@ def _scenario(
                             )
                         ] += 1
                         continue
+                entry_funnels[strategy.name]["next_bar_intents"] += 1
                 pending[key] = {
                     "available_at": timestamp + timedelta(minutes=1),
                     "stop_loss": stop_loss,
@@ -885,6 +891,10 @@ def _scenario(
                     [trade for trade in trades if trade["entry_time"][:10] >= cutoff]
                 ),
                 "evaluations": evaluated[name],
+                "entry_funnel": {
+                    "evaluations": evaluated[name],
+                    **dict(entry_funnels[name]),
+                },
                 "no_vote_reasons": dict(rejections[name]),
                 "research_gate_counts": dict(
                     getattr(
