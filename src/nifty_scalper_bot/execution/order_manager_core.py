@@ -8871,8 +8871,8 @@ class OrderManager:
 
     def _check_zombie_orders(self) -> None:
         """
-        🛡️ SAFETY: Auto-cancel orders stuck in PENDING for too long (> 45s).
-        Prevents margin blockage and 'ghost' fills.
+        Auto-cancel stale entry orders still PENDING after 45s.
+        Never cancel broker-resident protective or other reducing orders.
         """
         now = time.time()
         ZOMBIE_TIMEOUT = 45.0  # Seconds
@@ -8880,11 +8880,16 @@ class OrderManager:
         zombies = []
         with self._lock:
             for oid, order in self._orders.items():
-                if order.status == OrderStatus.PENDING:
-                    # Check age
-                    age = now - order.timestamp.timestamp()
-                    if age > ZOMBIE_TIMEOUT:
-                        zombies.append(oid)
+                if order.status != OrderStatus.PENDING:
+                    continue
+                # Exchange SLs and other reducing orders may legitimately stay
+                # pending until triggered. Only known entry intents can expire.
+                intent = str(getattr(order, "intent", "UNKNOWN") or "UNKNOWN")
+                if intent.strip().upper() not in _TRADE_PLAN_IDENTITY_INTENTS:
+                    continue
+                age = now - order.timestamp.timestamp()
+                if age > ZOMBIE_TIMEOUT:
+                    zombies.append(oid)
 
         if not zombies:
             return

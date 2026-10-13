@@ -700,3 +700,45 @@ def test_exit_order_raw_broker_receives_only_zerodha_supported_tag(
     assert order_id == "strict-exit-1"
     assert broker.payload is not None
     assert broker.payload["tag"] == "EXIT_abcd1234_1"
+
+
+@pytest.mark.parametrize(
+    ("intent", "tag", "age_seconds", "should_cancel"),
+    [
+        ("ENTRY", "SMC", 60, True),
+        ("SCALE_IN", "scale_in", 60, True),
+        ("REVERSAL", "reversal", 60, True),
+        ("EXIT", "psl_entry", 60, False),
+        ("REDUCE", "EXIT_GUARD", 60, False),
+        ("FLATTEN", "operator_flatten", 60, False),
+        ("UNKNOWN", "adopted_manual_trade", 60, False),
+        ("ENTRY", "SMC", 10, False),
+    ],
+)
+def test_stale_order_cleanup_only_cancels_known_entry_intents(
+    intent, tag, age_seconds, should_cancel
+):
+    """Broker-resident exchange stops must never be killed as pending zombies."""
+    from datetime import datetime, timedelta, timezone
+    from threading import RLock
+    from types import SimpleNamespace
+
+    from nifty_scalper_bot.execution.order_manager import OrderStatus
+
+    cancelled = []
+    order = SimpleNamespace(
+        status=OrderStatus.PENDING,
+        intent=intent,
+        tag=tag,
+        timestamp=datetime.now(timezone.utc) - timedelta(seconds=age_seconds),
+    )
+    manager = SimpleNamespace(
+        _lock=RLock(),
+        _orders={"pending-order": order},
+        _logger=SimpleNamespace(warning=lambda *a, **kw: None),
+        cancel_order=cancelled.append,
+    )
+
+    OrderManager._check_zombie_orders(manager)
+
+    assert cancelled == (["pending-order"] if should_cancel else [])
