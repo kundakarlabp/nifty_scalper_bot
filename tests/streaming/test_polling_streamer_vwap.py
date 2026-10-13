@@ -14,8 +14,8 @@ class FakeResolver:
         return 'NSE:NIFTY'
 
 
-def test_fetch_ticks_falls_back_to_ohlc_close_for_vwap() -> None:
-    """Test VWAP fallback. Args: None. Returns: None. Raises: None."""
+def test_fetch_ticks_does_not_fabricate_vwap_from_ohlc_close() -> None:
+    """An unavailable broker VWAP must remain unavailable despite OHLC close."""
 
     class QuoteBroker:
         def quote(self, symbols: list[str]) -> dict[str, dict[str, Any]]:
@@ -39,7 +39,8 @@ def test_fetch_ticks_falls_back_to_ohlc_close_for_vwap() -> None:
     )
     ticks = streamer._fetch_ticks([101])
     assert len(ticks) == 1
-    assert ticks[0]['average_price'] == pytest.approx(122.0)
+    assert ticks[0]['average_price'] == pytest.approx(0.0)
+    assert ticks[0]['last_price'] == pytest.approx(123.45)
 
 
 def test_fetch_ticks_preserves_valid_broker_datetime_and_labels_receipt() -> None:
