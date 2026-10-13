@@ -97,7 +97,9 @@ def classify_completed_futures_bars(
             abs(float(rows[index]["high"]) - closes[index - 1]),
             abs(float(rows[index]["low"]) - closes[index - 1]),
         )
-        for index in range(len(rows) - 14, len(rows) - 1)
+        # Fourteen completed ranges ending with the preceding bar;
+        # exclude the signal candle to prevent future-bar leakage.
+        for index in range(len(rows) - 15, len(rows) - 1)
     ]
     atr = sum(true_ranges) / len(true_ranges)
     volume_mean = sum(volumes[-21:-1]) / 20.0
