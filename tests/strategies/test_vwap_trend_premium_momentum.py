@@ -12,9 +12,7 @@ from nifty_scalper_bot.strategies.elite_strategies.vwap_pro import VWAPProStrate
 
 def _evaluate(monkeypatch, *, side="CE", enabled=True, **updates):
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
-    monkeypatch.setenv(
-        "VWAP_TREND_MOMENTUM_ENABLED", "true" if enabled else "false"
-    )
+    monkeypatch.setenv("VWAP_TREND_MOMENTUM_ENABLED", "true" if enabled else "false")
     monkeypatch.setenv("VWAP_TREND_MOMENTUM_OPTION_RVOL_MIN", "1.5")
     indicators = {
         "vwap": 100.0,
@@ -43,23 +41,23 @@ def _evaluate(monkeypatch, *, side="CE", enabled=True, **updates):
         def get_history(self, _symbol, count=None, *, field="close"):
             assert field == "bars"
             assert count in (None, 1)
-            return [{
-                "timestamp": indicators.get(
-                    "history_timestamp", indicators["latest_bar_ts"]
-                ),
-                "open": indicators["open"],
-                "high": indicators["high"],
-                "low": indicators["low"],
-                "close": indicators["close"],
-                "volume": indicators["volume"],
-                "is_complete": indicators.get("is_complete", True),
-                "is_provisional": indicators.get("is_provisional", False),
-            }]
+            return [
+                {
+                    "timestamp": indicators.get(
+                        "history_timestamp", indicators["latest_bar_ts"]
+                    ),
+                    "open": indicators["open"],
+                    "high": indicators["high"],
+                    "low": indicators["low"],
+                    "close": indicators["close"],
+                    "volume": indicators["volume"],
+                    "is_complete": indicators.get("is_complete", True),
+                    "is_provisional": indicators.get("is_provisional", False),
+                }
+            ]
 
     strategy = VWAPProStrategy(VWAPProStrategyConfig(), _CompletedBarEngine())
-    signal = strategy._evaluate_signal(
-        f"NFO:NIFTY2691523400{side}", indicators, 103.0
-    )
+    signal = strategy._evaluate_signal(f"NFO:NIFTY2691523400{side}", indicators, 103.0)
     return strategy, signal
 
 
@@ -111,10 +109,13 @@ def test_weak_option_candle_does_not_confirm_momentum(monkeypatch):
     assert strategy.last_no_vote_reason == "trend_momentum_premium_not_confirmed"
 
 
-@pytest.mark.parametrize("updates", [
-    {"is_complete": False},
-    {"is_provisional": True},
-])
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"is_complete": False},
+        {"is_provisional": True},
+    ],
+)
 def test_explicitly_unfinished_option_candle_is_rejected(monkeypatch, updates):
     strategy, signal = _evaluate(monkeypatch, **updates)
 
