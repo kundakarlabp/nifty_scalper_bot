@@ -44,7 +44,9 @@ def _evaluate(monkeypatch, *, side="CE", enabled=True, **updates):
             assert field == "bars"
             assert count in (None, 1)
             return [{
-                "timestamp": indicators.get("history_timestamp", indicators["latest_bar_ts"]),
+                "timestamp": indicators.get(
+                    "history_timestamp", indicators["latest_bar_ts"]
+                ),
                 "open": indicators["open"],
                 "high": indicators["high"],
                 "low": indicators["low"],
