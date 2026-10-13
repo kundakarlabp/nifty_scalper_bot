@@ -931,7 +931,6 @@ def test_flat_reconcile_checks_broker_orderbook_when_history_returns_unknown(
     assert broker.cancel_calls == []
 
 
-
 def test_flat_reconcile_recovers_stop_from_complete_broker_tradebook(
     monkeypatch,
 ) -> None:
@@ -992,15 +991,12 @@ def test_open_stop_status_takes_priority_over_tradebook(
     monkeypatch.setattr(
         broker,
         "get_order_trades",
-        lambda _order_id: [
-            {"order_id": "open-stop", "trade_id": "t1", "quantity": 65}
-        ],
+        lambda _order_id: [{"order_id": "open-stop", "trade_id": "t1", "quantity": 65}],
         raising=False,
     )
 
     assert manager.reconcile_symbol_flat(SYMBOL) == 0
     assert manager.get_bracket("entry-1") is bracket
-
 
 
 def test_unknown_history_does_not_override_live_stop_in_orderbook(
