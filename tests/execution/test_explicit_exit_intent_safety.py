@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone
 from threading import RLock
-import logging
 from types import SimpleNamespace
 
 import pytest
