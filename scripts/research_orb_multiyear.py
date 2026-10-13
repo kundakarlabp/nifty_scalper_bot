@@ -31,10 +31,16 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from nifty_scalper_bot.backtesting.directional_hypotheses import (  # noqa: E402
+    _research_strategies,
+)
 from nifty_scalper_bot.backtesting.strategy_research import (  # noqa: E402
+    _scenario,
+    load_archive,
     run_orb_session_research,
     summarize,
 )
+from nifty_scalper_bot.config.settings import get_settings  # noqa: E402
 from nifty_scalper_bot.risk.cost_model import estimate_round_trip_cost  # noqa: E402
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -600,7 +606,26 @@ def run_fixed_hypothesis_day(task: tuple[str, str]) -> dict[str, Any]:
             normalize_opening_range=True,
         )
         scenario["strategies"]["ORBRangeScaledResearch"] = scaled
-    return {"day": day, "scenarios": research["scenarios"]}
+    # Policy-level ablation, fixed geometry and costs, no strategy tuning.
+    # Turning trailing off can change later admissions; aggregate and matched
+    # entry comparisons are therefore both explicitly reported below.
+    histories, instruments, _ = load_archive(directory)
+    no_trailing = _scenario(
+        histories,
+        instruments,
+        get_settings().elite,
+        10.0,
+        components={"PullbackResearch", "CompressionResearch", "MomentumResearch"},
+        minimum_net_rr=1.5,
+        strict_liquidity=True,
+        lifecycle_proxy=False,
+        strategy_factory=_research_strategies,
+    )
+    return {
+        "day": day,
+        "scenarios": research["scenarios"],
+        "exit_ablation": no_trailing["strategies"],
+    }
 
 
 def summarize_fixed_hypothesis_days(
@@ -670,6 +695,71 @@ def summarize_fixed_hypothesis_days(
                     }
                 )
     return results
+
+
+def summarize_exit_lifecycle_ablation(
+    daily: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Compare original vs non-trailing proxy; keep shared entries identifiable.
+
+    This is not a randomized or current-live exit comparison. Holding positions
+    longer changes which subsequent entry intents the simulator can admit.
+    """
+    years = {
+        "development": {"2017", "2018"},
+        "validation": {"2019"},
+        "final": {"2020"},
+    }
+    families = ("PullbackResearch", "CompressionResearch", "MomentumResearch")
+    if len({row["day"] for row in daily}) != len(daily):
+        raise ValueError("hypothesis_duplicate_session")
+    summary: list[dict[str, Any]] = []
+    for phase, year_set in years.items():
+        sessions = [row for row in daily if row["day"][:4] in year_set]
+        for family in families:
+            original: list[dict[str, Any]] = []
+            alternate: list[dict[str, Any]] = []
+            unresolved = [0, 0]
+            for session in sessions:
+                before = [
+                    item for item in session["scenarios"]
+                    if item["slippage_bps_per_side"] == 10.0
+                ]
+                after = session.get("exit_ablation", {})
+                if len(before) != 1 or family not in after:
+                    raise ValueError("exit_ablation_scenario_incomplete")
+                old = before[0]["strategies"][family]
+                new = after[family]
+                original.extend(old["trades"])
+                alternate.extend(new["trades"])
+                unresolved[0] += len(old["unresolved_trades"])
+                unresolved[1] += len(new["unresolved_trades"])
+            def by_entry(trades: list[dict[str, Any]]) -> dict[tuple[str, str], dict[str, Any]]:
+                keyed = {(t["symbol"], t["entry_time"]): t for t in trades}
+                if len(keyed) != len(trades):
+                    raise ValueError("exit_ablation_duplicate_trade_identity")
+                return keyed
+            a, b = by_entry(original), by_entry(alternate)
+            matched = sorted(a.keys() & b.keys())
+            summary.append({
+                "phase": phase,
+                "candidate": family,
+                "slippage_bps_per_side": 10.0,
+                "method": "one_policy_change_no_bar_lifecycle_proxy",
+                "original": {
+                    "metrics": summarize(original),
+                    "unresolved_exit_count": unresolved[0],
+                },
+                "no_trailing": {
+                    "metrics": summarize(alternate),
+                    "unresolved_exit_count": unresolved[1],
+                },
+                "identical_entry_count": len(matched),
+                "identical_entry_original_metrics": summarize([a[k] for k in matched]),
+                "identical_entry_no_trailing_metrics": summarize([b[k] for k in matched]),
+                "caveat": "nonmatched_accepted_entries_change_with_holding_time",
+            })
+    return summary
 
 
 def fixed_cohort_slippage_stress(
@@ -758,6 +848,7 @@ def run_fixed_hypothesis_study(output: Path, workers: int) -> None:
     daily = [json.loads((directory / f"{day}.json").read_text()) for day in days]
     results = summarize_fixed_hypothesis_days(daily)
     cost_stress = fixed_cohort_slippage_stress(results)
+    exit_ablation = summarize_exit_lifecycle_ablation(daily)
     write_json(
         output / "fixed_hypothesis_results.json",
         {
@@ -806,10 +897,12 @@ def run_fixed_hypothesis_study(output: Path, workers: int) -> None:
                 "No production basket selection, arbitration or broker parity",
                 "Unresolved exits excluded from primary and shown separately",
                 "Opening-range normalization was proposed after earlier ORB results",
+                "No-trailing ablation differs in position occupancy; paired entries separately reported",
                 "No setting selected or authorized for live trading",
             ],
             "results": results,
             "fixed_10bps_cohort_slippage_stress": cost_stress,
+            "fixed_10bps_exit_lifecycle_ablation": exit_ablation,
             "research_quality": {
                 "matched_orb_baseline_has_trades": any(
                     row["candidate"] == "ORBNetGateBaseline"
