@@ -432,21 +432,26 @@ def test_exit_lifecycle_ablation_preserves_original_and_paired_entries() -> None
         }
         for family in families
     }
-    daily = [{
-        "day": "2020-01-02",
-        "scenarios": [{
-            "slippage_bps_per_side": 10.0,
-            "strategies": {
-                family: {"trades": [first, second], "unresolved_trades": []}
-                for family in families
-            },
-        }],
-        "exit_ablation": no_trailing,
-    }]
+    daily = [
+        {
+            "day": "2020-01-02",
+            "scenarios": [
+                {
+                    "slippage_bps_per_side": 10.0,
+                    "strategies": {
+                        family: {"trades": [first, second], "unresolved_trades": []}
+                        for family in families
+                    },
+                }
+            ],
+            "exit_ablation": no_trailing,
+        }
+    ]
     summary = summarize_exit_lifecycle_ablation(daily)
     assert len(summary) == 9
     final = next(
-        row for row in summary
+        row
+        for row in summary
         if row["phase"] == "final" and row["candidate"] == "PullbackResearch"
     )
     assert final["original"]["metrics"]["trade_count"] == 2
@@ -458,14 +463,16 @@ def test_exit_lifecycle_ablation_preserves_original_and_paired_entries() -> None
     with pytest.raises(ValueError, match="exit_ablation_scenario_incomplete"):
         summarize_exit_lifecycle_ablation([{**daily[0], "exit_ablation": {}}])
     with pytest.raises(ValueError, match="exit_ablation_duplicate_trade_identity"):
-        corrupted = [{
-            **daily[0],
-            "exit_ablation": {
-                **no_trailing,
-                "PullbackResearch": {
-                    "trades": [longer, longer],
-                    "unresolved_trades": [],
+        corrupted = [
+            {
+                **daily[0],
+                "exit_ablation": {
+                    **no_trailing,
+                    "PullbackResearch": {
+                        "trades": [longer, longer],
+                        "unresolved_trades": [],
+                    },
                 },
-            },
-        }]
+            }
+        ]
         summarize_exit_lifecycle_ablation(corrupted)
