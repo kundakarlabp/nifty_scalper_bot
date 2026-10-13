@@ -770,6 +770,7 @@ def _scenario(
                 ):
                     rejections[strategy.name]["invalid_signal_geometry"] += 1
                     continue
+                entry_funnels[strategy.name]["geometry_valid"] += 1
                 if require_option_premium_confirmation:
                     rejection = _option_premium_confirmation_reason(
                         bar,
@@ -778,7 +779,6 @@ def _scenario(
                     if rejection is not None:
                         rejections[strategy.name][rejection] += 1
                         continue
-                entry_funnels[strategy.name]["geometry_valid"] += 1
                 if minimum_opening_rvol is not None:
                     rvol = opening_relative_volume(
                         histories[future], timestamp, settings.orb.orb_minutes
@@ -893,7 +893,10 @@ def _scenario(
                 "evaluations": evaluated[name],
                 "entry_funnel": {
                     "evaluations": evaluated[name],
-                    **dict(entry_funnels[name]),
+                    "signals_emitted": entry_funnels[name]["signals_emitted"],
+                    "geometry_valid": entry_funnels[name]["geometry_valid"],
+                    "next_bar_intents": entry_funnels[name]["next_bar_intents"],
+                    "accepted_fills": entry_funnels[name]["accepted_fills"],
                 },
                 "no_vote_reasons": dict(rejections[name]),
                 "research_gate_counts": dict(
