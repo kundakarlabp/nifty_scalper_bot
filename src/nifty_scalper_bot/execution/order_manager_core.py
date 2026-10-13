@@ -7916,11 +7916,9 @@ class OrderManager:
 
             self._notify_failed_entry_terminal(order, old_status, status_raw)
 
-            # ── FIX (BUG 3): CANCELLED exit orders — reactivate bracket.
-            # _check_zombie_orders cancels stuck PENDING orders after 45s via
-            # cancel_order(). If that order was an exit, on_order_update(CANCELLED)
-            # is the only place to catch it and recover the bracket.
-            # Without this, the position stays open with no SL protection.
+            # Recover explicitly cancelled exits (e.g. broker/operator action).
+            # Generic stale-entry cleanup must never cancel protective orders;
+            # broker cancellation can still require bracket reconciliation.
             is_cancelled = status_raw in (
                 "CANCELLED",
                 "CANCELED",
