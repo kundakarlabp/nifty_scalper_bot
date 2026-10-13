@@ -11,10 +11,15 @@ import pytest
 
 from nifty_scalper_bot.backtesting.directional_hypotheses import (
     ArchivedDirectionalHypothesis,
+    ORBRangeScaledResearch,
     classify_completed_futures_bars,
     run_directional_hypothesis_research,
 )
 from nifty_scalper_bot.risk.cost_model import estimate_round_trip_cost
+from nifty_scalper_bot.strategies.elite_strategies.config_models import (
+    ORBProStrategyConfig,
+)
+from nifty_scalper_bot.strategies.elite_strategies.orb_pro import ORBProStrategy
 
 _START = datetime(2026, 10, 1, 9, 30, tzinfo=timezone(timedelta(hours=5, minutes=30)))
 _FUTURE = "NFO:NIFTY26OCTFUT"
@@ -229,6 +234,7 @@ def test_fixed_hypothesis_summary_preserves_costs_periods_and_missing_exits() ->
 
     names = (
         "ORBNetGateBaseline",
+        "ORBRangeScaledResearch",
         "PullbackResearch",
         "CompressionResearch",
         "MomentumResearch",
@@ -270,7 +276,7 @@ def test_fixed_hypothesis_summary_preserves_costs_periods_and_missing_exits() ->
         sessions.append({"day": day, "scenarios": scenarios})
 
     results = summarize_fixed_hypothesis_days(sessions)
-    assert len(results) == 36
+    assert len(results) == 45
     development = next(
         row
         for row in results
@@ -363,3 +369,35 @@ def test_fixed_cohort_slippage_uses_identical_trades_without_reselection() -> No
         fixed_cohort_slippage_stress(
             [{**base, "trades": [{**trade, "cost_source": "unverified"}]}]
         )
+
+
+def test_orb_15minute_range_scaling_research_only() -> None:
+    """Expose an ATR horizon mismatch, preserving every other structural gate."""
+    config = ORBProStrategyConfig(orb_minutes=15)
+    engine = _HistoryEngine(_momentum_bars())
+    live_reference = ORBProStrategy(config, engine)
+    research = ORBRangeScaledResearch(config, engine)
+    evidence = {
+        "side": "CE",
+        "direction": "CE",
+        "penetration_atr": 0.3,
+        "volume_ratio": 1.5,
+        "opening_range_atr": 3.5,
+        "indicators": {"futures_vwap_slope": 0.05},
+    }
+    assert live_reference._structural_evidence(**evidence)[0] is False
+    passed, reasons, balanced, _, _ = research._structural_evidence(**evidence)
+    assert passed is True
+    assert balanced is True
+    assert "balanced_opening_range" in reasons
+    assert research.research_gate_counts["evaluated"] == 1
+    assert research.research_gate_counts["raw_range_pass"] == 0
+    assert research.research_gate_counts["scaled_range_pass"] == 1
+
+    blocked, *_ = research._structural_evidence(
+        **{**evidence, "volume_ratio": 0.4}
+    )
+    assert blocked is False
+    assert research.research_gate_counts["failed_underlying_volume_confirmation"] == 1
+    assert research.name == "ORBPro"
+    assert live_reference._structural_evidence(**evidence)[0] is False
