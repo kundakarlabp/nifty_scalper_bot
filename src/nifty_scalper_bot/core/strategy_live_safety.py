@@ -61,11 +61,15 @@ def _metadata_true(value: Any) -> bool:
 
 
 def _indicator_bars_available(manager: Any, symbol: str) -> int:
-    getter = getattr(getattr(manager, "_indicator_engine", None), "get_history", None)
-    if not callable(getter):
-        return 0
-    with suppress(Exception):
-        return len(getter(symbol) or [])
+    indicator = getattr(manager, "_indicator_engine", None)
+    counter = getattr(indicator, "history_count", None)
+    if callable(counter):
+        with suppress(Exception):
+            return max(0, int(counter(symbol)))
+    getter = getattr(indicator, "get_history", None)
+    if callable(getter):
+        with suppress(Exception):
+            return len(getter(symbol) or [])
     return 0
 
 
