@@ -14,6 +14,7 @@ from nifty_scalper_bot.backtesting.directional_hypotheses import (
     classify_completed_futures_bars,
     run_directional_hypothesis_research,
 )
+from nifty_scalper_bot.risk.cost_model import estimate_round_trip_cost
 
 _START = datetime(2026, 10, 1, 9, 30, tzinfo=timezone(timedelta(hours=5, minutes=30)))
 _FUTURE = "NFO:NIFTY26OCTFUT"
@@ -316,7 +317,6 @@ def test_fixed_hypothesis_summary_preserves_costs_periods_and_missing_exits() ->
 
 def test_fixed_cohort_slippage_uses_identical_trades_without_reselection() -> None:
     """Stress realized 10-bps trades without re-running the entry RR gate."""
-    from nifty_scalper_bot.risk.cost_model import estimate_round_trip_cost
     from scripts.research_orb_multiyear import fixed_cohort_slippage_stress
 
     base_entry = 100.0
