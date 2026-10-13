@@ -555,7 +555,10 @@ def _scenario(
             pending.clear()
             engine = IndicatorEngine()
             if os.getenv("VWAP_TREND_MOMENTUM_ENABLED", "").lower() in {
-                "1", "true", "yes", "on"
+                "1",
+                "true",
+                "yes",
+                "on",
             }:
                 regime_detector = MarketRegimeDetector()
                 regime_manager = MarketRegimeManager(regime_detector)
