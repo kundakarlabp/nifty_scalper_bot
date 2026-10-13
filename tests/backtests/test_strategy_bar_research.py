@@ -440,6 +440,7 @@ def test_vwap_comparison_is_bounded_restores_environment_and_never_auto_promotes
                 "slope": os.environ.get("VWAP_FUTURES_SLOPE_MIN_BPS"),
                 "futures_rvol": os.environ.get("VWAP_FUTURES_VOLUME_MIN_RATIO"),
                 "penetration": os.environ.get("VWAP_ALLOW_PENETRATION_ONLY_ENTRY"),
+                "trend_momentum": os.environ.get("VWAP_TREND_MOMENTUM_ENABLED"),
             }
         )
         return {
@@ -459,14 +460,16 @@ def test_vwap_comparison_is_bounded_restores_environment_and_never_auto_promotes
         replay,
     )
     monkeypatch.setenv("VWAP_FUTURES_SLOPE_MIN_BPS", "1.25")
+    monkeypatch.setenv("VWAP_TREND_MOMENTUM_ENABLED", "true")
     before = dict(os.environ)
 
     report = run_vwap_comparison(tmp_path)
 
     assert dict(os.environ) == before
-    assert report["candidate_count"] == 7
+    assert report["candidate_count"] == 8
     assert report["slippage_scenario_count"] == 3
-    assert len(observed) == 21
+    assert len(observed) == 24
+    assert sum(row["trend_momentum"] == "true" for row in observed) == 3
     slippages = {
         row["slippage_bps_per_side"] for row in report["candidates"][0]["scenarios"]
     }
