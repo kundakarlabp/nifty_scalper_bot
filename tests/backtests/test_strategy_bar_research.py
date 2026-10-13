@@ -591,3 +591,128 @@ def test_opening_relative_volume_requires_prior_complete_sessions_only():
     assert opening_relative_volume(history, now - timedelta(minutes=2), 5) is None
     del history[first + timedelta(minutes=1)]
     assert opening_relative_volume(history, now, 5) is None
+
+
+@pytest.mark.parametrize(
+    "instrument,spot,when,reason",
+    [
+        (
+            {"expiry": "2026-10-13", "strike": 22400.0},
+            22401.0,
+            "2026-09-15T10:01:00+05:30",
+            "archive_weekly_expiry_not_proven",
+        ),
+        (
+            {"expiry": "2026-10-13", "strike": 22400.0},
+            22401.0,
+            "2026-10-13T10:01:00+05:30",
+            None,
+        ),
+        (
+            {"expiry": "2026-10-13", "strike": 23000.0},
+            22401.0,
+            "2026-10-12T10:01:00+05:30",
+            "archive_strike_outside_atm_basket",
+        ),
+        (
+            {"expiry": "2026-10-13"},
+            22401.0,
+            "2026-10-12T10:01:00+05:30",
+            "archive_strike_missing",
+        ),
+        (
+            {"expiry": "2026-10-06", "strike": 22400.0},
+            22401.0,
+            "2026-10-12T10:01:00+05:30",
+            "archive_weekly_expiry_not_proven",
+        ),
+    ],
+)
+def test_archived_weekly_atm_proxy_eligibility(instrument, spot, when, reason):
+    from nifty_scalper_bot.backtesting.strategy_research import (
+        _archived_weekly_atm_rejection,
+    )
+
+    assert (
+        _archived_weekly_atm_rejection(instrument, datetime.fromisoformat(when), spot)
+        == reason
+    )
+
+
+def test_vwap_research_requests_weekly_atm_scope_for_every_candidate(
+    tmp_path, monkeypatch
+):
+    from nifty_scalper_bot.backtesting.strategy_research import run_vwap_comparison
+
+    archive(tmp_path)
+    observed = []
+
+    def replay(*args, **kwargs):
+        observed.append(kwargs)
+        return {
+            "strategies": {
+                "VWAPPro": {
+                    "metrics": {"trade_count": 0, "expectancy": None},
+                    "development_metrics": {"trade_count": 0, "expectancy": None},
+                    "data_quality": {"development_unresolved_exit_count": 0},
+                    "trades": [],
+                    "setup_metrics": {},
+                }
+            }
+        }
+
+    monkeypatch.setattr(
+        "nifty_scalper_bot.backtesting.strategy_research._scenario", replay
+    )
+    run_vwap_comparison(tmp_path)
+    assert len(observed) == 24
+    assert all(call["require_archived_weekly_atm"] is True for call in observed)
+
+
+@pytest.mark.parametrize("include_strikes", [False, True])
+def test_research_weekly_atm_scope_applies_before_strategy_vote(
+    tmp_path, monkeypatch, include_strikes
+):
+    from nifty_scalper_bot.backtesting.strategy_research import _scenario, load_archive
+    from nifty_scalper_bot.config.settings import get_settings
+
+    archive(tmp_path)
+    if include_strikes:
+        for path in (tmp_path / "candles").glob("*.json"):
+            payload = json.loads(path.read_text())
+            if payload["instrument"]["instrument_type"] in {"CE", "PE"}:
+                payload["instrument"]["strike"] = 100.0
+                path.write_text(json.dumps(payload))
+
+    observations = []
+
+    class Candidate:
+        name = "VWAPPro"
+
+        def generate_signal(self, symbol, indicators, current_price, position=None):
+            observations.append(symbol)
+            return None
+
+        @property
+        def evaluation_health(self):
+            return {"healthy": True}
+
+    histories, instruments, _ = load_archive(tmp_path)
+    report = _scenario(
+        histories,
+        instruments,
+        get_settings().elite,
+        10.0,
+        components={"VWAPPro"},
+        require_archived_weekly_atm=True,
+        strategy_factory=lambda engine: [Candidate()],
+    )
+    assert report["archive_weekly_atm_proxy_enabled"] is True
+    result = report["strategies"]["VWAPPro"]
+    if include_strikes:
+        assert result["evaluations"] == 8
+        assert len(observations) == 8
+    else:
+        assert result["evaluations"] == 0
+        assert observations == []
+        assert result["no_vote_reasons"]["archive_strike_missing"] == 8
