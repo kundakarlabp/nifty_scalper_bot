@@ -274,6 +274,13 @@ def test_fixed_hypothesis_summary_preserves_costs_periods_and_missing_exits() ->
                     "unresolved_trades": unresolved,
                     "worst_case_stress_trades": [trade(day)] if is_reference else [],
                     "no_vote_reasons": {"no_setup": 3},
+                    "entry_funnel": {
+                        "evaluations": 12,
+                        "signals_emitted": 5,
+                        "geometry_valid": 4,
+                        "next_bar_intents": 3,
+                        "accepted_fills": int(is_reference),
+                    },
                 }
             scenarios.append({"slippage_bps_per_side": bps, "strategies": strategies})
         sessions.append({"day": day, "scenarios": scenarios})
@@ -292,6 +299,16 @@ def test_fixed_hypothesis_summary_preserves_costs_periods_and_missing_exits() ->
     assert development["metrics"]["gross_pnl"] == 750.0
     assert development["metrics"]["fees"] == 150.0
     assert development["metrics"]["net_pnl"] == 600.0
+    assert development["entry_funnel"] == {
+        "evaluations": 24,
+        "signals_emitted": 10,
+        "geometry_valid": 8,
+        "next_bar_intents": 6,
+        "accepted_fills": 2,
+    }
+    assert development["entry_funnel"]["accepted_fills"] == development["metrics"][
+        "trade_count"
+    ]
     holdout = next(
         row
         for row in results
@@ -300,6 +317,7 @@ def test_fixed_hypothesis_summary_preserves_costs_periods_and_missing_exits() ->
         and row["slippage_bps_per_side"] == 10.0
     )
     assert holdout["metrics"]["trade_count"] == 0
+    assert holdout["entry_funnel"]["accepted_fills"] == 0
     assert holdout["data_quality"]["unresolved_exit_count"] == 1
     assert holdout["data_quality"]["primary_metrics_complete"] is False
     with pytest.raises(ValueError, match="hypothesis_duplicate_session"):
