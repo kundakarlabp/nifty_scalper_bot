@@ -11,7 +11,7 @@ class FakeResolver:
 
     def format_token_as_symbol(self, token: int) -> str:
         """Return symbol. Args: token. Returns: symbol. Raises: None."""
-        return 'NSE:NIFTY'
+        return "NSE:NIFTY"
 
 
 def test_fetch_ticks_does_not_fabricate_vwap_from_ohlc_close() -> None:
@@ -22,11 +22,11 @@ def test_fetch_ticks_does_not_fabricate_vwap_from_ohlc_close() -> None:
             """Return quote payload. Args: symbols. Returns: quote map. Raises: None."""
             return {
                 symbols[0]: {
-                    'last_price': 123.45,
-                    'instrument_token': 101,
-                    'average_price': 0.0,
-                    'volume': 0,
-                    'ohlc': {'close': 122.0},
+                    "last_price": 123.45,
+                    "instrument_token": 101,
+                    "average_price": 0.0,
+                    "volume": 0,
+                    "ohlc": {"close": 122.0},
                 }
             }
 
@@ -39,8 +39,8 @@ def test_fetch_ticks_does_not_fabricate_vwap_from_ohlc_close() -> None:
     )
     ticks = streamer._fetch_ticks([101])
     assert len(ticks) == 1
-    assert ticks[0]['average_price'] == pytest.approx(0.0)
-    assert ticks[0]['last_price'] == pytest.approx(123.45)
+    assert ticks[0]["average_price"] == pytest.approx(0.0)
+    assert ticks[0]["last_price"] == pytest.approx(123.45)
 
 
 def test_fetch_ticks_preserves_valid_broker_datetime_and_labels_receipt() -> None:
