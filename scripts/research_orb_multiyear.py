@@ -35,7 +35,6 @@ from nifty_scalper_bot.backtesting.strategy_research import (  # noqa: E402
     run_orb_session_research,
     summarize,
 )
-
 from nifty_scalper_bot.risk.cost_model import estimate_round_trip_cost  # noqa: E402
 
 IST = ZoneInfo("Asia/Kolkata")
