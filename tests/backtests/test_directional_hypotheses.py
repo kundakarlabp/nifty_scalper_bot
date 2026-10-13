@@ -15,7 +15,10 @@ from nifty_scalper_bot.backtesting.directional_hypotheses import (
     classify_completed_futures_bars,
     run_directional_hypothesis_research,
 )
-from nifty_scalper_bot.risk.cost_model import estimate_round_trip_cost
+from nifty_scalper_bot.risk.cost_model import (
+    estimate_round_trip_cost,
+    evaluate_net_reward_risk,
+)
 from nifty_scalper_bot.strategies.elite_strategies.config_models import (
     ORBProStrategyConfig,
 )
@@ -476,3 +479,93 @@ def test_exit_lifecycle_ablation_preserves_original_and_paired_entries() -> None
             }
         ]
         summarize_exit_lifecycle_ablation(corrupted)
+
+
+
+def test_orb_target_cost_feasibility_without_weakening_rr_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same 8% stop can fail at 1.8R and pass at a farther 2.2R target."""
+    monkeypatch.setenv("MIN_NET_REWARD_RISK", "1.5")
+    entry = 55.0
+    stop = entry * 0.92
+    risk = entry - stop
+    first = evaluate_net_reward_risk(
+        entry_price=entry,
+        stop_price=stop,
+        target_price=entry + risk * 1.8,
+        quantity=65,
+    )
+    second = evaluate_net_reward_risk(
+        entry_price=entry,
+        stop_price=stop,
+        target_price=entry + risk * 2.2,
+        quantity=65,
+    )
+    assert first.allowed is False
+    assert second.allowed is True
+    assert first.minimum == second.minimum == 1.5
+    assert first.target_cost.total > 0
+    assert second.net_rr > first.net_rr
+
+
+def test_orb_target_sensitivity_distinguishes_cost_rejects_and_shared_trades() -> None:
+    """Never attribute altered trade admission to an improved held-out edge."""
+    from scripts.research_orb_multiyear import summarize_orb_target_sensitivity
+
+    def trade(entry_time: str, pnl: float) -> dict[str, Any]:
+        return {
+            "symbol": _CE,
+            "entry_time": entry_time,
+            "exit_time": "2020-01-02T10:59:00+05:30",
+            "entry_price": 55.0,
+            "exit_price": 56.0,
+            "quantity": 65,
+            "gross_pnl": pnl + 60.0,
+            "fees": 60.0,
+            "net_pnl": pnl,
+            "duration_minutes": 3.0,
+            "exit_reason": "stop",
+        }
+
+    shared = trade("2020-01-02T10:00:00+05:30", -90.0)
+    other = trade("2020-01-02T10:30:00+05:30", 200.0)
+    changed_shared = {**shared, "net_pnl": 110.0, "gross_pnl": 170.0}
+    original = {
+        "trades": [shared, other],
+        "unresolved_trades": [],
+        "no_vote_reasons": {"cost_net_rr_rejected": 15},
+    }
+    changed = {
+        "trades": [changed_shared],
+        "unresolved_trades": [{"reason": "ambiguous_intrabar_stop_target"}],
+        "no_vote_reasons": {"cost_net_rr_rejected": 2},
+    }
+    day = {
+        "day": "2020-01-02",
+        "scenarios": [{
+            "slippage_bps_per_side": 10.0,
+            "strategies": {"ORBRangeScaledResearch": original},
+        }],
+        "orb_target_2_2": changed,
+    }
+    result = summarize_orb_target_sensitivity([day])
+    assert len(result) == 3
+    final = next(row for row in result if row["phase"] == "final")
+    assert final["baseline"]["metrics"]["trade_count"] == 2
+    assert final["target_2_2"]["metrics"]["trade_count"] == 1
+    assert final["baseline"]["cost_net_rr_rejections"] == 15
+    assert final["target_2_2"]["cost_net_rr_rejections"] == 2
+    assert final["target_2_2"]["unresolved_exit_count"] == 1
+    assert final["identical_entry_count"] == 1
+    assert final["identical_entry_baseline"]["net_pnl"] == -90.0
+    assert final["identical_entry_target_2_2"]["net_pnl"] == 110.0
+    with pytest.raises(ValueError, match="orb_target_sensitivity_incomplete"):
+        summarize_orb_target_sensitivity([{**day, "orb_target_2_2": None}])
+    with pytest.raises(ValueError, match="orb_target_duplicate_entry"):
+        summarize_orb_target_sensitivity([
+            {**day, "orb_target_2_2": {
+                **changed,
+                "trades": [changed_shared, changed_shared],
+            }}
+        ])
