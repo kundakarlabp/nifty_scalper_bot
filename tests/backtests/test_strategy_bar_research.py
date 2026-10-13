@@ -627,9 +627,7 @@ def test_opening_relative_volume_requires_prior_complete_sessions_only():
         ),
     ],
 )
-def test_archived_weekly_atm_proxy_eligibility(
-    instrument, spot, when, reason
-):
+def test_archived_weekly_atm_proxy_eligibility(instrument, spot, when, reason):
     from nifty_scalper_bot.backtesting.strategy_research import (
         _archived_weekly_atm_rejection,
     )
@@ -676,10 +674,7 @@ def test_vwap_research_requests_weekly_atm_scope_for_every_candidate(
 def test_research_weekly_atm_scope_applies_before_strategy_vote(
     tmp_path, monkeypatch, include_strikes
 ):
-    from nifty_scalper_bot.backtesting.strategy_research import (
-        _scenario,
-        load_archive,
-    )
+    from nifty_scalper_bot.backtesting.strategy_research import _scenario, load_archive
     from nifty_scalper_bot.config.settings import get_settings
 
     archive(tmp_path)
