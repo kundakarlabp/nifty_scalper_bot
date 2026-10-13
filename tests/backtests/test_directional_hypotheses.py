@@ -306,9 +306,10 @@ def test_fixed_hypothesis_summary_preserves_costs_periods_and_missing_exits() ->
         "next_bar_intents": 6,
         "accepted_fills": 2,
     }
-    assert development["entry_funnel"]["accepted_fills"] == development["metrics"][
-        "trade_count"
-    ]
+    assert (
+        development["entry_funnel"]["accepted_fills"]
+        == development["metrics"]["trade_count"]
+    )
     holdout = next(
         row
         for row in results
