@@ -1248,6 +1248,19 @@ class ZerodhaKiteClient(BaseBrokerClient):
                 return order
         return {}
 
+    def get_order_trades(self, order_id: str) -> list[dict]:
+        """Read broker-confirmed executions for one exact Kite order ID."""
+        self._acquire_bucket(self._GENERAL_BUCKET)
+        response = self._ensure_json(
+            self._make_request("GET", f"/orders/{order_id}/trades")
+        )
+        trades = response.get("data")
+        if not isinstance(trades, list) or any(
+            not isinstance(trade, dict) for trade in trades
+        ):
+            raise BrokerError("Malformed Zerodha order-trades response")
+        return cast(list[dict], trades)
+
     def get_order_charges(
         self,
         orders: Sequence[Mapping[str, Any]],
