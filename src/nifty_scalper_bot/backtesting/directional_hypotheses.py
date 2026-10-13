@@ -18,8 +18,8 @@ from types import SimpleNamespace
 from typing import Any, Mapping, Sequence
 
 from nifty_scalper_bot.config.settings import get_settings
-from nifty_scalper_bot.strategies.indicators import IndicatorEngine
 from nifty_scalper_bot.strategies.elite_strategies.orb_pro import ORBProStrategy
+from nifty_scalper_bot.strategies.indicators import IndicatorEngine
 
 _FAMILIES = {
     "trend_pullback": "PullbackResearch",
