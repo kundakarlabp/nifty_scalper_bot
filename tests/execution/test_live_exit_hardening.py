@@ -999,6 +999,89 @@ def test_open_stop_status_takes_priority_over_tradebook(
     assert manager.get_bracket("entry-1") is bracket
 
 
+@pytest.mark.parametrize(
+    "case",
+    [
+        "verified_previous_session",
+        "same_session",
+        "fresh_book_contains_stop",
+        "fresh_book_contains_open_order",
+        "nonflat_position",
+        "unavailable_fresh_book",
+        "missing_entry_fill_time",
+        "missing_validity_provenance",
+    ],
+)
+def test_prior_session_day_stop_retirement_requires_independent_broker_proof(
+    monkeypatch, case: str
+) -> None:
+    """Old DAY stops expire; never clear an active or unproven broker order."""
+    manager, _order_manager, broker = _manager(cancel_confirms=False)
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    bracket.exchange_stop_order_id = "yesterday-stop"
+    bracket.exchange_stop_quantity = 65
+    bracket.exchange_stop_validity = "DAY"
+    bracket.created_at = time.time() - 3 * 86400
+    bracket.entry_fill_ts = time.time() - 3 * 86400
+    bracket.exchange_stop_submitted_at = time.time() - 3 * 86400
+    broker.statuses["yesterday-stop"] = "UNKNOWN"
+    broker.positions = []
+    today_orders: list[dict[str, Any]] = []
+    if case == "same_session":
+        bracket.exchange_stop_submitted_at = time.time()
+    elif case == "fresh_book_contains_stop":
+        today_orders = [{"order_id": "yesterday-stop", "status": "OPEN"}]
+    elif case == "fresh_book_contains_open_order":
+        today_orders = [
+            {
+                "order_id": "another-order",
+                "tradingsymbol": SYMBOL.split(":", 1)[1],
+                "exchange": "NFO",
+                "status": "TRIGGER PENDING",
+            }
+        ]
+    elif case == "nonflat_position":
+        broker.positions = [{"symbol": SYMBOL, "quantity": 65}]
+    elif case == "missing_entry_fill_time":
+        bracket.exchange_stop_submitted_at = None
+        bracket.entry_fill_ts = None
+    elif case == "missing_validity_provenance":
+        bracket.exchange_stop_validity = "GTC"
+    if case != "unavailable_fresh_book":
+        monkeypatch.setattr(broker, "get_orders_fresh", lambda: today_orders, raising=False)
+
+    removed = manager.reconcile_symbol_flat(SYMBOL)
+    if case == "verified_previous_session":
+        assert removed == 1
+        assert manager.get_bracket("entry-1") is None
+        assert broker.cancel_calls == []
+    else:
+        assert removed == 0
+        assert manager.get_bracket("entry-1") is bracket
+
+
+def test_legacy_previous_session_day_stop_recovers_without_new_timestamp(
+    monkeypatch,
+) -> None:
+    """Legacy restored brackets may prove age through confirmed entry-fill time."""
+    manager, _order_manager, broker = _manager(cancel_confirms=False)
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    bracket.exchange_stop_order_id = "legacy-stop"
+    bracket.exchange_stop_quantity = 65
+    bracket.exchange_stop_validity = "DAY"
+    bracket.created_at = time.time() - 3 * 86400
+    bracket.entry_fill_ts = time.time() - 3 * 86400
+    bracket.exchange_stop_submitted_at = None
+    broker.statuses["legacy-stop"] = "UNKNOWN"
+    broker.positions = []
+    monkeypatch.setattr(broker, "get_orders_fresh", lambda: [], raising=False)
+
+    assert manager.reconcile_symbol_flat(SYMBOL) == 1
+    assert broker.cancel_calls == []
+
+
 def test_unknown_history_does_not_override_live_stop_in_orderbook(
     monkeypatch,
 ) -> None:
