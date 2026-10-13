@@ -41,6 +41,7 @@ from nifty_scalper_bot.config.env_utils import parse_float_env, parse_int_env
 from datetime import datetime, timezone
 import math
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 _THREADING_MODULE = threading
 _RLOCK_CLASS = RLock
@@ -346,6 +347,9 @@ class BracketState:
     linked_exit_order_ids: list[str] = field(default_factory=list)
     exchange_stop_order_id: str | None = None
     exchange_stop_quantity: int = 0
+    # DAY stop orders cannot remain on the exchange across trading sessions.
+    exchange_stop_validity: str = "DAY"
+    exchange_stop_submitted_at: float | None = None
     exchange_stop_trigger_price: float | None = None
     exchange_stop_limit_price: float | None = None
     exchange_stop_triggered_at: float | None = None
@@ -498,6 +502,8 @@ class BracketState:
             "linked_exit_order_ids": list(self.linked_exit_order_ids),
             "exchange_stop_order_id": self.exchange_stop_order_id,
             "exchange_stop_quantity": self.exchange_stop_quantity,
+            "exchange_stop_validity": self.exchange_stop_validity,
+            "exchange_stop_submitted_at": self.exchange_stop_submitted_at,
             "exchange_stop_trigger_price": self.exchange_stop_trigger_price,
             "exchange_stop_limit_price": self.exchange_stop_limit_price,
             "exchange_stop_triggered_at": self.exchange_stop_triggered_at,
@@ -5253,6 +5259,7 @@ class BracketManager:
     def _clear_exchange_stop_locked(self, bracket: BracketState) -> None:
         bracket.exchange_stop_order_id = None
         bracket.exchange_stop_quantity = 0
+        bracket.exchange_stop_submitted_at = None
         bracket.exchange_stop_trigger_price = None
         bracket.exchange_stop_limit_price = None
         bracket.exchange_stop_triggered_at = None
@@ -5440,6 +5447,8 @@ class BracketManager:
         with self._lock:
             bracket.exchange_stop_order_id = stop_id
             bracket.exchange_stop_quantity = qty
+            bracket.exchange_stop_validity = "DAY"
+            bracket.exchange_stop_submitted_at = time.time()
             bracket.exchange_stop_trigger_price = trigger
             bracket.exchange_stop_limit_price = limit_price
             bracket.exchange_stop_triggered_at = None
@@ -5694,6 +5703,75 @@ class BracketManager:
         )
         return True
 
+    def _prior_session_day_stop_is_absent(
+        self, bracket: BracketState, order_id: str
+    ) -> bool:
+        """Prove old DAY stop is absent with fresh broker orderbook and net flat.
+
+        Kite order APIs are day-scoped. An old, expired DAY stop can correctly
+        return UNKNOWN, even if yesterday's order was filled. Neither missing
+        history nor a cached orderbook alone proves it is safe to retire.
+        """
+        if str(bracket.exchange_stop_validity or "").upper() != "DAY":
+            return False
+        if int(bracket.exchange_stop_quantity or 0) <= 0:
+            return False
+        ist = ZoneInfo("Asia/Kolkata")
+        today = datetime.now(ist).date()
+        # A restored legacy bracket has no stop submission timestamp. Its
+        # confirmed previous-session entry fill is the conservative fallback.
+        timestamps = (bracket.created_at, bracket.entry_fill_ts)
+        submitted = bracket.exchange_stop_submitted_at
+        if submitted is not None:
+            timestamps += (submitted,)
+        try:
+            if any(
+                value is None
+                or float(value) <= 0
+                or datetime.fromtimestamp(float(value), ist).date() >= today
+                for value in timestamps
+            ):
+                return False
+        except (TypeError, ValueError, OverflowError, OSError):
+            return False
+        broker = getattr(self.order_manager, "_broker", None)
+        fresh_orders = getattr(broker, "get_orders_fresh", None)
+        if not callable(fresh_orders):
+            return False
+        try:
+            if self._authoritative_position_quantity(bracket.symbol) != 0:
+                return False
+            orders = fresh_orders()
+        except Exception as exc:  # noqa: BLE001 - no proof on broker error
+            LOGGER.warning(
+                "PRIOR_SESSION_STOP_PROOF_UNAVAILABLE order_id=%s reason=%s",
+                order_id,
+                type(exc).__name__,
+            )
+            return False
+        if not isinstance(orders, list) or any(
+            not isinstance(order, Mapping) for order in orders
+        ):
+            return False
+        for order in orders:
+            if str(order.get("order_id") or order.get("id") or "") == order_id:
+                return False
+            exchange = str(order.get("exchange") or "").upper()
+            tradingsymbol = str(
+                order.get("tradingsymbol") or order.get("symbol") or ""
+            ).upper()
+            if (exchange, tradingsymbol) == tuple(bracket.symbol.upper().split(":", 1)):
+                status = str(order.get("status") or "").upper()
+                if status not in _FILLED_STATUSES | _CANCELLED_STATUSES:
+                    return False
+        LOGGER.info(
+            "PRIOR_SESSION_DAY_STOP_RETIRED symbol=%s order_id=%s "
+            "reason=broker_net_flat_and_fresh_day_book_absent",
+            bracket.symbol,
+            order_id,
+        )
+        return True
+
     def _retire_exchange_protective_stop(
         self,
         bracket: BracketState,
@@ -5715,6 +5793,12 @@ class BracketManager:
                 self._clear_exchange_stop_locked(bracket)
                 bracket.updated_at = time.time()
             return "cancelled"
+        if (
+            reason == "broker_position_flat"
+            and status_text in {"", "UNKNOWN"}
+            and self._prior_session_day_stop_is_absent(bracket, order_id)
+        ):
+            return "absent"
         if (
             reason == "broker_position_flat"
             and status_text in {"", "UNKNOWN"}
@@ -6072,6 +6156,16 @@ class BracketManager:
             ),
             exchange_stop_quantity=max(
                 0, int(payload.get("exchange_stop_quantity") or 0)
+            ),
+            # Legacy protective stops were regular DAY orders; retain that
+            # contract on restoration, never infer a GTC/overnight stop.
+            exchange_stop_validity=str(
+                payload.get("exchange_stop_validity") or "DAY"
+            ).upper(),
+            exchange_stop_submitted_at=(
+                finite_float("exchange stop submitted at", payload["exchange_stop_submitted_at"])
+                if payload.get("exchange_stop_submitted_at") is not None
+                else None
             ),
             exchange_stop_trigger_price=(
                 finite_float(
