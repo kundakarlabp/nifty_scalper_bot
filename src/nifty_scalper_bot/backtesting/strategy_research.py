@@ -429,6 +429,34 @@ def _bar_lifecycle_time_stop_due(
     return (prior_mfe / initial_risk) < 0.50
 
 
+def _archived_weekly_atm_rejection(
+    instrument: dict[str, Any], timestamp: datetime, spot_close: float
+) -> str | None:
+    """Exclude obviously wrong weekly/near-ATM contracts without inventing data."""
+    try:
+        expiry = datetime.fromisoformat(str(instrument["expiry"])).date()
+    except (KeyError, TypeError, ValueError):
+        return "archive_weekly_expiry_not_proven"
+    days = (expiry - timestamp.date()).days
+    if not 0 <= days <= 7:
+        return "archive_weekly_expiry_not_proven"
+    try:
+        strike = float(instrument["strike"])
+    except (KeyError, TypeError, ValueError):
+        return "archive_strike_missing"
+    if not (
+        math.isfinite(strike)
+        and strike > 0
+        and math.isfinite(spot_close)
+        and spot_close > 0
+    ):
+        return "archive_strike_missing"
+    atm = round(spot_close / 50) * 50
+    if abs(strike - atm) > 100:
+        return "archive_strike_outside_atm_basket"
+    return None
+
+
 def _scenario(
     histories: dict[str, dict[datetime, dict[str, Any]]],
     instruments: dict[str, dict[str, Any]],
@@ -441,6 +469,7 @@ def _scenario(
     compact_orb_context: bool = False,
     strict_liquidity: bool = False,
     lifecycle_proxy: bool = False,
+    require_archived_weekly_atm: bool = False,
     strategy_factory: Callable[[IndicatorEngine], list[Any]] | None = None,
 ) -> dict[str, Any]:
     if compact_orb_context and components != {"ORBPro"}:
@@ -689,6 +718,18 @@ def _scenario(
         if future not in bars or "NSE:NIFTY 50" not in bars:
             continue
         eligible_options = [symbol for symbol in options if symbol in bars]
+        if require_archived_weekly_atm:
+            scoped_options = []
+            for symbol in eligible_options:
+                reason = _archived_weekly_atm_rejection(
+                    instruments[symbol], timestamp, bars["NSE:NIFTY 50"]["close"]
+                )
+                if reason is not None:
+                    for strategy in strategies:
+                        rejections[strategy.name][reason] += 1
+                else:
+                    scoped_options.append(symbol)
+            eligible_options = scoped_options
         if not eligible_options:
             continue
         underlying_context = _research_orb_structural_context(
@@ -844,6 +885,7 @@ def _scenario(
         trades.sort(key=lambda trade: (trade["exit_time"], trade["symbol"]))
     return {
         "slippage_bps_per_side": slippage_bps,
+        "archive_weekly_atm_proxy_enabled": require_archived_weekly_atm,
         "strategies": {
             name: {
                 "metrics": summarize(trades),
@@ -1104,6 +1146,7 @@ def run_vwap_comparison(directory: Path) -> dict[str, Any]:
                     minimum_net_rr=1.5,
                     strict_liquidity=True,
                     lifecycle_proxy=True,
+                    require_archived_weekly_atm=True,
                 )["strategies"]["VWAPPro"]
                 scenarios.append({"slippage_bps_per_side": slippage, **result})
             candidates.append(
@@ -1162,7 +1205,7 @@ def run_vwap_comparison(directory: Path) -> dict[str, Any]:
             "selected_for_live": None,
             "promotion_eligible": False,
             "blockers": [
-                "Retrospectively selected active contracts; no historical ATM rotation",
+                "Archived contracts retrospectively selected; weekly near-ATM proxy only",
                 "Reused archive is not an untouched holdout",
                 "Historical bid/ask depth and full live arbitration unavailable",
                 "Prospective chronological and paper validation required",
@@ -1177,6 +1220,11 @@ def run_vwap_comparison(directory: Path) -> dict[str, Any]:
             "net_rr_filter": "minimum 1.5 after modeled slippage and canonical fees",
             "lifecycle": "existing causal 0.6R minute-bar trailing/time-stop proxy",
             "quantity": "one_archived_lot",
+            "historical_eligibility": (
+                "Archived weekly option expiry 0-7 days and strike within "
+                "two 50-point steps of completed NIFTY spot close. Missing "
+                "expired instruments and intrabar ATM rotations remain unproven."
+            ),
             "check": "Last 20 percent of option sessions; excluded from ranking",
             "zero_trades": "Abstention, not demonstrated alpha",
         },
