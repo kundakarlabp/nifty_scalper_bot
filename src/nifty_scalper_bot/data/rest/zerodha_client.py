@@ -1400,6 +1400,23 @@ class ZerodhaKiteClient(BaseBrokerClient):
                 return cast(list[dict], cached)
             raise
 
+    def get_orders_fresh(self) -> list[dict]:
+        """Read today's orderbook without the cached-data fallback.
+
+        Required when determining whether a prior-session protective stop can
+        be retired: stale REST cache is never authoritative negative proof.
+        """
+        self._acquire_bucket(self._GENERAL_BUCKET)
+        payload = self._ensure_json(
+            self._make_request("GET", "/orders", operation_label="orders.fresh")
+        )
+        orders = payload.get("data")
+        if not isinstance(orders, list) or any(
+            not isinstance(order, dict) for order in orders
+        ):
+            raise BrokerError("Malformed fresh Zerodha orderbook response")
+        return cast(list[dict], orders)
+
     def get_pnl_snapshot(self) -> dict[str, Any]:
         """Return native broker account/tradebook P&L evidence (diagnostic)."""
         from nifty_scalper_bot.data.rest.broker_pnl_snapshot import (
