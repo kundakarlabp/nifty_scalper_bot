@@ -5643,6 +5643,57 @@ class BracketManager:
             self.save_state()
         return confirmed
 
+    def _exchange_stop_filled_in_tradebook(
+        self, bracket: BracketState, order_id: str
+    ) -> bool:
+        """Prove a complete exchange stop fill from unique broker trade IDs.
+
+        An unknown order status is never treated as cancelled. A partial fill,
+        absent tradebook, or an unknown stop quantity is insufficient proof.
+        """
+        expected = int(bracket.exchange_stop_quantity or 0)
+        broker = getattr(self.order_manager, "_broker", None)
+        getter = getattr(broker, "get_order_trades", None)
+        if expected <= 0 or not callable(getter):
+            return False
+        try:
+            trades = getter(order_id)
+        except Exception as exc:  # noqa: BLE001 - broker proof unavailable
+            LOGGER.warning(
+                "EXCHANGE_STOP_TRADEBOOK_UNAVAILABLE order_id=%s error=%s",
+                order_id,
+                exc,
+            )
+            return False
+        if not isinstance(trades, (list, tuple)):
+            return False
+        seen: set[str] = set()
+        filled = 0
+        for trade in trades:
+            if not isinstance(trade, Mapping) or str(trade.get("order_id") or "") != order_id:
+                continue
+            trade_id = str(trade.get("trade_id") or "").strip()
+            if not trade_id or trade_id in seen:
+                continue
+            seen.add(trade_id)
+            try:
+                quantity = int(trade.get("quantity") or 0)
+            except (TypeError, ValueError):
+                return False
+            if quantity <= 0:
+                return False
+            filled += quantity
+        if filled != expected:
+            return False
+        LOGGER.info(
+            "EXCHANGE_PROTECTIVE_STOP_FILL_PROVEN_BY_TRADES order_id=%s "
+            "symbol=%s filled_qty=%s",
+            order_id,
+            bracket.symbol,
+            filled,
+        )
+        return True
+
     def _retire_exchange_protective_stop(
         self,
         bracket: BracketState,
@@ -5664,6 +5715,12 @@ class BracketManager:
                 self._clear_exchange_stop_locked(bracket)
                 bracket.updated_at = time.time()
             return "cancelled"
+        if (
+            reason == "broker_position_flat"
+            and status_text in {"", "UNKNOWN"}
+            and self._exchange_stop_filled_in_tradebook(bracket, order_id)
+        ):
+            return "filled"
 
         # The same broker order may already be the confirmed terminal exit,
         # even when a later order-status lookup returns UNKNOWN (e.g. after
@@ -5715,6 +5772,12 @@ class BracketManager:
         status = self._get_broker_order_status(order_id)
         status_text = str((status or {}).get("status") or "").strip().upper()
         if status_text in _FILLED_STATUSES:
+            return "filled"
+        if (
+            reason == "broker_position_flat"
+            and status_text in {"", "UNKNOWN"}
+            and self._exchange_stop_filled_in_tradebook(bracket, order_id)
+        ):
             return "filled"
         if status_text in _CANCELLED_STATUSES:
             with self._lock:
