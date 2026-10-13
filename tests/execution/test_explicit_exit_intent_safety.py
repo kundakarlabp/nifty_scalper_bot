@@ -7,7 +7,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from nifty_scalper_bot.execution.order_manager import OrderManager, OrderStatus, OrderType
+from nifty_scalper_bot.execution.order_manager import (
+    OrderManager,
+    OrderStatus,
+    OrderType,
+)
 from nifty_scalper_bot.execution.position_manager import PositionManager
 from nifty_scalper_bot.utils.rate_limiter import RateLimiter
 
