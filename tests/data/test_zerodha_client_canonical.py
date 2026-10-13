@@ -82,7 +82,6 @@ def test_get_order_status_returns_latest_history_state(
     client.close()
 
 
-
 def test_get_order_trades_is_exactly_order_scoped(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -99,7 +98,6 @@ def test_get_order_trades_is_exactly_order_scoped(
     assert requested == [("GET", "/orders/123/trades")]
     assert trades == [{"order_id": "123", "trade_id": "a", "quantity": 65}]
     client.close()
-
 
 
 def test_get_order_charges_posts_virtual_contract_note_json(
