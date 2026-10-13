@@ -460,6 +460,7 @@ def test_vwap_comparison_is_bounded_restores_environment_and_never_auto_promotes
         replay,
     )
     monkeypatch.setenv("VWAP_FUTURES_SLOPE_MIN_BPS", "1.25")
+    monkeypatch.setenv("VWAP_TREND_MOMENTUM_ENABLED", "true")
     before = dict(os.environ)
 
     report = run_vwap_comparison(tmp_path)
