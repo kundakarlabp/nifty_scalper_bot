@@ -1132,8 +1132,12 @@ def run_vwap_comparison(directory: Path) -> dict[str, Any]:
     baseline_environment = {key: os.environ.get(key) for key in environment_keys}
     candidates: list[dict[str, Any]] = []
     for name, overrides in variants:
-        original = {key: os.environ.get(key) for key in overrides}
+        # The reference must remain a true default-off comparator even if the
+        # process environment has opted into the experimental live profile.
+        keys = {"VWAP_TREND_MOMENTUM_ENABLED", *overrides}
+        original = {key: os.environ.get(key) for key in keys}
         try:
+            os.environ["VWAP_TREND_MOMENTUM_ENABLED"] = "false"
             os.environ.update(overrides)
             scenarios: list[dict[str, Any]] = []
             for slippage in (10.0, 25.0, 50.0):
