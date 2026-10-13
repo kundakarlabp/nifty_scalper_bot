@@ -348,6 +348,13 @@ class VWAPProStrategy(EliteStrategy):
                 or fut_ctx.get("direction_bias")
                 or ""
             ).upper()
+            # Never let generic option bias impersonate explicit underlying evidence.
+            explicit_underlying_direction = str(
+                indicators.get("underlying_direction_bias")
+                or spot_ctx.get("underlying_direction_bias")
+                or fut_ctx.get("underlying_direction_bias")
+                or ""
+            ).upper()
             context_age_seconds = resolve_context_age_seconds(indicators)
             try:
                 underlying_direction_confidence = float(
@@ -633,11 +640,31 @@ class VWAPProStrategy(EliteStrategy):
                 if trend_momentum_regime != MarketRegime.TREND:
                     self._no_vote("trend_momentum_regime_not_trend")
                     return None
-                if underlying_direction != contract_side:
+                if explicit_underlying_direction != contract_side:
                     self._no_vote("trend_momentum_underlying_not_confirmed")
                     return None
-                if (bar_anchor is None or indicators.get("is_complete") is False
-                        or indicators.get("is_provisional") is True):
+                # A live quote is not a completed premium momentum candle.
+                # Require the current option contract\u0027s completed bar, not tick OHLC.
+                bar_getter = getattr(self._indicator_engine, "get_history", None)
+                try:
+                    last_bars = (
+                        bar_getter(symbol, count=1, field="bars")
+                        if callable(bar_getter) else []
+                    )
+                    confirmed_bar = last_bars[-1] if last_bars else None
+                    bar_confirmed = bool(
+                        isinstance(confirmed_bar, Mapping)
+                        and confirmed_bar.get("is_complete") is True
+                        and confirmed_bar.get("is_provisional") is not True
+                        and bar_anchor is not None
+                        and _normalize_thesis_anchor(confirmed_bar.get("timestamp"))
+                        == _normalize_thesis_anchor(bar_anchor)
+                        and float(confirmed_bar.get("open")) == open_price
+                        and float(confirmed_bar.get("close")) == close
+                    )
+                except (TypeError, ValueError, AttributeError, IndexError):
+                    bar_confirmed = False
+                if not bar_confirmed:
                     self._no_vote("trend_momentum_bar_unconfirmed")
                     return None
                 if not momentum_continuation_confirmed:
