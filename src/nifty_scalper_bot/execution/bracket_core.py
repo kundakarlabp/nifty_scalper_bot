@@ -39,6 +39,7 @@ import os
 import tempfile
 from nifty_scalper_bot.config.env_utils import parse_float_env, parse_int_env
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 import math
 from pathlib import Path
 
@@ -5694,6 +5695,54 @@ class BracketManager:
         )
         return True
 
+    def _prior_day_mis_stop_expired_at_broker(
+        self, bracket: BracketState, order_id: str
+    ) -> bool:
+        """Prove an old regular DAY stop cannot still be active at Kite.
+
+        Requires a prior-session MIS entry, a fresh broker-flat position, and
+        an uncached current-day broker orderbook that excludes the exact ID.
+        Never use this fallback for same-day, NRML, or unknown broker state.
+        """
+        if bracket.product != "MIS":
+            return False
+        broker = getattr(self.order_manager, "_broker", None)
+        get_orders = getattr(broker, "get_orders", None)
+        if not callable(get_orders):
+            return False
+        try:
+            now = datetime.now(ZoneInfo("Asia/Kolkata"))
+            timestamps = [float(bracket.created_at)]
+            if bracket.entry_fill_ts is not None:
+                timestamps.append(float(bracket.entry_fill_ts))
+            if any(
+                value <= 0
+                or datetime.fromtimestamp(value, tz=now.tzinfo).date() >= now.date()
+                for value in timestamps
+            ):
+                return False
+            if self._authoritative_position_quantity(bracket.symbol) != 0:
+                return False
+            orders = get_orders(allow_cache_fallback=False)
+        except Exception:  # noqa: BLE001 - missing broker proof is not expiry
+            return False
+        if not isinstance(orders, list) or any(
+            not isinstance(order, Mapping) for order in orders
+        ):
+            return False
+        if any(
+            str(order.get("order_id") or order.get("id") or "") == order_id
+            for order in orders
+        ):
+            return False
+        LOGGER.info(
+            "EXCHANGE_PROTECTIVE_DAY_STOP_EXPIRED_CONFIRMED order_id=%s "
+            "symbol=%s broker_flat=True fresh_day_orderbook=True",
+            order_id,
+            bracket.symbol,
+        )
+        return True
+
     def _retire_exchange_protective_stop(
         self,
         bracket: BracketState,
@@ -5721,6 +5770,16 @@ class BracketManager:
             and self._exchange_stop_filled_in_tradebook(bracket, order_id)
         ):
             return "filled"
+
+        # A prior-day regular MIS/DAY order cannot remain exchange-active.
+        # Require a fresh broker snapshot and uncached day orderbook before
+        # pruning a legacy bracket with unavailable historical fill records.
+        if (
+            reason == "broker_position_flat"
+            and status_text in {"", "UNKNOWN"}
+            and self._prior_day_mis_stop_expired_at_broker(bracket, order_id)
+        ):
+            return "expired"
 
         # The same broker order may already be the confirmed terminal exit,
         # even when a later order-status lookup returns UNKNOWN (e.g. after
