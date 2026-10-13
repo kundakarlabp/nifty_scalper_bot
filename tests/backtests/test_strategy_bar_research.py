@@ -592,6 +592,7 @@ def test_opening_relative_volume_requires_prior_complete_sessions_only():
     del history[first + timedelta(minutes=1)]
     assert opening_relative_volume(history, now, 5) is None
 
+
 @pytest.mark.parametrize(
     "instrument,spot,when,reason",
     [
