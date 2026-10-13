@@ -1,4 +1,7 @@
+from types import SimpleNamespace
+
 from nifty_scalper_bot.core import app
+from nifty_scalper_bot.core.strategy_live_safety import _indicator_bars_available
 
 
 def test_nifty_token_fallback_present():
@@ -31,16 +34,15 @@ def test_hydration_diagnostics_use_canonical_symbol():
     assert '"symbol": canonical_sym' in src
 
 
-def test_history_readiness_uses_indicator_count_without_reading_missing_history() -> None:
+def test_history_readiness_uses_count_without_missing_history_reads() -> None:
     """Readiness checks must not trigger missing-history logging hot paths."""
-    from types import SimpleNamespace
-    from nifty_scalper_bot.core.strategy_live_safety import _indicator_bars_available
-
     class _Indicator:
         def __init__(self, count: int) -> None:
             self.count = count
+
         def history_count(self, _symbol: str) -> int:
             return self.count
+
         def get_history(self, _symbol: str) -> list:
             raise AssertionError("history copy is unnecessary for bar counts")
 
