@@ -8880,11 +8880,16 @@ class OrderManager:
         zombies = []
         with self._lock:
             for oid, order in self._orders.items():
-                if order.status == OrderStatus.PENDING:
-                    # Check age
-                    age = now - order.timestamp.timestamp()
-                    if age > ZOMBIE_TIMEOUT:
-                        zombies.append(oid)
+                if order.status != OrderStatus.PENDING:
+                    continue
+                # Exchange SLs and other reducing orders may legitimately stay
+                # pending until triggered. Only known entry intents can expire.
+                intent = str(getattr(order, "intent", "UNKNOWN") or "UNKNOWN").strip().upper()
+                if intent not in _TRADE_PLAN_IDENTITY_INTENTS:
+                    continue
+                age = now - order.timestamp.timestamp()
+                if age > ZOMBIE_TIMEOUT:
+                    zombies.append(oid)
 
         if not zombies:
             return
