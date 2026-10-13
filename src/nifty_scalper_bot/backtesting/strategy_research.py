@@ -850,7 +850,11 @@ def _scenario(
                 "no_vote_reasons": dict(rejections[name]),
                 "research_gate_counts": dict(
                     getattr(
-                        next(strategy for strategy in strategies if strategy.name == name),
+                        next(
+                            strategy
+                            for strategy in strategies
+                            if strategy.name == name
+                        ),
                         "research_gate_counts",
                         {},
                     )
