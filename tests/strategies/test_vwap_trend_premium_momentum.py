@@ -16,7 +16,6 @@ def _evaluate(monkeypatch, *, side="CE", enabled=True, **updates):
         "VWAP_TREND_MOMENTUM_ENABLED", "true" if enabled else "false"
     )
     monkeypatch.setenv("VWAP_TREND_MOMENTUM_OPTION_RVOL_MIN", "1.5")
-    strategy = VWAPProStrategy(VWAPProStrategyConfig(), None)
     indicators = {
         "vwap": 100.0,
         "atr": 5.0,
@@ -39,6 +38,23 @@ def _evaluate(monkeypatch, *, side="CE", enabled=True, **updates):
         "is_provisional": False,
     }
     indicators.update(updates)
+
+    class _CompletedBarEngine:
+        def get_history(self, _symbol, count=None, *, field="close"):
+            assert field == "bars"
+            assert count in (None, 1)
+            return [{
+                "timestamp": indicators.get("history_timestamp", indicators["latest_bar_ts"]),
+                "open": indicators["open"],
+                "high": indicators["high"],
+                "low": indicators["low"],
+                "close": indicators["close"],
+                "volume": indicators["volume"],
+                "is_complete": indicators.get("is_complete", True),
+                "is_provisional": indicators.get("is_provisional", False),
+            }]
+
+    strategy = VWAPProStrategy(VWAPProStrategyConfig(), _CompletedBarEngine())
     signal = strategy._evaluate_signal(
         f"NFO:NIFTY2691523400{side}", indicators, 103.0
     )
@@ -117,3 +133,12 @@ def test_research_mode_disabled_preserves_legacy_vwap_candidacy(monkeypatch):
 
     assert signal is not None
     assert signal.metadata["trend_momentum_enabled"] is False
+
+
+def test_stale_or_mismatched_premium_bar_cannot_confirm_entry(monkeypatch):
+    strategy, signal = _evaluate(
+        monkeypatch, history_timestamp="2026-09-10T09:59:00+05:30"
+    )
+
+    assert signal is None
+    assert strategy.last_no_vote_reason == "trend_momentum_bar_unconfirmed"
