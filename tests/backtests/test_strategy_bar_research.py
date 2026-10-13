@@ -634,9 +634,7 @@ def test_archived_weekly_atm_proxy_eligibility(instrument, spot, when, reason):
     )
 
     assert (
-        _archived_weekly_atm_rejection(
-            instrument, datetime.fromisoformat(when), spot
-        )
+        _archived_weekly_atm_rejection(instrument, datetime.fromisoformat(when), spot)
         == reason
     )
 
