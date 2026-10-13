@@ -1205,7 +1205,7 @@ def run_vwap_comparison(directory: Path) -> dict[str, Any]:
             "selected_for_live": None,
             "promotion_eligible": False,
             "blockers": [
-                "Archived contracts retrospectively selected; weekly near-ATM proxy only",
+                "Archived basket incomplete; weekly near-ATM proximity only",
                 "Reused archive is not an untouched holdout",
                 "Historical bid/ask depth and full live arbitration unavailable",
                 "Prospective chronological and paper validation required",
