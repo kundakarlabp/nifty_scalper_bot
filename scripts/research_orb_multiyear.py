@@ -808,13 +808,9 @@ def summarize_orb_target_sensitivity(
         rejected = [0, 0]
         for day in (row for row in daily if row["day"][:4] in period):
             matched = [
-                row
-                for row in day["scenarios"]
-                if row["slippage_bps_per_side"] == 10.0
+                row for row in day["scenarios"] if row["slippage_bps_per_side"] == 10.0
             ]
-            if len(matched) != 1 or not isinstance(
-                day.get("orb_target_2_2"), dict
-            ):
+            if len(matched) != 1 or not isinstance(day.get("orb_target_2_2"), dict):
                 raise ValueError("orb_target_sensitivity_incomplete")
             base = matched[0]["strategies"]["ORBRangeScaledResearch"]
             alt = day["orb_target_2_2"]
