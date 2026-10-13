@@ -1344,8 +1344,8 @@ class ZerodhaKiteClient(BaseBrokerClient):
         )
         return cast(dict[str, Any], response.get("data", {}))
 
-    def get_orders(self) -> list[dict]:
-        """Get all Zerodha orders for the trading day (Log-Silent if empty)."""
+    def get_orders(self, *, allow_cache_fallback: bool = True) -> list[dict]:
+        """Read day orders; strict callers can reject stale fallback on failure."""
         LOGGER.debug(
             "Entered ZerodhaKiteClient.get_orders",
             extra={"event": "zerodha_get_orders_start"},
@@ -1395,9 +1395,10 @@ class ZerodhaKiteClient(BaseBrokerClient):
                 exc,
                 extra={"event": "zerodha_get_orders_error"},
             )
-            cached = self._load_rest_cache(self._orders_cache, label=label)
-            if cached is not None:
-                return cast(list[dict], cached)
+            if allow_cache_fallback:
+                cached = self._load_rest_cache(self._orders_cache, label=label)
+                if cached is not None:
+                    return cast(list[dict], cached)
             raise
 
     def get_pnl_snapshot(self) -> dict[str, Any]:
