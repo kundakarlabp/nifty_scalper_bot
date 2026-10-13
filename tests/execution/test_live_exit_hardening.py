@@ -1027,7 +1027,9 @@ def test_prior_day_mis_stop_absent_from_live_broker_orders_can_retire(
     assert False in calls
 
 
-@pytest.mark.parametrize("unsafe", ["same_day", "overnight", "position_open", "unproven_book"])
+@pytest.mark.parametrize(
+    "unsafe", ["same_day", "overnight", "position_open", "unproven_book"]
+)
 def test_expired_day_stop_reconcile_requires_all_broker_and_age_proofs(
     monkeypatch, unsafe: str
 ) -> None:
