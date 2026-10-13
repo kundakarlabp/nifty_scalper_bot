@@ -82,6 +82,24 @@ def test_get_order_status_returns_latest_history_state(
     client.close()
 
 
+def test_get_order_trades_is_exactly_order_scoped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = ZerodhaKiteClient(api_key="k", access_token="t")
+    monkeypatch.setattr(client, "_acquire_bucket", lambda _bucket: None)
+    requested: list[tuple[str, str]] = []
+
+    def request(method: str, endpoint: str):
+        requested.append((method, endpoint))
+        return {"data": [{"order_id": "123", "trade_id": "a", "quantity": 65}]}
+
+    monkeypatch.setattr(client, "_make_request", request)
+    trades = client.get_order_trades("123")
+    assert requested == [("GET", "/orders/123/trades")]
+    assert trades == [{"order_id": "123", "trade_id": "a", "quantity": 65}]
+    client.close()
+
+
 def test_get_order_charges_posts_virtual_contract_note_json(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

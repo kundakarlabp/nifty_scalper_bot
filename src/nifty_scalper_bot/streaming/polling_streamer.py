@@ -692,46 +692,24 @@ class PollingStreamer:
                     avg_price = quote.get("average_price") or quote.get("vwap")
                     volume = quote.get("volume")
                     oi = quote.get("oi")
-                    ohlc = quote.get("ohlc") or {}
 
                     # Convert to proper types with safe defaults
                     avg_price_float = float(avg_price) if avg_price is not None else 0.0
                     volume_int = int(volume) if volume is not None else 0
                     oi_int = int(oi) if oi is not None else 0
 
-                    used_vwap_fallback = False
+                    # Broker OHLC close is not a volume-weighted average. For
+                    # indices and temporarily incomplete quotes, preserve the
+                    # missing VWAP; the canonical candle-based indicator owner
+                    # can compute its own session VWAP where volume is valid.
                     if avg_price_float <= 0:
-                        ohlc_close = ohlc.get("close")
-                        if ohlc_close is not None:
-                            try:
-                                avg_price_float = float(ohlc_close)
-                                used_vwap_fallback = avg_price_float > 0
-                            except (TypeError, ValueError) as exc:
-                                LOGGER.debug(
-                                    "[POLL] VWAP fallback conversion failed: %s",
-                                    exc,
-                                )
-
-                    if used_vwap_fallback:
+                        avg_price_float = 0.0
                         log_throttled(
                             LOGGER,
-                            f"vwap_fallback_{key}",
-                            (
-                                "Condition met: vwap_fallback_ohlc "
-                                f"for {key} (close={avg_price_float:.2f})"
-                            ),
+                            f"broker_vwap_unavailable_{key}",
+                            f"[POLL] Missing broker VWAP for {key}; no close fallback",
                             interval_sec=300.0,
-                        )
-                    elif avg_price_float == 0:
-                        # ✅ DIAGNOSTIC: Log if VWAP is missing (but don't spam)
-                        log_throttled(
-                            LOGGER,
-                            f"vwap_zero_{key}",
-                            (
-                                f"⚠️ VWAP=0 for {key} | This prevents VWAP "
-                                "strategy from triggering"
-                            ),
-                            interval_sec=300.0,  # Only log every 5 minutes
+                            level=logging.DEBUG,
                         )
 
                     valid_broker_ts = None
