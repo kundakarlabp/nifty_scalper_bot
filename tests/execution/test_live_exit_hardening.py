@@ -999,6 +999,67 @@ def test_open_stop_status_takes_priority_over_tradebook(
     assert manager.get_bracket("entry-1") is bracket
 
 
+def test_prior_day_mis_stop_absent_from_live_broker_orders_can_retire(
+    monkeypatch,
+) -> None:
+    """DAY stop is expired when yesterday's MIS trade is broker-flat."""
+    manager, _order_manager, broker = _manager(cancel_confirms=False)
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    yesterday = time.time() - 86400
+    bracket.created_at = yesterday
+    bracket.entry_fill_ts = yesterday
+    bracket.exchange_stop_order_id = "previous-day-stop"
+    bracket.exchange_stop_quantity = 0  # Legacy persisted stop.
+    broker.statuses["previous-day-stop"] = "UNKNOWN"
+    broker.positions = []
+    calls: list[bool] = []
+
+    def get_orders(*, allow_cache_fallback: bool = True):
+        calls.append(allow_cache_fallback)
+        return []
+
+    monkeypatch.setattr(broker, "get_orders", get_orders, raising=False)
+
+    assert manager.reconcile_symbol_flat(SYMBOL) == 1
+    assert manager.get_bracket("entry-1") is None
+    assert broker.cancel_calls == []
+    assert False in calls
+
+
+@pytest.mark.parametrize(
+    "unsafe", ["same_day", "overnight", "position_open", "unproven_book"]
+)
+def test_expired_day_stop_reconcile_requires_all_broker_and_age_proofs(
+    monkeypatch, unsafe: str
+) -> None:
+    manager, _order_manager, broker = _manager(cancel_confirms=False)
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    yesterday = time.time() - 86400
+    bracket.created_at = yesterday
+    bracket.entry_fill_ts = yesterday
+    bracket.exchange_stop_order_id = "previous-day-stop"
+    bracket.exchange_stop_quantity = 0
+    broker.statuses["previous-day-stop"] = "UNKNOWN"
+    broker.positions = []
+    if unsafe == "same_day":
+        bracket.entry_fill_ts = time.time()
+    elif unsafe == "overnight":
+        bracket.product = "NRML"
+    elif unsafe == "position_open":
+        broker.positions = [{"symbol": SYMBOL, "quantity": 65}]
+
+    def get_orders(*, allow_cache_fallback: bool = True):
+        if unsafe == "unproven_book" and not allow_cache_fallback:
+            raise RuntimeError("broker orderbook unavailable")
+        return []
+
+    monkeypatch.setattr(broker, "get_orders", get_orders, raising=False)
+    assert manager.reconcile_symbol_flat(SYMBOL) == 0
+    assert manager.get_bracket("entry-1") is bracket
+
+
 def test_unknown_history_does_not_override_live_stop_in_orderbook(
     monkeypatch,
 ) -> None:
