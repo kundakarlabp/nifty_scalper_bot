@@ -646,12 +646,31 @@ def run_fixed_hypothesis_day(task: tuple[str, str]) -> dict[str, Any]:
         strategy_factory=_research_strategies,
         require_option_premium_confirmation=True,
     )
+
+    # Research-only, predeclared signed 20-bar futures trend-efficiency
+    # confirmation (ER >= 0.30), applied only to pullback and momentum.
+    # Compression is expected to emerge from non-trending conditions.
+    def trend_quality_factory(engine: IndicatorEngine) -> list[Any]:
+        return _research_strategies(engine, min_prior_trend_efficiency=0.30)
+
+    trend_efficient = _scenario(
+        histories,
+        instruments,
+        get_settings().elite,
+        10.0,
+        components={"PullbackResearch", "CompressionResearch", "MomentumResearch"},
+        minimum_net_rr=1.5,
+        strict_liquidity=True,
+        lifecycle_proxy=True,
+        strategy_factory=trend_quality_factory,
+    )
     return {
         "day": day,
         "scenarios": research["scenarios"],
         "exit_ablation": no_trailing["strategies"],
         "orb_target_2_2": target_2_2,
         "option_premium_confirmation": premium_confirmed["strategies"],
+        "prior_trend_efficiency": trend_efficient["strategies"],
     }
 
 
@@ -879,8 +898,18 @@ def summarize_orb_target_sensitivity(
 
 def summarize_option_premium_confirmation(
     daily: list[dict[str, Any]],
+    *,
+    alternative_key: str = "option_premium_confirmation",
+    alternative_label: str = "premium_confirmed",
+    rejection_fields: tuple[str, ...] = (
+        "option_confirmation_history_unavailable",
+        "option_premium_not_confirmed",
+        "cost_net_rr_rejected",
+    ),
+    method: str = "closed_option_premium_above_open_and_previous_close",
+    error_prefix: str = "premium_confirmation",
 ) -> list[dict[str, Any]]:
-    """Chronological entry-eligibility audit; only research signal rules change.
+    """Shared fixed-cohort comparison for causal entry eligibility research.
 
     Both policies retain all economic and risk gates; original reference trades
     and exact matched-entry cohorts are never silently reselected.
@@ -907,9 +936,9 @@ def summarize_option_premium_confirmation(
                     for scenario in day["scenarios"]
                     if scenario["slippage_bps_per_side"] == 10.0
                 ]
-                alt = day.get("option_premium_confirmation")
+                alt = day.get(alternative_key)
                 if len(matches) != 1 or not isinstance(alt, dict) or family not in alt:
-                    raise ValueError("premium_confirmation_scenario_incomplete")
+                    raise ValueError(f"{error_prefix}_scenario_incomplete")
                 old = matches[0]["strategies"][family]
                 new = alt[family]
                 baseline.extend(old["trades"])
@@ -923,7 +952,7 @@ def summarize_option_premium_confirmation(
             ) -> dict[tuple[str, str], dict[str, Any]]:
                 index = {(t["symbol"], t["entry_time"]): t for t in trades}
                 if len(index) != len(trades):
-                    raise ValueError("premium_confirmation_duplicate_entry")
+                    raise ValueError(f"{error_prefix}_duplicate_entry")
                 return index
 
             original, alternative = by_identity(baseline), by_identity(confirmed)
@@ -933,28 +962,24 @@ def summarize_option_premium_confirmation(
                     "phase": phase,
                     "candidate": family,
                     "slippage_bps_per_side": 10.0,
-                    "method": "closed_option_premium_above_open_and_previous_close",
+                    "method": method,
                     "baseline": {
                         "metrics": summarize(baseline),
                         "unresolved_exit_count": unresolved[0],
                     },
-                    "premium_confirmed": {
+                    alternative_label: {
                         "metrics": summarize(confirmed),
                         "unresolved_exit_count": unresolved[1],
                     },
                     "entry_eligibility_rejections": {
                         key: rejects.get(key, 0)
-                        for key in (
-                            "option_confirmation_history_unavailable",
-                            "option_premium_not_confirmed",
-                            "cost_net_rr_rejected",
-                        )
+                        for key in rejection_fields
                     },
                     "identical_entry_count": len(same_entries),
                     "identical_entry_baseline": summarize(
                         [original[key] for key in same_entries]
                     ),
-                    "identical_entry_premium_confirmed": summarize(
+                    f"identical_entry_{alternative_label}": summarize(
                         [alternative[key] for key in same_entries]
                     ),
                     "caveat": "filter_changes_admission_and_position_occupancy",
@@ -1052,6 +1077,14 @@ def run_fixed_hypothesis_study(output: Path, workers: int) -> None:
     exit_ablation = summarize_exit_lifecycle_ablation(daily)
     target_sensitivity = summarize_orb_target_sensitivity(daily)
     option_premium_confirmation = summarize_option_premium_confirmation(daily)
+    trend_regime_quality = summarize_option_premium_confirmation(
+        daily,
+        alternative_key="prior_trend_efficiency",
+        alternative_label="trend_efficient",
+        rejection_fields=("prior_futures_trend_inefficient", "cost_net_rr_rejected"),
+        method="signed_prior_20bar_futures_efficiency_ge_0_30",
+        error_prefix="trend_efficiency",
+    )
     write_json(
         output / "fixed_hypothesis_results.json",
         {
@@ -1104,6 +1137,7 @@ def run_fixed_hypothesis_study(output: Path, workers: int) -> None:
                 "No-trailing changes admission by keeping positions open longer",
                 "2.2R ORB target is post-hoc research, not an untouched holdout",
                 "Option-premium confirmation is a post-hoc entry hypothesis",
+                "0.30 futures efficiency filter is a post-hoc research hypothesis",
                 "No setting selected or authorized for live trading",
             ],
             "results": results,
@@ -1111,6 +1145,7 @@ def run_fixed_hypothesis_study(output: Path, workers: int) -> None:
             "fixed_10bps_exit_lifecycle_ablation": exit_ablation,
             "fixed_10bps_orb_target_sensitivity": target_sensitivity,
             "fixed_10bps_option_premium_confirmation": option_premium_confirmation,
+            "fixed_10bps_prior_futures_trend_efficiency": trend_regime_quality,
             "research_quality": {
                 "matched_orb_baseline_has_trades": any(
                     row["candidate"] == "ORBNetGateBaseline"
