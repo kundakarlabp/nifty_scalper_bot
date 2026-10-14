@@ -128,6 +128,7 @@ def test_canonical_vwap_prefers_session_over_rolling_and_never_invents_one() -> 
     assert resolve_canonical_vwap({"current_price": 103.0, "ltp": 103.0}) is None
     assert resolve_canonical_vwap({}) is None
 
+
 def test_canonical_vwap_rejects_nonfinite_values_before_fallback() -> None:
     assert (
         resolve_canonical_vwap(
