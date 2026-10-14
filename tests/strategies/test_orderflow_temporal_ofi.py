@@ -199,6 +199,7 @@ def test_live_strong_depth_without_ofi_requires_distinct_temporal_snapshots(
     )
     indicators.pop("_expected_support")
     indicators["ofi_ready"] = False
+    indicators["tick_direction"] = "NONE"
 
     first = strategy._evaluate_signal(SYMBOL, indicators, current_price=100.25)
     assert first is not None
