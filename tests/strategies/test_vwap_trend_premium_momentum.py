@@ -219,6 +219,14 @@ def test_opt_in_refuses_rolling_vwap_without_session_reference(monkeypatch):
     assert strategy.last_no_vote_reason == "trend_momentum_session_vwap_unavailable"
 
 
+@pytest.mark.parametrize("invalid", [float("nan"), float("inf"), -1.0])
+def test_invalid_session_reference_never_authorizes_candidate(monkeypatch, invalid):
+    strategy, signal = _evaluate(monkeypatch, session_vwap=invalid)
+
+    assert signal is None
+    assert strategy.last_no_vote_reason == "trend_momentum_session_vwap_unavailable"
+
+
 def test_legacy_mode_keeps_rolling_fallback(monkeypatch):
     _, signal = _evaluate(monkeypatch, enabled=False, session_vwap=None)
 
