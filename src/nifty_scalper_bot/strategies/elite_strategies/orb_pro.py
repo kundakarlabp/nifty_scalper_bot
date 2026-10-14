@@ -644,7 +644,8 @@ class ORBProStrategy(EliteStrategy):
         # breakout or conceal a failed retest. A backfill may restore the
         # current bar without burning its once-per-bar evaluation identity.
         post_range_rows = {
-            bar["timestamp"] for bar in snapshot["rows"]
+            bar["timestamp"]
+            for bar in snapshot["rows"]
             if snapshot["cutoff"] <= bar["timestamp"] <= snapshot["current_ts"]
         }
         elapsed_minutes = int(
