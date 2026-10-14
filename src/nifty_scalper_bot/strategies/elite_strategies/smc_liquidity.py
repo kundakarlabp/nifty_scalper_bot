@@ -1110,6 +1110,9 @@ class SMCStrategy(EliteStrategy):
                     == "strategy_manager_pre_strategy"
                 )
 
+                sweep_epoch = event["sweep_ts"].timestamp()
+                confirmation_epoch = current_ts.timestamp()
+
                 def _feature_after_sweep(feature: str, timestamp_key: str) -> bool:
                     if not bool(indicators.get(feature)):
                         return False
@@ -1118,9 +1121,7 @@ class SMCStrategy(EliteStrategy):
                     evidence_ts = _safe_float(indicators.get(timestamp_key))
                     return bool(
                         evidence_ts is not None
-                        and event["sweep_ts"].timestamp()
-                        < evidence_ts
-                        <= current_ts.timestamp()
+                        and sweep_epoch < evidence_ts <= confirmation_epoch
                     )
 
                 bos_confirmed = (
