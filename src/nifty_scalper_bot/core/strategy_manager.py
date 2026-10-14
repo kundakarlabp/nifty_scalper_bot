@@ -4198,6 +4198,30 @@ class StrategyManager(_BaseStrategyManager):
                 context_vote_count=len(context_votes),
             )
             return None
+        # A one-second OrderFlow/OFI vote is context, not independent SMC
+        # entry confirmation. Keep OrderFlow's adverse-context veto above,
+        # but require a separate strategy or independent trigger for SMC.
+        smc_trigger_present = any(
+            str(evidence.strategy or "").strip().upper() == "SMC"
+            for _signal, evidence in trigger_votes
+        )
+        if (
+            smc_trigger_present
+            and not independent_trigger_confirmation
+            and same_side_context
+            and all(
+                str(evidence.strategy or "").strip().upper() == "ORDERFLOW"
+                for evidence in same_side_context
+            )
+        ):
+            _record_no_signal(
+                "strategy_confirmation_missing",
+                "smc_independent_confirmation_missing",
+                "context_contract",
+                trigger_vote_count=len(trigger_votes),
+                context_vote_count=len(context_votes),
+            )
+            return None
         if not independent_trigger_confirmation and not same_side_context:
             context_diagnostics = [
                 {
