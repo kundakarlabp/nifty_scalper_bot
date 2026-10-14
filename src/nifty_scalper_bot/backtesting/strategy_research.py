@@ -330,7 +330,9 @@ def _research_orb_structural_context(
             observation.confidence if observation else 0.0
         ),
         "context_fresh": bool(spot_observation or futures_observation),
+        # Closed minute bars establish bar-order causality, NOT live tick age.
         "context_age_seconds": 0.0,
+        "research_context_age_proxy": "completed_bar_same_step",
         "futures_vwap_slope": futures_payload.get("vwap_slope"),
         "futures_volume_ratio": futures_payload.get("futures_volume_ratio"),
         "research_direction_resolution": resolution.reason,
@@ -1188,6 +1190,14 @@ def run_vwap_comparison(directory: Path) -> dict[str, Any]:
                 "VWAP_TREND_MOMENTUM_OPTION_RVOL_MIN": "1.5",
             },
         ),
+        (
+            "trend_premium_vwap_retest",
+            {
+                "VWAP_TREND_MOMENTUM_ENABLED": "true",
+                "VWAP_TREND_MOMENTUM_OPTION_RVOL_MIN": "1.5",
+                "VWAP_TREND_REQUIRE_RETEST": "true",
+            },
+        ),
     ]
     environment_keys = (
         "VWAP_TREND_QUALITY_MAX_DISTANCE_ATR",
@@ -1196,15 +1206,21 @@ def run_vwap_comparison(directory: Path) -> dict[str, Any]:
         "VWAP_ALLOW_PENETRATION_ONLY_ENTRY",
         "VWAP_TREND_MOMENTUM_ENABLED",
         "VWAP_TREND_MOMENTUM_OPTION_RVOL_MIN",
+        "VWAP_TREND_REQUIRE_RETEST",
     )
     baseline_environment = {key: os.environ.get(key) for key in environment_keys}
     candidates: list[dict[str, Any]] = []
     for name, overrides in variants:
         # Keep the baseline independent of any inherited experimental toggle.
-        keys = {"VWAP_TREND_MOMENTUM_ENABLED", *overrides}
+        keys = {
+            "VWAP_TREND_MOMENTUM_ENABLED",
+            "VWAP_TREND_REQUIRE_RETEST",
+            *overrides,
+        }
         original = {key: os.environ.get(key) for key in keys}
         try:
             os.environ["VWAP_TREND_MOMENTUM_ENABLED"] = "false"
+            os.environ["VWAP_TREND_REQUIRE_RETEST"] = "false"
             os.environ.update(overrides)
             scenarios: list[dict[str, Any]] = []
             for slippage in (10.0, 25.0, 50.0):
@@ -1279,6 +1295,7 @@ def run_vwap_comparison(directory: Path) -> dict[str, Any]:
                 "Archived basket incomplete; weekly near-ATM proximity only",
                 "Reused archive is not an untouched holdout",
                 "Historical bid/ask depth and full live arbitration unavailable",
+                "Bar-close context age is a proxy, not verified live tick freshness",
                 "Prospective chronological and paper validation required",
             ],
         },

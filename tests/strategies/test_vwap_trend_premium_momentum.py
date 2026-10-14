@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
+
 import pytest
 
 from nifty_scalper_bot.strategies.elite_strategies.config_models import (
@@ -10,12 +12,14 @@ from nifty_scalper_bot.strategies.elite_strategies.config_models import (
 from nifty_scalper_bot.strategies.elite_strategies.vwap_pro import VWAPProStrategy
 
 
-def _evaluate(monkeypatch, *, side="CE", enabled=True, **updates):
+def _evaluate(monkeypatch, *, side="CE", enabled=True, retest=False, **updates):
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     monkeypatch.setenv("VWAP_TREND_MOMENTUM_ENABLED", "true" if enabled else "false")
     monkeypatch.setenv("VWAP_TREND_MOMENTUM_OPTION_RVOL_MIN", "1.5")
+    monkeypatch.setenv("VWAP_TREND_REQUIRE_RETEST", "true" if retest else "false")
     indicators = {
         "vwap": 100.0,
+        "session_vwap": 100.0,
         "atr": 5.0,
         "open": 100.0,
         "high": 104.0,
@@ -40,8 +44,26 @@ def _evaluate(monkeypatch, *, side="CE", enabled=True, **updates):
     class _CompletedBarEngine:
         def get_history(self, _symbol, count=None, *, field="close"):
             assert field == "bars"
-            assert count in (None, 1)
-            return [
+            assert count in (None, 1, 21)
+            current_ts = datetime.fromisoformat(indicators["latest_bar_ts"])
+            prior = [
+                {
+                    "timestamp": current_ts
+                    - timedelta(minutes=max(i, indicators.get("prior_gap_minutes", 1))),
+                    "open": 100.0,
+                    "high": 103.0,
+                    "low": 98.0,
+                    "close": 101.0,
+                    "volume": v,
+                    "is_complete": True,
+                    "is_provisional": False,
+                }
+                for i, v in enumerate(
+                    reversed(indicators.get("prior_volumes", [900.0] * 10)),
+                    start=1,
+                )
+            ]
+            bars = list(reversed(prior)) + [
                 {
                     "timestamp": indicators.get(
                         "history_timestamp", indicators["latest_bar_ts"]
@@ -55,6 +77,7 @@ def _evaluate(monkeypatch, *, side="CE", enabled=True, **updates):
                     "is_provisional": indicators.get("is_provisional", False),
                 }
             ]
+            return bars[-count:] if count is not None else bars
 
     strategy = VWAPProStrategy(VWAPProStrategyConfig(), _CompletedBarEngine())
     signal = strategy._evaluate_signal(f"NFO:NIFTY2691523400{side}", indicators, 103.0)
@@ -73,6 +96,8 @@ def test_trending_underlying_and_confirmed_premium_generate_candidate(
     assert signal.metadata["trend_momentum_regime"] == "TREND"
     assert signal.metadata["trend_momentum_premium_confirmed"] is True
     assert signal.metadata["option_volume_ratio"] == 2.0
+    assert signal.metadata["trend_momentum_volume_baseline_bars"] == 10
+    assert signal.metadata["vwap_reference_source"] == "session_vwap"
     assert signal.metadata["trend_momentum_completed_option_rvol"] == 2.0
     assert signal.metadata["trend_momentum_close_location"] > 0.8
     assert signal.metadata["trend_momentum_underlying_quality_confirmed"] is True
@@ -185,3 +210,62 @@ def test_invalid_completed_bar_geometry_never_authorizes_entry(monkeypatch):
 
     assert signal is None
     assert strategy.last_no_vote_reason == "trend_momentum_bar_unconfirmed"
+
+
+def test_opt_in_refuses_rolling_vwap_without_session_reference(monkeypatch):
+    strategy, signal = _evaluate(monkeypatch, session_vwap=None)
+
+    assert signal is None
+    assert strategy.last_no_vote_reason == "trend_momentum_session_vwap_unavailable"
+
+
+@pytest.mark.parametrize("invalid", [float("nan"), float("inf"), -1.0])
+def test_invalid_session_reference_never_authorizes_candidate(monkeypatch, invalid):
+    strategy, signal = _evaluate(monkeypatch, session_vwap=invalid)
+
+    assert signal is None
+    assert strategy.last_no_vote_reason == "trend_momentum_session_vwap_unavailable"
+
+
+def test_legacy_mode_keeps_rolling_fallback(monkeypatch):
+    _, signal = _evaluate(monkeypatch, enabled=False, session_vwap=None)
+
+    assert signal is not None
+    assert signal.metadata["vwap_reference_source"] == "rolling_vwap"
+
+
+def test_volume_compared_with_prior_completed_bars_not_current_average(monkeypatch):
+    _, signal = _evaluate(monkeypatch, avg_volume=3000.0)
+
+    assert signal is not None
+    assert signal.metadata["trend_momentum_completed_option_rvol"] == 2.0
+
+
+def test_insufficient_independent_option_volume_history_is_rejected(monkeypatch):
+    strategy, signal = _evaluate(monkeypatch, prior_volumes=[900.0] * 3)
+
+    assert signal is None
+    assert strategy.last_no_vote_reason == "trend_momentum_volume_history_insufficient"
+
+
+def test_retest_mode_requires_prior_reclaim_and_current_hold(monkeypatch):
+    strategy, signal = _evaluate(monkeypatch, low=100.0, retest=True)
+
+    assert signal is not None
+    assert signal.metadata["trend_momentum_retest_confirmed"] is True
+
+
+def test_retest_mode_rejects_unheld_vwap(monkeypatch):
+    strategy, signal = _evaluate(monkeypatch, low=98.0, retest=True)
+
+    assert signal is None
+    assert strategy.last_no_vote_reason == "trend_momentum_retest_unconfirmed"
+
+
+def test_retest_mode_rejects_stale_previous_candle(monkeypatch):
+    strategy, signal = _evaluate(
+        monkeypatch, low=100.0, prior_gap_minutes=2, retest=True
+    )
+
+    assert signal is None
+    assert strategy.last_no_vote_reason == "trend_momentum_retest_unconfirmed"
