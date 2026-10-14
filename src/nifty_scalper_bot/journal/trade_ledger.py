@@ -598,17 +598,19 @@ def _build_trade_row(event: Mapping[str, Any]) -> dict[str, Any] | None:
         "costs_json": _mapping_json(costs),
         "execution_quality_json": _mapping_json(quality),
         "outcome_json": _mapping_json(outcome),
-        "entry_evidence_json": _mapping_json(
-            {
-                **dict(meta.get("research_context")),
-                "decision_at_epoch": timestamp,
-                "build_sha": event.get("build_sha"),
-            }
-        )
-        if event_name == "candidate.approved"
-        and isinstance(meta.get("research_context"), Mapping)
-        and bool(meta.get("research_context"))
-        else None,
+        "entry_evidence_json": (
+            _mapping_json(
+                {
+                    **dict(meta.get("research_context")),
+                    "decision_at_epoch": timestamp,
+                    "build_sha": event.get("build_sha"),
+                }
+            )
+            if event_name == "candidate.approved"
+            and isinstance(meta.get("research_context"), Mapping)
+            and bool(meta.get("research_context"))
+            else None
+        ),
     }
 
 
