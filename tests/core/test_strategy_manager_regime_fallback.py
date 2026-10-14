@@ -294,9 +294,7 @@ def test_smc_option_vwap_proxy_excludes_previous_session_bars() -> None:
             },
         ]
     )
-    enriched = _enrich_smc_pre_strategy(
-        "NFO:NIFTY26O1922700CE", {}, history
-    )
+    enriched = _enrich_smc_pre_strategy("NFO:NIFTY26O1922700CE", {}, history)
     assert enriched["premium_vwap"] is not None
     assert 90 < enriched["premium_vwap"] < 110
 
@@ -306,9 +304,7 @@ def test_smc_no_timestamp_does_not_invent_proxy_vwap() -> None:
         {"open": 100.0, "high": 102.0, "low": 98.0, "close": 100.0, "volume": 100}
         for _ in range(25)
     ]
-    enriched = _enrich_smc_pre_strategy(
-        "NFO:NIFTY26O1922700CE", {}, history
-    )
+    enriched = _enrich_smc_pre_strategy("NFO:NIFTY26O1922700CE", {}, history)
     assert enriched["premium_vwap"] is None
     assert enriched["premium_reclaim"] is False
 
