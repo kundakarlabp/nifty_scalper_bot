@@ -539,8 +539,7 @@ def _build_trade_row(event: Mapping[str, Any]) -> dict[str, Any] | None:
     research_value = meta.get("research_context")
     entry_evidence = (
         dict(research_value)
-        if event_name == "candidate.approved"
-        and isinstance(research_value, Mapping)
+        if event_name == "candidate.approved" and isinstance(research_value, Mapping)
         else {}
     )
 
