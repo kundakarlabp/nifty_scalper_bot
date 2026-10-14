@@ -972,8 +972,7 @@ def summarize_option_premium_confirmation(
                         "unresolved_exit_count": unresolved[1],
                     },
                     "entry_eligibility_rejections": {
-                        key: rejects.get(key, 0)
-                        for key in rejection_fields
+                        key: rejects.get(key, 0) for key in rejection_fields
                     },
                     "identical_entry_count": len(same_entries),
                     "identical_entry_baseline": summarize(
