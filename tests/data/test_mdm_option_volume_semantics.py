@@ -356,3 +356,32 @@ def test_out_of_order_rest_does_not_move_baseline() -> None:
     # Baseline intact: a later legitimate value still measures from 28_574_325.
     resumed = _rest(mdm, 28_574_400)
     assert resumed["volume_delta"] == 75.0
+
+
+def test_direct_rest_quote_plain_volume_uses_daily_cumulative_baseline() -> None:
+    """An unprepared REST quote cannot masquerade as 28m interval trades."""
+    mdm = _mdm()
+    first = mdm._normalize_tick(
+        _SYM, {"last_price": 45.0, "volume": 28_574_260, "source": "rest"}
+    )
+    second = mdm._normalize_tick(
+        _SYM, {"last_price": 45.2, "volume": 28_574_325, "source": "rest"}
+    )
+
+    assert first is not None and second is not None
+    assert first["volume_delta"] == 0
+    assert first["volume_cumulative"] == 28_574_260
+    assert second["volume_delta"] == 65
+    assert second["volume_cumulative"] == 28_574_325
+
+
+def test_price_only_tick_never_replays_previous_interval_volume() -> None:
+    mdm = _mdm()
+    prior = {"volume": 950, "volume_delta": 950}
+    price_only = mdm._normalize_tick(
+        _SYM, {"last_price": 45.2, "source": "ws"}, previous=prior
+    )
+
+    assert price_only is not None
+    assert price_only.get("volume", 0) == 0
+    assert price_only.get("volume_delta", 0) == 0
