@@ -385,6 +385,13 @@ class VWAPProStrategy(EliteStrategy):
                 None if futures_vwap_slope is None else futures_vwap_slope * 100.0
             )
             option_volume_ratio = vol / avg_vol if avg_vol > 0 else None
+            if self._trend_momentum_enabled and (
+                vwap_source not in {"exchange_vwap", "session_vwap"}
+                or not math.isfinite(vwap)
+                or vwap <= 0
+            ):
+                self._no_vote("trend_momentum_session_vwap_unavailable")
+                return None
             if current_price <= 0 or vwap <= 0:
                 self._no_vote("missing_vwap")
                 LOGGER.debug("STRATEGY_NO_VOTE strategy=VWAPPro reason=missing_vwap")
@@ -645,13 +652,6 @@ class VWAPProStrategy(EliteStrategy):
             trend_momentum_volume_baseline_bars: int | None = None
             trend_momentum_retest_confirmed: bool | None = None
             if self._trend_momentum_enabled:
-                if (
-                    vwap_source not in {"exchange_vwap", "session_vwap"}
-                    or not math.isfinite(vwap)
-                    or vwap <= 0
-                ):
-                    self._no_vote("trend_momentum_session_vwap_unavailable")
-                    return None
                 if trend_momentum_regime != MarketRegime.TREND:
                     self._no_vote("trend_momentum_regime_not_trend")
                     return None
