@@ -13,6 +13,7 @@ from nifty_scalper_bot.backtesting.directional_hypotheses import (
     ArchivedDirectionalHypothesis,
     ORBRangeScaledResearch,
     classify_completed_futures_bars,
+    prior_futures_trend_efficiency,
     run_directional_hypothesis_research,
 )
 from nifty_scalper_bot.risk.cost_model import (
@@ -57,6 +58,56 @@ def test_momentum_acceleration_respects_futures_side_and_completed_bar() -> None
 
         rows[-1] = {**rows[-1], "is_complete": False}
         assert classify_completed_futures_bars(rows) == {}
+
+
+def test_prior_futures_efficiency_is_signed_causal_and_bounded() -> None:
+    bullish = _momentum_bars("CE")
+    bearish = _momentum_bars("PE")
+    assert prior_futures_trend_efficiency(bullish, "CE") == pytest.approx(1.0)
+    assert prior_futures_trend_efficiency(bullish, "PE") == pytest.approx(0.0)
+    assert prior_futures_trend_efficiency(bearish, "PE") == pytest.approx(1.0)
+    assert prior_futures_trend_efficiency(bearish, "CE") == pytest.approx(0.0)
+    changed_signal = [dict(row) for row in bullish]
+    changed_signal[-1]["close"] += 5000.0
+    assert prior_futures_trend_efficiency(
+        changed_signal, "CE"
+    ) == prior_futures_trend_efficiency(bullish, "CE")
+    zigzag = [dict(row) for row in bullish]
+    for i in range(23, 44):
+        zigzag[i]["close"] = 24000.0 + (10.0 if i % 2 else -10.0)
+    assert prior_futures_trend_efficiency(zigzag, "CE") < 0.1
+    assert prior_futures_trend_efficiency(bullish[:21], "CE") is None
+
+
+def test_research_trend_efficiency_veto_does_not_change_original_signals(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nifty_scalper_bot.backtesting import directional_hypotheses as research
+
+    bullish = _momentum_bars("CE")
+    context = {"futures_symbol": _FUTURE, "bar_timestamp": bullish[-1]["timestamp"]}
+    original = ArchivedDirectionalHypothesis(
+        "momentum_acceleration", _HistoryEngine(bullish)
+    )
+    candidate = ArchivedDirectionalHypothesis(
+        "momentum_acceleration",
+        _HistoryEngine(bullish),
+        min_prior_trend_efficiency=0.30,
+    )
+    assert original.generate_signal(_CE, context, 60.0) is not None
+    assert candidate.generate_signal(_CE, context, 60.0) is not None
+    monkeypatch.setattr(
+        research, "prior_futures_trend_efficiency", lambda bars, side: 0.25
+    )
+    assert candidate.generate_signal(_CE, context, 60.0) is None
+    assert candidate.last_no_vote_reason == "prior_futures_trend_inefficient"
+    assert original.generate_signal(_CE, context, 60.0) is not None
+    with pytest.raises(ValueError, match="research_trend_efficiency_threshold_invalid"):
+        ArchivedDirectionalHypothesis(
+            "momentum_acceleration",
+            _HistoryEngine(bullish),
+            min_prior_trend_efficiency=float("nan"),
+        )
 
 
 def test_futures_atr_uses_14_preceding_bars_without_signal_bar() -> None:
@@ -737,3 +788,74 @@ def test_premium_confirmation_entry_funnel_distinguishes_matched_cohorts() -> No
                 }
             ]
         )
+
+
+def test_trend_efficiency_comparison_reuses_original_paired_cohort() -> None:
+    from scripts.research_orb_multiyear import summarize_option_premium_confirmation
+
+    family = "MomentumResearch"
+    old = {
+        "symbol": _CE,
+        "entry_time": "2020-01-02T09:48:00+05:30",
+        "exit_time": "2020-01-02T10:05:00+05:30",
+        "entry_price": 60.0,
+        "exit_price": 61.0,
+        "quantity": 65,
+        "gross_pnl": 65.0,
+        "fees": 20.0,
+        "net_pnl": 45.0,
+        "duration_minutes": 17.0,
+        "exit_reason": "target",
+    }
+    names = ("PullbackResearch", "CompressionResearch", "MomentumResearch")
+    day = {
+        "day": "2020-01-02",
+        "scenarios": [
+            {
+                "slippage_bps_per_side": 10.0,
+                "strategies": {
+                    name: {
+                        "trades": [old] if name == family else [],
+                        "unresolved_trades": [],
+                    }
+                    for name in names
+                },
+            }
+        ],
+        "prior_trend_efficiency": {
+            name: {
+                "trades": [old] if name == family else [],
+                "unresolved_trades": [],
+                "no_vote_reasons": {
+                    "prior_futures_trend_inefficient": 2,
+                    "cost_net_rr_rejected": 3,
+                },
+            }
+            for name in names
+        },
+    }
+    rows = summarize_option_premium_confirmation(
+        [day],
+        alternative_key="prior_trend_efficiency",
+        alternative_label="trend_efficient",
+        rejection_fields=("prior_futures_trend_inefficient", "cost_net_rr_rejected"),
+        method="signed_prior_20bar_futures_efficiency_ge_0_30",
+        error_prefix="trend_efficiency",
+    )
+    final = next(
+        row
+        for row in rows
+        if row["phase"] == "final" and row["candidate"] == family
+    )
+    assert final["baseline"]["metrics"]["net_pnl"] == 45.0
+    assert final["trend_efficient"]["metrics"]["net_pnl"] == 45.0
+    assert final["identical_entry_count"] == 1
+    assert final["identical_entry_trend_efficient"]["net_pnl"] == 45.0
+    assert final["entry_eligibility_rejections"]["prior_futures_trend_inefficient"] == 2
+    with pytest.raises(ValueError, match="trend_efficiency_scenario_incomplete"):
+        summarize_option_premium_confirmation(
+            [{**day, "prior_trend_efficiency": {}}],
+            alternative_key="prior_trend_efficiency",
+            error_prefix="trend_efficiency",
+        )
+
