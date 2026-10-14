@@ -1101,22 +1101,50 @@ class SMCStrategy(EliteStrategy):
                 # Enrichment supplies a side for each structure event. A break
                 # against the option being bought cannot confirm that entry.
                 # Older providers without side metadata retain their vote.
+                # Manager-derived option features are usable for THIS sweep
+                # only if their completed-bar event happened afterwards and
+                # no later than the underlying confirmation bar. An older BOS,
+                # retest or reclaim is not independent current corroboration.
+                manager_enriched = (
+                    indicators.get("smc_enrichment_source")
+                    == "strategy_manager_pre_strategy"
+                )
+
+                sweep_epoch = event["sweep_ts"].timestamp()
+                confirmation_epoch = current_ts.timestamp()
+
+                def _feature_after_sweep(feature: str, timestamp_key: str) -> bool:
+                    if not bool(indicators.get(feature)):
+                        return False
+                    if not manager_enriched:
+                        return True
+                    evidence_ts = _safe_float(indicators.get(timestamp_key))
+                    return bool(
+                        evidence_ts is not None
+                        and sweep_epoch < evidence_ts <= confirmation_epoch
+                    )
+
                 bos_confirmed = (
-                    bool(indicators.get("bos_confirmed"))
+                    _feature_after_sweep("bos_confirmed", "bos_ts_epoch")
                     and str(indicators.get("bos_side") or contract_side).upper()
                     == contract_side
                 )
                 choch_confirmed = (
-                    bool(indicators.get("choch_confirmed"))
+                    _feature_after_sweep("choch_confirmed", "choch_ts_epoch")
                     and str(indicators.get("choch_side") or contract_side).upper()
                     == contract_side
                 )
                 structure_confirmed = bool(bos_confirmed or choch_confirmed)
                 retest_confirmed = bool(
-                    indicators.get("retest_confirmed")
-                    or indicators.get("mitigation_confirmed")
+                    _feature_after_sweep("retest_confirmed", "retest_ts_epoch")
+                    or (
+                        not manager_enriched
+                        and bool(indicators.get("mitigation_confirmed"))
+                    )
                 )
-                premium_reclaim = bool(indicators.get("premium_reclaim"))
+                premium_reclaim = _feature_after_sweep(
+                    "premium_reclaim", "premium_reclaim_ts_epoch"
+                )
                 direction_aligned = (
                     effective_direction in {"CE", "PE"}
                     and effective_direction == contract_side
