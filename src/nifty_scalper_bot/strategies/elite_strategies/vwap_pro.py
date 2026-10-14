@@ -3,7 +3,7 @@
 # mypy: ignore-errors
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import math
 import os
 from typing import Any, Mapping
@@ -149,6 +149,9 @@ class VWAPProStrategy(EliteStrategy):
             0.0,
             float(os.getenv("VWAP_TREND_MOMENTUM_OPTION_RVOL_MIN", "1.5")),
         )
+        self._trend_require_retest = str(
+            os.getenv("VWAP_TREND_REQUIRE_RETEST", "false")
+        ).strip().lower() in {"1", "true", "yes", "on"}
 
         # get_session_vwap_slope() returns percentage change over finalized
         # bars. Convert percentage points to basis points for a scale-readable
@@ -309,12 +312,12 @@ class VWAPProStrategy(EliteStrategy):
         del position
         try:
             self._no_vote("stale_or_invalid_data")
-            vwap = float(
-                indicators.get("exchange_vwap")
-                or indicators.get("session_vwap")
-                or indicators.get("vwap")
-                or 0.0
+            vwap_source = next(
+                (key for key in ("exchange_vwap", "session_vwap", "vwap")
+                 if indicators.get(key) not in (None, "", 0, 0.0)),
+                None,
             )
+            vwap = float(indicators.get(vwap_source) or 0.0) if vwap_source else 0.0
             atr = float(indicators.get("atr") or 0.0)
             close = float(indicators.get("close") or current_price)
             open_price = float(indicators.get("open") or current_price)
@@ -639,7 +642,12 @@ class VWAPProStrategy(EliteStrategy):
             )
             trend_momentum_close_location: float | None = None
             completed_option_rvol: float | None = None
+            trend_momentum_volume_baseline_bars: int | None = None
+            trend_momentum_retest_confirmed: bool | None = None
             if self._trend_momentum_enabled:
+                if vwap_source not in {"exchange_vwap", "session_vwap"}:
+                    self._no_vote("trend_momentum_session_vwap_unavailable")
+                    return None
                 if trend_momentum_regime != MarketRegime.TREND:
                     self._no_vote("trend_momentum_regime_not_trend")
                     return None
@@ -654,7 +662,7 @@ class VWAPProStrategy(EliteStrategy):
                 bar_getter = getattr(self._indicator_engine, "get_history", None)
                 try:
                     last_bars = (
-                        bar_getter(symbol, count=1, field="bars")
+                        bar_getter(symbol, count=21, field="bars")
                         if callable(bar_getter) else []
                     )
                     confirmed_bar = last_bars[-1] if last_bars else None
@@ -702,15 +710,65 @@ class VWAPProStrategy(EliteStrategy):
                 if trend_momentum_close_location < 0.70:
                     self._no_vote("trend_momentum_weak_close")
                     return None
-                completed_option_rvol = (
-                    confirmed_volume / avg_vol if avg_vol > 0 else None
-                )
-                if (
-                    completed_option_rvol is None
-                    or completed_option_rvol < self._trend_momentum_option_rvol_min
-                ):
+                # Current signal volume must never inflate its own reference mean.
+                # Only completed option bars from the same recent session qualify.
+                try:
+                    current_ts = datetime.fromisoformat(
+                        _normalize_thesis_anchor(confirmed_bar["timestamp"])
+                    )
+                    prior_bars = []
+                    for prior in last_bars[:-1]:
+                        if (
+                            not isinstance(prior, Mapping)
+                            or prior.get("is_complete") is not True
+                            or prior.get("is_provisional") is True
+                        ):
+                            continue
+                        ts = datetime.fromisoformat(
+                            _normalize_thesis_anchor(prior.get("timestamp"))
+                        )
+                        age = (current_ts - ts).total_seconds()
+                        volume = float(prior["volume"])
+                        if (
+                            ts.date() == current_ts.date()
+                            and 0 < age <= 1800
+                            and math.isfinite(volume)
+                            and volume > 0
+                        ):
+                            prior_bars.append(volume)
+                except (KeyError, TypeError, ValueError, OverflowError):
+                    prior_bars = []
+                trend_momentum_volume_baseline_bars = len(prior_bars)
+                if trend_momentum_volume_baseline_bars < 5:
+                    self._no_vote("trend_momentum_volume_history_insufficient")
+                    return None
+                prior_avg_volume = sum(prior_bars) / len(prior_bars)
+                completed_option_rvol = confirmed_volume / prior_avg_volume
+                if completed_option_rvol < self._trend_momentum_option_rvol_min:
                     self._no_vote("trend_momentum_option_volume_not_confirmed")
                     return None
+                if self._trend_require_retest:
+                    trend_momentum_retest_confirmed = False
+                    if len(last_bars) >= 2:
+                        prior = last_bars[-2]
+                        try:
+                            prior_ts = datetime.fromisoformat(
+                                _normalize_thesis_anchor(prior["timestamp"])
+                            )
+                            trend_momentum_retest_confirmed = bool(
+                                prior.get("is_complete") is True
+                                and prior.get("is_provisional") is not True
+                                and current_ts - prior_ts == timedelta(minutes=1)
+                                and float(prior["low"]) < vwap
+                                and float(prior["close"]) >= vwap
+                                and confirmed_low >= vwap
+                                and open_price >= vwap
+                            )
+                        except (KeyError, TypeError, ValueError):
+                            pass
+                    if not trend_momentum_retest_confirmed:
+                        self._no_vote("trend_momentum_retest_unconfirmed")
+                        return None
 
             setup_type: str | None = None
             if pullback_flag and continuation_confirmed:
@@ -848,6 +906,7 @@ class VWAPProStrategy(EliteStrategy):
                 "candidate_symbol": symbol,
                 "rejection_reasons": [],
                 "vwap": vwap,
+                "vwap_reference_source": vwap_source or "unavailable",
                 "distance_pct": round(distance_pct, 4),
                 "vwap_distance_atr": round(distance_atr, 4),
                 "vwap_stddev": vwap_stddev,
@@ -905,6 +964,9 @@ class VWAPProStrategy(EliteStrategy):
                 "trend_momentum_underlying_quality_confirmed": strong_fresh_trend_context,
                 "trend_momentum_close_location": trend_momentum_close_location,
                 "trend_momentum_completed_option_rvol": completed_option_rvol,
+                "trend_momentum_volume_baseline_bars": trend_momentum_volume_baseline_bars,
+                "trend_momentum_require_retest": self._trend_require_retest,
+                "trend_momentum_retest_confirmed": trend_momentum_retest_confirmed,
                 "days_to_expiry": indicators.get("days_to_expiry"),
                 "strike_distance_from_atm": indicators.get("strike_distance_from_atm"),
                 "minutes_since_open": indicators.get("minutes_since_open"),
