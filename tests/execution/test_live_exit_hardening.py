@@ -1675,12 +1675,16 @@ def test_exchange_stop_pending_modify_does_not_issue_another_ratchet(
         "broker_stop_status_unverified:MODIFY PENDING"
     )
     bracket.sl_trigger_price = 150.0
-    statuses = [
-        {"status": "MODIFY PENDING", "quantity": 65},
-        {"status": "TRIGGER PENDING", "quantity": 65},
-    ]
+    statuses = iter(
+        [
+            {"status": "MODIFY PENDING", "quantity": 65},
+            {"status": "TRIGGER PENDING", "quantity": 65},
+        ]
+    )
     monkeypatch.setattr(
-        manager, "_get_broker_order_status", lambda _order_id: statuses.pop(0)
+        manager,
+        "_get_broker_order_status",
+        lambda _order_id: next(statuses, {"status": "TRIGGER PENDING", "quantity": 65}),
     )
 
     assert manager._sync_exchange_protective_stop(bracket) is False
