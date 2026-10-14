@@ -335,6 +335,7 @@ def test_ofi_reversal_holdoff_does_not_modify_nonlive_confirmation(
     indicators.pop("_expected_support")
     assert strategy._evaluate_signal(SYMBOL, indicators, 100.25) is not None
     indicators["ofi_1s_normalized"] = 0.50
+    indicators["ofi_3s_normalized"] = 0.50
     recovered = strategy._evaluate_signal(SYMBOL, indicators, 100.25)
     assert recovered is not None
     assert recovered.metadata["ofi_reversal_holdoff_active"] is False
