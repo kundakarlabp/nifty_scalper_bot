@@ -91,6 +91,7 @@ class TemporalOfiAccumulator:
             "ofi_3s": 0.0,
             "ofi_1s_normalized": 0.0,
             "ofi_3s_normalized": 0.0,
+            "ofi_3s_span_seconds": 0.0,
             "ofi_update_count_1s": 0,
             "ofi_update_count_3s": 0,
             "ofi_1s_complete": True,
@@ -206,6 +207,8 @@ class TemporalOfiAccumulator:
                 now=now,
                 seconds=3.0,
             )
+            recent_3s = [event[0] for event in events if now - event[0] <= 3.0]
+            span_3s = (recent_3s[-1] - recent_3s[0]) if len(recent_3s) >= 2 else 0.0
             snapshot = {
                 "ofi_ready": count_1s >= 2
                 and (not truncated_at or now - truncated_at > 1.0),
@@ -214,6 +217,7 @@ class TemporalOfiAccumulator:
                 "ofi_3s": ofi_3s,
                 "ofi_1s_normalized": normalized_1s,
                 "ofi_3s_normalized": normalized_3s,
+                "ofi_3s_span_seconds": max(0.0, span_3s),
                 "ofi_update_count_1s": count_1s,
                 "ofi_update_count_3s": count_3s,
                 "ofi_1s_complete": not truncated_at or now - truncated_at > 1.0,
