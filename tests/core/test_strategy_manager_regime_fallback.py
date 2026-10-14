@@ -6,8 +6,8 @@ from nifty_scalper_bot.core.strategy_manager import (
     Signal,
     StrategyEvidence,
     StrategyManager,
-    resolve_canonical_vwap,
     _enrich_smc_pre_strategy,
+    resolve_canonical_vwap,
     signal_to_evidence,
 )
 
