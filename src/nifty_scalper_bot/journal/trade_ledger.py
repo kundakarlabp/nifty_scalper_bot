@@ -55,7 +55,8 @@ INSERT INTO trade_ledger (
     decision_at, entry_submitted_at, entry_filled_at, bracket_armed_at,
     exit_triggered_at, exit_submitted_at, exit_filled_at, closed_at,
     created_at, updated_at, last_event_name, build_sha,
-    costs_json, execution_quality_json, outcome_json
+    costs_json, execution_quality_json, outcome_json,
+    entry_evidence_json
 ) VALUES (
     :trade_id, :signal_id, :trace_id, :strategy, :symbol, :side,
     :state, :state_rank, :entry_order_id, :exit_order_id, :quantity,
@@ -66,7 +67,8 @@ INSERT INTO trade_ledger (
     :decision_at, :entry_submitted_at, :entry_filled_at, :bracket_armed_at,
     :exit_triggered_at, :exit_submitted_at, :exit_filled_at, :closed_at,
     :created_at, :updated_at, :last_event_name, :build_sha,
-    :costs_json, :execution_quality_json, :outcome_json
+    :costs_json, :execution_quality_json, :outcome_json,
+    :entry_evidence_json
 )
 ON CONFLICT(trade_id) DO UPDATE SET
     signal_id = COALESCE(trade_ledger.signal_id, excluded.signal_id),
@@ -216,7 +218,8 @@ ON CONFLICT(trade_id) DO UPDATE SET
     END,
     costs_json = {_monotonic_merge_sql("costs_json")},
     execution_quality_json = {_monotonic_merge_sql("execution_quality_json")},
-    outcome_json = {_monotonic_merge_sql("outcome_json")}
+    outcome_json = {_monotonic_merge_sql("outcome_json")},
+    entry_evidence_json = COALESCE(trade_ledger.entry_evidence_json, excluded.entry_evidence_json)
 """
 
 
@@ -265,13 +268,16 @@ def ensure_trade_ledger_schema(conn: sqlite3.Connection) -> None:
             build_sha TEXT,
             costs_json TEXT,
             execution_quality_json TEXT,
-            outcome_json TEXT
+            outcome_json TEXT,
+            entry_evidence_json TEXT
         )
         """)
     existing = {str(row[1]) for row in conn.execute("PRAGMA table_info(trade_ledger)")}
     for column in ("initial_stop_price", "initial_target_price"):
         if column not in existing:
             conn.execute(f"ALTER TABLE trade_ledger ADD COLUMN {column} REAL")
+    if "entry_evidence_json" not in existing:
+        conn.execute("ALTER TABLE trade_ledger ADD COLUMN entry_evidence_json TEXT")
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_trade_ledger_signal_id "
         "ON trade_ledger(signal_id)"
@@ -590,6 +596,17 @@ def _build_trade_row(event: Mapping[str, Any]) -> dict[str, Any] | None:
         "costs_json": _mapping_json(costs),
         "execution_quality_json": _mapping_json(quality),
         "outcome_json": _mapping_json(outcome),
+        "entry_evidence_json": _mapping_json(
+            {
+                **dict(meta.get("research_context")),
+                "decision_at_epoch": timestamp,
+                "build_sha": event.get("build_sha"),
+            }
+        )
+        if event_name == "candidate.approved"
+        and isinstance(meta.get("research_context"), Mapping)
+        and bool(meta.get("research_context"))
+        else None,
     }
 
 
