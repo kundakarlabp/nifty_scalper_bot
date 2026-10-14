@@ -645,7 +645,11 @@ class VWAPProStrategy(EliteStrategy):
             trend_momentum_volume_baseline_bars: int | None = None
             trend_momentum_retest_confirmed: bool | None = None
             if self._trend_momentum_enabled:
-                if vwap_source not in {"exchange_vwap", "session_vwap"}:
+                if (
+                    vwap_source not in {"exchange_vwap", "session_vwap"}
+                    or not math.isfinite(vwap)
+                    or vwap <= 0
+                ):
                     self._no_vote("trend_momentum_session_vwap_unavailable")
                     return None
                 if trend_momentum_regime != MarketRegime.TREND:
@@ -906,7 +910,10 @@ class VWAPProStrategy(EliteStrategy):
                 "candidate_symbol": symbol,
                 "rejection_reasons": [],
                 "vwap": vwap,
-                "vwap_reference_source": vwap_source or "unavailable",
+                "vwap_reference_source": (
+                    "rolling_vwap" if vwap_source == "vwap"
+                    else vwap_source or "unavailable"
+                ),
                 "distance_pct": round(distance_pct, 4),
                 "vwap_distance_atr": round(distance_atr, 4),
                 "vwap_stddev": vwap_stddev,
