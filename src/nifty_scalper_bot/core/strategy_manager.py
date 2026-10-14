@@ -141,7 +141,24 @@ def _normalise_ohlcv_bars(bars: t.Any) -> list[dict[str, float]]:
             continue
         if volume_v is not None and not isfinite(volume_v):
             continue
-        normalised.append({"open": open_v, "high": high_v, "low": low_v, "close": close_v, "volume": float(volume_v if volume_v is not None else 0.0)})
+        result = {"open": open_v, "high": high_v, "low": low_v, "close": close_v, "volume": float(volume_v if volume_v is not None else 0.0)}
+        # Preserve canonical completed-bar timestamps through both normalising
+        # passes; OHLC alone cannot prove a structure feature follows its sweep.
+        raw_ts = bar.get("bar_ts_epoch")
+        if raw_ts is None:
+            raw_ts = bar.get("timestamp") or bar.get("date")
+        if isinstance(raw_ts, datetime):
+            raw_ts = raw_ts.timestamp() if raw_ts.tzinfo is not None else None
+        elif isinstance(raw_ts, str):
+            try:
+                parsed = datetime.fromisoformat(raw_ts.replace("Z", "+00:00"))
+                raw_ts = parsed.timestamp() if parsed.tzinfo is not None else None
+            except ValueError:
+                raw_ts = None
+        epoch = _safe_float_value(raw_ts)
+        if epoch is not None and isfinite(epoch) and epoch > 1_000_000_000:
+            result["bar_ts_epoch"] = epoch / 1000.0 if epoch > 1e12 else epoch
+        normalised.append(result)
     return normalised
 
 
@@ -220,30 +237,39 @@ def _enrich_smc_pre_strategy(
 
     latest = ohlcv[-1]
     previous = ohlcv[-2]
-    closes = [bar["close"] for bar in ohlcv[-5:]]
+    recent_window = ohlcv[-5:]
+    closes = [bar["close"] for bar in recent_window]
+    def _latest_timestamp(matching: t.Iterable[dict[str, float]]) -> float | None:
+        return max((bar["bar_ts_epoch"] for bar in matching if "bar_ts_epoch" in bar), default=None)
     symbol_side = "CE" if str(symbol).upper().endswith("CE") else "PE" if str(symbol).upper().endswith("PE") else ""
     direction_bias = str(enriched.get("direction_bias") or enriched.get("underlying_direction_bias") or "").upper()
     side = symbol_side if symbol_side in {"CE", "PE"} else direction_bias if direction_bias in {"CE", "PE"} else ""
 
     bos_side: str | None = None
+    bos_ts_epoch: float | None = None
     bos_confirmed = False
     if latest_high is not None and any(close > latest_high for close in closes):
         if side in {"", "CE"}:
             bos_confirmed = True
             bos_side = "CE"
+            bos_ts_epoch = _latest_timestamp(bar for bar in recent_window if bar["close"] > latest_high)
     if latest_low is not None and any(close < latest_low for close in closes):
         if side in {"", "PE"}:
             bos_confirmed = True
             bos_side = "PE"
+            bos_ts_epoch = _latest_timestamp(bar for bar in recent_window if bar["close"] < latest_low)
 
     choch_side: str | None = None
+    choch_ts_epoch: float | None = None
     choch_confirmed = False
     if direction_bias == "CE" and latest_low is not None and any(close < latest_low for close in closes):
         choch_confirmed = True
         choch_side = "PE"
+        choch_ts_epoch = _latest_timestamp(bar for bar in recent_window if bar["close"] < latest_low)
     elif direction_bias == "PE" and latest_high is not None and any(close > latest_high for close in closes):
         choch_confirmed = True
         choch_side = "CE"
+        choch_ts_epoch = _latest_timestamp(bar for bar in recent_window if bar["close"] > latest_high)
 
     premium_current = latest["close"]
     fallback_price = _safe_float_value(enriched.get("current_price") or enriched.get("ltp") or enriched.get("price"))
@@ -261,13 +287,15 @@ def _enrich_smc_pre_strategy(
 
     tolerance = max(abs(premium_current) * 0.003, 0.05)
     recent_bars = ohlcv[-5:]
-    retest_confirmed = False
+    retest_matches: list[dict[str, float]] = []
     if latest_high is not None and side in {"", "CE"}:
-        retest_confirmed = any(abs(bar["low"] - latest_high) <= tolerance or abs(bar["close"] - latest_high) <= tolerance for bar in recent_bars)
-    if not retest_confirmed and latest_low is not None and side in {"", "PE"}:
-        retest_confirmed = any(abs(bar["high"] - latest_low) <= tolerance or abs(bar["close"] - latest_low) <= tolerance for bar in recent_bars)
-    if not retest_confirmed and premium_vwap is not None:
-        retest_confirmed = any(bar["low"] - tolerance <= premium_vwap <= bar["high"] + tolerance for bar in recent_bars)
+        retest_matches = [bar for bar in recent_bars if abs(bar["low"] - latest_high) <= tolerance or abs(bar["close"] - latest_high) <= tolerance]
+    if not retest_matches and latest_low is not None and side in {"", "PE"}:
+        retest_matches = [bar for bar in recent_bars if abs(bar["high"] - latest_low) <= tolerance or abs(bar["close"] - latest_low) <= tolerance]
+    if not retest_matches and premium_vwap is not None:
+        retest_matches = [bar for bar in recent_bars if bar["low"] - tolerance <= premium_vwap <= bar["high"] + tolerance]
+    retest_confirmed = bool(retest_matches)
+    retest_ts_epoch = _latest_timestamp(retest_matches)
 
     current_body = abs(latest["close"] - latest["open"])
     previous_body = abs(previous["close"] - previous["open"])
@@ -283,13 +311,17 @@ def _enrich_smc_pre_strategy(
         "swing_low": latest_low,
         "bos_confirmed": bos_confirmed,
         "bos_side": bos_side,
+        "bos_ts_epoch": bos_ts_epoch,
         "choch_confirmed": choch_confirmed,
         "choch_side": choch_side,
+        "choch_ts_epoch": choch_ts_epoch,
         "retest_confirmed": retest_confirmed,
+        "retest_ts_epoch": retest_ts_epoch,
         "premium_current": premium_current,
         "premium_prev_close": premium_prev_close,
         "premium_vwap": premium_vwap,
         "premium_reclaim": premium_reclaim,
+        "premium_reclaim_ts_epoch": latest.get("bar_ts_epoch") if premium_reclaim else None,
         "bullish_reversal": bullish_reversal,
         "bearish_reversal": bearish_reversal,
         "smc_enrichment_source": "strategy_manager_pre_strategy",
