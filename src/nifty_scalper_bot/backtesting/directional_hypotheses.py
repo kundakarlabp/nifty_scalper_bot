@@ -47,6 +47,30 @@ def _band(values: Sequence[float]) -> tuple[float, float, float]:
     )
 
 
+def prior_futures_trend_efficiency(
+    bars: Sequence[Mapping[str, Any]], side: str
+) -> float | None:
+    """Direction-signed efficiency of 20 *preceding* one-minute futures moves.
+
+    Assumes the caller has validated 45 contiguous completed futures bars.
+    Never includes the newly generated signal candle or any future bar.
+    """
+    if len(bars) < 22 or side not in {"CE", "PE"}:
+        return None
+    try:
+        closes = [float(row["close"]) for row in bars[-22:-1]]
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not all(math.isfinite(value) and value > 0 for value in closes):
+        return None
+    path = sum(abs(right - left) for left, right in zip(closes, closes[1:]))
+    if path <= 0:
+        return 0.0
+    displacement = closes[-1] - closes[0]
+    aligned = displacement if side == "CE" else -displacement
+    return max(0.0, aligned / path)
+
+
 def classify_completed_futures_bars(
     bars: Sequence[Mapping[str, Any]],
 ) -> dict[str, str]:
@@ -182,9 +206,21 @@ def classify_completed_futures_bars(
 class ArchivedDirectionalHypothesis:
     """Minimal adapter for the existing research-only archived simulator."""
 
-    def __init__(self, family: str, engine: IndicatorEngine) -> None:
+    def __init__(
+        self,
+        family: str,
+        engine: IndicatorEngine,
+        *,
+        min_prior_trend_efficiency: float | None = None,
+    ) -> None:
         if family not in _FAMILIES:
             raise ValueError("unknown_research_hypothesis")
+        if min_prior_trend_efficiency is not None and (
+            not math.isfinite(min_prior_trend_efficiency)
+            or not 0 <= min_prior_trend_efficiency <= 1
+        ):
+            raise ValueError("research_trend_efficiency_threshold_invalid")
+        self.min_prior_trend_efficiency = min_prior_trend_efficiency
         self.family = family
         self.name = _FAMILIES[family]
         self.engine = engine
@@ -227,6 +263,14 @@ class ArchivedDirectionalHypothesis:
         detected = classify_completed_futures_bars(rows)
         if detected.get(self.family) != side:
             return None
+        if (
+            self.min_prior_trend_efficiency is not None
+            and self.family in {"trend_pullback", "momentum_acceleration"}
+        ):
+            efficiency = prior_futures_trend_efficiency(rows, side)
+            if efficiency is None or efficiency < self.min_prior_trend_efficiency:
+                self.last_no_vote_reason = "prior_futures_trend_inefficient"
+                return None
 
         try:
             price = float(current_price)
