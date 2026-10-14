@@ -263,10 +263,10 @@ class ArchivedDirectionalHypothesis:
         detected = classify_completed_futures_bars(rows)
         if detected.get(self.family) != side:
             return None
-        if (
-            self.min_prior_trend_efficiency is not None
-            and self.family in {"trend_pullback", "momentum_acceleration"}
-        ):
+        if self.min_prior_trend_efficiency is not None and self.family in {
+            "trend_pullback",
+            "momentum_acceleration",
+        }:
             efficiency = prior_futures_trend_efficiency(rows, side)
             if efficiency is None or efficiency < self.min_prior_trend_efficiency:
                 self.last_no_vote_reason = "prior_futures_trend_inefficient"
