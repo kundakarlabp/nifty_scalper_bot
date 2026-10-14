@@ -742,6 +742,69 @@ def test_regime_aware_smc_requires_corroboration_in_ranges(
 
 
 @pytest.mark.parametrize(
+    ("evidence_offset_minutes", "should_vote"),
+    [(-2, False), (0, False), (1, True), (2, False)],
+)
+def test_smc_manager_option_structure_must_follow_its_actual_sweep(
+    monkeypatch, evidence_offset_minutes: int, should_vote: bool
+) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    rows = _base_rows()
+    strategy = _strategy(rows, volume_spike_mult=10.0)
+    sweep = _bar(30, open_=23988, high=23991, low=23974, close=23984, volume=1000)
+    rows.append(sweep)
+    indicators = _indicators(
+        latest_bar_ts=sweep["timestamp"],
+        regime="RANGE",
+        bos_confirmed=True,
+        bos_side="CE",
+        bos_ts_epoch=(
+            sweep["timestamp"] + timedelta(minutes=evidence_offset_minutes)
+        ).timestamp(),
+        smc_enrichment_source="strategy_manager_pre_strategy",
+        choch_confirmed=False,
+        retest_confirmed=False,
+        premium_reclaim=False,
+    )
+    assert strategy.generate_signal(CE, indicators, 102.0) is None
+    rows.append(_bar(31, open_=23984, high=23999, low=23982, close=23997, volume=1000))
+    indicators["latest_bar_ts"] = rows[-1]["timestamp"]
+    signal = strategy.generate_signal(CE, indicators, 103.0)
+    if should_vote:
+        assert signal is not None
+        assert signal.metadata["structure_confirmed"] is True
+    else:
+        assert signal is None
+        assert strategy.last_no_vote_reason == "smc_range_corroboration_missing"
+
+
+def test_smc_manager_option_retest_and_reclaim_do_not_use_pre_sweep_bars(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    rows = _base_rows()
+    strategy = _strategy(rows, volume_spike_mult=10.0)
+    sweep = _bar(30, open_=23988, high=23991, low=23974, close=23984, volume=1000)
+    rows.append(sweep)
+    indicators = _indicators(
+        latest_bar_ts=sweep["timestamp"],
+        regime="RANGE",
+        bos_confirmed=False,
+        choch_confirmed=False,
+        retest_confirmed=True,
+        retest_ts_epoch=(sweep["timestamp"] - timedelta(minutes=1)).timestamp(),
+        premium_reclaim=True,
+        premium_reclaim_ts_epoch=(sweep["timestamp"] - timedelta(minutes=1)).timestamp(),
+        smc_enrichment_source="strategy_manager_pre_strategy",
+    )
+    assert strategy.generate_signal(CE, indicators, 102.0) is None
+    rows.append(_bar(31, open_=23984, high=23999, low=23982, close=23997, volume=1000))
+    indicators["latest_bar_ts"] = rows[-1]["timestamp"]
+    assert strategy.generate_signal(CE, indicators, 103.0) is None
+    assert strategy.last_no_vote_reason == "smc_range_corroboration_missing"
+
+
+@pytest.mark.parametrize(
     ("quote_age_seconds", "should_vote"),
     [(290, True), (315, False)],
 )
