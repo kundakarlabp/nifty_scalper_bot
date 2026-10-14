@@ -141,6 +141,65 @@ def test_replication_is_idempotent_and_preserves_risk_semantics(tmp_path: Any) -
     assert trade["ledger_complete"] is True
 
 
+def test_replication_retains_approved_entry_evidence_after_trade_closes(
+    tmp_path: Any,
+) -> None:
+    db_path = tmp_path / "trades.db"
+    journal = TradeJournal(str(db_path))
+    approval = journal._normalize_event(
+        {
+            "event_type": "TRADE_DECISION",
+            "timestamp": 1_789_999_999.0,
+            "symbol": "NFO:NIFTYCE",
+            "meta": {
+                "event_name": "candidate.approved",
+                "trade_id": "trade-1",
+                "signal_id": "signal-1",
+                "strategy": "VWAPPro",
+                "build_sha": "approved-build-sha",
+                "research_context": {
+                    "strategy": "VWAPPro",
+                    "setup_id": "vwap:session:contract",
+                    "regime": "TREND",
+                    "approval_path": "single_trigger_context_confirmed",
+                    "confirmation_contract": {
+                        "passed": True,
+                        "context_strategies": ["OrderFlow"],
+                    },
+                },
+            },
+        }
+    )
+    conn = journal._flush_batch([approval], None)
+    assert conn is not None
+    conn.close()
+    _write_lifecycle(db_path)
+    calls: list[dict[str, Any]] = []
+
+    def transport(
+        _url: str, payload: Mapping[str, Any], _timeout: float
+    ) -> Mapping[str, Any]:
+        calls.append(dict(payload))
+        return {"ok": True}
+
+    replicator = SupabaseTradeReplicator(
+        db_path=db_path,
+        endpoint_url="https://example.test/ingest",
+        transport=transport,
+    )
+    replicator.replicate_once()
+    trade = calls[0]["ledger"][0]
+    snapshot = trade["entry_snapshot"]
+    assert trade["status"] == "CLOSED"
+    assert trade["net_pnl"] == 600.0
+    assert snapshot["strategy"] == "VWAPPro"
+    assert snapshot["setup_id"] == "vwap:session:contract"
+    assert snapshot["approval_path"] == "single_trigger_context_confirmed"
+    assert snapshot["confirmation_contract"]["context_strategies"] == ["OrderFlow"]
+    assert snapshot["build_sha"] == "approved-build-sha"
+    assert snapshot["decision_at_epoch"] == 1_789_999_999.0
+
+
 def test_ledger_batch_uses_uniform_postgrest_row_shape(tmp_path: Any) -> None:
     db_path = tmp_path / "trades.db"
     _write_lifecycle(db_path)
