@@ -755,3 +755,28 @@ def test_runner_history_count_uses_quiet_indicator_count_api() -> None:
 
     assert runner.indicator_history_count("NFO:NIFTY26JUN24000CE") == 37
     assert runner._history_count_for_symbol("NFO:NIFTY26JUN24000CE") == 37
+
+
+def test_history_ensure_without_runtime_loop_defers_instead_of_spawning_loop() -> None:
+    """No ad-hoc asyncio.run thread may touch the canonical MDM history lock."""
+    runner = _runner_for_scheduling()
+    runner._main_loop = None
+    runner._runtime_loop_attached = False
+    calls: list[str] = []
+
+    async def ensure(symbol, **kwargs):
+        calls.append(symbol)
+
+    runner.set_runtime_history_ensurer(ensure)
+    symbol = "NFO:NIFTY26JUN24000CE"
+
+    assert not runner._schedule_runtime_history_ensure(
+        symbol,
+        role="selected_option",
+        phase="runner_sync",
+        reason="initial_history",
+        required_bars=30,
+    )
+    assert calls == []
+    assert runner._runtime_history_ensure_inflight == {}
+    assert runner._runtime_history_ensure_roles == {}

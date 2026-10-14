@@ -2065,12 +2065,23 @@ class StrategyRunner:
                         scheduled_coro.close()
                         raise
                 else:
-                    thread = threading.Thread(
-                        target=lambda: asyncio.run(_run()),
-                        name=f"runtime-history-ensure-{normalized}",
-                        daemon=True,
+                    # MDM hydration owns an asyncio lock bound to the runtime
+                    # loop. An independent asyncio.run() thread can bind it
+                    # to a different loop and corrupt subsequent requests.
+                    # The next context tick/startup check retries when attached.
+                    restore_after_schedule_failure()
+                    self._logger.info(
+                        "CANONICAL_HISTORY_ENSURE_DEFERRED symbol=%s role=%s reason=no_runtime_loop",
+                        normalized,
+                        role,
+                        extra={
+                            "event": "CANONICAL_HISTORY_ENSURE_DEFERRED",
+                            "symbol": normalized,
+                            "role": role,
+                            "reason": "no_runtime_loop",
+                        },
                     )
-                    thread.start()
+                    return False
             else:
                 scheduled_coro = _run()
                 try:
