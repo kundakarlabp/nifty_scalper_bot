@@ -843,9 +843,7 @@ def test_trend_efficiency_comparison_reuses_original_paired_cohort() -> None:
         error_prefix="trend_efficiency",
     )
     final = next(
-        row
-        for row in rows
-        if row["phase"] == "final" and row["candidate"] == family
+        row for row in rows if row["phase"] == "final" and row["candidate"] == family
     )
     assert final["baseline"]["metrics"]["net_pnl"] == 45.0
     assert final["trend_efficient"]["metrics"]["net_pnl"] == 45.0
@@ -858,4 +856,3 @@ def test_trend_efficiency_comparison_reuses_original_paired_cohort() -> None:
             alternative_key="prior_trend_efficiency",
             error_prefix="trend_efficiency",
         )
-
