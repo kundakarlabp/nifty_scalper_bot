@@ -7,6 +7,7 @@ from nifty_scalper_bot.core.strategy_manager import (
     StrategyEvidence,
     StrategyManager,
     resolve_canonical_vwap,
+    _enrich_smc_pre_strategy,
     signal_to_evidence,
 )
 
@@ -148,3 +149,59 @@ def test_canonical_vwap_rejects_nonfinite_values_before_fallback() -> None:
         )
         is None
     )
+
+
+def test_smc_enrichment_rejects_unfinished_and_invalid_option_bars() -> None:
+    clean = [
+        {
+            "open": 100.0,
+            "high": 102.0,
+            "low": 98.0,
+            "close": 100.0,
+            "volume": 100.0,
+            "is_complete": True,
+        }
+        for _ in range(25)
+    ]
+    partial = {
+        "open": 100.0,
+        "high": 150.0,
+        "low": 99.0,
+        "close": 149.0,
+        "volume": 3000.0,
+        "is_complete": False,
+    }
+    invalid = {
+        "open": 100.0,
+        "high": float("nan"),
+        "low": 99.0,
+        "close": 140.0,
+        "volume": 100.0,
+    }
+    enriched = _enrich_smc_pre_strategy(
+        "NFO:NIFTY26O1922700CE", {}, [*clean, partial, invalid]
+    )
+    assert enriched["smc_enrichment_bars"] == 25
+    assert enriched["premium_current"] == 100.0
+    assert enriched["bos_confirmed"] is False
+    assert enriched["smc_enrichment_lookahead_safe"] is True
+
+
+def test_smc_enrichment_drops_provisional_bar_without_complete_flag() -> None:
+    history = [
+        {"open": 100.0, "high": 102.0, "low": 98.0, "close": 100.0, "volume": 100}
+        for _ in range(25)
+    ]
+    history.append(
+        {
+            "open": 100.0,
+            "high": 160.0,
+            "low": 99.0,
+            "close": 159.0,
+            "volume": 1000,
+            "is_provisional": True,
+        }
+    )
+    enriched = _enrich_smc_pre_strategy("NFO:NIFTY26O1922700CE", {}, history)
+    assert enriched["smc_enrichment_bars"] == 25
+    assert enriched["premium_current"] == 100.0
