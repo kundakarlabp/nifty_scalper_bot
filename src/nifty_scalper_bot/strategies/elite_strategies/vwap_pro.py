@@ -316,9 +316,13 @@ class VWAPProStrategy(EliteStrategy):
             # Nonzero NaN/Inf/negative values must not hide a valid fallback.
             vwap = 0.0
             vwap_source = None
-            for key in ("exchange_vwap", "session_vwap", "vwap"):
+            for key, value in (
+                ("exchange_vwap", indicators.get("exchange_vwap")),
+                ("session_vwap", indicators.get("session_vwap")),
+                ("vwap", indicators.get("vwap")),
+            ):
                 try:
-                    candidate = float(indicators.get(key))
+                    candidate = float(value)
                 except (TypeError, ValueError):
                     continue
                 if math.isfinite(candidate) and candidate > 0:
