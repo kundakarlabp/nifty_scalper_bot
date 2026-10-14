@@ -1295,7 +1295,7 @@ def run_vwap_comparison(directory: Path) -> dict[str, Any]:
                 "Archived basket incomplete; weekly near-ATM proximity only",
                 "Reused archive is not an untouched holdout",
                 "Historical bid/ask depth and full live arbitration unavailable",
-                "Completed-bar context age is a research proxy, not proven live two-second freshness",
+                "Bar-close context age is a proxy, not verified live tick freshness",
                 "Prospective chronological and paper validation required",
             ],
         },
