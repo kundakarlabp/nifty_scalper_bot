@@ -650,7 +650,7 @@ def run_fixed_hypothesis_day(task: tuple[str, str]) -> dict[str, Any]:
     # Research-only, predeclared signed 20-bar futures trend-efficiency
     # confirmation (ER >= 0.30), applied only to pullback and momentum.
     # Compression is expected to emerge from non-trending conditions.
-    def trend_quality_factory(engine: IndicatorEngine) -> list[Any]:
+    def trend_quality_factory(engine: Any) -> list[Any]:
         return _research_strategies(engine, min_prior_trend_efficiency=0.30)
 
     trend_efficient = _scenario(
