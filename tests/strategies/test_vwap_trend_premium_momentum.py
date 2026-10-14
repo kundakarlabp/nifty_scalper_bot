@@ -48,7 +48,9 @@ def _evaluate(monkeypatch, *, side="CE", enabled=True, **updates):
             current_ts = datetime.fromisoformat(indicators["latest_bar_ts"])
             prior = [
                 {
-                    "timestamp": current_ts - timedelta(minutes=i),
+                    "timestamp": current_ts - timedelta(
+                        minutes=max(i, indicators.get("prior_gap_minutes", 1))
+                    ),
                     "open": 100.0,
                     "high": 103.0,
                     "low": 98.0,
@@ -258,8 +260,8 @@ def test_retest_mode_rejects_unheld_vwap(monkeypatch):
 def test_retest_mode_rejects_stale_previous_candle(monkeypatch):
     monkeypatch.setenv("VWAP_TREND_REQUIRE_RETEST", "true")
     strategy, signal = _evaluate(
-        monkeypatch, low=100.0, prior_volumes=[900.0] * 5
+        monkeypatch, low=100.0, prior_gap_minutes=2
     )
 
-    assert signal is not None
-    assert signal.metadata["trend_momentum_retest_confirmed"] is True
+    assert signal is None
+    assert strategy.last_no_vote_reason == "trend_momentum_retest_unconfirmed"
