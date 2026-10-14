@@ -536,6 +536,14 @@ def _build_trade_row(event: Mapping[str, Any]) -> dict[str, Any] | None:
             event.get("price"),
         )
 
+    research_value = meta.get("research_context")
+    entry_evidence = (
+        dict(research_value)
+        if event_name == "candidate.approved"
+        and isinstance(research_value, Mapping)
+        else {}
+    )
+
     ledger_complete = None
     if "ledger_complete" in outcome:
         ledger_complete = int(bool(outcome.get("ledger_complete")))
@@ -601,14 +609,12 @@ def _build_trade_row(event: Mapping[str, Any]) -> dict[str, Any] | None:
         "entry_evidence_json": (
             _mapping_json(
                 {
-                    **dict(meta.get("research_context")),
+                    **entry_evidence,
                     "decision_at_epoch": timestamp,
                     "build_sha": event.get("build_sha"),
                 }
             )
-            if event_name == "candidate.approved"
-            and isinstance(meta.get("research_context"), Mapping)
-            and bool(meta.get("research_context"))
+            if entry_evidence
             else None
         ),
     }
