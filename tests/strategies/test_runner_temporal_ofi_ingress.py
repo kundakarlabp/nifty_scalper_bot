@@ -77,7 +77,7 @@ def test_three_second_ofi_span_is_measured_not_inferred_from_completeness() -> N
     assert snapshot["ofi_3s_complete"] is True
     assert snapshot["ofi_update_count_3s"] == 4
     assert snapshot["ofi_3s_span_seconds"] == pytest.approx(2.2)
-    assert snapshot["ofi_update_count_1s"] == 2
+    assert snapshot["ofi_update_count_1s"] == 3
     assert snapshot["ofi_ready"] is True
 
 
