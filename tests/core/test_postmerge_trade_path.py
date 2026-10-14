@@ -152,7 +152,6 @@ def test_single_trigger_requires_fresh_independent_context(monkeypatch) -> None:
     assert result.metadata["context_confirmation_strategies"] == ["OrderFlow"]
 
 
-
 def test_smc_is_not_confirmed_by_short_orderflow_context_alone(
     monkeypatch,
 ) -> None:
