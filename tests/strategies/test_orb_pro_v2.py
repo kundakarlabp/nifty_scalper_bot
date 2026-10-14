@@ -760,9 +760,7 @@ def test_missing_post_range_minute_cannot_create_fresh_orb_breakout(
     monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
     monkeypatch.setenv("ORB_BALANCED_RANGE_MAX_ATR", "2.0")
     rows = _opening_rows()
-    rows.append(
-        _bar(15, open_=24_002.0, high=24_012.0, low=23_998.0, close=24_010.0)
-    )
+    rows.append(_bar(15, open_=24_002.0, high=24_012.0, low=23_998.0, close=24_010.0))
     rows.append(
         _bar(
             17,
