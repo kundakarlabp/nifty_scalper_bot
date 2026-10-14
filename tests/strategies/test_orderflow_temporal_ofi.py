@@ -44,7 +44,9 @@ def _indicators(
         "ofi_1s_normalized": ofi_value,
         "ofi_3s_normalized": ofi_value,
         "ofi_update_count_1s": 2,
-        "ofi_update_count_3s": 2,
+        "ofi_update_count_3s": 3,
+        "ofi_3s_span_seconds": 2.0,
+        "ofi_3s_complete": True,
         "ofi_source": "runner_datahub_tick_updates",
         "queue_imbalance_top": (buy - sell) / max(buy + sell, 1.0),
         "_expected_support": supports,
@@ -142,6 +144,72 @@ def test_orderflow_context_log_exposes_microstructure_diagnostics(
     assert extra["ofi_unavailable_reason"] is None
     assert extra["depth_imbalance"] == signal.metadata["depth_imbalance"]
     assert extra["strong_depth_conflicts_side"] is False
+
+
+def test_live_short_ofi_cannot_authorize_vwap_or_orb_entry_context(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    strategy = _strategy()
+    indicators = _indicators(
+        buy=300.0, sell=100.0, ofi_value=3.14, supports=True
+    )
+    indicators.pop("_expected_support")
+    # Two book events can flip the one-second imbalance instantly.
+    indicators["ofi_update_count_3s"] = 2
+    indicators["ofi_3s_span_seconds"] = 0.15
+
+    signal = strategy._evaluate_signal(SYMBOL, indicators, current_price=100.25)
+
+    assert signal is not None
+    assert signal.metadata["ofi_supports_side"] is True
+    assert signal.metadata["ofi_sustained_confirmation"] is False
+    assert signal.metadata["effective_context_alignment"] is False
+    assert signal.metadata["context_alignment_source"] is None
+    assert signal.metadata["effective_context_conflict"] is False
+
+
+def test_live_opposing_three_second_flow_cannot_confirm_positive_one_second(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    strategy = _strategy()
+    indicators = _indicators(
+        buy=300.0, sell=100.0, ofi_value=0.50, supports=True
+    )
+    indicators.pop("_expected_support")
+    indicators["ofi_3s_normalized"] = -0.40
+
+    signal = strategy._evaluate_signal(SYMBOL, indicators, current_price=100.25)
+
+    assert signal is not None
+    assert signal.metadata["ofi_sustained_confirmation"] is False
+    assert signal.metadata["effective_context_alignment"] is False
+
+
+def test_live_strong_depth_without_ofi_requires_distinct_temporal_snapshots(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    clock = [100.0]
+    monkeypatch.setattr(order_flow_module.time, "monotonic", lambda: clock[0])
+    strategy = _strategy()
+    indicators = _indicators(
+        buy=400.0, sell=100.0, ofi_value=0.0, supports=True
+    )
+    indicators.pop("_expected_support")
+    indicators["ofi_ready"] = False
+
+    first = strategy._evaluate_signal(SYMBOL, indicators, current_price=100.25)
+    assert first is not None
+    assert first.metadata["context_alignment_candidate_source"] == "strong_depth"
+    assert first.metadata["effective_context_alignment"] is False
+
+    clock[0] = 101.2
+    indicators["quote_update_version"] = 4
+    later = strategy._evaluate_signal(SYMBOL, indicators, current_price=100.25)
+    assert later is not None
+    assert later.metadata["effective_context_alignment"] is True
 
 
 def test_live_tick_only_depth_confirmation_needs_two_distinct_fresh_snapshots(
