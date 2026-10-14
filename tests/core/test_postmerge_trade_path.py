@@ -152,6 +152,55 @@ def test_single_trigger_requires_fresh_independent_context(monkeypatch) -> None:
     assert result.metadata["context_confirmation_strategies"] == ["OrderFlow"]
 
 
+def test_smc_is_not_confirmed_by_short_orderflow_context_alone(
+    monkeypatch,
+) -> None:
+    """2026-10-14: transient one-second OFI must not authorize an SMC entry."""
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    manager = _manager()
+    smc = _signal_evidence("SMC")
+    orderflow = _signal_evidence("OrderFlow", role="context")
+    orderflow[1].metadata.update(
+        {
+            "context_alignment_source": "temporal_ofi",
+            "ofi_ready": True,
+            "ofi_update_count_1s": 2,
+            "ofi_1s_normalized": 3.14,
+        }
+    )
+
+    result = manager._combine_strategy_votes(
+        symbol=_CE,
+        signals=[smc, orderflow],
+        indicators=_live_indicators("CE"),
+    )
+
+    assert result is None
+    decision = manager._last_no_signal_decision_by_symbol[_CE]
+    assert decision.reason == "smc_independent_confirmation_missing"
+    assert decision.blocked_at == "context_contract"
+
+
+def test_smc_with_independent_trigger_still_approves_despite_short_orderflow(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    manager = _manager()
+    smc = _signal_evidence("SMC")
+    orb = _signal_evidence("ORBPro")
+    orderflow = _signal_evidence("OrderFlow", role="context")
+
+    result = manager._combine_strategy_votes(
+        symbol=_CE,
+        signals=[smc, orb, orderflow],
+        indicators=_live_indicators("CE"),
+    )
+
+    assert result is not None
+    assert result.metadata["approval_path"] == "aligned_trigger_consensus"
+    assert result.metadata["confirmation_contract"]["trigger_consensus"] is True
+
+
 def test_capacity_rejected_smc_retry_requires_trigger_consensus(monkeypatch) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     manager = _manager()
