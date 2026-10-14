@@ -58,6 +58,29 @@ def test_runner_tick_ingress_builds_one_second_ofi_before_strategy_eval() -> Non
     assert snapshot["ofi_source"] == "runner_datahub_tick_updates"
 
 
+def test_three_second_ofi_span_is_measured_not_inferred_from_completeness() -> None:
+    accumulator = TemporalOfiAccumulator()
+    snapshot: dict[str, object] = {}
+    for version, buy, at in (
+        (1, 100.0, 10.0),
+        (2, 110.0, 10.2),
+        (3, 140.0, 11.5),
+        (4, 160.0, 12.2),
+        (5, 180.0, 12.4),
+    ):
+        snapshot = accumulator.update(
+            SYMBOL,
+            {"source": "ws", **_tick(version=version, buy=buy, sell=100.0)},
+            update_version=version,
+            observed_at=at,
+        )
+    assert snapshot["ofi_3s_complete"] is True
+    assert snapshot["ofi_update_count_3s"] == 4
+    assert snapshot["ofi_3s_span_seconds"] == pytest.approx(2.2)
+    assert snapshot["ofi_update_count_1s"] == 2
+    assert snapshot["ofi_ready"] is True
+
+
 @pytest.mark.parametrize("source", ["ws", "ws_full"])
 def test_runner_uses_same_tick_ws_quote_book_for_temporal_ofi(source: str) -> None:
     """Sparse callbacks may borrow ONLY the matching authoritative FULL book."""
