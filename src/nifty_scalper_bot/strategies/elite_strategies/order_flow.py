@@ -292,6 +292,14 @@ class OrderFlowStrategy(EliteStrategy):
             )
             ofi_ready = bool(indicators.get("ofi_ready"))
             ofi_value = _safe_float_value(indicators.get("ofi_1s_normalized"))
+            ofi_3s_value = _safe_float_value(indicators.get("ofi_3s_normalized"))
+            ofi_3s_span = max(
+                0.0, _safe_float_value(indicators.get("ofi_3s_span_seconds")) or 0.0
+            )
+            try:
+                ofi_3s_updates = max(0, int(indicators.get("ofi_update_count_3s") or 0))
+            except (TypeError, ValueError, OverflowError):
+                ofi_3s_updates = 0
             try:
                 ofi_updates = max(0, int(indicators.get("ofi_update_count_1s") or 0))
             except (TypeError, ValueError, OverflowError):
@@ -315,6 +323,21 @@ class OrderFlowStrategy(EliteStrategy):
                 ofi_directional
                 and _depth_supports_side(
                     float(ofi_value or 0.0),
+                    side=side,
+                    option_premium_domain=option_premium_domain,
+                    threshold=ofi_threshold,
+                )
+            )
+            # Book update count alone is not persistence: require actual
+            # elapsed coverage and same-side flow over the longer window.
+            ofi_sustained_confirmation = bool(
+                ofi_supports_side
+                and indicators.get("ofi_3s_complete") is True
+                and ofi_3s_updates >= 3
+                and ofi_3s_span >= 1.5
+                and ofi_3s_value is not None
+                and _depth_supports_side(
+                    ofi_3s_value,
                     side=side,
                     option_premium_domain=option_premium_domain,
                     threshold=ofi_threshold,
@@ -351,12 +374,9 @@ class OrderFlowStrategy(EliteStrategy):
                 and direction_available
             )
             context_alignment_source: str | None = None
-            if (
-                ofi_directional
-                and ofi_supports_side
-                and not strong_depth_conflicts_side
-            ):
-                context_alignment_source = "temporal_ofi"
+            if ofi_directional:
+                if ofi_sustained_confirmation and not strong_depth_conflicts_side:
+                    context_alignment_source = "temporal_ofi"
             elif depth_supports_side and flow_supports_side and not flow_conflicts_side:
                 context_alignment_source = "depth_plus_flow"
             elif strong_depth_supports_side and not flow_conflicts_side:
@@ -387,7 +407,7 @@ class OrderFlowStrategy(EliteStrategy):
             # provides its own multi-tick confirmation.
             if (
                 is_live
-                and context_alignment_source == "depth_plus_flow"
+                and context_alignment_source in {"depth_plus_flow", "strong_depth"}
                 and not ofi_directional
                 and context_quality_eligible
                 and side_aligns
@@ -490,6 +510,10 @@ class OrderFlowStrategy(EliteStrategy):
                 "ofi_ready": ofi_ready,
                 "ofi_1s_normalized": ofi_value,
                 "ofi_update_count_1s": ofi_updates,
+                "ofi_3s_normalized": ofi_3s_value,
+                "ofi_update_count_3s": ofi_3s_updates,
+                "ofi_3s_span_seconds": ofi_3s_span,
+                "ofi_sustained_confirmation": ofi_sustained_confirmation,
                 "ofi_source": indicators.get("ofi_source"),
                 "ofi_unavailable_reason": ofi_unavailable_reason,
                 "ofi_threshold": ofi_threshold,
@@ -573,6 +597,8 @@ class OrderFlowStrategy(EliteStrategy):
                     "ofi_ready": ofi_ready,
                     "ofi_1s_normalized": ofi_value,
                     "ofi_update_count_1s": ofi_updates,
+                    "ofi_3s_span_seconds": ofi_3s_span,
+                    "ofi_sustained_confirmation": ofi_sustained_confirmation,
                     "ofi_reversal_holdoff_active": ofi_reversal_holdoff_active,
                     "ofi_unavailable_reason": ofi_unavailable_reason,
                     "depth_imbalance": round(depth_imbalance, 4),
