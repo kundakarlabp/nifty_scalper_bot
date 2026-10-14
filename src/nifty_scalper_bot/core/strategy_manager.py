@@ -278,12 +278,28 @@ def _enrich_smc_pre_strategy(
     premium_prev_close = previous["close"]
     premium_vwap = resolve_canonical_vwap(enriched)
     if premium_vwap is None:
-        volume_sum = sum(max(0.0, bar["volume"]) for bar in ohlcv)
-        if volume_sum > 0:
-            premium_vwap = sum(((bar["high"] + bar["low"] + bar["close"]) / 3.0) * max(0.0, bar["volume"]) for bar in ohlcv) / volume_sum
-        # No volume-backed VWAP exists. Falling back to the current premium made
-        # prev_close < price read as a VWAP reclaim on zero evidence, so the
-        # feature stays absent instead of being manufactured.
+        # The rolling proxy must not combine previous-session options with
+        # today's VWAP. Missing bar timestamps cannot prove session isolation.
+        same_session_bars: list[dict[str, float]] = []
+        if all("bar_ts_epoch" in bar for bar in ohlcv):
+            session_date = datetime.fromtimestamp(
+                latest["bar_ts_epoch"], timezone.utc
+            ).date()
+            same_session_bars = [
+                bar for bar in ohlcv
+                if datetime.fromtimestamp(
+                    bar["bar_ts_epoch"], timezone.utc
+                ).date() == session_date
+            ]
+        if len(same_session_bars) >= 2:
+            volume_sum = sum(max(0.0, bar["volume"]) for bar in same_session_bars)
+            if volume_sum > 0:
+                premium_vwap = sum(
+                    ((bar["high"] + bar["low"] + bar["close"]) / 3.0)
+                    * max(0.0, bar["volume"])
+                    for bar in same_session_bars
+                ) / volume_sum
+        # No verified session-volume VWAP exists; never manufacture a reclaim.
 
     tolerance = max(abs(premium_current) * 0.003, 0.05)
     recent_bars = ohlcv[-5:]
@@ -328,7 +344,18 @@ def _enrich_smc_pre_strategy(
         "smc_enrichment_bars": bar_count,
         "smc_enrichment_lookahead_safe": True,
     }
+    # Upstream booleans may be from a different timeframe/provider; never
+    # attach our derived bar timestamp to somebody else's event claim.
+    timestamp_parent = {
+        "bos_ts_epoch": "bos_confirmed",
+        "choch_ts_epoch": "choch_confirmed",
+        "retest_ts_epoch": "retest_confirmed",
+        "premium_reclaim_ts_epoch": "premium_reclaim",
+    }
     for key, value in derived.items():
+        parent = timestamp_parent.get(key)
+        if parent and indicators.get(parent) is not None:
+            continue
         if enriched.get(key) is None:
             enriched[key] = value
 
