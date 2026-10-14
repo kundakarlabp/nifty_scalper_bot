@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from datetime import datetime, timedelta, timezone
 
 from nifty_scalper_bot.core.strategy_manager import (
     Signal,
@@ -205,3 +206,55 @@ def test_smc_enrichment_drops_provisional_bar_without_complete_flag() -> None:
     enriched = _enrich_smc_pre_strategy("NFO:NIFTY26O1922700CE", {}, history)
     assert enriched["smc_enrichment_bars"] == 25
     assert enriched["premium_current"] == 100.0
+
+
+def test_smc_option_enrichment_retains_completed_event_timestamps() -> None:
+    start = datetime(2026, 10, 14, 5, 0, tzinfo=timezone.utc)
+    history = [
+        {
+            "timestamp": start + timedelta(minutes=index),
+            "open": 100.0,
+            "high": 102.0,
+            "low": 98.0,
+            "close": 100.0,
+            "volume": 100.0,
+            "is_complete": True,
+        }
+        for index in range(25)
+    ]
+    history[-2]["close"] = 90.0
+    history[-1].update(
+        {
+            "timestamp": (start + timedelta(minutes=24)).isoformat(),
+            "open": 90.0,
+            "high": 112.0,
+            "low": 89.0,
+            "close": 110.0,
+        }
+    )
+    enriched = _enrich_smc_pre_strategy(
+        "NFO:NIFTY26O1922700CE",
+        {"session_vwap": 100.0, "direction_bias": "CE"},
+        history,
+    )
+    expected = (start + timedelta(minutes=24)).timestamp()
+
+    assert enriched["premium_reclaim"] is True
+    assert enriched["premium_reclaim_ts_epoch"] == expected
+    assert enriched["bos_confirmed"] is True
+    assert enriched["bos_ts_epoch"] == expected
+
+
+def test_smc_missing_bar_timestamps_never_invent_event_provenance() -> None:
+    history = [
+        {"open": 100.0, "high": 102.0, "low": 98.0, "close": 100.0, "volume": 100}
+        for _ in range(25)
+    ]
+    history[-2]["close"] = 90.0
+    history[-1].update({"open": 90.0, "high": 112.0, "close": 110.0})
+    enriched = _enrich_smc_pre_strategy(
+        "NFO:NIFTY26O1922700CE", {"session_vwap": 100.0}, history
+    )
+    assert enriched["premium_reclaim"] is True
+    assert enriched["premium_reclaim_ts_epoch"] is None
+    assert enriched["bos_ts_epoch"] is None
