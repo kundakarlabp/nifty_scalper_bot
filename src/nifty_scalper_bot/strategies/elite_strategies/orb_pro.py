@@ -640,6 +640,24 @@ class ORBProStrategy(EliteStrategy):
             self._no_vote("orb_entry_window_expired")
             return None
 
+        # Missing completed futures candles can manufacture an apparent
+        # breakout or conceal a failed retest. A backfill may restore the
+        # current bar without burning its once-per-bar evaluation identity.
+        post_range_rows = {
+            bar["timestamp"]
+            for bar in snapshot["rows"]
+            if snapshot["cutoff"] <= bar["timestamp"] <= snapshot["current_ts"]
+        }
+        elapsed_minutes = int(
+            (snapshot["current_ts"] - snapshot["cutoff"]).total_seconds() // 60
+        )
+        if any(
+            snapshot["cutoff"] + timedelta(minutes=minute) not in post_range_rows
+            for minute in range(elapsed_minutes + 1)
+        ):
+            self._no_vote("orb_post_range_data_gap")
+            return None
+
         key = (str(snapshot["session_date"]), str(snapshot["symbol"]), side)
         current_ts = snapshot["current_ts"]
         if self._last_bar_by_key.get(key) == current_ts:

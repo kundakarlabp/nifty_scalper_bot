@@ -752,3 +752,72 @@ def test_opening_range_backfill_restores_same_bar_evaluation(
     assert signal is not None
     assert signal.metadata["opening_range_complete"] is True
     assert signal.metadata["orb_window_minutes"] == orb_minutes
+
+
+def test_missing_post_range_minute_cannot_create_fresh_orb_breakout(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    monkeypatch.setenv("ORB_BALANCED_RANGE_MAX_ATR", "2.0")
+    rows = _opening_rows()
+    rows.append(_bar(15, open_=24_002.0, high=24_012.0, low=23_998.0, close=24_010.0))
+    rows.append(
+        _bar(
+            17,
+            open_=24_010.0,
+            high=24_044.0,
+            low=24_008.0,
+            close=24_040.0,
+            volume=3_000.0,
+        )
+    )
+    strategy = _strategy({FUTURE: rows})
+    indicators = _base_indicators("CE", rows[-1]["timestamp"])
+
+    assert strategy.generate_signal(CE, indicators, 50.0) is None
+    assert strategy.last_no_vote_reason == "orb_post_range_data_gap"
+
+    # History backfill may make the same latest completed bar eligible.
+    rows.insert(
+        -1,
+        _bar(16, open_=24_010.0, high=24_016.0, low=24_006.0, close=24_011.0),
+    )
+    recovered = strategy.generate_signal(CE, indicators, 50.0)
+    assert recovered is not None
+    assert recovered.metadata["entry_branch"] == "momentum"
+
+
+def test_missing_bar_between_orb_breakout_and_retest_is_not_confirmation(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    monkeypatch.setenv("ORB_MOMENTUM_BRANCH_ENABLED", "false")
+    monkeypatch.setenv("ORB_BALANCED_RANGE_MAX_ATR", "2.0")
+    rows = _opening_rows()
+    rows.append(
+        _bar(
+            15,
+            open_=24_014.0,
+            high=24_034.0,
+            low=24_012.0,
+            close=24_030.0,
+            volume=1_600.0,
+        )
+    )
+    rows.append(
+        _bar(
+            17,
+            open_=24_024.0,
+            high=24_026.0,
+            low=24_019.0,
+            close=24_021.0,
+            volume=400.0,
+        )
+    )
+    strategy = _strategy({FUTURE: rows})
+    result = strategy.generate_signal(
+        CE, _base_indicators("CE", rows[-1]["timestamp"]), 50.0
+    )
+
+    assert result is None
+    assert strategy.last_no_vote_reason == "orb_post_range_data_gap"
