@@ -2237,3 +2237,58 @@ async def test_drain_telemetry_identifies_awaited_worker_turnaround(
     assert "awaited_worker_ms=" in sample.getMessage()
     assert mdm.get_tick_pressure_stats()["dropped_total"] == 0
     await _stop_mdm(mdm)
+
+
+def test_missing_required_option_first_tick_reasserts_ws_once(monkeypatch) -> None:
+    """REST fallback alone must not leave a missing WS subscription indefinitely."""
+    from nifty_scalper_bot.utils import market_hours
+
+    mdm = MarketDataManager(kite=None)
+    _wire_symbols(mdm)
+    now = time.monotonic()
+    missing = "NFO:NIFTY26JUN24000PE"
+    for symbol in mdm._required_live_symbols():
+        mdm._required_symbol_since_mono[symbol] = now - 180.0
+        if symbol != missing:
+            mdm._symbols_with_tick.add(symbol)
+            mdm._last_valid_live_tick_mono[symbol] = now
+    mdm._zombie_tick_threshold_sec = 60.0
+    mdm._last_hb_mono = now
+    mdm._last_raw_ws_receive_mono = now
+    mdm._last_ws_tick_mono = now
+    monkeypatch.setattr(market_hours, "is_market_open", lambda: True)
+    monkeypatch.setattr(mdm, "_monitor_spot_ws_health", lambda: None)
+    monkeypatch.setattr(mdm, "_is_ws_healthy", lambda: True)
+    monkeypatch.setattr(mdm, "_is_ws_connected", lambda: True)
+    sent: list[str] = []
+    fallback: list[str] = []
+    monkeypatch.setattr(
+        mdm, "_reconcile_ws_subscriptions", lambda: sent.append(missing)
+    )
+    monkeypatch.setattr(
+        mdm,
+        "request_fallback_refresh",
+        lambda symbol, reason: fallback.append(symbol) or True,
+    )
+    monkeypatch.setattr(
+        mdm,
+        "_trigger_zombie_ws_restart",
+        lambda: pytest.fail("healthy transport must not restart globally"),
+    )
+
+    mdm._check_zombie_ticks()
+    assert sent == [missing]
+    assert fallback == [missing]
+    assert mdm._symbol_recovery_attempt_state[missing]["attempts"] == 1
+    assert (
+        mdm.classify_live_tick_readiness(
+            missing, mdm.current_live_token(missing), max_age_s=60
+        )["ready"]
+        is False
+    )
+
+    # Simulate the recovery cooldown elapsing without a first WS tick.
+    mdm._symbol_recovery_last_attempt_mono.clear()
+    mdm._check_zombie_ticks()
+    assert sent == [missing]
+    assert fallback == [missing, missing]

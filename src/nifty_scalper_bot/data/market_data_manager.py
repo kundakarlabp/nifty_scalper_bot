@@ -10781,6 +10781,19 @@ class MarketDataManager:
                         recovery.get("reason") or "symbol_subscription_stale"
                     )
                 else:
+                    # A REST refresh cannot establish a missing WebSocket
+                    # subscription. Reassert the current required option once;
+                    # further checks use fallback while awaiting a new WS tick.
+                    if (
+                        sym in missing_symbols
+                        and sym in required
+                        and sym not in self._symbol_recovery_attempt_state
+                    ):
+                        self._attempt_symbol_subscription_recovery(
+                            sym,
+                            reason="required_option_first_tick_missing",
+                            now_mono=now_mono,
+                        )
                     dispatched = self.request_fallback_refresh(
                         sym, reason="ws_symbol_stale_recovery"
                     )
@@ -13815,8 +13828,15 @@ class MarketDataManager:
             )
             if cumulative_hint is not None:
                 normalized["volume_cumulative"] = float(cumulative_hint)
-        elif has_cumulative:
-            derived = self._normalise_tick_volume_delta(symbol, tick)
+        elif has_cumulative or (rest_quote_source and tick.get("volume") is not None):
+            # Zerodha REST /quote uses plain "volume" for the daily total.
+            # Normalize even when a caller has not run _prepare_rest_tick.
+            cumulative_tick = (
+                tick
+                if has_cumulative
+                else {**tick, "volume_traded_today": tick["volume"]}
+            )
+            derived = self._normalise_tick_volume_delta(symbol, cumulative_tick)
             for key in (
                 "volume",
                 "volume_delta",
@@ -13829,11 +13849,9 @@ class MarketDataManager:
                 if key in derived:
                     normalized[key] = derived[key]
         else:
+            # A price-only tick carries no new trades: never replay volume
+            # from an earlier tick into this candle or runner evaluation.
             plain_volume = self._coerce_float(tick, "volume")
-            if plain_volume is None and previous:
-                prev_vol = previous.get("volume")
-                if isinstance(prev_vol, (int, float)):
-                    plain_volume = float(prev_vol)
             if plain_volume is not None:
                 normalized["volume"] = float(plain_volume)
 
