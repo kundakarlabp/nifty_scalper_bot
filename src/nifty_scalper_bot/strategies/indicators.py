@@ -323,6 +323,7 @@ class IndicatorEngine:
                 "ofi_3s",
                 "ofi_1s_normalized",
                 "ofi_3s_normalized",
+                "ofi_3s_span_seconds",
                 "ofi_update_count_1s",
                 "ofi_update_count_3s",
                 "ofi_1s_complete",
