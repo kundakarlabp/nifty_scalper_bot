@@ -786,15 +786,16 @@ def test_smc_manager_option_retest_and_reclaim_do_not_use_pre_sweep_bars(
     strategy = _strategy(rows, volume_spike_mult=10.0)
     sweep = _bar(30, open_=23988, high=23991, low=23974, close=23984, volume=1000)
     rows.append(sweep)
+    stale_feature_timestamp = (sweep["timestamp"] - timedelta(minutes=1)).timestamp()
     indicators = _indicators(
         latest_bar_ts=sweep["timestamp"],
         regime="RANGE",
         bos_confirmed=False,
         choch_confirmed=False,
         retest_confirmed=True,
-        retest_ts_epoch=(sweep["timestamp"] - timedelta(minutes=1)).timestamp(),
+        retest_ts_epoch=stale_feature_timestamp,
         premium_reclaim=True,
-        premium_reclaim_ts_epoch=(sweep["timestamp"] - timedelta(minutes=1)).timestamp(),
+        premium_reclaim_ts_epoch=stale_feature_timestamp,
         smc_enrichment_source="strategy_manager_pre_strategy",
     )
     assert strategy.generate_signal(CE, indicators, 102.0) is None
