@@ -1109,6 +1109,7 @@ class SMCStrategy(EliteStrategy):
                     indicators.get("smc_enrichment_source")
                     == "strategy_manager_pre_strategy"
                 )
+
                 def _feature_after_sweep(feature: str, timestamp_key: str) -> bool:
                     if not bool(indicators.get(feature)):
                         return False
