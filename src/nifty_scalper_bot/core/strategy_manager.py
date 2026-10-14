@@ -119,6 +119,12 @@ def _normalise_ohlcv_bars(bars: t.Any) -> list[dict[str, float]]:
     for bar in rows:
         if not isinstance(bar, t.Mapping):
             continue
+        if (
+            bar.get("is_complete") is False
+            or bar.get("is_provisional") is True
+            or bar.get("provisional") is True
+        ):
+            continue
         raw_open = bar.get("open") if bar.get("open") is not None else bar.get("o")
         raw_high = bar.get("high") if bar.get("high") is not None else bar.get("h")
         raw_low = bar.get("low") if bar.get("low") is not None else bar.get("l")
@@ -130,6 +136,10 @@ def _normalise_ohlcv_bars(bars: t.Any) -> list[dict[str, float]]:
         close_v = _safe_float_value(raw_close)
         volume_v = _safe_float_value(raw_volume)
         if open_v is None or high_v is None or low_v is None or close_v is None:
+            continue
+        if not all(isfinite(value) for value in (open_v, high_v, low_v, close_v)):
+            continue
+        if volume_v is not None and not isfinite(volume_v):
             continue
         normalised.append({"open": open_v, "high": high_v, "low": low_v, "close": close_v, "volume": float(volume_v if volume_v is not None else 0.0)})
     return normalised
