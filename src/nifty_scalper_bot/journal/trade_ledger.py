@@ -219,7 +219,9 @@ ON CONFLICT(trade_id) DO UPDATE SET
     costs_json = {_monotonic_merge_sql("costs_json")},
     execution_quality_json = {_monotonic_merge_sql("execution_quality_json")},
     outcome_json = {_monotonic_merge_sql("outcome_json")},
-    entry_evidence_json = COALESCE(trade_ledger.entry_evidence_json, excluded.entry_evidence_json)
+    entry_evidence_json = COALESCE(
+        trade_ledger.entry_evidence_json, excluded.entry_evidence_json
+    )
 """
 
 
