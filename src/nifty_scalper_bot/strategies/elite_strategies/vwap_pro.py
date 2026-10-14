@@ -312,17 +312,23 @@ class VWAPProStrategy(EliteStrategy):
         del position
         try:
             self._no_vote("stale_or_invalid_data")
-            vwap = float(
-                indicators.get("exchange_vwap")
-                or indicators.get("session_vwap")
-                or indicators.get("vwap")
-                or 0.0
-            )
-            vwap_source = next(
-                (key for key in ("exchange_vwap", "session_vwap", "vwap")
-                 if indicators.get(key)),
-                None,
-            )
+            # Use the same finite, positive reference priority as SMC.
+            # Nonzero NaN/Inf/negative values must not hide a valid fallback.
+            vwap = 0.0
+            vwap_source = None
+            for key, value in (
+                ("exchange_vwap", indicators.get("exchange_vwap")),
+                ("session_vwap", indicators.get("session_vwap")),
+                ("vwap", indicators.get("vwap")),
+            ):
+                try:
+                    candidate = float(value)
+                except (TypeError, ValueError):
+                    continue
+                if math.isfinite(candidate) and candidate > 0:
+                    vwap = candidate
+                    vwap_source = key
+                    break
             atr = float(indicators.get("atr") or 0.0)
             close = float(indicators.get("close") or current_price)
             open_price = float(indicators.get("open") or current_price)

@@ -43,6 +43,49 @@ def _indicators(**updates):
     return payload
 
 
+def test_live_vwap_skips_invalid_primary_reference_and_uses_valid_session(
+    monkeypatch,
+):
+    """An invalid exchange VWAP must not mask a valid session reference."""
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    for invalid_value in (float("nan"), float("inf"), -10.0, 0.0):
+        strategy = VWAPProStrategy(VWAPProStrategyConfig(), _DummyEngine())
+        signal = strategy._evaluate_signal(
+            "NFO:NIFTY26FEB22500CE",
+            _indicators(
+                exchange_vwap=invalid_value,
+                session_vwap=100.0,
+                vwap=95.0,
+            ),
+            103.0,
+        )
+        assert signal is not None
+        assert signal.metadata["vwap"] == 100.0
+        assert signal.metadata["vwap_reference_source"] == "session_vwap"
+        assert signal.metadata["premium_above_vwap"] is True
+
+
+def test_live_vwap_with_only_nonfinite_or_nonpositive_references_fails_closed(
+    monkeypatch,
+):
+    """NaN VWAP must never become an apparently valid entry thesis."""
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    strategy = VWAPProStrategy(VWAPProStrategyConfig(), _DummyEngine())
+
+    signal = strategy._evaluate_signal(
+        "NFO:NIFTY26FEB22500CE",
+        _indicators(
+            exchange_vwap=float("nan"),
+            session_vwap=float("inf"),
+            vwap=-1.0,
+        ),
+        103.0,
+    )
+
+    assert signal is None
+    assert strategy.last_no_vote_reason == "missing_vwap"
+
+
 def test_vwap_metadata_contract_side_and_structural_setup_present():
     strategy = VWAPProStrategy(VWAPProStrategyConfig(), _DummyEngine())
     signal = strategy._evaluate_signal(

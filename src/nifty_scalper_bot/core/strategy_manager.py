@@ -174,7 +174,7 @@ def resolve_canonical_vwap(indicators: t.Mapping[str, t.Any] | None) -> float | 
     payload = indicators or {}
     for key in ("exchange_vwap", "session_vwap", "vwap"):
         value = _safe_float_value(payload.get(key))
-        if value is not None and value > 0:
+        if value is not None and isfinite(value) and value > 0:
             return value
     return None
 
