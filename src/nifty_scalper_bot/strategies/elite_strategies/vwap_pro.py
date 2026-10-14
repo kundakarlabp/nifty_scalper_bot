@@ -312,12 +312,17 @@ class VWAPProStrategy(EliteStrategy):
         del position
         try:
             self._no_vote("stale_or_invalid_data")
+            vwap = float(
+                indicators.get("exchange_vwap")
+                or indicators.get("session_vwap")
+                or indicators.get("vwap")
+                or 0.0
+            )
             vwap_source = next(
                 (key for key in ("exchange_vwap", "session_vwap", "vwap")
-                 if indicators.get(key) not in (None, "", 0, 0.0)),
+                 if indicators.get(key)),
                 None,
             )
-            vwap = float(indicators.get(vwap_source) or 0.0) if vwap_source else 0.0
             atr = float(indicators.get("atr") or 0.0)
             close = float(indicators.get("close") or current_price)
             open_price = float(indicators.get("open") or current_price)
