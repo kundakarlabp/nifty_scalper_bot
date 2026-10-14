@@ -1658,3 +1658,41 @@ def test_manual_trail_update_reprices_exchange_protection() -> None:
     assert bracket.trail_revision == 1
     assert order_manager.modify_calls[0][0] == "protect-1"
     assert order_manager.modify_calls[0][1]["trigger_price"] == 150.0
+
+
+def test_exchange_stop_pending_modify_does_not_issue_another_ratchet(
+    monkeypatch,
+) -> None:
+    """A broker MODIFY PENDING acknowledgement is not a settled SL amendment."""
+    manager, order_manager, _broker = _manager()
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    bracket.exchange_stop_order_id = "protect-1"
+    bracket.exchange_stop_quantity = 65
+    bracket.exchange_stop_trigger_price = 140.0
+    bracket.exchange_stop_limit_price = 133.0
+    bracket.exchange_stop_degraded_reason = (
+        "broker_stop_status_unverified:MODIFY PENDING"
+    )
+    bracket.sl_trigger_price = 150.0
+    statuses = iter(
+        [
+            {"status": "MODIFY PENDING", "quantity": 65},
+            {"status": "TRIGGER PENDING", "quantity": 65},
+        ]
+    )
+    monkeypatch.setattr(
+        manager,
+        "_get_broker_order_status",
+        lambda _order_id: next(statuses, {"status": "TRIGGER PENDING", "quantity": 65}),
+    )
+
+    assert manager._sync_exchange_protective_stop(bracket) is False
+    assert order_manager.modify_calls == []
+    assert bracket.exchange_stop_trigger_price == 140.0
+    assert bracket.exchange_stop_degraded_reason is not None
+
+    # Once the broker order is again confirmed resident, a new ratchet may be
+    # sent to the *same* order. The existing reconciliation path owns the ack.
+    manager._sync_exchange_protective_stop(bracket)
+    assert [call[0] for call in order_manager.modify_calls] == ["protect-1"]

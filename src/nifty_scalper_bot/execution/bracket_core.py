@@ -5503,6 +5503,18 @@ class BracketManager:
             order_id = str(bracket.exchange_stop_order_id or "").strip()
             if not order_id:
                 return False
+            # An accepted broker modification is not necessarily settled.
+            # Do not submit a second ratchet against a MODIFY PENDING order;
+            # reconcile its actual broker state before modifying again.
+            pending_modify = (
+                bracket.exchange_stop_degraded_reason
+                == "broker_stop_status_unverified:MODIFY PENDING"
+            )
+        if pending_modify and not self._confirm_exchange_protective_stop(bracket):
+            return False
+        with self._lock:
+            if str(bracket.exchange_stop_order_id or "") != order_id:
+                return False
             current_trigger = float(bracket.exchange_stop_trigger_price or 0.0)
             trigger, limit_price = self._exchange_stop_prices(
                 bracket,
