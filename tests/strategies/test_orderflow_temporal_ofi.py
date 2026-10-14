@@ -151,9 +151,7 @@ def test_live_short_ofi_cannot_authorize_vwap_or_orb_entry_context(
 ) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     strategy = _strategy()
-    indicators = _indicators(
-        buy=300.0, sell=100.0, ofi_value=3.14, supports=True
-    )
+    indicators = _indicators(buy=300.0, sell=100.0, ofi_value=3.14, supports=True)
     indicators.pop("_expected_support")
     # Two book events can flip the one-second imbalance instantly.
     indicators["ofi_update_count_3s"] = 2
@@ -174,9 +172,7 @@ def test_live_opposing_three_second_flow_cannot_confirm_positive_one_second(
 ) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     strategy = _strategy()
-    indicators = _indicators(
-        buy=300.0, sell=100.0, ofi_value=0.50, supports=True
-    )
+    indicators = _indicators(buy=300.0, sell=100.0, ofi_value=0.50, supports=True)
     indicators.pop("_expected_support")
     indicators["ofi_3s_normalized"] = -0.40
 
@@ -194,9 +190,7 @@ def test_live_strong_depth_without_ofi_requires_distinct_temporal_snapshots(
     clock = [100.0]
     monkeypatch.setattr(order_flow_module.time, "monotonic", lambda: clock[0])
     strategy = _strategy()
-    indicators = _indicators(
-        buy=400.0, sell=100.0, ofi_value=0.0, supports=True
-    )
+    indicators = _indicators(buy=400.0, sell=100.0, ofi_value=0.0, supports=True)
     indicators.pop("_expected_support")
     indicators["ofi_ready"] = False
     indicators["tick_direction"] = "NONE"
@@ -324,6 +318,7 @@ def test_recent_opposing_live_ofi_cannot_instantly_confirm_smc_context(
     assert premature.metadata["effective_context_alignment"] is False
 
     clock[0] = 115.1
+    indicators["ofi_3s_normalized"] = 0.47
     indicators["quote_update_version"] = 5
     recovered = strategy._evaluate_signal(SYMBOL, indicators, current_price=100.25)
     assert recovered is not None
