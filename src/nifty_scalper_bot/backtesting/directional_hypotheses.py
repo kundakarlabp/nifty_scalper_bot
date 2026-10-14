@@ -359,8 +359,17 @@ class ORBRangeScaledResearch(ORBProStrategy):
 
 def _research_strategies(
     engine: IndicatorEngine,
+    *,
+    min_prior_trend_efficiency: float | None = None,
 ) -> list[ArchivedDirectionalHypothesis]:
-    return [ArchivedDirectionalHypothesis(family, engine) for family in _FAMILIES]
+    return [
+        ArchivedDirectionalHypothesis(
+            family,
+            engine,
+            min_prior_trend_efficiency=min_prior_trend_efficiency,
+        )
+        for family in _FAMILIES
+    ]
 
 
 def run_directional_hypothesis_research(
