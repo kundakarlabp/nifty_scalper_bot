@@ -410,6 +410,13 @@ class SupabaseTradeReplicator:
             "updated_at": _iso_utc(float(row["updated_at"])),
             "created_at": _iso_utc(float(row["created_at"])),
         }
+        # The remote ledger already has an entry_snapshot jsonb column.
+        # Only send it when backed by an actual candidate.approved event:
+        # legacy rows must not erase a previously attributed snapshot.
+        if "entry_evidence_json" in row.keys():
+            entry_evidence = _json_object(row["entry_evidence_json"])
+            if entry_evidence:
+                payload["entry_snapshot"] = entry_evidence
         return payload
 
 
