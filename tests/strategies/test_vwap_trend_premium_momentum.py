@@ -12,11 +12,11 @@ from nifty_scalper_bot.strategies.elite_strategies.config_models import (
 from nifty_scalper_bot.strategies.elite_strategies.vwap_pro import VWAPProStrategy
 
 
-def _evaluate(monkeypatch, *, side="CE", enabled=True, **updates):
+def _evaluate(monkeypatch, *, side="CE", enabled=True, retest=False, **updates):
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     monkeypatch.setenv("VWAP_TREND_MOMENTUM_ENABLED", "true" if enabled else "false")
     monkeypatch.setenv("VWAP_TREND_MOMENTUM_OPTION_RVOL_MIN", "1.5")
-    monkeypatch.setenv("VWAP_TREND_REQUIRE_RETEST", "false")
+    monkeypatch.setenv("VWAP_TREND_REQUIRE_RETEST", "true" if retest else "false")
     indicators = {
         "vwap": 100.0,
         "session_vwap": 100.0,
@@ -249,24 +249,23 @@ def test_insufficient_independent_option_volume_history_is_rejected(monkeypatch)
 
 
 def test_retest_mode_requires_prior_reclaim_and_current_hold(monkeypatch):
-    monkeypatch.setenv("VWAP_TREND_REQUIRE_RETEST", "true")
-    strategy, signal = _evaluate(monkeypatch, low=100.0)
+    strategy, signal = _evaluate(monkeypatch, low=100.0, retest=True)
 
     assert signal is not None
     assert signal.metadata["trend_momentum_retest_confirmed"] is True
 
 
 def test_retest_mode_rejects_unheld_vwap(monkeypatch):
-    monkeypatch.setenv("VWAP_TREND_REQUIRE_RETEST", "true")
-    strategy, signal = _evaluate(monkeypatch, low=98.0)
+    strategy, signal = _evaluate(monkeypatch, low=98.0, retest=True)
 
     assert signal is None
     assert strategy.last_no_vote_reason == "trend_momentum_retest_unconfirmed"
 
 
 def test_retest_mode_rejects_stale_previous_candle(monkeypatch):
-    monkeypatch.setenv("VWAP_TREND_REQUIRE_RETEST", "true")
-    strategy, signal = _evaluate(monkeypatch, low=100.0, prior_gap_minutes=2)
+    strategy, signal = _evaluate(
+        monkeypatch, low=100.0, prior_gap_minutes=2, retest=True
+    )
 
     assert signal is None
     assert strategy.last_no_vote_reason == "trend_momentum_retest_unconfirmed"
