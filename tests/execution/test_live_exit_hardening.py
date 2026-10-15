@@ -1696,3 +1696,79 @@ def test_exchange_stop_pending_modify_does_not_issue_another_ratchet(
     # sent to the *same* order. The existing reconciliation path owns the ack.
     manager._sync_exchange_protective_stop(bracket)
     assert [call[0] for call in order_manager.modify_calls] == ["protect-1"]
+
+
+def test_prior_day_mis_stop_404_retires_without_obsolete_order_lookup(monkeypatch) -> None:
+    """Fresh broker-flat + current-day orderbook replaces prior-day 404 polling."""
+    manager, _order_manager, broker = _manager(cancel_confirms=False)
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    yesterday = time.time() - 86400
+    bracket.created_at = yesterday
+    bracket.entry_fill_ts = yesterday
+    bracket.exchange_stop_order_id = "2110254055325884416"
+    broker.positions = []
+    status_calls: list[str] = []
+    orderbook_calls: list[bool] = []
+
+    def stale_status(order_id: str) -> dict[str, Any]:
+        status_calls.append(order_id)
+        raise RuntimeError("Zerodha 404: Couldn't find that order_id")
+
+    def fresh_orders(*, allow_cache_fallback: bool = True) -> list[dict[str, Any]]:
+        orderbook_calls.append(allow_cache_fallback)
+        return []
+
+    monkeypatch.setattr(broker, "get_order_status", stale_status)
+    monkeypatch.setattr(broker, "get_orders", fresh_orders, raising=False)
+
+    assert manager.reconcile_symbol_flat(SYMBOL) == 1
+    assert manager.reconcile_symbol_flat(SYMBOL) == 0
+    assert manager.get_bracket("entry-1") is None
+    assert orderbook_calls == [False]
+    assert status_calls == []
+    assert broker.cancel_calls == []
+
+
+@pytest.mark.parametrize(
+    "unsafe", ["same_day", "nrml", "position_open", "book_contains_stop", "book_unavailable"]
+)
+def test_prior_day_404_reconcile_fails_closed_without_full_proof(
+    monkeypatch, unsafe: str
+) -> None:
+    """Never retire a stop based solely on a per-order 404 or the trade ledger."""
+    manager, _order_manager, broker = _manager(cancel_confirms=False)
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    yesterday = time.time() - 86400
+    bracket.created_at = yesterday
+    bracket.entry_fill_ts = yesterday
+    bracket.exchange_stop_order_id = "old-stop"
+    broker.positions = []
+    if unsafe == "same_day":
+        bracket.created_at = time.time()
+    elif unsafe == "nrml":
+        bracket.product = "NRML"
+    elif unsafe == "position_open":
+        broker.positions = [{"symbol": SYMBOL, "quantity": 65}]
+
+    status_calls: list[str] = []
+
+    def stale_status(order_id: str) -> dict[str, Any]:
+        status_calls.append(order_id)
+        raise RuntimeError("Zerodha 404: Couldn't find that order_id")
+
+    def fresh_orders(*, allow_cache_fallback: bool = True) -> list[dict[str, Any]]:
+        if unsafe == "book_unavailable":
+            raise RuntimeError("Broker orderbook unavailable")
+        if unsafe == "book_contains_stop":
+            return [{"order_id": "old-stop", "status": "OPEN"}]
+        return []
+
+    monkeypatch.setattr(broker, "get_order_status", stale_status)
+    monkeypatch.setattr(broker, "get_orders", fresh_orders, raising=False)
+
+    assert manager.reconcile_symbol_flat(SYMBOL) == 0
+    assert manager.get_bracket("entry-1") is bracket
+    assert status_calls == ["old-stop"]
+    assert broker.cancel_calls == []
