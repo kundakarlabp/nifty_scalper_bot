@@ -6571,16 +6571,41 @@ class StrategyRunner:
             positions_active = len(
                 getattr(self._position_manager, "get_all_positions", lambda: [])() or []
             )
+            manager_observability: dict[str, Any] = {}
+            getter = getattr(
+                self._strategy_manager, "get_signal_observability_snapshot", None
+            )
+            if callable(getter):
+                with suppress(Exception):
+                    manager_observability = dict(getter(reset_window=True) or {})
+            lifecycle = SETUP_LIFECYCLE.snapshot()
+            last_trigger_age = (
+                lifecycle.get("last_transition_age_sec", {}) or {}
+            ).get(SetupStage.TRIGGER_QUALIFIED.value)
+            evals_by_strategy = manager_observability.get(
+                "completed_strategy_evaluations_window", {}
+            )
+            no_votes_by_strategy = manager_observability.get(
+                "no_vote_reason_counts_by_strategy_window", {}
+            )
             self._logger.info(
                 "STRATEGY_STATUS_REPORT symbols_evaluated=%d "
-                "signals_generated=%d trailing_updates=%d positions_active=%d",
+                "strategy_evals=%s no_vote_reasons=%s "
+                "last_trigger_qualified_age_sec=%s signals_generated=%d "
+                "trailing_updates=%d positions_active=%d",
                 len(self._strategy_window_symbols),
+                evals_by_strategy,
+                no_votes_by_strategy,
+                last_trigger_age,
                 int(self._strategy_window_signals),
                 int(self._strategy_window_trailing_updates),
                 positions_active,
                 extra={
                     "event": "strategy_status_report",
                     "symbols_evaluated": len(self._strategy_window_symbols),
+                    "completed_strategy_evaluations": evals_by_strategy,
+                    "no_vote_reason_counts_by_strategy": no_votes_by_strategy,
+                    "last_trigger_qualified_age_sec": last_trigger_age,
                     "signals_generated": int(self._strategy_window_signals),
                     "trailing_updates": int(self._strategy_window_trailing_updates),
                     "positions_active": positions_active,
