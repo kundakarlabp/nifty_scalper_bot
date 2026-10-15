@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import threading
 import time
 import typing as t
 from abc import ABC, abstractmethod
@@ -1343,6 +1344,9 @@ class StrategyManager(_BaseStrategyManager):
             "signals_blocked_by_risk": 0,
             "orders_submitted": 0,
         }
+        self._signal_observability_lock = threading.RLock()
+        self._strategy_eval_counts_window: dict[str, int] = {}
+        self._strategy_no_vote_counts_window: dict[str, dict[str, int]] = {}
         self._adaptive_store = AdaptiveParameterStore(
             window_trades=app_settings.ADAPTIVE_WINDOW_TRADES
         )
@@ -1376,6 +1380,43 @@ class StrategyManager(_BaseStrategyManager):
         """Return the latest fail-closed decision for *symbol*, if present."""
         symbol_norm = str(normalize_symbol(symbol) or symbol or "").strip().upper()
         return self._last_no_signal_decision_by_symbol.get(symbol_norm)
+
+    def _record_strategy_evaluation_observability(self, strategy_name: str) -> None:
+        """Count one completed strategy invocation without changing admission."""
+        key = str(strategy_name or "unknown")
+        with self._signal_observability_lock:
+            self._strategy_eval_counts_window[key] = (
+                self._strategy_eval_counts_window.get(key, 0) + 1
+            )
+
+    def _record_strategy_no_vote_observability(
+        self, strategy_name: str, reason: str
+    ) -> None:
+        """Count one strategy-owned no-vote reason for operator diagnostics."""
+        key = str(strategy_name or "unknown")
+        reason_key = str(reason or "none")
+        with self._signal_observability_lock:
+            bucket = self._strategy_no_vote_counts_window.setdefault(key, {})
+            bucket[reason_key] = bucket.get(reason_key, 0) + 1
+
+    def get_signal_observability_snapshot(
+        self, *, reset_window: bool = False
+    ) -> dict[str, t.Any]:
+        """Return completed per-strategy evaluations and no-vote reasons."""
+        with self._signal_observability_lock:
+            snapshot = {
+                "completed_strategy_evaluations": dict(
+                    self._strategy_eval_counts_window
+                ),
+                "no_vote_reason_counts_by_strategy": {
+                    strategy: dict(reasons)
+                    for strategy, reasons in self._strategy_no_vote_counts_window.items()
+                },
+            }
+            if reset_window:
+                self._strategy_eval_counts_window.clear()
+                self._strategy_no_vote_counts_window.clear()
+        return snapshot
 
     @staticmethod
     def _canonical_no_signal_root_cause(
@@ -3626,9 +3667,11 @@ class StrategyManager(_BaseStrategyManager):
                     exc_info=exc,
                 )
                 continue
+            self._record_strategy_evaluation_observability(strategy_name)
             if base_signal is None:
                 empty.append(strategy.name)
                 reason = str(getattr(strategy, "last_no_vote_reason", "none") or "none")
+                self._record_strategy_no_vote_observability(strategy_name, reason)
                 no_vote_reason_counts[reason] = no_vote_reason_counts.get(reason, 0) + 1
                 strategy_reasons[strategy.name] = reason
                 continue
@@ -3640,6 +3683,7 @@ class StrategyManager(_BaseStrategyManager):
                 reason = "strategy_contract_side_conflict"
                 no_vote_reason_counts[reason] = no_vote_reason_counts.get(reason, 0) + 1
                 strategy_reasons[strategy.name] = reason
+                self._record_strategy_no_vote_observability(strategy_name, reason)
                 recorder = getattr(strategy, "_record_evaluation_failure", None)
                 if callable(recorder):
                     # A contract violation is a strategy fault, not a no-trade.
