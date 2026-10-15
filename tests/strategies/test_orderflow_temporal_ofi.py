@@ -141,6 +141,11 @@ def test_orderflow_context_log_exposes_microstructure_diagnostics(
     assert extra["ofi_ready"] is True
     assert extra["ofi_1s_normalized"] == 0.50
     assert extra["ofi_update_count_1s"] == 2
+    assert extra["ofi_3s_normalized"] == 0.50
+    assert extra["ofi_update_count_3s"] == 3
+    assert extra["ofi_3s_span_seconds"] == 2.0
+    assert extra["ofi_sustained_confirmation"] is True
+    assert extra["context_alignment_block_reason"] is None
     assert extra["ofi_unavailable_reason"] is None
     assert extra["depth_imbalance"] == signal.metadata["depth_imbalance"]
     assert extra["strong_depth_conflicts_side"] is False
@@ -163,6 +168,10 @@ def test_live_short_ofi_cannot_authorize_vwap_or_orb_entry_context(
     assert signal.metadata["ofi_supports_side"] is True
     assert signal.metadata["ofi_sustained_confirmation"] is False
     assert signal.metadata["effective_context_alignment"] is False
+    assert (
+        signal.metadata["context_alignment_block_reason"]
+        == "ofi_3s_insufficient_coverage"
+    )
     assert signal.metadata["context_alignment_source"] is None
     assert signal.metadata["effective_context_conflict"] is False
 
@@ -199,6 +208,10 @@ def test_live_strong_depth_without_ofi_requires_distinct_temporal_snapshots(
     assert first is not None
     assert first.metadata["context_alignment_candidate_source"] == "strong_depth"
     assert first.metadata["effective_context_alignment"] is False
+    assert (
+        first.metadata["context_alignment_block_reason"]
+        == "depth_persistence_unconfirmed"
+    )
 
     clock[0] = 101.2
     indicators["quote_update_version"] = 4
@@ -316,6 +329,10 @@ def test_recent_opposing_live_ofi_cannot_instantly_confirm_smc_context(
     assert premature.metadata["ofi_supports_side"] is True
     assert premature.metadata["ofi_reversal_holdoff_active"] is True
     assert premature.metadata["effective_context_alignment"] is False
+    assert (
+        premature.metadata["context_alignment_block_reason"]
+        == "ofi_reversal_holdoff"
+    )
 
     clock[0] = 115.1
     indicators["ofi_3s_normalized"] = 0.47
@@ -324,6 +341,7 @@ def test_recent_opposing_live_ofi_cannot_instantly_confirm_smc_context(
     assert recovered is not None
     assert recovered.metadata["ofi_reversal_holdoff_active"] is False
     assert recovered.metadata["effective_context_alignment"] is True
+    assert recovered.metadata["context_alignment_block_reason"] is None
 
 
 def test_ofi_reversal_holdoff_does_not_modify_nonlive_confirmation(
