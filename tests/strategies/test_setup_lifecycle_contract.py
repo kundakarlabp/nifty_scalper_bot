@@ -114,4 +114,3 @@ def test_setup_lifecycle_exposes_exact_last_transition_age() -> None:
     stage = SetupStage.TRIGGER_QUALIFIED.value
     assert snapshot["last_transition_ts"][stage] > 0
     assert 0 <= snapshot["last_transition_age_sec"][stage] < 1
-
