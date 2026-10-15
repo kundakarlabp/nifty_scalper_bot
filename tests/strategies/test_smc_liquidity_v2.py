@@ -837,9 +837,13 @@ def test_smc_live_sweep_expires_by_quote_time_not_stale_bar_clock(
 
 
 def test_impossible_futures_sweep_candle_never_arms_smc(monkeypatch) -> None:
-    """A sweep's completed underlying OHLC must be physically consistent."""
+    """An impossible candle must not invent a sweep of a prior valid pivot."""
     monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
-    rows = _base_rows()
+    rows = [
+        _bar(minute, open_=24000.0, high=24010.0, low=23990.0, close=24000.0)
+        for minute in range(30)
+    ]
+    rows[22] = _bar(22, open_=24000.0, high=24010.0, low=23980.0, close=24000.0)
     impossible = _bar(
         30,
         open_=23988.0,
@@ -859,4 +863,4 @@ def test_impossible_futures_sweep_candle_never_arms_smc(monkeypatch) -> None:
         )
         is None
     )
-    assert strategy.last_no_vote_reason != "smc_awaiting_confirmation"
+    assert strategy.last_no_vote_reason == "underlying_no_liquidity_sweep"
