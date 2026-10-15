@@ -1698,7 +1698,7 @@ def test_exchange_stop_pending_modify_does_not_issue_another_ratchet(
     assert [call[0] for call in order_manager.modify_calls] == ["protect-1"]
 
 
-def test_prior_day_mis_stop_404_retires_without_obsolete_order_lookup(monkeypatch) -> None:
+def test_prior_day_stop_404_avoids_obsolete_order_history(monkeypatch) -> None:
     """Fresh broker-flat + current-day orderbook replaces prior-day 404 polling."""
     manager, _order_manager, broker = _manager(cancel_confirms=False)
     bracket = manager.get_bracket("entry-1")
@@ -1731,7 +1731,8 @@ def test_prior_day_mis_stop_404_retires_without_obsolete_order_lookup(monkeypatc
 
 
 @pytest.mark.parametrize(
-    "unsafe", ["same_day", "nrml", "position_open", "book_contains_stop", "book_unavailable"]
+    "unsafe",
+    ["same_day", "nrml", "position_open", "book_contains_stop", "book_unavailable"],
 )
 def test_prior_day_404_reconcile_fails_closed_without_full_proof(
     monkeypatch, unsafe: str
