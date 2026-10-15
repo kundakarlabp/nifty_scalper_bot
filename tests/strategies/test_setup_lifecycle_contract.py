@@ -97,3 +97,20 @@ def test_native_strategy_sources_cover_direct_and_terminal_lifecycle_paths() -> 
     # SMC structural sweeps remain the native owner of setup formation.
     assert "SetupStage.ARMED" in smc
     assert "SetupStage.CONFIRMING" in smc
+
+
+def test_setup_lifecycle_exposes_exact_last_transition_age() -> None:
+    registry = SetupLifecycleRegistry(limit=128)
+    registry.transition(
+        SetupStage.TRIGGER_QUALIFIED,
+        strategy="SMC",
+        setup_id="smcv2:age",
+        symbol="NFO:NIFTY26O1923000CE",
+        side="CE",
+    )
+
+    snapshot = registry.snapshot()
+
+    stage = SetupStage.TRIGGER_QUALIFIED.value
+    assert snapshot["last_transition_ts"][stage] > 0
+    assert 0 <= snapshot["last_transition_age_sec"][stage] < 1

@@ -77,6 +77,7 @@ class SetupLifecycleRegistry:
         self._lock = threading.RLock()
         self._records: OrderedDict[str, SetupLifecycleRecord] = OrderedDict()
         self._transition_counts: Counter[str] = Counter()
+        self._last_transition_ts: dict[str, float] = {}
 
     @staticmethod
     def key(strategy: object, setup_id: object, side: object = "") -> str:
@@ -136,6 +137,7 @@ class SetupLifecycleRegistry:
             self._records[key] = record
             self._records.move_to_end(key)
             self._transition_counts[resolved.value] += 1
+            self._last_transition_ts[resolved.value] = now
             while len(self._records) > self._limit:
                 self._records.popitem(last=False)
         LOGGER.info(
@@ -162,6 +164,7 @@ class SetupLifecycleRegistry:
         return record
 
     def snapshot(self) -> dict[str, Any]:
+        now = time.time()
         with self._lock:
             active = [
                 asdict(item)
@@ -173,11 +176,17 @@ class SetupLifecycleRegistry:
                 for item in self._records.values()
                 if SetupStage(item.stage) in _TERMINAL
             )
+            last_transition_ts = dict(self._last_transition_ts)
             return {
                 "active_count": len(active),
                 "active": active,
                 "terminal_counts": dict(terminal),
                 "transition_counts": dict(self._transition_counts),
+                "last_transition_ts": last_transition_ts,
+                "last_transition_age_sec": {
+                    stage: round(max(0.0, now - ts), 3)
+                    for stage, ts in last_transition_ts.items()
+                },
                 "tracked_count": len(self._records),
             }
 

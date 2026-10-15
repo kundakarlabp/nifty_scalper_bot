@@ -424,6 +424,11 @@ def test_health_trading_balance_success_does_not_mark_order_endpoint_authenticat
 
     assert body["broker"]["funds_endpoint_verified"] is True
     assert body["broker"]["order_endpoint_verified"] is False
+    assert (
+        body["broker"]["order_endpoint_verification_state"]
+        == "not_yet_proven_by_live_order"
+    )
+    assert body["broker"]["order_endpoint_verification_required_for_readiness"] is False
     assert body["broker"]["broker_session_state"] == "funds_verified"
     assert body["broker"]["authentication"] == "authenticated"
     assert body["live_order_readiness"]["ready"] is True
@@ -581,3 +586,60 @@ def test_trading_status_distinguishes_live_configuration_from_current_arming(
     assert armed["configured_for_live"] is True
     assert armed["can_place_live_order_now"] is True
     assert armed["will_trade"] is True
+
+
+def test_health_trading_exposes_signal_observability_without_changing_readiness():
+    class Runner:
+        def get_status(self):
+            return {
+                "tick_count": 11,
+                "phase9_evaluation_count": 4,
+                "legacy_activity_count": 15,
+                "candidate_generated_count": 1,
+                "approved_candidate_count": 0,
+                "completed_strategy_evaluations_window": {
+                    "SMC": 4,
+                    "VWAPPro": 4,
+                    "ORBPro": 4,
+                },
+                "completed_strategy_evaluations_total": {
+                    "SMC": 10,
+                    "VWAPPro": 10,
+                    "ORBPro": 10,
+                },
+                "no_vote_reason_counts_by_strategy_window": {
+                    "SMC": {"underlying_no_liquidity_sweep": 3},
+                    "VWAPPro": {"distance_outside_band": 2},
+                    "ORBPro": {"non_breakout_regime": 4},
+                },
+                "no_vote_reason_counts_by_strategy_total": {},
+                "last_trigger_qualified_age_sec": 42.5,
+                "setup_lifecycle": {"transition_counts": {"TRIGGER_QUALIFIED": 2}},
+            }
+
+    ctx = _ctx(
+        blockers=(),
+        execution_ready=True,
+        live_orders_armed=True,
+        broker_balance_valid=True,
+        position_reconciliation_completed=True,
+        evaluation_ready=True,
+        strategy_runner=Runner(),
+    )
+    main.app.state.bot = SimpleNamespace(_ctx=ctx)
+
+    body = _json(main.health_trading())
+
+    observability = body["signal_observability"]
+    assert observability["runner_tick_count"] == 11
+    assert observability["phase9_evaluation_count"] == 4
+    assert observability["legacy_activity_count"] == 15
+    assert observability["completed_strategy_evaluations_window"]["SMC"] == 4
+    assert (
+        observability["no_vote_reason_counts_by_strategy_window"]["ORBPro"][
+            "non_breakout_regime"
+        ]
+        == 4
+    )
+    assert observability["last_trigger_qualified_age_sec"] == 42.5
+    assert body["live_order_readiness"]["ready"] is True
