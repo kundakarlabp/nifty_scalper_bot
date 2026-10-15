@@ -1260,7 +1260,11 @@ class StrategyRunner:
             max_workers=1,
             thread_name_prefix="nifty-entry-eval",
         )
+        # Legacy activity combines accepted runner ticks and phase-9 entries.
+        # Keep it for compatibility, but expose the two real quantities separately.
         self._eval_counter = 0
+        self._runner_tick_counter = 0
+        self._phase9_eval_counter = 0
         self._candidate_counter = 0
         self._structural_approved_counter = 0
         self._regime_block_counter = 0
@@ -5687,6 +5691,16 @@ class StrategyRunner:
 
     def get_status(self) -> dict[str, Any]:
         """Return current runner status including symbol level state."""
+        manager_observability: dict[str, Any] = {}
+        manager = getattr(self, "_strategy_manager", None)
+        getter = getattr(manager, "get_signal_observability_snapshot", None)
+        if callable(getter):
+            with suppress(Exception):
+                manager_observability = dict(getter(reset_window=False) or {})
+        lifecycle = SETUP_LIFECYCLE.snapshot()
+        last_trigger_age = (
+            lifecycle.get("last_transition_age_sec", {}) or {}
+        ).get(SetupStage.TRIGGER_QUALIFIED.value)
         with self._lock:
             symbols = {
                 symbol: state.snapshot() for symbol, state in self._symbol_state.items()
@@ -5701,8 +5715,23 @@ class StrategyRunner:
                 "approved_candidate_count": getattr(
                     self, "_structural_approved_counter", 0
                 ),
-                "setup_lifecycle": SETUP_LIFECYCLE.snapshot(),
-                "tick_count": getattr(self, "_eval_counter", 0),
+                "setup_lifecycle": lifecycle,
+                "last_trigger_qualified_age_sec": last_trigger_age,
+                "completed_strategy_evaluations_window": manager_observability.get(
+                    "completed_strategy_evaluations_window", {}
+                ),
+                "completed_strategy_evaluations_total": manager_observability.get(
+                    "completed_strategy_evaluations_total", {}
+                ),
+                "no_vote_reason_counts_by_strategy_window": manager_observability.get(
+                    "no_vote_reason_counts_by_strategy_window", {}
+                ),
+                "no_vote_reason_counts_by_strategy_total": manager_observability.get(
+                    "no_vote_reason_counts_by_strategy_total", {}
+                ),
+                "tick_count": getattr(self, "_runner_tick_counter", 0),
+                "phase9_evaluation_count": getattr(self, "_phase9_eval_counter", 0),
+                "legacy_activity_count": getattr(self, "_eval_counter", 0),
                 "last_tick_age_sec": (
                     round(time.monotonic() - self._last_tick_seen_ts, 1)
                     if getattr(self, "_last_tick_seen_ts", 0) > 0
@@ -8093,6 +8122,7 @@ class StrategyRunner:
                 extra={"symbol": normalized_symbol, "state": str(self._runner_state)},
             )
             self._eval_counter += 1
+            self._runner_tick_counter = getattr(self, "_runner_tick_counter", 0) + 1
             skip_inline_duplicate = False
             with self._eval_gate_lock:
                 last_eval = self._last_eval_ts[normalized_symbol]
@@ -8228,9 +8258,13 @@ class StrategyRunner:
             self._emit_composite_reports()
             if now - self._last_summary_log >= 60.0:
                 self._logger.info(
-                    "ENGINE_SUMMARY evals=%d candidate_generated=%d approved_candidates=%d "
-                    "regime_blocks=%d capital_blocks=%d runner_state=%s",
+                    "ENGINE_SUMMARY evals=%d evals_semantics=legacy_activity "
+                    "runner_ticks=%d phase9_evals=%d candidate_generated=%d "
+                    "approved_candidates=%d regime_blocks=%d capital_blocks=%d "
+                    "runner_state=%s",
                     self._eval_counter,
+                    getattr(self, "_runner_tick_counter", 0),
+                    getattr(self, "_phase9_eval_counter", 0),
                     self._candidate_counter,
                     self._structural_approved_counter,
                     self._regime_block_counter,
@@ -8238,6 +8272,9 @@ class StrategyRunner:
                     str(self._runner_state),
                     extra={
                         "evals": self._eval_counter,
+                        "evals_semantics": "legacy_activity",
+                        "runner_ticks": getattr(self, "_runner_tick_counter", 0),
+                        "phase9_evals": getattr(self, "_phase9_eval_counter", 0),
                         "candidate_generated": self._candidate_counter,
                         "approved_candidates": self._structural_approved_counter,
                         "regime_blocks": self._regime_block_counter,
@@ -8246,6 +8283,8 @@ class StrategyRunner:
                     },
                 )
                 self._eval_counter = 0
+                self._runner_tick_counter = 0
+                self._phase9_eval_counter = 0
                 self._candidate_counter = 0
                 self._structural_approved_counter = 0
                 self._regime_block_counter = 0
@@ -15121,6 +15160,7 @@ class StrategyRunner:
                     return
 
             self._eval_counter = getattr(self, "_eval_counter", 0) + 1
+            self._phase9_eval_counter = getattr(self, "_phase9_eval_counter", 0) + 1
             phase = "phase9_strategy_manager"
             # Visible INFO trace so Railway logs confirm PHASE 9 is reached
             log_throttled(
