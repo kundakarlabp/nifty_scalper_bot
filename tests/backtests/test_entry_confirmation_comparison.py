@@ -25,19 +25,31 @@ def _bar(ts: datetime, *, opening: float, closing: float, volume: float = 10) ->
 def test_completed_option_confirmation_is_causal_and_requires_contiguous_trading():
     now = datetime(2026, 10, 14, 10, 1, tzinfo=ZoneInfo("Asia/Kolkata"))
     previous = _bar(now - timedelta(minutes=1), opening=100, closing=101)
-    assert research._option_premium_confirmation_reason(
-        _bar(now, opening=101, closing=104), previous
-    ) is None
-    assert research._option_premium_confirmation_reason(
-        _bar(now, opening=101, closing=100), previous
-    ) == "option_premium_not_confirmed"
-    assert research._option_premium_confirmation_reason(
-        _bar(now, opening=101, closing=104),
-        _bar(now - timedelta(minutes=2), opening=100, closing=101),
-    ) == "option_confirmation_history_unavailable"
-    assert research._option_premium_confirmation_reason(
-        _bar(now, opening=101, closing=104, volume=0), previous
-    ) == "option_confirmation_history_unavailable"
+    assert (
+        research._option_premium_confirmation_reason(
+            _bar(now, opening=101, closing=104), previous
+        )
+        is None
+    )
+    assert (
+        research._option_premium_confirmation_reason(
+            _bar(now, opening=101, closing=100), previous
+        )
+        == "option_premium_not_confirmed"
+    )
+    assert (
+        research._option_premium_confirmation_reason(
+            _bar(now, opening=101, closing=104),
+            _bar(now - timedelta(minutes=2), opening=100, closing=101),
+        )
+        == "option_confirmation_history_unavailable"
+    )
+    assert (
+        research._option_premium_confirmation_reason(
+            _bar(now, opening=101, closing=104, volume=0), previous
+        )
+        == "option_confirmation_history_unavailable"
+    )
 
 
 @dataclass
