@@ -559,7 +559,10 @@ def test_worker_completes_component_research_without_claiming_live_parity(
         result["entry_confirmation_comparison"]["selection"]["promotion_eligible"]
         is False
     )
-    assert (tmp_path / "data/research/real-job/entry_confirmation_comparison.json").is_file()
+    comparison_path = (
+        tmp_path / "data/research/real-job/entry_confirmation_comparison.json"
+    )
+    assert comparison_path.is_file()
     assert result["live_equivalent"] is False
     assert result["backtest_scope"] == "active_contract_strategy_components"
     assert (tmp_path / "data/research/real-job/strategy_bar_research.json").is_file()
