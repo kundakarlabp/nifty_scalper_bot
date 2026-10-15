@@ -4313,6 +4313,24 @@ class StrategyManager(_BaseStrategyManager):
                     "ofi_1s_normalized": (evidence.metadata or {}).get(
                         "ofi_1s_normalized"
                     ),
+                    "ofi_3s_normalized": (evidence.metadata or {}).get(
+                        "ofi_3s_normalized"
+                    ),
+                    "ofi_update_count_3s": (evidence.metadata or {}).get(
+                        "ofi_update_count_3s"
+                    ),
+                    "ofi_3s_span_seconds": (evidence.metadata or {}).get(
+                        "ofi_3s_span_seconds"
+                    ),
+                    "ofi_sustained_confirmation": bool(
+                        (evidence.metadata or {}).get("ofi_sustained_confirmation")
+                    ),
+                    "ofi_reversal_holdoff_active": bool(
+                        (evidence.metadata or {}).get("ofi_reversal_holdoff_active")
+                    ),
+                    "alignment_block_reason": (evidence.metadata or {}).get(
+                        "context_alignment_block_reason"
+                    ),
                     "depth_imbalance": (evidence.metadata or {}).get(
                         "depth_imbalance"
                     ),
