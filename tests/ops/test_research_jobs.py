@@ -496,6 +496,15 @@ def test_worker_completes_component_research_without_claiming_live_parity(
             "selection": {"promotion_eligible": False},
         },
     )
+    monkeypatch.setattr(
+        "nifty_scalper_bot.backtesting.strategy_research.run_entry_confirmation_comparison",
+        lambda directory: {
+            "scope": "paired_three_strategy_entry_confirmation_component_ablation",
+            "candidate_count": 3,
+            "candidates": [],
+            "selection": {"promotion_eligible": False},
+        },
+    )
 
     def blocked_runtime(root, request):
         in_progress = json.loads(
@@ -545,6 +554,9 @@ def test_worker_completes_component_research_without_claiming_live_parity(
     assert (tmp_path / "data/research/real-job/orb_comparison.json").is_file()
     assert result["vwap_comparison"]["selection"]["promotion_eligible"] is False
     assert (tmp_path / "data/research/real-job/vwap_comparison.json").is_file()
+    assert result["entry_confirmation_comparison"]["candidate_count"] == 3
+    assert result["entry_confirmation_comparison"]["selection"]["promotion_eligible"] is False
+    assert (tmp_path / "data/research/real-job/entry_confirmation_comparison.json").is_file()
     assert result["live_equivalent"] is False
     assert result["backtest_scope"] == "active_contract_strategy_components"
     assert (tmp_path / "data/research/real-job/strategy_bar_research.json").is_file()
