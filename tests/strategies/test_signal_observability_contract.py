@@ -256,6 +256,20 @@ def test_runner_reports_candidate_and_final_approval_counts() -> None:
     runner._candidate_counter = 3
     runner._structural_approved_counter = 1
     runner._eval_counter = 9
+    runner._runner_tick_counter = 5
+    runner._phase9_eval_counter = 4
+    runner._strategy_manager = SimpleNamespace(
+        get_signal_observability_snapshot=lambda **_kwargs: {
+            "completed_strategy_evaluations_window": {"SMC": 2, "VWAPPro": 2},
+            "completed_strategy_evaluations_total": {"SMC": 8, "VWAPPro": 7},
+            "no_vote_reason_counts_by_strategy_window": {
+                "SMC": {"underlying_no_liquidity_sweep": 1}
+            },
+            "no_vote_reason_counts_by_strategy_total": {
+                "SMC": {"underlying_no_liquidity_sweep": 4}
+            },
+        }
+    )
     runner._last_tick_seen_ts = 0.0
     runner._last_global_eval_ts = 0.0
 
@@ -263,6 +277,16 @@ def test_runner_reports_candidate_and_final_approval_counts() -> None:
 
     assert status["candidate_generated_count"] == 3
     assert status["approved_candidate_count"] == 1
+    assert status["tick_count"] == 5
+    assert status["phase9_evaluation_count"] == 4
+    assert status["legacy_activity_count"] == 9
+    assert status["completed_strategy_evaluations_window"] == {
+        "SMC": 2,
+        "VWAPPro": 2,
+    }
+    assert status["no_vote_reason_counts_by_strategy_window"]["SMC"] == {
+        "underlying_no_liquidity_sweep": 1
+    }
 
 
 def test_manager_qualification_and_runner_approval_events_are_not_conflated() -> None:
@@ -276,3 +300,43 @@ def test_manager_qualification_and_runner_approval_events_are_not_conflated() ->
     assert "STRUCTURAL_CANDIDATE_QUALIFIED" in manager_source
     assert '"event": "SIGNAL_APPROVED"' not in manager_source
     assert '"event": "SIGNAL_APPROVED"' in runner_source
+
+def test_strategy_manager_observability_window_reset_preserves_totals() -> None:
+    import threading
+
+    from nifty_scalper_bot.core.strategy_manager import StrategyManager
+
+    manager = object.__new__(StrategyManager)
+    manager._signal_observability_lock = threading.RLock()
+    manager._strategy_eval_counts_window = {}
+    manager._strategy_eval_counts_total = {}
+    manager._strategy_no_vote_counts_window = {}
+    manager._strategy_no_vote_counts_total = {}
+
+    manager._record_strategy_evaluation_observability("SMC")
+    manager._record_strategy_evaluation_observability("SMC")
+    manager._record_strategy_evaluation_observability("VWAPPro")
+    manager._record_strategy_no_vote_observability(
+        "SMC", "underlying_no_liquidity_sweep"
+    )
+
+    before = manager.get_signal_observability_snapshot(reset_window=True)
+    after = manager.get_signal_observability_snapshot(reset_window=False)
+
+    assert before["completed_strategy_evaluations_window"] == {
+        "SMC": 2,
+        "VWAPPro": 1,
+    }
+    assert before["completed_strategy_evaluations_total"] == {
+        "SMC": 2,
+        "VWAPPro": 1,
+    }
+    assert before["no_vote_reason_counts_by_strategy_window"] == {
+        "SMC": {"underlying_no_liquidity_sweep": 1}
+    }
+    assert after["completed_strategy_evaluations_window"] == {}
+    assert after["completed_strategy_evaluations_total"] == {
+        "SMC": 2,
+        "VWAPPro": 1,
+    }
+
