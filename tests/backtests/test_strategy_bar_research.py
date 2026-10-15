@@ -845,3 +845,48 @@ def test_weekly_atm_holdout_uses_only_valid_option_sessions(tmp_path):
         "2026-10-01",
         "2026-10-02",
     ]
+
+
+def test_orb_structural_failures_are_attributed_without_changing_trade_admission(
+    tmp_path, monkeypatch
+):
+    from nifty_scalper_bot.backtesting.strategy_research import (
+        _scenario,
+        load_archive,
+    )
+
+    archive(tmp_path)
+
+    class Strategy:
+        name = "ORBPro"
+        last_no_vote_reason = "orb_structural_contract_not_passed"
+        last_structural_failure_reasons = (
+            "underlying_volume_confirmation",
+            "futures_vwap_slope_alignment",
+        )
+
+        def generate_signal(self, symbol, indicators, current_price, position=None):
+            return None
+
+        @property
+        def evaluation_health(self):
+            return {"healthy": True}
+
+    monkeypatch.setattr(
+        "nifty_scalper_bot.backtesting.strategy_research.build_elite_strategies",
+        lambda settings, engine: [Strategy()],
+    )
+    histories, instruments, _ = load_archive(tmp_path)
+    result = _scenario(
+        histories, instruments, None, 25, components={"ORBPro"}
+    )["strategies"]["ORBPro"]
+
+    assert result["metrics"]["trade_count"] == 0
+    assert result["entry_funnel"]["signals_emitted"] == 0
+    assert result["no_vote_reasons"]["orb_structural_contract_not_passed"] == result[
+        "evaluations"
+    ]
+    assert result["structural_gate_failures"] == {
+        "underlying_volume_confirmation": result["evaluations"],
+        "futures_vwap_slope_alignment": result["evaluations"],
+    }
