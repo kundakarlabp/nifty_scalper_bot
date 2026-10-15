@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import logging
+import math
 import os
 import time
 from typing import Any, Mapping
@@ -74,7 +75,8 @@ def _safe_float(value: Any) -> float | None:
     try:
         if value is None:
             return None
-        return float(value)
+        result = float(value)
+        return result if math.isfinite(result) else None
     except (TypeError, ValueError):
         return None
 
@@ -147,7 +149,10 @@ class SMCStrategy(EliteStrategy):
             high = _safe_float(raw.get("high"))
             low = _safe_float(raw.get("low"))
             close = _safe_float(raw.get("close"))
-            volume = _safe_float(raw.get("volume")) or 0.0
+            volume_value = _safe_float(raw.get("volume"))
+            if raw.get("volume") is not None and volume_value is None:
+                continue
+            volume = volume_value if volume_value is not None else 0.0
             if ts is None or None in {open_price, high, low, close}:
                 continue
             assert (
@@ -156,7 +161,11 @@ class SMCStrategy(EliteStrategy):
                 and low is not None
                 and close is not None
             )
-            if min(open_price, high, low, close) <= 0:
+            if (
+                min(open_price, high, low, close) <= 0
+                or volume < 0
+                or not (low <= open_price <= high and low <= close <= high)
+            ):
                 continue
             completed.append(
                 {
