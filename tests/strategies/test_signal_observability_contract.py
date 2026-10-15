@@ -340,4 +340,3 @@ def test_strategy_manager_observability_window_reset_preserves_totals() -> None:
         "SMC": 2,
         "VWAPPro": 1,
     }
-
