@@ -331,8 +331,7 @@ def test_recent_opposing_live_ofi_cannot_instantly_confirm_smc_context(
     assert premature.metadata["ofi_reversal_holdoff_active"] is True
     assert premature.metadata["effective_context_alignment"] is False
     assert (
-        premature.metadata["context_alignment_block_reason"]
-        == "ofi_reversal_holdoff"
+        premature.metadata["context_alignment_block_reason"] == "ofi_reversal_holdoff"
     )
 
     clock[0] = 115.1
