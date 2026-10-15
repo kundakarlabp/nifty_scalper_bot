@@ -502,6 +502,10 @@ def _broker_session_status(ctx):  # noqa: ANN001
         "market_data_authenticated": market_data_authenticated,
         "funds_endpoint_verified": funds_endpoint_verified,
         "order_endpoint_verified": order_endpoint_verified,
+        "order_endpoint_verification_state": (
+            "verified" if order_endpoint_verified else "not_yet_proven_by_live_order"
+        ),
+        "order_endpoint_verification_required_for_readiness": False,
     }
 
 
@@ -542,6 +546,41 @@ def _live_order_readiness(ctx, *, blockers=None):  # noqa: ANN001
         missing.append("data_pipeline_overloaded")
     missing.extend(str(b) for b in blockers if b)
     return {"ready": ready, "missing": list(dict.fromkeys(missing))}
+
+
+def _signal_observability(ctx):  # noqa: ANN001
+    """Return bounded, read-only strategy observability for health consumers."""
+    runner = getattr(ctx, "strategy_runner", None)
+    getter = getattr(runner, "get_status", None)
+    if not callable(getter):
+        return {}
+    try:
+        status = dict(getter() or {})
+    except Exception:
+        return {}
+    return {
+        "runner_tick_count": status.get("tick_count"),
+        "phase9_evaluation_count": status.get("phase9_evaluation_count"),
+        "legacy_activity_count": status.get("legacy_activity_count"),
+        "candidate_generated_count": status.get("candidate_generated_count"),
+        "approved_candidate_count": status.get("approved_candidate_count"),
+        "completed_strategy_evaluations_window": status.get(
+            "completed_strategy_evaluations_window", {}
+        ),
+        "completed_strategy_evaluations_total": status.get(
+            "completed_strategy_evaluations_total", {}
+        ),
+        "no_vote_reason_counts_by_strategy_window": status.get(
+            "no_vote_reason_counts_by_strategy_window", {}
+        ),
+        "no_vote_reason_counts_by_strategy_total": status.get(
+            "no_vote_reason_counts_by_strategy_total", {}
+        ),
+        "last_trigger_qualified_age_sec": status.get(
+            "last_trigger_qualified_age_sec"
+        ),
+        "setup_lifecycle": status.get("setup_lifecycle", {}),
+    }
 
 
 def _structured_runtime_status(ctx):  # noqa: ANN001
@@ -742,7 +781,16 @@ def health_trading():
                 "order_endpoint_verified": structured_status.get(
                     "order_endpoint_verified"
                 ),
+                "order_endpoint_verification_state": structured_status.get(
+                    "order_endpoint_verification_state"
+                ),
+                "order_endpoint_verification_required_for_readiness": (
+                    structured_status.get(
+                        "order_endpoint_verification_required_for_readiness"
+                    )
+                ),
             },
+            "signal_observability": _signal_observability(ctx),
             "live_order_readiness": live_order_readiness,
             "reconciliation": {
                 "started": bool(getattr(ctx, "position_reconciliation_started", False)),
