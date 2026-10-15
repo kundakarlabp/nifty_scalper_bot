@@ -428,9 +428,7 @@ def test_health_trading_balance_success_does_not_mark_order_endpoint_authenticat
         body["broker"]["order_endpoint_verification_state"]
         == "not_yet_proven_by_live_order"
     )
-    assert (
-        body["broker"]["order_endpoint_verification_required_for_readiness"] is False
-    )
+    assert body["broker"]["order_endpoint_verification_required_for_readiness"] is False
     assert body["broker"]["broker_session_state"] == "funds_verified"
     assert body["broker"]["authentication"] == "authenticated"
     assert body["live_order_readiness"]["ready"] is True
@@ -616,9 +614,7 @@ def test_health_trading_exposes_signal_observability_without_changing_readiness(
                 },
                 "no_vote_reason_counts_by_strategy_total": {},
                 "last_trigger_qualified_age_sec": 42.5,
-                "setup_lifecycle": {
-                    "transition_counts": {"TRIGGER_QUALIFIED": 2}
-                },
+                "setup_lifecycle": {"transition_counts": {"TRIGGER_QUALIFIED": 2}},
             }
 
     ctx = _ctx(
@@ -647,4 +643,3 @@ def test_health_trading_exposes_signal_observability_without_changing_readiness(
     )
     assert observability["last_trigger_qualified_age_sec"] == 42.5
     assert body["live_order_readiness"]["ready"] is True
-
