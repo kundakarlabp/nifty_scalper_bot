@@ -1523,7 +1523,8 @@ def run_entry_confirmation_comparison(directory: Path) -> dict[str, Any]:
                 summaries[strategy_name] = {
                     key: value
                     for key, value in result.items()
-                    if key not in {
+                    if key
+                    not in {
                         "trades",
                         "unresolved_trades",
                         "worst_case_stress_trades",
@@ -1548,8 +1549,7 @@ def run_entry_confirmation_comparison(directory: Path) -> dict[str, Any]:
         "live_equivalent": False,
         "data_sha256": digest,
         "baseline_configuration": {
-            name: asdict(getattr(settings, name))
-            for name in ("orb", "smc", "vwap")
+            name: asdict(getattr(settings, name)) for name in ("orb", "smc", "vwap")
         },
         "candidate_count": len(candidates),
         "slippage_scenario_count": 3,
