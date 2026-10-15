@@ -1477,3 +1477,119 @@ def run_orb_comparison(directory: Path) -> dict[str, Any]:
         },
         "candidates": candidates,
     }
+
+
+def run_entry_confirmation_comparison(directory: Path) -> dict[str, Any]:
+    """Pre-registered, SHADOW-only admission/confirmation ablation for all three.
+
+    Keep option contracts, timestamps, slippage and strategy classes identical
+    across arms. This does not infer live quote depth, choose a winning
+    configuration, or change production entry policy.
+    """
+    if os.getenv("EXECUTION_MODE", "SHADOW").upper() != "SHADOW":
+        raise ValueError("research_requires_shadow_process")
+    histories, instruments, digest = load_archive(directory)
+    settings = get_settings().elite
+    execution_proxy = {
+        "minimum_net_rr": 1.5,
+        "strict_liquidity": True,
+        "lifecycle_proxy": True,
+        "require_archived_weekly_atm": True,
+    }
+    variants: list[tuple[str, dict[str, Any]]] = [
+        ("current_component_reference", {}),
+        ("execution_feasibility_proxy", execution_proxy),
+        (
+            "execution_plus_completed_premium_confirmation",
+            {**execution_proxy, "require_option_premium_confirmation": True},
+        ),
+    ]
+    candidates: list[dict[str, Any]] = []
+    for name, constraints in variants:
+        scenarios = []
+        for slippage in (10.0, 25.0, 50.0):
+            report = _scenario(
+                histories,
+                instruments,
+                settings,
+                slippage,
+                components=COMPONENTS,
+                **constraints,
+            )
+            # The per-entry ledger remains in the saved component baseline;
+            # status summaries contain metrics and funnel diagnostics only.
+            summaries = {}
+            for strategy_name, result in report["strategies"].items():
+                summaries[strategy_name] = {
+                    key: value
+                    for key, value in result.items()
+                    if key
+                    not in {
+                        "trades",
+                        "unresolved_trades",
+                        "worst_case_stress_trades",
+                    }
+                }
+            scenarios.append(
+                {
+                    "slippage_bps_per_side": slippage,
+                    "strategies": summaries,
+                }
+            )
+        candidates.append(
+            {
+                "name": name,
+                "research_only_constraints": constraints,
+                "scenarios": scenarios,
+            }
+        )
+    return {
+        "scope": "paired_three_strategy_entry_confirmation_component_ablation",
+        "evidence_label": "RESEARCH_CANDIDATE",
+        "live_equivalent": False,
+        "data_sha256": digest,
+        "baseline_configuration": {
+            name: asdict(getattr(settings, name)) for name in ("orb", "smc", "vwap")
+        },
+        "candidate_count": len(candidates),
+        "slippage_scenario_count": 3,
+        "hypothesis": (
+            "Among opportunities passing the same modeled execution proxy, "
+            "an additional completed-option-bar premium follow-through check "
+            "may improve net expectancy, at a cost in accepted trades."
+        ),
+        "comparison_rule": (
+            "Compare execution_feasibility_proxy against "
+            "execution_plus_completed_premium_confirmation at each same "
+            "slippage level; current_component_reference explains the "
+            "different admission funnel, not incremental confirmation alpha."
+        ),
+        "selection": {
+            "selected_for_live": None,
+            "promotion_eligible": False,
+            "retrospective_check_is_untouched": False,
+            "minimum_development_trades_for_further_validation": 30,
+            "blockers": [
+                "Active-contract archive is not causal historical ATM rotation",
+                "Weekly/ATM scope is a research proximity proxy, not contract parity",
+                "Historical executable bid/ask depth and full live arbitration missing",
+                "Research dates reused; no untouched chronological test",
+                "Prospective recorded-feed and paper validation still required",
+            ],
+        },
+        "assumptions": {
+            "signal": "actual ORBPro, SMC and VWAPPro classes",
+            "premium_confirmation": (
+                "Current and preceding contiguous complete traded minute bars; "
+                "current premium close > max(current open, previous close)"
+            ),
+            "entry": "next_minute_open_after_complete_signal_bar",
+            "fill_cost_stress": "10/25/50 bps per side and canonical modeled fees",
+            "eligibility": (
+                "Research-only weekly DTE 0-7 and <=100 points from completed "
+                "spot-close ATM; never a reconstructed historical selection"
+            ),
+            "unresolved_exits": "excluded from primary outcomes; separate stress",
+        },
+        "candidates": candidates,
+    }

@@ -109,6 +109,7 @@ def run_worker(request: dict[str, Any], env_file: Path) -> dict[str, Any]:
 
     from nifty_scalper_bot.backtesting.strategy_research import (
         run_archived_research,
+        run_entry_confirmation_comparison,
         run_orb_comparison,
         run_vwap_comparison,
     )
@@ -210,6 +211,14 @@ def run_worker(request: dict[str, Any], env_file: Path) -> dict[str, Any]:
         }
         for candidate in vwap_comparison["candidates"]
     ]
+    status["stage"] = "entry_confirmation_comparison"
+    write_json(directory / "status.json", status)
+    write_json(ROOT / "data/research/latest.json", status)
+    confirmation = run_entry_confirmation_comparison(directory / "history")
+    write_json(directory / "entry_confirmation_comparison.json", confirmation)
+    # Candidate payloads contain only metric, funnel and rejection aggregates;
+    # no simulated trades, personal data, or execution permissions.
+    status["entry_confirmation_comparison"] = confirmation
     run_runtime = request.get("mode", "all") == "all"
     status.update(
         state="collecting" if run_runtime else "completed",
