@@ -523,6 +523,7 @@ def _scenario(
     rejections: dict[str, Counter[str]] = {}
     evaluated: Counter[str] = Counter()
     entry_funnels: dict[str, Counter[str]] = {}
+    orb_replay_regimes: Counter[str] = Counter()
     eligible_option_days: set[str] = set()
     eligible_option_bars = 0
     pending: dict[tuple[str, str], dict[str, Any]] = {}
@@ -618,12 +619,12 @@ def _scenario(
                 )
             pending.clear()
             engine = IndicatorEngine()
-            if os.getenv("VWAP_TREND_MOMENTUM_ENABLED", "").lower() in {
-                "1",
-                "true",
-                "yes",
-                "on",
-            }:
+            if compact_orb_context or os.getenv(
+                "VWAP_TREND_MOMENTUM_ENABLED", ""
+            ).lower() in {"1", "true", "yes", "on"}:
+                # A RANGE ablation without completed-bar regime data is inert.
+                # Populate the same causal detector for *all* compact ORB arms
+                # so the baseline and experiment receive identical context.
                 regime_detector = MarketRegimeDetector()
                 regime_manager = MarketRegimeManager(regime_detector)
             else:
@@ -793,6 +794,10 @@ def _scenario(
             stable_regime = regime_manager.get_latest_snapshot()
             if stable_regime is not None:
                 underlying_context["regime"] = stable_regime.regime
+        if compact_orb_context:
+            regime = underlying_context.get("regime")
+            regime_label = str(getattr(regime, "value", regime) or "UNKNOWN")
+            orb_replay_regimes[regime_label] += 1
         for symbol in eligible_options:
             bar = bars[symbol]
             if strict_liquidity and bar["volume"] <= 0:
@@ -939,6 +944,7 @@ def _scenario(
     return {
         "slippage_bps_per_side": slippage_bps,
         "archive_weekly_atm_proxy_enabled": require_archived_weekly_atm,
+        "orb_replay_regimes": dict(orb_replay_regimes),
         "strategies": {
             name: {
                 "metrics": summarize(trades),
@@ -1336,6 +1342,13 @@ def run_orb_comparison(directory: Path) -> dict[str, Any]:
     ] = [
         ("raw_reference", {}, None, None, None),
         ("cost_gated_reference", {}, None, 1.5, None),
+        (
+            "range_transition_research",
+            {"ORB_RESEARCH_ALLOW_RANGE_TRANSITION": "true"},
+            None,
+            1.5,
+            None,
+        ),
         ("retest_only", {"ORB_MOMENTUM_BRANCH_ENABLED": "false"}, None, 1.5, None),
         (
             "early_entry_60",
@@ -1351,6 +1364,7 @@ def run_orb_comparison(directory: Path) -> dict[str, Any]:
         ("opening_rvol_1", {}, None, 1.5, 1.0),
     ]
     environment_keys = (
+        "ORB_RESEARCH_ALLOW_RANGE_TRANSITION",
         "ORB_MOMENTUM_BRANCH_ENABLED",
         "ORB_MAX_ENTRY_MINUTES_AFTER_RANGE",
         "ORB_TARGET_RR",
@@ -1361,8 +1375,14 @@ def run_orb_comparison(directory: Path) -> dict[str, Any]:
     baseline_environment = {key: os.environ.get(key) for key in environment_keys}
     candidates: list[dict[str, Any]] = []
     for name, overrides, minutes, minimum_rr, rvol in variants:
-        original = {key: os.environ.get(key) for key in overrides}
+        # Keep every reference arm free of experimental overrides, even if
+        # the calling research process has the feature flag in its environment.
+        original = {
+            key: os.environ.get(key)
+            for key in {"ORB_RESEARCH_ALLOW_RANGE_TRANSITION", *overrides}
+        }
         try:
+            os.environ["ORB_RESEARCH_ALLOW_RANGE_TRANSITION"] = "false"
             os.environ.update(overrides)
             candidate_settings = (
                 replace(settings, orb=replace(settings.orb, orb_minutes=minutes))

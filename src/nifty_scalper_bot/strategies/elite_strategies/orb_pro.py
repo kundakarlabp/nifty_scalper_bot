@@ -626,7 +626,18 @@ class ORBProStrategy(EliteStrategy):
             self._no_vote("invalid_option_contract_side")
             return None
         regime = normalize_regime(indicators.get("regime"))
-        if regime in {MarketRegime.RANGE, MarketRegime.LOW_ACTIVITY}:
+        # An opening-range breakout can begin in a RANGE regime. Measure that
+        # hypothesis only in offline SHADOW replay; LIVE/PAPER keep the exact
+        # original veto until forward evidence justifies a separate promotion.
+        research_range_transition = (
+            regime is MarketRegime.RANGE
+            and os.getenv("EXECUTION_MODE", "SHADOW").strip().upper() == "SHADOW"
+            and _env_bool("ORB_RESEARCH_ALLOW_RANGE_TRANSITION", False)
+        )
+        if (
+            regime in {MarketRegime.RANGE, MarketRegime.LOW_ACTIVITY}
+            and not research_range_transition
+        ):
             self._no_vote("non_breakout_regime")
             return None
 

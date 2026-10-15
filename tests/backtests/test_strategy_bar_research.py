@@ -485,13 +485,20 @@ def test_vwap_comparison_is_bounded_restores_environment_and_never_auto_promotes
 def test_orb_comparison_uses_compact_orb_replay_for_all_fixed_scenarios(
     tmp_path, monkeypatch
 ):
+    import os
+
     from nifty_scalper_bot.backtesting.strategy_research import run_orb_comparison
 
     archive(tmp_path)
     calls = []
 
     def replay(*args, **kwargs):
-        calls.append(dict(kwargs))
+        calls.append(
+            {
+                **dict(kwargs),
+                "range_transition": os.getenv("ORB_RESEARCH_ALLOW_RANGE_TRANSITION"),
+            }
+        )
         return {
             "strategies": {
                 "ORBPro": {
@@ -511,11 +518,69 @@ def test_orb_comparison_uses_compact_orb_replay_for_all_fixed_scenarios(
 
     report = run_orb_comparison(tmp_path)
 
-    assert report["candidate_count"] == 9
+    assert report["candidate_count"] == 10
     assert report["slippage_scenario_count"] == 3
-    assert len(calls) == 27
+    assert len(calls) == 30
     assert all(call["components"] == {"ORBPro"} for call in calls)
     assert all(call["compact_orb_context"] is True for call in calls)
+    assert sum(call["range_transition"] == "true" for call in calls) == 3
+    assert sum(call["range_transition"] == "false" for call in calls) == 27
+
+
+def test_compact_orb_replay_passes_range_regime_without_vwap_trend_flag(
+    tmp_path, monkeypatch
+):
+    from nifty_scalper_bot.backtesting import strategy_research
+    from nifty_scalper_bot.config.settings import get_settings
+
+    archive(tmp_path)
+    monkeypatch.delenv("VWAP_TREND_MOMENTUM_ENABLED", raising=False)
+    seen_regimes = []
+
+    class Detector:
+        def evaluate(self, *_args, **_kwargs):
+            return None
+
+    class Manager:
+        def __init__(self, detector):
+            self.detector = detector
+
+        def get_latest_snapshot(self):
+            return SimpleNamespace(regime="RANGE")
+
+    class ProbeORB:
+        name = "ORBPro"
+        config = SimpleNamespace(enabled=True)
+        last_no_vote_reason = "underlying_orb_not_ready"
+
+        @property
+        def evaluation_health(self):
+            return {"healthy": True}
+
+        def generate_signal(self, symbol, indicators, current_price, position=None):
+            seen_regimes.append(indicators.get("regime"))
+            return None
+
+    monkeypatch.setattr(strategy_research, "MarketRegimeDetector", Detector)
+    monkeypatch.setattr(strategy_research, "MarketRegimeManager", Manager)
+    monkeypatch.setattr(
+        strategy_research,
+        "build_elite_strategies",
+        lambda settings, engine: [ProbeORB()],
+    )
+    histories, instruments, _ = strategy_research.load_archive(tmp_path)
+
+    result = strategy_research._scenario(
+        histories,
+        instruments,
+        get_settings().elite,
+        10.0,
+        components={"ORBPro"},
+        compact_orb_context=True,
+    )
+
+    assert seen_regimes and set(seen_regimes) == {"RANGE"}
+    assert result["orb_replay_regimes"]["RANGE"] > 0
 
 
 def test_bounded_comparison_restores_environment_and_never_promotes_small_sample(
@@ -530,7 +595,7 @@ def test_bounded_comparison_restores_environment_and_never_promotes_small_sample
     before = dict(os.environ)
     report = run_orb_comparison(tmp_path)
     assert dict(os.environ) == before
-    assert len(report["candidates"]) == 9
+    assert len(report["candidates"]) == 10
     assert report["selection"]["promotion_eligible"] is False
     assert report["selection"]["selected_for_live"] is None
     assert report["retrospective_check_is_untouched"] is False

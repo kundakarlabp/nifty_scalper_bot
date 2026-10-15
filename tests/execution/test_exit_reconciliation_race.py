@@ -903,10 +903,16 @@ async def test_real_bracket_manager_flat_reconcile_clears_unresolved_entry_block
     tmp_path,
     broker_rows: list[dict[str, Any]],
     expected_exposure: str,
+    monkeypatch,
 ) -> None:
     from nifty_scalper_bot.core.app import _reconcile_state
     from nifty_scalper_bot.execution.position_snapshot import BrokerExposureState
 
+    # This checks two explicit reconciliation passes, not background watchdog
+    # polling. Separate watchdog tests cover its real broker refresh behavior.
+    # Otherwise a concurrent watchdog tick adds an unrelated position fetch and
+    # makes the exact broker-call assertion nondeterministic.
+    monkeypatch.setattr(BracketManager, "_watchdog_exit_loop", lambda self: None)
     broker = _ReconBroker(broker_rows)
     pm = PositionManager(str(tmp_path / "positions.json"))
     order_manager = _ReconOrderManager(None, broker)
