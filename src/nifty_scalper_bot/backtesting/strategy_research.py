@@ -523,6 +523,7 @@ def _scenario(
     rejections: dict[str, Counter[str]] = {}
     evaluated: Counter[str] = Counter()
     entry_funnels: dict[str, Counter[str]] = {}
+    orb_replay_regimes: Counter[str] = Counter()
     eligible_option_days: set[str] = set()
     eligible_option_bars = 0
     pending: dict[tuple[str, str], dict[str, Any]] = {}
@@ -618,12 +619,12 @@ def _scenario(
                 )
             pending.clear()
             engine = IndicatorEngine()
-            if os.getenv("VWAP_TREND_MOMENTUM_ENABLED", "").lower() in {
-                "1",
-                "true",
-                "yes",
-                "on",
-            }:
+            if compact_orb_context or os.getenv(
+                "VWAP_TREND_MOMENTUM_ENABLED", ""
+            ).lower() in {"1", "true", "yes", "on"}:
+                # A RANGE ablation without completed-bar regime data is inert.
+                # Populate the same causal detector for *all* compact ORB arms
+                # so the baseline and experiment receive identical context.
                 regime_detector = MarketRegimeDetector()
                 regime_manager = MarketRegimeManager(regime_detector)
             else:
@@ -793,6 +794,11 @@ def _scenario(
             stable_regime = regime_manager.get_latest_snapshot()
             if stable_regime is not None:
                 underlying_context["regime"] = stable_regime.regime
+        if compact_orb_context:
+            regime = underlying_context.get("regime")
+            orb_replay_regimes[
+                str(getattr(regime, "value", regime) or "UNKNOWN")
+            ] += 1
         for symbol in eligible_options:
             bar = bars[symbol]
             if strict_liquidity and bar["volume"] <= 0:
@@ -939,6 +945,7 @@ def _scenario(
     return {
         "slippage_bps_per_side": slippage_bps,
         "archive_weekly_atm_proxy_enabled": require_archived_weekly_atm,
+        "orb_replay_regimes": dict(orb_replay_regimes),
         "strategies": {
             name: {
                 "metrics": summarize(trades),
