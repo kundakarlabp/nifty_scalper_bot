@@ -190,6 +190,7 @@ def test_live_opposing_three_second_flow_cannot_confirm_positive_one_second(
     assert signal is not None
     assert signal.metadata["ofi_sustained_confirmation"] is False
     assert signal.metadata["effective_context_alignment"] is False
+    assert signal.metadata["context_alignment_block_reason"] == "ofi_3s_not_aligned"
 
 
 def test_live_strong_depth_without_ofi_requires_distinct_temporal_snapshots(
