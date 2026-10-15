@@ -233,6 +233,19 @@ def test_live_multisecond_ofi_passes_accumulator_indicator_and_context(
     )
     assert evidence is not None
     assert evidence.metadata["ofi_sustained_confirmation"] is True
-    assert evidence.metadata["effective_context_alignment"] is True
+    assert evidence.metadata["effective_context_alignment"] is True, {
+        key: evidence.metadata.get(key)
+        for key in (
+            "context_alignment_block_reason",
+            "context_alignment_source",
+            "context_quality_eligible",
+            "quote_readiness_reason",
+            "ofi_sustained_confirmation",
+            "underlying_direction_bias",
+            "context_age_seconds",
+            "ofi_3s_span_seconds",
+            "effective_context_conflict",
+        )
+    }
     assert evidence.metadata["context_alignment_source"] == "temporal_ofi"
     assert evidence.metadata["context_alignment_block_reason"] is None
