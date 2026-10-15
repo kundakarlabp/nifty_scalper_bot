@@ -301,6 +301,7 @@ def test_manager_qualification_and_runner_approval_events_are_not_conflated() ->
     assert '"event": "SIGNAL_APPROVED"' not in manager_source
     assert '"event": "SIGNAL_APPROVED"' in runner_source
 
+
 def test_strategy_manager_observability_window_reset_preserves_totals() -> None:
     import threading
 
