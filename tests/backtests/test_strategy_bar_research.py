@@ -884,7 +884,10 @@ def test_orb_structural_failures_are_attributed_without_changing_trade_admission
     assert result["metrics"]["trade_count"] == 0
     assert result["entry_funnel"]["signals_emitted"] == 0
     observations = result["evaluations"]
-    assert result["no_vote_reasons"]["orb_structural_contract_not_passed"] == observations
+    structural_rejections = result["no_vote_reasons"][
+        "orb_structural_contract_not_passed"
+    ]
+    assert structural_rejections == observations
     assert result["structural_gate_failures"] == {
         "underlying_volume_confirmation": observations,
         "futures_vwap_slope_alignment": observations,
