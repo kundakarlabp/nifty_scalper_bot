@@ -576,9 +576,7 @@ def _signal_observability(ctx):  # noqa: ANN001
         "no_vote_reason_counts_by_strategy_total": status.get(
             "no_vote_reason_counts_by_strategy_total", {}
         ),
-        "last_trigger_qualified_age_sec": status.get(
-            "last_trigger_qualified_age_sec"
-        ),
+        "last_trigger_qualified_age_sec": status.get("last_trigger_qualified_age_sec"),
         "setup_lifecycle": status.get("setup_lifecycle", {}),
     }
 
