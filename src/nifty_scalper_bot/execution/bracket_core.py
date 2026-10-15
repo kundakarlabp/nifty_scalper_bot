@@ -5767,6 +5767,17 @@ class BracketManager:
         if not order_id:
             return "absent"
 
+        # A completed prior-session MIS/DAY bracket can outlive Kite's
+        # per-order history: its old order ID returns HTTP 404 the next day.
+        # Check fresh, uncached broker orders AND broker-flat exposure before
+        # calling the historical ID endpoint. Never apply this to same-day
+        # orders, NRML positions, an open broker stop, or unavailable evidence.
+        if (
+            reason == "broker_position_flat"
+            and self._prior_day_mis_stop_expired_at_broker(bracket, order_id)
+        ):
+            return "expired"
+
         status = self._get_broker_order_status(order_id)
         status_text = str((status or {}).get("status") or "").strip().upper()
         if status_text in _FILLED_STATUSES:
