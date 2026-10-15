@@ -1336,6 +1336,13 @@ def run_orb_comparison(directory: Path) -> dict[str, Any]:
     ] = [
         ("raw_reference", {}, None, None, None),
         ("cost_gated_reference", {}, None, 1.5, None),
+        (
+            "range_transition_research",
+            {"ORB_RESEARCH_ALLOW_RANGE_TRANSITION": "true"},
+            None,
+            1.5,
+            None,
+        ),
         ("retest_only", {"ORB_MOMENTUM_BRANCH_ENABLED": "false"}, None, 1.5, None),
         (
             "early_entry_60",
@@ -1351,6 +1358,7 @@ def run_orb_comparison(directory: Path) -> dict[str, Any]:
         ("opening_rvol_1", {}, None, 1.5, 1.0),
     ]
     environment_keys = (
+        "ORB_RESEARCH_ALLOW_RANGE_TRANSITION",
         "ORB_MOMENTUM_BRANCH_ENABLED",
         "ORB_MAX_ENTRY_MINUTES_AFTER_RANGE",
         "ORB_TARGET_RR",
@@ -1361,8 +1369,14 @@ def run_orb_comparison(directory: Path) -> dict[str, Any]:
     baseline_environment = {key: os.environ.get(key) for key in environment_keys}
     candidates: list[dict[str, Any]] = []
     for name, overrides, minutes, minimum_rr, rvol in variants:
-        original = {key: os.environ.get(key) for key in overrides}
+        # Keep every reference arm free of experimental overrides, even if
+        # the calling research process has the feature flag in its environment.
+        original = {
+            key: os.environ.get(key)
+            for key in {"ORB_RESEARCH_ALLOW_RANGE_TRANSITION", *overrides}
+        }
         try:
+            os.environ["ORB_RESEARCH_ALLOW_RANGE_TRANSITION"] = "false"
             os.environ.update(overrides)
             candidate_settings = (
                 replace(settings, orb=replace(settings.orb, orb_minutes=minutes))
