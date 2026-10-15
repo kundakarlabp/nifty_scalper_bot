@@ -834,3 +834,33 @@ def test_smc_live_sweep_expires_by_quote_time_not_stale_bar_clock(
     else:
         assert signal is None
         assert strategy.last_no_vote_reason == "smc_sweep_expired"
+
+
+def test_impossible_futures_sweep_candle_never_arms_smc(monkeypatch) -> None:
+    """An impossible candle must not invent a sweep of a prior valid pivot."""
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    rows = [
+        _bar(minute, open_=24000.0, high=24010.0, low=23990.0, close=24000.0)
+        for minute in range(30)
+    ]
+    rows[22] = _bar(22, open_=24000.0, high=24010.0, low=23980.0, close=24000.0)
+    impossible = _bar(
+        30,
+        open_=23988.0,
+        high=23960.0,
+        low=23974.0,
+        close=23984.0,
+        volume=2400.0,
+    )
+    rows.append(impossible)
+    strategy = _strategy(rows)
+
+    assert (
+        strategy.generate_signal(
+            CE,
+            _indicators(latest_bar_ts=impossible["timestamp"]),
+            102.0,
+        )
+        is None
+    )
+    assert strategy.last_no_vote_reason == "underlying_no_liquidity_sweep"

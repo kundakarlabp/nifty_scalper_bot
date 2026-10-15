@@ -269,3 +269,50 @@ def test_retest_mode_rejects_stale_previous_candle(monkeypatch):
 
     assert signal is None
     assert strategy.last_no_vote_reason == "trend_momentum_retest_unconfirmed"
+
+
+def test_nonfinite_futures_slope_cannot_confirm_vwap_entry(monkeypatch) -> None:
+    strategy, signal = _evaluate(
+        monkeypatch,
+        enabled=False,
+        regime="RANGE",
+        volume=450.0,
+        futures_volume_ratio=2.0,
+        futures_vwap_slope=float("inf"),
+        open=102.8,
+        close=103.0,
+    )
+
+    assert signal is None
+    assert strategy.last_no_vote_reason == "futures_slope_not_aligned"
+
+
+def test_nonfinite_spread_cannot_masquerade_as_tradable_quote(monkeypatch) -> None:
+    strategy, signal = _evaluate(
+        monkeypatch,
+        enabled=False,
+        regime="RANGE",
+        volume=450.0,
+        futures_volume_ratio=2.0,
+        spread_pct=float("nan"),
+        open=102.8,
+        close=103.0,
+    )
+
+    assert signal is None
+    assert strategy.last_no_vote_reason == "invalid_option_market_data"
+
+
+def test_nonfinite_futures_volume_cannot_confirm_thin_option(monkeypatch) -> None:
+    strategy, signal = _evaluate(
+        monkeypatch,
+        enabled=False,
+        regime="RANGE",
+        volume=450.0,
+        futures_volume_ratio=float("inf"),
+        open=102.8,
+        close=103.0,
+    )
+
+    assert signal is None
+    assert strategy.last_no_vote_reason == "volume_confirmation_missing"

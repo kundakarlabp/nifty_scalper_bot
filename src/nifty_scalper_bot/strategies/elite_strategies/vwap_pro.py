@@ -337,6 +337,25 @@ class VWAPProStrategy(EliteStrategy):
             vol = float(indicators.get("volume") or 0.0)
             avg_vol = float(indicators.get("avg_volume") or 0.0)
             spread_pct = float(indicators.get("spread_pct") or 0.0)
+            # Non-finite market observations are not low-spread, high-volume
+            # or momentum confirmation. Missing optional fields retain their
+            # previous defaults; explicitly malformed values cannot vote.
+            if not all(
+                math.isfinite(value)
+                for value in (
+                    current_price,
+                    atr,
+                    close,
+                    open_price,
+                    high,
+                    low,
+                    vol,
+                    avg_vol,
+                    spread_pct,
+                )
+            ):
+                self._no_vote("invalid_option_market_data")
+                return None
             spot_ctx = (
                 indicators.get("spot_context")
                 if isinstance(indicators.get("spot_context"), dict)
@@ -383,7 +402,10 @@ class VWAPProStrategy(EliteStrategy):
 
             def _optional_float(value: Any) -> float | None:
                 try:
-                    return None if value is None else float(value)
+                    if value is None:
+                        return None
+                    number = float(value)
+                    return number if math.isfinite(number) else None
                 except (TypeError, ValueError):
                     return None
 
