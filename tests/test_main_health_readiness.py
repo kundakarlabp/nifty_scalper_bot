@@ -589,6 +589,7 @@ def test_trading_status_distinguishes_live_configuration_from_current_arming(
     assert armed["can_place_live_order_now"] is True
     assert armed["will_trade"] is True
 
+
 def test_health_trading_exposes_signal_observability_without_changing_readiness():
     class Runner:
         def get_status(self):
