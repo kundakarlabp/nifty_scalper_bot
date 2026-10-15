@@ -166,3 +166,73 @@ def test_temporal_ofi_survives_indicator_context_handoff_to_orderflow() -> None:
     assert evidence is not None
     assert evidence.metadata["ofi_ready"] is True
     assert evidence.metadata["flow_confirmation_source"] == "temporal_ofi"
+
+
+def test_live_multisecond_ofi_passes_accumulator_indicator_and_context(
+    monkeypatch,
+) -> None:
+    """A genuinely persistent live OFI path must be able to confirm a setup."""
+    from nifty_scalper_bot.strategies.indicators import IndicatorEngine
+    from nifty_scalper_bot.strategies.order_flow_evidence import TemporalOfiAccumulator
+
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    symbol = "NFO:NIFTY26MAY24000CE"
+    acc = TemporalOfiAccumulator()
+    payload = {}
+    for version, at, bid_qty in (
+        (1, 100.0, 100.0),
+        (2, 100.4, 140.0),
+        (3, 101.2, 180.0),
+        (4, 102.0, 220.0),
+        (5, 102.4, 240.0),
+    ):
+        payload = acc.update(
+            symbol,
+            {
+                "source": "ws",
+                "bid": 100.0,
+                "ask": 100.5,
+                "depth": {
+                    "buy": [{"quantity": bid_qty}],
+                    "sell": [{"quantity": 100.0}],
+                },
+            },
+            update_version=version,
+            observed_at=at,
+        )
+    assert payload["ofi_ready"] is True
+    assert payload["ofi_update_count_1s"] >= 2
+    assert payload["ofi_update_count_3s"] >= 3
+    assert payload["ofi_3s_span_seconds"] >= 1.5
+    assert payload["ofi_3s_normalized"] > 0
+
+    engine = IndicatorEngine()
+    engine.set_runtime_context(
+        symbol,
+        {
+            **payload,
+            "bid": 100.0,
+            "ask": 100.5,
+            "spread_pct": 0.5,
+            "quote_age_s": 0.1,
+            "context_age_seconds": 0.1,
+            "depth": {
+                "buy": [{"quantity": 240.0}],
+                "sell": [{"quantity": 100.0}],
+            },
+            "direction_bias": "CE",
+            "underlying_direction_bias": "CE",
+            "tick_direction": "UP",
+            "quote_update_version": 5,
+            "tradable_quote": True,
+            "stale_data_used": False,
+        },
+    )
+    evidence = _strategy()._evaluate_signal(
+        symbol, engine.get_indicators(symbol), current_price=100.25
+    )
+    assert evidence is not None
+    assert evidence.metadata["ofi_sustained_confirmation"] is True
+    assert evidence.metadata["effective_context_alignment"] is True
+    assert evidence.metadata["context_alignment_source"] == "temporal_ofi"
+    assert evidence.metadata["context_alignment_block_reason"] is None
