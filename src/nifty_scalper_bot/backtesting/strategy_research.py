@@ -796,9 +796,8 @@ def _scenario(
                 underlying_context["regime"] = stable_regime.regime
         if compact_orb_context:
             regime = underlying_context.get("regime")
-            orb_replay_regimes[
-                str(getattr(regime, "value", regime) or "UNKNOWN")
-            ] += 1
+            regime_label = str(getattr(regime, "value", regime) or "UNKNOWN")
+            orb_replay_regimes[regime_label] += 1
         for symbol in eligible_options:
             bar = bars[symbol]
             if strict_liquidity and bar["volume"] <= 0:
