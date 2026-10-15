@@ -634,7 +634,10 @@ class ORBProStrategy(EliteStrategy):
             and os.getenv("EXECUTION_MODE", "SHADOW").strip().upper() == "SHADOW"
             and _env_bool("ORB_RESEARCH_ALLOW_RANGE_TRANSITION", False)
         )
-        if regime in {MarketRegime.RANGE, MarketRegime.LOW_ACTIVITY} and not research_range_transition:
+        if (
+            regime in {MarketRegime.RANGE, MarketRegime.LOW_ACTIVITY}
+            and not research_range_transition
+        ):
             self._no_vote("non_breakout_regime")
             return None
 
