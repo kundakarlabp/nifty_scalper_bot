@@ -1346,7 +1346,9 @@ class StrategyManager(_BaseStrategyManager):
         }
         self._signal_observability_lock = threading.RLock()
         self._strategy_eval_counts_window: dict[str, int] = {}
+        self._strategy_eval_counts_total: dict[str, int] = {}
         self._strategy_no_vote_counts_window: dict[str, dict[str, int]] = {}
+        self._strategy_no_vote_counts_total: dict[str, dict[str, int]] = {}
         self._adaptive_store = AdaptiveParameterStore(
             window_trades=app_settings.ADAPTIVE_WINDOW_TRADES
         )
@@ -1388,6 +1390,9 @@ class StrategyManager(_BaseStrategyManager):
             self._strategy_eval_counts_window[key] = (
                 self._strategy_eval_counts_window.get(key, 0) + 1
             )
+            self._strategy_eval_counts_total[key] = (
+                self._strategy_eval_counts_total.get(key, 0) + 1
+            )
 
     def _record_strategy_no_vote_observability(
         self, strategy_name: str, reason: str
@@ -1398,6 +1403,8 @@ class StrategyManager(_BaseStrategyManager):
         with self._signal_observability_lock:
             bucket = self._strategy_no_vote_counts_window.setdefault(key, {})
             bucket[reason_key] = bucket.get(reason_key, 0) + 1
+            total_bucket = self._strategy_no_vote_counts_total.setdefault(key, {})
+            total_bucket[reason_key] = total_bucket.get(reason_key, 0) + 1
 
     def get_signal_observability_snapshot(
         self, *, reset_window: bool = False
@@ -1405,12 +1412,19 @@ class StrategyManager(_BaseStrategyManager):
         """Return completed per-strategy evaluations and no-vote reasons."""
         with self._signal_observability_lock:
             snapshot = {
-                "completed_strategy_evaluations": dict(
+                "completed_strategy_evaluations_window": dict(
                     self._strategy_eval_counts_window
                 ),
-                "no_vote_reason_counts_by_strategy": {
+                "completed_strategy_evaluations_total": dict(
+                    self._strategy_eval_counts_total
+                ),
+                "no_vote_reason_counts_by_strategy_window": {
                     strategy: dict(reasons)
                     for strategy, reasons in self._strategy_no_vote_counts_window.items()
+                },
+                "no_vote_reason_counts_by_strategy_total": {
+                    strategy: dict(reasons)
+                    for strategy, reasons in self._strategy_no_vote_counts_total.items()
                 },
             }
             if reset_window:
