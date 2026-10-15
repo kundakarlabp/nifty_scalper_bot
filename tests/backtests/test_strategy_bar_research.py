@@ -527,6 +527,62 @@ def test_orb_comparison_uses_compact_orb_replay_for_all_fixed_scenarios(
     assert sum(call["range_transition"] == "false" for call in calls) == 27
 
 
+def test_compact_orb_replay_passes_range_regime_without_vwap_trend_flag(
+    tmp_path, monkeypatch
+):
+    from nifty_scalper_bot.backtesting import strategy_research
+    from nifty_scalper_bot.config.settings import get_settings
+
+    archive(tmp_path)
+    monkeypatch.delenv("VWAP_TREND_MOMENTUM_ENABLED", raising=False)
+    seen_regimes = []
+
+    class Detector:
+        def evaluate(self, *_args, **_kwargs):
+            return None
+
+    class Manager:
+        def __init__(self, detector):
+            self.detector = detector
+
+        def get_latest_snapshot(self):
+            return SimpleNamespace(regime="RANGE")
+
+    class ProbeORB:
+        name = "ORBPro"
+        config = SimpleNamespace(enabled=True)
+        last_no_vote_reason = "underlying_orb_not_ready"
+
+        @property
+        def evaluation_health(self):
+            return {"healthy": True}
+
+        def generate_signal(self, symbol, indicators, current_price, position=None):
+            seen_regimes.append(indicators.get("regime"))
+            return None
+
+    monkeypatch.setattr(strategy_research, "MarketRegimeDetector", Detector)
+    monkeypatch.setattr(strategy_research, "MarketRegimeManager", Manager)
+    monkeypatch.setattr(
+        strategy_research,
+        "build_elite_strategies",
+        lambda settings, engine: [ProbeORB()],
+    )
+    histories, instruments, _ = strategy_research.load_archive(tmp_path)
+
+    result = strategy_research._scenario(
+        histories,
+        instruments,
+        get_settings().elite,
+        10.0,
+        components={"ORBPro"},
+        compact_orb_context=True,
+    )
+
+    assert seen_regimes and set(seen_regimes) == {"RANGE"}
+    assert result["orb_replay_regimes"]["RANGE"] > 0
+
+
 def test_bounded_comparison_restores_environment_and_never_promotes_small_sample(
     tmp_path, monkeypatch
 ):
