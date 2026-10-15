@@ -821,3 +821,23 @@ def test_missing_bar_between_orb_breakout_and_retest_is_not_confirmation(
 
     assert result is None
     assert strategy.last_no_vote_reason == "orb_post_range_data_gap"
+
+
+def test_impossible_futures_breakout_candle_never_authorizes_orb(monkeypatch) -> None:
+    """A close above the quoted high cannot be breakout confirmation."""
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    rows = _opening_rows()
+    impossible = _bar(
+        15,
+        open_=24_008.0,
+        high=23_990.0,
+        low=24_006.0,
+        close=24_030.0,
+        volume=3_000.0,
+    )
+    rows.append(impossible)
+    strategy = _strategy({FUTURE: rows})
+    indicators = _base_indicators("CE", impossible["timestamp"])
+
+    assert strategy.generate_signal(CE, indicators, 50.0) is None
+    assert strategy.last_no_vote_reason == "underlying_orb_not_ready"
