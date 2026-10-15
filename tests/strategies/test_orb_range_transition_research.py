@@ -10,8 +10,8 @@ import pytest
 
 from .test_orb_pro_v2 import (
     CE,
-    PE,
     FUTURE,
+    PE,
     _bar,
     _base_indicators,
     _opening_rows,
