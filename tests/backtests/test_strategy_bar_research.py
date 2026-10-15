@@ -877,9 +877,8 @@ def test_orb_structural_failures_are_attributed_without_changing_trade_admission
         lambda settings, engine: [Strategy()],
     )
     histories, instruments, _ = load_archive(tmp_path)
-    result = _scenario(
-        histories, instruments, None, 25, components={"ORBPro"}
-    )["strategies"]["ORBPro"]
+    scenario = _scenario(histories, instruments, None, 25, components={"ORBPro"})
+    result = scenario["strategies"]["ORBPro"]
 
     assert result["metrics"]["trade_count"] == 0
     assert result["entry_funnel"]["signals_emitted"] == 0
