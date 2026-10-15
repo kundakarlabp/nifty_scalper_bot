@@ -47,7 +47,9 @@ def _breakout_rows(side: str, *, volume: float = 3_000.0) -> list[dict[str, obje
 
 
 @pytest.mark.parametrize("side,symbol", [("CE", CE), ("PE", PE)])
-def test_range_transition_disabled_by_default(monkeypatch, side: str, symbol: str) -> None:
+def test_range_transition_disabled_by_default(
+    monkeypatch, side: str, symbol: str
+) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
     monkeypatch.delenv("ORB_RESEARCH_ALLOW_RANGE_TRANSITION", raising=False)
     rows = _breakout_rows(side)
@@ -93,7 +95,9 @@ def test_experimental_flag_never_changes_live_or_paper_eligibility(
     assert strategy.last_no_vote_reason == "non_breakout_regime"
 
 
-def test_low_activity_remains_hard_veto_even_during_shadow_ablation(monkeypatch) -> None:
+def test_low_activity_remains_hard_veto_even_during_shadow_ablation(
+    monkeypatch,
+) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
     monkeypatch.setenv("ORB_RESEARCH_ALLOW_RANGE_TRANSITION", "true")
     rows = _breakout_rows("CE")
