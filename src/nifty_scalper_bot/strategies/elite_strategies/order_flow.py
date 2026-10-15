@@ -459,6 +459,31 @@ class OrderFlowStrategy(EliteStrategy):
                     or (side_aligns and microstructure_conflicts_side)
                 )
             )
+            # Observability only: explain missing independent confirmation
+            # without changing a single admission or conflict decision.
+            context_alignment_block_reason: str | None = None
+            if not effective_context_alignment:
+                if not context_quality_eligible:
+                    context_alignment_block_reason = "context_quality_unready"
+                elif not side_aligns:
+                    context_alignment_block_reason = "underlying_direction_mismatch"
+                elif microstructure_conflicts_side:
+                    context_alignment_block_reason = "adverse_microstructure"
+                elif ofi_reversal_holdoff_active:
+                    context_alignment_block_reason = "ofi_reversal_holdoff"
+                elif ofi_directional and ofi_supports_side:
+                    if (
+                        indicators.get("ofi_3s_complete") is not True
+                        or ofi_3s_updates < 3
+                        or ofi_3s_span < 1.5
+                    ):
+                        context_alignment_block_reason = "ofi_3s_insufficient_coverage"
+                    else:
+                        context_alignment_block_reason = "ofi_3s_not_aligned"
+                elif alignment_candidate_source and not microstructure_supports_side:
+                    context_alignment_block_reason = "depth_persistence_unconfirmed"
+                else:
+                    context_alignment_block_reason = "no_independent_flow_confirmation"
 
             reasons: list[str] = []
             if depth_supports_side:
@@ -513,6 +538,7 @@ class OrderFlowStrategy(EliteStrategy):
                 "ofi_3s_normalized": ofi_3s_value,
                 "ofi_update_count_3s": ofi_3s_updates,
                 "ofi_3s_span_seconds": ofi_3s_span,
+                "ofi_3s_complete": indicators.get("ofi_3s_complete") is True,
                 "ofi_sustained_confirmation": ofi_sustained_confirmation,
                 "ofi_source": indicators.get("ofi_source"),
                 "ofi_unavailable_reason": ofi_unavailable_reason,
@@ -532,6 +558,7 @@ class OrderFlowStrategy(EliteStrategy):
                 "context_fresh": context_fresh,
                 "context_quality_eligible": context_quality_eligible,
                 "effective_context_alignment": effective_context_alignment,
+                "context_alignment_block_reason": context_alignment_block_reason,
                 "ofi_reversal_holdoff_active": ofi_reversal_holdoff_active,
                 "effective_context_conflict": effective_context_conflict,
                 "context_role": "confirmation",
@@ -569,7 +596,9 @@ class OrderFlowStrategy(EliteStrategy):
                 "aligned=%s conflict=%s source=%s ofi_ready=%s ofi_norm=%s "
                 "depth=%.3f strong_depth_conflict=%s spread_pct=%.3f age_s=%.3f "
                 "ofi_updates_1s=%s ofi_unavailable=%s quote_version=%s "
-                "ofi_reversal_holdoff=%s",
+                "ofi_reversal_holdoff=%s ofi_3s_norm=%s "
+                "ofi_updates_3s=%s ofi_3s_span=%s "
+                "ofi_sustained=%s block_reason=%s",
                 symbol,
                 side,
                 context_quality_eligible,
@@ -586,6 +615,11 @@ class OrderFlowStrategy(EliteStrategy):
                 ofi_unavailable_reason,
                 quote_readiness.quote_update_version,
                 ofi_reversal_holdoff_active,
+                ofi_3s_value,
+                ofi_3s_updates,
+                round(ofi_3s_span, 3),
+                ofi_sustained_confirmation,
+                context_alignment_block_reason,
                 extra={
                     "event": "ORDERFLOW_CONTEXT_EVIDENCE",
                     "symbol": symbol,
@@ -594,10 +628,14 @@ class OrderFlowStrategy(EliteStrategy):
                     "effective_context_alignment": effective_context_alignment,
                     "effective_context_conflict": effective_context_conflict,
                     "context_alignment_source": context_alignment_source,
+                    "context_alignment_block_reason": context_alignment_block_reason,
                     "ofi_ready": ofi_ready,
                     "ofi_1s_normalized": ofi_value,
                     "ofi_update_count_1s": ofi_updates,
                     "ofi_3s_span_seconds": ofi_3s_span,
+                    "ofi_3s_normalized": ofi_3s_value,
+                    "ofi_update_count_3s": ofi_3s_updates,
+                    "ofi_3s_complete": indicators.get("ofi_3s_complete") is True,
                     "ofi_sustained_confirmation": ofi_sustained_confirmation,
                     "ofi_reversal_holdoff_active": ofi_reversal_holdoff_active,
                     "ofi_unavailable_reason": ofi_unavailable_reason,
