@@ -485,16 +485,19 @@ def test_vwap_comparison_is_bounded_restores_environment_and_never_auto_promotes
 def test_orb_comparison_uses_compact_orb_replay_for_all_fixed_scenarios(
     tmp_path, monkeypatch
 ):
-    from nifty_scalper_bot.backtesting.strategy_research import run_orb_comparison
-
     import os
+
+    from nifty_scalper_bot.backtesting.strategy_research import run_orb_comparison
 
     archive(tmp_path)
     calls = []
 
     def replay(*args, **kwargs):
         calls.append(
-            {**dict(kwargs), "range_transition": os.getenv("ORB_RESEARCH_ALLOW_RANGE_TRANSITION")}
+            {
+                **dict(kwargs),
+                "range_transition": os.getenv("ORB_RESEARCH_ALLOW_RANGE_TRANSITION"),
+            }
         )
         return {
             "strategies": {
