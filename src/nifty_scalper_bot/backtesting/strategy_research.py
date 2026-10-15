@@ -521,6 +521,7 @@ def _scenario(
     unresolved_outcomes: dict[str, list[dict[str, Any]]] = {}
     stress_outcomes: dict[str, list[dict[str, Any]]] = {}
     rejections: dict[str, Counter[str]] = {}
+    structural_gate_failures: Counter[str] = Counter()
     evaluated: Counter[str] = Counter()
     entry_funnels: dict[str, Counter[str]] = {}
     orb_replay_regimes: Counter[str] = Counter()
@@ -839,9 +840,16 @@ def _scenario(
                 if not strategy.evaluation_health["healthy"]:
                     raise ValueError("research_strategy_evaluation_failed")
                 if signal is None:
-                    rejections[strategy.name][
-                        getattr(strategy, "last_no_vote_reason", "no_signal")
-                    ] += 1
+                    no_vote = getattr(strategy, "last_no_vote_reason", "no_signal")
+                    rejections[strategy.name][no_vote] += 1
+                    if (
+                        strategy.name == "ORBPro"
+                        and no_vote == "orb_structural_contract_not_passed"
+                    ):
+                        for reason in getattr(
+                            strategy, "last_structural_failure_reasons", ()
+                        ):
+                            structural_gate_failures[reason] += 1
                     continue
                 entry_funnels[strategy.name]["signals_emitted"] += 1
                 metadata = dict(signal.metadata or {})
@@ -1000,6 +1008,9 @@ def _scenario(
                     "accepted_fills": entry_funnels[name]["accepted_fills"],
                 },
                 "no_vote_reasons": dict(rejections[name]),
+                "structural_gate_failures": (
+                    dict(structural_gate_failures) if name == "ORBPro" else {}
+                ),
                 "research_gate_counts": dict(
                     getattr(
                         next(

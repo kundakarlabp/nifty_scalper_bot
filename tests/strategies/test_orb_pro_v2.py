@@ -330,6 +330,9 @@ def test_retest_cannot_rescue_low_participation_breakout(monkeypatch) -> None:
 
     assert strategy.generate_signal(CE, second, 50.0) is None
     assert strategy.last_no_vote_reason == "orb_structural_contract_not_passed"
+    assert strategy.last_structural_failure_reasons == (
+        "underlying_volume_confirmation",
+    )
 
 
 def test_retest_tolerance_stays_anchored_to_breakout_volatility(monkeypatch) -> None:

@@ -85,6 +85,8 @@ class ORBProStrategy(EliteStrategy):
         self._cfg = config
         self._events: dict[tuple[str, str, str], dict[str, Any]] = {}
         self._last_bar_by_key: dict[tuple[str, str, str], datetime] = {}
+        # Diagnostic only; never changes whether a setup can generate a vote.
+        self.last_structural_failure_reasons: tuple[str, ...] = ()
 
     def get_required_indicators(self) -> set[str]:
         """Return strategy-facing option and underlying context requirements."""
@@ -520,6 +522,18 @@ class ORBProStrategy(EliteStrategy):
             indicators=indicators,
         )
         reasons.append("retest_hold" if branch == "retest" else "momentum_acceptance")
+        # Report each independently missing prerequisite. The rejection and
+        # trading policy remain unchanged; backtests can attribute the funnel.
+        required_reasons = (
+            "underlying_direction_alignment",
+            "underlying_volume_confirmation",
+            "normalized_breakout_penetration",
+            "balanced_opening_range",
+            "futures_vwap_slope_alignment",
+        )
+        self.last_structural_failure_reasons = tuple(
+            reason for reason in required_reasons if reason not in reasons
+        )
         context_fresh = indicators.get("context_fresh") is not False
         if not setup_pass or not context_fresh:
             self._no_vote(
@@ -627,6 +641,7 @@ class ORBProStrategy(EliteStrategy):
         position: Any | None = None,
     ) -> EliteSignal | None:
         del position
+        self.last_structural_failure_reasons = ()
         self._no_vote("stale_or_invalid_data")
         if current_price <= 0 or bool(indicators.get("stale_data_used")):
             return None
