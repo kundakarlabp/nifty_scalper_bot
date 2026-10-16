@@ -273,7 +273,6 @@ def archive_history(
     return report
 
 
-
 def historical_cache_inventory(cache_dir: Path, start: dt.date, end: dt.date) -> dict:
     """Inventory verified retained contracts; never substitute for causal replay.
 
@@ -283,9 +282,7 @@ def historical_cache_inventory(cache_dir: Path, start: dt.date, end: dt.date) ->
     """
     if start > end:
         raise ValueError("historical_cache_inventory_window_invalid")
-    option_minutes: dict[
-        str, dict[tuple[str, float, dt.datetime], set[str]]
-    ] = {}
+    option_minutes: dict[str, dict[tuple[str, float, dt.datetime], set[str]]] = {}
     context_minutes: dict[str, dict[str, set[dt.datetime]]] = {}
     valid_files = 0
     corrupt = 0
@@ -378,9 +375,7 @@ def historical_cache_inventory(cache_dir: Path, start: dt.date, end: dt.date) ->
             {
                 "date": day,
                 "paired_ce_pe_option_minutes": len(pairs),
-                "valid_paired_strikes": len(
-                    {(key[0], key[1]) for key in pairs}
-                ),
+                "valid_paired_strikes": len({(key[0], key[1]) for key in pairs}),
                 "synchronized_contract_minutes": synchronized,
             }
         )
