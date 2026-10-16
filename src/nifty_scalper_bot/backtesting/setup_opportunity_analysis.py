@@ -31,6 +31,8 @@ class CanonicalSetupOpportunity:
     final_reason: str
     regime: str
     research_context: Mapping[str, Any]
+    observed_stages: tuple[str, ...] = ()
+    blocked_reasons: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,6 +132,8 @@ def canonicalize_setup_opportunities(
             .strip()
             .upper()
         )
+        if not strategy or side not in {"CE", "PE"}:
+            continue
         key = f"{strategy}:{side}:{setup_id}"
         grouped.setdefault(key, []).append((ts, row, context))
 
@@ -162,13 +166,40 @@ def canonicalize_setup_opportunities(
         if len(strategies) != 1 or len(sides) != 1:
             continue
         last_ts, last_row, last_context = sample[-1]
+        approved_rows = [
+            item for item in sample if item[1].get("event_name") == "candidate.approved"
+        ]
+        # A later rejection of a different option must not erase an already
+        # approved underlying setup; use the latest approval as its outcome.
+        outcome_row = approved_rows[-1][1] if approved_rows else last_row
         setup_id = str(
             last_context.get("setup_id") or last_context.get("setup_structure_id") or ""
         ).strip()
-        event = str(last_row.get("event_name") or "").strip()
         final_reason = str(
-            last_row.get("reason_code") or last_row.get("final_reason") or "unknown"
+            outcome_row.get("reason_code")
+            or outcome_row.get("final_reason")
+            or "unknown"
         ).strip()
+        observed_stages = tuple(
+            sorted(
+                {
+                    str(context.get("decision_stage") or context.get("rejection_stage"))
+                    .strip()
+                    for _, _, context in sample
+                    if context.get("decision_stage") or context.get("rejection_stage")
+                }
+            )
+        )
+        blocked_reasons = tuple(
+            sorted(
+                {
+                    str(row.get("reason_code") or row.get("final_reason") or "unknown")
+                    .strip()
+                    for _, row, _ in sample
+                    if row.get("event_name") == "candidate.blocked"
+                }
+            )
+        )
         symbol = str(
             last_row.get("selected_candidate") or last_row.get("symbol") or ""
         ).strip()
@@ -183,10 +214,12 @@ def canonicalize_setup_opportunities(
                 first_seen_ts=sample[0][0],
                 last_seen_ts=last_ts,
                 decision_count=len(sample),
-                approved=event == "candidate.approved",
+                approved=bool(approved_rows),
                 final_reason=final_reason,
                 regime=str(last_context.get("regime") or "").strip().upper(),
                 research_context=dict(last_context),
+                observed_stages=observed_stages,
+                blocked_reasons=blocked_reasons,
             )
         )
     opportunities.sort(key=lambda item: (item.first_seen_ts, item.opportunity_id))
