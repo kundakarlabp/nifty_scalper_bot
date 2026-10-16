@@ -600,7 +600,8 @@ class IndicatorEngine:
             0.0, (datetime.now(timezone.utc) - episode[0]).total_seconds()
         )
         self._logger.info(
-            "INDICATOR_HISTORY_RECOVERED symbol=%s bars=%d missing_duration_s=%.3f source=%s",
+            "INDICATOR_HISTORY_RECOVERED symbol=%s bars=%d "
+            "missing_duration_s=%.3f source=%s",
             symbol,
             bars,
             elapsed,
@@ -653,7 +654,8 @@ class IndicatorEngine:
                         )
                         LOGGER.log(
                             logging.INFO if market_open_now else logging.DEBUG,
-                            "Condition met: indicator_history_missing symbol=%s market_open=%s",
+                            "Condition met: indicator_history_missing symbol=%s "
+                            "market_open=%s",
                             symbol,
                             market_open_now,
                             extra={
