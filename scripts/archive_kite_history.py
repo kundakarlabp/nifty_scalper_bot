@@ -216,6 +216,15 @@ def archive_history(
                 == json.loads(json.dumps(instrument, default=str))
                 and cached.get("candles_sha256") == _candle_digest(cached["candles"])
             ):
+                try:
+                    # A matching digest proves only byte consistency, not causal
+                    # minute timestamps or physically possible candle values.
+                    _validate_candles(cached["candles"], first_ts, last_ts)
+                except (TypeError, ValueError, OverflowError):
+                    cached = None
+            else:
+                cached = None
+            if cached is not None:
                 report["cached_requests"] += 1
                 if cache_path != path:
                     _write_json(path, cached)
@@ -262,6 +271,130 @@ def archive_history(
             cursor = last + dt.timedelta(days=1)
     _write_json(outdir / "coverage.json", report)
     return report
+
+
+
+def historical_cache_inventory(cache_dir: Path, start: dt.date, end: dt.date) -> dict:
+    """Inventory verified retained contracts; never substitute for causal replay.
+
+    Older active-contract exports can remain available on disk after their
+    contracts disappear from the current Kite master. Only report records with
+    independently checked identity, expiry, checksum and candle chronology.
+    """
+    if start > end:
+        raise ValueError("historical_cache_inventory_window_invalid")
+    option_minutes: dict[
+        str, dict[tuple[str, float, dt.datetime], set[str]]
+    ] = {}
+    context_minutes: dict[str, dict[str, set[dt.datetime]]] = {}
+    valid_files = 0
+    corrupt = 0
+    option_symbols: set[str] = set()
+    for path in sorted((cache_dir / "candles").glob("*.json")):
+        try:
+            payload = json.loads(path.read_text())
+            symbol = str(payload["symbol"])
+            instrument = payload["instrument"]
+            kind = str(instrument["instrument_type"]).upper()
+            token = int(payload["instrument_token"])
+            rows = payload["candles"]
+            first = dt.datetime.fromisoformat(str(payload["from"]))
+            last = dt.datetime.fromisoformat(str(payload["to"]))
+            captured = dt.datetime.fromisoformat(str(payload["captured_at"]))
+            if (
+                kind not in {"CE", "PE", "FUT", "EQ"}
+                or token <= 0
+                or first.tzinfo is None
+                or last.tzinfo is None
+                or captured.tzinfo is None
+                or payload.get("interval") != "minute"
+                or payload.get("timestamp_convention") != "bar_start"
+                or payload.get("continuous") is not False
+                or payload.get("oi") is not True
+                or token != int(instrument["instrument_token"])
+                or symbol
+                != f"{instrument['exchange']}:{instrument['tradingsymbol']}"
+                or payload.get("candles_sha256") != _candle_digest(rows)
+                or not rows
+            ):
+                raise ValueError("untrusted_historical_cache_identity")
+            _validate_candles(rows, first, last)
+            expiry = None
+            strike = None
+            if kind == "EQ":
+                if symbol != "NSE:NIFTY 50":
+                    raise ValueError("historical_cache_spot_identity_invalid")
+            else:
+                if instrument.get("name") != "NIFTY" or not symbol.startswith(
+                    "NFO:NIFTY"
+                ):
+                    raise ValueError("historical_cache_nifty_identity_invalid")
+                expiry = dt.date.fromisoformat(str(instrument["expiry"]))
+                if captured.astimezone(IST).date() > expiry:
+                    raise ValueError("historical_cache_capture_after_expiry")
+                if kind in {"CE", "PE"}:
+                    strike = float(instrument["strike"])
+                    if not math.isfinite(strike) or strike <= 0:
+                        raise ValueError("historical_cache_strike_invalid")
+            parsed = [
+                dt.datetime.fromisoformat(str(row[0])).astimezone(IST)
+                for row in rows
+            ]
+            if captured < parsed[-1] or (
+                expiry is not None
+                and any(timestamp.date() > expiry for timestamp in parsed)
+            ):
+                raise ValueError("historical_cache_future_or_expired_bars")
+        except (OSError, KeyError, TypeError, ValueError, OverflowError, IndexError):
+            corrupt += 1
+            continue
+        valid_files += 1
+        if kind in {"CE", "PE"}:
+            option_symbols.add(symbol)
+        for timestamp in parsed:
+            day = timestamp.date()
+            if day < start or day > end:
+                continue
+            label = day.isoformat()
+            if kind in {"CE", "PE"}:
+                assert expiry is not None and strike is not None
+                key = (expiry.isoformat(), strike, timestamp)
+                option_minutes.setdefault(label, {}).setdefault(key, set()).add(kind)
+            else:
+                role = "spot" if kind == "EQ" else "future"
+                context_minutes.setdefault(label, {}).setdefault(role, set()).add(
+                    timestamp
+                )
+    sessions = []
+    synchronized_total = 0
+    for day in sorted(set(option_minutes) | set(context_minutes)):
+        option_rows = option_minutes.get(day, {})
+        pairs = {key for key, sides in option_rows.items() if sides == {"CE", "PE"}}
+        context = context_minutes.get(day, {})
+        paired_context = context.get("spot", set()) & context.get("future", set())
+        synchronized = sum(key[2] in paired_context for key in pairs)
+        synchronized_total += synchronized
+        sessions.append(
+            {
+                "date": day,
+                "paired_ce_pe_option_minutes": len(pairs),
+                "valid_paired_strikes": len(
+                    {(key[0], key[1]) for key in pairs}
+                ),
+                "synchronized_contract_minutes": synchronized,
+            }
+        )
+    return {
+        "source": "retained_kite_minute_cache",
+        "scope": "inventory_only_no_historical_selection_or_broker_fill_parity",
+        "valid_cached_files": valid_files,
+        "corrupt_or_untrusted_files": corrupt,
+        "retained_option_symbols": len(option_symbols),
+        "synchronized_contract_minutes": synchronized_total,
+        "sessions": sessions,
+        "promotion_eligible": False,
+        "historical_bid_ask_depth_available": False,
+    }
 
 
 def main(argv: list[str] | None = None) -> int:
