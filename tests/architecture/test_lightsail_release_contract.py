@@ -401,7 +401,10 @@ def test_auto_market_guard_rechecks_before_checkout_and_restart() -> None:
 
 def test_forced_restart_survives_market_boundary_deferral() -> None:
     release = _text("deploy/lightsail_release.sh")
-    assert 'RESTART_PENDING_FILE="${CONFIG_DIR}/auto_release_restart_pending"' in release
+    assert (
+        'RESTART_PENDING_FILE="${CONFIG_DIR}/auto_release_restart_pending"'
+        in release
+    )
     assert 'if [ -f "$RESTART_PENDING_FILE" ]; then FORCE_RESTART=true; fi' in release
     assert release.count(': > "$RESTART_PENDING_FILE"') == 2
     assert 'rm -f "$RESTART_PENDING_FILE"' in release
