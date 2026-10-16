@@ -696,7 +696,11 @@ def _history_tail_diagnostics(ctx, symbol, *, limit=12):  # noqa: ANN001
         overlap_start = max(min(values) for values in timestamps.values())
         overlap_end = min(max(values) for values in timestamps.values())
         shared_sets = {
-            source: {minute for minute in values if overlap_start <= minute <= overlap_end}
+            source: {
+                minute
+                for minute in values
+                if overlap_start <= minute <= overlap_end
+            }
             for source, values in timestamps.items()
         }
         for source in ("runner", "indicator"):
