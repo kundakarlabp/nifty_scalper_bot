@@ -345,22 +345,28 @@ def main(argv: list[str] | None = None) -> int:
             # Counts are unique setups, not option/bar evaluations. Only
             # stages explicitly persisted in decision provenance are reported.
             "observed_stage_unique_setups": {
-                stage: sum(stage in item.observed_stages for item in setup_opportunities)
-                for stage in sorted({
-                    stage
-                    for item in setup_opportunities
-                    for stage in item.observed_stages
-                })
+                stage: sum(
+                    stage in item.observed_stages for item in setup_opportunities
+                )
+                for stage in sorted(
+                    {
+                        stage
+                        for item in setup_opportunities
+                        for stage in item.observed_stages
+                    }
+                )
             },
             "blocked_reason_unique_setups": {
                 reason: sum(
                     reason in item.blocked_reasons for item in setup_opportunities
                 )
-                for reason in sorted({
-                    reason
-                    for item in setup_opportunities
-                    for reason in item.blocked_reasons
-                })
+                for reason in sorted(
+                    {
+                        reason
+                        for item in setup_opportunities
+                        for reason in item.blocked_reasons
+                    }
+                )
             },
             "stage_provenance_coverage_fraction": (
                 round(
