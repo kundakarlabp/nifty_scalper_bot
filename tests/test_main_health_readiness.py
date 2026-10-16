@@ -100,6 +100,36 @@ def test_health_trading_exposes_canonical_context():
     assert body["reconciliation"]["unprotected_positions"] == ["NFO:NIFTY26MAY23750CE"]
 
 
+
+def test_history_diagnostics_expose_count_delta_without_readiness_veto():
+    history = {
+        "required_execution_bars": 30,
+        "ce": {"mdm": 70, "indicator": 70, "runner": 81},
+        "pe": {"mdm": 70, "indicator": 70, "runner": 84},
+    }
+
+    diagnostic = main._history_count_diagnostics(history)
+    assert diagnostic["count_mismatch"] is True
+    assert diagnostic["execution_history_ready"] is True
+    assert diagnostic["per_side"]["ce"]["runner_minus_indicator"] == 11
+    assert diagnostic["per_side"]["pe"]["runner_minus_indicator"] == 14
+    assert diagnostic["per_side"]["ce"]["mdm_minus_indicator"] == 0
+    assert diagnostic["diagnostic_only"] is True
+
+
+def test_history_diagnostics_fail_closed_on_missing_canonical_history():
+    history = {
+        "required_execution_bars": 30,
+        "ce": {"mdm": 35, "indicator": 29, "runner": 50},
+        "pe": {"mdm": 0, "indicator": 0, "runner": 50},
+    }
+    diagnostic = main._history_count_diagnostics(history)
+    assert diagnostic["execution_history_ready"] is False
+    assert diagnostic["per_side"]["ce"]["minimum_ready"] is False
+    assert diagnostic["per_side"]["pe"]["minimum_ready"] is False
+    assert diagnostic["diagnostic_only"] is True
+
+
 class _DummyBot:
     def __init__(self, *, event=None, fail: Exception | None = None) -> None:
         self.event = event
