@@ -13931,11 +13931,11 @@ async def startup_sequence(ctx: BotContext) -> None:
                                     # abandoned selected strike must not remain
                                     # RUNNER_APPROVED/TRIGGER_QUALIFIED forever.
                                     # Never modify strategy, risk or order state.
-                                    from nifty_scalper_bot.strategies.setup_lifecycle import (
-                                        SETUP_LIFECYCLE,
+                                    from nifty_scalper_bot.strategies import (
+                                        setup_lifecycle as lifecycle,
                                     )
 
-                                    SETUP_LIFECYCLE.expire_unselected_option_setups(
+                                    lifecycle.SETUP_LIFECYCLE.expire_unselected_option_setups(
                                         committed_ce, committed_pe
                                     )
                                 for _sym in dict.fromkeys(
