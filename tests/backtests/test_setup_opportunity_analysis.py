@@ -223,7 +223,9 @@ def test_later_rejection_does_not_erase_prior_approved_setup() -> None:
     )
     blocked["meta"]["research_context"]["decision_stage"] = "order_manager"
 
-    opportunity, = canonicalize_setup_opportunities([blocked, accepted])
+    opportunities = canonicalize_setup_opportunities([blocked, accepted])
+    assert len(opportunities) == 1
+    opportunity = opportunities[0]
 
     assert opportunity.decision_count == 2
     assert opportunity.approved is True
