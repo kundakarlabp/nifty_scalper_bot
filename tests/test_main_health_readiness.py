@@ -100,6 +100,68 @@ def test_health_trading_exposes_canonical_context():
     assert body["reconciliation"]["unprotected_positions"] == ["NFO:NIFTY26MAY23750CE"]
 
 
+
+def test_recent_candle_timestamp_identity_explains_runner_count_delta():
+    from datetime import datetime, timedelta, timezone
+
+    base = datetime(2026, 10, 16, 7, 20, tzinfo=timezone.utc)
+    timestamps = [base + timedelta(minutes=minute) for minute in range(12)]
+    symbol = "NFO:NIFTY26O1923150CE"
+
+    class MDM:
+        def get_ohlc_bars(self, _symbol, *, limit=None):
+            rows = [{"timestamp": ts} for ts in timestamps]
+            return rows[-limit:] if limit else rows
+
+    class Runner:
+        def history_tail_timestamps(self, _symbol, *, limit=12):
+            return {
+                "runner": timestamps[-limit:],
+                "indicator": timestamps[-limit:],
+            }
+
+    ctx = _ctx(market_data_manager=MDM(), strategy_runner=Runner())
+    result = main._history_tail_diagnostics(ctx, symbol)
+    assert result["diagnostic_only"] is True
+    assert result["classification"] == "recent_tails_aligned"
+    assert result["sample_size"] == 12
+    assert result["latest_minute_by_source"]["runner"] == "2026-10-16T07:31Z"
+    assert result["latest_minute_by_source"]["mdm"] == "2026-10-16T07:31Z"
+
+
+def test_recent_candle_timestamp_divergence_does_not_change_readiness():
+    symbol = "NFO:NIFTY26O1923150PE"
+    class MDM:
+        def get_ohlc_bars(self, _symbol, *, limit=None):
+            return [
+                {"timestamp": "2026-10-16T07:25:00+00:00"},
+                {"timestamp": "2026-10-16T07:26:00+00:00"},
+            ]
+    class Runner:
+        def history_tail_timestamps(self, _symbol, *, limit=12):
+            return {
+                "runner": [
+                    "2026-10-16T07:25:00Z", "2026-10-16T07:27:00Z"
+                ],
+                "indicator": [
+                    "2026-10-16T07:25:00Z", "2026-10-16T07:26:00Z"
+                ],
+            }
+    result = main._history_tail_diagnostics(
+        _ctx(market_data_manager=MDM(), strategy_runner=Runner()),
+        symbol,
+    )
+    assert result["classification"] == "recent_tail_divergence"
+    assert result["latest_minute_by_source"]["runner"] == "2026-10-16T07:27Z"
+    assert result["diagnostic_only"] is True
+
+
+def test_recent_candle_identity_handles_missing_providers_without_crashing():
+    result = main._history_tail_diagnostics(_ctx(), "NFO:NIFTY26O1923150PE")
+    assert result["classification"] == "identities_unavailable"
+    assert result["diagnostic_only"] is True
+
+
 def test_history_diagnostics_expose_count_delta_without_readiness_veto():
     history = {
         "required_execution_bars": 30,
