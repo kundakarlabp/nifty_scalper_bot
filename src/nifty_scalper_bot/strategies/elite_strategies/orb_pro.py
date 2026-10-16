@@ -965,6 +965,9 @@ class ORBProStrategy(EliteStrategy):
         retest = current_ts > breakout_ts and current_resolution == "RETESTED"
         if invalidated:
             event["status"] = "INVALIDATED"
+            # An invalidating return inside the range releases this event;
+            # only a later, fresh crossing can form another breakout.
+            self._events.pop(key, None)
             transition_setup(
                 SetupStage.INVALIDATED,
                 strategy="ORBPro",
