@@ -526,6 +526,8 @@ def _scenario(
     smc_signaled_setups: set[str] = set()
     smc_filled_setups: set[str] = set()
     smc_setup_rejections: dict[str, set[tuple[str, str, str]]] = {}
+    smc_post_signal_rejections: dict[str, set[str]] = {}
+    smc_post_signal_unattributed: Counter[str] = Counter()
     evaluated: Counter[str] = Counter()
     entry_funnels: dict[str, Counter[str]] = {}
     orb_replay_regimes: Counter[str] = Counter()
@@ -540,6 +542,16 @@ def _scenario(
     current_day = None
     last_bars: dict[str, dict[str, Any]] = {}
     slip = slippage_bps / 10000.0
+
+    def _record_smc_post_signal_rejection(
+        name: str, setup_id: Any, reason: str
+    ) -> None:
+        if name != "SMC":
+            return
+        if isinstance(setup_id, str) and setup_id.strip():
+            smc_post_signal_rejections.setdefault(reason, set()).add(setup_id.strip())
+        else:
+            smc_post_signal_unattributed[reason] += 1
 
     def _trade_record(
         key: tuple[str, str],
@@ -666,13 +678,22 @@ def _scenario(
             bar = bars.get(key[1])
             if bar is None or timestamp != intent["available_at"]:
                 rejections[key[0]]["next_minute_unavailable"] += 1
+                _record_smc_post_signal_rejection(
+                    key[0], intent.get("setup_id"), "next_minute_unavailable"
+                )
                 continue
             if strict_liquidity and bar["volume"] <= 0:
                 rejections[key[0]]["next_minute_has_no_trades"] += 1
+                _record_smc_post_signal_rejection(
+                    key[0], intent.get("setup_id"), "next_minute_has_no_trades"
+                )
                 continue
             entry = bar["open"] * (1 + slip)
             if not intent["stop_loss"] < entry < intent["take_profit"]:
                 rejections[key[0]]["gap_invalidates_geometry"] += 1
+                _record_smc_post_signal_rejection(
+                    key[0], intent.get("setup_id"), "gap_invalidates_geometry"
+                )
                 continue
             quantity = int(instruments[key[1]]["lot_size"])
             if minimum_net_rr is not None:
@@ -684,6 +705,9 @@ def _scenario(
                 )
                 if economics.net_rr < minimum_net_rr:
                     rejections[key[0]]["cost_net_rr_rejected"] += 1
+                    _record_smc_post_signal_rejection(
+                        key[0], intent.get("setup_id"), "cost_net_rr_rejected"
+                    )
                     continue
             entry_funnels[key[0]]["accepted_fills"] += 1
             if key[0] == "SMC" and intent.get("setup_id"):
@@ -910,6 +934,11 @@ def _scenario(
                     or not 0 < stop_loss < bar["close"] < take_profit
                 ):
                     rejections[strategy.name]["invalid_signal_geometry"] += 1
+                    _record_smc_post_signal_rejection(
+                        strategy.name,
+                        metadata.get("setup_id"),
+                        "invalid_signal_geometry",
+                    )
                     continue
                 entry_funnels[strategy.name]["geometry_valid"] += 1
                 if require_option_premium_confirmation:
@@ -919,19 +948,24 @@ def _scenario(
                     )
                     if rejection is not None:
                         rejections[strategy.name][rejection] += 1
+                        _record_smc_post_signal_rejection(
+                            strategy.name, metadata.get("setup_id"), rejection
+                        )
                         continue
                 if minimum_opening_rvol is not None:
                     rvol = opening_relative_volume(
                         histories[future], timestamp, settings.orb.orb_minutes
                     )
                     if rvol is None or rvol < minimum_opening_rvol:
-                        rejections[strategy.name][
-                            (
-                                "opening_rvol_unavailable"
-                                if rvol is None
-                                else "opening_rvol_below_minimum"
-                            )
-                        ] += 1
+                        rejection = (
+                            "opening_rvol_unavailable"
+                            if rvol is None
+                            else "opening_rvol_below_minimum"
+                        )
+                        rejections[strategy.name][rejection] += 1
+                        _record_smc_post_signal_rejection(
+                            strategy.name, metadata.get("setup_id"), rejection
+                        )
                         continue
                 entry_funnels[strategy.name]["next_bar_intents"] += 1
                 pending[key] = {
@@ -1060,6 +1094,15 @@ def _scenario(
                         "armed_setups": len(smc_armed_setups),
                         "signaled_setups": len(smc_signaled_setups),
                         "simulated_filled_setups": len(smc_filled_setups),
+                        "post_signal_rejections_by_unique_setup": {
+                            reason: len(setups)
+                            for reason, setups in sorted(
+                                smc_post_signal_rejections.items()
+                            )
+                        },
+                        "post_signal_rejections_without_setup_id": dict(
+                            smc_post_signal_unattributed
+                        ),
                         "rejection_reasons_by_unique_setup": {
                             reason: len(setups)
                             for reason, setups in sorted(smc_setup_rejections.items())
