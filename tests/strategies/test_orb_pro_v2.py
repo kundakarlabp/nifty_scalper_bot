@@ -846,7 +846,6 @@ def test_impossible_futures_breakout_candle_never_authorizes_orb(monkeypatch) ->
     assert strategy.last_no_vote_reason == "underlying_orb_not_ready"
 
 
-
 def test_orb_does_not_use_futures_bar_ahead_of_option_observation(monkeypatch) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
     monkeypatch.setenv("ORB_BALANCED_RANGE_MAX_ATR", "2.0")
