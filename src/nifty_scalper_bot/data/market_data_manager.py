@@ -116,6 +116,10 @@ def _should_skip_live_nifty_candle(symbol: str, tick_ts: datetime) -> bool:
     REST historical imports bypass this real-time-only guard completely.
     """
     mode = str(os.getenv("EXECUTION_MODE", "")).strip().upper()
+    # The broker-free E2E runner may retain ENABLE_LIVE for production-parity
+    # fixtures; its explicit simulation mode must never be treated as live.
+    if mode in {"LIVE_SIMULATION", "SIMULATION", "SHADOW", "PAPER", "BACKTEST"}:
+        return False
     live = mode == "LIVE" or any(
         os.getenv(flag, "").strip().lower() in {"1", "true", "yes", "on"}
         for flag in ("ENABLE_LIVE", "ENABLE_LIVE_TRADING")
