@@ -142,14 +142,17 @@ def test_missing_next_minute_never_creates_a_delayed_entry(tmp_path, monkeypatch
     assert result["no_vote_reasons"]["next_minute_unavailable"] == 1
 
 
-def test_vwap_component_receives_underlying_futures_context(tmp_path, monkeypatch):
+@pytest.mark.parametrize("strategy_name", ["VWAPPro", "SMC"])
+def test_directional_components_receive_underlying_futures_context(
+    tmp_path, monkeypatch, strategy_name
+):
     from nifty_scalper_bot.backtesting.strategy_research import run_archived_research
 
     archive(tmp_path)
     observed = []
 
     class Strategy:
-        name = "VWAPPro"
+        name = strategy_name
         config = SimpleNamespace(enabled=True)
 
         def generate_signal(self, symbol, indicators, current_price, position=None):
