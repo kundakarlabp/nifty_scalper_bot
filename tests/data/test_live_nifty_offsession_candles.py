@@ -58,16 +58,16 @@ def test_offsession_live_tick_preserves_quote_but_not_ohlc(
 ) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     mdm = MarketDataManager(broker=None, websocket=None, settings={})
-    mdm.register_symbol(OPTION, 12075266)
-    engine = mdm.get_candle_engine(OPTION)
+    mdm.register_symbol("NSE:NIFTY", 256265)
+    engine = mdm.get_candle_engine("NSE:NIFTY")
     tick = {
-        "instrument_token": 12075266,
-        "symbol": OPTION,
+        "instrument_token": 256265,
+        "symbol": "NSE:NIFTY",
         "last_price": 100.0,
         "exchange_timestamp": datetime(2026, 10, 16, 16, 58, tzinfo=IST),
     }
     mdm._process_queued_tick(tick)
-    latest = mdm.get_latest_tick(OPTION)
+    latest = mdm.get_latest_tick("NSE:NIFTY")
     assert latest is not None
     assert latest["last_price"] == 100.0
     assert engine.current_candle is None
@@ -79,12 +79,12 @@ def test_regular_session_live_tick_still_builds_candle(
 ) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     mdm = MarketDataManager(broker=None, websocket=None, settings={})
-    mdm.register_symbol(OPTION, 12075266)
-    engine = mdm.get_candle_engine(OPTION)
+    mdm.register_symbol("NSE:NIFTY", 256265)
+    engine = mdm.get_candle_engine("NSE:NIFTY")
     mdm._process_queued_tick(
         {
-            "instrument_token": 12075266,
-            "symbol": OPTION,
+            "instrument_token": 256265,
+            "symbol": "NSE:NIFTY",
             "last_price": 100.0,
             "exchange_timestamp": datetime(2026, 10, 16, 10, 15, tzinfo=IST),
         }
