@@ -88,6 +88,21 @@ class ORBProStrategy(EliteStrategy):
         # Diagnostic only; never changes whether a setup can generate a vote.
         self.last_structural_failure_reasons: tuple[str, ...] = ()
 
+    def notify_entry_accepted(self, side: str, *, setup_id: str | None = None) -> None:
+        """Consume an ORB setup only after the canonical entry-accepted callback."""
+        if not setup_id:
+            return
+        for key, event in self._events.items():
+            if key[2] != str(side or "").upper():
+                continue
+            breakout_ts = event.get("breakout_timestamp")
+            if not isinstance(breakout_ts, datetime):
+                continue
+            event_id = f"orbv2:{key[0]}:{key[1]}:{key[2]}:{breakout_ts.isoformat()}"
+            if setup_id == event_id:
+                event["status"] = "EMITTED"
+                return
+
     def get_required_indicators(self) -> set[str]:
         """Return strategy-facing option and underlying context requirements."""
         return {
@@ -201,6 +216,18 @@ class ORBProStrategy(EliteStrategy):
         if not underlying_symbol:
             return None
         rows = self._read_completed_bars(underlying_symbol)
+        option_anchor = _coerce_datetime(
+            indicators.get("latest_bar_ts")
+            or indicators.get("bar_timestamp")
+            or indicators.get("setup_candle_timestamp")
+        )
+        if option_anchor is not None:
+            # A faster futures feed cannot authorize an earlier option observation.
+            rows = [row for row in rows if row["timestamp"] <= option_anchor]
+            if not rows or (option_anchor - rows[-1]["timestamp"]).total_seconds() > max(
+                60.0, _env_float("ORB_UNDERLYING_MAX_LAG_SECONDS", 120.0)
+            ):
+                return None
         if len(rows) < 2:
             return None
 
@@ -698,8 +725,6 @@ class ORBProStrategy(EliteStrategy):
         if self._last_bar_by_key.get(key) == current_ts:
             self._no_vote("orb_bar_already_evaluated")
             return None
-        self._last_bar_by_key[key] = current_ts
-
         direction = str(
             indicators.get("underlying_direction_bias")
             or indicators.get("direction_bias")
@@ -708,6 +733,11 @@ class ORBProStrategy(EliteStrategy):
         if direction in {"CE", "PE"} and direction != side:
             self._no_vote("underlying_direction_conflict_fail_closed")
             return None
+        if direction not in {"CE", "PE"}:
+            self._no_vote("underlying_direction_unavailable")
+            return None
+        # Do not burn this bar while asynchronous direction context is unusable.
+        self._last_bar_by_key[key] = current_ts
 
         orb_high = float(snapshot["orb_high"])
         orb_low = float(snapshot["orb_low"])
@@ -835,7 +865,6 @@ class ORBProStrategy(EliteStrategy):
                         reason="orb_structural_contract_rejected",
                     )
                     return None
-                event["status"] = "EMITTED"
                 return signal
             transition_setup(
                 SetupStage.CONFIRMING,
@@ -967,7 +996,6 @@ class ORBProStrategy(EliteStrategy):
                 reason="orb_structural_contract_rejected",
             )
             return None
-        event["status"] = "EMITTED"
         return signal
 
 
