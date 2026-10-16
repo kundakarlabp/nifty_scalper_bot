@@ -454,13 +454,17 @@ class SMCStrategy(EliteStrategy):
             if not underlying_symbol:
                 continue
             rows = self._read_completed_bars(underlying_symbol)
+            if option_anchor is not None:
+                # Both the latest candle AND pivot/ATR/volume history must be
+                # causal relative to the selected option's completed bar.
+                # A futures feed ahead of that bar must not hide earlier valid
+                # completed futures context or supply future confirmations.
+                rows = [row for row in rows if row["timestamp"] <= option_anchor]
             if len(rows) < required:
                 continue
             current = rows[-1]
             current_ts = current["timestamp"]
             if option_anchor is not None:
-                # The option observation cannot consume an underlying candle
-                # that has not closed yet, even if it is within the lag budget.
                 lag_seconds = (option_anchor - current_ts).total_seconds()
                 if lag_seconds < 0 or lag_seconds > max_lag_seconds:
                     continue

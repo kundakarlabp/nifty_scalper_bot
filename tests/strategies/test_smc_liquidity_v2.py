@@ -891,9 +891,15 @@ def test_impossible_futures_sweep_candle_never_arms_smc(monkeypatch) -> None:
     assert strategy.last_no_vote_reason == "underlying_no_liquidity_sweep"
 
 
-@pytest.mark.parametrize("lead_minutes", [1, 2])
+@pytest.mark.parametrize(
+    ("lead_minutes", "expected_reason"),
+    [
+        (1, "smc_awaiting_confirmation"),
+        (2, "underlying_context_not_ready"),
+    ],
+)
 def test_smc_never_arms_on_completed_futures_bar_ahead_of_option(
-    monkeypatch, lead_minutes: int
+    monkeypatch, lead_minutes: int, expected_reason: str
 ) -> None:
     """An available future-completed bar is not past data for an older option."""
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
@@ -914,8 +920,10 @@ def test_smc_never_arms_on_completed_futures_bar_ahead_of_option(
     signal = strategy.generate_signal(CE, _indicators(latest_bar_ts=option_ts), 102.0)
 
     assert signal is None
-    assert strategy.last_no_vote_reason == "underlying_context_not_ready"
-    assert strategy._events == {}
+    # An earlier *real* sweep can still be pending, but the later futures bar
+    # must never create or confirm an event before the option observation.
+    assert strategy.last_no_vote_reason == expected_reason
+    assert all(event["sweep_ts"] <= option_ts for event in strategy._events.values())
 
 
 def test_smc_lagged_option_cannot_use_later_futures_displacement(monkeypatch) -> None:
@@ -957,7 +965,7 @@ def test_smc_lagged_option_cannot_use_later_futures_displacement(monkeypatch) ->
     )
 
     assert premature is None
-    assert strategy.last_no_vote_reason == "underlying_context_not_ready"
+    assert strategy.last_no_vote_reason == "smc_awaiting_confirmation"
     assert (FUTURES, "CE") in strategy._events
     assert (
         strategy.generate_signal(
@@ -1038,3 +1046,65 @@ def test_smc_bos_enrichment_preserves_preexisting_feature_provenance() -> None:
     assert generated["smc_choch_source_domain"] == "option_premium"
     assert provided["smc_bos_source_domain"] == "prepared_indicator_unverified"
     assert provided["smc_choch_source_domain"] == "prepared_indicator_unverified"
+
+
+def test_smc_uses_latest_causal_futures_bar_when_feed_is_ahead(monkeypatch) -> None:
+    """A later completed futures candle must neither block nor leak into SMC."""
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    rows = _base_rows()
+    sweep = _bar(
+        30,
+        open_=23988.0,
+        high=23991.0,
+        low=23974.0,
+        close=23984.0,
+        volume=2400.0,
+    )
+    displacement = _bar(
+        31,
+        open_=23984.0,
+        high=23999.0,
+        low=23982.0,
+        close=23997.0,
+        volume=2100.0,
+    )
+    rows.extend([sweep, displacement])
+    strategy = _strategy(rows)
+
+    # The futures feed already contains minute 31, but the option's latest
+    # completed bar is minute 30. That must permit the sweep, not displacement.
+    premature = strategy.generate_signal(
+        CE, _indicators(latest_bar_ts=sweep["timestamp"]), 102.0
+    )
+
+    assert premature is None
+    assert strategy.last_no_vote_reason == "smc_awaiting_confirmation"
+    assert (FUTURES, "CE") in strategy._events
+    assert strategy._events[(FUTURES, "CE")]["sweep_ts"] == sweep["timestamp"]
+
+    # Once the option observation reaches minute 31, the same pre-existing
+    # sweep can receive the independent completed futures displacement.
+    confirmed = strategy.generate_signal(
+        CE, _indicators(latest_bar_ts=displacement["timestamp"]), 103.0
+    )
+    assert confirmed is not None
+    assert confirmed.metadata["sweep_timestamp"] == sweep["timestamp"]
+    assert confirmed.metadata["latest_bar_ts"] == displacement["timestamp"]
+
+
+def test_smc_causal_futures_snapshot_still_rejects_stale_history(
+    monkeypatch,
+) -> None:
+    """Selecting an earlier bar must not weaken the futures freshness cap."""
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    rows = _base_rows()
+    strategy = _strategy(rows)
+    stale_option_ts = rows[-1]["timestamp"] + timedelta(minutes=4)
+
+    signal = strategy.generate_signal(
+        CE, _indicators(latest_bar_ts=stale_option_ts), 102.0
+    )
+
+    assert signal is None
+    assert strategy.last_no_vote_reason == "underlying_context_not_ready"
+    assert strategy._events == {}
