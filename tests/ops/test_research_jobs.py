@@ -565,6 +565,8 @@ def test_worker_completes_component_research_without_claiming_live_parity(
     assert comparison_path.is_file()
     assert result["live_equivalent"] is False
     assert result["historical_synchronized_contract_minutes"] == 0
+    assert result["retained_session_research"] == []
+    assert result["retained_session_research_deferred"] == 0
     inventory_file = tmp_path / "data/research/real-job/historical_cache_inventory.json"
     assert inventory_file.is_file()
     assert json.loads(inventory_file.read_text())["promotion_eligible"] is False

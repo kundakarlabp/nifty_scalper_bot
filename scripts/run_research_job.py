@@ -158,6 +158,7 @@ def run_worker(request: dict[str, Any], env_file: Path) -> dict[str, Any]:
             get_data_dir() / "historical_archive",
             date.fromisoformat(request["start"]),
             date.fromisoformat(request["end"]),
+            stage_dir=directory / "retained_sessions",
         )
         write_json(directory / "historical_cache_inventory.json", retained)
         status["historical_cache_inventory"] = "historical_cache_inventory.json"
@@ -189,6 +190,31 @@ def run_worker(request: dict[str, Any], env_file: Path) -> dict[str, Any]:
     write_json(ROOT / "data/research/latest.json", status)
     report = run_archived_research(directory / "history")
     write_json(directory / "strategy_bar_research.json", report)
+    # A bounded secondary component replay uses observed cached contract
+    # pairs only. It does not reconstruct the unobserved historical ATM basket
+    # or execute orders; outcomes cannot promote live strategy parameters.
+    status["retained_session_research"] = []
+    for session_day in retained["staged_session_dates"][:3]:
+        session_report = run_archived_research(
+            directory / "retained_sessions" / session_day
+        )
+        filename = f"retained_component_{session_day}.json"
+        write_json(
+            directory / filename,
+            {
+                "scope": "retained_observed_pair_component_research",
+                "session_date": session_day,
+                "historical_active_universe_proven": False,
+                "promotion_eligible": False,
+                "component_report": session_report,
+            },
+        )
+        status["retained_session_research"].append(
+            {"session_date": session_day, "report": filename}
+        )
+    status["retained_session_research_deferred"] = max(
+        0, len(retained["staged_session_dates"]) - 3
+    )
     status["stage"] = "orb_comparison"
     write_json(directory / "status.json", status)
     write_json(ROOT / "data/research/latest.json", status)
