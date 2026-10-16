@@ -655,9 +655,68 @@ def _history_tail_diagnostics(ctx, symbol, *, limit=12):  # noqa: ANN001
     else:
         classification = "recent_tail_divergence"
 
+    # A shifted sample window or repeated minute may explain a count delta
+    # without demonstrating any live data loss. Report precise, bounded
+    # identities relative to the MDM source; never infer an execution veto.
+    all_present = all(timestamps.values())
+    duplicate_minutes = {}
+    for source, values in timestamps.items():
+        seen = set()
+        duplicates = set()
+        for minute in values:
+            if minute in seen:
+                duplicates.add(minute)
+            seen.add(minute)
+        duplicate_minutes[source] = sorted(duplicates)[:size]
+
+    latest_minute_agreement = (
+        len({max(values) for values in timestamps.values()}) == 1
+        if all_present
+        else None
+    )
+    sample_window_boundary_difference = (
+        len({min(values) for values in timestamps.values()}) > 1
+        if all_present
+        else None
+    )
+    matching_tail_suffix_bars = 0
+    if all_present:
+        for group in zip(
+            *[reversed(timestamps[source]) for source in ("mdm", "runner", "indicator")]
+        ):
+            if len(set(group)) != 1:
+                break
+            matching_tail_suffix_bars += 1
+
+    missing_vs_mdm = {}
+    extra_vs_mdm = {}
+    if all_present:
+        # Restrict comparisons to the shared sample window; earlier runner
+        # retention can legitimately include bars outside MDM's bounded view.
+        overlap_start = max(min(values) for values in timestamps.values())
+        overlap_end = min(max(values) for values in timestamps.values())
+        shared_sets = {}
+        for source, values in timestamps.items():
+            shared_sets[source] = {
+                minute for minute in values if overlap_start <= minute <= overlap_end
+            }
+        for source in ("runner", "indicator"):
+            missing_vs_mdm[source] = sorted(shared_sets["mdm"] - shared_sets[source])[
+                :size
+            ]
+            extra_vs_mdm[source] = sorted(shared_sets[source] - shared_sets["mdm"])[
+                :size
+            ]
+
     return {
         "diagnostic_only": True,
         "classification": classification,
+        "latest_minute_agreement": latest_minute_agreement,
+        "matching_tail_suffix_bars": matching_tail_suffix_bars,
+        "sample_window_boundary_difference": sample_window_boundary_difference,
+        "duplicate_minute_ids_by_source": duplicate_minutes,
+        "missing_vs_mdm_by_source": missing_vs_mdm,
+        "extra_vs_mdm_by_source": extra_vs_mdm,
         "sample_size": size,
         "latest_minute_by_source": {
             source: max(values) if values else None
