@@ -496,3 +496,48 @@ def test_retained_session_corrupt_cache_cannot_stage(tmp_path):
     )
     assert report["corrupt_or_untrusted_files"] == 1
     assert report["staged_session_dates"] == []
+
+@pytest.mark.parametrize(
+    "failure_type,expected_reason",
+    [
+        ("same_side_duplicate", "historical_option_selection_ambiguous"),
+        ("token_collision", "historical_contract_token_collision"),
+    ],
+)
+def test_retained_session_conflicting_contract_identity_is_not_staged(
+    tmp_path, failure_type, expected_reason
+):
+    candles = tmp_path / "cache/candles"
+    candles.mkdir(parents=True)
+    rows = [
+        _retained_session_payload("NSE:NIFTY 50", "EQ", 100),
+        _retained_session_payload(
+            "NFO:NIFTY26OCTFUT", "FUT", 101, expiry="2026-10-27"
+        ),
+        _retained_session_payload(
+            "NFO:NIFTY26O1322500CE", "CE", 102, strike=22500
+        ),
+        _retained_session_payload(
+            "NFO:NIFTY26O1322500PE", "PE", 103, strike=22500
+        ),
+    ]
+    if failure_type == "same_side_duplicate":
+        rows.append(
+            _retained_session_payload(
+                "NFO:NIFTY26O13X22500CE", "CE", 105, strike=22500
+            )
+        )
+    else:
+        rows[-1]["instrument_token"] = 101
+        rows[-1]["instrument"]["instrument_token"] = 101
+    for index, payload in enumerate(rows):
+        (candles / f"{index}.json").write_text(json.dumps(payload))
+    report = collector.historical_cache_inventory(
+        tmp_path / "cache",
+        dt.date(2026, 10, 12),
+        dt.date(2026, 10, 12),
+        stage_dir=tmp_path / "staged",
+        min_synchronized_minutes=3,
+    )
+    assert report["staged_session_dates"] == []
+    assert report["staging_rejections"]["2026-10-12"] == expected_reason
