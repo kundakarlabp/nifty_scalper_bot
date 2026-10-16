@@ -941,6 +941,7 @@ def test_smc_lagged_option_cannot_use_later_futures_displacement(monkeypatch) ->
         is not None
     )
 
+
 @pytest.mark.parametrize(
     ("manager_enriched", "expected_structure_domain"),
     [
@@ -984,6 +985,7 @@ def test_smc_separates_futures_setup_from_premium_structure_evidence(
     )
     if manager_enriched:
         confirmed["smc_enrichment_source"] = "strategy_manager_pre_strategy"
+        confirmed["smc_bos_source_domain"] = "option_premium"
         confirmed["bos_ts_epoch"] = rows[-1]["timestamp"].timestamp()
 
     signal = strategy.generate_signal(CE, confirmed, 103.0)
@@ -995,4 +997,19 @@ def test_smc_separates_futures_setup_from_premium_structure_evidence(
     )
     assert signal.metadata["underlying_displacement_domain"] == "nifty_futures"
     assert signal.metadata["underlying_structure_source"] == FUTURES
-    assert signal.metadata["independent_confirmation_approved"] is False
+    assert signal.metadata["confirmation_owner"] == "StrategyManager"
+
+
+def test_smc_bos_enrichment_preserves_preexisting_feature_provenance() -> None:
+    from nifty_scalper_bot.core.strategy_manager import _enrich_smc_pre_strategy
+
+    option_bars = _base_rows()
+    generated = _enrich_smc_pre_strategy(CE, {}, option_bars)
+    provided = _enrich_smc_pre_strategy(
+        CE, {"bos_confirmed": True, "choch_confirmed": True}, option_bars
+    )
+
+    assert generated["smc_bos_source_domain"] == "option_premium"
+    assert generated["smc_choch_source_domain"] == "option_premium"
+    assert provided["smc_bos_source_domain"] == "prepared_indicator_unverified"
+    assert provided["smc_choch_source_domain"] == "prepared_indicator_unverified"
