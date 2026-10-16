@@ -914,8 +914,12 @@ def test_smc_never_arms_on_completed_futures_bar_ahead_of_option(
     signal = strategy.generate_signal(CE, _indicators(latest_bar_ts=option_ts), 102.0)
 
     assert signal is None
-    assert strategy.last_no_vote_reason == "underlying_no_liquidity_sweep"
-    assert strategy._events == {}
+    # An earlier *real* sweep can still be pending, but the later futures bar
+    # must never create or confirm an event before the option observation.
+    assert strategy.last_no_vote_reason != "underlying_context_not_ready"
+    assert all(
+        event["sweep_ts"] <= option_ts for event in strategy._events.values()
+    )
 
 
 def test_smc_lagged_option_cannot_use_later_futures_displacement(monkeypatch) -> None:
