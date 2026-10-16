@@ -424,7 +424,7 @@ def test_admin_research_report_exposes_vwap_comparison(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("ledger_error", [False, True])
-@pytest.mark.parametrize("retained_sessions", [0, 5])
+@pytest.mark.parametrize("retained_sessions", [0, 5, 7])
 def test_worker_completes_component_research_without_claiming_live_parity(
     tmp_path, monkeypatch, ledger_error, retained_sessions
 ):
@@ -481,7 +481,9 @@ def test_worker_completes_component_research_without_claiming_live_parity(
             "2026-10-01",
             "2026-10-05",
             "2026-10-06",
-        ]
+            "2026-10-07",
+            "2026-10-08",
+        ][:retained_sessions]
         monkeypatch.setattr(
             "scripts.archive_kite_history.historical_cache_inventory",
             lambda *args, **kwargs: {
@@ -608,9 +610,11 @@ def test_worker_completes_component_research_without_claiming_live_parity(
     )
     assert result["retained_cache_coverage"]["staged_session_dates"] == retained_dates
     assert result["retained_cache_coverage"]["promotion_eligible"] is False
-    assert len(result["retained_session_research"]) == retained_sessions
-    assert result["retained_session_research_deferred"] == 0
-    assert len(mock_research_calls) == 1 + retained_sessions
+    assert len(result["retained_session_research"]) == min(5, retained_sessions)
+    assert result["retained_session_research_deferred"] == max(
+        0, retained_sessions - 5
+    )
+    assert len(mock_research_calls) == 1 + min(5, retained_sessions)
     for session in result["retained_session_research"]:
         assert session["promotion_eligible"] is False
         assert session["scenarios"][0]["strategies"]["ORBPro"] == {
