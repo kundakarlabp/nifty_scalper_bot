@@ -357,7 +357,7 @@ def test_market_window_gate_runs_before_any_checkout_or_service_mutation() -> No
     gate = release.index("if auto_release_should_defer; then")
     assert release.index("exec 9>") < gate
     assert gate < release.index('cd "$APP_DIR"')
-    assert gate < release.index("validate_environment")
+    assert gate < release.index("\nvalidate_environment\n", gate)
     assert gate < release.index("migrate_systemd_entrypoint", gate)
     assert gate < release.index('sudo systemctl restart "$SERVICE"', gate)
     assert "write_status deferred_market_window" in release[gate : gate + 420]
