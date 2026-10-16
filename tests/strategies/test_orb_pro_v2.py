@@ -852,7 +852,14 @@ def test_orb_does_not_use_futures_bar_ahead_of_option_observation(monkeypatch) -
     monkeypatch.setenv("ORB_BALANCED_RANGE_MAX_ATR", "2.0")
     rows = _opening_rows()
     rows.append(
-        _bar(15, open_=24_008.0, high=24_034.0, low=24_006.0, close=24_030.0, volume=3_000.0)
+        _bar(
+            15,
+            open_=24_008.0,
+            high=24_034.0,
+            low=24_006.0,
+            close=24_030.0,
+            volume=3_000.0,
+        )
     )
     option_timestamp = rows[-1]["timestamp"]
     rows.append(
@@ -867,11 +874,20 @@ def test_orb_does_not_use_futures_bar_ahead_of_option_observation(monkeypatch) -
     assert signal.metadata["underlying_entry"] == 24_030.0
 
 
-def test_orb_does_not_trade_using_future_breakout_before_option_bar(monkeypatch) -> None:
+def test_orb_does_not_trade_using_future_breakout_before_option_bar(
+    monkeypatch,
+) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
     rows = _opening_rows()
     rows.append(
-        _bar(15, open_=24_008.0, high=24_034.0, low=24_006.0, close=24_030.0, volume=3_000.0)
+        _bar(
+            15,
+            open_=24_008.0,
+            high=24_034.0,
+            low=24_006.0,
+            close=24_030.0,
+            volume=3_000.0,
+        )
     )
     strategy = _strategy({FUTURE: rows})
     indicators = _base_indicators("CE", rows[-2]["timestamp"])
@@ -880,12 +896,21 @@ def test_orb_does_not_trade_using_future_breakout_before_option_bar(monkeypatch)
     assert strategy.last_no_vote_reason == "underlying_orb_not_ready"
 
 
-def test_orb_allows_same_bar_retry_after_direction_context_recovers(monkeypatch) -> None:
+def test_orb_allows_same_bar_retry_after_direction_context_recovers(
+    monkeypatch,
+) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
     monkeypatch.setenv("ORB_BALANCED_RANGE_MAX_ATR", "2.0")
     rows = _opening_rows()
     rows.append(
-        _bar(15, open_=24_008.0, high=24_034.0, low=24_006.0, close=24_030.0, volume=3_000.0)
+        _bar(
+            15,
+            open_=24_008.0,
+            high=24_034.0,
+            low=24_006.0,
+            close=24_030.0,
+            volume=3_000.0,
+        )
     )
     strategy = _strategy({FUTURE: rows})
     indicators = _base_indicators("CE", rows[-1]["timestamp"])
@@ -898,12 +923,21 @@ def test_orb_allows_same_bar_retry_after_direction_context_recovers(monkeypatch)
     assert strategy.generate_signal(CE, indicators, 50.0) is not None
 
 
-def test_orb_uses_entry_acceptance_not_preliminary_signal_to_consume_setup(monkeypatch) -> None:
+def test_orb_uses_entry_acceptance_not_preliminary_signal_to_consume_setup(
+    monkeypatch,
+) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
     monkeypatch.setenv("ORB_BALANCED_RANGE_MAX_ATR", "2.0")
     rows = _opening_rows()
     rows.append(
-        _bar(15, open_=24_008.0, high=24_034.0, low=24_006.0, close=24_030.0, volume=3_000.0)
+        _bar(
+            15,
+            open_=24_008.0,
+            high=24_034.0,
+            low=24_006.0,
+            close=24_030.0,
+            volume=3_000.0,
+        )
     )
     strategy = _strategy({FUTURE: rows})
     indicators = _base_indicators("CE", rows[-1]["timestamp"])
