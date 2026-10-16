@@ -596,9 +596,7 @@ class IndicatorEngine:
         source: str,
     ) -> None:
         """Report one terminal resolution of a previously missing history."""
-        elapsed = max(
-            0.0, (datetime.now(timezone.utc) - episode[0]).total_seconds()
-        )
+        elapsed = max(0.0, (datetime.now(timezone.utc) - episode[0]).total_seconds())
         self._logger.info(
             "INDICATOR_HISTORY_RECOVERED symbol=%s bars=%d "
             "missing_duration_s=%.3f source=%s",
@@ -647,9 +645,13 @@ class IndicatorEngine:
                         market_open_now = True
                     previous = self._missing_history_episodes.get(symbol)
                     if previous is None or previous[1] != market_open_now:
+                        first_seen = (
+                            previous[0]
+                            if previous is not None
+                            else datetime.now(timezone.utc)
+                        )
                         self._missing_history_episodes[symbol] = (
-                            previous[0] if previous is not None
-                            else datetime.now(timezone.utc),
+                            first_seen,
                             market_open_now,
                         )
                         LOGGER.log(
