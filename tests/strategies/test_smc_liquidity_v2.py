@@ -891,9 +891,15 @@ def test_impossible_futures_sweep_candle_never_arms_smc(monkeypatch) -> None:
     assert strategy.last_no_vote_reason == "underlying_no_liquidity_sweep"
 
 
-@pytest.mark.parametrize("lead_minutes", [1, 2])
+@pytest.mark.parametrize(
+    ("lead_minutes", "expected_reason"),
+    [
+        (1, "smc_awaiting_confirmation"),
+        (2, "underlying_context_not_ready"),
+    ],
+)
 def test_smc_never_arms_on_completed_futures_bar_ahead_of_option(
-    monkeypatch, lead_minutes: int
+    monkeypatch, lead_minutes: int, expected_reason: str
 ) -> None:
     """An available future-completed bar is not past data for an older option."""
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
@@ -916,7 +922,7 @@ def test_smc_never_arms_on_completed_futures_bar_ahead_of_option(
     assert signal is None
     # An earlier *real* sweep can still be pending, but the later futures bar
     # must never create or confirm an event before the option observation.
-    assert strategy.last_no_vote_reason != "underlying_context_not_ready"
+    assert strategy.last_no_vote_reason == expected_reason
     assert all(event["sweep_ts"] <= option_ts for event in strategy._events.values())
 
 
