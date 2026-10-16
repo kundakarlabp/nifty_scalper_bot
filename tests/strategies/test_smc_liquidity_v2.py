@@ -1038,3 +1038,47 @@ def test_smc_bos_enrichment_preserves_preexisting_feature_provenance() -> None:
     assert generated["smc_choch_source_domain"] == "option_premium"
     assert provided["smc_bos_source_domain"] == "prepared_indicator_unverified"
     assert provided["smc_choch_source_domain"] == "prepared_indicator_unverified"
+
+
+def test_smc_uses_latest_causal_futures_bar_when_feed_is_ahead(monkeypatch) -> None:
+    """A later completed futures candle must neither block nor leak into SMC."""
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    rows = _base_rows()
+    sweep = _bar(
+        30,
+        open_=23988.0,
+        high=23991.0,
+        low=23974.0,
+        close=23984.0,
+        volume=2400.0,
+    )
+    displacement = _bar(
+        31,
+        open_=23984.0,
+        high=23999.0,
+        low=23982.0,
+        close=23997.0,
+        volume=2100.0,
+    )
+    rows.extend([sweep, displacement])
+    strategy = _strategy(rows)
+
+    # The futures feed already contains minute 31, but the option's latest
+    # completed bar is minute 30. That must permit the sweep, not displacement.
+    premature = strategy.generate_signal(
+        CE, _indicators(latest_bar_ts=sweep["timestamp"]), 102.0
+    )
+
+    assert premature is None
+    assert strategy.last_no_vote_reason == "smc_awaiting_confirmation"
+    assert (FUTURES, "CE") in strategy._events
+    assert strategy._events[(FUTURES, "CE")]["sweep_ts"] == sweep["timestamp"]
+
+    # Once the option observation reaches minute 31, the same pre-existing
+    # sweep can receive the independent completed futures displacement.
+    confirmed = strategy.generate_signal(
+        CE, _indicators(latest_bar_ts=displacement["timestamp"]), 103.0
+    )
+    assert confirmed is not None
+    assert confirmed.metadata["sweep_timestamp"] == sweep["timestamp"]
+    assert confirmed.metadata["latest_bar_ts"] == displacement["timestamp"]
