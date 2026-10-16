@@ -187,7 +187,13 @@ def _update_state() -> dict[str, Any]:
         data = value if isinstance(value, dict) else {}
     except (OSError, ValueError):
         return {}
-    transient = {"fetching", "validating", "deploying", "restarting", "recovering_runtime"}
+    transient = {
+        "fetching",
+        "validating",
+        "deploying",
+        "restarting",
+        "recovering_runtime",
+    }
     state = str(data.get("state") or "").lower()
     if state in transient:
         timeout = float(os.getenv("BOT_UPDATER_STALE_TIMEOUT_SECONDS", "900") or 900)
