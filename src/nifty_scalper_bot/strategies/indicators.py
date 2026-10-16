@@ -278,6 +278,9 @@ class IndicatorEngine:
         self._last_valid_vwap: Dict[str, float] = {}
         self._last_valid_vwap_at: Dict[str, datetime] = {}
         self._lock = threading.RLock()
+        # Only unresolved absence episodes are retained. Repeated lookups are
+        # not separate failures and must not dominate log-throttle summaries.
+        self._missing_history_episodes: Dict[str, tuple[datetime, bool]] = {}
         self._logger = get_logger(__name__)
 
     def set_runtime_context(
@@ -403,6 +406,12 @@ class IndicatorEngine:
                 is_provisional=is_provisional,
             )
             self._cache.pop(symbol, None)
+            missing_episode = self._missing_history_episodes.pop(symbol, None)
+            history_count = len(history)
+        if missing_episode is not None:
+            self._log_history_recovery(
+                symbol, missing_episode, history_count, source="price_update"
+            )
 
     def ingest_bar(self, symbol: str, bar: Any) -> None:
         """Ingest normalized/live bar. Args: symbol, bar. Returns: None. Raises: Exception."""
@@ -550,6 +559,11 @@ class IndicatorEngine:
                 self._histories[symbol] = new_history
                 self._cache.pop(symbol, None)
                 final_count = len(new_history)
+                missing_episode = self._missing_history_episodes.pop(symbol, None)
+            if missing_episode is not None:
+                self._log_history_recovery(
+                    symbol, missing_episode, final_count, source=source
+                )
             event_name = (
                 "INDICATOR_HISTORY_RESEEDED"
                 if final_count >= max(1, int(min_bars or 1))
@@ -573,6 +587,33 @@ class IndicatorEngine:
             )
             raise
 
+    def _log_history_recovery(
+        self,
+        symbol: str,
+        episode: tuple[datetime, bool],
+        bars: int,
+        *,
+        source: str,
+    ) -> None:
+        """Report one terminal resolution of a previously missing history."""
+        elapsed = max(
+            0.0, (datetime.now(timezone.utc) - episode[0]).total_seconds()
+        )
+        self._logger.info(
+            "INDICATOR_HISTORY_RECOVERED symbol=%s bars=%d missing_duration_s=%.3f source=%s",
+            symbol,
+            bars,
+            elapsed,
+            source,
+            extra={
+                "event": "INDICATOR_HISTORY_RECOVERED",
+                "symbol": symbol,
+                "bars": bars,
+                "missing_duration_s": round(elapsed, 3),
+                "source": source,
+            },
+        )
+
     def history_count(self, symbol: str) -> int:
         """Return symbol history length. Args: symbol. Returns: count. Raises: none."""
         with self._lock:
@@ -586,7 +627,7 @@ class IndicatorEngine:
         *,
         field: Literal["close", "bars"] = "close",
     ) -> list[Any]:
-        """Return history; missing-history diagnostics are throttled natively."""
+        """Return history with one log per missing episode/session transition."""
         LOGGER.debug(
             "Entered IndicatorEngine.get_history",
             extra={"event": "indicator_engine_get_history_enter", "symbol": symbol},
@@ -603,29 +644,24 @@ class IndicatorEngine:
                         market_open_now = is_market_open_now()
                     except Exception:
                         market_open_now = True
-                    if market_open_now:
-                        log_throttled(
-                            LOGGER,
-                            f"indicator_history_missing:{symbol}",
-                            "Condition met: indicator_history_missing",
-                            interval_sec=60.0,
-                            level=logging.INFO,
-                            extra={
-                                "event": "indicator_engine_history_missing",
-                                "symbol": symbol,
-                            },
+                    previous = self._missing_history_episodes.get(symbol)
+                    if previous is None or previous[1] != market_open_now:
+                        self._missing_history_episodes[symbol] = (
+                            previous[0] if previous is not None
+                            else datetime.now(timezone.utc),
+                            market_open_now,
                         )
-                    else:
-                        log_throttled(
-                            LOGGER,
-                            f"indicator_history_missing_offmarket:{symbol}",
-                            "Condition met: indicator_history_missing (market_closed)",
-                            interval_sec=900.0,
-                            level=logging.DEBUG,
+                        LOGGER.log(
+                            logging.INFO if market_open_now else logging.DEBUG,
+                            "Condition met: indicator_history_missing symbol=%s market_open=%s",
+                            symbol,
+                            market_open_now,
                             extra={
                                 "event": "indicator_engine_history_missing",
                                 "symbol": symbol,
-                                "market_session_state": "closed",
+                                "market_session_state": (
+                                    "open" if market_open_now else "closed"
+                                ),
                             },
                         )
                     return []
