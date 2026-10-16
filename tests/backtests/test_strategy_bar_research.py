@@ -1006,3 +1006,57 @@ def test_smc_research_counts_terminal_rejection_even_after_event_is_removed(
     assert smc["smc_unique_setup_funnel"]["armed_setups"] == 2
     assert reasons["smc_awaiting_confirmation"] == 2
     assert reasons["smc_sweep_invalidated"] == 2
+
+
+@pytest.mark.parametrize(
+    ("invalid_geometry", "rejection"),
+    [
+        (False, "next_minute_unavailable"),
+        (True, "invalid_signal_geometry"),
+    ],
+)
+def test_smc_post_signal_rejection_counts_unique_setups_not_option_attempts(
+    tmp_path, invalid_geometry, rejection
+):
+    from nifty_scalper_bot.backtesting.strategy_research import _scenario, load_archive
+
+    archive(tmp_path, gap=True)
+    candles = tmp_path / "candles"
+    extra_ce = json.loads((candles / "CE.json").read_text())
+    extra_ce["symbol"] = "NFO:NIFTY26O0622450CE"
+    (candles / "CE_extra.json").write_text(json.dumps(extra_ce))
+
+    class Strategy:
+        name = "SMC"
+        last_no_vote_reason = "underlying_no_liquidity_sweep"
+
+        def generate_signal(self, symbol, indicators, current_price, position=None):
+            if not symbol.endswith("CE") or indicators["history_count"] != 1:
+                return None
+            return SimpleNamespace(
+                action="BUY",
+                stop_loss=101 if invalid_geometry else 95,
+                take_profit=105,
+                metadata={"setup_id": "smcv2:shared_underlying:CE:2026-10-01T09:30"},
+            )
+
+        @property
+        def evaluation_health(self):
+            return {"healthy": True}
+
+    histories, instruments, _ = load_archive(tmp_path)
+    result = _scenario(
+        histories,
+        instruments,
+        None,
+        0,
+        components={"SMC"},
+        strategy_factory=lambda engine: [Strategy()],
+    )["strategies"]["SMC"]
+
+    assert result["entry_funnel"]["signals_emitted"] == 2
+    assert result["no_vote_reasons"][rejection] == 2
+    assert result["smc_unique_setup_funnel"][
+        "post_signal_rejections_by_unique_setup"
+    ][rejection] == 1
+    assert result["smc_unique_setup_funnel"]["simulated_filled_setups"] == 0
