@@ -699,9 +699,7 @@ def _history_tail_diagnostics(ctx, symbol, *, limit=12):  # noqa: ANN001
         # in-window comparisons are empty after intersection clipping.
         from datetime import datetime
 
-        mdm_latest = datetime.strptime(
-            max(timestamps["mdm"]), "%Y-%m-%dT%H:%MZ"
-        )
+        mdm_latest = datetime.strptime(max(timestamps["mdm"]), "%Y-%m-%dT%H:%MZ")
         for source in ("runner", "indicator"):
             source_latest = datetime.strptime(
                 max(timestamps[source]), "%Y-%m-%dT%H:%MZ"
@@ -722,20 +720,16 @@ def _history_tail_diagnostics(ctx, symbol, *, limit=12):  # noqa: ANN001
                     if overlap_start <= minute <= overlap_end
                 }
                 outside_shared_window[source] = {
-                    "older": sorted(
-                        {v for v in values if v < overlap_start}
-                    )[:size],
-                    "newer": sorted(
-                        {v for v in values if v > overlap_end}
-                    )[:size],
+                    "older": sorted({v for v in values if v < overlap_start})[:size],
+                    "newer": sorted({v for v in values if v > overlap_end})[:size],
                 }
             for source in ("runner", "indicator"):
                 missing_vs_mdm[source] = sorted(
                     shared_sets["mdm"] - shared_sets[source]
                 )[:size]
-                extra_vs_mdm[source] = sorted(
-                    shared_sets[source] - shared_sets["mdm"]
-                )[:size]
+                extra_vs_mdm[source] = sorted(shared_sets[source] - shared_sets["mdm"])[
+                    :size
+                ]
 
     return {
         "diagnostic_only": True,
