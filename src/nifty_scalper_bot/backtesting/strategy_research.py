@@ -838,6 +838,11 @@ def _scenario(
                 strategy_indicators = dict(indicators)
                 if strategy.name in {"ORBPro", "VWAPPro", "SMC"}:
                     strategy_indicators.update(underlying_context)
+                pre_smc_events: dict[Any, Any] = {}
+                if strategy.name == "SMC":
+                    current_events = getattr(strategy, "_events", {})
+                    if isinstance(current_events, dict):
+                        pre_smc_events = dict(current_events)
                 signal = strategy.generate_signal(
                     symbol,
                     strategy_indicators,
@@ -849,8 +854,14 @@ def _scenario(
                 if strategy.name == "SMC":
                     # Research-only read of the canonical SMC sweep state.
                     # One underlying sweep can be evaluated across many options.
-                    events = getattr(strategy, "_events", {})
-                    if isinstance(events, dict):
+                    # A terminal rejection may remove the active sweep during
+                    # evaluation. Preserve its pre-call identity for attribution.
+                    for events in (
+                        pre_smc_events,
+                        getattr(strategy, "_events", {}),
+                    ):
+                        if not isinstance(events, dict):
+                            continue
                         contract_side = instruments[symbol]["instrument_type"]
                         for event_key, event in events.items():
                             if (
