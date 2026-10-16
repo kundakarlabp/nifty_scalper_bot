@@ -187,7 +187,6 @@ def test_runner_terminalizes_setup_after_broker_acceptance() -> None:
     assert "SETUP_LIFECYCLE_BROKER_ACCEPTED_TELEMETRY_FAILED" in accepted_segment
 
 
-
 def test_repeated_stage_observations_do_not_inflate_transition_metrics(
     monkeypatch,
 ) -> None:
@@ -196,9 +195,7 @@ def test_repeated_stage_observations_do_not_inflate_transition_metrics(
     from nifty_scalper_bot.strategies import setup_lifecycle as lifecycle
 
     clock = iter([1000.0, 1010.0, 1020.0, 1030.0])
-    monkeypatch.setattr(
-        lifecycle, "time", SimpleNamespace(time=lambda: next(clock))
-    )
+    monkeypatch.setattr(lifecycle, "time", SimpleNamespace(time=lambda: next(clock)))
     registry = SetupLifecycleRegistry(limit=128)
     kwargs = {
         "strategy": "SMC",
@@ -251,6 +248,7 @@ def test_repeated_stage_observations_preserve_terminal_transition() -> None:
         "MANAGER_QUALIFIED": 1,
         "BROKER_ACCEPTED": 1,
     }
+
 
 def test_setup_lifecycle_exposes_exact_last_transition_age() -> None:
     registry = SetupLifecycleRegistry(limit=128)
