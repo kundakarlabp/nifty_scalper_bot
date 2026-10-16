@@ -18,6 +18,7 @@ STATUS_FILE="${BOT_UPDATE_STATUS_FILE:-$APP_DIR/data/auto_update_status.json}"
 VENV="${BOT_VENV:-$APP_DIR/.venv}"
 STREAMLIT_VENV="${BOT_STREAMLIT_VENV:-$APP_DIR/.streamlit-venv}"
 LOCK_FILE="${BOT_DEPLOY_LOCK_FILE:-/tmp/niftybot-deploy.lock}"
+RESTART_PENDING_FILE="${CONFIG_DIR}/auto_release_restart_pending"
 FORCE_RESTART=false
 AUTO_MODE=false
 SYSTEMD_ENTRYPOINT_MIGRATED=false
@@ -363,6 +364,22 @@ if [ "$AUTO_MODE" = true ]; then
   }
   AFTER="$(git rev-parse origin/main)"
   if auto_release_should_defer; then
+    # Never start a different/partially installed revision to recover a live process.
+    # A missing or differing runtime provenance requires operator reconciliation.
+    current_runtime_sha="$(first_nonempty_env GIT_COMMIT_SHA 2>/dev/null || true)"
+    if [[ ! "$current_runtime_sha" =~ ^[0-9a-fA-F]{40}$ ]] || [ "$current_runtime_sha" != "$BEFORE" ]; then
+      poll_research_request
+      write_status runtime_checkout_mismatch "recovery blocked: checkout ${BEFORE:0:7} differs from confirmed runtime build; manual reconciliation required"
+      log "Recovery blocked: do not restart an unverified checkout during trading"
+      exit 1
+    fi
+    live_release_json="$(curl -fsS --max-time 3 "http://127.0.0.1:${PORT}/releasez" 2>/dev/null || true)"
+    if [ -n "$live_release_json" ] && ! grep -Eq "\"effective_sha\"[[:space:]]*:[[:space:]]*\"${BEFORE:0:12}\"" <<<"$live_release_json"; then
+      poll_research_request
+      write_status runtime_checkout_mismatch "recovery blocked: running process does not match checkout ${BEFORE:0:7}"
+      log "Recovery blocked: running process and checkout provenance disagree"
+      exit 1
+    fi
     if ! service_healthy_confirmed "$BEFORE"; then
       write_status recovering_runtime "restarting unhealthy current revision ${BEFORE:0:7}; candidate release still deferred"
       log "Existing engine failed health probes; recovering current revision, not deploying candidate"
@@ -376,7 +393,7 @@ if [ "$AUTO_MODE" = true ]; then
     fi
     poll_research_request
     if [ "$BEFORE" != "$AFTER" ]; then
-      write_status deferred_market_window "validated release ${AFTER:0:7} pending after 15:45 IST; current ${BEFORE:0:7} retained"
+      write_status deferred_market_window "unvalidated revision ${AFTER:0:7} pending after 15:45 IST; current ${BEFORE:0:7} retained"
       log "Automatic release deferred during weekday 08:00-15:45 IST; current revision retained"
     else
       write_status current "running ${BEFORE:0:7}; no pending revision"
@@ -403,6 +420,9 @@ set_env_value SUPABASE_LOG_ARCHIVE_ENABLED true
 ensure_env_default SUPABASE_LOG_ARCHIVE_URL "https://dehdptgkqbrkyzyodicd.supabase.co/functions/v1/nifty-log-archive-ingest"
 ensure_env_default SUPABASE_LOG_ARCHIVE_INTERVAL_SECONDS 300
 if [ "$RUNTIME_ENV_CHANGED" = true ]; then FORCE_RESTART=true; fi
+# A prior pre-open operation may have persisted environment or unit changes but
+# deferred its restart at the protected boundary; carry it to after-hours.
+if [ -f "$RESTART_PENDING_FILE" ]; then FORCE_RESTART=true; fi
 migrate_systemd_entrypoint
 migrate_autodeploy_entrypoint
 if [ "$SYSTEMD_ENTRYPOINT_MIGRATED" = true ]; then
@@ -496,8 +516,12 @@ fi
 # A release started before the protected window must not cross into live hours.
 # Keep this recheck after candidate validation, immediately before checkout mutation.
 if auto_release_should_defer; then
+  if [ "$FORCE_RESTART" = true ]; then
+    mkdir -p "$CONFIG_DIR"
+    : > "$RESTART_PENDING_FILE"
+  fi
   poll_research_request
-  write_status deferred_market_window "candidate ${AFTER:0:7} validated; runtime untouched; release deferred until after 15:45 IST"
+  write_status deferred_market_window "candidate ${AFTER:0:7} validated; checkout untouched; release deferred until after 15:45 IST"
   exit 0
 fi
 
@@ -531,6 +555,10 @@ fi
 # Final boundary check: never restart the engine for an automatic release
 # that has crossed into the protected window. Restore the prior checkout.
 if auto_release_should_defer; then
+  if [ "$FORCE_RESTART" = true ]; then
+    mkdir -p "$CONFIG_DIR"
+    : > "$RESTART_PENDING_FILE"
+  fi
   if [ "$BEFORE" != "$AFTER" ]; then
     git reset --hard --quiet "$BEFORE"
     "$VENV/bin/python" -m pip install --quiet -e . || true
@@ -542,6 +570,7 @@ if auto_release_should_defer; then
 fi
 sudo systemctl restart "$SERVICE"
 if wait_for_service "$AFTER"; then
+  rm -f "$RESTART_PENDING_FILE"
   admin_ready=false
   if restart_admin; then
     admin_ready=true
