@@ -334,7 +334,7 @@ market_session_protected() {
   if ! [[ "$weekday" =~ ^[1-7]$ && "$hhmm" =~ ^([01][0-9]|2[0-3])[0-5][0-9]$ ]]; then
     return 0
   fi
-  [[ "$weekday" =~ ^[1-5]$ && "$hhmm" > "0844" && "$hhmm" < "1546" ]]
+  [[ "$weekday" =~ ^[1-5]$ && "$hhmm" > "0759" && "$hhmm" < "1546" ]]
 }
 
 auto_release_should_defer() {
@@ -348,17 +348,44 @@ auto_release_should_defer() {
 exec 9>"$LOCK_FILE"
 if ! flock -n 9; then log "Another deployment is already running"; exit 0; fi
 
-if auto_release_should_defer; then
-  write_status deferred_market_window "Automatic release deferred during weekday 08:45-15:45 IST market protection; running revision preserved"
-  log "Market-session protection: automatic release deferred; manual emergency release remains available"
-  exit 0
-fi
-
 cd "$APP_DIR"
-chmod +x "$APP_DIR/deploy/lightsail_release.sh" 2>/dev/null || true
 if [ ! -d .git ]; then
   write_status repository_missing "Git repository missing at $APP_DIR"; exit 1
 fi
+
+# Auto mode checks remote revisions without mutating the local runtime.
+# Preserve health recovery and independent research polling when a release waits.
+if [ "$AUTO_MODE" = true ]; then
+  BEFORE="$(git rev-parse HEAD)"
+  write_status fetching "checking origin/main from ${BEFORE:0:7}"
+  git fetch --quiet origin main || {
+    write_status fetch_failed "git fetch failed"; exit 1;
+  }
+  AFTER="$(git rev-parse origin/main)"
+  if auto_release_should_defer; then
+    if ! service_healthy_confirmed "$BEFORE"; then
+      write_status recovering_runtime "restarting unhealthy current revision ${BEFORE:0:7}; candidate release still deferred"
+      log "Existing engine failed health probes; recovering current revision, not deploying candidate"
+      sudo -n systemctl restart "$SERVICE" || {
+        write_status runtime_recovery_failed "current revision restart failed"; exit 1;
+      }
+      if ! service_healthy_confirmed "$BEFORE"; then
+        write_status runtime_recovery_failed "current revision unhealthy after recovery restart"
+        exit 1
+      fi
+    fi
+    poll_research_request
+    if [ "$BEFORE" != "$AFTER" ]; then
+      write_status deferred_market_window "validated release ${AFTER:0:7} pending after 15:45 IST; current ${BEFORE:0:7} retained"
+      log "Automatic release deferred during weekday 08:00-15:45 IST; current revision retained"
+    else
+      write_status current "running ${BEFORE:0:7}; no pending revision"
+    fi
+    exit 0
+  fi
+fi
+
+chmod +x "$APP_DIR/deploy/lightsail_release.sh" 2>/dev/null || true
 mkdir -p "$CONFIG_DIR" "$(dirname "$STATUS_FILE")"
 chmod 700 "$CONFIG_DIR" 2>/dev/null || true
 if [ ! -f "$ENV_FILE" ] && [ -f "$APP_DIR/.env" ]; then
@@ -466,6 +493,14 @@ if [ "${#EXISTING_TESTS[@]}" -gt 0 ]; then
   }
 fi
 
+# A release started before the protected window must not cross into live hours.
+# Keep this recheck after candidate validation, immediately before checkout mutation.
+if auto_release_should_defer; then
+  poll_research_request
+  write_status deferred_market_window "candidate ${AFTER:0:7} validated; runtime untouched; release deferred until after 15:45 IST"
+  exit 0
+fi
+
 mkdir -p "$CONFIG_DIR/backups"
 cp -p "$ENV_FILE" "$CONFIG_DIR/backups/niftybot.env.$(date +%Y%m%d_%H%M%S)"
 write_status deploying "deploying ${AFTER:0:7}"
@@ -492,6 +527,18 @@ if ! set_runtime_build_sha "$AFTER"; then
   fi
   write_status env_update_failed "could not publish runtime build SHA ${AFTER:0:7}"
   exit 1
+fi
+# Final boundary check: never restart the engine for an automatic release
+# that has crossed into the protected window. Restore the prior checkout.
+if auto_release_should_defer; then
+  if [ "$BEFORE" != "$AFTER" ]; then
+    git reset --hard --quiet "$BEFORE"
+    "$VENV/bin/python" -m pip install --quiet -e . || true
+  fi
+  set_runtime_build_sha "$BEFORE" || true
+  write_status deferred_market_window "market boundary reached before engine restart; current revision ${BEFORE:0:7} retained"
+  poll_research_request
+  exit 0
 fi
 sudo systemctl restart "$SERVICE"
 if wait_for_service "$AFTER"; then
