@@ -252,7 +252,6 @@ def test_history_identity_diagnostic_is_only_sampled_when_counts_differ():
     assert result["execution_history_ready"] is True
 
 
-
 def test_shifted_candle_tail_exposes_outside_overlap_and_minute_lag():
     mdm_minutes = [f"2026-10-16T10:{m:02d}:00Z" for m in range(12)]
     later_minutes = [f"2026-10-16T10:{m:02d}:00Z" for m in range(1, 13)]
