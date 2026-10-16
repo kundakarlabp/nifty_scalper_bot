@@ -695,21 +695,18 @@ def _history_tail_diagnostics(ctx, symbol, *, limit=12):  # noqa: ANN001
         # retention can legitimately include bars outside MDM's bounded view.
         overlap_start = max(min(values) for values in timestamps.values())
         overlap_end = min(max(values) for values in timestamps.values())
-        shared_sets = {
-            source: {
-                minute
-                for minute in values
-                if overlap_start <= minute <= overlap_end
+        shared_sets = {}
+        for source, values in timestamps.items():
+            shared_sets[source] = {
+                minute for minute in values if overlap_start <= minute <= overlap_end
             }
-            for source, values in timestamps.items()
-        }
         for source in ("runner", "indicator"):
-            missing_vs_mdm[source] = sorted(
-                shared_sets["mdm"] - shared_sets[source]
-            )[:size]
-            extra_vs_mdm[source] = sorted(
-                shared_sets[source] - shared_sets["mdm"]
-            )[:size]
+            missing_vs_mdm[source] = sorted(shared_sets["mdm"] - shared_sets[source])[
+                :size
+            ]
+            extra_vs_mdm[source] = sorted(shared_sets[source] - shared_sets["mdm"])[
+                :size
+            ]
 
     return {
         "diagnostic_only": True,
