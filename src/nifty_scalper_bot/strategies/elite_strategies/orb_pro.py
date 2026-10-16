@@ -41,9 +41,14 @@ def _coerce_datetime(value: Any) -> datetime | None:
         result = value
     elif isinstance(value, (int, float)):
         number = float(value)
+        if not math.isfinite(number):
+            return None
         if number > 10_000_000_000:
             number /= 1000.0
-        result = datetime.fromtimestamp(number, tz=timezone.utc)
+        try:
+            result = datetime.fromtimestamp(number, tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
     elif isinstance(value, str) and value.strip():
         try:
             result = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
@@ -216,11 +221,14 @@ class ORBProStrategy(EliteStrategy):
         if not underlying_symbol:
             return None
         rows = self._read_completed_bars(underlying_symbol)
-        option_anchor = _coerce_datetime(
+        raw_anchor = (
             indicators.get("latest_bar_ts")
             or indicators.get("bar_timestamp")
             or indicators.get("setup_candle_timestamp")
         )
+        option_anchor = _coerce_datetime(raw_anchor)
+        if raw_anchor not in (None, "") and option_anchor is None:
+            return None
         if option_anchor is not None:
             # A faster futures feed cannot authorize an earlier option observation.
             rows = [row for row in rows if row["timestamp"] <= option_anchor]
