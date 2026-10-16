@@ -560,11 +560,20 @@ if auto_release_should_defer; then
     : > "$RESTART_PENDING_FILE"
   fi
   if [ "$BEFORE" != "$AFTER" ]; then
-    git reset --hard --quiet "$BEFORE"
-    "$VENV/bin/python" -m pip install --quiet -e . || true
+    if ! git reset --hard --quiet "$BEFORE"; then
+      write_status runtime_restore_failed "checkout restoration failed; candidate may be partially installed"
+      exit 1
+    fi
+    if ! "$VENV/bin/python" -m pip install --quiet -e .; then
+      write_status runtime_restore_failed "retained revision dependency restoration failed; manual recovery required"
+      exit 1
+    fi
   fi
-  set_runtime_build_sha "$BEFORE" || true
-  write_status deferred_market_window "market boundary reached before engine restart; current revision ${BEFORE:0:7} retained"
+  if ! set_runtime_build_sha "$BEFORE"; then
+    write_status runtime_restore_failed "retained revision build provenance restoration failed; manual recovery required"
+    exit 1
+  fi
+  write_status deferred_market_window "market boundary reached before engine restart; current revision ${BEFORE:0:7} restored"
   poll_research_request
   exit 0
 fi
