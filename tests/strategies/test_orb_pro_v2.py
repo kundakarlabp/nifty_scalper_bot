@@ -844,3 +844,76 @@ def test_impossible_futures_breakout_candle_never_authorizes_orb(monkeypatch) ->
 
     assert strategy.generate_signal(CE, indicators, 50.0) is None
     assert strategy.last_no_vote_reason == "underlying_orb_not_ready"
+
+
+
+def test_orb_does_not_use_futures_bar_ahead_of_option_observation(monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    monkeypatch.setenv("ORB_BALANCED_RANGE_MAX_ATR", "2.0")
+    rows = _opening_rows()
+    rows.append(
+        _bar(15, open_=24_008.0, high=24_034.0, low=24_006.0, close=24_030.0, volume=3_000.0)
+    )
+    option_timestamp = rows[-1]["timestamp"]
+    rows.append(
+        _bar(16, open_=24_030.0, high=24_042.0, low=24_025.0, close=24_035.0)
+    )
+    strategy = _strategy({FUTURE: rows})
+    indicators = _base_indicators("CE", option_timestamp)
+
+    signal = strategy.generate_signal(CE, indicators, 50.0)
+    assert signal is not None
+    assert signal.metadata["breakout_timestamp"] == option_timestamp.timestamp()
+    assert signal.metadata["underlying_entry"] == 24_030.0
+
+
+def test_orb_does_not_trade_using_future_breakout_before_option_bar(monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    rows = _opening_rows()
+    rows.append(
+        _bar(15, open_=24_008.0, high=24_034.0, low=24_006.0, close=24_030.0, volume=3_000.0)
+    )
+    strategy = _strategy({FUTURE: rows})
+    indicators = _base_indicators("CE", rows[-2]["timestamp"])
+
+    assert strategy.generate_signal(CE, indicators, 50.0) is None
+    assert strategy.last_no_vote_reason == "underlying_orb_not_ready"
+
+
+def test_orb_allows_same_bar_retry_after_direction_context_recovers(monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    monkeypatch.setenv("ORB_BALANCED_RANGE_MAX_ATR", "2.0")
+    rows = _opening_rows()
+    rows.append(
+        _bar(15, open_=24_008.0, high=24_034.0, low=24_006.0, close=24_030.0, volume=3_000.0)
+    )
+    strategy = _strategy({FUTURE: rows})
+    indicators = _base_indicators("CE", rows[-1]["timestamp"])
+    indicators["underlying_direction_bias"] = "PE"
+    indicators["direction_bias"] = "PE"
+
+    assert strategy.generate_signal(CE, indicators, 50.0) is None
+    indicators["underlying_direction_bias"] = "CE"
+    indicators["direction_bias"] = "CE"
+    assert strategy.generate_signal(CE, indicators, 50.0) is not None
+
+
+def test_orb_uses_entry_acceptance_not_preliminary_signal_to_consume_setup(monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    monkeypatch.setenv("ORB_BALANCED_RANGE_MAX_ATR", "2.0")
+    rows = _opening_rows()
+    rows.append(
+        _bar(15, open_=24_008.0, high=24_034.0, low=24_006.0, close=24_030.0, volume=3_000.0)
+    )
+    strategy = _strategy({FUTURE: rows})
+    indicators = _base_indicators("CE", rows[-1]["timestamp"])
+    signal = strategy.generate_signal(CE, indicators, 50.0)
+    assert signal is not None
+    key = ("2026-09-01", FUTURE, "CE")
+    assert strategy._events[key]["status"] == "AWAITING_RETEST"
+
+    strategy.notify_entry_accepted("PE", setup_id=signal.metadata["setup_id"])
+    strategy.notify_entry_accepted("CE", setup_id="different-setup")
+    assert strategy._events[key]["status"] == "AWAITING_RETEST"
+    strategy.notify_entry_accepted("CE", setup_id=signal.metadata["setup_id"])
+    assert strategy._events[key]["status"] == "EMITTED"
