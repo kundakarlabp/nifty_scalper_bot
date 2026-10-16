@@ -334,8 +334,12 @@ def historical_cache_inventory(
                 if symbol != "NSE:NIFTY 50":
                     raise ValueError("historical_cache_spot_identity_invalid")
             else:
-                if instrument.get("name") != "NIFTY" or not symbol.startswith(
-                    "NFO:NIFTY"
+                if (
+                    instrument.get("name") != "NIFTY"
+                    or not symbol.startswith("NFO:NIFTY")
+                    or not symbol[4:].isascii()
+                    or not symbol[4:].isalnum()
+                    or kind in {"CE", "PE"} and not symbol.endswith(kind)
                 ):
                     raise ValueError("historical_cache_nifty_identity_invalid")
                 expiry = dt.date.fromisoformat(str(instrument["expiry"]))
@@ -437,6 +441,7 @@ def historical_cache_inventory(
                 if not futures:
                     continue
                 observed_pairs: dict[tuple[str, float], dict[str, str]] = {}
+                ambiguous_option = False
                 for symbol, source in sources.items():
                     instrument = source["instrument"]
                     side = str(instrument["instrument_type"])
@@ -446,9 +451,14 @@ def historical_cache_inventory(
                     strike = float(instrument["strike"])
                     if not 0 <= (expiry - day).days <= 7:
                         continue
-                    observed_pairs.setdefault((expiry.isoformat(), strike), {})[
-                        side
-                    ] = symbol
+                    pair = observed_pairs.setdefault((expiry.isoformat(), strike), {})
+                    if side in pair and pair[side] != symbol:
+                        ambiguous_option = True
+                        break
+                    pair[side] = symbol
+                if ambiguous_option:
+                    failure = "historical_option_selection_ambiguous"
+                    break
                 spot_close = float(spot["bars"][anchor][4])
                 eligible = sorted(
                     (
@@ -470,6 +480,9 @@ def historical_cache_inventory(
                     break
                 _, _, _, ce, pe = eligible[0]
                 participants = ("NSE:NIFTY 50", futures[0], ce, pe)
+                if len({sources[symbol]["token"] for symbol in participants}) != 4:
+                    failure = "historical_contract_token_collision"
+                    break
                 overlapping = set.intersection(
                     *(set(sources[symbol]["bars"]) for symbol in participants)
                 )
