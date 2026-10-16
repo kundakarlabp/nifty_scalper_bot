@@ -625,7 +625,8 @@ def _history_tail_diagnostics(ctx, symbol, *, limit=12):  # noqa: ANN001
             except TypeError:
                 mdm_rows = get_bars(symbol) or []
             timestamps["mdm"] = [
-                minute for row in mdm_rows[-size:]
+                minute
+                for row in mdm_rows[-size:]
                 if (minute := _bar_minute_identity(row)) is not None
             ]
         except Exception:  # noqa: BLE001 - diagnostics only
@@ -638,7 +639,8 @@ def _history_tail_diagnostics(ctx, symbol, *, limit=12):  # noqa: ANN001
             payload = getter(symbol, limit=size) or {}
             for source in ("runner", "indicator"):
                 timestamps[source] = [
-                    minute for row in (payload.get(source) or [])[-size:]
+                    minute
+                    for row in (payload.get(source) or [])[-size:]
                     if (minute := _bar_minute_identity(row)) is not None
                 ]
         except Exception:  # noqa: BLE001 - diagnostics only
@@ -671,9 +673,7 @@ def _history_tail_diagnostics(ctx, symbol, *, limit=12):  # noqa: ANN001
     }
 
 
-def _history_count_diagnostics(
-    history, *, ctx=None, selected=None
-):  # noqa: ANN001
+def _history_count_diagnostics(history, *, ctx=None, selected=None):  # noqa: ANN001
     """Explain historical-bar count deltas without changing readiness.
 
     Runner retention can include a still-forming bar or distinct history range.
