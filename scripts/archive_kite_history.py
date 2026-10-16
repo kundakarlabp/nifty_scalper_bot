@@ -309,8 +309,7 @@ def historical_cache_inventory(cache_dir: Path, start: dt.date, end: dt.date) ->
                 or payload.get("continuous") is not False
                 or payload.get("oi") is not True
                 or token != int(instrument["instrument_token"])
-                or symbol
-                != f"{instrument['exchange']}:{instrument['tradingsymbol']}"
+                or symbol != f"{instrument['exchange']}:{instrument['tradingsymbol']}"
                 or payload.get("candles_sha256") != _candle_digest(rows)
                 or not rows
             ):
