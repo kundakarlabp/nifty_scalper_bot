@@ -421,7 +421,7 @@ def test_auto_release_fails_closed_if_intraday_restore_fails() -> None:
     assert 'if ! "$VENV/bin/python" -m pip install --quiet -e .; then' in boundary
     assert 'if ! set_runtime_build_sha "$BEFORE"; then' in boundary
     assert boundary.count("write_status runtime_restore_failed") == 3
-    assert 'write_status deferred_market_window' in boundary
-    assert boundary.index('write_status runtime_restore_failed') < boundary.index(
-        'write_status deferred_market_window'
+    assert "write_status deferred_market_window" in boundary
+    assert boundary.index("write_status runtime_restore_failed") < boundary.index(
+        "write_status deferred_market_window"
     )
