@@ -446,9 +446,9 @@ def historical_cache_inventory(
                     strike = float(instrument["strike"])
                     if not 0 <= (expiry - day).days <= 7:
                         continue
-                    observed_pairs.setdefault(
-                        (expiry.isoformat(), strike), {}
-                    )[side] = symbol
+                    observed_pairs.setdefault((expiry.isoformat(), strike), {})[
+                        side
+                    ] = symbol
                 spot_close = float(spot["bars"][anchor][4])
                 eligible = sorted(
                     (
@@ -473,9 +473,7 @@ def historical_cache_inventory(
                 overlapping = set.intersection(
                     *(set(sources[symbol]["bars"]) for symbol in participants)
                 )
-                available = [
-                    stamp for stamp in overlapping if stamp >= anchor
-                ]
+                available = [stamp for stamp in overlapping if stamp >= anchor]
                 if len(available) < min_synchronized_minutes:
                     failure = "historical_minimum_synchronized_bars_missing"
                     continue
