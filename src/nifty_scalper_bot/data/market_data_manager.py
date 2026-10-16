@@ -1045,6 +1045,7 @@ class MarketDataManager:
         raw_row_count = len(bars or ())
         normalized_row_count = 0
         malformed_row_count = raw_row_count
+        offsession_rejected_rows = 0
         if not hasattr(self, "_lock"):
             self._lock = threading.RLock()
         with self._lock:
@@ -1075,6 +1076,9 @@ class MarketDataManager:
                     continue
                 ts = normalized.get("timestamp")
                 if isinstance(ts, datetime):
+                    if _should_skip_live_nifty_candle(normalized_symbol, ts):
+                        offsession_rejected_rows += 1
+                        continue
                     normalized["timestamp"] = ts.astimezone(timezone.utc).replace(
                         microsecond=0
                     )
@@ -1082,6 +1086,16 @@ class MarketDataManager:
                 normalized_rows.append(normalized)
             normalized_row_count = len(normalized_rows)
             malformed_row_count = max(0, raw_row_count - normalized_row_count)
+            if offsession_rejected_rows:
+                with self._lock:
+                    self._candle_metrics[
+                        "history_offsession_rows_quarantined_total"
+                    ] += offsession_rejected_rows
+                self._logger.info(
+                    "MDM_HISTORICAL_OFFSESSION_QUARANTINED symbol=%s rows=%d",
+                    normalized_symbol,
+                    offsession_rejected_rows,
+                )
             if not normalized_rows and bars:
                 raise DataIntegrityError("no valid historical OHLC rows to import")
             if normalized_rows:
