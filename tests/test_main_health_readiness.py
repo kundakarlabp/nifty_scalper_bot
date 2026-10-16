@@ -100,6 +100,18 @@ def test_health_trading_exposes_canonical_context():
     assert body["reconciliation"]["unprotected_positions"] == ["NFO:NIFTY26MAY23750CE"]
 
 
+def test_candle_identity_supports_datetimes_strings_and_bar_objects():
+    from datetime import datetime, timezone
+
+    stamp = datetime(2026, 10, 16, 7, 31, tzinfo=timezone.utc)
+    expected = "2026-10-16T07:31Z"
+    assert main._bar_minute_identity(stamp) == expected
+    assert main._bar_minute_identity("2026-10-16T13:01:59+05:30") == expected
+    assert main._bar_minute_identity({"timestamp": stamp}) == expected
+    assert main._bar_minute_identity(SimpleNamespace(timestamp=stamp)) == expected
+    assert main._bar_minute_identity(None) is None
+
+
 def test_recent_candle_timestamp_identity_explains_runner_count_delta():
     from datetime import datetime, timedelta, timezone
 
