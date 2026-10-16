@@ -597,22 +597,25 @@ class IndicatorEngine:
     ) -> None:
         """Report one terminal resolution of a previously missing history."""
         elapsed = max(0.0, (datetime.now(timezone.utc) - episode[0]).total_seconds())
-        self._logger.info(
-            "INDICATOR_HISTORY_RECOVERED symbol=%s bars=%d "
-            "missing_duration_s=%.3f source=%s",
-            symbol,
-            bars,
-            elapsed,
-            source,
-            extra={
-                "event": "INDICATOR_HISTORY_RECOVERED",
-                "bypass_filters": True,
-                "symbol": symbol,
-                "bars": bars,
-                "missing_duration_s": round(elapsed, 3),
-                "source": source,
-            },
-        )
+        try:
+            self._logger.info(
+                "INDICATOR_HISTORY_RECOVERED symbol=%s bars=%d "
+                "missing_duration_s=%.3f source=%s",
+                symbol,
+                bars,
+                elapsed,
+                source,
+                extra={
+                    "event": "INDICATOR_HISTORY_RECOVERED",
+                    "bypass_filters": True,
+                    "symbol": symbol,
+                    "bars": bars,
+                    "missing_duration_s": round(elapsed, 3),
+                    "source": source,
+                },
+            )
+        except Exception:  # noqa: BLE001 - diagnostics must not block data ingestion
+            pass
 
     def history_count(self, symbol: str) -> int:
         """Return symbol history length. Args: symbol. Returns: count. Raises: none."""
