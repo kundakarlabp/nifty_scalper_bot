@@ -340,7 +340,7 @@ def test_restart_preserves_identity_for_equivalent_anchor_formats(
 def test_vwap_recovery_cannot_use_later_same_session_bar(monkeypatch):
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     history = [
-        _bar("2026-09-08T10:00:00", open_=102.0, high=103.0, low=101.0, close=102.0),
+        _bar("2026-09-08T10:00:00", open_=102.0, high=102.0, low=102.0, close=102.0),
         _bar("2026-09-08T10:02:00", open_=100.0, high=101.0, low=90.0, close=92.0),
     ]
     strategy = VWAPProStrategy(VWAPProStrategyConfig(), _HistoryEngine(history))
