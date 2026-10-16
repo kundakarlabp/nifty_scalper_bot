@@ -402,12 +402,26 @@ def test_auto_market_guard_rechecks_before_checkout_and_restart() -> None:
 def test_forced_restart_survives_market_boundary_deferral() -> None:
     release = _text("deploy/lightsail_release.sh")
     assert (
-        'RESTART_PENDING_FILE="${CONFIG_DIR}/auto_release_restart_pending"'
-        in release
+        'RESTART_PENDING_FILE="${CONFIG_DIR}/auto_release_restart_pending"' in release
     )
     assert 'if [ -f "$RESTART_PENDING_FILE" ]; then FORCE_RESTART=true; fi' in release
     assert release.count(': > "$RESTART_PENDING_FILE"') == 2
     assert 'rm -f "$RESTART_PENDING_FILE"' in release
     assert release.index('rm -f "$RESTART_PENDING_FILE"') > release.index(
         'if wait_for_service "$AFTER"; then'
+    )
+
+
+def test_auto_release_fails_closed_if_intraday_restore_fails() -> None:
+    release = _text("deploy/lightsail_release.sh")
+    boundary = release.split("# Final boundary check:", 1)[1].split(
+        'sudo systemctl restart "$SERVICE"', 1
+    )[0]
+    assert 'if ! git reset --hard --quiet "$BEFORE"; then' in boundary
+    assert 'if ! "$VENV/bin/python" -m pip install --quiet -e .; then' in boundary
+    assert 'if ! set_runtime_build_sha "$BEFORE"; then' in boundary
+    assert boundary.count("write_status runtime_restore_failed") == 3
+    assert 'write_status deferred_market_window' in boundary
+    assert boundary.index('write_status runtime_restore_failed') < boundary.index(
+        'write_status deferred_market_window'
     )
