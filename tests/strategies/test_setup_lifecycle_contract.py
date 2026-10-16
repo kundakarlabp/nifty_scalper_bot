@@ -172,6 +172,22 @@ def test_option_rotation_is_wired_only_after_committed_contract_change() -> None
         name in rotation for name in ("selection_changed", "committed_ce", "committed_pe")
     )
 
+
+def test_runner_accepted_order_terminalizes_setup_without_changing_order_result() -> None:
+    from pathlib import Path
+
+    source = Path("src/nifty_scalper_bot/strategies/runner.py").read_text()
+    acceptance = source.index("SetupStage.BROKER_ACCEPTED,")
+    order_result = source.index(
+        'return SignalExecutionResult(\n                    True,\n                    "order_submitted",',
+        acceptance,
+    )
+    accepted_segment = source[acceptance:order_result]
+    assert "reason=str(order_id)" in accepted_segment
+    assert "except Exception as lifecycle_exc" in accepted_segment
+    assert "SETUP_LIFECYCLE_BROKER_ACCEPTED_TELEMETRY_FAILED" in accepted_segment
+
+
 def test_setup_lifecycle_exposes_exact_last_transition_age() -> None:
     registry = SetupLifecycleRegistry(limit=128)
     registry.transition(
