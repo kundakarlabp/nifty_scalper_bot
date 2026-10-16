@@ -93,6 +93,7 @@ from nifty_scalper_bot.utils.logging import get_logger, get_tracer_logger, log_t
 from nifty_scalper_bot.utils.market_hours import (
     MarketState,
     get_market_state,
+    get_market_session_state,
     get_runtime_market_mode,
     post_market_market_data_summary_seconds,
     post_market_quiet_mode_enabled,
@@ -105,6 +106,32 @@ from nifty_scalper_bot.utils.symbols import (
     enforce_canonical,
     normalize_symbol,
 )
+
+
+def _should_skip_live_nifty_candle(symbol: str, tick_ts: datetime) -> bool:
+    """Quarantine off-session NIFTY OHLC in LIVE; never suppress the quote.
+
+    Timestamp classification uses the broker observation's event time rather
+    than processing wall-clock time. Delayed in-session ticks remain eligible;
+    REST historical imports bypass this real-time-only guard completely.
+    """
+    mode = str(os.getenv("EXECUTION_MODE", "")).strip().upper()
+    live = mode == "LIVE" or any(
+        os.getenv(flag, "").strip().lower() in {"1", "true", "yes", "on"}
+        for flag in ("ENABLE_LIVE", "ENABLE_LIVE_TRADING")
+    )
+    if not live:
+        return False
+    normalized = str(symbol or "").strip().upper()
+    nifty = normalized.startswith("NFO:NIFTY") or normalized in {
+        "NSE:NIFTY",
+        "NSE:NIFTY 50",
+        "NSE:NIFTY50",
+    }
+    if not nifty:
+        return False
+    return get_market_session_state(tick_ts) != "open"
+
 
 HistoryImportReason = Literal[
     "startup_bootstrap",
@@ -8995,7 +9022,31 @@ class MarketDataManager:
                 )
             engine = self.get_candle_engine(symbol)
             stage_started = time.perf_counter()
-            candle = engine.on_tick(tick)
+            off_session_candle = _should_skip_live_nifty_candle(
+                symbol, tick_ts.to_pydatetime()
+            )
+            if off_session_candle:
+                # A quote is still delivered to the market-data bus below.
+                # Only a false after-hours minute candle is quarantined.
+                candle = None
+                log_throttled(
+                    self._logger,
+                    f"mdm_offsession_candle:{symbol}",
+                    "MDM_CANDLE_INPUT_QUARANTINED symbol=%s timestamp=%s "
+                    "reason=outside_exchange_session quote_delivery=preserved",
+                    symbol,
+                    tick_ts.isoformat(),
+                    interval_sec=300.0,
+                    level=logging.INFO,
+                    extra={
+                        "event": "MDM_CANDLE_INPUT_QUARANTINED",
+                        "symbol": symbol,
+                        "timestamp": tick_ts.isoformat(),
+                        "reason": "outside_exchange_session",
+                    },
+                )
+            else:
+                candle = engine.on_tick(tick)
             duration_ms = (time.perf_counter() - stage_started) * 1000.0
             if duration_ms >= 50.0:
                 self._log_slow_tick_stage(
