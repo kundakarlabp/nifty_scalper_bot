@@ -522,6 +522,10 @@ def _scenario(
     stress_outcomes: dict[str, list[dict[str, Any]]] = {}
     rejections: dict[str, Counter[str]] = {}
     structural_gate_failures: Counter[str] = Counter()
+    smc_armed_setups: set[tuple[str, str, str]] = set()
+    smc_signaled_setups: set[str] = set()
+    smc_filled_setups: set[str] = set()
+    smc_setup_rejections: dict[str, set[tuple[str, str, str]]] = {}
     evaluated: Counter[str] = Counter()
     entry_funnels: dict[str, Counter[str]] = {}
     orb_replay_regimes: Counter[str] = Counter()
@@ -682,6 +686,8 @@ def _scenario(
                     rejections[key[0]]["cost_net_rr_rejected"] += 1
                     continue
             entry_funnels[key[0]]["accepted_fills"] += 1
+            if key[0] == "SMC" and intent.get("setup_id"):
+                smc_filled_setups.add(str(intent["setup_id"]))
             positions[key] = {
                 "entry_time": timestamp,
                 "entry_price": entry,
@@ -839,9 +845,37 @@ def _scenario(
                 )
                 if not strategy.evaluation_health["healthy"]:
                     raise ValueError("research_strategy_evaluation_failed")
+                active_smc_setups: set[tuple[str, str, str]] = set()
+                if strategy.name == "SMC":
+                    # Research-only read of the canonical SMC sweep state.
+                    # One underlying sweep can be evaluated across many options.
+                    events = getattr(strategy, "_events", {})
+                    if isinstance(events, dict):
+                        contract_side = instruments[symbol]["instrument_type"]
+                        for event_key, event in events.items():
+                            if (
+                                not isinstance(event_key, tuple)
+                                or len(event_key) != 2
+                                or event_key[1] != contract_side
+                                or not isinstance(event, dict)
+                                or not isinstance(event.get("sweep_ts"), datetime)
+                            ):
+                                continue
+                            active_smc_setups.add(
+                                (
+                                    str(event_key[0]),
+                                    str(contract_side),
+                                    event["sweep_ts"].isoformat(),
+                                )
+                            )
+                    smc_armed_setups.update(active_smc_setups)
                 if signal is None:
                     no_vote = getattr(strategy, "last_no_vote_reason", "no_signal")
                     rejections[strategy.name][no_vote] += 1
+                    if active_smc_setups:
+                        smc_setup_rejections.setdefault(no_vote, set()).update(
+                            active_smc_setups
+                        )
                     if (
                         strategy.name == "ORBPro"
                         and no_vote == "orb_structural_contract_not_passed"
@@ -853,6 +887,8 @@ def _scenario(
                     continue
                 entry_funnels[strategy.name]["signals_emitted"] += 1
                 metadata = dict(signal.metadata or {})
+                if strategy.name == "SMC" and metadata.get("setup_id"):
+                    smc_signaled_setups.add(str(metadata["setup_id"]))
                 stop_loss, take_profit, geometry_source = (
                     _resolve_research_signal_geometry(signal, bar["close"])
                 )
@@ -1008,6 +1044,19 @@ def _scenario(
                     "accepted_fills": entry_funnels[name]["accepted_fills"],
                 },
                 "no_vote_reasons": dict(rejections[name]),
+                "smc_unique_setup_funnel": (
+                    {
+                        "armed_setups": len(smc_armed_setups),
+                        "signaled_setups": len(smc_signaled_setups),
+                        "simulated_filled_setups": len(smc_filled_setups),
+                        "rejection_reasons_by_unique_setup": {
+                            reason: len(setups)
+                            for reason, setups in sorted(smc_setup_rejections.items())
+                        },
+                    }
+                    if name == "SMC"
+                    else {}
+                ),
                 "structural_gate_failures": (
                     dict(structural_gate_failures) if name == "ORBPro" else {}
                 ),

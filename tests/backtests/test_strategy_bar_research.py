@@ -894,3 +894,67 @@ def test_orb_structural_failures_are_attributed_without_changing_trade_admission
         "underlying_volume_confirmation": observations,
         "futures_vwap_slope_alignment": observations,
     }
+
+
+def test_smc_research_funnel_counts_unique_underlying_setups_not_option_checks(
+    tmp_path, monkeypatch
+):
+    from nifty_scalper_bot.backtesting.strategy_research import _scenario, load_archive
+
+    archive(tmp_path)
+    candles = tmp_path / "candles"
+    extra_ce = json.loads((candles / "CE.json").read_text())
+    extra_ce["symbol"] = "NFO:NIFTY26O0622450CE"
+    (candles / "CE_extra.json").write_text(json.dumps(extra_ce))
+
+    class Strategy:
+        name = "SMC"
+        last_no_vote_reason = "smc_awaiting_confirmation"
+
+        def __init__(self):
+            self._events = {}
+
+        def generate_signal(self, symbol, indicators, current_price, position=None):
+            side = "CE" if symbol.endswith("CE") else "PE"
+            owner = indicators["futures_symbol"]
+            key = (owner, side)
+            if key not in self._events:
+                self._events[key] = {"sweep_ts": indicators["bar_timestamp"]}
+            if indicators["history_count"] == 2:
+                sweep_ts = self._events[key]["sweep_ts"]
+                return SimpleNamespace(
+                    action="BUY",
+                    stop_loss=95,
+                    take_profit=105,
+                    metadata={
+                        "setup_id": f"smcv2:{owner}:{side}:{sweep_ts.isoformat()}"
+                    },
+                )
+            return None
+
+        @property
+        def evaluation_health(self):
+            return {"healthy": True}
+
+        def notify_entry_accepted(self, side, *, setup_id=None):
+            pass
+
+    histories, instruments, _ = load_archive(tmp_path)
+    report = _scenario(
+        histories,
+        instruments,
+        None,
+        0,
+        components={"SMC"},
+        strategy_factory=lambda engine: [Strategy()],
+    )
+    smc = report["strategies"]["SMC"]
+    funnel = smc["smc_unique_setup_funnel"]
+
+    assert smc["entry_funnel"]["signals_emitted"] == 3
+    assert smc["entry_funnel"]["accepted_fills"] == 3
+    assert funnel["armed_setups"] == 2
+    assert funnel["signaled_setups"] == 2
+    assert funnel["simulated_filled_setups"] == 2
+    assert funnel["rejection_reasons_by_unique_setup"]["smc_awaiting_confirmation"] == 2
+    assert smc["evaluations"] > funnel["armed_setups"]
