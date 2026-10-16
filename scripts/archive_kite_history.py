@@ -333,8 +333,7 @@ def historical_cache_inventory(cache_dir: Path, start: dt.date, end: dt.date) ->
                     if not math.isfinite(strike) or strike <= 0:
                         raise ValueError("historical_cache_strike_invalid")
             parsed = [
-                dt.datetime.fromisoformat(str(row[0])).astimezone(IST)
-                for row in rows
+                dt.datetime.fromisoformat(str(row[0])).astimezone(IST) for row in rows
             ]
             if captured < parsed[-1] or (
                 expiry is not None
