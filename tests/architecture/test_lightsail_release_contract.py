@@ -278,3 +278,94 @@ def test_release_health_separates_candidate_integrity_from_broker_auth() -> None
     assert 'wait_for_service "$AFTER"' in release
     assert 'service_healthy_confirmed "$BEFORE"' in release
     assert "deployed_dependency_degraded" in release
+
+
+def _market_session_release_helpers() -> str:
+    """Execute only the pure time-gate functions, never the deployment body."""
+    release = _text("deploy/lightsail_release.sh")
+    assert release.count("market_session_protected() {") == 1
+    assert release.count("auto_release_should_defer() {") == 1
+    return "market_session_protected() {" + release.split(
+        "market_session_protected() {", 1
+    )[1].split("\nexec 9>", 1)[0]
+
+
+def test_auto_release_market_window_boundary_and_failure_modes() -> None:
+    helpers = _market_session_release_helpers()
+    cases = [
+        ("1", "0844", False),
+        ("1", "0845", True),
+        ("5", "1230", True),
+        ("5", "1545", True),
+        ("5", "1546", False),
+        ("6", "1230", False),
+        ("7", "1230", False),
+        ("", "", True),
+        ("5", "2580", True),
+    ]
+    for weekday, hhmm, defer in cases:
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                helpers + '\nmarket_session_protected "$1" "$2"',
+                "fixture",
+                weekday,
+                hhmm,
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert (result.returncode == 0) is defer, (weekday, hhmm, result.stderr)
+
+
+def test_auto_release_only_and_manual_emergency_bypass() -> None:
+    helpers = _market_session_release_helpers()
+    shell = (
+        helpers
+        + """
+AUTO_MODE="$1"
+FAKE_DAY="$2"
+FAKE_CLOCK="$3"
+date() {
+  case "$1" in
+    +%u) printf '%s' "$FAKE_DAY";;
+    +%H%M) printf '%s' "$FAKE_CLOCK";;
+    *) return 1;;
+  esac
+}
+auto_release_should_defer
+"""
+    )
+    for mode, weekday, hhmm, defer in (
+        ("true", "5", "1225", True),
+        ("true", "6", "1225", False),
+        ("false", "5", "1225", False),
+    ):
+        result = subprocess.run(
+            ["bash", "-c", shell, "fixture", mode, weekday, hhmm],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert (result.returncode == 0) is defer, (mode, weekday, result.stderr)
+
+
+def test_market_window_gate_runs_before_any_checkout_or_service_mutation() -> None:
+    release = _text("deploy/lightsail_release.sh")
+    gate = release.index("if auto_release_should_defer; then")
+    assert release.index("exec 9>") < gate
+    assert gate < release.index('cd "$APP_DIR"')
+    assert gate < release.index("validate_environment")
+    assert gate < release.index("migrate_systemd_entrypoint", gate)
+    assert gate < release.index('sudo systemctl restart "$SERVICE"', gate)
+    assert "write_status deferred_market_window" in release[gate : gate + 420]
+    assert "TZ=Asia/Kolkata date +%u" in release
+    assert "TZ=Asia/Kolkata date +%H%M" in release
+    assert subprocess.run(
+        ["bash", "-n", str(ROOT / "deploy/lightsail_release.sh")],
+        capture_output=True,
+        text=True,
+        check=False,
+    ).returncode == 0
