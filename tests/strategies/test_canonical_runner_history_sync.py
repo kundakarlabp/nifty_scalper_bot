@@ -789,9 +789,9 @@ def test_recent_history_timestamp_samples_are_bounded_and_read_only() -> None:
     rows = _bars(24)
     runner = StrategyRunner.__new__(StrategyRunner)
     runner._normalize_symbol = lambda value: str(value)
-    runner._symbol_history = {symbol: [
-        SimpleNamespace(timestamp=row["timestamp"]) for row in rows
-    ]}
+    runner._symbol_history = {
+        symbol: [SimpleNamespace(timestamp=row["timestamp"]) for row in rows]
+    }
     runner._lock = threading.RLock()
 
     class _Indicator:
