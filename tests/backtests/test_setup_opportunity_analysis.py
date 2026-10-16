@@ -208,3 +208,58 @@ def test_experiment_record_rejects_train_test_overlap() -> None:
 
     with pytest.raises(ValueError, match="strictly later"):
         validate_experiment_record(record)
+
+
+def test_later_rejection_does_not_erase_prior_approved_setup() -> None:
+    accepted = _decision(
+        "2026-09-30T04:00:00Z",
+        event_name="candidate.approved",
+        reason="order_submitted",
+    )
+    accepted["meta"]["research_context"]["decision_stage"] = "order_submitted"
+    blocked = _decision(
+        "2026-09-30T04:01:00Z",
+        reason="later_option_candidate_rejected",
+    )
+    blocked["meta"]["research_context"]["decision_stage"] = "order_manager"
+
+    opportunities = canonicalize_setup_opportunities([blocked, accepted])
+    assert len(opportunities) == 1
+    opportunity = opportunities[0]
+
+    assert opportunity.decision_count == 2
+    assert opportunity.approved is True
+    assert opportunity.final_reason == "order_submitted"
+    assert opportunity.observed_stages == ("order_manager", "order_submitted")
+    assert opportunity.blocked_reasons == ("later_option_candidate_rejected",)
+
+
+def test_stage_provenance_counts_unique_setups_not_repeated_bar_votes() -> None:
+    rows = [
+        _decision("2026-09-30T04:00:00Z", reason="confirmation_missing"),
+        _decision("2026-09-30T04:00:05Z", reason="confirmation_missing"),
+        _decision(
+            "2026-09-30T04:01:00Z",
+            reason="wide_spread",
+            setup_id="orb:CE:independent",
+        ),
+    ]
+    stages = ["strategy_confirmation", "strategy_confirmation", "execution_quote"]
+    for row, stage in zip(rows, stages):
+        row["meta"]["research_context"]["decision_stage"] = stage
+
+    opportunities = canonicalize_setup_opportunities(rows)
+    assert len(opportunities) == 2
+    assert opportunities[0].decision_count == 2
+    assert opportunities[0].observed_stages == ("strategy_confirmation",)
+    assert opportunities[0].blocked_reasons == ("confirmation_missing",)
+    assert opportunities[1].observed_stages == ("execution_quote",)
+
+
+def test_unattributed_strategy_or_side_is_not_assigned_fake_setup() -> None:
+    missing_strategy = _decision("2026-09-30T04:00:00Z")
+    missing_strategy["meta"]["research_context"].pop("strategy")
+    missing_side = _decision("2026-09-30T04:01:00Z")
+    missing_side["direction"] = ""
+    missing_side["meta"]["research_context"].pop("contract_side")
+    assert canonicalize_setup_opportunities([missing_strategy, missing_side]) == ()
