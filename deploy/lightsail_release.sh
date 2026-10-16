@@ -18,6 +18,7 @@ STATUS_FILE="${BOT_UPDATE_STATUS_FILE:-$APP_DIR/data/auto_update_status.json}"
 VENV="${BOT_VENV:-$APP_DIR/.venv}"
 STREAMLIT_VENV="${BOT_STREAMLIT_VENV:-$APP_DIR/.streamlit-venv}"
 LOCK_FILE="${BOT_DEPLOY_LOCK_FILE:-/tmp/niftybot-deploy.lock}"
+RELEASE_TEST_TIMEOUT_SECONDS="${BOT_RELEASE_TEST_TIMEOUT_SECONDS:-300}"
 FORCE_RESTART=false
 AUTO_MODE=false
 SYSTEMD_ENTRYPOINT_MIGRATED=false
@@ -245,40 +246,86 @@ PY_MIGRATE
 migrate_autodeploy_entrypoint() {
   local unit_path="/etc/systemd/system/${AUTODEPLOY_SERVICE}.service"
   local canonical_exec="ExecStart=/usr/bin/env bash ${APP_DIR}/deploy/lightsail_release.sh --auto"
+  local canonical_timeout="TimeoutStartSec=600"
+  local canonical_kill_mode="KillMode=control-group"
   if [ ! -f "$unit_path" ]; then
     AUTODEPLOY_ENTRYPOINT_MIGRATED=false
     return 0
   fi
-  if grep -Fqx "$canonical_exec" "$unit_path" 2>/dev/null; then
+  if grep -Fqx "$canonical_exec" "$unit_path" 2>/dev/null \
+    && grep -Fqx "$canonical_timeout" "$unit_path" 2>/dev/null \
+    && grep -Fqx "$canonical_kill_mode" "$unit_path" 2>/dev/null; then
     AUTODEPLOY_ENTRYPOINT_MIGRATED=false
     return 0
   fi
-  if ! grep -q '^ExecStart=' "$unit_path" 2>/dev/null; then
-    log "WARNING: $unit_path has no ExecStart; skipping auto-deploy entrypoint migration"
+  if ! grep -q '^\[Service\]$' "$unit_path" 2>/dev/null \
+    || ! grep -q '^ExecStart=' "$unit_path" 2>/dev/null; then
+    log "WARNING: $unit_path lacks a canonical Service/ExecStart block; skipping auto-deploy migration"
     AUTODEPLOY_ENTRYPOINT_MIGRATED=false
     return 0
   fi
-  sudo python3 - "$unit_path" "$canonical_exec" <<'PY_MIGRATE'
+  sudo python3 - "$unit_path" "$canonical_exec" "$canonical_timeout" "$canonical_kill_mode" <<'PY_MIGRATE'
 import sys
 from pathlib import Path
+
 unit = Path(sys.argv[1])
-canonical = sys.argv[2]
-text = unit.read_text(encoding="utf-8")
-lines = text.splitlines()
+canonical_exec = sys.argv[2]
+canonical_timeout = sys.argv[3]
+canonical_kill_mode = sys.argv[4]
+lines = unit.read_text(encoding="utf-8").splitlines()
 out = []
+service = False
+seen_exec = False
+seen_timeout = False
+seen_kill_mode = False
 changed = False
-for line in lines:
-    if line.startswith("ExecStart=") and not changed:
-        out.append(canonical)
+
+def append_missing_service_fields():
+    global changed
+    if not seen_timeout:
+        out.append(canonical_timeout)
         changed = True
-    else:
+    if not seen_kill_mode:
+        out.append(canonical_kill_mode)
+        changed = True
+
+for line in lines:
+    if line.startswith("[") and line.endswith("]"):
+        if service:
+            append_missing_service_fields()
+        service = line == "[Service]"
         out.append(line)
+        continue
+    if service and line.startswith("ExecStart="):
+        if line != canonical_exec:
+            changed = True
+        out.append(canonical_exec)
+        seen_exec = True
+        continue
+    if service and line.startswith("TimeoutStartSec="):
+        if line != canonical_timeout:
+            changed = True
+        out.append(canonical_timeout)
+        seen_timeout = True
+        continue
+    if service and line.startswith("KillMode="):
+        if line != canonical_kill_mode:
+            changed = True
+        out.append(canonical_kill_mode)
+        seen_kill_mode = True
+        continue
+    out.append(line)
+
+if service:
+    append_missing_service_fields()
+if not seen_exec:
+    raise SystemExit("autodeploy unit missing ExecStart")
 if changed:
     unit.write_text("\n".join(out).rstrip() + "\n", encoding="utf-8")
 PY_MIGRATE
   sudo systemctl daemon-reload
   AUTODEPLOY_ENTRYPOINT_MIGRATED=true
-  log "migrated $AUTODEPLOY_SERVICE ExecStart to bash wrapper"
+  log "migrated $AUTODEPLOY_SERVICE to bounded bash release runner"
 }
 
 restart_admin() {
@@ -322,6 +369,37 @@ poll_research_request() {
     200|202|409) return 0 ;;
     *) log "WARNING: research manifest poll unavailable (http=${code:-none}); trading deployment unaffected" ;;
   esac
+}
+
+github_ci_state() {
+  local sha="$1" payload
+  payload="$(curl -fsS --max-time 6     -H 'Accept: application/vnd.github+json'     "https://api.github.com/repos/kundakarlabp/nifty_scalper_bot/actions/runs?head_sha=${sha}&event=push&per_page=20"     2>/dev/null || true)"
+  if [ -z "$payload" ]; then
+    printf '%s' unavailable
+    return 0
+  fi
+  printf '%s' "$payload" | "$VENV/bin/python" -c '
+import json
+import sys
+
+try:
+    payload = json.load(sys.stdin)
+except (ValueError, TypeError):
+    print("unavailable")
+    raise SystemExit(0)
+
+runs = [run for run in payload.get("workflow_runs", []) if run.get("name") == "CI"]
+if not runs:
+    print("pending")
+    raise SystemExit(0)
+latest = max(runs, key=lambda run: int(run.get("run_number") or 0))
+if latest.get("status") != "completed":
+    print("pending")
+elif latest.get("conclusion") == "success":
+    print("success")
+else:
+    print("failed")
+'
 }
 
 exec 9>"$LOCK_FILE"
@@ -375,6 +453,28 @@ if [ "$BEFORE" = "$AFTER" ] && [ "$FORCE_RESTART" = false ]; then
   fi
 fi
 
+if [ "$BEFORE" != "$AFTER" ]; then
+  ci_state="$(github_ci_state "$AFTER")"
+  case "$ci_state" in
+    success) ;;
+    pending)
+      write_status awaiting_ci "waiting for GitHub CI on ${AFTER:0:7}"
+      log "GitHub CI still running for ${AFTER:0:7}; deployment deferred"
+      exit 0
+      ;;
+    failed)
+      write_status ci_failed "GitHub CI failed for ${AFTER:0:7}; current production preserved"
+      log "GitHub CI failed for ${AFTER:0:7}; deployment blocked"
+      exit 0
+      ;;
+    *)
+      write_status ci_unavailable "GitHub CI state unavailable for ${AFTER:0:7}; current production preserved"
+      log "GitHub CI state unavailable for ${AFTER:0:7}; deployment deferred"
+      exit 0
+      ;;
+  esac
+fi
+
 CANDIDATE="/tmp/niftybot-candidate-${AFTER:0:12}"
 cleanup() { git worktree remove --force "$CANDIDATE" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
@@ -394,49 +494,43 @@ PYTHONPATH="$CANDIDATE/src" "$VENV/bin/python" -m compileall -q "$CANDIDATE/src"
 }
 
 TARGETED_TESTS=(
-  tests/architecture/test_file_header_standard.py
-  tests/architecture/test_canonical_bo_ownership.py
   tests/architecture/test_lightsail_release_contract.py
   tests/ops/test_research_jobs.py
-  tests/scripts/test_archive_kite_history.py
-  tests/backtests/test_strategy_bar_research.py
-  tests/infra/test_supabase_trade_replication.py
-  tests/infra/test_daily_log_archive.py
-  tests/infra/test_scheduled_tasks.py
-  tests/utils/test_market_hours.py
-  tests/core/test_eod_flatten_schedule.py
-  tests/strategies/test_candidate_risk_affordability.py
   tests/test_execution_path_contract.py
   tests/execution/test_runtime_order_facade.py
   tests/execution/test_runtime_bracket_facade.py
   tests/execution/test_bracket_persistence_policy.py
   tests/integration/test_canonical_bo_end_to_end.py
-  tests/dashboard/test_event_buffer_truth.py
-  tests/dashboard/test_log_export.py
-  tests/data/test_datahub_bounded_persistence.py
-  tests/data/test_mdm_tick_coalescing.py
-  tests/test_mdm_event_loop_consumer.py
-  tests/core/test_selected_option_exec_min_regression.py
   tests/dashboard/test_superlite_admin_core.py
-  tests/execution/test_external_close_reconcile.py
 )
 EXISTING_TESTS=()
 for test_path in "${TARGETED_TESTS[@]}"; do
   [ -f "$CANDIDATE/$test_path" ] && EXISTING_TESTS+=("$CANDIDATE/$test_path")
 done
 if [ "${#EXISTING_TESTS[@]}" -gt 0 ]; then
-  env \
-    EXECUTION_MODE=SHADOW \
-    ENABLE_LIVE=false \
-    ENABLE_LIVE_TRADING=false \
-    ORDERS__ENABLE_LIVE=false \
-    PAPER_MODE=true \
-    SHADOW_MODE=true \
-    DATA_DIR="$CANDIDATE/.validation-data" \
-    PYTHONPATH="$CANDIDATE/src:$CANDIDATE" \
-    "$VENV/bin/python" -m pytest -q "${EXISTING_TESTS[@]}" || {
-    write_status validation_failed "focused tests failed for ${AFTER:0:7}"; exit 1;
-  }
+  if ! [[ "$RELEASE_TEST_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
+    RELEASE_TEST_TIMEOUT_SECONDS=300
+  fi
+  test_rc=0
+  timeout --signal=TERM --kill-after=30s "$RELEASE_TEST_TIMEOUT_SECONDS" \
+    env \
+      EXECUTION_MODE=SHADOW \
+      ENABLE_LIVE=false \
+      ENABLE_LIVE_TRADING=false \
+      ORDERS__ENABLE_LIVE=false \
+      PAPER_MODE=true \
+      SHADOW_MODE=true \
+      DATA_DIR="$CANDIDATE/.validation-data" \
+      PYTHONPATH="$CANDIDATE/src:$CANDIDATE" \
+      "$VENV/bin/python" -m pytest -q "${EXISTING_TESTS[@]}" || test_rc=$?
+  if [ "$test_rc" -ne 0 ]; then
+    if [ "$test_rc" -eq 124 ] || [ "$test_rc" -eq 137 ]; then
+      write_status validation_timeout "host smoke tests exceeded ${RELEASE_TEST_TIMEOUT_SECONDS}s for ${AFTER:0:7}"
+    else
+      write_status validation_failed "host smoke tests failed for ${AFTER:0:7}"
+    fi
+    exit 1
+  fi
 fi
 
 mkdir -p "$CONFIG_DIR/backups"
