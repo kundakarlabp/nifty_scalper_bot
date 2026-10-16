@@ -342,6 +342,36 @@ def main(argv: list[str] | None = None) -> int:
                 else 0.0
             ),
             "ready_for_forward_labelling": bool(setup_opportunities),
+            # Counts are unique setups, not option/bar evaluations. Only
+            # stages explicitly persisted in decision provenance are reported.
+            "observed_stage_unique_setups": {
+                stage: sum(stage in item.observed_stages for item in setup_opportunities)
+                for stage in sorted({
+                    stage
+                    for item in setup_opportunities
+                    for stage in item.observed_stages
+                })
+            },
+            "blocked_reason_unique_setups": {
+                reason: sum(
+                    reason in item.blocked_reasons for item in setup_opportunities
+                )
+                for reason in sorted({
+                    reason
+                    for item in setup_opportunities
+                    for reason in item.blocked_reasons
+                })
+            },
+            "stage_provenance_coverage_fraction": (
+                round(
+                    sum(bool(item.observed_stages) for item in setup_opportunities)
+                    / len(setup_opportunities),
+                    4,
+                )
+                if setup_opportunities
+                else 0.0
+            ),
+            "broker_acceptance_inferred": False,
         }
         outcome_labels = (
             load_opportunity_outcomes(args.opportunity_outcomes_json)
