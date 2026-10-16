@@ -690,28 +690,54 @@ def _history_tail_diagnostics(ctx, symbol, *, limit=12):  # noqa: ANN001
 
     missing_vs_mdm = {}
     extra_vs_mdm = {}
+    outside_shared_window = {}
+    latest_minute_offset = {}
+    shared_window_exists = None
     if all_present:
-        # Restrict comparisons to the shared sample window; earlier runner
-        # retention can legitimately include bars outside MDM's bounded view.
+        # UTC minute identities are validated by _bar_minute_identity above.
+        # The signed offset makes latest-bar divergence explicit even when all
+        # in-window comparisons are empty after intersection clipping.
+        from datetime import datetime
+
+        mdm_latest = datetime.strptime(max(timestamps["mdm"]), "%Y-%m-%dT%H:%MZ")
+        for source in ("runner", "indicator"):
+            source_latest = datetime.strptime(
+                max(timestamps[source]), "%Y-%m-%dT%H:%MZ"
+            )
+            latest_minute_offset[source] = int(
+                (source_latest - mdm_latest).total_seconds() / 60
+            )
+
         overlap_start = max(min(values) for values in timestamps.values())
         overlap_end = min(max(values) for values in timestamps.values())
-        shared_sets = {}
-        for source, values in timestamps.items():
-            shared_sets[source] = {
-                minute for minute in values if overlap_start <= minute <= overlap_end
-            }
-        for source in ("runner", "indicator"):
-            missing_vs_mdm[source] = sorted(shared_sets["mdm"] - shared_sets[source])[
-                :size
-            ]
-            extra_vs_mdm[source] = sorted(shared_sets[source] - shared_sets["mdm"])[
-                :size
-            ]
+        shared_window_exists = overlap_start <= overlap_end
+        if shared_window_exists:
+            shared_sets = {}
+            for source, values in timestamps.items():
+                shared_sets[source] = {
+                    minute
+                    for minute in values
+                    if overlap_start <= minute <= overlap_end
+                }
+                outside_shared_window[source] = {
+                    "older": sorted({v for v in values if v < overlap_start})[:size],
+                    "newer": sorted({v for v in values if v > overlap_end})[:size],
+                }
+            for source in ("runner", "indicator"):
+                missing_vs_mdm[source] = sorted(
+                    shared_sets["mdm"] - shared_sets[source]
+                )[:size]
+                extra_vs_mdm[source] = sorted(shared_sets[source] - shared_sets["mdm"])[
+                    :size
+                ]
 
     return {
         "diagnostic_only": True,
         "classification": classification,
         "latest_minute_agreement": latest_minute_agreement,
+        "shared_window_exists": shared_window_exists,
+        "latest_minute_offset_vs_mdm_minutes": latest_minute_offset,
+        "outside_shared_window_by_source": outside_shared_window,
         "matching_tail_suffix_bars": matching_tail_suffix_bars,
         "sample_window_boundary_difference": sample_window_boundary_difference,
         "duplicate_minute_ids_by_source": duplicate_minutes,

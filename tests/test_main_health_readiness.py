@@ -252,6 +252,80 @@ def test_history_identity_diagnostic_is_only_sampled_when_counts_differ():
     assert result["execution_history_ready"] is True
 
 
+def test_shifted_candle_tail_exposes_outside_overlap_and_minute_lag():
+    mdm_minutes = [f"2026-10-16T10:{m:02d}:00Z" for m in range(12)]
+    later_minutes = [f"2026-10-16T10:{m:02d}:00Z" for m in range(1, 13)]
+
+    class MDM:
+        def get_ohlc_bars(self, _symbol, *, limit=12):
+            return [{"timestamp": ts} for ts in mdm_minutes][-limit:]
+
+    class Runner:
+        def history_tail_timestamps(self, _symbol, *, limit=12):
+            return {
+                "runner": later_minutes[-limit:],
+                "indicator": later_minutes[-limit:],
+            }
+
+    result = main._history_tail_diagnostics(
+        _ctx(market_data_manager=MDM(), strategy_runner=Runner()),
+        "NFO:NIFTY26O1923150PE",
+    )
+    assert result["classification"] == "recent_tail_divergence"
+    assert result["shared_window_exists"] is True
+    assert result["latest_minute_offset_vs_mdm_minutes"] == {
+        "runner": 1,
+        "indicator": 1,
+    }
+    assert result["outside_shared_window_by_source"]["mdm"]["older"] == [
+        "2026-10-16T10:00Z"
+    ]
+    assert result["outside_shared_window_by_source"]["runner"]["newer"] == [
+        "2026-10-16T10:12Z"
+    ]
+    assert result["outside_shared_window_by_source"]["indicator"]["newer"] == [
+        "2026-10-16T10:12Z"
+    ]
+    assert result["missing_vs_mdm_by_source"]["runner"] == []
+    assert result["extra_vs_mdm_by_source"]["runner"] == []
+    assert result["shared_recent_minutes"] == 11
+    assert result["diagnostic_only"] is True
+
+
+def test_nonoverlapping_candle_tails_flag_comparison_unavailable():
+    class MDM:
+        def get_ohlc_bars(self, _symbol, *, limit=12):
+            return [{"timestamp": "2026-10-16T10:00:00Z"}]
+
+    class Runner:
+        def history_tail_timestamps(self, _symbol, *, limit=12):
+            return {
+                "runner": ["2026-10-16T10:16:00Z"],
+                "indicator": ["2026-10-16T10:16:00Z"],
+            }
+
+    result = main._history_tail_diagnostics(
+        _ctx(market_data_manager=MDM(), strategy_runner=Runner()),
+        "NFO:NIFTY26O1923150CE",
+    )
+    assert result["shared_window_exists"] is False
+    assert result["latest_minute_offset_vs_mdm_minutes"] == {
+        "runner": 16,
+        "indicator": 16,
+    }
+    assert result["outside_shared_window_by_source"] == {}
+    assert result["missing_vs_mdm_by_source"] == {}
+    assert result["extra_vs_mdm_by_source"] == {}
+    assert result["diagnostic_only"] is True
+
+
+def test_diagnostic_unavailable_provider_has_no_false_lag():
+    result = main._history_tail_diagnostics(_ctx(), "NFO:NIFTY26O1923150CE")
+    assert result["latest_minute_offset_vs_mdm_minutes"] == {}
+    assert result["shared_window_exists"] is None
+    assert result["outside_shared_window_by_source"] == {}
+
+
 def test_recent_candle_identity_handles_missing_providers_without_crashing():
     result = main._history_tail_diagnostics(_ctx(), "NFO:NIFTY26O1923150PE")
     assert result["classification"] == "identities_unavailable"
