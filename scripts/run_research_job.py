@@ -165,6 +165,14 @@ def run_worker(request: dict[str, Any], env_file: Path) -> dict[str, Any]:
         status["historical_synchronized_contract_minutes"] = retained[
             "synchronized_contract_minutes"
         ]
+        status["retained_cache_coverage"] = {
+            "scope": "verified_retained_pairs_not_full_historical_universe",
+            "staged_session_dates": retained["staged_session_dates"],
+            "staging_rejections": retained["staging_rejections"],
+            "valid_cached_files": retained["valid_cached_files"],
+            "corrupt_or_untrusted_files": retained["corrupt_or_untrusted_files"],
+            "promotion_eligible": False,
+        }
         status["stage"] = "ledger_analysis"
         write_json(directory / "status.json", status)
         write_json(ROOT / "data/research/latest.json", status)
@@ -194,7 +202,13 @@ def run_worker(request: dict[str, Any], env_file: Path) -> dict[str, Any]:
     # pairs only. It does not reconstruct the unobserved historical ATM basket
     # or execute orders; outcomes cannot promote live strategy parameters.
     status["retained_session_research"] = []
-    for session_day in retained["staged_session_dates"][:3]:
+    # Bound CPU and output size while evaluating all five sessions observed
+    # in the first retained-history coverage run.
+    max_retained_sessions = 5
+    status["retained_session_research_deferred"] = max(
+        0, len(retained["staged_session_dates"]) - max_retained_sessions
+    )
+    for session_day in retained["staged_session_dates"][:max_retained_sessions]:
         session_report = run_archived_research(
             directory / "retained_sessions" / session_day
         )
@@ -210,11 +224,33 @@ def run_worker(request: dict[str, Any], env_file: Path) -> dict[str, Any]:
             },
         )
         status["retained_session_research"].append(
-            {"session_date": session_day, "report": filename}
+            {
+                "session_date": session_day,
+                "report": filename,
+                "promotion_eligible": False,
+                "scenarios": [
+                    {
+                        "slippage_bps_per_side": scenario["slippage_bps_per_side"],
+                        "strategies": {
+                            name: {
+                                "signals_emitted": result["entry_funnel"][
+                                    "signals_emitted"
+                                ],
+                                "resolved_trades": result["metrics"]["trade_count"],
+                                "unresolved_trades": result["data_quality"][
+                                    "unresolved_exit_count"
+                                ],
+                                "modeled_net_pnl": result["metrics"]["net_pnl"],
+                            }
+                            for name, result in scenario["strategies"].items()
+                        },
+                    }
+                    for scenario in session_report["scenarios"]
+                ],
+            }
         )
-    status["retained_session_research_deferred"] = max(
-        0, len(retained["staged_session_dates"]) - 3
-    )
+        write_json(directory / "status.json", status)
+        write_json(ROOT / "data/research/latest.json", status)
     status["stage"] = "orb_comparison"
     write_json(directory / "status.json", status)
     write_json(ROOT / "data/research/latest.json", status)
