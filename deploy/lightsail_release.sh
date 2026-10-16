@@ -324,8 +324,35 @@ poll_research_request() {
   esac
 }
 
+
+# Routine updates must never restart live trading or protective-order management
+# during the market session. Use an explicit manual release for emergencies.
+# The buffer covers pre-open preparation and post-close exit reconciliation.
+market_session_protected() {
+  local weekday="$1" hhmm="$2"
+  # An unreadable clock fails closed for automatic releases.
+  if ! [[ "$weekday" =~ ^[1-7]$ && "$hhmm" =~ ^([01][0-9]|2[0-3])[0-5][0-9]$ ]]; then
+    return 0
+  fi
+  [[ "$weekday" =~ ^[1-5]$ && "$hhmm" > "0844" && "$hhmm" < "1546" ]]
+}
+
+auto_release_should_defer() {
+  [ "$AUTO_MODE" = true ] || return 1
+  local weekday hhmm
+  weekday="$(TZ=Asia/Kolkata date +%u)" || return 0
+  hhmm="$(TZ=Asia/Kolkata date +%H%M)" || return 0
+  market_session_protected "$weekday" "$hhmm"
+}
+
 exec 9>"$LOCK_FILE"
 if ! flock -n 9; then log "Another deployment is already running"; exit 0; fi
+
+if auto_release_should_defer; then
+  write_status deferred_market_window "Automatic release deferred during weekday 08:45-15:45 IST market protection; running revision preserved"
+  log "Market-session protection: automatic release deferred; manual emergency release remains available"
+  exit 0
+fi
 
 cd "$APP_DIR"
 chmod +x "$APP_DIR/deploy/lightsail_release.sh" 2>/dev/null || true
