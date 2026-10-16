@@ -995,8 +995,8 @@ def test_smc_separates_futures_setup_from_premium_structure_evidence(
     assert signal.metadata["structure_confirmation_domain"] == (
         expected_structure_domain
     )
-    assert signal.metadata["underlying_displacement_domain"] == "nifty_futures"
-    assert signal.metadata["underlying_structure_source"] == FUTURES
+    assert signal.metadata["source_domain"] == "underlying_price"
+    assert signal.metadata["structure_symbol"] == FUTURES
     assert signal.metadata["confirmation_owner"] == "StrategyManager"
 
 
