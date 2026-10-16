@@ -285,9 +285,10 @@ def _market_session_release_helpers() -> str:
     release = _text("deploy/lightsail_release.sh")
     assert release.count("market_session_protected() {") == 1
     assert release.count("auto_release_should_defer() {") == 1
-    return "market_session_protected() {" + release.split(
-        "market_session_protected() {", 1
-    )[1].split("\nexec 9>", 1)[0]
+    return (
+        "market_session_protected() {"
+        + release.split("market_session_protected() {", 1)[1].split("\nexec 9>", 1)[0]
+    )
 
 
 def test_auto_release_market_window_boundary_and_failure_modes() -> None:
@@ -322,9 +323,7 @@ def test_auto_release_market_window_boundary_and_failure_modes() -> None:
 
 def test_auto_release_only_and_manual_emergency_bypass() -> None:
     helpers = _market_session_release_helpers()
-    shell = (
-        helpers
-        + """
+    shell = helpers + """
 AUTO_MODE="$1"
 FAKE_DAY="$2"
 FAKE_CLOCK="$3"
@@ -337,7 +336,6 @@ date() {
 }
 auto_release_should_defer
 """
-    )
     for mode, weekday, hhmm, defer in (
         ("true", "5", "1225", True),
         ("true", "6", "1225", False),
@@ -363,9 +361,12 @@ def test_market_window_gate_runs_before_any_checkout_or_service_mutation() -> No
     assert "write_status deferred_market_window" in release[gate : gate + 420]
     assert "TZ=Asia/Kolkata date +%u" in release
     assert "TZ=Asia/Kolkata date +%H%M" in release
-    assert subprocess.run(
-        ["bash", "-n", str(ROOT / "deploy/lightsail_release.sh")],
-        capture_output=True,
-        text=True,
-        check=False,
-    ).returncode == 0
+    assert (
+        subprocess.run(
+            ["bash", "-n", str(ROOT / "deploy/lightsail_release.sh")],
+            capture_output=True,
+            text=True,
+            check=False,
+        ).returncode
+        == 0
+    )
