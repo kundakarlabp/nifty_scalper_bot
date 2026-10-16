@@ -181,6 +181,102 @@ def test_smc_is_not_confirmed_by_short_orderflow_context_alone(
     assert decision.blocked_at == "context_contract"
 
 
+def test_smc_confirmation_wait_tracks_one_nonterminal_setup_across_retries(
+    monkeypatch,
+) -> None:
+    """Repeated manager vetoes must not multiply distinct SMC opportunities."""
+    from nifty_scalper_bot.strategies import setup_lifecycle
+
+    registry = setup_lifecycle.SetupLifecycleRegistry()
+    monkeypatch.setattr(setup_lifecycle, "SETUP_LIFECYCLE", registry)
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    manager = _manager()
+    smc_signal, smc_evidence = _signal_evidence("SMC")
+    smc_signal.metadata["setup_id"] = "smcv2:futures:CE:2026-10-16T09:31"
+    smc_evidence.metadata["setup_id"] = smc_signal.metadata["setup_id"]
+    setup_lifecycle.transition_setup(
+        setup_lifecycle.SetupStage.TRIGGER_QUALIFIED,
+        strategy="SMC",
+        setup_id=smc_signal.metadata["setup_id"],
+        symbol=_CE,
+        side="CE",
+        reason="structural_setup_valid",
+    )
+    context = _signal_evidence("OrderFlow", role="context")
+
+    for _ in range(3):
+        result = manager._combine_strategy_votes(
+            symbol=_CE,
+            signals=[(smc_signal, smc_evidence), context],
+            indicators=_live_indicators("CE"),
+        )
+        assert result is None
+
+    snapshot = registry.snapshot()
+    assert snapshot["tracked_count"] == 1
+    assert snapshot["active_count"] == 1
+    record = snapshot["active"][0]
+    assert record["setup_id"] == smc_signal.metadata["setup_id"]
+    assert record["stage"] == "TRIGGER_QUALIFIED"
+    assert record["reason"] == "smc_independent_confirmation_missing"
+    assert record["transitions"] == 2
+
+    approved = manager._combine_strategy_votes(
+        symbol=_CE,
+        signals=[(smc_signal, smc_evidence), _signal_evidence("ORBPro")],
+        indicators=_live_indicators("CE"),
+    )
+    assert approved is not None
+    snapshot = registry.snapshot()
+    assert snapshot["tracked_count"] == 1
+    assert snapshot["active"][0]["stage"] == "MANAGER_QUALIFIED"
+    assert snapshot["active"][0]["transitions"] == 3
+
+
+def test_smc_capacity_retry_confirmation_wait_is_tracked_without_new_approval(
+    monkeypatch,
+) -> None:
+    from nifty_scalper_bot.strategies import setup_lifecycle
+
+    registry = setup_lifecycle.SetupLifecycleRegistry()
+    monkeypatch.setattr(setup_lifecycle, "SETUP_LIFECYCLE", registry)
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    manager = _manager()
+    smc_signal, evidence = _signal_evidence("SMC")
+    smc_signal.metadata["setup_id"] = "smcv2:futures:CE:2026-10-16T09:32"
+    smc_signal.metadata["capacity_rejection_retry"] = True
+    evidence.metadata.update(smc_signal.metadata)
+
+    result = manager._combine_strategy_votes(
+        symbol=_CE,
+        signals=[(smc_signal, evidence), _signal_evidence("OrderFlow", role="context")],
+        indicators=_live_indicators("CE"),
+    )
+    assert result is None
+    active = registry.snapshot()["active"]
+    assert len(active) == 1
+    assert active[0]["reason"] == "capacity_retry_independent_confirmation_missing"
+
+
+def test_smc_confirmation_wait_never_invents_missing_setup_id(monkeypatch) -> None:
+    from nifty_scalper_bot.strategies import setup_lifecycle
+
+    registry = setup_lifecycle.SetupLifecycleRegistry()
+    monkeypatch.setattr(setup_lifecycle, "SETUP_LIFECYCLE", registry)
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    manager = _manager()
+    result = manager._combine_strategy_votes(
+        symbol=_CE,
+        signals=[
+            _signal_evidence("SMC"),
+            _signal_evidence("OrderFlow", role="context"),
+        ],
+        indicators=_live_indicators("CE"),
+    )
+    assert result is None
+    assert registry.snapshot()["tracked_count"] == 0
+
+
 def test_smc_with_independent_trigger_still_approves_despite_short_orderflow(
     monkeypatch,
 ) -> None:

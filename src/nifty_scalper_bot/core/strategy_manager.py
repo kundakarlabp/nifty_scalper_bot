@@ -4317,6 +4317,28 @@ class StrategyManager(_BaseStrategyManager):
             and bool((evidence.metadata or {}).get("effective_context_alignment"))
         ]
 
+        def _observe_smc_confirmation_wait(reason: str) -> None:
+            # Keep the already-qualified trigger's lifecycle stage. A move
+            # back to CONFIRMING would be ignored by the monotonic registry.
+            # This is observability only: no additional vote or admission.
+            for candidate_signal, evidence in trigger_votes:
+                if str(evidence.strategy or "").strip().upper() != "SMC":
+                    continue
+                metadata = dict(candidate_signal.metadata or {})
+                setup_id = metadata.get("setup_id") or (
+                    evidence.metadata or {}
+                ).get("setup_id")
+                if not setup_id:
+                    continue
+                transition_setup(
+                    SetupStage.TRIGGER_QUALIFIED,
+                    strategy="SMC",
+                    setup_id=setup_id,
+                    symbol=candidate_signal.symbol,
+                    side=side,
+                    reason=reason,
+                )
+
         independent_trigger_confirmation, confirming_trigger_strategies = (
             independent_same_side_confirmation(trigger_votes)
         )
@@ -4336,6 +4358,7 @@ class StrategyManager(_BaseStrategyManager):
                 trigger_vote_count=len(trigger_votes),
                 context_vote_count=len(context_votes),
             )
+            _observe_smc_confirmation_wait("capacity_retry_independent_confirmation_missing")
             return None
         # A one-second OrderFlow/OFI vote is context, not independent SMC
         # entry confirmation. Keep OrderFlow's adverse-context veto above,
@@ -4360,6 +4383,7 @@ class StrategyManager(_BaseStrategyManager):
                 trigger_vote_count=len(trigger_votes),
                 context_vote_count=len(context_votes),
             )
+            _observe_smc_confirmation_wait("smc_independent_confirmation_missing")
             return None
         if not independent_trigger_confirmation and not same_side_context:
             context_diagnostics = [
@@ -4430,6 +4454,7 @@ class StrategyManager(_BaseStrategyManager):
                 trigger_vote_count=len(trigger_votes),
                 context_vote_count=len(context_votes),
             )
+            _observe_smc_confirmation_wait("independent_confirmation_missing")
             return None
 
         primary_signal, primary_evidence = trigger_votes[0]
