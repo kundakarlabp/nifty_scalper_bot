@@ -13926,11 +13926,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                                         atm_strike=commit_atm_strike,
                                     )
                                 )
-                                if (
-                                    selection_changed
-                                    and committed_ce
-                                    and committed_pe
-                                ):
+                                if selection_changed and committed_ce and committed_pe:
                                     # Telemetry-only: abandoned contracts must
                                     # not leave stale approved setups. Execution
                                     # ownership and admission remain unchanged.
