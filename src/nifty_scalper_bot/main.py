@@ -591,11 +591,12 @@ def _bar_minute_identity(row):  # noqa: ANN001
     """Canonical UTC minute key for observational candle comparison."""
     from datetime import datetime, timezone
 
-    raw = (
-        row.get("timestamp") or row.get("start") or row.get("date")
-        if isinstance(row, dict)
-        else getattr(row, "timestamp", row)
-    )
+    if isinstance(row, (datetime, str, int, float)):
+        raw = row
+    elif isinstance(row, dict):
+        raw = row.get("timestamp") or row.get("start") or row.get("date")
+    else:
+        raw = getattr(row, "timestamp", None)
     try:
         if isinstance(raw, datetime):
             stamp = raw
