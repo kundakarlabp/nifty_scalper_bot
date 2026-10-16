@@ -187,6 +187,67 @@ def test_runner_terminalizes_setup_after_broker_acceptance() -> None:
     assert "SETUP_LIFECYCLE_BROKER_ACCEPTED_TELEMETRY_FAILED" in accepted_segment
 
 
+
+def test_repeated_stage_observations_do_not_inflate_transition_metrics(
+    monkeypatch,
+) -> None:
+    from nifty_scalper_bot.strategies import setup_lifecycle as lifecycle
+
+    clock = iter([1000.0, 1010.0, 1020.0, 1030.0])
+    monkeypatch.setattr(lifecycle.time, "time", lambda: next(clock))
+    registry = SetupLifecycleRegistry(limit=128)
+    kwargs = {
+        "strategy": "SMC",
+        "setup_id": "smcv2:stable:2026-10-16T07:44:00+00:00",
+        "symbol": "NFO:NIFTY26O1923150CE",
+        "side": "CE",
+    }
+    first = registry.transition(
+        SetupStage.TRIGGER_QUALIFIED, reason="reclaim_confirmed", **kwargs
+    )
+    changed_reason = registry.transition(
+        SetupStage.TRIGGER_QUALIFIED, reason="manager_confirmation_pending", **kwargs
+    )
+    repeated = registry.transition(
+        SetupStage.TRIGGER_QUALIFIED, reason="manager_confirmation_pending", **kwargs
+    )
+    assert first is changed_reason is repeated
+    assert repeated.transitions == 1
+    assert repeated.reason == "manager_confirmation_pending"
+    assert repeated.updated_ts == 1000.0
+    assert repeated.last_observed_ts == 1020.0
+
+    snapshot = registry.snapshot()
+    assert snapshot["active_count"] == 1
+    assert snapshot["transition_counts"]["TRIGGER_QUALIFIED"] == 1
+    assert snapshot["last_transition_ts"]["TRIGGER_QUALIFIED"] == 1000.0
+    assert snapshot["last_transition_age_sec"]["TRIGGER_QUALIFIED"] == 30.0
+    assert snapshot["active"][0]["last_observed_ts"] == 1020.0
+
+
+def test_repeated_stage_observations_preserve_terminal_transition() -> None:
+    registry = SetupLifecycleRegistry()
+    kwargs = {
+        "strategy": "SMC",
+        "setup_id": "smcv2:terminal",
+        "symbol": "NFO:NIFTY26O1923150CE",
+        "side": "CE",
+    }
+    registry.transition(SetupStage.TRIGGER_QUALIFIED, reason="a", **kwargs)
+    registry.transition(SetupStage.TRIGGER_QUALIFIED, reason="b", **kwargs)
+    registry.transition(SetupStage.MANAGER_QUALIFIED, reason="ok", **kwargs)
+    terminal = registry.transition(SetupStage.BROKER_ACCEPTED, reason="oid", **kwargs)
+    assert terminal is not None
+    assert terminal.transitions == 3
+    summary = registry.snapshot()
+    assert summary["active_count"] == 0
+    assert summary["terminal_counts"]["BROKER_ACCEPTED"] == 1
+    assert summary["transition_counts"] == {
+        "TRIGGER_QUALIFIED": 1,
+        "MANAGER_QUALIFIED": 1,
+        "BROKER_ACCEPTED": 1,
+    }
+
 def test_setup_lifecycle_exposes_exact_last_transition_age() -> None:
     registry = SetupLifecycleRegistry(limit=128)
     registry.transition(
