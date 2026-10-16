@@ -342,6 +342,18 @@ def _enrich_smc_pre_strategy(
         "bullish_reversal": bullish_reversal,
         "bearish_reversal": bearish_reversal,
         "smc_enrichment_source": "strategy_manager_pre_strategy",
+        # The manager generates option-OHLC BOS/CHOCH only when the provider
+        # did not already supply a feature. Never overwrite its provenance.
+        "smc_bos_source_domain": (
+            "prepared_indicator_unverified"
+            if indicators.get("bos_confirmed") is not None
+            else "option_premium"
+        ),
+        "smc_choch_source_domain": (
+            "prepared_indicator_unverified"
+            if indicators.get("choch_confirmed") is not None
+            else "option_premium"
+        ),
         "smc_enrichment_bars": bar_count,
         "smc_enrichment_lookahead_safe": True,
     }

@@ -940,3 +940,76 @@ def test_smc_lagged_option_cannot_use_later_futures_displacement(monkeypatch) ->
         )
         is not None
     )
+
+
+@pytest.mark.parametrize(
+    ("manager_enriched", "expected_structure_domain"),
+    [
+        (True, "option_premium"),
+        (False, "prepared_indicator_unverified"),
+    ],
+)
+def test_smc_separates_futures_setup_from_premium_structure_evidence(
+    monkeypatch, manager_enriched: bool, expected_structure_domain: str
+) -> None:
+    """Do not present option BOS as independent futures market structure."""
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    rows = _base_rows()
+    strategy = _strategy(rows)
+    rows.append(
+        _bar(
+            30,
+            open_=23988.0,
+            high=23991.0,
+            low=23974.0,
+            close=23984.0,
+            volume=2400.0,
+        )
+    )
+    sweep_indicators = _indicators(latest_bar_ts=rows[-1]["timestamp"])
+    assert strategy.generate_signal(CE, sweep_indicators, 102.0) is None
+    rows.append(
+        _bar(
+            31,
+            open_=23984.0,
+            high=23999.0,
+            low=23982.0,
+            close=23997.0,
+            volume=2100.0,
+        )
+    )
+    confirmed = _indicators(
+        latest_bar_ts=rows[-1]["timestamp"],
+        bos_confirmed=True,
+        bos_side="CE",
+    )
+    if manager_enriched:
+        confirmed["smc_enrichment_source"] = "strategy_manager_pre_strategy"
+        confirmed["smc_bos_source_domain"] = "option_premium"
+        confirmed["bos_ts_epoch"] = rows[-1]["timestamp"].timestamp()
+
+    signal = strategy.generate_signal(CE, confirmed, 103.0)
+
+    assert signal is not None
+    assert signal.metadata["structure_confirmed"] is True
+    assert signal.metadata["structure_confirmation_domain"] == (
+        expected_structure_domain
+    )
+    assert signal.metadata["source_domain"] == "underlying_price"
+    assert signal.metadata["structure_symbol"] == FUTURES
+    assert signal.metadata["confirmation_owner"] == "StrategyManager"
+
+
+def test_smc_bos_enrichment_preserves_preexisting_feature_provenance() -> None:
+    from nifty_scalper_bot.core.strategy_manager import _enrich_smc_pre_strategy
+
+    option_bars = _base_rows()
+    generated = _enrich_smc_pre_strategy(CE, {}, option_bars)
+    provided = _enrich_smc_pre_strategy(
+        CE, {"bos_confirmed": True, "choch_confirmed": True}, option_bars
+    )
+
+    assert generated["smc_bos_source_domain"] == "option_premium"
+    assert generated["smc_choch_source_domain"] == "option_premium"
+    assert provided["smc_bos_source_domain"] == "prepared_indicator_unverified"
+    assert provided["smc_choch_source_domain"] == "prepared_indicator_unverified"
