@@ -100,7 +100,6 @@ def test_health_trading_exposes_canonical_context():
     assert body["reconciliation"]["unprotected_positions"] == ["NFO:NIFTY26MAY23750CE"]
 
 
-
 def test_recent_candle_timestamp_identity_explains_runner_count_delta():
     from datetime import datetime, timedelta, timezone
 
@@ -131,22 +130,21 @@ def test_recent_candle_timestamp_identity_explains_runner_count_delta():
 
 def test_recent_candle_timestamp_divergence_does_not_change_readiness():
     symbol = "NFO:NIFTY26O1923150PE"
+
     class MDM:
         def get_ohlc_bars(self, _symbol, *, limit=None):
             return [
                 {"timestamp": "2026-10-16T07:25:00+00:00"},
                 {"timestamp": "2026-10-16T07:26:00+00:00"},
             ]
+
     class Runner:
         def history_tail_timestamps(self, _symbol, *, limit=12):
             return {
-                "runner": [
-                    "2026-10-16T07:25:00Z", "2026-10-16T07:27:00Z"
-                ],
-                "indicator": [
-                    "2026-10-16T07:25:00Z", "2026-10-16T07:26:00Z"
-                ],
+                "runner": ["2026-10-16T07:25:00Z", "2026-10-16T07:27:00Z"],
+                "indicator": ["2026-10-16T07:25:00Z", "2026-10-16T07:26:00Z"],
             }
+
     result = main._history_tail_diagnostics(
         _ctx(market_data_manager=MDM(), strategy_runner=Runner()),
         symbol,
