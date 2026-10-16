@@ -13926,6 +13926,18 @@ async def startup_sequence(ctx: BotContext) -> None:
                                         atm_strike=commit_atm_strike,
                                     )
                                 )
+                                if selection_changed and committed_ce and committed_pe:
+                                    # Telemetry-only: abandoned contracts must
+                                    # not leave stale approved setups. Execution
+                                    # ownership and admission remain unchanged.
+                                    from nifty_scalper_bot.strategies import (
+                                        setup_lifecycle as lifecycle,
+                                    )
+
+                                    registry = lifecycle.SETUP_LIFECYCLE
+                                    registry.expire_unselected_option_setups(
+                                        committed_ce, committed_pe
+                                    )
                                 for _sym in dict.fromkeys(
                                     [*add_symbols, committed_ce, committed_pe]
                                 ):

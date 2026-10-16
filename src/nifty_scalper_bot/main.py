@@ -581,6 +581,37 @@ def _signal_observability(ctx):  # noqa: ANN001
     }
 
 
+def _history_count_diagnostics(history):  # noqa: ANN001
+    """Explain historical-bar count deltas without changing readiness.
+
+    Runner retention can include a still-forming bar or distinct history range.
+    A count difference cannot establish missing candles; timestamps are needed
+    for that diagnosis. The canonical execution history floor remains unchanged.
+    """
+    required = max(1, int(history.get("required_execution_bars", 30)))
+    per_side = {}
+    for side in ("ce", "pe"):
+        counts = history.get(side, {}) or {}
+        mdm = max(0, int(counts.get("mdm", 0) or 0))
+        indicator = max(0, int(counts.get("indicator", 0) or 0))
+        runner = max(0, int(counts.get("runner", 0) or 0))
+        per_side[side] = {
+            "minimum_ready": min(mdm, indicator, runner) >= required,
+            "mdm_minus_indicator": mdm - indicator,
+            "runner_minus_indicator": runner - indicator,
+            "count_mismatch": len({mdm, indicator, runner}) != 1,
+        }
+    return {
+        "diagnostic_only": True,
+        "execution_history_ready": all(
+            part["minimum_ready"] for part in per_side.values()
+        ),
+        "count_mismatch": any(part["count_mismatch"] for part in per_side.values()),
+        "per_side": per_side,
+        "interpretation": "count_delta_requires_timestamp_identity_audit",
+    }
+
+
 def _structured_runtime_status(ctx):  # noqa: ANN001
     basket = getattr(ctx, "active_contract_basket", None) or {}
 
@@ -606,6 +637,11 @@ def _structured_runtime_status(ctx):  # noqa: ANN001
     mdm = getattr(ctx, "market_data_manager", None)
     stats_fn = getattr(mdm, "get_tick_pressure_stats", None)
     tick_pressure = stats_fn() if callable(stats_fn) else {}
+    history = {
+        "required_execution_bars": required,
+        "ce": _symbol_bar_counts(ctx, selected_ce),
+        "pe": _symbol_bar_counts(ctx, selected_pe),
+    }
     broker_status = _broker_session_status(ctx)
     auth_state = {
         "order_verified": "authenticated",
@@ -616,11 +652,8 @@ def _structured_runtime_status(ctx):  # noqa: ANN001
     }.get(str(broker_status["broker_session_state"]), "unknown")
     return {
         "selected": selected,
-        "history": {
-            "required_execution_bars": required,
-            "ce": _symbol_bar_counts(ctx, selected_ce),
-            "pe": _symbol_bar_counts(ctx, selected_pe),
-        },
+        "history": history,
+        "history_diagnostics": _history_count_diagnostics(history),
         "state": {
             "startup_ready": bool(
                 getattr(ctx, "startup_ready", getattr(ctx, "data_hard_ready", False))
