@@ -337,7 +337,6 @@ def test_restart_preserves_identity_for_equivalent_anchor_formats(
     assert deterministic_signal_id(uninterrupted) == deterministic_signal_id(recovered)
 
 
-
 def test_vwap_recovery_cannot_use_later_same_session_bar(monkeypatch):
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     history = [
