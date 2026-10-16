@@ -181,7 +181,6 @@ def test_smc_is_not_confirmed_by_short_orderflow_context_alone(
     assert decision.blocked_at == "context_contract"
 
 
-
 def test_smc_confirmation_wait_tracks_one_nonterminal_setup_across_retries(
     monkeypatch,
 ) -> None:
@@ -195,6 +194,14 @@ def test_smc_confirmation_wait_tracks_one_nonterminal_setup_across_retries(
     smc_signal, smc_evidence = _signal_evidence("SMC")
     smc_signal.metadata["setup_id"] = "smcv2:futures:CE:2026-10-16T09:31"
     smc_evidence.metadata["setup_id"] = smc_signal.metadata["setup_id"]
+    setup_lifecycle.transition_setup(
+        setup_lifecycle.SetupStage.TRIGGER_QUALIFIED,
+        strategy="SMC",
+        setup_id=smc_signal.metadata["setup_id"],
+        symbol=_CE,
+        side="CE",
+        reason="structural_setup_valid",
+    )
     context = _signal_evidence("OrderFlow", role="context")
 
     for _ in range(3):
@@ -210,9 +217,9 @@ def test_smc_confirmation_wait_tracks_one_nonterminal_setup_across_retries(
     assert snapshot["active_count"] == 1
     record = snapshot["active"][0]
     assert record["setup_id"] == smc_signal.metadata["setup_id"]
-    assert record["stage"] == "CONFIRMING"
+    assert record["stage"] == "TRIGGER_QUALIFIED"
     assert record["reason"] == "smc_independent_confirmation_missing"
-    assert record["transitions"] == 1
+    assert record["transitions"] == 2
 
     approved = manager._combine_strategy_votes(
         symbol=_CE,
@@ -223,7 +230,7 @@ def test_smc_confirmation_wait_tracks_one_nonterminal_setup_across_retries(
     snapshot = registry.snapshot()
     assert snapshot["tracked_count"] == 1
     assert snapshot["active"][0]["stage"] == "MANAGER_QUALIFIED"
-    assert snapshot["active"][0]["transitions"] == 2
+    assert snapshot["active"][0]["transitions"] == 3
 
 
 def test_smc_capacity_retry_confirmation_wait_is_tracked_without_new_approval(
@@ -268,7 +275,6 @@ def test_smc_confirmation_wait_never_invents_missing_setup_id(monkeypatch) -> No
     )
     assert result is None
     assert registry.snapshot()["tracked_count"] == 0
-
 
 
 def test_smc_with_independent_trigger_still_approves_despite_short_orderflow(
