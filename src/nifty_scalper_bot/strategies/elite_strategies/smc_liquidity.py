@@ -1145,6 +1145,29 @@ class SMCStrategy(EliteStrategy):
                     == contract_side
                 )
                 structure_confirmed = bool(bos_confirmed or choch_confirmed)
+                structure_domains = {
+                    str(
+                        indicators.get(
+                            "smc_bos_source_domain"
+                            if name == "bos"
+                            else "smc_choch_source_domain"
+                        )
+                        or "prepared_indicator_unverified"
+                    )
+                    for name, confirmed in (
+                        ("bos", bos_confirmed),
+                        ("choch", choch_confirmed),
+                    )
+                    if confirmed
+                }
+                if not structure_confirmed:
+                    structure_domain: str | None = None
+                elif manager_enriched and structure_domains == {"option_premium"}:
+                    structure_domain = "option_premium"
+                elif manager_enriched and "option_premium" in structure_domains:
+                    structure_domain = "mixed_or_unverified"
+                else:
+                    structure_domain = "prepared_indicator_unverified"
                 retest_confirmed = bool(
                     _feature_after_sweep("retest_confirmed", "retest_ts_epoch")
                     or (
@@ -1317,6 +1340,10 @@ class SMCStrategy(EliteStrategy):
                     "reclaim_distance_atr": float(event["reclaim_atr"]),
                     "displacement_atr": round(displacement_atr, 3),
                     "structure_confirmed": structure_confirmed,
+                    # The sweep/displacement is underlying-led, but the
+                    # manager's BOS/CHOCH can be computed from option OHLC.
+                    # This origin label is diagnostic, not an extra vote.
+                    "structure_confirmation_domain": structure_domain,
                     "momentum_confirmed": True,
                     "structure_or_momentum_confirmed": True,
                     "smc_sweep_type": (
