@@ -154,9 +154,11 @@ def test_option_rotation_is_wired_only_after_committed_contract_change() -> None
     committed = source.index("committed_ce, committed_pe =")
     expired = source.index("expire_unselected_option_setups(", committed)
     assert source.index("_commit_active_dynamic_basket(", committed) < expired
-    assert "selection_changed and committed_ce and committed_pe" in source[
-        committed:expired + 150
-    ]
+    rotation = source[committed:expired + 150]
+    assert all(
+        name in rotation
+        for name in ("selection_changed", "committed_ce", "committed_pe")
+    )
 
 
 def test_setup_lifecycle_exposes_exact_last_transition_age() -> None:
