@@ -914,7 +914,7 @@ def test_smc_never_arms_on_completed_futures_bar_ahead_of_option(
     signal = strategy.generate_signal(CE, _indicators(latest_bar_ts=option_ts), 102.0)
 
     assert signal is None
-    assert strategy.last_no_vote_reason == "underlying_context_not_ready"
+    assert strategy.last_no_vote_reason == "underlying_no_liquidity_sweep"
     assert strategy._events == {}
 
 
@@ -957,7 +957,7 @@ def test_smc_lagged_option_cannot_use_later_futures_displacement(monkeypatch) ->
     )
 
     assert premature is None
-    assert strategy.last_no_vote_reason == "underlying_context_not_ready"
+    assert strategy.last_no_vote_reason == "smc_awaiting_confirmation"
     assert (FUTURES, "CE") in strategy._events
     assert (
         strategy.generate_signal(
@@ -1082,3 +1082,21 @@ def test_smc_uses_latest_causal_futures_bar_when_feed_is_ahead(monkeypatch) -> N
     assert confirmed is not None
     assert confirmed.metadata["sweep_timestamp"] == sweep["timestamp"]
     assert confirmed.metadata["latest_bar_ts"] == displacement["timestamp"]
+
+
+def test_smc_causal_futures_snapshot_still_rejects_stale_history(
+    monkeypatch,
+) -> None:
+    """Selecting an earlier bar must not weaken the futures freshness cap."""
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    rows = _base_rows()
+    strategy = _strategy(rows)
+    stale_option_ts = rows[-1]["timestamp"] + timedelta(minutes=4)
+
+    signal = strategy.generate_signal(
+        CE, _indicators(latest_bar_ts=stale_option_ts), 102.0
+    )
+
+    assert signal is None
+    assert strategy.last_no_vote_reason == "underlying_context_not_ready"
+    assert strategy._events == {}
