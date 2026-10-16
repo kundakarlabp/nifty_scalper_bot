@@ -102,3 +102,27 @@ def test_live_simulation_mode_does_not_consume_live_enable_flag(
         SYMBOL, [_bar(IN_SESSION), _bar(AFTER_CLOSE)], min_bars=1
     )
     assert count == 2
+
+
+def test_broker_free_live_mode_fixture_is_explicitly_exempt(monkeypatch) -> None:
+    from nifty_scalper_bot.data.market_data_manager import (
+        _should_skip_live_nifty_candle,
+    )
+
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    monkeypatch.setenv("BROKER_SIMULATION", "true")
+    monkeypatch.setenv("NSB_TEST_MODE", "true")
+    monkeypatch.setenv("ALLOW_REAL_BROKER", "false")
+    assert _should_skip_live_nifty_candle(SYMBOL, AFTER_CLOSE) is False
+    runner = _runner()
+    assert runner.reseed_history_from_bars(
+        SYMBOL, [_bar(IN_SESSION), _bar(AFTER_CLOSE)], min_bars=1
+    ) == 2
+
+    # A broker-enabled process cannot escape the guard using test flags.
+    monkeypatch.setenv("ALLOW_REAL_BROKER", "true")
+    assert _should_skip_live_nifty_candle(SYMBOL, AFTER_CLOSE) is True
+    monkeypatch.setenv("ALLOW_REAL_BROKER", "false")
+    monkeypatch.setenv("NSB_TEST_MODE", "false")
+    assert _should_skip_live_nifty_candle(SYMBOL, AFTER_CLOSE) is True
