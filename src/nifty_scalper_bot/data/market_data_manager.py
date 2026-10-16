@@ -107,6 +107,7 @@ from nifty_scalper_bot.utils.symbols import (
     normalize_symbol,
 )
 
+
 def _should_skip_live_nifty_candle(symbol: str, tick_ts: datetime) -> bool:
     """Quarantine off-session NIFTY OHLC in LIVE; never suppress the quote.
 
@@ -123,7 +124,9 @@ def _should_skip_live_nifty_candle(symbol: str, tick_ts: datetime) -> bool:
         return False
     normalized = str(symbol or "").strip().upper()
     nifty = normalized.startswith("NFO:NIFTY") or normalized in {
-        "NSE:NIFTY", "NSE:NIFTY 50", "NSE:NIFTY50"
+        "NSE:NIFTY",
+        "NSE:NIFTY 50",
+        "NSE:NIFTY50",
     }
     if not nifty:
         return False
