@@ -166,6 +166,103 @@ def test_recent_candle_timestamp_divergence_does_not_change_readiness():
     assert result["diagnostic_only"] is True
 
 
+
+def test_recent_candle_diagnostics_locate_duplicates_and_missing_minutes():
+    minutes = [
+        f"2026-10-16T07:{minute:02d}:00Z" for minute in range(20, 24)
+    ]
+
+    class MDM:
+        def get_ohlc_bars(self, _symbol, *, limit=12):
+            return [{"timestamp": minute} for minute in minutes]
+
+    class Runner:
+        def history_tail_timestamps(self, _symbol, *, limit=12):
+            return {
+                "runner": [minutes[0], minutes[1], minutes[1], minutes[3]],
+                "indicator": list(minutes),
+            }
+
+    result = main._history_tail_diagnostics(
+        _ctx(market_data_manager=MDM(), strategy_runner=Runner()),
+        "NFO:NIFTY26O1923100PE",
+    )
+    assert result["classification"] == "recent_tail_divergence"
+    assert result["latest_minute_agreement"] is True
+    assert result["matching_tail_suffix_bars"] == 1
+    assert result["duplicate_minute_ids_by_source"]["runner"] == [
+        "2026-10-16T07:21Z"
+    ]
+    assert result["missing_vs_mdm_by_source"]["runner"] == [
+        "2026-10-16T07:22Z"
+    ]
+    assert result["extra_vs_mdm_by_source"]["runner"] == []
+    assert result["missing_vs_mdm_by_source"]["indicator"] == []
+    assert result["diagnostic_only"] is True
+
+
+def test_recent_candle_diagnostics_distinguish_window_boundary_from_live_gap():
+    canonical = [
+        f"2026-10-16T07:{minute:02d}:00Z" for minute in range(20, 24)
+    ]
+    runner_rows = [
+        "2026-10-16T07:19:00Z", *canonical[1:]
+    ]
+
+    class MDM:
+        def get_ohlc_bars(self, _symbol, *, limit=12):
+            return [{"timestamp": minute} for minute in canonical]
+
+    class Runner:
+        def history_tail_timestamps(self, _symbol, *, limit=12):
+            return {"runner": runner_rows, "indicator": canonical}
+
+    diagnostic = main._history_tail_diagnostics(
+        _ctx(market_data_manager=MDM(), strategy_runner=Runner()),
+        "NFO:NIFTY26O1923100CE",
+    )
+    assert diagnostic["latest_minute_agreement"] is True
+    assert diagnostic["matching_tail_suffix_bars"] == 3
+    assert diagnostic["sample_window_boundary_difference"] is True
+    assert diagnostic["missing_vs_mdm_by_source"]["runner"] == ["2026-10-16T07:20Z"]
+    assert diagnostic["extra_vs_mdm_by_source"]["runner"] == []
+    assert diagnostic["classification"] == "recent_tail_divergence"
+
+
+def test_recent_candle_diagnostics_missing_provider_has_no_false_gap():
+    result = main._history_tail_diagnostics(_ctx(), "NFO:NIFTY26O1923100PE")
+    assert result["classification"] == "identities_unavailable"
+    assert result["latest_minute_agreement"] is None
+    assert result["missing_vs_mdm_by_source"] == {}
+    assert result["extra_vs_mdm_by_source"] == {}
+    assert result["diagnostic_only"] is True
+
+
+def test_history_identity_diagnostic_is_only_sampled_when_counts_differ():
+    class Runner:
+        def __init__(self):
+            self.reads = 0
+
+        def history_tail_timestamps(self, _symbol, *, limit=12):
+            self.reads += 1
+            return {"runner": [], "indicator": []}
+
+    runner = Runner()
+    history = {
+        "required_execution_bars": 30,
+        "ce": {"mdm": 50, "runner": 50, "indicator": 50},
+        "pe": {"mdm": 50, "runner": 51, "indicator": 50},
+    }
+    result = main._history_count_diagnostics(
+        history,
+        ctx=_ctx(strategy_runner=runner),
+        selected={"ce": "NFO:NIFTY26O1923100CE", "pe": "NFO:NIFTY26O1923100PE"},
+    )
+    assert runner.reads == 1
+    assert "recent_timestamp_identity" not in result["per_side"]["ce"]
+    assert result["execution_history_ready"] is True
+
+
 def test_recent_candle_identity_handles_missing_providers_without_crashing():
     result = main._history_tail_diagnostics(_ctx(), "NFO:NIFTY26O1923150PE")
     assert result["classification"] == "identities_unavailable"
