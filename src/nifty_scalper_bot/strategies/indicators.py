@@ -661,13 +661,15 @@ class IndicatorEngine:
                         LOGGER.log(
                             logging.INFO if market_open_now else logging.DEBUG,
                             "Condition met: indicator_history_missing symbol=%s "
-                            "market_open=%s",
+                            "market_open=%s first_seen=%s",
                             symbol,
                             market_open_now,
+                            first_seen.isoformat(),
                             extra={
                                 "event": "indicator_engine_history_missing",
                                 "bypass_filters": True,
                                 "symbol": symbol,
+                                "first_seen": first_seen.isoformat(),
                                 "market_session_state": (
                                     "open" if market_open_now else "closed"
                                 ),
