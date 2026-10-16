@@ -1043,7 +1043,9 @@ class SMCStrategy(EliteStrategy):
                 # contracts. Preserve each contract's original premium risk
                 # anchor; another contract must never rebase it.
                 premiums = event.get("first_vote_premiums_by_symbol")
-                first_vote = premiums.get(symbol) if isinstance(premiums, dict) else None
+                first_vote = None
+                if isinstance(premiums, dict):
+                    first_vote = premiums.get(symbol)
                 if is_live and first_vote is not None:
                     first_premium, first_risk = first_vote
                     if first_risk > 0 and current_price <= first_premium - first_risk:
