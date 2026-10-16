@@ -865,6 +865,7 @@ def test_impossible_futures_sweep_candle_never_arms_smc(monkeypatch) -> None:
     )
     assert strategy.last_no_vote_reason == "underlying_no_liquidity_sweep"
 
+
 @pytest.mark.parametrize("lead_minutes", [1, 2])
 def test_smc_never_arms_on_completed_futures_bar_ahead_of_option(
     monkeypatch, lead_minutes: int
@@ -885,9 +886,7 @@ def test_smc_never_arms_on_completed_futures_bar_ahead_of_option(
     strategy = _strategy(rows)
     option_ts = rows[-1]["timestamp"] - timedelta(minutes=lead_minutes)
 
-    signal = strategy.generate_signal(
-        CE, _indicators(latest_bar_ts=option_ts), 102.0
-    )
+    signal = strategy.generate_signal(CE, _indicators(latest_bar_ts=option_ts), 102.0)
 
     assert signal is None
     assert strategy.last_no_vote_reason == "underlying_context_not_ready"
@@ -909,9 +908,12 @@ def test_smc_lagged_option_cannot_use_later_futures_displacement(monkeypatch) ->
             volume=2400.0,
         )
     )
-    assert strategy.generate_signal(
-        CE, _indicators(latest_bar_ts=rows[-1]["timestamp"]), 102.0
-    ) is None
+    assert (
+        strategy.generate_signal(
+            CE, _indicators(latest_bar_ts=rows[-1]["timestamp"]), 102.0
+        )
+        is None
+    )
     rows.append(
         _bar(
             31,
@@ -932,6 +934,9 @@ def test_smc_lagged_option_cannot_use_later_futures_displacement(monkeypatch) ->
     assert premature is None
     assert strategy.last_no_vote_reason == "underlying_context_not_ready"
     assert (FUTURES, "CE") in strategy._events
-    assert strategy.generate_signal(
-        CE, _indicators(latest_bar_ts=rows[-1]["timestamp"]), 103.0
-    ) is not None
+    assert (
+        strategy.generate_signal(
+            CE, _indicators(latest_bar_ts=rows[-1]["timestamp"]), 103.0
+        )
+        is not None
+    )
