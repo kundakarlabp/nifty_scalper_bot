@@ -861,9 +861,7 @@ def test_orb_does_not_use_futures_bar_ahead_of_option_observation(monkeypatch) -
         )
     )
     option_timestamp = rows[-1]["timestamp"]
-    rows.append(
-        _bar(16, open_=24_030.0, high=24_042.0, low=24_025.0, close=24_035.0)
-    )
+    rows.append(_bar(16, open_=24_030.0, high=24_042.0, low=24_025.0, close=24_035.0))
     strategy = _strategy({FUTURE: rows})
     indicators = _base_indicators("CE", option_timestamp)
 
