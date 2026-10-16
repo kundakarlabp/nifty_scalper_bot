@@ -273,7 +273,14 @@ def archive_history(
     return report
 
 
-def historical_cache_inventory(cache_dir: Path, start: dt.date, end: dt.date) -> dict:
+def historical_cache_inventory(
+    cache_dir: Path,
+    start: dt.date,
+    end: dt.date,
+    *,
+    stage_dir: Path | None = None,
+    min_synchronized_minutes: int = 60,
+) -> dict:
     """Inventory verified retained contracts; never substitute for causal replay.
 
     Older active-contract exports can remain available on disk after their
@@ -282,6 +289,12 @@ def historical_cache_inventory(cache_dir: Path, start: dt.date, end: dt.date) ->
     """
     if start > end:
         raise ValueError("historical_cache_inventory_window_invalid")
+    if min_synchronized_minutes < 1:
+        raise ValueError("historical_cache_minimum_minutes_invalid")
+    # Retain source bars only when staging is requested. The ordinary inventory
+    # remains streaming/bounded rather than copying 90-day option history.
+    staged_sources: dict[str, dict[str, dict]] = {}
+    staging_conflicts: set[str] = set()
     option_minutes: dict[str, dict[tuple[str, float, dt.datetime], set[str]]] = {}
     context_minutes: dict[str, dict[str, set[dt.datetime]]] = {}
     valid_files = 0
@@ -346,11 +359,22 @@ def historical_cache_inventory(cache_dir: Path, start: dt.date, end: dt.date) ->
         valid_files += 1
         if kind in {"CE", "PE"}:
             option_symbols.add(symbol)
-        for timestamp in parsed:
+        for timestamp, row in zip(parsed, rows):
             day = timestamp.date()
             if day < start or day > end:
                 continue
             label = day.isoformat()
+            if stage_dir is not None:
+                sources = staged_sources.setdefault(label, {})
+                source = sources.setdefault(
+                    symbol, {"token": token, "instrument": instrument, "bars": {}}
+                )
+                if source["token"] != token or source["instrument"] != instrument:
+                    staging_conflicts.add(label)
+                previous = source["bars"].get(timestamp)
+                if previous is not None and previous != row:
+                    staging_conflicts.add(label)
+                source["bars"][timestamp] = row
             if kind in {"CE", "PE"}:
                 assert expiry is not None and strike is not None
                 key = (expiry.isoformat(), strike, timestamp)
@@ -377,7 +401,123 @@ def historical_cache_inventory(cache_dir: Path, start: dt.date, end: dt.date) ->
                 "synchronized_contract_minutes": synchronized,
             }
         )
+    staged_dates: list[str] = []
+    staging_rejections: dict[str, str] = {}
+    if stage_dir is not None:
+        for label, sources in sorted(staged_sources.items()):
+            day = dt.date.fromisoformat(label)
+            if corrupt or label in staging_conflicts:
+                staging_rejections[label] = "historical_source_untrusted_or_conflicting"
+                continue
+            spot = sources.get("NSE:NIFTY 50")
+            if spot is None:
+                staging_rejections[label] = "historical_spot_unavailable"
+                continue
+            # Use the first *observed* joint bar in the entry window. No later
+            # option or context bar is allowed to nominate an earlier contract.
+            anchors = sorted(
+                timestamp
+                for timestamp in spot["bars"]
+                if dt.time(9, 30) <= timestamp.time() <= dt.time(9, 45)
+            )
+            selected: tuple[str, str, str, dt.datetime] | None = None
+            failure = "historical_atm_pair_not_observed_asof"
+            for anchor in anchors:
+                futures = [
+                    symbol
+                    for symbol, source in sources.items()
+                    if source["instrument"]["instrument_type"] == "FUT"
+                    and anchor in source["bars"]
+                    and dt.date.fromisoformat(str(source["instrument"]["expiry"]))
+                    >= day
+                ]
+                if len(futures) > 1:
+                    failure = "historical_future_selection_ambiguous"
+                    break
+                if not futures:
+                    continue
+                observed_pairs: dict[tuple[str, float], dict[str, str]] = {}
+                for symbol, source in sources.items():
+                    instrument = source["instrument"]
+                    side = str(instrument["instrument_type"])
+                    if side not in {"CE", "PE"} or anchor not in source["bars"]:
+                        continue
+                    expiry = dt.date.fromisoformat(str(instrument["expiry"]))
+                    strike = float(instrument["strike"])
+                    if not 0 <= (expiry - day).days <= 7:
+                        continue
+                    observed_pairs.setdefault(
+                        (expiry.isoformat(), strike), {}
+                    )[side] = symbol
+                spot_close = float(spot["bars"][anchor][4])
+                eligible = sorted(
+                    (
+                        abs(strike - spot_close),
+                        expiry,
+                        strike,
+                        sides["CE"],
+                        sides["PE"],
+                    )
+                    for (expiry, strike), sides in observed_pairs.items()
+                    if "CE" in sides
+                    and "PE" in sides
+                    and abs(strike - spot_close) <= 100
+                )
+                if not eligible:
+                    continue
+                if len(eligible) > 1 and eligible[0][:3] == eligible[1][:3]:
+                    failure = "historical_option_selection_ambiguous"
+                    break
+                _, _, _, ce, pe = eligible[0]
+                participants = ("NSE:NIFTY 50", futures[0], ce, pe)
+                overlapping = set.intersection(
+                    *(set(sources[symbol]["bars"]) for symbol in participants)
+                )
+                available = [
+                    stamp for stamp in overlapping if stamp >= anchor
+                ]
+                if len(available) < min_synchronized_minutes:
+                    failure = "historical_minimum_synchronized_bars_missing"
+                    continue
+                selected = (futures[0], ce, pe, anchor)
+                break
+            if selected is None:
+                staging_rejections[label] = failure
+                continue
+            future, ce, pe, anchor = selected
+            destination = stage_dir / label
+            if destination.exists():
+                staging_rejections[label] = "historical_stage_destination_exists"
+                continue
+            # Publish one session atomically; partial files must never become a
+            # replay input after an interrupted job.
+            import tempfile
+
+            stage_dir.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(dir=stage_dir) as temporary:
+                staging = Path(temporary)
+                for symbol in ("NSE:NIFTY 50", future, ce, pe):
+                    source = sources[symbol]
+                    candles = [
+                        row
+                        for timestamp, row in sorted(source["bars"].items())
+                        if timestamp >= anchor or symbol in {"NSE:NIFTY 50", future}
+                    ]
+                    _write_json(
+                        staging / "candles" / (symbol.replace(":", "_") + ".json"),
+                        {
+                            "symbol": symbol,
+                            "instrument": source["instrument"],
+                            "timestamp_convention": "bar_start",
+                            "candles": candles,
+                        },
+                    )
+                staging.rename(destination)
+            staged_dates.append(label)
     return {
+        "staged_session_dates": staged_dates,
+        "staging_rejections": staging_rejections,
+        "staging_scope": "observed_contract_pair_only_no_full_historical_universe",
         "source": "retained_kite_minute_cache",
         "scope": "inventory_only_no_historical_selection_or_broker_fill_parity",
         "valid_cached_files": valid_files,
