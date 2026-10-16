@@ -399,6 +399,13 @@ def test_opposite_trigger_sides_fail_closed(monkeypatch) -> None:
 
 
 def _wired_mdm() -> tuple[MarketDataManager, str, str]:
+    # This contract tests the installed runtime overload policy, not the
+    # unpatched MarketDataManager fallback or another test's import order.
+    from nifty_scalper_bot.core.runtime_reliability_hardening import (
+        _install_mdm_overload_patch,
+    )
+
+    assert _install_mdm_overload_patch() is True
     mdm = MarketDataManager(kite=None)
     selected = "NFO:NIFTY26AUG24550CE"
     selected_pe = "NFO:NIFTY26AUG24550PE"
