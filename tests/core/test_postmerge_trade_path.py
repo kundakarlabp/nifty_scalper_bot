@@ -219,7 +219,7 @@ def test_smc_confirmation_wait_tracks_one_nonterminal_setup_across_retries(
     assert record["setup_id"] == smc_signal.metadata["setup_id"]
     assert record["stage"] == "TRIGGER_QUALIFIED"
     assert record["reason"] == "smc_independent_confirmation_missing"
-    assert record["transitions"] == 2
+    assert record["transitions"] == 1  # same stage, new reason is observation
 
     approved = manager._combine_strategy_votes(
         symbol=_CE,
