@@ -606,6 +606,7 @@ class IndicatorEngine:
             source,
             extra={
                 "event": "INDICATOR_HISTORY_RECOVERED",
+                "bypass_filters": True,
                 "symbol": symbol,
                 "bars": bars,
                 "missing_duration_s": round(elapsed, 3),
@@ -662,6 +663,7 @@ class IndicatorEngine:
                             market_open_now,
                             extra={
                                 "event": "indicator_engine_history_missing",
+                                "bypass_filters": True,
                                 "symbol": symbol,
                                 "market_session_state": (
                                     "open" if market_open_now else "closed"
