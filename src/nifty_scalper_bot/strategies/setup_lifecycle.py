@@ -228,8 +228,26 @@ class SetupLifecycleRegistry:
                 if SetupStage(item.stage) in _TERMINAL
             )
             last_transition_ts = dict(self._last_transition_ts)
+            # Each lifecycle key is one underlying strategy setup, regardless
+            # of repeated option evaluations or manager veto observations.
+            smc_wait_reasons = {
+                "smc_independent_confirmation_missing",
+                "capacity_retry_independent_confirmation_missing",
+                "independent_confirmation_missing",
+            }
+            smc_waits: Counter[str] = Counter(
+                str(item.reason)
+                for item in self._records.values()
+                if str(item.strategy).strip().upper() == "SMC"
+                and item.stage == SetupStage.TRIGGER_QUALIFIED.value
+                and item.reason in smc_wait_reasons
+            )
             return {
                 "active_count": len(active),
+                "smc_confirmation_wait": {
+                    "unique_active_setups": sum(smc_waits.values()),
+                    "by_reason": dict(sorted(smc_waits.items())),
+                },
                 "active": active,
                 "terminal_counts": dict(terminal),
                 "transition_counts": dict(self._transition_counts),
