@@ -135,3 +135,26 @@ def test_reseed_resolves_missing_history_episode(monkeypatch, caplog) -> None:
         if getattr(item, "event", "") == "INDICATOR_HISTORY_RECOVERED"
     ]
     assert len(recovered) == 1
+
+
+def test_recovery_logger_failure_does_not_block_market_data(monkeypatch) -> None:
+    from datetime import datetime, timezone
+    from unittest.mock import Mock
+
+    from nifty_scalper_bot.utils import market_hours
+
+    monkeypatch.setattr(market_hours, "is_market_open_now", lambda: True)
+    engine = IndicatorEngine()
+    symbol = "NFO:NIFTY26O1923150CE"
+    assert engine.get_history(symbol) == []
+    monkeypatch.setattr(
+        engine._logger, "info", Mock(side_effect=RuntimeError("logger unavailable"))
+    )
+
+    engine.update_price(
+        symbol,
+        101.0,
+        timestamp=datetime(2026, 10, 16, 5, 2, tzinfo=timezone.utc),
+    )
+    assert engine.history_count(symbol) == 1
+    assert engine.get_history(symbol) == [101.0]
