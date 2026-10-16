@@ -266,6 +266,7 @@ def test_setup_lifecycle_exposes_exact_last_transition_age() -> None:
     assert snapshot["last_transition_ts"][stage] > 0
     assert 0 <= snapshot["last_transition_age_sec"][stage] < 1
 
+
 def test_smc_confirmation_wait_summary_counts_distinct_active_setups() -> None:
     """Repeated manager vetoes do not become additional SMC opportunities."""
     registry = SetupLifecycleRegistry(limit=128)
