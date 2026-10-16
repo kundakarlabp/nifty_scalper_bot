@@ -830,7 +830,7 @@ def _scenario(
                     continue
                 evaluated[strategy.name] += 1
                 strategy_indicators = dict(indicators)
-                if strategy.name in {"ORBPro", "VWAPPro"}:
+                if strategy.name in {"ORBPro", "VWAPPro", "SMC"}:
                     strategy_indicators.update(underlying_context)
                 signal = strategy.generate_signal(
                     symbol,
