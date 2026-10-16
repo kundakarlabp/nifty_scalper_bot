@@ -73,7 +73,8 @@ def test_missing_indicator_history_emits_once_until_recovered(
         assert engine.get_history(symbol) == []
         assert engine.get_history(symbol, field="bars") == []
         missing = [
-            item for item in caplog.records
+            item
+            for item in caplog.records
             if getattr(item, "event", "") == "indicator_engine_history_missing"
         ]
         assert len(missing) == 1
@@ -87,7 +88,8 @@ def test_missing_indicator_history_emits_once_until_recovered(
         assert engine.history_count(symbol) == 1
         assert engine.get_history(symbol) == [103.5]
         recovered = [
-            item for item in caplog.records
+            item
+            for item in caplog.records
             if getattr(item, "event", "") == "INDICATOR_HISTORY_RECOVERED"
         ]
         assert len(recovered) == 1
@@ -96,10 +98,12 @@ def test_missing_indicator_history_emits_once_until_recovered(
         with engine._lock:
             engine._histories.pop(symbol)
         assert engine.get_history(symbol) == []
-        assert len([
-            item for item in caplog.records
+        repeated = [
+            item
+            for item in caplog.records
             if getattr(item, "event", "") == "indicator_engine_history_missing"
-        ]) == 2
+        ]
+        assert len(repeated) == 2
 
 
 def test_reseed_resolves_missing_history_episode(monkeypatch, caplog) -> None:
@@ -112,18 +116,22 @@ def test_reseed_resolves_missing_history_episode(monkeypatch, caplog) -> None:
     with caplog.at_level(logging.INFO):
         result = engine.replace_history(
             symbol,
-            [{
-                "timestamp": "2026-10-16T05:02:00+00:00",
-                "open": 100.0,
-                "high": 101.0,
-                "low": 99.0,
-                "close": 100.5,
-                "volume": 10,
-            }],
+            [
+                {
+                    "timestamp": "2026-10-16T05:02:00+00:00",
+                    "open": 100.0,
+                    "high": 101.0,
+                    "low": 99.0,
+                    "close": 100.5,
+                    "volume": 10,
+                }
+            ],
         )
     assert result == 1
     assert engine.history_count(symbol) == 1
-    assert len([
-        item for item in caplog.records
+    recovered = [
+        item
+        for item in caplog.records
         if getattr(item, "event", "") == "INDICATOR_HISTORY_RECOVERED"
-    ]) == 1
+    ]
+    assert len(recovered) == 1
