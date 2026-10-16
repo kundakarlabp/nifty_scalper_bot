@@ -606,9 +606,7 @@ def _history_count_diagnostics(history):  # noqa: ANN001
         "execution_history_ready": all(
             part["minimum_ready"] for part in per_side.values()
         ),
-        "count_mismatch": any(
-            part["count_mismatch"] for part in per_side.values()
-        ),
+        "count_mismatch": any(part["count_mismatch"] for part in per_side.values()),
         "per_side": per_side,
         "interpretation": "count_delta_requires_timestamp_identity_audit",
     }
