@@ -458,11 +458,12 @@ class SMCStrategy(EliteStrategy):
                 continue
             current = rows[-1]
             current_ts = current["timestamp"]
-            if (
-                option_anchor is not None
-                and abs((option_anchor - current_ts).total_seconds()) > max_lag_seconds
-            ):
-                continue
+            if option_anchor is not None:
+                # The option observation cannot consume an underlying candle
+                # that has not closed yet, even if it is within the lag budget.
+                lag_seconds = (option_anchor - current_ts).total_seconds()
+                if lag_seconds < 0 or lag_seconds > max_lag_seconds:
+                    continue
             pivot_low, pivot_high = self._latest_confirmed_pivots(
                 rows, strength=strength, lookback=lookback
             )

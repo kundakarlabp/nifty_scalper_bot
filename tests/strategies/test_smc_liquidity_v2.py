@@ -864,3 +864,79 @@ def test_impossible_futures_sweep_candle_never_arms_smc(monkeypatch) -> None:
         is None
     )
     assert strategy.last_no_vote_reason == "underlying_no_liquidity_sweep"
+
+
+@pytest.mark.parametrize("lead_minutes", [1, 2])
+def test_smc_never_arms_on_completed_futures_bar_ahead_of_option(
+    monkeypatch, lead_minutes: int
+) -> None:
+    """An available future-completed bar is not past data for an older option."""
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    rows = _base_rows()
+    rows.append(
+        _bar(
+            30,
+            open_=23988.0,
+            high=23991.0,
+            low=23974.0,
+            close=23984.0,
+            volume=2400.0,
+        )
+    )
+    strategy = _strategy(rows)
+    option_ts = rows[-1]["timestamp"] - timedelta(minutes=lead_minutes)
+
+    signal = strategy.generate_signal(CE, _indicators(latest_bar_ts=option_ts), 102.0)
+
+    assert signal is None
+    assert strategy.last_no_vote_reason == "underlying_context_not_ready"
+    assert strategy._events == {}
+
+
+def test_smc_lagged_option_cannot_use_later_futures_displacement(monkeypatch) -> None:
+    """The confirmation bar must be completed before the option observation."""
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    rows = _base_rows()
+    strategy = _strategy(rows)
+    rows.append(
+        _bar(
+            30,
+            open_=23988.0,
+            high=23991.0,
+            low=23974.0,
+            close=23984.0,
+            volume=2400.0,
+        )
+    )
+    assert (
+        strategy.generate_signal(
+            CE, _indicators(latest_bar_ts=rows[-1]["timestamp"]), 102.0
+        )
+        is None
+    )
+    rows.append(
+        _bar(
+            31,
+            open_=23984.0,
+            high=23999.0,
+            low=23982.0,
+            close=23997.0,
+            volume=2100.0,
+        )
+    )
+
+    premature = strategy.generate_signal(
+        CE,
+        _indicators(latest_bar_ts=rows[-2]["timestamp"]),
+        103.0,
+    )
+
+    assert premature is None
+    assert strategy.last_no_vote_reason == "underlying_context_not_ready"
+    assert (FUTURES, "CE") in strategy._events
+    assert (
+        strategy.generate_signal(
+            CE, _indicators(latest_bar_ts=rows[-1]["timestamp"]), 103.0
+        )
+        is not None
+    )
