@@ -120,6 +120,21 @@ def _should_skip_live_nifty_candle(symbol: str, tick_ts: datetime) -> bool:
     # fixtures; its explicit simulation mode must never be treated as live.
     if mode in {"LIVE_SIMULATION", "SIMULATION", "SHADOW", "PAPER", "BACKTEST"}:
         return False
+    # The deterministic E2E fixture deliberately uses EXECUTION_MODE=LIVE
+    # while proving a broker-free path. Its historical warmup starts before
+    # NSE opening. Exempt only the explicitly isolated test broker, never a
+    # real-money process or an ordinary LIVE deployment.
+    test_mode = os.getenv("NSB_TEST_MODE", "").strip().lower() in {
+        "1", "true", "yes", "on"
+    }
+    simulated = os.getenv("BROKER_SIMULATION", "").strip().lower() in {
+        "1", "true", "yes", "on"
+    }
+    real_broker_allowed = os.getenv("ALLOW_REAL_BROKER", "").strip().lower() in {
+        "1", "true", "yes", "on"
+    }
+    if test_mode and simulated and not real_broker_allowed:
+        return False
     live = mode == "LIVE" or any(
         os.getenv(flag, "").strip().lower() in {"1", "true", "yes", "on"}
         for flag in ("ENABLE_LIVE", "ENABLE_LIVE_TRADING")
