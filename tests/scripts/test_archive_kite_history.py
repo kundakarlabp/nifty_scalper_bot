@@ -350,7 +350,12 @@ def test_retained_cache_inventory_rejects_post_expiry_candles(tmp_path):
     assert result["synchronized_contract_minutes"] == 0
 
 def _retained_session_payload(
-    symbol, kind, token, *, strike=None, expiry="2026-10-13",
+    symbol,
+    kind,
+    token,
+    *,
+    strike=None,
+    expiry="2026-10-13",
     first_minute=30,
 ):
     timestamps = [
@@ -394,23 +399,25 @@ def test_retained_session_stages_only_asof_synchronized_observed_contracts(tmp_p
     candles.mkdir(parents=True)
     payloads = [
         _retained_session_payload("NSE:NIFTY 50", "EQ", 100),
-        _retained_session_payload(
-            "NFO:NIFTY26OCTFUT", "FUT", 101, expiry="2026-10-27"
-        ),
-        _retained_session_payload(
-            "NFO:NIFTY26O1322500CE", "CE", 102, strike=22500
-        ),
-        _retained_session_payload(
-            "NFO:NIFTY26O1322500PE", "PE", 103, strike=22500
-        ),
+        _retained_session_payload("NFO:NIFTY26OCTFUT", "FUT", 101, expiry="2026-10-27"),
+        _retained_session_payload("NFO:NIFTY26O1322500CE", "CE", 102, strike=22500),
+        _retained_session_payload("NFO:NIFTY26O1322500PE", "PE", 103, strike=22500),
         # Later quote discovery cannot change the decision-time universe.
         _retained_session_payload(
-            "NFO:NIFTY26O2022500CE", "CE", 104, strike=22500,
-            expiry="2026-10-20", first_minute=31,
+            "NFO:NIFTY26O2022500CE",
+            "CE",
+            104,
+            strike=22500,
+            expiry="2026-10-20",
+            first_minute=31,
         ),
         _retained_session_payload(
-            "NFO:NIFTY26O2022500PE", "PE", 105, strike=22500,
-            expiry="2026-10-20", first_minute=31,
+            "NFO:NIFTY26O2022500PE",
+            "PE",
+            105,
+            strike=22500,
+            expiry="2026-10-20",
+            first_minute=31,
         ),
     ]
     for index, payload in enumerate(payloads):
@@ -444,18 +451,10 @@ def test_retained_session_ambiguous_futures_fail_closed(tmp_path):
     candles.mkdir(parents=True)
     rows = [
         _retained_session_payload("NSE:NIFTY 50", "EQ", 100),
-        _retained_session_payload(
-            "NFO:NIFTY26OCTFUT", "FUT", 101, expiry="2026-10-27"
-        ),
-        _retained_session_payload(
-            "NFO:NIFTY26NOVFUT", "FUT", 106, expiry="2026-11-24"
-        ),
-        _retained_session_payload(
-            "NFO:NIFTY26O1322500CE", "CE", 102, strike=22500
-        ),
-        _retained_session_payload(
-            "NFO:NIFTY26O1322500PE", "PE", 103, strike=22500
-        ),
+        _retained_session_payload("NFO:NIFTY26OCTFUT", "FUT", 101, expiry="2026-10-27"),
+        _retained_session_payload("NFO:NIFTY26NOVFUT", "FUT", 106, expiry="2026-11-24"),
+        _retained_session_payload("NFO:NIFTY26O1322500CE", "CE", 102, strike=22500),
+        _retained_session_payload("NFO:NIFTY26O1322500PE", "PE", 103, strike=22500),
     ]
     for index, payload in enumerate(rows):
         (candles / f"{index}.json").write_text(json.dumps(payload))
@@ -479,15 +478,9 @@ def test_retained_session_corrupt_cache_cannot_stage(tmp_path):
     candles.mkdir(parents=True)
     rows = [
         _retained_session_payload("NSE:NIFTY 50", "EQ", 100),
-        _retained_session_payload(
-            "NFO:NIFTY26OCTFUT", "FUT", 101, expiry="2026-10-27"
-        ),
-        _retained_session_payload(
-            "NFO:NIFTY26O1322500CE", "CE", 102, strike=22500
-        ),
-        _retained_session_payload(
-            "NFO:NIFTY26O1322500PE", "PE", 103, strike=22500
-        ),
+        _retained_session_payload("NFO:NIFTY26OCTFUT", "FUT", 101, expiry="2026-10-27"),
+        _retained_session_payload("NFO:NIFTY26O1322500CE", "CE", 102, strike=22500),
+        _retained_session_payload("NFO:NIFTY26O1322500PE", "PE", 103, strike=22500),
     ]
     rows[-1]["candles_sha256"] = "not-a-valid-digest"
     for index, payload in enumerate(rows):
