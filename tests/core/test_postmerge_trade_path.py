@@ -230,7 +230,7 @@ def test_smc_confirmation_wait_tracks_one_nonterminal_setup_across_retries(
     snapshot = registry.snapshot()
     assert snapshot["tracked_count"] == 1
     assert snapshot["active"][0]["stage"] == "MANAGER_QUALIFIED"
-    assert snapshot["active"][0]["transitions"] == 3
+    assert snapshot["active"][0]["transitions"] == 2  # actual new stage
 
 
 def test_smc_capacity_retry_confirmation_wait_is_tracked_without_new_approval(
