@@ -497,6 +497,7 @@ def test_retained_session_corrupt_cache_cannot_stage(tmp_path):
     assert report["corrupt_or_untrusted_files"] == 1
     assert report["staged_session_dates"] == []
 
+
 @pytest.mark.parametrize(
     "failure_type,expected_reason",
     [
@@ -511,21 +512,13 @@ def test_retained_session_conflicting_contract_identity_is_not_staged(
     candles.mkdir(parents=True)
     rows = [
         _retained_session_payload("NSE:NIFTY 50", "EQ", 100),
-        _retained_session_payload(
-            "NFO:NIFTY26OCTFUT", "FUT", 101, expiry="2026-10-27"
-        ),
-        _retained_session_payload(
-            "NFO:NIFTY26O1322500CE", "CE", 102, strike=22500
-        ),
-        _retained_session_payload(
-            "NFO:NIFTY26O1322500PE", "PE", 103, strike=22500
-        ),
+        _retained_session_payload("NFO:NIFTY26OCTFUT", "FUT", 101, expiry="2026-10-27"),
+        _retained_session_payload("NFO:NIFTY26O1322500CE", "CE", 102, strike=22500),
+        _retained_session_payload("NFO:NIFTY26O1322500PE", "PE", 103, strike=22500),
     ]
     if failure_type == "same_side_duplicate":
         rows.append(
-            _retained_session_payload(
-                "NFO:NIFTY26O13X22500CE", "CE", 105, strike=22500
-            )
+            _retained_session_payload("NFO:NIFTY26O13X22500CE", "CE", 105, strike=22500)
         )
     else:
         rows[-1]["instrument_token"] = 101
