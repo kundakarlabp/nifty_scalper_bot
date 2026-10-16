@@ -112,10 +112,38 @@ def _should_skip_live_nifty_candle(symbol: str, tick_ts: datetime) -> bool:
     """Quarantine off-session NIFTY OHLC in LIVE; never suppress the quote.
 
     Timestamp classification uses the broker observation's event time rather
-    than processing wall-clock time. Delayed in-session ticks remain eligible;
-    REST historical imports bypass this real-time-only guard completely.
+    than processing wall-clock time. Delayed in-session ticks and validated
+    historical bars from earlier NSE sessions remain eligible.
     """
     mode = str(os.getenv("EXECUTION_MODE", "")).strip().upper()
+    # The broker-free E2E runner may retain ENABLE_LIVE for production-parity
+    # fixtures; its explicit simulation mode must never be treated as live.
+    if mode in {"LIVE_SIMULATION", "SIMULATION", "SHADOW", "PAPER", "BACKTEST"}:
+        return False
+    # The deterministic E2E fixture deliberately uses EXECUTION_MODE=LIVE
+    # while proving a broker-free path. Its historical warmup starts before
+    # NSE opening. Exempt only the explicitly isolated test broker, never a
+    # real-money process or an ordinary LIVE deployment.
+    test_mode = os.getenv("NSB_TEST_MODE", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    simulated = os.getenv("BROKER_SIMULATION", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    real_broker_allowed = os.getenv("ALLOW_REAL_BROKER", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if test_mode and simulated and not real_broker_allowed:
+        return False
     live = mode == "LIVE" or any(
         os.getenv(flag, "").strip().lower() in {"1", "true", "yes", "on"}
         for flag in ("ENABLE_LIVE", "ENABLE_LIVE_TRADING")
@@ -1045,6 +1073,7 @@ class MarketDataManager:
         raw_row_count = len(bars or ())
         normalized_row_count = 0
         malformed_row_count = raw_row_count
+        offsession_rejected_rows = 0
         if not hasattr(self, "_lock"):
             self._lock = threading.RLock()
         with self._lock:
@@ -1075,6 +1104,9 @@ class MarketDataManager:
                     continue
                 ts = normalized.get("timestamp")
                 if isinstance(ts, datetime):
+                    if _should_skip_live_nifty_candle(normalized_symbol, ts):
+                        offsession_rejected_rows += 1
+                        continue
                     normalized["timestamp"] = ts.astimezone(timezone.utc).replace(
                         microsecond=0
                     )
@@ -1082,6 +1114,16 @@ class MarketDataManager:
                 normalized_rows.append(normalized)
             normalized_row_count = len(normalized_rows)
             malformed_row_count = max(0, raw_row_count - normalized_row_count)
+            if offsession_rejected_rows:
+                with self._lock:
+                    self._candle_metrics[
+                        "history_offsession_rows_quarantined_total"
+                    ] += offsession_rejected_rows
+                self._logger.info(
+                    "MDM_HISTORICAL_OFFSESSION_QUARANTINED symbol=%s rows=%d",
+                    normalized_symbol,
+                    offsession_rejected_rows,
+                )
             if not normalized_rows and bars:
                 raise DataIntegrityError("no valid historical OHLC rows to import")
             if normalized_rows:

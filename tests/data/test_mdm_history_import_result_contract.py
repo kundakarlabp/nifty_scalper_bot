@@ -328,3 +328,57 @@ def test_projection_refresh_reuses_precomputed_timestamp_fingerprints(monkeypatc
     assert refreshed[-1]["timestamp"] == completed[-1]["timestamp"]
     assert mdm._candle_metrics["candle_projection_divergence_total"] == 0
     assert calls <= 220
+
+
+def test_live_nifty_history_import_excludes_offsession_rows(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    mdm = _mdm()
+    in_session = _bar()
+    in_session["timestamp"] = datetime(2026, 10, 16, 4, 0, tzinfo=timezone.utc)
+    after_close = _bar()
+    after_close["timestamp"] = datetime(2026, 10, 16, 11, 28, tzinfo=timezone.utc)
+
+    result = mdm.import_historical_ohlc(SYMBOL, [in_session, after_close])
+    timestamps = [bar["timestamp"] for bar in mdm.get_ohlc_bars(SYMBOL)]
+    assert result.success
+    assert result.accepted_rows == 1
+    assert result.validation_rejected_rows == 1
+    assert len(timestamps) == 1
+    assert mdm._candle_metrics["history_offsession_rows_quarantined_total"] == 1
+
+
+def test_live_history_import_all_offsession_rows_cannot_mark_ready(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    mdm = _mdm()
+    calls = []
+    mdm.update_hydration_status = lambda *args, **kwargs: calls.append(args)
+    after_close = _bar()
+    after_close["timestamp"] = datetime(2026, 10, 16, 11, 28, tzinfo=timezone.utc)
+
+    result = mdm.import_historical_ohlc(SYMBOL, [after_close])
+    assert not result.success
+    assert result.accepted_rows == 0
+    assert result.validation_rejected_rows == 1
+    assert mdm._candle_metrics["history_offsession_rows_quarantined_total"] == 1
+    assert mdm.get_ohlc_bars(SYMBOL) == []
+    assert calls == []
+
+
+def test_research_mode_history_import_keeps_afterhours_rows(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    monkeypatch.delenv("ENABLE_LIVE", raising=False)
+    monkeypatch.delenv("ENABLE_LIVE_TRADING", raising=False)
+    mdm = _mdm()
+    after_close = _bar()
+    after_close["timestamp"] = datetime(2026, 10, 16, 11, 28, tzinfo=timezone.utc)
+
+    result = mdm.import_historical_ohlc(SYMBOL, [after_close])
+    assert result.success
+    assert result.accepted_rows == 1
+    assert mdm._candle_metrics["history_offsession_rows_quarantined_total"] == 0
