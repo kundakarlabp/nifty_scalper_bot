@@ -166,11 +166,8 @@ def test_recent_candle_timestamp_divergence_does_not_change_readiness():
     assert result["diagnostic_only"] is True
 
 
-
 def test_recent_candle_diagnostics_locate_duplicates_and_missing_minutes():
-    minutes = [
-        f"2026-10-16T07:{minute:02d}:00Z" for minute in range(20, 24)
-    ]
+    minutes = [f"2026-10-16T07:{minute:02d}:00Z" for minute in range(20, 24)]
 
     class MDM:
         def get_ohlc_bars(self, _symbol, *, limit=12):
@@ -190,24 +187,16 @@ def test_recent_candle_diagnostics_locate_duplicates_and_missing_minutes():
     assert result["classification"] == "recent_tail_divergence"
     assert result["latest_minute_agreement"] is True
     assert result["matching_tail_suffix_bars"] == 1
-    assert result["duplicate_minute_ids_by_source"]["runner"] == [
-        "2026-10-16T07:21Z"
-    ]
-    assert result["missing_vs_mdm_by_source"]["runner"] == [
-        "2026-10-16T07:22Z"
-    ]
+    assert result["duplicate_minute_ids_by_source"]["runner"] == ["2026-10-16T07:21Z"]
+    assert result["missing_vs_mdm_by_source"]["runner"] == ["2026-10-16T07:22Z"]
     assert result["extra_vs_mdm_by_source"]["runner"] == []
     assert result["missing_vs_mdm_by_source"]["indicator"] == []
     assert result["diagnostic_only"] is True
 
 
 def test_recent_candle_diagnostics_distinguish_window_boundary_from_live_gap():
-    canonical = [
-        f"2026-10-16T07:{minute:02d}:00Z" for minute in range(20, 24)
-    ]
-    runner_rows = [
-        "2026-10-16T07:19:00Z", *canonical[1:]
-    ]
+    canonical = [f"2026-10-16T07:{minute:02d}:00Z" for minute in range(20, 24)]
+    runner_rows = ["2026-10-16T07:19:00Z", *canonical[1:]]
 
     class MDM:
         def get_ohlc_bars(self, _symbol, *, limit=12):
