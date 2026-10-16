@@ -20529,6 +20529,23 @@ class StrategyRunner:
                         else None
                     ),
                 )
+                # Terminal setup observability is downstream of the accepted
+                # broker order. It never influences the entry or risk decision.
+                try:
+                    transition_setup(
+                        SetupStage.BROKER_ACCEPTED,
+                        metadata,
+                        strategy=metadata.get("strategy") or signal_strategy,
+                        symbol=signal.symbol,
+                        side=option_side,
+                        reason=str(order_id),
+                    )
+                except Exception as lifecycle_exc:  # noqa: BLE001 - telemetry only
+                    self._logger.warning(
+                        "SETUP_LIFECYCLE_BROKER_ACCEPTED_TELEMETRY_FAILED "
+                        "error_type=%s",
+                        type(lifecycle_exc).__name__,
+                    )
                 return SignalExecutionResult(
                     True,
                     "order_submitted",
