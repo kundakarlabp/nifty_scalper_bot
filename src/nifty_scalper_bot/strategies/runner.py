@@ -208,6 +208,25 @@ if TYPE_CHECKING:
     from nifty_scalper_bot.execution.order_manager import ExitIntent
 
 LOGGER = get_logger(__name__)
+
+
+def _update_runner_live_candle(
+    builder: OneMinuteBarBuilder,
+    symbol: str,
+    price: float,
+    volume: int,
+    timestamp: datetime,
+) -> OneMinuteBar | None:
+    """Keep LIVE off-session quotes out of the runner's independent bar builder.
+
+    MDM continues publishing quotes for risk/protection, but may quarantine
+    its own CandleEngine input. Use the identical source-time session policy
+    to prevent runner/indicator drift from the same after-hours quote.
+    """
+    if _should_skip_live_nifty_candle(symbol, timestamp):
+        return None
+    return builder.update(price, volume, timestamp)
+
 RELAX_REGIME_FILTER = (
     os.getenv("RELAX_REGIME_FILTER", "true").lower() != "false"
 )  # default True: regime starts with no snapshot
@@ -6988,6 +7007,14 @@ class StrategyRunner:
         - Uses canonical .timestamp property (Contract).
         - Maps Bar object to IndicatorEngine.update_price API.
         """
+        # Reject an independent LIVE runner bar built outside the exchange
+        # session even if a caller bypassed the normal tick builder. Do not
+        # suppress order-protection ticks or valid historical imports.
+        if not is_backfill and _should_skip_live_nifty_candle(
+            symbol, bar.timestamp
+        ):
+            return
+
         # 1. Monotonicity Check (Prevent out-of-order processing)
         last_ts = self._last_bar_ts.get(symbol)
 
@@ -14895,7 +14922,9 @@ class StrategyRunner:
 
             builder = self._bar_builders.setdefault(symbol, OneMinuteBarBuilder())
             try:
-                completed_bar = builder.update(float(price), volume, timestamp)
+                completed_bar = _update_runner_live_candle(
+                    builder, symbol, float(price), volume, timestamp
+                )
                 if completed_bar is not None:
                     self._ingest_bar(symbol, completed_bar)
                     runner_history_count = len(
