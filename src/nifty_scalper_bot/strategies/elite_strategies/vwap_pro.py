@@ -217,6 +217,7 @@ class VWAPProStrategy(EliteStrategy):
         *,
         session_scope: str,
         vwap: float,
+        observation_anchor: Any,
     ) -> str | None:
         """Reconstruct same-contract VWAP state after restart/ATM rotation.
 
@@ -225,7 +226,13 @@ class VWAPProStrategy(EliteStrategy):
         already observable before process restart; it does not create a new
         trigger, relax a structural prerequisite, or borrow state from another strike.
         """
-        if session_scope == "unknown" or vwap <= 0:
+        if session_scope == "unknown" or vwap <= 0 or observation_anchor in (None, ""):
+            return None
+        try:
+            observation_ts = datetime.fromisoformat(
+                _normalize_thesis_anchor(observation_anchor)
+            )
+        except (TypeError, ValueError, OverflowError):
             return None
         engine = self._indicator_engine
         getter = getattr(engine, "get_history", None)
@@ -263,6 +270,12 @@ class VWAPProStrategy(EliteStrategy):
             if timestamp in (None, ""):
                 continue
             if _resolve_session_token({}, timestamp) != session_scope:
+                continue
+            try:
+                row_ts = datetime.fromisoformat(_normalize_thesis_anchor(timestamp))
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if row_ts > observation_ts:
                 continue
             try:
                 row_open = float(raw.get("open") or 0.0)
@@ -498,6 +511,7 @@ class VWAPProStrategy(EliteStrategy):
                     symbol,
                     session_scope=session_scope,
                     vwap=vwap,
+                    observation_anchor=bar_anchor,
                 )
                 if recovered_anchor:
                     thesis_anchor = recovered_anchor
