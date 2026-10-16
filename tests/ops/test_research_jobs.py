@@ -611,9 +611,7 @@ def test_worker_completes_component_research_without_claiming_live_parity(
     assert result["retained_cache_coverage"]["staged_session_dates"] == retained_dates
     assert result["retained_cache_coverage"]["promotion_eligible"] is False
     assert len(result["retained_session_research"]) == min(5, retained_sessions)
-    assert result["retained_session_research_deferred"] == max(
-        0, retained_sessions - 5
-    )
+    assert result["retained_session_research_deferred"] == max(0, retained_sessions - 5)
     assert len(mock_research_calls) == 1 + min(5, retained_sessions)
     for session in result["retained_session_research"]:
         assert session["promotion_eligible"] is False
