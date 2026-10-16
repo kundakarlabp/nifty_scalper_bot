@@ -335,3 +335,30 @@ def test_restart_preserves_identity_for_equivalent_anchor_formats(
     )
     assert uninterrupted.metadata["setup_id"] == recovered.metadata["setup_id"]
     assert deterministic_signal_id(uninterrupted) == deterministic_signal_id(recovered)
+
+
+def test_vwap_recovery_cannot_use_later_same_session_bar(monkeypatch):
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    history = [
+        _bar("2026-09-08T10:00:00", open_=102.0, high=102.0, low=102.0, close=102.0),
+        _bar("2026-09-08T10:02:00", open_=100.0, high=101.0, low=90.0, close=92.0),
+    ]
+    strategy = VWAPProStrategy(VWAPProStrategyConfig(), _HistoryEngine(history))
+    assert (
+        strategy._recover_thesis_anchor_from_history(
+            "NFO:NIFTY2690823650CE",
+            session_scope="2026-09-08",
+            vwap=100.0,
+            observation_anchor="2026-09-08T10:01:00+05:30",
+        )
+        is None
+    )
+    assert (
+        strategy._recover_thesis_anchor_from_history(
+            "NFO:NIFTY2690823650CE",
+            session_scope="2026-09-08",
+            vwap=100.0,
+            observation_anchor="2026-09-08T10:03:00+05:30",
+        )
+        is not None
+    )
