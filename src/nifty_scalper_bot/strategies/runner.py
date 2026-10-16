@@ -100,7 +100,10 @@ from nifty_scalper_bot.core.trade_manager import TradeManager
 from nifty_scalper_bot.core.universe_controller import UniverseController
 
 # Assumes you created the data/constants.py file as advised
-from nifty_scalper_bot.data.market_data_manager import MarketDataManager
+from nifty_scalper_bot.data.market_data_manager import (
+    MarketDataManager,
+    _should_skip_live_nifty_candle,
+)
 from nifty_scalper_bot.data.normalizers import normalize_history_row
 from nifty_scalper_bot.strategies.order_flow_evidence import TemporalOfiAccumulator
 from nifty_scalper_bot.data.pipeline import (
@@ -1826,13 +1829,31 @@ class StrategyRunner:
 
         cached = self._recent_history_cache.get(normalized) or []
         if cached and not self._symbol_history.get(normalized):
-            self._symbol_history[normalized] = list(cached)
-            self._restored_from_cache_symbols.add(normalized)
-            self._logger.info(
-                "RUNNER_HISTORY_CACHE_RESTORED symbol=%s bars=%d",
-                normalized,
-                len(cached),
-            )
+            valid_cached = []
+            for bar in cached:
+                ts = (
+                    bar.get("timestamp")
+                    if isinstance(bar, Mapping)
+                    else getattr(bar, "timestamp", None)
+                )
+                if isinstance(ts, str):
+                    try:
+                        ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                    except ValueError:
+                        ts = None
+                if isinstance(ts, datetime) and _should_skip_live_nifty_candle(
+                    normalized, ts
+                ):
+                    continue
+                valid_cached.append(bar)
+            if valid_cached:
+                self._symbol_history[normalized] = list(valid_cached)
+                self._restored_from_cache_symbols.add(normalized)
+                self._logger.info(
+                    "RUNNER_HISTORY_CACHE_RESTORED symbol=%s bars=%d",
+                    normalized,
+                    len(valid_cached),
+                )
         self._hydrate_from_mdm_cache(normalized)
 
         self._logger.info("Tracking symbol %s", normalized)
@@ -5995,6 +6016,9 @@ class StrategyRunner:
             if ts.tzinfo is None:
                 ts = ts.replace(tzinfo=timezone.utc)
 
+            symbol = canonical(str(data["symbol"]))
+            if _should_skip_live_nifty_candle(symbol, ts):
+                return
             end_ts = ts + timedelta(minutes=1)
 
             # 2. Construct EXACTLY matching the signature
@@ -6017,7 +6041,6 @@ class StrategyRunner:
             # The live builder owns the current minute.
             if end_ts > datetime.now(timezone.utc):
                 return
-            symbol = canonical(str(data["symbol"]))
             self._ingest_bar(symbol, bar, is_backfill=True)
 
             # 4. Force Registration
@@ -6106,6 +6129,8 @@ class StrategyRunner:
                 if not isinstance(ts_value, datetime):
                     continue
                 timestamp = ts_value.astimezone(timezone.utc).replace(microsecond=0)
+                if _should_skip_live_nifty_candle(normalized_symbol, timestamp):
+                    continue
                 normalized_rows[timestamp] = {
                     "timestamp": timestamp,
                     "open": float(normalized["open"]),
@@ -6365,6 +6390,10 @@ class StrategyRunner:
                     row["timestamp"] = datetime.fromisoformat(ts.replace("Z", "+00:00"))
                 except Exception:
                     continue
+            if isinstance(row.get("timestamp"), datetime) and (
+                _should_skip_live_nifty_candle(symbol, row["timestamp"])
+            ):
+                continue
             rows.append(row)
         return rows
 
