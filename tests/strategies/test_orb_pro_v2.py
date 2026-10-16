@@ -948,3 +948,27 @@ def test_orb_uses_entry_acceptance_not_preliminary_signal_to_consume_setup(
     assert strategy._events[key]["status"] == "AWAITING_RETEST"
     strategy.notify_entry_accepted("CE", setup_id=signal.metadata["setup_id"])
     assert strategy._events[key]["status"] == "EMITTED"
+
+
+@pytest.mark.parametrize("invalid_anchor", ["not-a-timestamp", float("inf")])
+def test_orb_invalid_explicit_option_timestamp_cannot_bypass_causality(
+    monkeypatch, invalid_anchor
+) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    rows = _opening_rows()
+    rows.append(
+        _bar(
+            15,
+            open_=24_008.0,
+            high=24_034.0,
+            low=24_006.0,
+            close=24_030.0,
+            volume=3_000.0,
+        )
+    )
+    strategy = _strategy({FUTURE: rows})
+    indicators = _base_indicators("CE", rows[-1]["timestamp"])
+    indicators["latest_bar_ts"] = invalid_anchor
+
+    assert strategy.generate_signal(CE, indicators, 50.0) is None
+    assert strategy.last_no_vote_reason == "underlying_orb_not_ready"
