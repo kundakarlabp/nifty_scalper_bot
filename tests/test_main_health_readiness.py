@@ -453,6 +453,7 @@ def test_health_trading_balance_success_does_not_mark_order_endpoint_authenticat
 
     assert body["broker"]["funds_endpoint_verified"] is True
     assert body["broker"]["order_endpoint_verified"] is False
+    assert body["broker"]["order_endpoint_verification_scope"] == "process_local"
     assert (
         body["broker"]["order_endpoint_verification_state"]
         == "not_yet_proven_by_live_order"
@@ -624,6 +625,9 @@ def test_health_trading_exposes_signal_observability_without_changing_readiness(
                 "tick_count": 11,
                 "phase9_evaluation_count": 4,
                 "legacy_activity_count": 15,
+                "last_tick_age_sec": 0.8,
+                "last_eval_age_sec": 17.2,
+                "runner_state": "RunnerState.EXECUTION_ENABLED",
                 "candidate_generated_count": 1,
                 "approved_candidate_count": 0,
                 "completed_strategy_evaluations_window": {
@@ -663,6 +667,9 @@ def test_health_trading_exposes_signal_observability_without_changing_readiness(
     assert observability["runner_tick_count"] == 11
     assert observability["phase9_evaluation_count"] == 4
     assert observability["legacy_activity_count"] == 15
+    assert observability["last_tick_age_sec"] == 0.8
+    assert observability["last_eval_age_sec"] == 17.2
+    assert observability["runner_state"] == "RunnerState.EXECUTION_ENABLED"
     assert observability["completed_strategy_evaluations_window"]["SMC"] == 4
     assert (
         observability["no_vote_reason_counts_by_strategy_window"]["ORBPro"][
