@@ -66,6 +66,7 @@ class SetupLifecycleRecord:
     reason: str | None
     first_seen_ts: float
     updated_ts: float
+    last_observed_ts: float | None = None
     transitions: int = 1
 
 
@@ -112,9 +113,13 @@ class SetupLifecycleRegistry:
                 next_rank = _RANK.get(resolved, previous_rank + 1)
                 if resolved not in _TERMINAL and next_rank < previous_rank:
                     return previous
-                same_reason = str(reason or "") == str(previous.reason or "")
-                if previous_stage == resolved and same_reason:
-                    previous.updated_ts = now
+                if previous_stage == resolved:
+                    # Repeated evaluations and changing explanations are not
+                    # another transition through the same lifecycle stage.
+                    # Preserve updated_ts for actual stage-change age, while
+                    # tracking the most recent observation separately.
+                    previous.last_observed_ts = now
+                    previous.reason = str(reason) if reason not in (None, "") else None
                     self._records.move_to_end(key)
                     return previous
                 first_seen = previous.first_seen_ts
@@ -132,6 +137,7 @@ class SetupLifecycleRegistry:
                 reason=str(reason) if reason not in (None, "") else None,
                 first_seen_ts=first_seen,
                 updated_ts=now,
+                last_observed_ts=now,
                 transitions=transitions,
             )
             self._records[key] = record

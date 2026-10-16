@@ -219,7 +219,7 @@ def test_smc_confirmation_wait_tracks_one_nonterminal_setup_across_retries(
     assert record["setup_id"] == smc_signal.metadata["setup_id"]
     assert record["stage"] == "TRIGGER_QUALIFIED"
     assert record["reason"] == "smc_independent_confirmation_missing"
-    assert record["transitions"] == 2
+    assert record["transitions"] == 1  # same stage, new reason is observation
 
     approved = manager._combine_strategy_votes(
         symbol=_CE,
@@ -230,7 +230,7 @@ def test_smc_confirmation_wait_tracks_one_nonterminal_setup_across_retries(
     snapshot = registry.snapshot()
     assert snapshot["tracked_count"] == 1
     assert snapshot["active"][0]["stage"] == "MANAGER_QUALIFIED"
-    assert snapshot["active"][0]["transitions"] == 3
+    assert snapshot["active"][0]["transitions"] == 2  # actual new stage
 
 
 def test_smc_capacity_retry_confirmation_wait_is_tracked_without_new_approval(

@@ -587,7 +587,94 @@ def _signal_observability(ctx):  # noqa: ANN001
     }
 
 
-def _history_count_diagnostics(history):  # noqa: ANN001
+def _bar_minute_identity(row):  # noqa: ANN001
+    """Canonical UTC minute key for observational candle comparison."""
+    from datetime import datetime, timezone
+
+    if isinstance(row, (datetime, str, int, float)):
+        raw = row
+    elif isinstance(row, dict):
+        raw = row.get("timestamp") or row.get("start") or row.get("date")
+    else:
+        raw = getattr(row, "timestamp", None)
+    try:
+        if isinstance(raw, datetime):
+            stamp = raw
+        elif isinstance(raw, (int, float)):
+            stamp = datetime.fromtimestamp(float(raw), timezone.utc)
+        elif isinstance(raw, str):
+            stamp = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        else:
+            return None
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=timezone.utc)
+        return stamp.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%MZ")
+    except (ValueError, TypeError, OverflowError, OSError):
+        return None
+
+
+def _history_tail_diagnostics(ctx, symbol, *, limit=12):  # noqa: ANN001
+    """Compare recent candle identities without modifying trading readiness."""
+    size = max(1, min(16, int(limit)))
+    timestamps = {"mdm": [], "runner": [], "indicator": []}
+    mdm = getattr(ctx, "market_data_manager", None)
+    get_bars = getattr(mdm, "get_ohlc_bars", None)
+    if callable(get_bars):
+        try:
+            try:
+                mdm_rows = get_bars(symbol, limit=size) or []
+            except TypeError:
+                mdm_rows = get_bars(symbol) or []
+            timestamps["mdm"] = [
+                minute
+                for row in mdm_rows[-size:]
+                if (minute := _bar_minute_identity(row)) is not None
+            ]
+        except Exception:  # noqa: BLE001 - diagnostics only
+            pass
+
+    runner = getattr(ctx, "strategy_runner", None)
+    getter = getattr(runner, "history_tail_timestamps", None)
+    if callable(getter):
+        try:
+            payload = getter(symbol, limit=size) or {}
+            for source in ("runner", "indicator"):
+                timestamps[source] = [
+                    minute
+                    for row in (payload.get(source) or [])[-size:]
+                    if (minute := _bar_minute_identity(row)) is not None
+                ]
+        except Exception:  # noqa: BLE001 - diagnostics only
+            pass
+
+    populated = [values for values in timestamps.values() if values]
+    if len(populated) < 3:
+        classification = "identities_unavailable"
+    elif all(values == populated[0] for values in populated[1:]):
+        classification = "recent_tails_aligned"
+    else:
+        classification = "recent_tail_divergence"
+
+    return {
+        "diagnostic_only": True,
+        "classification": classification,
+        "sample_size": size,
+        "latest_minute_by_source": {
+            source: max(values) if values else None
+            for source, values in timestamps.items()
+        },
+        "sampled_count_by_source": {
+            source: len(values) for source, values in timestamps.items()
+        },
+        "shared_recent_minutes": len(
+            set(timestamps["mdm"])
+            & set(timestamps["runner"])
+            & set(timestamps["indicator"])
+        ),
+    }
+
+
+def _history_count_diagnostics(history, *, ctx=None, selected=None):  # noqa: ANN001
     """Explain historical-bar count deltas without changing readiness.
 
     Runner retention can include a still-forming bar or distinct history range.
@@ -607,6 +694,15 @@ def _history_count_diagnostics(history):  # noqa: ANN001
             "runner_minus_indicator": runner - indicator,
             "count_mismatch": len({mdm, indicator, runner}) != 1,
         }
+        if (
+            per_side[side]["count_mismatch"]
+            and ctx is not None
+            and isinstance(selected, dict)
+            and selected.get(side)
+        ):
+            per_side[side]["recent_timestamp_identity"] = _history_tail_diagnostics(
+                ctx, selected[side]
+            )
     return {
         "diagnostic_only": True,
         "execution_history_ready": all(
@@ -659,7 +755,9 @@ def _structured_runtime_status(ctx):  # noqa: ANN001
     return {
         "selected": selected,
         "history": history,
-        "history_diagnostics": _history_count_diagnostics(history),
+        "history_diagnostics": _history_count_diagnostics(
+            history, ctx=ctx, selected=selected
+        ),
         "state": {
             "startup_ready": bool(
                 getattr(ctx, "startup_ready", getattr(ctx, "data_hard_ready", False))

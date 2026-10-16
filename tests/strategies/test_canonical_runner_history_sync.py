@@ -780,3 +780,30 @@ def test_history_ensure_without_runtime_loop_defers_instead_of_spawning_loop() -
     assert calls == []
     assert runner._runtime_history_ensure_inflight == {}
     assert runner._runtime_history_ensure_roles == {}
+
+
+def test_recent_history_timestamp_samples_are_bounded_and_read_only() -> None:
+    import threading
+
+    symbol = "NFO:NIFTY26O1923150CE"
+    rows = _bars(24)
+    runner = StrategyRunner.__new__(StrategyRunner)
+    runner._normalize_symbol = lambda value: str(value)
+    runner._symbol_history = {
+        symbol: [SimpleNamespace(timestamp=row["timestamp"]) for row in rows]
+    }
+    runner._lock = threading.RLock()
+
+    class _Indicator:
+        def get_history(self, value, *, count, field):
+            assert value == symbol
+            assert field == "bars"
+            assert count == 12
+            return rows[-count:]
+
+    runner._indicator_engine = _Indicator()
+    before = list(runner._symbol_history[symbol])
+    sample = runner.history_tail_timestamps(symbol)
+    assert sample["runner"] == [row["timestamp"] for row in rows[-12:]]
+    assert sample["indicator"] == sample["runner"]
+    assert runner._symbol_history[symbol] == before

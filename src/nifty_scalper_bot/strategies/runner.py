@@ -11501,6 +11501,34 @@ class StrategyRunner:
         except Exception:
             return 0
 
+    def history_tail_timestamps(
+        self, symbol: str, *, limit: int = 12
+    ) -> dict[str, list[Any]]:
+        """Sample existing runner/indicator bar identities; never alter history."""
+        count = max(1, min(16, int(limit)))
+        normalized = self._normalize_symbol(symbol)
+        try:
+            with self._lock:
+                rows = list((self._symbol_history.get(normalized) or [])[-count:])
+            runner_times = [
+                bar.get("timestamp") if isinstance(bar, Mapping)
+                else getattr(bar, "timestamp", None)
+                for bar in rows
+            ]
+        except Exception:
+            runner_times = []
+        try:
+            engine = self._indicator_engine
+            rows = engine.get_history(normalized, count=count, field="bars") or []
+            indicator_times = [
+                row.get("timestamp") if isinstance(row, Mapping)
+                else getattr(row, "timestamp", None)
+                for row in rows[-count:]
+            ]
+        except Exception:
+            indicator_times = []
+        return {"runner": runner_times, "indicator": indicator_times}
+
     def indicator_history_count(self, symbol: str) -> int:
         """Args: symbol. Returns: IndicatorEngine history bar count. Read-only;
         returns 0 on missing state. Raises: none.
