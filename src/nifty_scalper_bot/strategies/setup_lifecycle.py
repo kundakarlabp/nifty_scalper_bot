@@ -163,6 +163,51 @@ class SetupLifecycleRegistry:
         )
         return record
 
+    def expire_unselected_option_setups(
+        self, selected_ce: str, selected_pe: str
+    ) -> int:
+        """Close observability records for option contracts no longer selected.
+
+        This registry is observational only: expiration must never cancel orders,
+        invalidate strategy-native state or change any execution admission gate.
+        An incomplete/invalid contract selection is not sufficient proof that an
+        earlier setup has expired.
+        """
+        ce = str(selected_ce or "").strip()
+        pe = str(selected_pe or "").strip()
+        if (
+            not ce.startswith("NFO:")
+            or not ce.endswith("CE")
+            or not pe.startswith("NFO:")
+            or not pe.endswith("PE")
+        ):
+            return 0
+        selected = {ce, pe}
+        expired = 0
+        with self._lock:
+            old_setups = [
+                (record.strategy, record.setup_id, record.symbol, record.side)
+                for record in self._records.values()
+                if (
+                    SetupStage(record.stage) not in _TERMINAL
+                    and record.symbol.startswith("NFO:")
+                    and record.symbol.endswith(("CE", "PE"))
+                    and record.symbol not in selected
+                )
+            ]
+            for strategy, setup_id, symbol, side in old_setups:
+                result = self.transition(
+                    SetupStage.EXPIRED,
+                    strategy=strategy,
+                    setup_id=setup_id,
+                    symbol=symbol,
+                    side=side,
+                    reason="selected_option_contract_rotated",
+                )
+                if result is not None and result.stage == SetupStage.EXPIRED.value:
+                    expired += 1
+        return expired
+
     def snapshot(self) -> dict[str, Any]:
         now = time.time()
         with self._lock:
