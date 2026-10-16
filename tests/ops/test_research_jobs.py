@@ -424,8 +424,9 @@ def test_admin_research_report_exposes_vwap_comparison(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("ledger_error", [False, True])
+@pytest.mark.parametrize("retained_sessions", [0, 5, 7])
 def test_worker_completes_component_research_without_claiming_live_parity(
-    tmp_path, monkeypatch, ledger_error
+    tmp_path, monkeypatch, ledger_error, retained_sessions
 ):
     import io
     from types import SimpleNamespace
@@ -473,14 +474,54 @@ def test_worker_completes_component_research_without_claiming_live_parity(
         return {"saved_requests": 4, "empty_requests": [], "failed_requests": []}
 
     monkeypatch.setattr("scripts.archive_kite_history.archive_history", collect)
-    monkeypatch.setattr(
-        "nifty_scalper_bot.backtesting.strategy_research.run_archived_research",
-        lambda directory: {
+    if retained_sessions:
+        retained_dates = [
+            "2026-09-29",
+            "2026-09-30",
+            "2026-10-01",
+            "2026-10-05",
+            "2026-10-06",
+            "2026-10-07",
+            "2026-10-08",
+        ][:retained_sessions]
+        monkeypatch.setattr(
+            "scripts.archive_kite_history.historical_cache_inventory",
+            lambda *args, **kwargs: {
+                "promotion_eligible": False,
+                "valid_cached_files": 14,
+                "corrupt_or_untrusted_files": 1,
+                "synchronized_contract_minutes": 165978,
+                "staged_session_dates": retained_dates,
+                "staging_rejections": {"2026-09-28": "historical_spot_unavailable"},
+            },
+        )
+    else:
+        retained_dates = []
+    mock_research_calls = []
+
+    def mock_research(directory):
+        mock_research_calls.append(directory)
+        return {
             "scope": "active_contract_strategy_components",
             "evidence_label": "RESEARCH_CANDIDATE",
             "coverage": {},
-            "scenarios": [],
-        },
+            "scenarios": [
+                {
+                    "slippage_bps_per_side": 10.0,
+                    "strategies": {
+                        "ORBPro": {
+                            "metrics": {"trade_count": 1, "net_pnl": 12.5},
+                            "data_quality": {"unresolved_exit_count": 2},
+                            "entry_funnel": {"signals_emitted": 3},
+                        }
+                    },
+                }
+            ],
+        }
+
+    monkeypatch.setattr(
+        "nifty_scalper_bot.backtesting.strategy_research.run_archived_research",
+        mock_research,
     )
     monkeypatch.setattr(
         "nifty_scalper_bot.backtesting.strategy_research.run_orb_comparison",
@@ -564,9 +605,25 @@ def test_worker_completes_component_research_without_claiming_live_parity(
     )
     assert comparison_path.is_file()
     assert result["live_equivalent"] is False
-    assert result["historical_synchronized_contract_minutes"] == 0
-    assert result["retained_session_research"] == []
-    assert result["retained_session_research_deferred"] == 0
+    assert result["historical_synchronized_contract_minutes"] == (
+        165978 if retained_sessions else 0
+    )
+    assert result["retained_cache_coverage"]["staged_session_dates"] == retained_dates
+    assert result["retained_cache_coverage"]["promotion_eligible"] is False
+    assert len(result["retained_session_research"]) == min(5, retained_sessions)
+    assert result["retained_session_research_deferred"] == max(0, retained_sessions - 5)
+    assert len(mock_research_calls) == 1 + min(5, retained_sessions)
+    for session in result["retained_session_research"]:
+        assert session["promotion_eligible"] is False
+        assert session["scenarios"][0]["strategies"]["ORBPro"] == {
+            "signals_emitted": 3,
+            "resolved_trades": 1,
+            "unresolved_trades": 2,
+            "modeled_net_pnl": 12.5,
+        }
+        saved = tmp_path / "data/research/real-job" / session["report"]
+        assert saved.is_file()
+        assert json.loads(saved.read_text())["promotion_eligible"] is False
     inventory_file = tmp_path / "data/research/real-job/historical_cache_inventory.json"
     assert inventory_file.is_file()
     assert json.loads(inventory_file.read_text())["promotion_eligible"] is False
