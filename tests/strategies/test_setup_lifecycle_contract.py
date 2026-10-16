@@ -191,10 +191,14 @@ def test_runner_terminalizes_setup_after_broker_acceptance() -> None:
 def test_repeated_stage_observations_do_not_inflate_transition_metrics(
     monkeypatch,
 ) -> None:
+    from types import SimpleNamespace
+
     from nifty_scalper_bot.strategies import setup_lifecycle as lifecycle
 
     clock = iter([1000.0, 1010.0, 1020.0, 1030.0])
-    monkeypatch.setattr(lifecycle.time, "time", lambda: next(clock))
+    monkeypatch.setattr(
+        lifecycle, "time", SimpleNamespace(time=lambda: next(clock))
+    )
     registry = SetupLifecycleRegistry(limit=128)
     kwargs = {
         "strategy": "SMC",
