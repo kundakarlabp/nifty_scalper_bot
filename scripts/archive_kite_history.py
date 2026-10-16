@@ -339,7 +339,7 @@ def historical_cache_inventory(
                     or not symbol.startswith("NFO:NIFTY")
                     or not symbol[4:].isascii()
                     or not symbol[4:].isalnum()
-                    or kind in {"CE", "PE"} and not symbol.endswith(kind)
+                    or (kind in {"CE", "PE"} and not symbol.endswith(kind))
                 ):
                     raise ValueError("historical_cache_nifty_identity_invalid")
                 expiry = dt.date.fromisoformat(str(instrument["expiry"]))
