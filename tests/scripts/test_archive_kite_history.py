@@ -349,6 +349,7 @@ def test_retained_cache_inventory_rejects_post_expiry_candles(tmp_path):
     assert result["corrupt_or_untrusted_files"] == 1
     assert result["synchronized_contract_minutes"] == 0
 
+
 def _retained_session_payload(
     symbol,
     kind,
