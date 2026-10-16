@@ -224,9 +224,13 @@ class ORBProStrategy(EliteStrategy):
         if option_anchor is not None:
             # A faster futures feed cannot authorize an earlier option observation.
             rows = [row for row in rows if row["timestamp"] <= option_anchor]
-            if not rows or (option_anchor - rows[-1]["timestamp"]).total_seconds() > max(
+            if not rows:
+                return None
+            lag_seconds = (option_anchor - rows[-1]["timestamp"]).total_seconds()
+            max_lag_seconds = max(
                 60.0, _env_float("ORB_UNDERLYING_MAX_LAG_SECONDS", 120.0)
-            ):
+            )
+            if lag_seconds > max_lag_seconds:
                 return None
         if len(rows) < 2:
             return None
