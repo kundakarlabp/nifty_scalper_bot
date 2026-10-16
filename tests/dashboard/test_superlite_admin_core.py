@@ -166,6 +166,21 @@ def test_updater_malformed_timestamp_is_stale(monkeypatch, tmp_path) -> None:
     assert value["stale_reason"] == "malformed_timestamp"
 
 
+def test_interrupted_runtime_recovery_is_reported_stale(monkeypatch, tmp_path) -> None:
+    import nifty_scalper_bot.superlite_admin_core as core
+
+    status_file = tmp_path / "status.json"
+    status_file.write_text(
+        '{"state":"recovering_runtime","updated_ts":1,"message":"restarting"}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(core, "STATUS_PATH", status_file)
+    monkeypatch.setenv("BOT_UPDATER_STALE_TIMEOUT_SECONDS", "1")
+    value = core._update_state()
+    assert value["state"] == "stale_interrupted"
+    assert value["previous_state"] == "recovering_runtime"
+
+
 def test_broker_auth_unknown_is_not_reported_authenticated(monkeypatch) -> None:
     import nifty_scalper_bot.superlite_admin_core as core
 
