@@ -294,7 +294,9 @@ def _market_session_release_helpers() -> str:
 def test_auto_release_market_window_boundary_and_failure_modes() -> None:
     helpers = _market_session_release_helpers()
     cases = [
-        ("1", "0844", False),
+        ("1", "0759", False),
+        ("1", "0800", True),
+        ("1", "0844", True),
         ("1", "0845", True),
         ("5", "1230", True),
         ("5", "1545", True),
@@ -350,17 +352,35 @@ auto_release_should_defer
         assert (result.returncode == 0) is defer, (mode, weekday, result.stderr)
 
 
-def test_market_window_gate_runs_before_any_checkout_or_service_mutation() -> None:
+def test_auto_market_gate_preserves_health_recovery_and_research_poll() -> None:
     release = _text("deploy/lightsail_release.sh")
     gate = release.index("if auto_release_should_defer; then")
-    assert release.index("exec 9>") < gate
-    assert gate < release.index('cd "$APP_DIR"')
+    protected = release[gate : release.index("\nchmod +x", gate)]
+    assert release.index("exec 9>") < release.index('cd "$APP_DIR"') < gate
+    assert release.index("git fetch --quiet origin main") < gate
+    assert "service_healthy_confirmed" in protected
+    assert 'sudo -n systemctl restart "$SERVICE"' in protected
+    assert "runtime_recovery_failed" in protected
+    assert "poll_research_request" in protected
+    assert 'if [ "$BEFORE" != "$AFTER" ]; then' in protected
+    assert "write_status deferred_market_window" in protected
+    assert "write_status current" in protected
     assert gate < release.index("\nvalidate_environment\n", gate)
-    assert gate < release.index("migrate_systemd_entrypoint", gate)
-    assert gate < release.index('sudo systemctl restart "$SERVICE"', gate)
-    assert "write_status deferred_market_window" in release[gate : gate + 420]
     assert "TZ=Asia/Kolkata date +%u" in release
     assert "TZ=Asia/Kolkata date +%H%M" in release
+
+
+def test_auto_market_guard_rechecks_before_checkout_and_restart() -> None:
+    release = _text("deploy/lightsail_release.sh")
+    validated = release.index('write_status validating "validating')
+    after_candidate = release.index("if auto_release_should_defer; then", validated)
+    checkout = release.index('git reset --hard --quiet "$AFTER"', after_candidate)
+    restart_gate = release.index("if auto_release_should_defer; then", checkout)
+    engine_restart = release.index('sudo systemctl restart "$SERVICE"', restart_gate)
+    assert validated < after_candidate < checkout < restart_gate < engine_restart
+    assert "runtime untouched" in release[after_candidate:checkout]
+    assert 'set_runtime_build_sha "$BEFORE"' in release[restart_gate:engine_restart]
+    assert 'git reset --hard --quiet "$BEFORE"' in release[restart_gate:engine_restart]
     assert (
         subprocess.run(
             ["bash", "-n", str(ROOT / "deploy/lightsail_release.sh")],
