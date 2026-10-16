@@ -99,6 +99,66 @@ def test_native_strategy_sources_cover_direct_and_terminal_lifecycle_paths() -> 
     assert "SetupStage.CONFIRMING" in smc
 
 
+
+def test_option_rotation_expires_only_abandoned_active_option_setups() -> None:
+    registry = SetupLifecycleRegistry()
+    def arm(sid: str, symbol: str, side: str) -> None:
+        registry.transition(
+            SetupStage.TRIGGER_QUALIFIED,
+            strategy="VWAPPro", setup_id=sid, symbol=symbol, side=side,
+        )
+
+    old_pe = "NFO:NIFTY26O1922950PE"
+    new_ce = "NFO:NIFTY26O1923000CE"
+    new_pe = "NFO:NIFTY26O1923000PE"
+    arm("old-pe", old_pe, "PE")
+    arm("new-ce", new_ce, "CE")
+    arm("new-pe", new_pe, "PE")
+    registry.transition(
+        SetupStage.BROKER_ACCEPTED,
+        strategy="SMC", setup_id="filled-old-ce",
+        symbol="NFO:NIFTY26O1922950CE", side="CE",
+    )
+
+    assert registry.expire_unselected_option_setups(new_ce, "") == 0
+    assert registry.snapshot()["active_count"] == 3
+    assert registry.expire_unselected_option_setups(new_ce, new_pe) == 1
+    assert registry.expire_unselected_option_setups(new_ce, new_pe) == 0
+    status = registry.snapshot()
+    assert status["active_count"] == 2
+    assert {item["symbol"] for item in status["active"]} == {new_ce, new_pe}
+    assert status["terminal_counts"][SetupStage.EXPIRED.value] == 1
+    assert status["terminal_counts"][SetupStage.BROKER_ACCEPTED.value] == 1
+    assert status["transition_counts"][SetupStage.EXPIRED.value] == 1
+
+
+def test_option_rotation_retains_context_and_selected_lifecycle() -> None:
+    registry = SetupLifecycleRegistry()
+    registry.transition(
+        SetupStage.CONFIRMING, strategy="SMC", setup_id="fut-context",
+        symbol="NFO:NIFTY26OCTFUT", side="CE",
+    )
+    registry.transition(
+        SetupStage.ARMED, strategy="VWAPPro", setup_id="new-selected",
+        symbol="NFO:NIFTY26O1923000PE", side="PE",
+    )
+    assert registry.expire_unselected_option_setups(
+        "NFO:NIFTY26O1923000CE", "NFO:NIFTY26O1923000PE"
+    ) == 0
+    assert registry.snapshot()["active_count"] == 2
+
+
+def test_option_rotation_is_wired_only_after_committed_contract_change() -> None:
+    from pathlib import Path
+    source = Path("src/nifty_scalper_bot/core/app.py").read_text()
+    committed = source.index("committed_ce, committed_pe =")
+    expired = source.index("expire_unselected_option_setups(", committed)
+    assert source.index("_commit_active_dynamic_basket(", committed) < expired
+    assert "selection_changed and committed_ce and committed_pe" in source[
+        committed:expired + 150
+    ]
+
+
 def test_setup_lifecycle_exposes_exact_last_transition_age() -> None:
     registry = SetupLifecycleRegistry(limit=128)
     registry.transition(
