@@ -240,6 +240,7 @@ def test_history_universe_matches_canonical_active_expiry_and_option_cap(monkeyp
     assert all("NIFTY26O13" in symbol for symbol in option_symbols)
     assert not any("NIFTY26O20" in symbol for symbol in option_symbols)
 
+
 def test_checksum_valid_but_out_of_range_cached_candles_are_not_trusted(tmp_path):
     broker = Broker()
     args = (
