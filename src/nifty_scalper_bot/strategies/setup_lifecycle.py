@@ -119,9 +119,7 @@ class SetupLifecycleRegistry:
                     # Preserve updated_ts for actual stage-change age, while
                     # tracking the most recent observation separately.
                     previous.last_observed_ts = now
-                    previous.reason = (
-                        str(reason) if reason not in (None, "") else None
-                    )
+                    previous.reason = str(reason) if reason not in (None, "") else None
                     self._records.move_to_end(key)
                     return previous
                 first_seen = previous.first_seen_ts
