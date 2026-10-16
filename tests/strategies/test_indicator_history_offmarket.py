@@ -86,6 +86,7 @@ def test_missing_indicator_history_emits_once_until_recovered(
             timestamp=datetime(2026, 10, 16, 5, 1, tzinfo=timezone.utc),
         )
         assert engine.history_count(symbol) == 1
+        assert symbol not in engine._missing_history_episodes
         assert engine.get_history(symbol) == [103.5]
         recovered = [
             item
@@ -98,6 +99,7 @@ def test_missing_indicator_history_emits_once_until_recovered(
         with engine._lock:
             engine._histories.pop(symbol)
         assert engine.get_history(symbol) == []
+        assert symbol in engine._missing_history_episodes
         repeated = [
             item
             for item in caplog.records
