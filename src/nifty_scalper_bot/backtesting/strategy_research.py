@@ -935,7 +935,9 @@ def _scenario(
                 ):
                     rejections[strategy.name]["invalid_signal_geometry"] += 1
                     _record_smc_post_signal_rejection(
-                        strategy.name, metadata.get("setup_id"), "invalid_signal_geometry"
+                        strategy.name,
+                        metadata.get("setup_id"),
+                        "invalid_signal_geometry",
                     )
                     continue
                 entry_funnels[strategy.name]["geometry_valid"] += 1
