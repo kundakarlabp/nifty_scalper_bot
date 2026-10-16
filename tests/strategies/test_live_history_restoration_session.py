@@ -59,9 +59,7 @@ def test_live_runner_reseed_does_not_restore_offsession_candles(monkeypatch):
     assert runner._last_bar_ts[SYMBOL] == IN_SESSION
 
 
-def test_live_disk_cache_restore_excludes_out_of_session_rows(
-    monkeypatch, tmp_path
-):
+def test_live_disk_cache_restore_excludes_out_of_session_rows(monkeypatch, tmp_path):
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     runner = _runner()
     runner._history_cache_dir = tmp_path
@@ -116,9 +114,12 @@ def test_broker_free_live_mode_fixture_is_explicitly_exempt(monkeypatch) -> None
     monkeypatch.setenv("ALLOW_REAL_BROKER", "false")
     assert _should_skip_live_nifty_candle(SYMBOL, AFTER_CLOSE) is False
     runner = _runner()
-    assert runner.reseed_history_from_bars(
-        SYMBOL, [_bar(IN_SESSION), _bar(AFTER_CLOSE)], min_bars=1
-    ) == 2
+    assert (
+        runner.reseed_history_from_bars(
+            SYMBOL, [_bar(IN_SESSION), _bar(AFTER_CLOSE)], min_bars=1
+        )
+        == 2
+    )
 
     # A broker-enabled process cannot escape the guard using test flags.
     monkeypatch.setenv("ALLOW_REAL_BROKER", "true")
