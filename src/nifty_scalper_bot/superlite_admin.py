@@ -71,8 +71,9 @@ def _validated_update() -> tuple[bool, str]:
 def _flash(request: Request) -> str:
     if request.query_params.get("upd") == "ok":
         return (
-            '<div class="flash ok">Remote revision refreshed. The validated '
-            "updater deploys eligible changes within two minutes.</div>"
+            '<div class="flash ok">Update check requested. Routine releases '
+            "are deferred 08:00–15:45 IST on weekdays; a successful request "
+            "does not mean a revision was deployed. Check release status.</div>"
         )
     return _ORIGINAL_FLASH(request)
 

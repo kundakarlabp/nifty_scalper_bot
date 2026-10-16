@@ -278,3 +278,150 @@ def test_release_health_separates_candidate_integrity_from_broker_auth() -> None
     assert 'wait_for_service "$AFTER"' in release
     assert 'service_healthy_confirmed "$BEFORE"' in release
     assert "deployed_dependency_degraded" in release
+
+
+def _market_session_release_helpers() -> str:
+    """Execute only the pure time-gate functions, never the deployment body."""
+    release = _text("deploy/lightsail_release.sh")
+    assert release.count("market_session_protected() {") == 1
+    assert release.count("auto_release_should_defer() {") == 1
+    return (
+        "market_session_protected() {"
+        + release.split("market_session_protected() {", 1)[1].split("\nexec 9>", 1)[0]
+    )
+
+
+def test_auto_release_market_window_boundary_and_failure_modes() -> None:
+    helpers = _market_session_release_helpers()
+    cases = [
+        ("1", "0759", False),
+        ("1", "0800", True),
+        ("1", "0844", True),
+        ("1", "0845", True),
+        ("5", "1230", True),
+        ("5", "1545", True),
+        ("5", "1546", False),
+        ("6", "1230", False),
+        ("7", "1230", False),
+        ("", "", True),
+        ("5", "2580", True),
+    ]
+    for weekday, hhmm, defer in cases:
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                helpers + '\nmarket_session_protected "$1" "$2"',
+                "fixture",
+                weekday,
+                hhmm,
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert (result.returncode == 0) is defer, (weekday, hhmm, result.stderr)
+
+
+def test_auto_release_only_and_manual_emergency_bypass() -> None:
+    helpers = _market_session_release_helpers()
+    shell = helpers + """
+AUTO_MODE="$1"
+FAKE_DAY="$2"
+FAKE_CLOCK="$3"
+date() {
+  case "$1" in
+    +%u) printf '%s' "$FAKE_DAY";;
+    +%H%M) printf '%s' "$FAKE_CLOCK";;
+    *) return 1;;
+  esac
+}
+auto_release_should_defer
+"""
+    for mode, weekday, hhmm, defer in (
+        ("true", "5", "1225", True),
+        ("true", "6", "1225", False),
+        ("false", "5", "1225", False),
+    ):
+        result = subprocess.run(
+            ["bash", "-c", shell, "fixture", mode, weekday, hhmm],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert (result.returncode == 0) is defer, (mode, weekday, result.stderr)
+
+
+def test_auto_market_gate_preserves_health_recovery_and_research_poll() -> None:
+    release = _text("deploy/lightsail_release.sh")
+    gate = release.index("if auto_release_should_defer; then")
+    protected = release[gate : release.index("\nchmod +x", gate)]
+    assert release.index("exec 9>") < release.index('cd "$APP_DIR"') < gate
+    assert release.index("git fetch --quiet origin main") < gate
+    assert "service_healthy_confirmed" in protected
+    assert 'sudo -n systemctl restart "$SERVICE"' in protected
+    assert "runtime_recovery_failed" in protected
+    assert "runtime_checkout_mismatch" in protected
+    assert 'current_runtime_sha" != "$BEFORE"' in protected
+    assert '"http://127.0.0.1:${PORT}/releasez"' in protected
+    assert protected.index("runtime_checkout_mismatch") < protected.index(
+        'sudo -n systemctl restart "$SERVICE"'
+    )
+    assert "unvalidated revision" in protected
+    assert "poll_research_request" in protected
+    assert 'if [ "$BEFORE" != "$AFTER" ]; then' in protected
+    assert "write_status deferred_market_window" in protected
+    assert "write_status current" in protected
+    assert gate < release.index("\nvalidate_environment\n", gate)
+    assert "TZ=Asia/Kolkata date +%u" in release
+    assert "TZ=Asia/Kolkata date +%H%M" in release
+
+
+def test_auto_market_guard_rechecks_before_checkout_and_restart() -> None:
+    release = _text("deploy/lightsail_release.sh")
+    validated = release.index('write_status validating "validating')
+    after_candidate = release.index("if auto_release_should_defer; then", validated)
+    checkout = release.index('git reset --hard --quiet "$AFTER"', after_candidate)
+    restart_gate = release.index("if auto_release_should_defer; then", checkout)
+    engine_restart = release.index('sudo systemctl restart "$SERVICE"', restart_gate)
+    assert validated < after_candidate < checkout < restart_gate < engine_restart
+    assert "checkout untouched" in release[after_candidate:checkout]
+    assert 'set_runtime_build_sha "$BEFORE"' in release[restart_gate:engine_restart]
+    assert 'git reset --hard --quiet "$BEFORE"' in release[restart_gate:engine_restart]
+    assert (
+        subprocess.run(
+            ["bash", "-n", str(ROOT / "deploy/lightsail_release.sh")],
+            capture_output=True,
+            text=True,
+            check=False,
+        ).returncode
+        == 0
+    )
+
+
+def test_forced_restart_survives_market_boundary_deferral() -> None:
+    release = _text("deploy/lightsail_release.sh")
+    assert (
+        'RESTART_PENDING_FILE="${CONFIG_DIR}/auto_release_restart_pending"' in release
+    )
+    assert 'if [ -f "$RESTART_PENDING_FILE" ]; then FORCE_RESTART=true; fi' in release
+    assert release.count(': > "$RESTART_PENDING_FILE"') == 2
+    assert 'rm -f "$RESTART_PENDING_FILE"' in release
+    assert release.index('rm -f "$RESTART_PENDING_FILE"') > release.index(
+        'if wait_for_service "$AFTER"; then'
+    )
+
+
+def test_auto_release_fails_closed_if_intraday_restore_fails() -> None:
+    release = _text("deploy/lightsail_release.sh")
+    boundary = release.split("# Final boundary check:", 1)[1].split(
+        'sudo systemctl restart "$SERVICE"', 1
+    )[0]
+    assert 'if ! git reset --hard --quiet "$BEFORE"; then' in boundary
+    assert 'if ! "$VENV/bin/python" -m pip install --quiet -e .; then' in boundary
+    assert 'if ! set_runtime_build_sha "$BEFORE"; then' in boundary
+    assert boundary.count("write_status runtime_restore_failed") == 3
+    assert "write_status deferred_market_window" in boundary
+    assert boundary.index("write_status runtime_restore_failed") < boundary.index(
+        "write_status deferred_market_window"
+    )

@@ -18,6 +18,7 @@ STATUS_FILE="${BOT_UPDATE_STATUS_FILE:-$APP_DIR/data/auto_update_status.json}"
 VENV="${BOT_VENV:-$APP_DIR/.venv}"
 STREAMLIT_VENV="${BOT_STREAMLIT_VENV:-$APP_DIR/.streamlit-venv}"
 LOCK_FILE="${BOT_DEPLOY_LOCK_FILE:-/tmp/niftybot-deploy.lock}"
+RESTART_PENDING_FILE="${CONFIG_DIR}/auto_release_restart_pending"
 FORCE_RESTART=false
 AUTO_MODE=false
 SYSTEMD_ENTRYPOINT_MIGRATED=false
@@ -324,14 +325,84 @@ poll_research_request() {
   esac
 }
 
+
+# Routine updates must never restart live trading or protective-order management
+# during the market session. Use an explicit manual release for emergencies.
+# The buffer covers pre-open preparation and post-close exit reconciliation.
+market_session_protected() {
+  local weekday="$1" hhmm="$2"
+  # An unreadable clock fails closed for automatic releases.
+  if ! [[ "$weekday" =~ ^[1-7]$ && "$hhmm" =~ ^([01][0-9]|2[0-3])[0-5][0-9]$ ]]; then
+    return 0
+  fi
+  [[ "$weekday" =~ ^[1-5]$ && "$hhmm" > "0759" && "$hhmm" < "1546" ]]
+}
+
+auto_release_should_defer() {
+  [ "$AUTO_MODE" = true ] || return 1
+  local weekday hhmm
+  weekday="$(TZ=Asia/Kolkata date +%u)" || return 0
+  hhmm="$(TZ=Asia/Kolkata date +%H%M)" || return 0
+  market_session_protected "$weekday" "$hhmm"
+}
+
 exec 9>"$LOCK_FILE"
 if ! flock -n 9; then log "Another deployment is already running"; exit 0; fi
 
 cd "$APP_DIR"
-chmod +x "$APP_DIR/deploy/lightsail_release.sh" 2>/dev/null || true
 if [ ! -d .git ]; then
   write_status repository_missing "Git repository missing at $APP_DIR"; exit 1
 fi
+
+# Auto mode checks remote revisions without mutating the local runtime.
+# Preserve health recovery and independent research polling when a release waits.
+if [ "$AUTO_MODE" = true ]; then
+  BEFORE="$(git rev-parse HEAD)"
+  write_status fetching "checking origin/main from ${BEFORE:0:7}"
+  git fetch --quiet origin main || {
+    write_status fetch_failed "git fetch failed"; exit 1;
+  }
+  AFTER="$(git rev-parse origin/main)"
+  if auto_release_should_defer; then
+    # Never start a different/partially installed revision to recover a live process.
+    # A missing or differing runtime provenance requires operator reconciliation.
+    current_runtime_sha="$(first_nonempty_env GIT_COMMIT_SHA 2>/dev/null || true)"
+    if [[ ! "$current_runtime_sha" =~ ^[0-9a-fA-F]{40}$ ]] || [ "$current_runtime_sha" != "$BEFORE" ]; then
+      poll_research_request
+      write_status runtime_checkout_mismatch "recovery blocked: checkout ${BEFORE:0:7} differs from confirmed runtime build; manual reconciliation required"
+      log "Recovery blocked: do not restart an unverified checkout during trading"
+      exit 1
+    fi
+    live_release_json="$(curl -fsS --max-time 3 "http://127.0.0.1:${PORT}/releasez" 2>/dev/null || true)"
+    if [ -n "$live_release_json" ] && ! grep -Eq "\"effective_sha\"[[:space:]]*:[[:space:]]*\"${BEFORE:0:12}\"" <<<"$live_release_json"; then
+      poll_research_request
+      write_status runtime_checkout_mismatch "recovery blocked: running process does not match checkout ${BEFORE:0:7}"
+      log "Recovery blocked: running process and checkout provenance disagree"
+      exit 1
+    fi
+    if ! service_healthy_confirmed "$BEFORE"; then
+      write_status recovering_runtime "restarting unhealthy current revision ${BEFORE:0:7}; candidate release still deferred"
+      log "Existing engine failed health probes; recovering current revision, not deploying candidate"
+      sudo -n systemctl restart "$SERVICE" || {
+        write_status runtime_recovery_failed "current revision restart failed"; exit 1;
+      }
+      if ! service_healthy_confirmed "$BEFORE"; then
+        write_status runtime_recovery_failed "current revision unhealthy after recovery restart"
+        exit 1
+      fi
+    fi
+    poll_research_request
+    if [ "$BEFORE" != "$AFTER" ]; then
+      write_status deferred_market_window "unvalidated revision ${AFTER:0:7} pending after 15:45 IST; current ${BEFORE:0:7} retained"
+      log "Automatic release deferred during weekday 08:00-15:45 IST; current revision retained"
+    else
+      write_status current "running ${BEFORE:0:7}; no pending revision"
+    fi
+    exit 0
+  fi
+fi
+
+chmod +x "$APP_DIR/deploy/lightsail_release.sh" 2>/dev/null || true
 mkdir -p "$CONFIG_DIR" "$(dirname "$STATUS_FILE")"
 chmod 700 "$CONFIG_DIR" 2>/dev/null || true
 if [ ! -f "$ENV_FILE" ] && [ -f "$APP_DIR/.env" ]; then
@@ -349,6 +420,9 @@ set_env_value SUPABASE_LOG_ARCHIVE_ENABLED true
 ensure_env_default SUPABASE_LOG_ARCHIVE_URL "https://dehdptgkqbrkyzyodicd.supabase.co/functions/v1/nifty-log-archive-ingest"
 ensure_env_default SUPABASE_LOG_ARCHIVE_INTERVAL_SECONDS 300
 if [ "$RUNTIME_ENV_CHANGED" = true ]; then FORCE_RESTART=true; fi
+# A prior pre-open operation may have persisted environment or unit changes but
+# deferred its restart at the protected boundary; carry it to after-hours.
+if [ -f "$RESTART_PENDING_FILE" ]; then FORCE_RESTART=true; fi
 migrate_systemd_entrypoint
 migrate_autodeploy_entrypoint
 if [ "$SYSTEMD_ENTRYPOINT_MIGRATED" = true ]; then
@@ -439,6 +513,18 @@ if [ "${#EXISTING_TESTS[@]}" -gt 0 ]; then
   }
 fi
 
+# A release started before the protected window must not cross into live hours.
+# Keep this recheck after candidate validation, immediately before checkout mutation.
+if auto_release_should_defer; then
+  if [ "$FORCE_RESTART" = true ]; then
+    mkdir -p "$CONFIG_DIR"
+    : > "$RESTART_PENDING_FILE"
+  fi
+  poll_research_request
+  write_status deferred_market_window "candidate ${AFTER:0:7} validated; checkout untouched; release deferred until after 15:45 IST"
+  exit 0
+fi
+
 mkdir -p "$CONFIG_DIR/backups"
 cp -p "$ENV_FILE" "$CONFIG_DIR/backups/niftybot.env.$(date +%Y%m%d_%H%M%S)"
 write_status deploying "deploying ${AFTER:0:7}"
@@ -466,8 +552,34 @@ if ! set_runtime_build_sha "$AFTER"; then
   write_status env_update_failed "could not publish runtime build SHA ${AFTER:0:7}"
   exit 1
 fi
+# Final boundary check: never restart the engine for an automatic release
+# that has crossed into the protected window. Restore the prior checkout.
+if auto_release_should_defer; then
+  if [ "$FORCE_RESTART" = true ]; then
+    mkdir -p "$CONFIG_DIR"
+    : > "$RESTART_PENDING_FILE"
+  fi
+  if [ "$BEFORE" != "$AFTER" ]; then
+    if ! git reset --hard --quiet "$BEFORE"; then
+      write_status runtime_restore_failed "checkout restoration failed; candidate may be partially installed"
+      exit 1
+    fi
+    if ! "$VENV/bin/python" -m pip install --quiet -e .; then
+      write_status runtime_restore_failed "retained revision dependency restoration failed; manual recovery required"
+      exit 1
+    fi
+  fi
+  if ! set_runtime_build_sha "$BEFORE"; then
+    write_status runtime_restore_failed "retained revision build provenance restoration failed; manual recovery required"
+    exit 1
+  fi
+  write_status deferred_market_window "market boundary reached before engine restart; current revision ${BEFORE:0:7} restored"
+  poll_research_request
+  exit 0
+fi
 sudo systemctl restart "$SERVICE"
 if wait_for_service "$AFTER"; then
+  rm -f "$RESTART_PENDING_FILE"
   admin_ready=false
   if restart_admin; then
     admin_ready=true
