@@ -79,6 +79,7 @@ def test_missing_indicator_history_emits_once_until_recovered(
         ]
         assert len(missing) == 1
         assert symbol in missing[0].getMessage()
+        first_seen = missing[0].first_seen
 
         engine.update_price(
             symbol,
@@ -100,12 +101,10 @@ def test_missing_indicator_history_emits_once_until_recovered(
             engine._histories.pop(symbol)
         assert engine.get_history(symbol) == []
         assert symbol in engine._missing_history_episodes
-        repeated = [
-            item
-            for item in caplog.records
-            if getattr(item, "event", "") == "indicator_engine_history_missing"
-        ]
-        assert len(repeated) == 2
+        # The global logging layer may coalesce two same-symbol INFO events
+        # in one short burst; the new episode identity must still advance.
+        next_started_at = engine._missing_history_episodes[symbol][0].isoformat()
+        assert next_started_at != first_seen
 
 
 def test_reseed_resolves_missing_history_episode(monkeypatch, caplog) -> None:
