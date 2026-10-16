@@ -112,8 +112,8 @@ def _should_skip_live_nifty_candle(symbol: str, tick_ts: datetime) -> bool:
     """Quarantine off-session NIFTY OHLC in LIVE; never suppress the quote.
 
     Timestamp classification uses the broker observation's event time rather
-    than processing wall-clock time. Delayed in-session ticks remain eligible;
-    REST historical imports bypass this real-time-only guard completely.
+    than processing wall-clock time. Delayed in-session ticks and validated
+    historical bars from earlier NSE sessions remain eligible.
     """
     mode = str(os.getenv("EXECUTION_MODE", "")).strip().upper()
     # The broker-free E2E runner may retain ENABLE_LIVE for production-parity
@@ -125,13 +125,22 @@ def _should_skip_live_nifty_candle(symbol: str, tick_ts: datetime) -> bool:
     # NSE opening. Exempt only the explicitly isolated test broker, never a
     # real-money process or an ordinary LIVE deployment.
     test_mode = os.getenv("NSB_TEST_MODE", "").strip().lower() in {
-        "1", "true", "yes", "on"
+        "1",
+        "true",
+        "yes",
+        "on",
     }
     simulated = os.getenv("BROKER_SIMULATION", "").strip().lower() in {
-        "1", "true", "yes", "on"
+        "1",
+        "true",
+        "yes",
+        "on",
     }
     real_broker_allowed = os.getenv("ALLOW_REAL_BROKER", "").strip().lower() in {
-        "1", "true", "yes", "on"
+        "1",
+        "true",
+        "yes",
+        "on",
     }
     if test_mode and simulated and not real_broker_allowed:
         return False
