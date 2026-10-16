@@ -101,7 +101,11 @@ def run_worker(request: dict[str, Any], env_file: Path) -> dict[str, Any]:
     from dotenv import load_dotenv
 
     load_dotenv(env_file, override=False)
-    from scripts.archive_kite_history import archive_history, history_universe
+    from scripts.archive_kite_history import (
+        archive_history,
+        historical_cache_inventory,
+        history_universe,
+    )
     from scripts.reporting.analyze_completed_trades import (
         build_analysis,
         load_trade_ledger_rows,
@@ -150,6 +154,16 @@ def run_worker(request: dict[str, Any], env_file: Path) -> dict[str, Any]:
             cache_dir=get_data_dir() / "historical_archive",
         )
         status["coverage"] = coverage
+        retained = historical_cache_inventory(
+            get_data_dir() / "historical_archive",
+            date.fromisoformat(request["start"]),
+            date.fromisoformat(request["end"]),
+        )
+        write_json(directory / "historical_cache_inventory.json", retained)
+        status["historical_cache_inventory"] = "historical_cache_inventory.json"
+        status["historical_synchronized_contract_minutes"] = retained[
+            "synchronized_contract_minutes"
+        ]
         status["stage"] = "ledger_analysis"
         write_json(directory / "status.json", status)
         write_json(ROOT / "data/research/latest.json", status)

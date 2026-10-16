@@ -239,3 +239,112 @@ def test_history_universe_matches_canonical_active_expiry_and_option_cap(monkeyp
     assert len(option_symbols) == 8
     assert all("NIFTY26O13" in symbol for symbol in option_symbols)
     assert not any("NIFTY26O20" in symbol for symbol in option_symbols)
+
+
+def test_checksum_valid_but_out_of_range_cached_candles_are_not_trusted(tmp_path):
+    broker = Broker()
+    args = (
+        broker,
+        ["NFO:NIFTY26OCT25000CE"],
+        dt.date(2026, 9, 1),
+        dt.date(2026, 9, 2),
+        tmp_path,
+    )
+    archive_history(*args)
+    path = next((tmp_path / "candles").glob("*.json"))
+    payload = json.loads(path.read_text())
+    payload["candles"][0][0] = "2026-09-10T09:15:00+05:30"
+    payload["candles_sha256"] = collector._candle_digest(payload["candles"])
+    path.write_text(json.dumps(payload))
+
+    result = archive_history(*args)
+
+    assert result["saved_requests"] == 1
+    assert result["cached_requests"] == 0
+    assert len(broker.calls) == 2
+
+
+def test_retained_cache_inventory_counts_synchronized_historical_contracts(tmp_path):
+    directory = tmp_path / "candles"
+    directory.mkdir()
+    stamp = "2026-10-12T09:30:00+05:30"
+
+    def keep(symbol, kind, token, *, strike=None, valid=True):
+        instrument = {
+            "exchange": "NFO" if kind != "EQ" else "NSE",
+            "tradingsymbol": symbol.split(":", 1)[1],
+            "instrument_type": kind,
+            "name": "NIFTY",
+            "instrument_token": token,
+            "expiry": "2026-10-13",
+            "strike": strike,
+            "lot_size": 65,
+        }
+        candles = [[stamp, 100, 105, 95, 102, 200, 600]]
+        payload = {
+            "symbol": symbol,
+            "instrument_token": token,
+            "interval": "minute",
+            "continuous": False,
+            "oi": True,
+            "timestamp_convention": "bar_start",
+            "from": "2026-10-12T00:00:00+05:30",
+            "to": "2026-10-12T23:59:59+05:30",
+            "captured_at": "2026-10-12T16:00:00+05:30",
+            "instrument": instrument,
+            "candles": candles,
+            "candles_sha256": collector._candle_digest(candles),
+        }
+        if not valid:
+            payload["candles_sha256"] = "forged"
+        (directory / f"{token}.json").write_text(json.dumps(payload))
+
+    keep("NSE:NIFTY 50", "EQ", 101)
+    keep("NFO:NIFTY26OCTFUT", "FUT", 102)
+    keep("NFO:NIFTY26O1322500CE", "CE", 103, strike=22500)
+    keep("NFO:NIFTY26O1322500PE", "PE", 104, strike=22500)
+    keep("NFO:NIFTY26O1322600CE", "CE", 105, strike=22600, valid=False)
+    result = collector.historical_cache_inventory(
+        tmp_path, dt.date(2026, 10, 12), dt.date(2026, 10, 12)
+    )
+
+    assert result["corrupt_or_untrusted_files"] == 1
+    assert result["synchronized_contract_minutes"] == 1
+    assert result["sessions"][0]["date"] == "2026-10-12"
+    assert result["sessions"][0]["synchronized_contract_minutes"] == 1
+    assert result["sessions"][0]["valid_paired_strikes"] == 1
+    assert result["promotion_eligible"] is False
+
+
+def test_retained_cache_inventory_rejects_post_expiry_candles(tmp_path):
+    directory = tmp_path / "candles"
+    directory.mkdir()
+    payload = {
+        "symbol": "NFO:NIFTY26O0622500CE",
+        "instrument_token": 123,
+        "interval": "minute",
+        "continuous": False,
+        "oi": True,
+        "timestamp_convention": "bar_start",
+        "from": "2026-10-07T00:00:00+05:30",
+        "to": "2026-10-07T23:59:59+05:30",
+        "captured_at": "2026-10-05T10:00:00+05:30",
+        "instrument": {
+            "exchange": "NFO",
+            "tradingsymbol": "NIFTY26O0622500CE",
+            "instrument_type": "CE",
+            "name": "NIFTY",
+            "instrument_token": 123,
+            "expiry": "2026-10-06",
+            "strike": 22500,
+            "lot_size": 65,
+        },
+        "candles": [["2026-10-07T09:30:00+05:30", 100, 105, 95, 102, 200]],
+    }
+    payload["candles_sha256"] = collector._candle_digest(payload["candles"])
+    (directory / "invalid.json").write_text(json.dumps(payload))
+    result = collector.historical_cache_inventory(
+        tmp_path, dt.date(2026, 10, 7), dt.date(2026, 10, 7)
+    )
+    assert result["corrupt_or_untrusted_files"] == 1
+    assert result["synchronized_contract_minutes"] == 0
