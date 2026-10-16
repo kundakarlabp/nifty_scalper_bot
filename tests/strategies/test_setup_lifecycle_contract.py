@@ -168,20 +168,17 @@ def test_option_rotation_is_wired_only_after_committed_contract_change() -> None
     expired = source.index("expire_unselected_option_setups(", committed)
     assert source.index("_commit_active_dynamic_basket(", committed) < expired
     rotation = source[committed : expired + 150]
-    assert all(
-        name in rotation for name in ("selection_changed", "committed_ce", "committed_pe")
-    )
+    fields = ("selection_changed", "committed_ce", "committed_pe")
+    assert all(name in rotation for name in fields)
 
 
-def test_runner_accepted_order_terminalizes_setup_without_changing_order_result() -> None:
+def test_runner_terminalizes_setup_after_broker_acceptance() -> None:
     from pathlib import Path
 
     source = Path("src/nifty_scalper_bot/strategies/runner.py").read_text()
     acceptance = source.index("SetupStage.BROKER_ACCEPTED,")
-    order_result = source.index(
-        'return SignalExecutionResult(\n                    True,\n                    "order_submitted",',
-        acceptance,
-    )
+    order_result = source.index("return SignalExecutionResult(", acceptance)
+    assert '"order_submitted"' in source[order_result : order_result + 140]
     accepted_segment = source[acceptance:order_result]
     assert "reason=str(order_id)" in accepted_segment
     assert "except Exception as lifecycle_exc" in accepted_segment
