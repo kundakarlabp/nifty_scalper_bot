@@ -1056,7 +1056,8 @@ def test_smc_post_signal_rejection_counts_unique_setups_not_option_attempts(
 
     assert result["entry_funnel"]["signals_emitted"] == 2
     assert result["no_vote_reasons"][rejection] == 2
-    assert result["smc_unique_setup_funnel"][
+    unique_rejections = result["smc_unique_setup_funnel"][
         "post_signal_rejections_by_unique_setup"
-    ][rejection] == 1
+    ]
+    assert unique_rejections[rejection] == 1
     assert result["smc_unique_setup_funnel"]["simulated_filled_setups"] == 0
