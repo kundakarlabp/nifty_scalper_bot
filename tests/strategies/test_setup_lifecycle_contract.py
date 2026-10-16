@@ -99,7 +99,6 @@ def test_native_strategy_sources_cover_direct_and_terminal_lifecycle_paths() -> 
     assert "SetupStage.CONFIRMING" in smc
 
 
-
 def test_option_rotation_expires_only_abandoned_active_option_setups() -> None:
     registry = SetupLifecycleRegistry()
 
@@ -154,9 +153,12 @@ def test_option_rotation_retains_context_and_selected_lifecycle() -> None:
         symbol="NFO:NIFTY26O1923000PE",
         side="PE",
     )
-    assert registry.expire_unselected_option_setups(
-        "NFO:NIFTY26O1923000CE", "NFO:NIFTY26O1923000PE"
-    ) == 0
+    assert (
+        registry.expire_unselected_option_setups(
+            "NFO:NIFTY26O1923000CE", "NFO:NIFTY26O1923000PE"
+        )
+        == 0
+    )
     assert registry.snapshot()["active_count"] == 2
 
 
