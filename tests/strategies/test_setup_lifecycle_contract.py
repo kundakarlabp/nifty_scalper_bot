@@ -297,6 +297,15 @@ def test_smc_confirmation_wait_summary_counts_distinct_active_setups() -> None:
         reason="capacity_retry_independent_confirmation_missing",
         **pe,
     )
+    additional_smc = {
+        **ce,
+        "setup_id": "smcv2:NFO:NIFTYFUT:CE:2026-10-16T09:37",
+    }
+    registry.transition(
+        SetupStage.TRIGGER_QUALIFIED,
+        reason="independent_confirmation_missing",
+        **additional_smc,
+    )
     registry.transition(
         SetupStage.TRIGGER_QUALIFIED,
         strategy="ORBPro",
@@ -308,14 +317,18 @@ def test_smc_confirmation_wait_summary_counts_distinct_active_setups() -> None:
 
     summary = registry.snapshot()["smc_confirmation_wait"]
 
-    assert summary["unique_active_setups"] == 2
+    assert summary["unique_active_setups"] == 3
     assert summary["by_reason"] == {
         "capacity_retry_independent_confirmation_missing": 1,
+        "independent_confirmation_missing": 1,
         "smc_independent_confirmation_missing": 1,
     }
 
     registry.transition(SetupStage.MANAGER_QUALIFIED, reason="approved", **ce)
     registry.transition(SetupStage.EXPIRED, reason="expired", **pe)
+    registry.transition(
+        SetupStage.MANAGER_QUALIFIED, reason="approved", **additional_smc
+    )
 
     assert registry.snapshot()["smc_confirmation_wait"] == {
         "unique_active_setups": 0,
