@@ -361,6 +361,13 @@ def test_auto_market_gate_preserves_health_recovery_and_research_poll() -> None:
     assert "service_healthy_confirmed" in protected
     assert 'sudo -n systemctl restart "$SERVICE"' in protected
     assert "runtime_recovery_failed" in protected
+    assert "runtime_checkout_mismatch" in protected
+    assert 'current_runtime_sha" != "$BEFORE"' in protected
+    assert '"http://127.0.0.1:${PORT}/releasez"' in protected
+    assert protected.index("runtime_checkout_mismatch") < protected.index(
+        'sudo -n systemctl restart "$SERVICE"'
+    )
+    assert "unvalidated revision" in protected
     assert "poll_research_request" in protected
     assert 'if [ "$BEFORE" != "$AFTER" ]; then' in protected
     assert "write_status deferred_market_window" in protected
@@ -378,7 +385,7 @@ def test_auto_market_guard_rechecks_before_checkout_and_restart() -> None:
     restart_gate = release.index("if auto_release_should_defer; then", checkout)
     engine_restart = release.index('sudo systemctl restart "$SERVICE"', restart_gate)
     assert validated < after_candidate < checkout < restart_gate < engine_restart
-    assert "runtime untouched" in release[after_candidate:checkout]
+    assert "checkout untouched" in release[after_candidate:checkout]
     assert 'set_runtime_build_sha "$BEFORE"' in release[restart_gate:engine_restart]
     assert 'git reset --hard --quiet "$BEFORE"' in release[restart_gate:engine_restart]
     assert (
@@ -389,4 +396,15 @@ def test_auto_market_guard_rechecks_before_checkout_and_restart() -> None:
             check=False,
         ).returncode
         == 0
+    )
+
+
+def test_forced_restart_survives_market_boundary_deferral() -> None:
+    release = _text("deploy/lightsail_release.sh")
+    assert 'RESTART_PENDING_FILE="${CONFIG_DIR}/auto_release_restart_pending"' in release
+    assert 'if [ -f "$RESTART_PENDING_FILE" ]; then FORCE_RESTART=true; fi' in release
+    assert release.count(': > "$RESTART_PENDING_FILE"') == 2
+    assert 'rm -f "$RESTART_PENDING_FILE"' in release
+    assert release.index('rm -f "$RESTART_PENDING_FILE"') > release.index(
+        'if wait_for_service "$AFTER"; then'
     )
