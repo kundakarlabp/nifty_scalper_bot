@@ -958,3 +958,51 @@ def test_smc_research_funnel_counts_unique_underlying_setups_not_option_checks(
     assert funnel["simulated_filled_setups"] == 2
     assert funnel["rejection_reasons_by_unique_setup"]["smc_awaiting_confirmation"] == 2
     assert smc["evaluations"] > funnel["armed_setups"]
+
+
+def test_smc_research_counts_terminal_rejection_even_after_event_is_removed(
+    tmp_path, monkeypatch
+):
+    from nifty_scalper_bot.backtesting.strategy_research import _scenario, load_archive
+
+    archive(tmp_path)
+
+    class Strategy:
+        name = "SMC"
+        last_no_vote_reason = "smc_awaiting_confirmation"
+
+        def __init__(self):
+            self._events = {}
+
+        def generate_signal(self, symbol, indicators, current_price, position=None):
+            side = "CE" if symbol.endswith("CE") else "PE"
+            key = (indicators["futures_symbol"], side)
+            if indicators["history_count"] == 1:
+                self._events[key] = {"sweep_ts": indicators["bar_timestamp"]}
+                self.last_no_vote_reason = "smc_awaiting_confirmation"
+            elif indicators["history_count"] == 2:
+                self._events.pop(key, None)
+                self.last_no_vote_reason = "smc_sweep_invalidated"
+            else:
+                self.last_no_vote_reason = "underlying_no_liquidity_sweep"
+            return None
+
+        @property
+        def evaluation_health(self):
+            return {"healthy": True}
+
+    histories, instruments, _ = load_archive(tmp_path)
+    report = _scenario(
+        histories,
+        instruments,
+        None,
+        0,
+        components={"SMC"},
+        strategy_factory=lambda engine: [Strategy()],
+    )
+    smc = report["strategies"]["SMC"]
+    reasons = smc["smc_unique_setup_funnel"]["rejection_reasons_by_unique_setup"]
+
+    assert smc["smc_unique_setup_funnel"]["armed_setups"] == 2
+    assert reasons["smc_awaiting_confirmation"] == 2
+    assert reasons["smc_sweep_invalidated"] == 2
