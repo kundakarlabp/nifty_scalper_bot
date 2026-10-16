@@ -180,26 +180,21 @@ def canonicalize_setup_opportunities(
             or outcome_row.get("final_reason")
             or "unknown"
         ).strip()
-        observed_stages = tuple(
-            sorted(
-                {
-                    str(context.get("decision_stage") or context.get("rejection_stage"))
-                    .strip()
-                    for _, _, context in sample
-                    if context.get("decision_stage") or context.get("rejection_stage")
-                }
-            )
-        )
-        blocked_reasons = tuple(
-            sorted(
-                {
-                    str(row.get("reason_code") or row.get("final_reason") or "unknown")
-                    .strip()
-                    for _, row, _ in sample
-                    if row.get("event_name") == "candidate.blocked"
-                }
-            )
-        )
+        observed_stage_values: set[str] = set()
+        blocked_reason_values: set[str] = set()
+        for _, row, context in sample:
+            stage = str(
+                context.get("decision_stage") or context.get("rejection_stage") or ""
+            ).strip()
+            if stage:
+                observed_stage_values.add(stage)
+            if row.get("event_name") == "candidate.blocked":
+                reason = str(
+                    row.get("reason_code") or row.get("final_reason") or "unknown"
+                ).strip()
+                blocked_reason_values.add(reason)
+        observed_stages = tuple(sorted(observed_stage_values))
+        blocked_reasons = tuple(sorted(blocked_reason_values))
         symbol = str(
             last_row.get("selected_candidate") or last_row.get("symbol") or ""
         ).strip()
