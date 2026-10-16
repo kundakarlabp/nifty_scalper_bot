@@ -502,6 +502,9 @@ def _broker_session_status(ctx):  # noqa: ANN001
         "market_data_authenticated": market_data_authenticated,
         "funds_endpoint_verified": funds_endpoint_verified,
         "order_endpoint_verified": order_endpoint_verified,
+        # Successful fills from a previous run do not prove that the
+        # current process has validated a fresh order request.
+        "order_endpoint_verification_scope": "process_local",
         "order_endpoint_verification_state": (
             "verified" if order_endpoint_verified else "not_yet_proven_by_live_order"
         ),
@@ -562,6 +565,9 @@ def _signal_observability(ctx):  # noqa: ANN001
         "runner_tick_count": status.get("tick_count"),
         "phase9_evaluation_count": status.get("phase9_evaluation_count"),
         "legacy_activity_count": status.get("legacy_activity_count"),
+        "last_tick_age_sec": status.get("last_tick_age_sec"),
+        "last_eval_age_sec": status.get("last_eval_age_sec"),
+        "runner_state": status.get("runner_state"),
         "candidate_generated_count": status.get("candidate_generated_count"),
         "approved_candidate_count": status.get("approved_candidate_count"),
         "completed_strategy_evaluations_window": status.get(
@@ -811,6 +817,9 @@ def health_trading():
                 ),
                 "order_endpoint_verified": structured_status.get(
                     "order_endpoint_verified"
+                ),
+                "order_endpoint_verification_scope": structured_status.get(
+                    "order_endpoint_verification_scope"
                 ),
                 "order_endpoint_verification_state": structured_status.get(
                     "order_endpoint_verification_state"
