@@ -1039,13 +1039,15 @@ class SMCStrategy(EliteStrategy):
                 # A broker rejection must not turn an already-invalidated
                 # premium thesis into a cheap late entry. This uses the
                 # original 1.5-ATR/3%-premium risk band, not a score gate.
-                if (
-                    is_live
-                    and event.get("first_vote_symbol") == symbol
-                    and event.get("first_vote_premium") is not None
-                ):
-                    first_premium = float(event["first_vote_premium"])
-                    first_risk = float(event.get("first_vote_risk_points") or 0.0)
+                # A sweep can be evaluated on multiple eligible CE/PE
+                # contracts. Preserve each contract's original premium risk
+                # anchor; another contract must never rebase it.
+                premiums = event.get("first_vote_premiums_by_symbol")
+                first_vote = None
+                if isinstance(premiums, dict):
+                    first_vote = premiums.get(symbol)
+                if is_live and first_vote is not None:
+                    first_premium, first_risk = first_vote
                     if first_risk > 0 and current_price <= first_premium - first_risk:
                         self._events.pop(event_key, None)
                         self._last_emitted_bar[event_key] = current_ts
@@ -1397,12 +1399,14 @@ class SMCStrategy(EliteStrategy):
                 if "first_vote_confirmation_ts" not in event:
                     event["first_vote_confirmation_ts"] = current_ts
                     event["first_vote_monotonic"] = time.monotonic()
-                if event.get("first_vote_symbol") != symbol:
-                    event["first_vote_symbol"] = symbol
-                    event["first_vote_premium"] = current_price
-                    event["first_vote_risk_points"] = max(
-                        1.0, option_atr * 1.5, current_price * 0.03
-                    )
+                premium_anchors = event.setdefault("first_vote_premiums_by_symbol", {})
+                premium_anchors.setdefault(
+                    symbol,
+                    (
+                        current_price,
+                        max(1.0, option_atr * 1.5, current_price * 0.03),
+                    ),
+                )
                 LOGGER.info(
                     "STRATEGY_EVIDENCE strategy=SMC side=%s source=%s "
                     "sweep_depth_atr=%.3f displacement_atr=%.3f",

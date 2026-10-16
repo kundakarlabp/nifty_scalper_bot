@@ -701,6 +701,31 @@ def test_live_smc_declining_premium_past_initial_risk_invalidates_setup(
     assert strategy.generate_signal(PE, context, 131.55) is None
 
 
+def test_smc_contract_switch_cannot_reset_prior_option_risk_reference(
+    monkeypatch,
+) -> None:
+    """Rechecking the first PE must use its first vote price after rotation."""
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    rows = _base_rows()
+    rows.append(_bar(30, open_=24012, high=24027, low=24009, close=24017, volume=2400))
+    strategy = _strategy(rows)
+    assert (
+        strategy.generate_signal(
+            PE, _indicators("PE", latest_bar_ts=rows[-1]["timestamp"]), 138.60
+        )
+        is None
+    )
+    rows.append(_bar(31, open_=24017, high=24019, low=23999, close=24001, volume=2200))
+    context = _indicators("PE", latest_bar_ts=rows[-1]["timestamp"])
+    original = strategy.generate_signal(PE, context, 138.60)
+    rotated = strategy.generate_signal("NFO:NIFTY2690324050PE", context, 145.00)
+
+    assert original is not None and rotated is not None
+    assert original.metadata["setup_id"] == rotated.metadata["setup_id"]
+    assert strategy.generate_signal(PE, context, 131.55) is None
+    assert strategy.last_no_vote_reason == "smc_pre_entry_premium_invalidated"
+
+
 @pytest.mark.parametrize(
     ("regime", "structure", "should_vote"),
     [
