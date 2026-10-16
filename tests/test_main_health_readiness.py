@@ -100,7 +100,6 @@ def test_health_trading_exposes_canonical_context():
     assert body["reconciliation"]["unprotected_positions"] == ["NFO:NIFTY26MAY23750CE"]
 
 
-
 def test_history_diagnostics_expose_count_delta_without_readiness_veto():
     history = {
         "required_execution_bars": 30,
