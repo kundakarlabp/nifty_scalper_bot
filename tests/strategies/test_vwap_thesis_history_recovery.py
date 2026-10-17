@@ -512,3 +512,37 @@ def test_zero_volume_history_cannot_arm_a_fresh_vwap_touch():
         )
         is None
     )
+
+
+def test_recovery_preserves_real_touch_with_identical_duplicate():
+    """Deduplication must retain an actual valid completed VWAP reclaim anchor."""
+    bars = [
+        _bar("2026-09-08T10:00:00", open_=110, high=110, low=110, close=110),
+        _bar("2026-09-08T10:01:00", open_=90, high=90, low=90, close=90),
+    ]
+    bars.append(dict(bars[-1]))
+    strategy = VWAPProStrategy(VWAPProStrategyConfig(), _HistoryEngine(bars))
+    anchor = strategy._recover_thesis_anchor_from_history(
+        "NFO:NIFTY2690823650CE",
+        session_scope="2026-09-08",
+        vwap=100.0,
+        observation_anchor="2026-09-08T10:02:00+05:30",
+    )
+    assert anchor == "2026-09-08 04:31:00+00:00"
+
+
+def test_recovery_ignores_provisional_version_of_valid_completed_bar():
+    """An unfinished market-data update must not invalidate the final bar."""
+    first = _bar("2026-09-08T10:00:00", open_=110, high=110, low=110, close=110)
+    final = _bar("2026-09-08T10:01:00", open_=90, high=90, low=90, close=90)
+    provisional = dict(final, close=91, is_complete=False, is_provisional=True)
+    strategy = VWAPProStrategy(
+        VWAPProStrategyConfig(), _HistoryEngine([first, provisional, final])
+    )
+    anchor = strategy._recover_thesis_anchor_from_history(
+        "NFO:NIFTY2690823650CE",
+        session_scope="2026-09-08",
+        vwap=100.0,
+        observation_anchor="2026-09-08T10:02:00+05:30",
+    )
+    assert anchor == "2026-09-08 04:31:00+00:00"
