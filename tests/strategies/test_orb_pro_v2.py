@@ -972,3 +972,67 @@ def test_orb_invalid_explicit_option_timestamp_cannot_bypass_causality(
 
     assert strategy.generate_signal(CE, indicators, 50.0) is None
     assert strategy.last_no_vote_reason == "underlying_orb_not_ready"
+
+
+@pytest.mark.parametrize("duplicate_minute", [0, 8, 15])
+def test_orb_rejects_duplicate_completed_futures_minute(monkeypatch, duplicate_minute):
+    """A complete timestamp set is not sufficient if a minute is duplicated."""
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    rows = _opening_rows()
+    rows.append(
+        _bar(
+            15,
+            open_=24_008.0,
+            high=24_034.0,
+            low=24_006.0,
+            close=24_030.0,
+            volume=3_000.0,
+        )
+    )
+    rows.insert(duplicate_minute + 1, dict(rows[duplicate_minute]))
+    strategy = _strategy({FUTURE: rows})
+
+    assert (
+        strategy.generate_signal(
+            CE, _base_indicators("CE", rows[-1]["timestamp"]), 50.0
+        )
+        is None
+    )
+    assert strategy.last_no_vote_reason == "underlying_orb_not_ready"
+
+
+@pytest.mark.parametrize(
+    ("unavailable", "reason"),
+    [
+        ({"context_fresh": False}, "underlying_context_stale"),
+        ({"futures_vwap_slope": None}, "orb_futures_vwap_slope_unavailable"),
+    ],
+)
+def test_orb_retries_same_bar_after_required_context_recovers(
+    monkeypatch, unavailable, reason
+):
+    """Temporary missing context must not permanently consume a valid breakout."""
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    rows = _opening_rows()
+    rows.append(
+        _bar(
+            15,
+            open_=24_008.0,
+            high=24_034.0,
+            low=24_006.0,
+            close=24_030.0,
+            volume=3_000.0,
+        )
+    )
+    strategy = _strategy({FUTURE: rows})
+    indicators = _base_indicators("CE", rows[-1]["timestamp"])
+    indicators.update(unavailable)
+
+    assert strategy.generate_signal(CE, indicators, 50.0) is None
+    assert strategy.last_no_vote_reason == reason
+
+    indicators["context_fresh"] = True
+    indicators["futures_vwap_slope"] = 1.0
+    assert strategy.generate_signal(CE, indicators, 50.0) is not None
+    assert strategy.generate_signal(CE, indicators, 50.0) is None
+    assert strategy.last_no_vote_reason == "orb_bar_already_evaluated"
