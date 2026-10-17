@@ -513,12 +513,8 @@ def _historical_weekly_atm_evaluability(
         "eligible_session_count": quality.get("eligible_session_count"),
         "eligible_session_dates": quality.get("eligible_session_dates", []),
         "eligible_option_bar_count": eligible,
-        "weekly_expiry_rejections": rejected.get(
-            "archive_weekly_expiry_not_proven", 0
-        ),
-        "outside_atm_rejections": rejected.get(
-            "archive_strike_outside_atm_basket", 0
-        ),
+        "weekly_expiry_rejections": rejected.get("archive_weekly_expiry_not_proven", 0),
+        "outside_atm_rejections": rejected.get("archive_strike_outside_atm_basket", 0),
         "historical_selection_verified": False,
     }
 
