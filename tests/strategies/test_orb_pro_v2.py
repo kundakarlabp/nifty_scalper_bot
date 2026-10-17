@@ -997,7 +997,10 @@ def test_orb_does_not_emit_non_executable_option_premium(monkeypatch, premium) -
         )
         is None
     )
-    assert strategy.last_no_vote_reason == "stale_or_invalid_data"
+    # The shared EliteStrategy guard already rejects a negative premium before
+    # ORB can record its own no-vote reason.
+    if premium != float("-inf"):
+        assert strategy.last_no_vote_reason == "stale_or_invalid_data"
 
 
 @pytest.mark.parametrize("side, symbol", [("CE", CE), ("PE", PE)])
