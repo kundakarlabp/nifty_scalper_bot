@@ -500,7 +500,9 @@ class ORBProStrategy(EliteStrategy):
         branch: str,
         retest_timestamp: datetime | None,
     ) -> EliteSignal | None:
-        option_atr = max(_safe_float(indicators.get("atr")) or 0.0, current_price * 0.01, 1.0)
+        option_atr = max(
+            _safe_float(indicators.get("atr")) or 0.0, current_price * 0.01, 1.0
+        )
         max_stop_pct = max(0.5, _env_float("ORB_PREMIUM_STOP_MAX_PCT", 8.0)) / 100.0
         atr_stop = max(0.5, _env_float("ORB_PREMIUM_STOP_ATR_MULT", 0.75) * option_atr)
         premium_stop_distance = min(atr_stop, max(0.5, current_price * max_stop_pct))
