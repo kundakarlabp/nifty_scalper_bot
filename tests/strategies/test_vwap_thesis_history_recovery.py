@@ -385,18 +385,19 @@ def test_recovery_uses_chronological_vwap_for_out_of_order_history(monkeypatch):
     assert strategy.last_no_vote_reason == "vwap_thesis_not_armed"
 
 
-@pytest.mark.parametrize("bad_field,bad_value", [
-    ("high", float("nan")),
-    ("volume", float("inf")),
-])
+@pytest.mark.parametrize(
+    "bad_field,bad_value",
+    [
+        ("high", float("nan")),
+        ("volume", float("inf")),
+    ],
+)
 def test_recovery_ignores_nonfinite_history_before_valid_reclaim(
     monkeypatch, bad_field, bad_value
 ):
     """One corrupted candle must not poison all subsequent session VWAP values."""
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
-    corrupt = _bar(
-        "2026-09-08T10:00:00", open_=101, high=101, low=101, close=101
-    )
+    corrupt = _bar("2026-09-08T10:00:00", open_=101, high=101, low=101, close=101)
     corrupt[bad_field] = bad_value
     history = [
         corrupt,
