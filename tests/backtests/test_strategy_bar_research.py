@@ -952,7 +952,8 @@ def test_smc_research_funnel_counts_unique_underlying_setups_not_option_checks(
     funnel = smc["smc_unique_setup_funnel"]
 
     assert smc["entry_funnel"]["signals_emitted"] == 3
-    assert smc["entry_funnel"]["accepted_fills"] == 3
+    assert smc["entry_funnel"]["accepted_fills"] == 2
+    assert smc["no_vote_reasons"]["smc_setup_already_filled"] == 1
     assert funnel["armed_setups"] == 2
     assert funnel["signaled_setups"] == 2
     assert funnel["simulated_filled_setups"] == 2
@@ -1147,3 +1148,107 @@ def test_smc_archived_component_signal_can_reach_execution_feasibility(
     assert result["entry_funnel"]["geometry_valid"] == 2
     assert result["entry_funnel"]["accepted_fills"] == 2
     assert result["no_vote_reasons"].get("invalid_signal_geometry", 0) == 0
+
+
+def test_smc_research_does_not_refill_an_already_accepted_underlying_setup(
+    tmp_path, monkeypatch
+):
+    from nifty_scalper_bot.backtesting.strategy_research import _scenario, load_archive
+
+    archive(tmp_path)
+
+    class Strategy:
+        name = "SMC"
+        last_no_vote_reason = "underlying_no_liquidity_sweep"
+
+        def generate_signal(self, symbol, indicators, current_price, position=None):
+            if indicators["history_count"] not in {2, 3}:
+                return None
+            side = "CE" if symbol.endswith("CE") else "PE"
+            return SimpleNamespace(
+                action="BUY",
+                stop_loss=95,
+                take_profit=105,
+                metadata={"setup_id": f"smcv2:shared_underlying:{side}:same_sweep"},
+            )
+
+        @property
+        def evaluation_health(self):
+            return {"healthy": True}
+
+        def notify_entry_accepted(self, side, *, setup_id=None):
+            pass
+
+    histories, instruments, _ = load_archive(tmp_path)
+    result = _scenario(
+        histories,
+        instruments,
+        None,
+        0,
+        components={"SMC"},
+        strategy_factory=lambda engine: [Strategy()],
+    )["strategies"]["SMC"]
+
+    assert result["entry_funnel"]["signals_emitted"] == 4
+    assert result["entry_funnel"]["next_bar_intents"] == 2
+    assert result["entry_funnel"]["accepted_fills"] == 2
+    assert result["no_vote_reasons"]["smc_setup_already_filled"] == 2
+    assert result["smc_unique_setup_funnel"]["simulated_filled_setups"] == 2
+
+
+def test_smc_research_failed_candidate_does_not_consume_shared_setup(
+    tmp_path, monkeypatch
+):
+    from nifty_scalper_bot.backtesting.strategy_research import _scenario, load_archive
+
+    archive(tmp_path)
+    candles = tmp_path / "candles"
+    extra_ce = json.loads((candles / "CE.json").read_text())
+    extra_ce["symbol"] = "NFO:NIFTY26O0622450CE"
+    (candles / "CE_extra.json").write_text(json.dumps(extra_ce))
+    original_ce = json.loads((candles / "CE.json").read_text())
+    # history_count=2 emits on the second completed candle, so the next
+    # candle is the executable third minute: only this candidate lacks trades.
+    original_ce["candles"][2][-1] = 0
+    (candles / "CE.json").write_text(json.dumps(original_ce))
+
+    class Strategy:
+        name = "SMC"
+        last_no_vote_reason = "underlying_no_liquidity_sweep"
+
+        def generate_signal(self, symbol, indicators, current_price, position=None):
+            if indicators["history_count"] != 2:
+                return None
+            side = "CE" if symbol.endswith("CE") else "PE"
+            return SimpleNamespace(
+                action="BUY",
+                stop_loss=95,
+                take_profit=105,
+                metadata={"setup_id": f"smcv2:shared_underlying:{side}:same_sweep"},
+            )
+
+        @property
+        def evaluation_health(self):
+            return {"healthy": True}
+
+        def notify_entry_accepted(self, side, *, setup_id=None):
+            pass
+
+    histories, instruments, _ = load_archive(tmp_path)
+    result = _scenario(
+        histories,
+        instruments,
+        None,
+        0,
+        components={"SMC"},
+        strict_liquidity=True,
+        strategy_factory=lambda engine: [Strategy()],
+    )["strategies"]["SMC"]
+
+    assert result["entry_funnel"]["signals_emitted"] == 3, result["entry_funnel"]
+    assert result["no_vote_reasons"].get("next_minute_has_no_trades", 0) == 1, (
+        result["entry_funnel"],
+        result["no_vote_reasons"],
+    )
+    assert result["entry_funnel"]["accepted_fills"] == 2
+    assert result["smc_unique_setup_funnel"]["simulated_filled_setups"] == 2
