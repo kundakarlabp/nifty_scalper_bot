@@ -24,7 +24,8 @@ _MARKET_OPEN = time(hour=9, minute=15)
 
 def _env_float(name: str, default: float) -> float:
     try:
-        return float(os.getenv(name, str(default)) or default)
+        value = float(os.getenv(name, str(default)) or default)
+        return value if math.isfinite(value) else float(default)
     except (TypeError, ValueError):
         return float(default)
 
@@ -499,13 +500,19 @@ class ORBProStrategy(EliteStrategy):
         branch: str,
         retest_timestamp: datetime | None,
     ) -> EliteSignal | None:
-        option_atr = max(float(indicators.get("atr") or 0.0), current_price * 0.01, 1.0)
+        option_atr = max(_safe_float(indicators.get("atr")) or 0.0, current_price * 0.01, 1.0)
         max_stop_pct = max(0.5, _env_float("ORB_PREMIUM_STOP_MAX_PCT", 8.0)) / 100.0
         atr_stop = max(0.5, _env_float("ORB_PREMIUM_STOP_ATR_MULT", 0.75) * option_atr)
         premium_stop_distance = min(atr_stop, max(0.5, current_price * max_stop_pct))
         stop_loss = max(0.05, current_price - premium_stop_distance)
+        # The minimum tradable stop price may cap the actual risk distance.
+        # Reward and metadata must use that distance, not the requested one.
+        premium_stop_distance = current_price - stop_loss
         target_rr = max(1.0, _env_float("ORB_TARGET_RR", 1.8))
         target = current_price + premium_stop_distance * target_rr
+        if not (0.0 < stop_loss < current_price < target and math.isfinite(target)):
+            self._no_vote("orb_invalid_premium_stop_geometry")
+            return None
 
         boundary = float(event["boundary"])
         current_underlying_atr = float(snapshot["atr"])
@@ -682,7 +689,11 @@ class ORBProStrategy(EliteStrategy):
         del position
         self.last_structural_failure_reasons = ()
         self._no_vote("stale_or_invalid_data")
-        if current_price <= 0 or bool(indicators.get("stale_data_used")):
+        if (
+            not math.isfinite(current_price)
+            or current_price <= 0.05
+            or bool(indicators.get("stale_data_used"))
+        ):
             return None
         side = self._side_from_symbol(symbol)
         if not side:
