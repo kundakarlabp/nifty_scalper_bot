@@ -34,6 +34,9 @@ from nifty_scalper_bot.risk.cost_model import (
 )
 from nifty_scalper_bot.strategies.elite_strategies.builder import build_elite_strategies
 from nifty_scalper_bot.strategies.indicators import IndicatorEngine
+from nifty_scalper_bot.strategies.premium_risk_geometry import (
+    validate_option_premium_geometry,
+)
 
 IST = ZoneInfo("Asia/Kolkata")
 COMPONENTS = {"ORBPro", "SMC", "VWAPPro"}
@@ -213,6 +216,39 @@ def _resolve_research_signal_geometry(
         return stop, target, "signal"
 
     metadata = dict(getattr(signal, "metadata", {}) or {})
+    # SMC emits a premium risk *distance*, not an absolute stop. Resolve it
+    # using the same canonical geometry owner as Runner, without changing live
+    # strategy signals or inventing research-only SMC prices.
+    if (
+        str(metadata.get("strategy") or metadata.get("strategy_name") or "").upper()
+        == "SMC"
+        and str(getattr(signal, "action", "")).upper() == "BUY"
+    ):
+        try:
+            distance = float(metadata["premium_stop_distance"])
+            reward_risk = float(metadata["premium_target_rr"])
+        except (KeyError, TypeError, ValueError):
+            pass
+        else:
+            if (
+                math.isfinite(distance)
+                and distance > 0.0
+                and math.isfinite(reward_risk)
+                and reward_risk > 0.0
+            ):
+                resolved = validate_option_premium_geometry(
+                    None,
+                    signal,
+                    entry_price=current_price,
+                    entry_side="BUY",
+                    atr=0.0,
+                )
+                return (
+                    resolved.stop_loss,
+                    resolved.take_profit,
+                    "canonical_option_premium_geometry",
+                )
+
     proxy_stop_raw = metadata.get("setup_invalidation_premium")
     target_rr_raw = metadata.get("premium_target_rr")
     if proxy_stop_raw is None or target_rr_raw is None:
