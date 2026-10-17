@@ -76,7 +76,9 @@ def test_entry_comparison_uses_paired_all_three_strategy_arms(monkeypatch):
                     "evaluations": 0,
                     "data_quality": {
                         "eligible_option_bar_count": (
-                            0 if constraints.get("require_archived_weekly_atm") else None
+                            0
+                            if constraints.get("require_archived_weekly_atm")
+                            else None
                         ),
                         "eligible_session_count": 0,
                     },
