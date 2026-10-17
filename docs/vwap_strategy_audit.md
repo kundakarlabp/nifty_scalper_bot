@@ -208,3 +208,31 @@ volume poisoning, opt-in absence of completed-bar proof, positive CE/PE
 completed-bar acceptance, and malformed OHLC. Run focused VWAP suites, full
 repository validation and final-head PR CI before main merge. CI results
 are recorded on the linked PR; tests alone do not prove trading profitability.
+
+
+## 2026-10-18 next batch: recovery history integrity
+
+The next RED-first regression identifies another restart-only safety problem.
+Repeated completed same-minute option bars were counted repeatedly in the
+cumulative option VWAP, sometimes creating a false touch and a different
+setup ID. Other corrupt histories permitted incompatible OHLC geometry or
+a zero-volume candle to count as a VWAP touch.
+
+The existing chronological recovery owner in `vwap_pro.py` now:
+
+- Deduplicates identical completed rows by normalized UTC minute timestamp,
+  including equivalent timestamp formats, before applying volume weights.
+- Rejects the *entire historical recovery* when two otherwise eligible
+  completed rows disagree on the same timestamp, rather than selecting an
+  arbitrary corrected version; normal intraday evaluation remains unchanged.
+- Ignores impossible historical candle geometry and zero-traded-volume
+  bars when reconstructing touch evidence.
+- Preserves an actual touch with identical duplicates and tolerates
+  provisional/unfinished revisions that are already excluded by the
+  existing bar-completion rules.
+
+Only historical thesis recovery (restart and ATM state rebuilding) changes.
+No entry thresholds, signal score, position size, ATR risk geometry, setup
+identity schema, broker order route, or LIVE environment variables change.
+Use existing focused VWAP tests, full CI and final merged-head verification.
+These engineering regressions do not demonstrate higher post-cost expectancy.
