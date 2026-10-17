@@ -362,3 +362,61 @@ def test_vwap_recovery_cannot_use_later_same_session_bar(monkeypatch):
         )
         is not None
     )
+
+
+def test_recovery_uses_chronological_vwap_for_out_of_order_history(monkeypatch):
+    """Unsorted candles must not manufacture a historical VWAP crossing."""
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    history = [
+        _bar("2026-09-08T10:02:00", open_=100, high=100, low=100, close=100),
+        _bar("2026-09-08T10:01:00", open_=110, high=110, low=110, close=110),
+        _bar("2026-09-08T10:00:00", open_=90, high=90, low=90, close=90),
+    ]
+    strategy = VWAPProStrategy(VWAPProStrategyConfig(), _HistoryEngine(history))
+    signal = strategy._evaluate_signal(
+        "NFO:NIFTY2690823650CE",
+        _indicators(
+            session_date="2026-09-08",
+            latest_bar_ts="2026-09-08T10:03:00+05:30",
+        ),
+        103.0,
+    )
+    assert signal is None
+    assert strategy.last_no_vote_reason == "vwap_thesis_not_armed"
+
+
+@pytest.mark.parametrize("bad_field,bad_value", [
+    ("high", float("nan")),
+    ("volume", float("inf")),
+])
+def test_recovery_ignores_nonfinite_history_before_valid_reclaim(
+    monkeypatch, bad_field, bad_value
+):
+    """One corrupted candle must not poison all subsequent session VWAP values."""
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    corrupt = _bar(
+        "2026-09-08T10:00:00", open_=101, high=101, low=101, close=101
+    )
+    corrupt[bad_field] = bad_value
+    history = [
+        corrupt,
+        _bar(
+            "2026-09-08T10:01:00",
+            open_=101.0,
+            high=101.2,
+            low=99.0,
+            close=99.8,
+        ),
+    ]
+    strategy = VWAPProStrategy(VWAPProStrategyConfig(), _HistoryEngine(history))
+    signal = strategy._evaluate_signal(
+        "NFO:NIFTY2690823650CE",
+        _indicators(
+            session_date="2026-09-08",
+            latest_bar_ts="2026-09-08T10:02:00+05:30",
+        ),
+        103.0,
+    )
+    assert signal is not None
+    assert signal.metadata["thesis_recovered_from_history"] is True
+    assert "2026-09-08 04:31:00+00:00" in signal.metadata["setup_id"]
