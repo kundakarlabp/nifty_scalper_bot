@@ -742,6 +742,16 @@ def _scenario(
         # Fill intents before exposing this minute's completed OHLC to strategies.
         for key, intent in list(pending.items()):
             pending.pop(key)
+            # The same underlying sweep can appear on multiple option strikes.
+            # Count only the first accepted fill as an executed SMC opportunity.
+            # An unfilled candidate must not consume a setup for other strikes.
+            setup_id = str(intent.get("setup_id") or "").strip()
+            if key[0] == "SMC" and setup_id in smc_filled_setups:
+                rejections[key[0]]["smc_setup_already_filled"] += 1
+                _record_smc_post_signal_rejection(
+                    key[0], setup_id, "smc_setup_already_filled"
+                )
+                continue
             bar = bars.get(key[1])
             if bar is None or timestamp != intent["available_at"]:
                 rejections[key[0]]["next_minute_unavailable"] += 1
@@ -990,7 +1000,15 @@ def _scenario(
                 entry_funnels[strategy.name]["signals_emitted"] += 1
                 metadata = dict(signal.metadata or {})
                 if strategy.name == "SMC" and metadata.get("setup_id"):
-                    smc_signaled_setups.add(str(metadata["setup_id"]))
+                    setup_id = str(metadata["setup_id"]).strip()
+                    if setup_id:
+                        smc_signaled_setups.add(setup_id)
+                        if setup_id in smc_filled_setups:
+                            rejections[strategy.name]["smc_setup_already_filled"] += 1
+                            _record_smc_post_signal_rejection(
+                                strategy.name, setup_id, "smc_setup_already_filled"
+                            )
+                            continue
                 stop_loss, take_profit, geometry_source = (
                     _resolve_research_signal_geometry(signal, bar["close"])
                 )
