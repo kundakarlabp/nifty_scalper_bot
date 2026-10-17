@@ -972,3 +972,131 @@ def test_orb_invalid_explicit_option_timestamp_cannot_bypass_causality(
 
     assert strategy.generate_signal(CE, indicators, 50.0) is None
     assert strategy.last_no_vote_reason == "underlying_orb_not_ready"
+
+
+@pytest.mark.parametrize("premium", [0.05, float("nan"), float("inf"), float("-inf")])
+def test_orb_does_not_emit_non_executable_option_premium(
+    monkeypatch, premium
+) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    monkeypatch.setenv("ORB_BALANCED_RANGE_MAX_ATR", "2.0")
+    rows = _opening_rows()
+    rows.append(
+        _bar(
+            15,
+            open_=24_008.0,
+            high=24_034.0,
+            low=24_006.0,
+            close=24_030.0,
+            volume=3_000.0,
+        )
+    )
+    strategy = _strategy({FUTURE: rows})
+
+    assert (
+        strategy.generate_signal(
+            CE, _base_indicators("CE", rows[-1]["timestamp"]), premium
+        )
+        is None
+    )
+    assert strategy.last_no_vote_reason == "stale_or_invalid_data"
+
+
+@pytest.mark.parametrize("side, symbol", [("CE", CE), ("PE", PE)])
+def test_orb_target_uses_actual_capped_stop_distance(monkeypatch, side, symbol) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    monkeypatch.setenv("ORB_BALANCED_RANGE_MAX_ATR", "2.0")
+    rows = _opening_rows()
+    if side == "CE":
+        rows.append(
+            _bar(
+                15,
+                open_=24_008.0,
+                high=24_034.0,
+                low=24_006.0,
+                close=24_030.0,
+                volume=3_000.0,
+            )
+        )
+    else:
+        rows.append(
+            _bar(
+                15,
+                open_=23_992.0,
+                high=23_994.0,
+                low=23_960.0,
+                close=23_965.0,
+                volume=3_000.0,
+            )
+        )
+    strategy = _strategy({FUTURE: rows})
+    premium = 0.30
+
+    signal = strategy.generate_signal(
+        symbol, _base_indicators(side, rows[-1]["timestamp"]), premium
+    )
+
+    assert signal is not None
+    assert 0.0 < signal.stop_loss < premium < signal.take_profit
+    actual_distance = premium - signal.stop_loss
+    assert actual_distance == pytest.approx(0.25)
+    assert signal.metadata["premium_stop_distance"] == pytest.approx(
+        actual_distance
+    )
+    assert (signal.take_profit - premium) / actual_distance == pytest.approx(
+        signal.metadata["premium_target_rr"]
+    )
+
+
+@pytest.mark.parametrize("raw_atr", [float("nan"), float("inf"), "unavailable"])
+def test_orb_ignores_nonfinite_optional_premium_atr(monkeypatch, raw_atr) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    monkeypatch.setenv("ORB_BALANCED_RANGE_MAX_ATR", "2.0")
+    rows = _opening_rows()
+    rows.append(
+        _bar(
+            15,
+            open_=24_008.0,
+            high=24_034.0,
+            low=24_006.0,
+            close=24_030.0,
+            volume=3_000.0,
+        )
+    )
+    indicators = _base_indicators("CE", rows[-1]["timestamp"])
+    indicators["atr"] = raw_atr
+    signal = _strategy({FUTURE: rows}).generate_signal(CE, indicators, 50.0)
+
+    assert signal is not None
+    assert signal.stop_loss == pytest.approx(49.25)
+    assert signal.take_profit == pytest.approx(51.35)
+
+
+@pytest.mark.parametrize("bad_config", ["inf", "-inf", "nan"])
+def test_orb_nonfinite_numeric_configuration_uses_safe_defaults(
+    monkeypatch, bad_config
+) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    monkeypatch.setenv("ORB_BALANCED_RANGE_MAX_ATR", "2.0")
+    rows = _opening_rows()
+    rows.append(
+        _bar(
+            15,
+            open_=24_008.0,
+            high=24_034.0,
+            low=24_006.0,
+            close=24_030.0,
+            volume=3_000.0,
+        )
+    )
+    indicators = _base_indicators("CE", rows[-1]["timestamp"])
+    baseline = _strategy({FUTURE: rows}).generate_signal(CE, indicators, 50.0)
+    assert baseline is not None
+
+    monkeypatch.setenv("ORB_PREMIUM_STOP_ATR_MULT", bad_config)
+    monkeypatch.setenv("ORB_TARGET_RR", bad_config)
+    actual = _strategy({FUTURE: rows}).generate_signal(CE, indicators, 50.0)
+
+    assert actual is not None
+    assert actual.stop_loss == pytest.approx(baseline.stop_loss)
+    assert actual.take_profit == pytest.approx(baseline.take_profit)
