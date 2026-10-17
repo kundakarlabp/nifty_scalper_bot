@@ -1120,6 +1120,8 @@ def test_smc_archived_component_signal_can_reach_execution_feasibility(
                 quantity=75,
                 confidence=1.0,
                 reason="SMC",
+                stop_loss=None,
+                take_profit=None,
                 metadata={
                     "strategy": "SMC",
                     "premium_stop_distance": 8.0,
