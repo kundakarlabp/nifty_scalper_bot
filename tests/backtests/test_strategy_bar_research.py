@@ -1061,3 +1061,89 @@ def test_smc_post_signal_rejection_counts_unique_setups_not_option_attempts(
     ]
     assert unique_rejections[rejection] == 1
     assert result["smc_unique_setup_funnel"]["simulated_filled_setups"] == 0
+
+
+@pytest.mark.parametrize(
+    ("premium_stop_distance", "expected_stop", "expected_target"),
+    [(8.0, 92.0, 116.0), (200.0, 40.0, 220.0)],
+)
+def test_smc_component_research_resolves_canonical_option_premium_geometry(
+    premium_stop_distance, expected_stop, expected_target
+):
+    """An SMC vote carries premium-risk metadata without explicit price levels."""
+    from nifty_scalper_bot.backtesting.strategy_research import (
+        _resolve_research_signal_geometry,
+    )
+    from nifty_scalper_bot.strategies.signal_generator import Signal
+
+    signal = Signal(
+        action="BUY",
+        symbol="NFO:NIFTY26O0622400CE",
+        quantity=75,
+        confidence=1.0,
+        reason="SMC",
+        stop_loss=None,
+        take_profit=None,
+        metadata={
+            "strategy": "SMC",
+            "source_domain": "underlying_price",
+            "premium_stop_distance": premium_stop_distance,
+            "premium_target_rr": 2.0,
+        },
+    )
+    stop, target, source = _resolve_research_signal_geometry(signal, 100.0)
+
+    assert stop == pytest.approx(expected_stop)
+    assert target == pytest.approx(expected_target)
+    assert source == "canonical_option_premium_geometry"
+
+
+def test_smc_archived_component_signal_can_reach_execution_feasibility(
+    tmp_path, monkeypatch
+):
+    """Missing direct SL/TP must not reject a valid SMC premium-risk contract."""
+    from nifty_scalper_bot.backtesting.strategy_research import run_archived_research
+    from nifty_scalper_bot.strategies.signal_generator import Signal
+
+    archive(tmp_path)
+
+    class Strategy:
+        name = "SMC"
+        config = SimpleNamespace(enabled=True)
+
+        def generate_signal(self, symbol, indicators, current_price, position=None):
+            if indicators["history_count"] != 1:
+                return None
+            return Signal(
+                action="BUY",
+                symbol=symbol,
+                quantity=75,
+                confidence=1.0,
+                reason="SMC",
+                stop_loss=None,
+                take_profit=None,
+                metadata={
+                    "strategy": "SMC",
+                    "premium_stop_distance": 8.0,
+                    "premium_target_rr": 2.0,
+                },
+            )
+
+        @property
+        def evaluation_health(self):
+            return {"healthy": True}
+
+        def notify_entry_accepted(self, side, *, setup_id=None):
+            pass
+
+    monkeypatch.setattr(
+        "nifty_scalper_bot.backtesting.strategy_research.build_elite_strategies",
+        lambda settings, engine: [Strategy()],
+    )
+    report = run_archived_research(tmp_path, slippage_bps=0)
+    result = report["scenarios"][0]["strategies"]["SMC"]
+
+    assert result["entry_funnel"]["signals_emitted"] == 2
+    assert result["entry_funnel"]["geometry_valid"] == 2
+    assert result["entry_funnel"]["accepted_fills"] == 2
+    assert result["no_vote_reasons"].get("invalid_signal_geometry", 0) == 0
