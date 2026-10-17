@@ -1070,7 +1070,7 @@ def test_smc_post_signal_rejection_counts_unique_setups_not_option_attempts(
 def test_smc_component_research_resolves_canonical_option_premium_geometry(
     premium_stop_distance, expected_stop, expected_target
 ):
-    """A canonical SMC vote has no explicit levels, but carries a premium risk contract."""
+    """An SMC vote carries premium-risk metadata without explicit price levels."""
     from nifty_scalper_bot.backtesting.strategy_research import (
         _resolve_research_signal_geometry,
     )
