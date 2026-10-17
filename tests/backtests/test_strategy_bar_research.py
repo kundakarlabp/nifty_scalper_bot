@@ -1207,7 +1207,7 @@ def test_smc_research_failed_candidate_does_not_consume_shared_setup(
     extra_ce["symbol"] = "NFO:NIFTY26O0622450CE"
     (candles / "CE_extra.json").write_text(json.dumps(extra_ce))
     original_ce = json.loads((candles / "CE.json").read_text())
-    original_ce["candles"][2][-1] = 0
+    original_ce["candles"][3][-1] = 0
     (candles / "CE.json").write_text(json.dumps(original_ce))
 
     class Strategy:
