@@ -161,3 +161,50 @@ Key observations on data flow and integrity:
 
 ## Conclusion
 The VWAP strategy stack is generally aligned with global best practices: it prioritizes reliable VWAP sourcing, volume gating, and regime awareness, and it applies risk controls that respect option premium mechanics. The most impactful improvements for production reliability are **diagnostic documentation** and **data provenance clarity**, rather than changes to strategy logic.
+
+
+## 2026-10-18 targeted follow-up: causal replay and optional completed-bar entry proof
+
+Repository baseline: `a7fd5db7b2497011a0c79c329fe9d51c840fbdca`.
+
+### Confirmed engineering corrections
+
+- VWAP thesis restart recovery now sorts completed, same-session option bars by
+  normalized observation time before calculating cumulative typical-price VWAP.
+  Reversed broker history must not manufacture an earlier VWAP crossing.
+- Non-finite OHLC or volume and negative volume are skipped before they can
+  poison the session cumulative volume/turnover. Missing or zero-volume input
+  retains its previous treatment. Recovery remains bounded by the current
+  observation timestamp and only the same contract/session can rearm.
+- A single finalized-option-bar proof block is reused by the existing
+  `VWAP_TREND_MOMENTUM_ENABLED` profile and a new independent, **default-off**
+  `VWAP_REQUIRE_FINALIZED_SIGNAL_BAR` research switch. The proof checks
+  timestamp, open, close, candle completion, plausible high/low and finite
+  premium volume. In default LIVE mode, the original entry criteria remain
+  unchanged. The candidate records both required/confirmed status.
+
+### Behaviour boundaries and research experiments
+
+No threshold, score weight, contract selection, stop, target, risk gate, order
+placement, execution mode, broker state or production environment is changed.
+`VWAP_PROXIMITY_PCT` remains telemetry-only, `VWAP_EMA_PERIOD` remains
+a history floor, and the configured 2R target remains a **proposal** rather
+than a calibrated win probability. The opt-in check should not be promoted
+until matched same-contract minute bars are proven available at the decision
+timestamp and baseline-vs-opt-in replay is positive after costs.
+
+Run matched strategy backtests, using the existing experiment tracking and
+fee/depth model, for (1) completed-bar versus existing reclaim,
+(2) immediate reclaim versus retest, (3) stricter time-aligned option/futures
+participation, (4) option-premium distance caps, (5) bounded time exits and
+current targets. Compare all accepted and rejected setups using aligned
+opportunities, chronological session/expiry splits and a reserved holdout.
+None of these **unvalidated parameter changes** is enabled by this patch.
+
+### Regression acceptance
+
+New tests cover deliberately unsorted session history, non-finite price and
+volume poisoning, opt-in absence of completed-bar proof, positive CE/PE
+completed-bar acceptance, and malformed OHLC. Run focused VWAP suites, full
+repository validation and final-head PR CI before main merge. CI results
+are recorded on the linked PR; tests alone do not prove trading profitability.
