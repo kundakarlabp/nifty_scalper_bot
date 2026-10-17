@@ -326,9 +326,7 @@ def test_finalized_signal_bar_gate_is_opt_in_and_preserves_default(monkeypatch):
     assert baseline is not None
 
     monkeypatch.setenv("VWAP_REQUIRE_FINALIZED_SIGNAL_BAR", "true")
-    gated_strategy, gated = _evaluate(
-        monkeypatch, enabled=False, is_complete=False
-    )
+    gated_strategy, gated = _evaluate(monkeypatch, enabled=False, is_complete=False)
     assert gated is None
     assert gated_strategy.last_no_vote_reason == "vwap_signal_bar_unconfirmed"
 
@@ -344,8 +342,6 @@ def test_finalized_signal_bar_gate_accepts_completed_premium_event(monkeypatch, 
 
 def test_finalized_signal_bar_gate_rejects_mismatched_ohlc(monkeypatch):
     monkeypatch.setenv("VWAP_REQUIRE_FINALIZED_SIGNAL_BAR", "true")
-    strategy, signal = _evaluate(
-        monkeypatch, enabled=False, history_high=99.0
-    )
+    strategy, signal = _evaluate(monkeypatch, enabled=False, history_high=99.0)
     assert signal is None
     assert strategy.last_no_vote_reason == "vwap_signal_bar_unconfirmed"
