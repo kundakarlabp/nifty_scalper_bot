@@ -1207,9 +1207,9 @@ def test_smc_research_failed_candidate_does_not_consume_shared_setup(
     extra_ce["symbol"] = "NFO:NIFTY26O0622450CE"
     (candles / "CE_extra.json").write_text(json.dumps(extra_ce))
     original_ce = json.loads((candles / "CE.json").read_text())
-    # The first contract loses its next-bar quote; the alternative remains
-    # evaluable and must still be permitted to fill the shared setup.
-    original_ce["candles"].pop()
+    # history_count=2 emits on the second completed candle, so the next
+    # candle is the executable third minute: only this candidate lacks trades.
+    original_ce["candles"][2][-1] = 0
     (candles / "CE.json").write_text(json.dumps(original_ce))
 
     class Strategy:
@@ -1246,7 +1246,7 @@ def test_smc_research_failed_candidate_does_not_consume_shared_setup(
     )["strategies"]["SMC"]
 
     assert result["entry_funnel"]["signals_emitted"] == 3, result["entry_funnel"]
-    assert result["no_vote_reasons"].get("next_minute_unavailable", 0) == 1, (
+    assert result["no_vote_reasons"].get("next_minute_has_no_trades", 0) == 1, (
         result["entry_funnel"],
         result["no_vote_reasons"],
     )
