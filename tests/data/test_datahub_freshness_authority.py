@@ -92,3 +92,129 @@ def test_is_fresh_preserves_datahub_cache_fallback_without_mdm_tick() -> None:
 
     assert fresh is True
     assert float(meta["effective_ms"]) < 1_000.0
+
+
+def test_newer_subscription_generation_replaces_newer_replay_timestamp() -> None:
+    hub = DataHub(_Mdm(None), clock=lambda: _NOW_S)
+    hub._warmup_grace_s = 0.0
+    hub._start_mono = hub._monotonic() - 10.0
+    replay_ts = datetime.fromtimestamp(_NOW_S - 0.1, tz=timezone.utc)
+    live_ts = datetime.fromtimestamp(_NOW_S - 0.2, tz=timezone.utc)
+
+    hub.ingest_tick_sync(
+        {
+            **_tick(0.1),
+            "timestamp": replay_ts.isoformat(),
+            "source": "mdm_replay",
+            "subscription_generation": 1,
+        }
+    )
+    hub.ingest_tick_sync(
+        {
+            **_tick(0.2),
+            "timestamp": live_ts.isoformat(),
+            "source": "ws_full",
+            "subscription_generation": 2,
+            "ltp": 101.0,
+            "last_price": 101.0,
+        }
+    )
+
+    quote = hub.get_quote(_SYMBOL, allow_pull=False)
+    assert quote is not None
+    assert quote["source"] == "ws_full"
+    assert quote["subscription_generation"] == 2
+    assert quote["ltp"] == 101.0
+
+
+def test_valid_same_generation_replay_chronology_rejects_older_ws_tick() -> None:
+    hub = DataHub(_Mdm(None), clock=lambda: _NOW_S)
+    hub._warmup_grace_s = 0.0
+    hub._start_mono = hub._monotonic() - 10.0
+
+    hub.ingest_tick_sync(
+        {
+            **_tick(0.1),
+            "source": "mdm_replay",
+            "subscription_generation": 2,
+            "ltp": 102.0,
+            "last_price": 102.0,
+        }
+    )
+    hub.ingest_tick_sync(
+        {
+            **_tick(0.2),
+            "source": "ws_full",
+            "subscription_generation": 2,
+            "ltp": 101.0,
+            "last_price": 101.0,
+        }
+    )
+
+    quote = hub.get_quote(_SYMBOL, allow_pull=False)
+    assert quote is not None
+    assert quote["source"] == "mdm_replay"
+    assert quote["ltp"] == 102.0
+
+
+def test_fresh_ws_full_reclaims_authority_from_rest_fallback() -> None:
+    hub = DataHub(_Mdm(None), clock=lambda: _NOW_S)
+    hub._warmup_grace_s = 0.0
+    hub._start_mono = hub._monotonic() - 10.0
+
+    hub.ingest_tick_sync(
+        {
+            **_tick(0.1),
+            "source": "rest_poll",
+            "subscription_generation": 2,
+            "ltp": 102.0,
+            "last_price": 102.0,
+        }
+    )
+    hub.ingest_tick_sync(
+        {
+            **_tick(0.2),
+            "source": "ws_full",
+            "subscription_generation": 2,
+            "ltp": 101.0,
+            "last_price": 101.0,
+        }
+    )
+
+    quote = hub.get_quote(_SYMBOL, allow_pull=False)
+    assert quote is not None
+    assert quote["source"] == "ws_full"
+    assert quote["ltp"] == 101.0
+
+
+def test_older_subscription_generation_cannot_replace_newer_generation() -> None:
+    hub = DataHub(_Mdm(None), clock=lambda: _NOW_S)
+    hub._warmup_grace_s = 0.0
+    hub._start_mono = hub._monotonic() - 10.0
+
+    current = _tick(0.5)
+    current.update(
+        {
+            "source": "ws_full",
+            "subscription_generation": 7,
+            "ltp": 102.0,
+            "last_price": 102.0,
+        }
+    )
+    older_generation = _tick(0.1)
+    older_generation.update(
+        {
+            "source": "ws_full",
+            "subscription_generation": 6,
+            "ltp": 103.0,
+            "last_price": 103.0,
+        }
+    )
+
+    hub.ingest_tick_sync(current)
+    hub.ingest_tick_sync(older_generation)
+
+    quote = hub.get_quote(_SYMBOL, allow_pull=False)
+    assert quote is not None
+    assert quote["subscription_generation"] == 7
+    assert quote["ltp"] == 102.0

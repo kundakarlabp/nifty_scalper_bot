@@ -76,6 +76,107 @@
     },
     "trace_id": {
       "type": "string"
+    },
+    "event_timestamp_ms": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "received_timestamp_ms": {
+      "type": "number",
+      "minimum": 0
+    },
+    "received_monotonic_ns": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "timestamp_quality": {
+      "type": "string",
+      "minLength": 1
+    },
+    "source_timestamp_valid": {
+      "type": "boolean"
+    },
+    "subscription_generation": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "quote_update_version": {
+      "type": [
+        "integer",
+        "number",
+        "string"
+      ]
+    },
+    "depth_available": {
+      "type": "boolean"
+    },
+    "depth_two_sided": {
+      "type": "boolean"
+    },
+    "depth_complete_5x5": {
+      "type": "boolean"
+    },
+    "bid_depth_levels": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "ask_depth_levels": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "bid_depth_qty_5": {
+      "type": "number",
+      "minimum": 0
+    },
+    "ask_depth_qty_5": {
+      "type": "number",
+      "minimum": 0
+    },
+    "depth_imbalance_5": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": -1,
+      "maximum": 1
+    },
+    "microprice": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "bid_qty": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "ask_qty": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "volume_delta": {
+      "type": "number",
+      "minimum": 0
+    },
+    "volume_cumulative": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0
     }
   },
   "additionalProperties": true

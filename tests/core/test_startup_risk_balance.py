@@ -5,6 +5,7 @@ import pytest
 from nifty_scalper_bot.core.app import (
     _resolve_startup_risk_initial_balance,
     apply_broker_auth_failure_to_context,
+    apply_broker_auth_recovery_to_context,
 )
 from nifty_scalper_bot.utils.errors import BrokerBalanceUnavailableError
 
@@ -79,3 +80,35 @@ def test_auth_failure_callback_marks_context_fail_closed():
     assert ctx.trading_ready is False
     assert ctx.live_block_reason == "broker_auth_invalid"
     assert ctx.execution_block_reason == "broker_auth_invalid"
+
+
+def test_auth_recovery_clears_only_auth_blockers() -> None:
+    ctx = SimpleNamespace(
+        broker_auth_invalid=True,
+        broker_auth_error="expired",
+        broker_auth_invalid_at=object(),
+        broker_session_invalid=True,
+        broker_ready=False,
+        broker_balance_valid=False,
+        broker_balance_error="expired",
+        live_orders_armed=False,
+        execution_armed=False,
+        trading_ready=False,
+        live_block_reason="execution_not_armed:broker_auth_invalid",
+        execution_block_reason="broker_auth_invalid",
+        runtime_readiness_recomputed_mono=123.0,
+    )
+
+    apply_broker_auth_recovery_to_context(ctx, {"valid": True, "generation": 8})
+
+    assert ctx.broker_auth_invalid is False
+    assert ctx.broker_auth_error is None
+    assert ctx.broker_session_invalid is False
+    assert ctx.broker_ready is True
+    assert ctx.broker_balance_valid is False
+    assert ctx.live_orders_armed is False
+    assert ctx.execution_armed is False
+    assert ctx.trading_ready is False
+    assert ctx.live_block_reason is None
+    assert ctx.execution_block_reason is None
+    assert ctx.runtime_readiness_recomputed_mono == 0.0

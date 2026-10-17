@@ -1,6 +1,5 @@
 from types import SimpleNamespace
 
-from nifty_scalper_bot.core.strategy_runner_dynamic_universe_safety import apply_patches
 from nifty_scalper_bot.strategies.runner import StrategyRunner
 
 
@@ -89,7 +88,6 @@ def test_live_option_freshness_prefers_genuine_ws_age_over_fresh_cached_quote(
 ) -> None:
     """A poll/cache refresh must not make a stale genuine WS option tick fresh."""
 
-    apply_patches()
     runner = object.__new__(StrategyRunner)
     runner._data_hub = None
     runner._market_data = SimpleNamespace(
@@ -117,6 +115,42 @@ def test_live_option_freshness_prefers_genuine_ws_age_over_fresh_cached_quote(
     assert (
         runner._is_option_symbol_tick_fresh("NFO:NIFTY26MAY24000CE", max_age_s=60.0)
         is False
+    )
+
+
+def test_live_option_freshness_uses_receive_age_over_old_event_time(
+    monkeypatch,
+) -> None:
+    runner = object.__new__(StrategyRunner)
+    runner._data_hub = None
+    runner._market_data = SimpleNamespace(
+        time_since_last_live_ws_tick=lambda _symbol: 0.2,
+        time_since_last_tick=lambda _symbol: 0.2,
+    )
+    monkeypatch.setattr(runner, "_is_tradable_symbol", lambda symbol: True)
+    monkeypatch.setattr(
+        runner,
+        "_resolve_execution_mode_snapshot",
+        lambda: SimpleNamespace(is_live_mode=True),
+    )
+    monkeypatch.setattr(
+        runner,
+        "_get_cached_quote_for_live_entry",
+        lambda symbol: {
+            "quote_age_s": 90.0,
+            "ltp": 100.0,
+            "bid": 99.5,
+            "ask": 100.5,
+            "source": "ws_full",
+        },
+    )
+
+    assert (
+        runner._is_option_symbol_tick_fresh(
+            "NFO:NIFTY26MAY24000CE",
+            max_age_s=60.0,
+        )
+        is True
     )
 
 

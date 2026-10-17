@@ -5172,6 +5172,29 @@ def apply_broker_auth_failure_to_context(
     ctx.execution_block_reason = "broker_auth_invalid"
 
 
+def apply_broker_auth_recovery_to_context(
+    ctx: Any,
+    snapshot: Mapping[str, Any] | None,
+) -> None:
+    """Clear only auth/session blockers after authenticated broker recovery."""
+
+    snapshot = snapshot or {}
+    if snapshot.get("valid") is not True:
+        return
+    ctx.broker_auth_invalid = False
+    ctx.broker_auth_error = None
+    ctx.broker_auth_invalid_at = None
+    ctx.broker_session_invalid = False
+    ctx.broker_ready = True
+    # Authentication recovery does not prove current funds/reconciliation and
+    # never re-arms orders by itself. Those gates must independently recover.
+    for attr in ("live_block_reason", "execution_block_reason"):
+        value = str(getattr(ctx, attr, "") or "")
+        if value == "broker_auth_invalid" or value.endswith(":broker_auth_invalid"):
+            setattr(ctx, attr, None)
+    ctx.runtime_readiness_recomputed_mono = 0.0
+
+
 def initialize_components(settings: Settings | None = None) -> BotContext:
     """Initialize all components in correct order."""
 
@@ -7011,7 +7034,18 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
     ):
         market_data_manager.replay_metadata_provider = _replay_metadata
 
-    def _on_broker_auth_failure(snapshot: Mapping[str, Any]) -> None:
+    def _on_broker_auth_state(snapshot: Mapping[str, Any]) -> None:
+        if snapshot.get("valid") is True:
+            apply_broker_auth_recovery_to_context(ctx, snapshot)
+            LOGGER.warning(
+                "BROKER_AUTH_RESTORED_PROPAGATED generation=%s",
+                snapshot.get("generation"),
+                extra={
+                    "event": "BROKER_AUTH_RESTORED_PROPAGATED",
+                    "generation": snapshot.get("generation"),
+                },
+            )
+            return
         apply_broker_auth_failure_to_context(ctx, snapshot)
         reason = str(snapshot.get("reason") or "broker_auth_invalid")
         LOGGER.error(
@@ -7027,7 +7061,7 @@ def initialize_components(settings: Settings | None = None) -> BotContext:
 
     set_auth_callback = getattr(broker_client, "set_auth_failure_callback", None)
     if callable(set_auth_callback):
-        set_auth_callback(_on_broker_auth_failure)
+        set_auth_callback(_on_broker_auth_state)
     if startup_broker_auth_error is not None:
         apply_broker_auth_failure_to_context(
             ctx,

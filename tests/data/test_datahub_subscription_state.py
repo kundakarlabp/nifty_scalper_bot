@@ -39,3 +39,25 @@ def test_datahub_first_ws_tick_advances_subscription_live():
     assert record is not None
     assert record.state == SubscriptionState.LIVE
     assert record.token == 12345
+
+
+def test_datahub_first_ws_full_tick_advances_subscription_live():
+    mdm = _Mdm()
+    hub = DataHub(mdm)
+    symbol = "NFO:NIFTY26MAY23750CE"
+    hub.subscribe_ticks(symbol, lambda tick: None, force_live=True)
+
+    hub.ingest_tick_sync(
+        {
+            "symbol": symbol,
+            "instrument_token": 12345,
+            "last_price": 100.0,
+            "timestamp": "2026-06-21T09:16:00+05:30",
+            "source": "ws_full",
+        }
+    )
+
+    record = hub.get_subscription_record(symbol)
+    assert record is not None
+    assert record.state == SubscriptionState.LIVE
+    assert record.token == 12345

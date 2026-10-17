@@ -57,8 +57,13 @@ LOGGER = logging.getLogger(__name__)
 Tick = Dict[str, Any]
 TickListener = Callable[[Tick], None]
 OrderListener = Callable[[dict[str, Any]], None]
-_UNUSABLE_TIMESTAMP_QUALITIES = {"synthetic", "unknown", "invalid"}
-_WS_SOURCES = {"ws", "websocket", "stream"}
+_UNUSABLE_TIMESTAMP_QUALITIES = {
+    "synthetic",
+    "unknown",
+    "invalid",
+    "received_at",
+}
+_WS_SOURCES = {"ws", "ws_full", "full", "websocket", "stream"}
 _QUOTE_IDENTITY_KEYS = (
     "symbol",
     "tradingsymbol",
@@ -1092,6 +1097,19 @@ class DataHub:
             received_at = float(tick.get("received_at") or time.time())
         except Exception:
             received_at = time.time()
+        try:
+            received_timestamp_ms = float(
+                tick.get("received_timestamp_ms") or (received_at * 1000.0)
+            )
+        except (TypeError, ValueError):
+            received_timestamp_ms = received_at * 1000.0
+        try:
+            received_monotonic_ns = int(
+                tick.get("received_monotonic_ns")
+                or int(self._monotonic() * 1_000_000_000)
+            )
+        except (TypeError, ValueError):
+            received_monotonic_ns = int(self._monotonic() * 1_000_000_000)
         bid, ask, spread_pct, bid_ask_source = resolve_quote_bid_ask_spread(tick)
         if bid is not None and ask is not None:
             tick.setdefault("bid", bid)
@@ -1102,10 +1120,25 @@ class DataHub:
             tick.setdefault("spread_pct", spread_pct)
         if bid_ask_source != "missing":
             tick.setdefault("bid_ask_source", bid_ask_source)
-        if tick.get("depth"):
-            tick["depth_available"] = True
+        depth = tick.get("depth")
+        if isinstance(depth, Mapping):
+            buy_levels = depth.get("buy")
+            sell_levels = depth.get("sell")
+            depth_two_sided = bool(buy_levels and sell_levels)
+            tick["depth_available"] = bool(depth)
+            tick["depth_two_sided"] = depth_two_sided
+            tick.setdefault(
+                "depth_complete_5x5",
+                bool(
+                    isinstance(buy_levels, list)
+                    and isinstance(sell_levels, list)
+                    and len(buy_levels) >= 5
+                    and len(sell_levels) >= 5
+                ),
+            )
         else:
             tick.setdefault("depth_available", False)
+            tick.setdefault("depth_two_sided", False)
         if bid is not None and ask is not None and bid > 0 and ask > bid:
             tick["tradable_quote"] = True
         else:
@@ -1126,8 +1159,15 @@ class DataHub:
                 "last_price": price,
                 "timestamp": ts_iso,
                 "timestamp_ms": ts_ms,
+                "event_timestamp_ms": (
+                    ts_ms
+                    if timestamp_quality not in _UNUSABLE_TIMESTAMP_QUALITIES
+                    else None
+                ),
                 "timestamp_quality": timestamp_quality,
                 "received_at": received_at,
+                "received_timestamp_ms": received_timestamp_ms,
+                "received_monotonic_ns": received_monotonic_ns,
             }
         )
         return to_json_safe(self._stamp_quote_identity(symbol, tick))
@@ -1319,6 +1359,63 @@ class DataHub:
         )
         return base, expiry, strike, side == "CE"
 
+    @staticmethod
+    def _source_authority(payload: Mapping[str, Any]) -> int:
+        """Rank transport authority without converting it into a strategy score."""
+        source = str(payload.get("source") or "").strip().lower()
+        quality = str(payload.get("timestamp_quality") or "").strip().lower()
+        if source in _WS_SOURCES and quality not in _UNUSABLE_TIMESTAMP_QUALITIES:
+            return 3
+        if source == "mdm_replay":
+            return 2
+        if source in {"poll", "rest", "rest_poll", "fallback", "quote", "rest_quote"}:
+            return 1
+        return 0
+
+    @staticmethod
+    def _payload_subscription_generation(payload: Mapping[str, Any]) -> int | None:
+        raw = payload.get("subscription_generation")
+        if raw is None:
+            raw = payload.get("_mdm_subscription_generation")
+        try:
+            return None if raw is None else int(raw)
+        except (TypeError, ValueError):
+            return None
+
+    def _incoming_quote_has_higher_authority(
+        self,
+        current: Mapping[str, Any] | None,
+        incoming: Mapping[str, Any],
+    ) -> bool:
+        """Return whether incoming evidence should outrank timestamp ordering."""
+        if not isinstance(current, Mapping):
+            return False
+        current_generation = self._payload_subscription_generation(current)
+        incoming_generation = self._payload_subscription_generation(incoming)
+        if current_generation is not None and incoming_generation is not None:
+            if incoming_generation > current_generation:
+                return True
+            if incoming_generation < current_generation:
+                return False
+        current_quality = str(current.get("timestamp_quality") or "").strip().lower()
+        incoming_quality = str(incoming.get("timestamp_quality") or "").strip().lower()
+        current_source = str(current.get("source") or "").strip().lower()
+        incoming_source = str(incoming.get("source") or "").strip().lower()
+        if (
+            current_source
+            in {"poll", "rest", "rest_poll", "fallback", "quote", "rest_quote"}
+            and incoming_source in _WS_SOURCES
+            and incoming_quality not in _UNUSABLE_TIMESTAMP_QUALITIES
+        ):
+            # REST is degraded-feed fallback; current-generation live WS should
+            # reclaim quote authority even if its last-trade timestamp is older.
+            return True
+        return bool(
+            current_quality in _UNUSABLE_TIMESTAMP_QUALITIES
+            and incoming_quality not in _UNUSABLE_TIMESTAMP_QUALITIES
+            and self._source_authority(incoming) > self._source_authority(current)
+        )
+
     def _ingest_tick_impl(self, tick: Tick) -> None:
         canonical_tick = (
             self._canonicalize_tick_payload(tick) if isinstance(tick, Mapping) else None
@@ -1342,21 +1439,51 @@ class DataHub:
         mono_now = self._monotonic()
 
         with self._lock:
-            if self._should_drop_stale_tick(symbol, ts_ms, now_ms, mono_now):
-                LOGGER.warning("stale_tick_dropped symbol=%s age_ms=%.1f", symbol, now_ms - ts_ms)
+            current_quote = self._quotes.get(symbol)
+            current_generation = (
+                self._payload_subscription_generation(current_quote)
+                if isinstance(current_quote, Mapping)
+                else None
+            )
+            incoming_generation = self._payload_subscription_generation(tick)
+            if (
+                current_generation is not None
+                and incoming_generation is not None
+                and incoming_generation < current_generation
+            ):
+                LOGGER.debug(
+                    "DATAHUB_TICK_REJECTED reason=older_subscription_generation "
+                    "symbol=%s current_generation=%s incoming_generation=%s",
+                    symbol,
+                    current_generation,
+                    incoming_generation,
+                    extra={
+                        "event": "DATAHUB_TICK_REJECTED",
+                        "reason": "older_subscription_generation",
+                        "symbol": symbol,
+                        "current_generation": current_generation,
+                        "incoming_generation": incoming_generation,
+                    },
+                )
+                return
+            higher_authority = self._incoming_quote_has_higher_authority(
+                current_quote, tick
+            )
+            if not higher_authority and self._should_drop_stale_tick(
+                symbol, ts_ms, now_ms, mono_now
+            ):
+                LOGGER.warning(
+                    "stale_tick_dropped symbol=%s age_ms=%.1f",
+                    symbol,
+                    now_ms - ts_ms,
+                )
                 return
             last_ts = self._last_ts.get(symbol, 0.0)
             last_arr = self._last_arrival.get(symbol, 0.0)
             last_ws = self._last_ws_arrival.get(symbol, 0.0)
-            deliver_older_ws = False
-            if ts_ms < last_ts:
-                # Replay/cache authority can stamp a newer synthetic event time
-                # than subsequent live WS ticks. Still deliver those WS ticks to
-                # Runner so entry evaluation does not stop after startup replay.
-                if source not in {"ws", "websocket", "stream"}:
-                    return
-                deliver_older_ws = True
-            if (not deliver_older_ws) and ts_ms == last_ts and now_ms <= last_arr:
+            if ts_ms < last_ts and not higher_authority:
+                return
+            if ts_ms == last_ts and now_ms <= last_arr and not higher_authority:
                 return
             if source == "poll" and (now_ms - last_ws) < self._poll_block_ms:
                 return
@@ -1370,34 +1497,36 @@ class DataHub:
             if token is not None:
                 canonical_tick["instrument_token"] = token
                 canonical_tick["token"] = token
-                if not deliver_older_ws:
-                    self._ticks[token] = canonical_tick
-                    self._token_quotes[token] = canonical_tick
-                    self._token_by_symbol[symbol] = token
-                    self._symbol_by_token[token] = symbol
+                self._ticks[token] = canonical_tick
+                self._token_quotes[token] = canonical_tick
+                self._token_by_symbol[symbol] = token
+                self._symbol_by_token[token] = symbol
             first_seen = symbol not in self._quotes
-            if not deliver_older_ws:
-                self._quotes[symbol] = canonical_tick
-                self._last_ts[symbol] = ts_ms
-                self._last_arrival[symbol] = now_ms
-                self._last_arrival_mono[symbol] = mono_now
-            if source in {"ws", "websocket", "stream"}:
+            self._quotes[symbol] = canonical_tick
+            self._last_ts[symbol] = ts_ms
+            self._last_arrival[symbol] = now_ms
+            self._last_arrival_mono[symbol] = mono_now
+            if source in _WS_SOURCES:
                 self._last_ws_arrival[symbol] = now_ms
                 self._last_global_ws_arrival = now_ms
-                if not deliver_older_ws:
-                    self._set_subscription_state(
-                        symbol,
-                        SubscriptionState.LIVE,
-                        reason="first_live_tick" if first_seen else "live_tick",
-                        token=token,
-                    )
+                self._set_subscription_state(
+                    symbol,
+                    SubscriptionState.LIVE,
+                    reason="first_live_tick" if first_seen else "live_tick",
+                    token=token,
+                )
             elif source in {"poll", "rest"}:
                 self._last_poll_arrival[symbol] = now_ms
             self._stale_candidates[symbol] = 0
-            if not deliver_older_ws:
-                self._quote_update_versions[symbol] = int(self._quote_update_versions.get(symbol, 0)) + 1
-            canonical_tick["quote_update_version"] = int(self._quote_update_versions.get(symbol, 0))
-            token_value = canonical_tick.get("instrument_token") or canonical_tick.get("token")
+            self._quote_update_versions[symbol] = (
+                int(self._quote_update_versions.get(symbol, 0)) + 1
+            )
+            canonical_tick["quote_update_version"] = int(
+                self._quote_update_versions.get(symbol, 0)
+            )
+            token_value = canonical_tick.get("instrument_token") or canonical_tick.get(
+                "token"
+            )
             token_int = None
             try:
                 token_int = int(token_value) if token_value is not None else None

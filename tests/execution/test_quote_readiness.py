@@ -193,15 +193,38 @@ def test_max_quote_age_seconds_invalid_non_empty_uses_default(monkeypatch):
     )
 
 
-def test_tick_age_prefers_real_quote_timestamp_over_stale_cached_age(monkeypatch):
+def test_tick_age_prefers_explicit_receive_age_over_event_timestamp(monkeypatch):
     import nifty_scalper_bot.execution.quote_readiness as quote_readiness
 
     monkeypatch.setattr(quote_readiness.time, "time", lambda: 1_800_000_000.0)
     age_ms = resolve_tick_age_ms(
         {
-            "tick_age_ms": 2_287_265.0,
-            "last_tick_ts_ms": 1_799_999_999_500.0,
+            "tick_age_ms": 125.0,
+            "last_tick_ts_ms": 1_799_999_000_000.0,
         }
     )
 
-    assert age_ms == 500.0
+    assert age_ms == 125.0
+
+
+def test_explicit_one_sided_depth_cannot_satisfy_depth_required_execution() -> None:
+    result = evaluate_execution_quote(
+        "NFO:NIFTY26JUN24000CE",
+        {
+            "bid": 99.9,
+            "ask": 100.1,
+            "tick_age_ms": 100,
+            "timestamp_quality": "exchange",
+            "depth_available": True,
+            "depth_two_sided": False,
+            "tradable_quote": True,
+        },
+        live_mode=True,
+        max_tick_age_ms=2500,
+        max_spread_pct=0.75,
+        require_depth=True,
+    )
+
+    assert result.allowed is False
+    assert result.reason == "quote_depth_missing"
+    assert result.depth_available is False

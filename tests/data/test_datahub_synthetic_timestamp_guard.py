@@ -69,13 +69,22 @@ def test_valid_broker_timestamp_can_satisfy_guarded_cached_ltp() -> None:
     assert hub.get_cached_ltp(symbol, max_age_seconds=2.0, require_ws=True) == 100.0
 
 
-def test_received_at_quality_preserved_when_it_is_the_only_valid_time_proof() -> None:
+def test_received_at_only_quality_is_not_hard_readiness_proof() -> None:
     hub = DataHub(_MdmNoop())
     symbol = "NSE:NIFTY"
 
-    hub.ingest_tick_sync(_quote_payload(symbol=symbol, received_at=pd.Timestamp.utcnow().timestamp(), source="ws"))
+    hub.ingest_tick_sync(
+        _quote_payload(
+            symbol=symbol,
+            received_at=pd.Timestamp.utcnow().timestamp(),
+            source="ws",
+        )
+    )
     quote = hub.get_quote(symbol, allow_pull=False)
 
     assert quote is not None
     assert quote["timestamp_quality"] == "received_at"
-    assert quote["hard_readiness_eligible"] is True
+    assert quote["hard_readiness_eligible"] is False
+    assert quote["tradable_quote"] is False
+    assert quote["event_timestamp_ms"] is None
+    assert quote["received_timestamp_ms"] > 0

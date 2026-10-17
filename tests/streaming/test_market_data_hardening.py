@@ -176,3 +176,57 @@ def test_websocket_hardening_installer_is_verification_only() -> None:
 
     assert WebSocketManager._on_ticks is before
     assert WebSocketManager._market_data_hardening_installed is True
+
+
+@pytest.mark.asyncio
+async def test_ws_connect_is_suppressed_while_broker_auth_invalid() -> None:
+    manager = WebSocketManager(
+        "api_key",
+        "access_token",
+        trading_window_enabled=False,
+    )
+    manager.set_auth_state_provider(lambda: True)
+    called = False
+
+    async def _unexpected_replace() -> None:
+        nonlocal called
+        called = True
+
+    manager._replace_ticker = _unexpected_replace
+
+    await manager._connect_once("auth_test")
+
+    assert called is False
+    assert manager.is_connected() is False
+    assert manager.connection_state().name == "DISCONNECTED"
+    assert manager._stream_health == "auth_blocked"
+    status = manager.status_snapshot()
+    assert status["stream_health"] == "auth_blocked"
+    assert status["auth_blocked"] is True
+
+
+def test_ws_ticker_build_refreshes_token_from_provider(monkeypatch) -> None:
+    class _Ticker:
+        def __init__(self, api_key, access_token, reconnect=False):
+            self.api_key = api_key
+            self.access_token = access_token
+            self.reconnect = reconnect
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(
+        "nifty_scalper_bot.streaming.websocket_manager.KiteTicker",
+        _Ticker,
+    )
+    manager = WebSocketManager(
+        "api_key",
+        "stale_token",
+        trading_window_enabled=False,
+    )
+    manager.set_access_token_provider(lambda: "fresh_token")
+
+    ticker = manager._build_ticker()
+
+    assert manager._access_token == "fresh_token"
+    assert ticker.access_token == "fresh_token"
