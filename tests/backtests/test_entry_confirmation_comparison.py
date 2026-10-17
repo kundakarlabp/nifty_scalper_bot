@@ -73,6 +73,13 @@ def test_entry_comparison_uses_paired_all_three_strategy_arms(monkeypatch):
             "strategies": {
                 name: {
                     "metrics": {"trade_count": 0, "net_pnl": 0},
+                    "evaluations": 0,
+                    "data_quality": {
+                        "eligible_option_bar_count": (
+                            0 if constraints.get("require_archived_weekly_atm") else None
+                        ),
+                        "eligible_session_count": 0,
+                    },
                     "entry_funnel": {"signals_emitted": 0},
                     "no_vote_reasons": {"no_signal": 1},
                     "trades": [{"test": True}],
@@ -96,6 +103,7 @@ def test_entry_comparison_uses_paired_all_three_strategy_arms(monkeypatch):
     assert observed[6][1]["require_option_premium_confirmation"] is True
     assert report["selection"]["selected_for_live"] is None
     assert report["selection"]["promotion_eligible"] is False
+    assert report["historical_eligibility"]["status"] == "not_evaluable"
     assert all(
         "trades" not in results
         for arm in report["candidates"]
@@ -127,10 +135,7 @@ def test_zero_eligible_option_bars_are_not_misreported_as_no_signal():
         }
     )
     assert result["status"] == "not_evaluable"
-    assert (
-        result["reason_code"]
-        == "INSUFFICIENT_HISTORICAL_WEEKLY_ATM_COVERAGE"
-    )
+    assert result["reason_code"] == "INSUFFICIENT_HISTORICAL_WEEKLY_ATM_COVERAGE"
     assert result["weekly_expiry_rejections"] == 31033
     assert result["outside_atm_rejections"] == 7896
     assert result["eligible_session_count"] == 0
