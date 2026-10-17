@@ -975,9 +975,7 @@ def test_orb_invalid_explicit_option_timestamp_cannot_bypass_causality(
 
 
 @pytest.mark.parametrize("premium", [0.05, float("nan"), float("inf"), float("-inf")])
-def test_orb_does_not_emit_non_executable_option_premium(
-    monkeypatch, premium
-) -> None:
+def test_orb_does_not_emit_non_executable_option_premium(monkeypatch, premium) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
     monkeypatch.setenv("ORB_BALANCED_RANGE_MAX_ATR", "2.0")
     rows = _opening_rows()
@@ -1040,9 +1038,7 @@ def test_orb_target_uses_actual_capped_stop_distance(monkeypatch, side, symbol) 
     assert 0.0 < signal.stop_loss < premium < signal.take_profit
     actual_distance = premium - signal.stop_loss
     assert actual_distance == pytest.approx(0.25)
-    assert signal.metadata["premium_stop_distance"] == pytest.approx(
-        actual_distance
-    )
+    assert signal.metadata["premium_stop_distance"] == pytest.approx(actual_distance)
     assert (signal.take_profit - premium) / actual_distance == pytest.approx(
         signal.metadata["premium_target_rr"]
     )
