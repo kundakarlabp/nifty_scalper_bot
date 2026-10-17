@@ -488,6 +488,37 @@ def _archived_weekly_atm_rejection(
     return None
 
 
+def _historical_weekly_atm_evaluability(
+    strategy_result: dict[str, Any],
+) -> dict[str, Any]:
+    """Explain an empty strict research comparison without weakening admission."""
+    quality = strategy_result.get("data_quality") or {}
+    rejected = strategy_result.get("no_vote_reasons") or {}
+    eligible = quality.get("eligible_option_bar_count")
+    evaluated = strategy_result.get("evaluations", 0)
+    if eligible is None:
+        status, reason = "coverage_not_measured", None
+    elif eligible == 0:
+        status, reason = (
+            "not_evaluable",
+            "INSUFFICIENT_HISTORICAL_WEEKLY_ATM_COVERAGE",
+        )
+    else:
+        status, reason = "research_proxy_only", None
+    return {
+        "status": status,
+        "reason_code": reason,
+        "evaluations": evaluated,
+        "source_option_session_count": quality.get("source_option_session_count"),
+        "eligible_session_count": quality.get("eligible_session_count"),
+        "eligible_session_dates": quality.get("eligible_session_dates", []),
+        "eligible_option_bar_count": eligible,
+        "weekly_expiry_rejections": rejected.get("archive_weekly_expiry_not_proven", 0),
+        "outside_atm_rejections": rejected.get("archive_strike_outside_atm_basket", 0),
+        "historical_selection_verified": False,
+    }
+
+
 def _scenario(
     histories: dict[str, dict[datetime, dict[str, Any]]],
     instruments: dict[str, dict[str, Any]],
@@ -1392,6 +1423,9 @@ def run_vwap_comparison(directory: Path) -> dict[str, Any]:
     )
     return {
         "scope": "bounded_vwap_active_contract_component_comparison",
+        "historical_eligibility": _historical_weekly_atm_evaluability(
+            candidates[0]["scenarios"][0]
+        ),
         "evidence_label": "RESEARCH_CANDIDATE",
         "live_equivalent": False,
         "data_sha256": digest,
@@ -1659,6 +1693,9 @@ def run_entry_confirmation_comparison(directory: Path) -> dict[str, Any]:
         )
     return {
         "scope": "paired_three_strategy_entry_confirmation_component_ablation",
+        "historical_eligibility": _historical_weekly_atm_evaluability(
+            candidates[1]["scenarios"][0]["strategies"]["VWAPPro"]
+        ),
         "evidence_label": "RESEARCH_CANDIDATE",
         "live_equivalent": False,
         "data_sha256": digest,
