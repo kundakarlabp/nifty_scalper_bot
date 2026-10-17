@@ -152,6 +152,11 @@ class VWAPProStrategy(EliteStrategy):
         self._trend_require_retest = str(
             os.getenv("VWAP_TREND_REQUIRE_RETEST", "false")
         ).strip().lower() in {"1", "true", "yes", "on"}
+        # Research-only: demand proof that the signal OHLC is the latest
+        # finalized option candle. Existing LIVE candidacy is unchanged.
+        self._require_finalized_signal_bar = str(
+            os.getenv("VWAP_REQUIRE_FINALIZED_SIGNAL_BAR", "false")
+        ).strip().lower() in {"1", "true", "yes", "on"}
 
         # get_session_vwap_slope() returns percentage change over finalized
         # bars. Convert percentage points to basis points for a scale-readable
@@ -249,6 +254,18 @@ class VWAPProStrategy(EliteStrategy):
             return None
         if not rows:
             return None
+
+        def _bar_timestamp(raw: Any) -> datetime:
+            """Order replay chronologically; never let a later bar change earlier VWAP."""
+            if isinstance(raw, Mapping):
+                value = raw.get("timestamp") or raw.get("date") or raw.get("time")
+                if value not in (None, ""):
+                    try:
+                        return datetime.fromisoformat(_normalize_thesis_anchor(value))
+                    except (TypeError, ValueError, OverflowError):
+                        pass
+            return datetime.max.replace(tzinfo=timezone.utc)
+
         raw_lookback = os.getenv("VWAP_THESIS_RECOVERY_LOOKBACK_BARS")
         lookback: int | None = None
         if raw_lookback not in (None, ""):
@@ -261,7 +278,7 @@ class VWAPProStrategy(EliteStrategy):
         session_rows: list[tuple[Any, float, float, float, float]] = []
         cumulative_turnover = 0.0
         cumulative_volume = 0.0
-        for raw in rows:
+        for raw in sorted(rows, key=_bar_timestamp):
             if not isinstance(raw, Mapping):
                 continue
             if raw.get("is_provisional") is True or raw.get("is_complete") is False:
@@ -285,7 +302,14 @@ class VWAPProStrategy(EliteStrategy):
                 row_volume = float(raw.get("volume") or 0.0)
             except (TypeError, ValueError):
                 continue
-            if min(row_open, row_high, row_low, row_close) <= 0:
+            if (
+                not all(
+                    math.isfinite(value)
+                    for value in (row_open, row_high, row_low, row_close, row_volume)
+                )
+                or min(row_open, row_high, row_low, row_close) <= 0
+                or row_volume < 0
+            ):
                 continue
             if row_volume > 0:
                 typical_price = (row_high + row_low + row_close) / 3.0
@@ -708,8 +732,13 @@ class VWAPProStrategy(EliteStrategy):
                 if not strong_fresh_trend_context:
                     self._no_vote("trend_momentum_underlying_quality_unconfirmed")
                     return None
-                # A live quote is not a completed premium momentum candle.
-                # Require the current option contract\u0027s completed bar, not tick OHLC.
+
+            confirmed_bar = None
+            last_bars = []
+            if self._trend_momentum_enabled or self._require_finalized_signal_bar:
+                # Confirm exactly the completed premium candle used by this vote.
+                # One proof owner serves both research profiles without a second
+                # signal path or an unconditional LIVE admission change.
                 bar_getter = getattr(self._indicator_engine, "get_history", None)
                 try:
                     last_bars = (
@@ -730,28 +759,41 @@ class VWAPProStrategy(EliteStrategy):
                 except (TypeError, ValueError, AttributeError, IndexError):
                     bar_confirmed = False
                 if not bar_confirmed:
-                    self._no_vote("trend_momentum_bar_unconfirmed")
+                    self._no_vote(
+                        "trend_momentum_bar_unconfirmed"
+                        if self._trend_momentum_enabled
+                        else "vwap_signal_bar_unconfirmed"
+                    )
                     return None
-                # All premium acceptance evidence must come from the same
-                # finalized option bar, not a potentially newer tick snapshot.
                 try:
                     confirmed_high = float(confirmed_bar["high"])
                     confirmed_low = float(confirmed_bar["low"])
                     confirmed_volume = float(confirmed_bar["volume"])
                 except (TypeError, ValueError, KeyError):
-                    self._no_vote("trend_momentum_bar_unconfirmed")
+                    self._no_vote(
+                        "trend_momentum_bar_unconfirmed"
+                        if self._trend_momentum_enabled
+                        else "vwap_signal_bar_unconfirmed"
+                    )
                     return None
                 if not (
-                    all(math.isfinite(value) for value in (
-                        confirmed_high, confirmed_low, confirmed_volume
-                    ))
+                    all(
+                        math.isfinite(value)
+                        for value in (confirmed_high, confirmed_low, confirmed_volume)
+                    )
                     and confirmed_low < confirmed_high
                     and confirmed_low <= open_price <= confirmed_high
                     and confirmed_low <= close <= confirmed_high
                     and confirmed_volume >= 0
                 ):
-                    self._no_vote("trend_momentum_bar_unconfirmed")
+                    self._no_vote(
+                        "trend_momentum_bar_unconfirmed"
+                        if self._trend_momentum_enabled
+                        else "vwap_signal_bar_unconfirmed"
+                    )
                     return None
+
+            if self._trend_momentum_enabled:
                 if not momentum_continuation_confirmed:
                     self._no_vote("trend_momentum_premium_not_confirmed")
                     return None
@@ -1012,6 +1054,10 @@ class VWAPProStrategy(EliteStrategy):
                 "vwap_penetration_atr": round(penetration_atr, 4),
                 "vwap_event_confirmed": event_confirmed,
                 "trend_momentum_enabled": self._trend_momentum_enabled,
+                "vwap_finalized_bar_required": (
+                    self._require_finalized_signal_bar or self._trend_momentum_enabled
+                ),
+                "vwap_finalized_bar_confirmed": confirmed_bar is not None,
                 "trend_momentum_regime": trend_momentum_regime.value,
                 "trend_momentum_option_rvol_min": self._trend_momentum_option_rvol_min,
                 "trend_momentum_premium_confirmed": momentum_continuation_confirmed,

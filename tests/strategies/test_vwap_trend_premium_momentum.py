@@ -316,3 +316,32 @@ def test_nonfinite_futures_volume_cannot_confirm_thin_option(monkeypatch) -> Non
 
     assert signal is None
     assert strategy.last_no_vote_reason == "volume_confirmation_missing"
+
+
+def test_finalized_signal_bar_gate_is_opt_in_and_preserves_default(monkeypatch):
+    monkeypatch.delenv("VWAP_REQUIRE_FINALIZED_SIGNAL_BAR", raising=False)
+    baseline_strategy, baseline = _evaluate(
+        monkeypatch, enabled=False, is_complete=False
+    )
+    assert baseline is not None
+
+    monkeypatch.setenv("VWAP_REQUIRE_FINALIZED_SIGNAL_BAR", "true")
+    gated_strategy, gated = _evaluate(monkeypatch, enabled=False, is_complete=False)
+    assert gated is None
+    assert gated_strategy.last_no_vote_reason == "vwap_signal_bar_unconfirmed"
+
+
+@pytest.mark.parametrize("side", ["CE", "PE"])
+def test_finalized_signal_bar_gate_accepts_completed_premium_event(monkeypatch, side):
+    monkeypatch.setenv("VWAP_REQUIRE_FINALIZED_SIGNAL_BAR", "true")
+    strategy, signal = _evaluate(monkeypatch, side=side, enabled=False)
+    assert signal is not None
+    assert signal.metadata["vwap_finalized_bar_required"] is True
+    assert signal.metadata["vwap_finalized_bar_confirmed"] is True
+
+
+def test_finalized_signal_bar_gate_rejects_mismatched_ohlc(monkeypatch):
+    monkeypatch.setenv("VWAP_REQUIRE_FINALIZED_SIGNAL_BAR", "true")
+    strategy, signal = _evaluate(monkeypatch, enabled=False, history_high=99.0)
+    assert signal is None
+    assert strategy.last_no_vote_reason == "vwap_signal_bar_unconfirmed"
