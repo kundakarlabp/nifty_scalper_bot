@@ -276,6 +276,9 @@ class VWAPProStrategy(EliteStrategy):
             if lookback is not None:
                 lookback = max(5, min(120, lookback))
         session_rows: list[tuple[Any, float, float, float, float]] = []
+        # A repeated candle must not receive extra VWAP weight. Conflicting
+        # completed versions make cumulative recovery ambiguous: fail closed.
+        seen_bars: dict[datetime, tuple[float, float, float, float, float]] = {}
         cumulative_turnover = 0.0
         cumulative_volume = 0.0
         for raw in sorted(rows, key=_bar_timestamp):
@@ -309,14 +312,30 @@ class VWAPProStrategy(EliteStrategy):
                 )
                 or min(row_open, row_high, row_low, row_close) <= 0
                 or row_volume < 0
+                or not (
+                    row_low <= row_open <= row_high
+                    and row_low <= row_close <= row_high
+                )
             ):
                 continue
-            if row_volume > 0:
-                typical_price = (row_high + row_low + row_close) / 3.0
-                cumulative_turnover += typical_price * row_volume
-                cumulative_volume += row_volume
-            if cumulative_volume <= 0:
+            values = (row_open, row_high, row_low, row_close, row_volume)
+            previous = seen_bars.get(row_ts)
+            if previous is not None:
+                if previous != values:
+                    LOGGER.debug(
+                        "VWAP_THESIS_RECOVERY_CONFLICT symbol=%s bar=%s",
+                        symbol,
+                        row_ts,
+                    )
+                    return None
                 continue
+            seen_bars[row_ts] = values
+            # A candle without traded volume cannot establish a VWAP touch.
+            if row_volume == 0:
+                continue
+            typical_price = (row_high + row_low + row_close) / 3.0
+            cumulative_turnover += typical_price * row_volume
+            cumulative_volume += row_volume
             session_rows.append(
                 (
                     timestamp,
