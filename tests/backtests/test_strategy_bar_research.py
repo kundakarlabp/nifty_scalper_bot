@@ -1245,6 +1245,10 @@ def test_smc_research_failed_candidate_does_not_consume_shared_setup(
         strategy_factory=lambda engine: [Strategy()],
     )["strategies"]["SMC"]
 
-    assert result["no_vote_reasons"]["next_minute_unavailable"] == 1
+    assert result["entry_funnel"]["signals_emitted"] == 3, result["entry_funnel"]
+    assert result["no_vote_reasons"].get("next_minute_unavailable", 0) == 1, (
+        result["entry_funnel"],
+        result["no_vote_reasons"],
+    )
     assert result["entry_funnel"]["accepted_fills"] == 2
     assert result["smc_unique_setup_funnel"]["simulated_filled_setups"] == 2
