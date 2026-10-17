@@ -266,6 +266,10 @@ class ORBProStrategy(EliteStrategy):
         ]
         if len(session_rows) < 2:
             return None
+        # Replayed or rehydrated duplicate minutes can fabricate a previous
+        # close and a breakout despite otherwise complete minute coverage.
+        if len({row["timestamp"] for row in session_rows}) != len(session_rows):
+            return None
 
         # Minute bars are timestamped by bar start, therefore a 15-minute OR
         # is [09:15, 09:30), not [09:15, 09:30].
@@ -748,7 +752,14 @@ class ORBProStrategy(EliteStrategy):
         if direction not in {"CE", "PE"}:
             self._no_vote("underlying_direction_unavailable")
             return None
-        # Do not burn this bar while asynchronous direction context is unusable.
+        # Asynchronous required context can become usable later on this
+        # completed bar. Do not consume its identity or invalidate the event.
+        if indicators.get("context_fresh") is False:
+            self._no_vote("underlying_context_stale")
+            return None
+        if _safe_float(indicators.get("futures_vwap_slope")) is None:
+            self._no_vote("orb_futures_vwap_slope_unavailable")
+            return None
         self._last_bar_by_key[key] = current_ts
 
         orb_high = float(snapshot["orb_high"])
