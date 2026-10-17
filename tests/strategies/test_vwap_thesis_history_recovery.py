@@ -421,3 +421,94 @@ def test_recovery_ignores_nonfinite_history_before_valid_reclaim(
     assert signal is not None
     assert signal.metadata["thesis_recovered_from_history"] is True
     assert "2026-09-08 04:31:00+00:00" in signal.metadata["setup_id"]
+
+
+@pytest.mark.parametrize("duplicate_representation", ["native", "equivalent_utc"])
+def test_recovery_does_not_double_count_repeated_minute_candles(
+    duplicate_representation,
+):
+    """A duplicate high-price minute must not invent a later below-VWAP touch."""
+    bars = [
+        _bar("2026-09-08T10:00:00", open_=100, high=100, low=100, close=100),
+        _bar("2026-09-08T10:01:00", open_=110, high=110, low=110, close=110),
+        _bar("2026-09-08T10:02:00", open_=105, high=105, low=105, close=105),
+    ]
+    duplicate = dict(bars[1])
+    if duplicate_representation == "equivalent_utc":
+        duplicate["timestamp"] = "2026-09-08T04:31:00+00:00"
+    bars.insert(2, duplicate)
+    strategy = VWAPProStrategy(VWAPProStrategyConfig(), _HistoryEngine(bars))
+
+    assert (
+        strategy._recover_thesis_anchor_from_history(
+            "NFO:NIFTY2690823650CE",
+            session_scope="2026-09-08",
+            vwap=105.0,
+            observation_anchor="2026-09-08T10:03:00+05:30",
+        )
+        is None
+    )
+
+
+def test_recovery_fails_closed_on_conflicting_completed_same_minute_bars():
+    """Inconsistent duplicate OHLC cannot produce a trustworthy session VWAP."""
+    bars = [
+        _bar("2026-09-08T10:00:00", open_=100, high=100, low=100, close=100),
+        _bar("2026-09-08T10:01:00", open_=110, high=110, low=110, close=110),
+        _bar("2026-09-08T10:01:00", open_=120, high=120, low=120, close=120),
+        _bar("2026-09-08T10:02:00", open_=90, high=90, low=90, close=90),
+    ]
+    strategy = VWAPProStrategy(VWAPProStrategyConfig(), _HistoryEngine(bars))
+
+    assert (
+        strategy._recover_thesis_anchor_from_history(
+            "NFO:NIFTY2690823650CE",
+            session_scope="2026-09-08",
+            vwap=100.0,
+            observation_anchor="2026-09-08T10:03:00+05:30",
+        )
+        is None
+    )
+
+
+def test_recovery_ignores_impossible_ohlc_candle():
+    bars = [
+        _bar("2026-09-08T10:00:00", open_=100, high=100, low=100, close=100),
+        _bar("2026-09-08T10:01:00", open_=120, high=105, low=99, close=105),
+    ]
+    strategy = VWAPProStrategy(VWAPProStrategyConfig(), _HistoryEngine(bars))
+
+    assert (
+        strategy._recover_thesis_anchor_from_history(
+            "NFO:NIFTY2690823650CE",
+            session_scope="2026-09-08",
+            vwap=100.0,
+            observation_anchor="2026-09-08T10:02:00+05:30",
+        )
+        is None
+    )
+
+
+def test_zero_volume_history_cannot_arm_a_fresh_vwap_touch():
+    bars = [
+        _bar("2026-09-08T10:00:00", open_=110, high=110, low=110, close=110),
+        _bar(
+            "2026-09-08T10:01:00",
+            open_=100,
+            high=100,
+            low=100,
+            close=100,
+            volume=0.0,
+        ),
+    ]
+    strategy = VWAPProStrategy(VWAPProStrategyConfig(), _HistoryEngine(bars))
+
+    assert (
+        strategy._recover_thesis_anchor_from_history(
+            "NFO:NIFTY2690823650CE",
+            session_scope="2026-09-08",
+            vwap=110.0,
+            observation_anchor="2026-09-08T10:02:00+05:30",
+        )
+        is None
+    )
