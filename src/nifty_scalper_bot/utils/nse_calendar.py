@@ -13,8 +13,18 @@ from functools import lru_cache
 from typing import Mapping
 
 
+# Official NSE F&O 2026 circular plus the January 15 amendment.
+# Research must use the immutable built-in record, not runtime env overrides.
+NSE_FO_CALENDAR_SOURCES_BY_YEAR: Mapping[int, tuple[str, ...]] = {
+    2026: (
+        "NSE/FAOP/71777 - https://nsearchives.nseindia.com/content/circulars/FAOP71777.pdf",
+        "NSE/FAOP/72262 - https://nsearchives.nseindia.com/content/circulars/FAOP72262.pdf",
+    ),
+}
+
 NSE_FO_HOLIDAYS_BY_YEAR: Mapping[int, Mapping[date, str]] = {
     2026: {
+        date(2026, 1, 15): "Municipal Corporation Election - Maharashtra",
         date(2026, 1, 26): "Republic Day",
         date(2026, 3, 3): "Holi",
         date(2026, 3, 26): "Shri Ram Navami",
@@ -79,6 +89,7 @@ def calendar_available(year: int) -> bool:
 
 
 __all__ = [
+    "NSE_FO_CALENDAR_SOURCES_BY_YEAR",
     "NSE_FO_HOLIDAYS_BY_YEAR",
     "calendar_available",
     "holiday_name",
