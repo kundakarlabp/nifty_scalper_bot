@@ -1432,3 +1432,103 @@ def test_smc_research_bracket_anchors_at_actual_simulated_fill(
                 "canonical_option_premium_geometry"
             )
         assert trade["exit_reason"] == "target"
+
+
+def test_orb_compact_replay_exposes_missing_market_data_separately_from_strategy(
+    tmp_path,
+) -> None:
+    """Counts mutually exclusive missing-input reasons per replay minute, not strike."""
+    from nifty_scalper_bot.backtesting.strategy_research import _scenario, load_archive
+    from nifty_scalper_bot.config.settings import get_settings
+
+    first = archive(tmp_path)
+    histories, instruments, _ = load_archive(tmp_path)
+    futures = "NFO:NIFTY26OCTFUT"
+    histories[futures].pop(first + timedelta(minutes=1))
+    histories["NSE:NIFTY 50"].pop(first + timedelta(minutes=2))
+    for symbol in ("NFO:NIFTY26O0622400CE", "NFO:NIFTY26O0622400PE"):
+        histories[symbol].pop(first + timedelta(minutes=3))
+
+    result = _scenario(
+        histories,
+        instruments,
+        get_settings().elite,
+        25.0,
+        components={"ORBPro"},
+        compact_orb_context=True,
+    )["strategies"]["ORBPro"]
+    coverage = result["data_quality"]["orb_replay_coverage"]
+
+    assert coverage == {
+        "candidate_minutes": 4,
+        "missing_underlying_minutes": 2,
+        "missing_futures_minutes": 1,
+        "missing_spot_minutes": 1,
+        "missing_option_minutes": 1,
+        "matched_market_minutes": 1,
+        "pre_opening_range_end_minutes": 0,
+        "complete_opening_range_minutes": 0,
+        "incomplete_opening_range_minutes": 1,
+    }
+    assert result["entry_funnel"]["signals_emitted"] == 0
+
+
+def test_orb_compact_replay_range_coverage_uses_only_prior_completed_minutes(
+    tmp_path,
+) -> None:
+    from nifty_scalper_bot.backtesting.strategy_research import _scenario, load_archive
+    from nifty_scalper_bot.config.settings import get_settings
+
+    first = archive(tmp_path)
+    histories, instruments, _ = load_archive(tmp_path)
+    for symbol in ("NFO:NIFTY26OCTFUT", "NSE:NIFTY 50"):
+        for minute in range(15):
+            timestamp = first - timedelta(minutes=15 - minute)
+            histories[symbol][timestamp] = {
+                "timestamp": timestamp,
+                "open": 100.0,
+                "high": 106.0,
+                "low": 94.0,
+                "close": 100.0,
+                "volume": 1000.0,
+                "is_complete": True,
+                "is_provisional": False,
+            }
+
+    result = _scenario(
+        histories,
+        instruments,
+        get_settings().elite,
+        25.0,
+        components={"ORBPro"},
+        compact_orb_context=True,
+    )["strategies"]["ORBPro"]
+    coverage = result["data_quality"]["orb_replay_coverage"]
+    assert coverage["candidate_minutes"] == 4
+    assert coverage["matched_market_minutes"] == 4
+    assert coverage["complete_opening_range_minutes"] == 4
+    assert coverage["incomplete_opening_range_minutes"] == 0
+
+
+def test_orb_compact_replay_coverage_is_independent_of_option_strike_count(
+    tmp_path,
+) -> None:
+    from nifty_scalper_bot.backtesting.strategy_research import _scenario, load_archive
+    from nifty_scalper_bot.config.settings import get_settings
+
+    archive(tmp_path)
+    histories, instruments, _ = load_archive(tmp_path)
+    result = _scenario(
+        histories,
+        instruments,
+        get_settings().elite,
+        10.0,
+        components={"ORBPro"},
+        compact_orb_context=True,
+    )["strategies"]["ORBPro"]
+
+    coverage = result["data_quality"]["orb_replay_coverage"]
+    assert coverage["candidate_minutes"] == 4
+    assert coverage["matched_market_minutes"] == 4
+    assert coverage["incomplete_opening_range_minutes"] == 4
+    assert result["evaluations"] == 8
