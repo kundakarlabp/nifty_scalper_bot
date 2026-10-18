@@ -50,3 +50,21 @@ async def test_pr_template_requires_validation_and_residual_risk() -> None:
         "## Residual risk",
     ):
         assert heading in text
+
+
+async def test_current_docs_replace_retired_prompt_and_deployment_duplicates() -> None:
+    retired = (
+        "docs/codex_prompt.md",
+        "docs/mdm_codex_prompts.md",
+        "docs/lightsail_validation.md",
+        "docs/lightsail_scope2.md",
+    )
+    assert not [name for name in retired if (ROOT / name).exists()]
+    for canonical in (
+        "AGENTS.md",
+        "docs/AGENT_START_HERE.md",
+        "docs/REPO_MAP.md",
+        "docs/ENGINEERING_FAILURE_PATTERNS.md",
+        "deploy/LIGHTSAIL_SETUP.md",
+    ):
+        assert (ROOT / canonical).is_file()
