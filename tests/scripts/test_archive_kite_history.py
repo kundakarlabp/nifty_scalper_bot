@@ -923,24 +923,36 @@ def test_retained_research_never_substitutes_next_week_for_missing_front_week(
         _retained_session_payload("NSE:NIFTY 50", "EQ", 100),
         _retained_session_payload("NFO:NIFTY26OCTFUT", "FUT", 101, expiry="2026-10-27"),
         _retained_session_payload(
-            "NFO:NIFTY26O1922500CE", "CE", 104,
-            strike=22500, expiry="2026-10-19",
+            "NFO:NIFTY26O1922500CE",
+            "CE",
+            104,
+            strike=22500,
+            expiry="2026-10-19",
         ),
         _retained_session_payload(
-            "NFO:NIFTY26O1922500PE", "PE", 105,
-            strike=22500, expiry="2026-10-19",
+            "NFO:NIFTY26O1922500PE",
+            "PE",
+            105,
+            strike=22500,
+            expiry="2026-10-19",
         ),
     ]
     if front_first_minute is not None:
         rows.extend(
             [
                 _retained_session_payload(
-                    "NFO:NIFTY26O1322500CE", "CE", 102,
-                    strike=22500, first_minute=front_first_minute,
+                    "NFO:NIFTY26O1322500CE",
+                    "CE",
+                    102,
+                    strike=22500,
+                    first_minute=front_first_minute,
                 ),
                 _retained_session_payload(
-                    "NFO:NIFTY26O1322500PE", "PE", 103,
-                    strike=22500, first_minute=front_first_minute,
+                    "NFO:NIFTY26O1322500PE",
+                    "PE",
+                    103,
+                    strike=22500,
+                    first_minute=front_first_minute,
                 ),
             ]
         )
@@ -972,7 +984,8 @@ def test_retained_research_never_substitutes_next_week_for_missing_front_week(
         assert report["staged_session_dates"] == ["2026-10-13"]
         _, instruments, _ = load_archive(stage / "2026-10-13")
         selected = {
-            symbol for symbol, instrument in instruments.items()
+            symbol
+            for symbol, instrument in instruments.items()
             if instrument["instrument_type"] in {"CE", "PE"}
         }
         assert selected == {
