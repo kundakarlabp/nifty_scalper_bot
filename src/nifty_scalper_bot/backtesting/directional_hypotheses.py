@@ -429,18 +429,23 @@ class ORBCausalGateResearch(ORBRangeScaledResearch):
         opening_range_atr: float,
         indicators: Mapping[str, Any],
     ) -> tuple[bool, list[str], bool, float, float]:
-        values = dict(
+        if self._range_rule == "scaled":
+            return super()._structural_evidence(
+                side=side,
+                direction=direction,
+                penetration_atr=penetration_atr,
+                volume_ratio=volume_ratio,
+                opening_range_atr=opening_range_atr,
+                indicators=indicators,
+            )
+        passed, reasons, balanced, low, high = ORBProStrategy._structural_evidence(
+            self,
             side=side,
             direction=direction,
             penetration_atr=penetration_atr,
             volume_ratio=volume_ratio,
             opening_range_atr=opening_range_atr,
             indicators=indicators,
-        )
-        if self._range_rule == "scaled":
-            return super()._structural_evidence(**values)
-        passed, reasons, balanced, low, high = ORBProStrategy._structural_evidence(
-            self, **values
         )
         if self._range_rule == "raw":
             return passed, reasons, balanced, low, high
