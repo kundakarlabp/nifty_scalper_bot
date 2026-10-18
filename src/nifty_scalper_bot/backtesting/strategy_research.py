@@ -1402,6 +1402,7 @@ def run_orb_session_research(
     minimum_net_rr: float | None = 1.5,
     lifecycle_proxy: bool = False,
     normalize_opening_range: bool = False,
+    causal_gate_profile: str | None = None,
 ) -> dict[str, Any]:
     """Replay a preselected historical basket in an isolated research process.
 
@@ -1414,12 +1415,36 @@ def run_orb_session_research(
         raise ValueError("research_override_not_orb_setting")
     if not math.isfinite(slippage_bps) or not 0 <= slippage_bps <= 1000:
         raise ValueError("research_slippage_invalid")
+    if causal_gate_profile is not None and normalize_opening_range:
+        raise ValueError("research_ablation_mode_conflict")
+    if causal_gate_profile is not None:
+        from nifty_scalper_bot.backtesting.directional_hypotheses import (
+            ORB_CAUSAL_GATE_PROFILES,
+        )
+
+        if causal_gate_profile not in ORB_CAUSAL_GATE_PROFILES:
+            raise ValueError("orb_gate_ablation_profile_invalid")
     histories, instruments, _ = load_archive(directory)
     original = {key: os.environ.get(key) for key in overrides}
     try:
         os.environ.update(overrides)
         research_factory: Callable[[IndicatorEngine], list[Any]] | None = None
-        if normalize_opening_range:
+        if causal_gate_profile is not None:
+            from nifty_scalper_bot.backtesting.directional_hypotheses import (
+                ORBCausalGateResearch,
+            )
+
+            def _make_gate_ablation(engine: IndicatorEngine) -> list[Any]:
+                return [
+                    ORBCausalGateResearch(
+                        get_settings().elite.orb,
+                        engine,
+                        profile=causal_gate_profile,
+                    )
+                ]
+
+            research_factory = _make_gate_ablation
+        elif normalize_opening_range:
             from nifty_scalper_bot.backtesting.directional_hypotheses import (
                 ORBRangeScaledResearch,
             )
