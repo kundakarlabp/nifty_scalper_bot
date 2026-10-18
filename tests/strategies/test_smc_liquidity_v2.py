@@ -1108,3 +1108,43 @@ def test_smc_causal_futures_snapshot_still_rejects_stale_history(
     assert signal is None
     assert strategy.last_no_vote_reason == "underlying_context_not_ready"
     assert strategy._events == {}
+
+
+@pytest.mark.parametrize("mode", ["SHADOW", "LIVE"])
+def test_duplicate_completed_futures_bar_cannot_satisfy_smc_warmup(
+    monkeypatch, mode: str
+) -> None:
+    """A retransmitted minute cannot count as an additional structural candle."""
+    monkeypatch.setenv("EXECUTION_MODE", mode)
+    monkeypatch.setenv("SMC_MIN_BARS_REQUIRED", "30")
+    rows = _base_rows()[:29]
+    # 30 records, but only 29 genuine completed 1-minute candles.
+    rows.insert(10, dict(rows[10]))
+    strategy = _strategy(rows)
+
+    signal = strategy.generate_signal(
+        CE, _indicators(latest_bar_ts=rows[-1]["timestamp"]), 102.0
+    )
+
+    assert signal is None
+    assert strategy.last_no_vote_reason == "underlying_context_not_ready"
+
+
+@pytest.mark.parametrize("mode", ["SHADOW", "LIVE"])
+def test_conflicting_completed_futures_candles_fail_closed(
+    monkeypatch, mode: str
+) -> None:
+    """Two different completed OHLC values for one timestamp are untrusted."""
+    monkeypatch.setenv("EXECUTION_MODE", mode)
+    rows = _base_rows()
+    conflicting = dict(rows[10])
+    conflicting["high"] = float(conflicting["high"]) + 2.0
+    rows.insert(11, conflicting)
+    strategy = _strategy(rows)
+
+    signal = strategy.generate_signal(
+        CE, _indicators(latest_bar_ts=rows[-1]["timestamp"]), 102.0
+    )
+
+    assert signal is None
+    assert strategy.last_no_vote_reason == "underlying_context_not_ready"

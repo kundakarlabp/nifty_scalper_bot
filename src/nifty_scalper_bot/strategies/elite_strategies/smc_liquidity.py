@@ -178,7 +178,18 @@ class SMCStrategy(EliteStrategy):
                 }
             )
         completed.sort(key=lambda row: row["timestamp"])
-        return completed
+        distinct: list[dict[str, Any]] = []
+        for row in completed:
+            if distinct and row["timestamp"] == distinct[-1]["timestamp"]:
+                # Replayed/retransmitted candles cannot increase structural
+                # warm-up, pivot density, ATR or relative-volume sample size.
+                # Contradictory finalized OHLCV is untrusted, not an alternate
+                # market-structure observation.
+                if row != distinct[-1]:
+                    return []
+                continue
+            distinct.append(row)
+        return distinct
 
     @staticmethod
     def _atr(rows: list[dict[str, Any]], period: int = 14) -> float:
