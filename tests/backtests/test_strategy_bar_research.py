@@ -1572,3 +1572,38 @@ def test_research_archive_rejects_conflicting_broker_instrument_identity(
 
     with pytest.raises(ValueError, match=reason):
         load_archive(tmp_path)
+
+
+def test_research_archive_allows_token_reuse_after_expiry_on_a_later_date(tmp_path):
+    """Broker tokens are not lifetime identifiers for expired derivatives."""
+    from nifty_scalper_bot.backtesting.strategy_research import load_archive
+
+    archive(tmp_path)
+    ce_path = tmp_path / "candles" / "CE.json"
+    old = json.loads(ce_path.read_text())
+    old["instrument"].update(
+        exchange="NFO",
+        tradingsymbol=old["symbol"].split(":", 1)[1],
+        instrument_token=13579,
+    )
+    ce_path.write_text(json.dumps(old))
+
+    later = json.loads(json.dumps(old))
+    later["symbol"] = "NFO:NIFTY26O1322400CE"
+    later["instrument"].update(
+        expiry="2026-10-13",
+        tradingsymbol="NIFTY26O1322400CE",
+    )
+    later["candles"] = [
+        [
+            (datetime.fromisoformat(row[0]) + timedelta(days=7)).isoformat(),
+            *row[1:],
+        ]
+        for row in later["candles"]
+    ]
+    (tmp_path / "candles" / "later_CE.json").write_text(json.dumps(later))
+
+    histories, instruments, _ = load_archive(tmp_path)
+    assert old["symbol"] in instruments
+    assert later["symbol"] in instruments
+    assert set(histories[old["symbol"]]).isdisjoint(histories[later["symbol"]])
