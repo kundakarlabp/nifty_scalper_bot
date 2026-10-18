@@ -1347,3 +1347,85 @@ def test_vwap_research_reports_a_cost_matched_retest_ablation(tmp_path, monkeypa
         assert scenario["development_sample_eligible"] is True
         assert scenario["holdout_expectancy_delta"] is None
     assert comparison["selected_for_live"] is None
+
+
+@pytest.mark.parametrize(
+    ("absolute_level", "slippage_bps"),
+    [(False, 0.0), (False, 25.0), (True, 0.0)],
+)
+def test_smc_research_bracket_anchors_at_actual_simulated_fill(
+    tmp_path, monkeypatch, absolute_level, slippage_bps
+):
+    """Distance stops follow fill drift, but absolute technical levels do not."""
+    from nifty_scalper_bot.backtesting.strategy_research import run_archived_research
+    from nifty_scalper_bot.strategies.signal_generator import Signal
+
+    archive(tmp_path)
+    for path in (tmp_path / "candles").glob("*.json"):
+        payload = json.loads(path.read_text())
+        if payload["instrument"]["instrument_type"] in {"CE", "PE"}:
+            # The first completed candle closes at 100 and emits SMC.
+            # The next candle opens at 110, then hits the anchored target.
+            payload["candles"][1][1:5] = [110.0, 130.0, 109.0, 110.0]
+            path.write_text(json.dumps(payload))
+
+    class Strategy:
+        name = "SMC"
+        config = SimpleNamespace(enabled=True)
+
+        def generate_signal(self, symbol, indicators, current_price, position=None):
+            if indicators["history_count"] != 1:
+                return None
+            metadata = {"strategy": "SMC"}
+            if absolute_level:
+                metadata["bracket_anchor_mode"] = "absolute_level"
+            else:
+                metadata.update(
+                    premium_stop_distance=8.0,
+                    premium_target_rr=2.0,
+                )
+            return Signal(
+                action="BUY",
+                symbol=symbol,
+                quantity=75,
+                confidence=1.0,
+                reason="SMC",
+                stop_loss=95.0 if absolute_level else None,
+                take_profit=125.0 if absolute_level else None,
+                metadata=metadata,
+            )
+
+        @property
+        def evaluation_health(self):
+            return {"healthy": True}
+
+        def notify_entry_accepted(self, side, *, setup_id=None):
+            pass
+
+    monkeypatch.setattr(
+        "nifty_scalper_bot.backtesting.strategy_research.build_elite_strategies",
+        lambda settings, engine: [Strategy()],
+    )
+    result = run_archived_research(tmp_path, slippage_bps=slippage_bps)
+    smc = next(
+        scenario["strategies"]["SMC"]
+        for scenario in result["scenarios"]
+        if scenario["slippage_bps_per_side"] == slippage_bps
+    )
+
+    assert smc["entry_funnel"]["accepted_fills"] == 2
+    assert len(smc["trades"]) == 2
+    fill = 110.0 * (1.0 + slippage_bps / 10000.0)
+    for trade in smc["trades"]:
+        assert trade["entry_price"] == pytest.approx(fill)
+        if absolute_level:
+            assert trade["initial_stop_loss"] == pytest.approx(95.0)
+            assert trade["take_profit"] == pytest.approx(125.0)
+            assert trade["research_geometry_source"] == "signal"
+        else:
+            assert trade["initial_stop_loss"] == pytest.approx(fill - 8.0)
+            assert trade["take_profit"] == pytest.approx(fill + 16.0)
+            assert trade["research_geometry_source"] == (
+                "canonical_option_premium_geometry"
+            )
+        assert trade["exit_reason"] == "target"
