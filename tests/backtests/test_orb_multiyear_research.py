@@ -209,8 +209,15 @@ def test_causal_gate_ablation_preserves_identical_data_and_no_trade_abstention(
             "unresolved_trades": [],
         }
 
+    import logging
+    import os
+
     monkeypatch.setattr(study, "run_orb_session_research", fake_research)
+    previous_env = dict(os.environ)
+    previous_logging_level = logging.root.manager.disable
     row = study.run_orb_causal_gate_day((str(tmp_path), "2017-01-02"))
+    assert dict(os.environ) == previous_env
+    assert logging.root.manager.disable == previous_logging_level
     assert list(row["arms"]) == list(ORB_CAUSAL_GATE_PROFILES)
     assert len(seen) == 6
     assert len({entry[0] for entry in seen}) == 1
