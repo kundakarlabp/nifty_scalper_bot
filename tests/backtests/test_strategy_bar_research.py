@@ -235,15 +235,18 @@ def test_research_canonical_target_repair_is_diagnostic_not_a_trade(
         slippage=0,
         required_net_rr=1.5,
     )
-    assert _orb_bounded_target_repair_viable(
-        symbol="NFO:NIFTY26O0622400CE",
-        entry=100,
-        stop=95,
-        target=109,
-        quantity=75,
-        slippage=0,
-        required_net_rr=2.0,
-    ) is None
+    assert (
+        _orb_bounded_target_repair_viable(
+            symbol="NFO:NIFTY26O0622400CE",
+            entry=100,
+            stop=95,
+            target=109,
+            quantity=75,
+            slippage=0,
+            required_net_rr=2.0,
+        )
+        is None
+    )
     monkeypatch.setenv("MAX_NET_RR_TARGET_UPLIFT_R", "0")
     assert not _orb_bounded_target_repair_viable(
         symbol="NFO:NIFTY26O0622400CE",
