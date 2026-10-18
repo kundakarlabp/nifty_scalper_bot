@@ -78,6 +78,7 @@ def test_retired_entrypoints_and_standalone_helpers_stay_absent() -> None:
     assert Path("src/nifty_scalper_bot/superlite_admin.py").is_file()
     assert Path("dashboard/superlite_console.py").is_file()
 
+
 def test_obsolete_health_and_real_order_smoke_scripts_stay_retired() -> None:
     retired = (
         "scripts/healthcheck.py",
@@ -98,9 +99,12 @@ def test_backup_runs_without_root_config_and_does_not_capture_env(
     tmp_path: Path,
 ) -> None:
     script = Path("scripts/backup_data.sh")
-    assert subprocess.run(
-        ["bash", "-n", str(script)], check=False, capture_output=True
-    ).returncode == 0
+    assert (
+        subprocess.run(
+            ["bash", "-n", str(script)], check=False, capture_output=True
+        ).returncode
+        == 0
+    )
     assert "backups/" in Path(".gitignore").read_text().splitlines()
     assert "backups/" in Path(".dockerignore").read_text().splitlines()
 
@@ -116,9 +120,7 @@ def test_backup_runs_without_root_config_and_does_not_capture_env(
     bindir = tmp_path / "bin"
     bindir.mkdir()
     fake_rsync = bindir / "rsync"
-    fake_rsync.write_text(
-        '#!/bin/sh\nset -eu\nmkdir -p "$4"\ncp -R "$3/." "$4/"\n'
-    )
+    fake_rsync.write_text('#!/bin/sh\nset -eu\nmkdir -p "$4"\ncp -R "$3/." "$4/"\n')
     fake_rsync.chmod(0o755)
     env = dict(os.environ)
     env["PATH"] = str(bindir) + os.pathsep + env.get("PATH", "")
