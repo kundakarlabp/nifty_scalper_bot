@@ -49,7 +49,8 @@ def load_archive(
     """Validate and normalize raw Kite arrays/dicts; reject conflicting history."""
     histories: dict[str, dict[datetime, dict[str, Any]]] = {}
     instruments: dict[str, dict[str, Any]] = {}
-    token_owners: dict[int, str] = {}
+    # Zerodha may reuse derivative tokens after expiry; mapping is per session.
+    token_owners: dict[tuple[str, int], str] = {}
     digest = hashlib.sha256()
     for path in sorted((directory / "candles").glob("*.json")):
         raw = path.read_bytes()
@@ -74,6 +75,7 @@ def load_archive(
             )
             if value is not None
         ]
+        token: int | None = None
         if token_values:
             if any(
                 isinstance(value, bool) or not str(value).isdigit()
@@ -86,9 +88,6 @@ def load_archive(
             token = parsed_tokens.pop()
             if token <= 0:
                 raise ValueError("research_instrument_token_invalid")
-            previous_symbol = token_owners.setdefault(token, symbol)
-            if previous_symbol != symbol:
-                raise ValueError("research_instrument_token_collision")
         if symbol in instruments and instruments[symbol] != instrument:
             raise ValueError("research_instrument_identity_conflict")
         instruments[symbol] = instrument
@@ -109,6 +108,11 @@ def load_archive(
             if timestamp.tzinfo is None:
                 raise ValueError("research_timestamp_timezone_missing")
             timestamp = timestamp.astimezone(IST)
+            if token is not None:
+                token_key = (timestamp.date().isoformat(), token)
+                previous_symbol = token_owners.setdefault(token_key, symbol)
+                if previous_symbol != symbol:
+                    raise ValueError("research_instrument_token_collision")
             if timestamp.second or timestamp.microsecond:
                 raise ValueError("research_bar_alignment_invalid")
             bar = {
