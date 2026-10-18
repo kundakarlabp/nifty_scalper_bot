@@ -260,6 +260,31 @@ def test_retest_mode_requires_prior_reclaim_and_current_hold(monkeypatch):
     assert signal.metadata["trend_momentum_retest_confirmed"] is True
 
 
+@pytest.mark.parametrize("prior_volume", [0.0, -1.0, float("nan"), float("inf")])
+def test_retest_rejects_untraded_prior_reclaim_without_losing_momentum(
+    monkeypatch, prior_volume
+):
+    """Untraded or invalid prior-volume bars cannot establish a VWAP reclaim."""
+    prior_volumes = [900.0] * 9 + [prior_volume]
+    strategy, signal = _evaluate(
+        monkeypatch,
+        retest=True,
+        low=100.0,
+        prior_volumes=prior_volumes,
+    )
+    assert signal is None
+    assert strategy.last_no_vote_reason == "trend_momentum_prior_bar_no_trades"
+
+    # Preserve the independent immediate-momentum research arm.
+    _, immediate_signal = _evaluate(
+        monkeypatch,
+        retest=False,
+        low=100.0,
+        prior_volumes=prior_volumes,
+    )
+    assert immediate_signal is not None
+
+
 def test_retest_mode_rejects_unheld_vwap(monkeypatch):
     strategy, signal = _evaluate(monkeypatch, low=98.0, retest=True)
 
