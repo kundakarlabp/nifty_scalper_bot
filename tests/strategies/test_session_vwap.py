@@ -128,3 +128,65 @@ def test_historical_session_vwap_requires_exact_finalized_target_bar():
     assert engine.get_session_vwap_at(symbol, second[0]) is None
     assert engine.get_session_vwap_at(symbol, second[0] + timedelta(minutes=1)) is None
     assert engine.get_session_vwap_at(symbol, first[0]) == pytest.approx(100)
+
+def test_historical_session_vwap_rejects_missing_intermediate_minute():
+    symbol = "NFO:NIFTY2680424400CE"
+    bars = [_session_bar(0, 100.0, 100), _session_bar(2, 200.0, 100)]
+    engine = _engine_with_bars(bars)
+
+    assert engine.get_session_vwap_at(symbol, bars[-1][0]) is None
+
+
+def test_historical_session_vwap_rejects_unfinished_intermediate_minute():
+    symbol = "NFO:NIFTY2680424400CE"
+    first = _session_bar(0, 100.0, 100)
+    last = _session_bar(2, 200.0, 100)
+    engine = _engine_with_bars([first])
+    engine.update_price(
+        symbol,
+        {"open": 170, "high": 170, "low": 170, "close": 170},
+        volume=400,
+        timestamp=_session_bar(1, 170.0, 400)[0],
+        is_complete=False,
+        is_provisional=True,
+    )
+    engine.update_price(
+        symbol,
+        {"open": 200, "high": 200, "low": 200, "close": 200},
+        volume=100,
+        timestamp=last[0],
+    )
+
+    assert engine.get_session_vwap_at(symbol, last[0]) is None
+
+
+def test_historical_session_vwap_rejects_subminute_intermediate_candle():
+    symbol = "NFO:NIFTY2680424400CE"
+    first, last = _session_bar(0, 100.0, 100), _session_bar(2, 200.0, 100)
+    engine = _engine_with_bars([first])
+    engine.update_price(
+        symbol,
+        {"open": 160, "high": 160, "low": 160, "close": 160},
+        volume=300,
+        timestamp=_session_bar(1, 160.0, 300)[0] + timedelta(seconds=30),
+    )
+    engine.update_price(
+        symbol,
+        {"open": 200, "high": 200, "low": 200, "close": 200},
+        volume=100,
+        timestamp=last[0],
+    )
+
+    assert engine.get_session_vwap_at(symbol, last[0]) is None
+
+
+def test_historical_session_vwap_preserves_complete_zero_volume_minutes():
+    symbol = "NFO:NIFTY2680424400CE"
+    bars = [
+        _session_bar(0, 100.0, 100),
+        _session_bar(1, 160.0, 0),
+        _session_bar(2, 200.0, 100),
+    ]
+    engine = _engine_with_bars(bars)
+
+    assert engine.get_session_vwap_at(symbol, bars[-1][0]) == pytest.approx(150.0)
