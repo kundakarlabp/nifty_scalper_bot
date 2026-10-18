@@ -439,8 +439,8 @@ class ORBCausalGateResearch(ORBRangeScaledResearch):
         )
         if self._range_rule == "scaled":
             return super()._structural_evidence(**values)
-        passed, reasons, balanced, low, high = (
-            ORBProStrategy._structural_evidence(self, **values)
+        passed, reasons, balanced, low, high = ORBProStrategy._structural_evidence(
+            self, **values
         )
         if self._range_rule == "raw":
             return passed, reasons, balanced, low, high
