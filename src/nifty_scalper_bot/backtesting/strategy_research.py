@@ -749,9 +749,12 @@ def _scenario(
             # component and compact research; otherwise a baseline with no
             # regime can silently yield zero trades while a compact run trades.
             orb_in_scope = components is None or "ORBPro" in components
-            if orb_in_scope or os.getenv(
-                "VWAP_TREND_MOMENTUM_ENABLED", ""
-            ).lower() in {"1", "true", "yes", "on"}:
+            if orb_in_scope or os.getenv("VWAP_TREND_MOMENTUM_ENABLED", "").lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }:
                 # A RANGE ablation without completed-bar regime data is inert.
                 # Populate the same causal detector for *all* compact ORB arms
                 # so the baseline and experiment receive identical context.
