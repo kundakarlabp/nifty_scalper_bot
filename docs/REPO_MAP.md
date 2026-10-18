@@ -69,7 +69,7 @@ This repository map is navigational only. Do not copy ownership/routing tables b
 
 - `config/settings.py` — runtime settings facade.
 - `infra/metrics.py` — metrics.
-- `dashboard/operations_console.py` — operator dashboard.
+- `dashboard/superlite_console.py` — production read-only Streamlit operations dashboard; `superlite_admin.py` hosts isolated admin controls.
 - `deploy/lightsail_release.sh` — staged Lightsail release path.
 
 ### Backtesting

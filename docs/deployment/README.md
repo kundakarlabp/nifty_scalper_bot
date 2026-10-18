@@ -27,14 +27,13 @@ The engine writes interactive reports into `backtest_reports/` by default.
 
 This builds the Docker image and launches the compose stack (bot, Prometheus, Grafana).
 
-## Systemd service
+## Production Lightsail service
 
-Copy `deploy/systemd/nifty-scalper.service` to `/etc/systemd/system/` and enable it:
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now nifty-scalper.service
-```
+Use [the canonical Lightsail operations guide](../../deploy/LIGHTSAIL_SETUP.md)
+and `deploy/lightsail_setup.sh` for initial provisioning. The active
+`niftybot` engine and isolated `niftybot-admin` / `niftybot-streamlit`
+services are managed through `deploy/lightsail_release.sh`; do not install
+historical `nifty-scalper` or `nifty-admin` units.
 
 ## Monitoring stack
 
