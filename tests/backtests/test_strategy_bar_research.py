@@ -298,6 +298,7 @@ def test_cost_repaired_target_requires_an_actual_modeled_price_touch(
 ):
     from nifty_scalper_bot.backtesting.strategy_research import _scenario, load_archive
     from nifty_scalper_bot.config.settings import get_settings
+    from nifty_scalper_bot.risk.net_rr_gate import minimum_target_for_net_rr
 
     monkeypatch.setenv("MIN_NET_REWARD_RISK", "1.5")
     monkeypatch.delenv("MAX_NET_RR_TARGET_UPLIFT_R", raising=False)
@@ -342,8 +343,6 @@ def test_cost_repaired_target_requires_an_actual_modeled_price_touch(
     # Set the OHLC high strictly below the same canonical repaired target
     # regardless of configured statutory fees; the baseline 109 target is not
     # sufficient evidence for the higher counterfactual exit.
-    from nifty_scalper_bot.risk.net_rr_gate import minimum_target_for_net_rr
-
     corrected_target = minimum_target_for_net_rr(
         SimpleNamespace(
             symbol="NFO:NIFTY26O0622400CE",
