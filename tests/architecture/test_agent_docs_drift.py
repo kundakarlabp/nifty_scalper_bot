@@ -51,6 +51,7 @@ async def test_pr_template_requires_validation_and_residual_risk() -> None:
     ):
         assert heading in text
 
+
 async def test_current_docs_replace_retired_prompt_and_deployment_duplicates() -> None:
     retired = (
         "docs/codex_prompt.md",
