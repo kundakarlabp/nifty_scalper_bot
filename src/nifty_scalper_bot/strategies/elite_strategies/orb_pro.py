@@ -24,7 +24,8 @@ _MARKET_OPEN = time(hour=9, minute=15)
 
 def _env_float(name: str, default: float) -> float:
     try:
-        return float(os.getenv(name, str(default)) or default)
+        value = float(os.getenv(name, str(default)) or default)
+        return value if math.isfinite(value) else float(default)
     except (TypeError, ValueError):
         return float(default)
 
@@ -266,6 +267,10 @@ class ORBProStrategy(EliteStrategy):
         ]
         if len(session_rows) < 2:
             return None
+        # Replayed or rehydrated duplicate minutes can fabricate a previous
+        # close and a breakout despite otherwise complete minute coverage.
+        if len({row["timestamp"] for row in session_rows}) != len(session_rows):
+            return None
 
         # Minute bars are timestamped by bar start, therefore a 15-minute OR
         # is [09:15, 09:30), not [09:15, 09:30].
@@ -320,6 +325,7 @@ class ORBProStrategy(EliteStrategy):
         snapshot: Mapping[str, Any],
         *,
         side: str,
+        strict_retest_wick: bool,
     ) -> dict[str, Any] | None:
         """Recover only a breakout that could still be awaiting its first retest.
 
@@ -391,6 +397,7 @@ class ORBProStrategy(EliteStrategy):
                         side=side,
                         boundary=boundary,
                         tolerance=breakout_tolerance,
+                        strict_retest_wick=strict_retest_wick,
                     )
                     is not None
                 ):
@@ -424,15 +431,20 @@ class ORBProStrategy(EliteStrategy):
         side: str,
         boundary: float,
         tolerance: float,
+        strict_retest_wick: bool = False,
     ) -> str | None:
-        """Classify one completed underlying bar against an active ORB event."""
+        """Classify a completed bar; strict intrabar breach is research-only."""
         close = float(row["close"])
         if side == "CE":
+            if strict_retest_wick and float(row["low"]) < boundary - tolerance:
+                return "INVALIDATED"
             if close < boundary - tolerance:
                 return "INVALIDATED"
             if float(row["low"]) <= boundary + tolerance and close >= boundary:
                 return "RETESTED"
         else:
+            if strict_retest_wick and float(row["high"]) > boundary + tolerance:
+                return "INVALIDATED"
             if close > boundary + tolerance:
                 return "INVALIDATED"
             if float(row["high"]) >= boundary - tolerance and close <= boundary:
@@ -498,14 +510,23 @@ class ORBProStrategy(EliteStrategy):
         event: Mapping[str, Any],
         branch: str,
         retest_timestamp: datetime | None,
+        strict_retest_wick: bool,
     ) -> EliteSignal | None:
-        option_atr = max(float(indicators.get("atr") or 0.0), current_price * 0.01, 1.0)
+        option_atr = max(
+            _safe_float(indicators.get("atr")) or 0.0, current_price * 0.01, 1.0
+        )
         max_stop_pct = max(0.5, _env_float("ORB_PREMIUM_STOP_MAX_PCT", 8.0)) / 100.0
         atr_stop = max(0.5, _env_float("ORB_PREMIUM_STOP_ATR_MULT", 0.75) * option_atr)
         premium_stop_distance = min(atr_stop, max(0.5, current_price * max_stop_pct))
         stop_loss = max(0.05, current_price - premium_stop_distance)
+        # The minimum tradable stop price may cap the actual risk distance.
+        # Reward and metadata must use that distance, not the requested one.
+        premium_stop_distance = current_price - stop_loss
         target_rr = max(1.0, _env_float("ORB_TARGET_RR", 1.8))
         target = current_price + premium_stop_distance * target_rr
+        if not (0.0 < stop_loss < current_price < target and math.isfinite(target)):
+            self._no_vote("orb_invalid_premium_stop_geometry")
+            return None
 
         boundary = float(event["boundary"])
         current_underlying_atr = float(snapshot["atr"])
@@ -583,6 +604,18 @@ class ORBProStrategy(EliteStrategy):
             return None
 
         breakout_ts = event["breakout_timestamp"]
+        # Completed-bar excursion records the depth of the retest; it is
+        # observable even in the unchanged baseline and is never a live gate.
+        retest_excursion_atr: float | None = None
+        if branch == "retest":
+            excursion_points = (
+                boundary - float(snapshot["current"]["low"])
+                if side == "CE"
+                else float(snapshot["current"]["high"]) - boundary
+            )
+            retest_excursion_atr = round(
+                max(0.0, excursion_points) / breakout_underlying_atr, 4
+            )
         source = str(snapshot["source"])
         setup_id = (
             f"orbv2:{snapshot['session_date']}:{snapshot['symbol']}:{side}:"
@@ -621,6 +654,8 @@ class ORBProStrategy(EliteStrategy):
             ),
             "entry_branch": branch,
             "retest_confirmed": branch == "retest",
+            "retest_wick_research_guard": strict_retest_wick,
+            "underlying_retest_wick_excursion_atr": retest_excursion_atr,
             "retest_timestamp": (
                 retest_timestamp.timestamp() if retest_timestamp else None
             ),
@@ -682,7 +717,11 @@ class ORBProStrategy(EliteStrategy):
         del position
         self.last_structural_failure_reasons = ()
         self._no_vote("stale_or_invalid_data")
-        if current_price <= 0 or bool(indicators.get("stale_data_used")):
+        if (
+            not math.isfinite(current_price)
+            or current_price <= 0.05
+            or bool(indicators.get("stale_data_used"))
+        ):
             return None
         side = self._side_from_symbol(symbol)
         if not side:
@@ -748,6 +787,21 @@ class ORBProStrategy(EliteStrategy):
         if direction not in {"CE", "PE"}:
             self._no_vote("underlying_direction_unavailable")
             return None
+        # Asynchronous required context can become usable later on this
+        # completed bar. Do not consume its identity or invalidate the event.
+        if indicators.get("context_fresh") is False:
+            self._no_vote("underlying_context_stale")
+            return None
+        if _safe_float(indicators.get("futures_vwap_slope")) is None:
+            self._no_vote("orb_futures_vwap_slope_unavailable")
+            return None
+        # This ablation is enabled only in offline SHADOW research, never by
+        # a flag alone in LIVE/PAPER or in the normal SHADOW baseline.
+        strict_retest_wick = os.getenv(
+            "EXECUTION_MODE", "SHADOW"
+        ).strip().upper() == "SHADOW" and _env_bool(
+            "ORB_RESEARCH_STRICT_RETEST_WICK", False
+        )
         # Do not burn this bar while asynchronous direction context is unusable.
         self._last_bar_by_key[key] = current_ts
 
@@ -789,6 +843,7 @@ class ORBProStrategy(EliteStrategy):
             event = self._recover_unconfirmed_breakout(
                 snapshot,
                 side=side,
+                strict_retest_wick=strict_retest_wick,
             )
             if event is not None:
                 self._events[key] = event
@@ -865,6 +920,7 @@ class ORBProStrategy(EliteStrategy):
                     event=event,
                     branch="momentum",
                     retest_timestamp=None,
+                    strict_retest_wick=strict_retest_wick,
                 )
                 if signal is None:
                     event["status"] = "CONTRACT_REJECTED"
@@ -930,6 +986,7 @@ class ORBProStrategy(EliteStrategy):
                 side=side,
                 boundary=boundary,
                 tolerance=event_tolerance,
+                strict_retest_wick=strict_retest_wick,
             )
             if prior_resolution is not None:
                 break
@@ -968,6 +1025,7 @@ class ORBProStrategy(EliteStrategy):
             side=side,
             boundary=boundary,
             tolerance=event_tolerance,
+            strict_retest_wick=strict_retest_wick,
         )
         invalidated = current_resolution == "INVALIDATED"
         retest = current_ts > breakout_ts and current_resolution == "RETESTED"
@@ -999,6 +1057,7 @@ class ORBProStrategy(EliteStrategy):
             event=event,
             branch="retest",
             retest_timestamp=current_ts,
+            strict_retest_wick=strict_retest_wick,
         )
         if signal is None:
             event["status"] = "CONTRACT_REJECTED"

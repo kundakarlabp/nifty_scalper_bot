@@ -43,3 +43,38 @@ No candidate is automatically eligible for live promotion: missing historical co
 ## Engineering validation
 
 Red-capable tests cover environment restoration, bounded candidate count, explicit non-promotion, actual slipped-fill fee feasibility and prior-session-only complete-window RVOL. Existing tests cover causal next-minute entry, stop-first ambiguous candles, missing-minute cancellation, malformed/expired archives and real production component determinism. Run the public agent check/full facade and exact final-head CI before merge. These checks establish implementation behavior, not investment performance.
+
+
+## 18 October 2026 — SHADOW-only retest wick-depth ablation
+
+A separate registered candidate, `retest_wick_guard_research`, sets
+`ORB_RESEARCH_STRICT_RETEST_WICK=true` **only** during its SHADOW comparison
+scenarios. The raw and cost-gated references, all other ORB research arms,
+LIVE and PAPER retain their previous retest definition. The new arm keeps the
+same opening-range length, breakout volume, direction, momentum branch,
+slippage scenarios (10/25/50 bps per side), cost gate and risk geometry as
+the cost-gated reference.
+
+Hypothesis: a completed retest candle whose **intrabar low** (CE) or
+**intrabar high** (PE) breaches the breakout boundary by more than the
+original breakout-ATR-based retest tolerance may indicate a failed hold
+despite closing back outside the range. The strict candidate classifies
+that candle as `INVALIDATED` before it can authorize a retest. It uses
+completed futures candles; restart/history recovery applies the identical
+rule and cannot silently resurrect an already-breached setup. Successful
+retest signals expose `underlying_retest_wick_excursion_atr` as diagnostic
+metadata, without using that field as a live trade gate.
+
+Evidence status: **RESEARCH_CANDIDATE**, not a validated improvement. The
+2026 descriptive QQQ minute-data study *Anatomy of the Retest in the QQQ
+Opening Range Breakout* (Pineda, SSRN 6745958) motivates examining
+post-breakout path features, but explicitly does not establish causality
+or profitability. A one-minute NIFTY futures wick is not directly
+interchangeable with a US ETF retest; test post-cost net expectancy, drawdown,
+trade count, regime stability and chronological holdout before considering
+any separate LIVE policy change.
+
+Because this is an additional experiment on historically reused archives,
+the expanded comparison still has **no promotion eligibility**. Existing
+archived option-basket selection, depth reconstruction and replay-parity
+limitations persist.

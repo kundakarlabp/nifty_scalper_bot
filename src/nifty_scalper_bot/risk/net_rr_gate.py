@@ -241,7 +241,7 @@ def minimum_target_for_net_rr(signal: Any, *, tick_size: float = 0.05) -> float 
             entry_price=entry,
             exit_price=candidate,
             quantity=quantity,
-            half_spread=half_spread,
+            half_spread=cost_half_spread,
         ).total
         net_reward = (candidate - entry) * quantity - target_cost
         return net_reward / net_risk if net_reward > 0.0 else 0.0

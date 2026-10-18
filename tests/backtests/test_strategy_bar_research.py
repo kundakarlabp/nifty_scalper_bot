@@ -500,6 +500,7 @@ def test_orb_comparison_uses_compact_orb_replay_for_all_fixed_scenarios(
             {
                 **dict(kwargs),
                 "range_transition": os.getenv("ORB_RESEARCH_ALLOW_RANGE_TRANSITION"),
+                "strict_retest_wick": os.getenv("ORB_RESEARCH_STRICT_RETEST_WICK"),
             }
         )
         return {
@@ -521,13 +522,15 @@ def test_orb_comparison_uses_compact_orb_replay_for_all_fixed_scenarios(
 
     report = run_orb_comparison(tmp_path)
 
-    assert report["candidate_count"] == 10
+    assert report["candidate_count"] == 11
     assert report["slippage_scenario_count"] == 3
-    assert len(calls) == 30
+    assert len(calls) == 33
     assert all(call["components"] == {"ORBPro"} for call in calls)
     assert all(call["compact_orb_context"] is True for call in calls)
     assert sum(call["range_transition"] == "true" for call in calls) == 3
-    assert sum(call["range_transition"] == "false" for call in calls) == 27
+    assert sum(call["range_transition"] == "false" for call in calls) == 30
+    assert sum(call["strict_retest_wick"] == "true" for call in calls) == 3
+    assert sum(call["strict_retest_wick"] == "false" for call in calls) == 30
 
 
 def test_compact_orb_replay_passes_range_regime_without_vwap_trend_flag(
@@ -598,7 +601,7 @@ def test_bounded_comparison_restores_environment_and_never_promotes_small_sample
     before = dict(os.environ)
     report = run_orb_comparison(tmp_path)
     assert dict(os.environ) == before
-    assert len(report["candidates"]) == 10
+    assert len(report["candidates"]) == 11
     assert report["selection"]["promotion_eligible"] is False
     assert report["selection"]["selected_for_live"] is None
     assert report["retrospective_check_is_untouched"] is False

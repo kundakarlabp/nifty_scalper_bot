@@ -81,7 +81,10 @@ def test_native_strategy_sources_cover_direct_and_terminal_lifecycle_paths() -> 
 
     # ORB momentum can trigger without a retest; it must still start at ARMED.
     momentum_idx = orb.index("if momentum_confirmed:")
-    momentum = orb[momentum_idx - 700 : momentum_idx + 900]
+    # Bound the contract to the branch itself; a fixed character window
+    # breaks whenever harmless arguments are added before the terminal path.
+    momentum_end = orb.index("return signal", momentum_idx)
+    momentum = orb[momentum_idx - 700 : momentum_end]
     assert "SetupStage.ARMED" in momentum
     assert "SetupStage.CONFIRMING" in momentum
     assert "SetupStage.CONTRACT_REJECTED" in momentum
