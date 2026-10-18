@@ -764,7 +764,13 @@ def _scenario(
                 )
             # Outstanding intents must be accounted for before day reset.
             for key, intent in list(pending.items()):
-                _reject(key[0], "next_minute_unavailable", timestamp)
+                # Charge an expired next-bar intent to the signal's session,
+                # not the first timestamp of the following market day.
+                _reject(
+                    key[0],
+                    "next_minute_unavailable",
+                    intent["available_at"] - timedelta(minutes=1),
+                )
                 _record_smc_post_signal_rejection(
                     key[0], intent.get("setup_id"), "next_minute_unavailable"
                 )
