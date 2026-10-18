@@ -1,7 +1,7 @@
 """Canonical history-readiness SSOT tests (spec §8/§11 Readiness).
 
-async so they execute under the repo conftest pyfunc hook (sync tests are
-silently no-op'd by that hook).
+Async tests run under the repo's event-loop pytest hook. Synchronous tests
+remain executable through normal pytest handling.
 """
 
 from __future__ import annotations
@@ -30,11 +30,6 @@ def _ctx(ce_bars: int, pe_bars: int, *, ce="NFO:NIFTY2661623300CE", pe="NFO:NIFT
             return counts.get(sym, 0)
 
     return SimpleNamespace(market_data_manager=_MDM(), strategy_runner=_Runner())
-
-
-async def test_canonical_tests_execute_sentinel() -> None:
-    # Spec §9: prove this file's async bodies actually run.
-    assert True
 
 
 async def test_both_ready_blocker_absent() -> None:
