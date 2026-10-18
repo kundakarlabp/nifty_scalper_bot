@@ -1466,11 +1466,15 @@ def _vwap_retest_archive_coverage(
         if row.get("instrument_type") in {"CE", "PE"}
     )
     future = next(
-        symbol
-        for symbol, row in instruments.items()
-        if row.get("instrument_type") == "FUT"
+        (
+            symbol
+            for symbol, row in instruments.items()
+            if row.get("instrument_type") == "FUT"
+        ),
+        None,
     )
-    spot = histories["NSE:NIFTY 50"]
+    futures_bars = histories[future] if future is not None else {}
+    spot = histories.get("NSE:NIFTY 50", {})
     metrics = (
         "observed_option_bars",
         "missing_underlying_minutes",
@@ -1527,7 +1531,7 @@ def _vwap_retest_archive_coverage(
                 continue
             sessions.add((symbol, timestamp.date().isoformat()))
             record(side, contract, "observed_option_bars")
-            if timestamp not in histories[future] or timestamp not in spot:
+            if timestamp not in futures_bars or timestamp not in spot:
                 record(side, contract, "missing_underlying_minutes")
                 continue
             rejection = _archived_weekly_atm_rejection(
