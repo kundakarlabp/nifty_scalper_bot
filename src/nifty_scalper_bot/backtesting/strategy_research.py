@@ -599,6 +599,7 @@ def _scenario(
     evaluated: Counter[str] = Counter()
     entry_funnels: dict[str, Counter[str]] = {}
     orb_replay_regimes: Counter[str] = Counter()
+    orb_replay_coverage: Counter[str] = Counter()
     eligible_option_days: set[str] = set()
     eligible_option_bars = 0
     pending: dict[tuple[str, str], dict[str, Any]] = {}
@@ -880,6 +881,17 @@ def _scenario(
             )
             if timestamp > entry_end:
                 continue
+            # Per-minute causal coverage, independent of the option-strike
+            # count and of any subsequent strategy/rejection decisions.
+            orb_replay_coverage["candidate_minutes"] += 1
+            missing_future = future not in bars
+            missing_spot = "NSE:NIFTY 50" not in bars
+            if missing_future:
+                orb_replay_coverage["missing_futures_minutes"] += 1
+            if missing_spot:
+                orb_replay_coverage["missing_spot_minutes"] += 1
+            if missing_future or missing_spot:
+                orb_replay_coverage["missing_underlying_minutes"] += 1
         if future not in bars or "NSE:NIFTY 50" not in bars:
             continue
         eligible_options = [symbol for symbol in options if symbol in bars]
@@ -896,7 +908,25 @@ def _scenario(
                     scoped_options.append(symbol)
             eligible_options = scoped_options
         if not eligible_options:
+            if compact_orb_context:
+                orb_replay_coverage["missing_option_minutes"] += 1
             continue
+        if compact_orb_context:
+            orb_replay_coverage["matched_market_minutes"] += 1
+            opening = timestamp.replace(hour=9, minute=15, second=0, microsecond=0)
+            range_minutes = settings.orb.orb_minutes
+            range_end = opening + timedelta(minutes=range_minutes)
+            if timestamp < range_end:
+                orb_replay_coverage["pre_opening_range_end_minutes"] += 1
+            elif all(
+                (opening + timedelta(minutes=minute)) in histories[future]
+                for minute in range(range_minutes)
+            ):
+                # Every opening bar precedes the evaluated bar; no future
+                # observation is used to score coverage.
+                orb_replay_coverage["complete_opening_range_minutes"] += 1
+            else:
+                orb_replay_coverage["incomplete_opening_range_minutes"] += 1
         underlying_context = _research_orb_structural_context(
             engine,
             spot_symbol="NSE:NIFTY 50",
@@ -1165,6 +1195,24 @@ def _scenario(
                     "eligible_session_count": len(eligible_option_days),
                     "eligible_session_dates": sorted(eligible_option_days),
                     "eligible_option_bar_count": eligible_option_bars,
+                    "orb_replay_coverage": (
+                        {
+                            key: orb_replay_coverage[key]
+                            for key in (
+                                "candidate_minutes",
+                                "missing_underlying_minutes",
+                                "missing_futures_minutes",
+                                "missing_spot_minutes",
+                                "missing_option_minutes",
+                                "matched_market_minutes",
+                                "pre_opening_range_end_minutes",
+                                "complete_opening_range_minutes",
+                                "incomplete_opening_range_minutes",
+                            )
+                        }
+                        if compact_orb_context and name == "ORBPro"
+                        else {}
+                    ),
                     "development_eligible_session_count": sum(
                         day < cutoff for day in days
                     ),

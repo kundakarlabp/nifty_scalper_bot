@@ -1117,6 +1117,11 @@ class IndicatorEngine:
                 observed = observed.astimezone(timezone.utc)
                 if not session_open <= observed <= at:
                     continue
+                # An omitted or off-grid minute may conceal traded volume.
+                # Preserve zero-volume finalized candles as interval evidence,
+                # but never silently synthesize an absent historical minute.
+                if (observed - session_open).total_seconds() % 60 != 0:
+                    return None
                 if (
                     row.get("is_complete") is not True
                     or row.get("is_provisional") is True
@@ -1152,7 +1157,13 @@ class IndicatorEngine:
                     cumulative_volume += volume
         except (KeyError, TypeError, ValueError, OverflowError):
             return None
-        if not (found_open and found_target and cumulative_volume > 0):
+        expected_minutes = int((at - session_open).total_seconds() // 60) + 1
+        if not (
+            found_open
+            and found_target
+            and cumulative_volume > 0
+            and len(seen) == expected_minutes
+        ):
             return None
         return cumulative_turnover / cumulative_volume
 
