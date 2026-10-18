@@ -1728,9 +1728,7 @@ def test_orb_research_attributes_direction_once_per_replay_minute(
     )["strategies"]["ORBPro"]["data_quality"]
 
     assert len(observations) == 4
-    assert data["orb_direction_resolution_minutes"] == {
-        "spot_futures_conflict": 4
-    }
+    assert data["orb_direction_resolution_minutes"] == {"spot_futures_conflict": 4}
     assert data["orb_replay_coverage"]["matched_market_minutes"] == 4
     assert data["eligible_option_bar_count"] == 8
     assert data["historical_executable_quote_fidelity"] == "ohlcv_only"
@@ -1761,9 +1759,7 @@ def test_orb_weekly_atm_proximity_reports_rejected_historical_basket_without_fil
     assert proxy["candidate_option_bars"] == 8
     assert proxy["eligible_option_bars"] == 4
     assert proxy["eligible_minutes"] == 4
-    assert proxy["rejection_reasons"] == {
-        "archive_strike_outside_atm_basket": 4
-    }
+    assert proxy["rejection_reasons"] == {"archive_strike_outside_atm_basket": 4}
     assert data["eligible_option_bar_count"] == 8
     assert data["historical_executable_quote_fidelity"] == "ohlcv_only"
 
