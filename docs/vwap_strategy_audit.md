@@ -509,3 +509,27 @@ untraded premium evidence. Existing reclaim, continuation and penetration
 capabilities remain available on traded option candles. The minimum
 positive-volume test is not proof of liquidity, executable bid/ask depth,
 or better profitability; broker execution risk filters remain necessary.
+
+
+## 2026-10-18: enforce physically possible OHLC for default VWAP entries
+
+The actual `VWAPProStrategy._evaluate_signal` default LIVE path previously
+checked only whether option OHLC prices were finite. It could therefore
+issue a BUY on a contradictory candle, such as a reported **high below its
+close**, and arm future VWAP theses using impossible premium lows/highs.
+The opt-in completed-bar momentum proof already checked those bounds,
+but default reclaim/continuation did not. A RED regression reproduced
+the false BUY with a traded, but impossible, candle.
+
+The strategy now rejects nonpositive OHLC or any premium bar failing
+`low <= open <= high` and `low <= close <= high`, with the explicit
+`invalid_option_candle_geometry` reason, *before* arming state or
+evaluating the VWAP trigger. Real flat-price bars remain acceptable.
+Normal positive-volume traded candle entry logic, futures confirmation,
+session VWAP references, signal metadata, risk and broker execution
+are unchanged.
+
+This is a production-code quality and safety correction, not evidence
+of improved trade expectancy. A lower number of invalid signals does
+not prove profitability; backtests and broker-quote execution checks
+remain necessary.
