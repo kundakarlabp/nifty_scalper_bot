@@ -320,6 +320,7 @@ class ORBProStrategy(EliteStrategy):
         snapshot: Mapping[str, Any],
         *,
         side: str,
+        strict_retest_wick: bool,
     ) -> dict[str, Any] | None:
         """Recover only a breakout that could still be awaiting its first retest.
 
@@ -391,6 +392,7 @@ class ORBProStrategy(EliteStrategy):
                         side=side,
                         boundary=boundary,
                         tolerance=breakout_tolerance,
+                        strict_retest_wick=strict_retest_wick,
                     )
                     is not None
                 ):
@@ -424,15 +426,20 @@ class ORBProStrategy(EliteStrategy):
         side: str,
         boundary: float,
         tolerance: float,
+        strict_retest_wick: bool = False,
     ) -> str | None:
-        """Classify one completed underlying bar against an active ORB event."""
+        """Classify a completed bar; strict intrabar breach is research-only."""
         close = float(row["close"])
         if side == "CE":
+            if strict_retest_wick and float(row["low"]) < boundary - tolerance:
+                return "INVALIDATED"
             if close < boundary - tolerance:
                 return "INVALIDATED"
             if float(row["low"]) <= boundary + tolerance and close >= boundary:
                 return "RETESTED"
         else:
+            if strict_retest_wick and float(row["high"]) > boundary + tolerance:
+                return "INVALIDATED"
             if close > boundary + tolerance:
                 return "INVALIDATED"
             if float(row["high"]) >= boundary - tolerance and close <= boundary:
@@ -498,6 +505,7 @@ class ORBProStrategy(EliteStrategy):
         event: Mapping[str, Any],
         branch: str,
         retest_timestamp: datetime | None,
+        strict_retest_wick: bool,
     ) -> EliteSignal | None:
         option_atr = max(float(indicators.get("atr") or 0.0), current_price * 0.01, 1.0)
         max_stop_pct = max(0.5, _env_float("ORB_PREMIUM_STOP_MAX_PCT", 8.0)) / 100.0
@@ -583,6 +591,18 @@ class ORBProStrategy(EliteStrategy):
             return None
 
         breakout_ts = event["breakout_timestamp"]
+        # Completed-bar excursion records the depth of the retest; it is
+        # observable even in the unchanged baseline and is never a live gate.
+        retest_excursion_atr = None
+        if branch == "retest":
+            excursion_points = (
+                boundary - float(snapshot["current"]["low"])
+                if side == "CE"
+                else float(snapshot["current"]["high"]) - boundary
+            )
+            retest_excursion_atr = round(
+                max(0.0, excursion_points) / breakout_underlying_atr, 4
+            )
         source = str(snapshot["source"])
         setup_id = (
             f"orbv2:{snapshot['session_date']}:{snapshot['symbol']}:{side}:"
@@ -621,6 +641,8 @@ class ORBProStrategy(EliteStrategy):
             ),
             "entry_branch": branch,
             "retest_confirmed": branch == "retest",
+            "retest_wick_research_guard": strict_retest_wick,
+            "underlying_retest_wick_excursion_atr": retest_excursion_atr,
             "retest_timestamp": (
                 retest_timestamp.timestamp() if retest_timestamp else None
             ),
@@ -748,6 +770,12 @@ class ORBProStrategy(EliteStrategy):
         if direction not in {"CE", "PE"}:
             self._no_vote("underlying_direction_unavailable")
             return None
+        # This ablation is enabled only in offline SHADOW research, never by
+        # a flag alone in LIVE/PAPER or in the normal SHADOW baseline.
+        strict_retest_wick = (
+            os.getenv("EXECUTION_MODE", "SHADOW").strip().upper() == "SHADOW"
+            and _env_bool("ORB_RESEARCH_STRICT_RETEST_WICK", False)
+        )
         # Do not burn this bar while asynchronous direction context is unusable.
         self._last_bar_by_key[key] = current_ts
 
@@ -789,6 +817,7 @@ class ORBProStrategy(EliteStrategy):
             event = self._recover_unconfirmed_breakout(
                 snapshot,
                 side=side,
+                strict_retest_wick=strict_retest_wick,
             )
             if event is not None:
                 self._events[key] = event
@@ -865,6 +894,7 @@ class ORBProStrategy(EliteStrategy):
                     event=event,
                     branch="momentum",
                     retest_timestamp=None,
+                    strict_retest_wick=strict_retest_wick,
                 )
                 if signal is None:
                     event["status"] = "CONTRACT_REJECTED"
@@ -930,6 +960,7 @@ class ORBProStrategy(EliteStrategy):
                 side=side,
                 boundary=boundary,
                 tolerance=event_tolerance,
+                strict_retest_wick=strict_retest_wick,
             )
             if prior_resolution is not None:
                 break
@@ -968,6 +999,7 @@ class ORBProStrategy(EliteStrategy):
             side=side,
             boundary=boundary,
             tolerance=event_tolerance,
+            strict_retest_wick=strict_retest_wick,
         )
         invalidated = current_resolution == "INVALIDATED"
         retest = current_ts > breakout_ts and current_resolution == "RETESTED"
@@ -999,6 +1031,7 @@ class ORBProStrategy(EliteStrategy):
             event=event,
             branch="retest",
             retest_timestamp=current_ts,
+            strict_retest_wick=strict_retest_wick,
         )
         if signal is None:
             event["status"] = "CONTRACT_REJECTED"
