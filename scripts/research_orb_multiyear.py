@@ -377,6 +377,12 @@ def run_task(task: tuple[str, dict[str, Any], float, list[str]]) -> dict[str, An
     stress_trades: list[dict[str, Any]] = []
     reasons: Counter[str] = Counter()
     funnel: Counter[str] = Counter()
+    # One direction/regime observation per eligible underlying minute, not
+    # one count per CE/PE option evaluation. Keep those denominators distinct.
+    direction_minutes: Counter[str] = Counter()
+    regime_minutes: Counter[str] = Counter()
+    coverage_minutes: Counter[str] = Counter()
+    structural_failures: Counter[str] = Counter()
     for index, day in enumerate(days):
         result = run_orb_session_research(
             Path(root) / "sessions" / day,
@@ -389,6 +395,11 @@ def run_task(task: tuple[str, dict[str, Any], float, list[str]]) -> dict[str, An
         stress_trades.extend(result["worst_case_stress_trades"])
         reasons.update(result["no_vote_reasons"])
         funnel.update(result.get("entry_funnel", {}))
+        quality = result.get("data_quality", {})
+        direction_minutes.update(quality.get("orb_direction_resolution_minutes", {}))
+        regime_minutes.update(result.get("orb_replay_regimes", {}))
+        coverage_minutes.update(quality.get("orb_replay_coverage", {}))
+        structural_failures.update(result.get("structural_gate_failures", {}))
         if (index + 1) % 100 == 0:
             print(
                 f"{candidate['name']} / {slippage} bps: "
@@ -430,6 +441,21 @@ def run_task(task: tuple[str, dict[str, Any], float, list[str]]) -> dict[str, An
                 "next_bar_intents",
                 "accepted_fills",
             )
+        },
+        # Per-underlying-minute evidence identifies context/regime readiness
+        # without confusing two option evaluations with two market minutes.
+        # Structural failures are multi-label and can overlap per evaluation.
+        "context_diagnostics": {
+            "basis": "one_observation_per_matched_market_minute",
+            "coverage_minutes": dict(coverage_minutes),
+            "direction_resolution_minutes": dict(direction_minutes),
+            "regime_minutes": dict(regime_minutes),
+            "structural_gate_failures_by_option_evaluation": dict(
+                structural_failures
+            ),
+            "attributed_direction_minutes": sum(direction_minutes.values()),
+            "attributed_regime_minutes": sum(regime_minutes.values()),
+            "matched_market_minutes": coverage_minutes["matched_market_minutes"],
         },
         "research_evidence_status": (
             "NO_RESOLVED_TRADES_WITH_UNRESOLVED_EXITS"
