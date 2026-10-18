@@ -50,3 +50,47 @@ Still out of scope:
 ## Operational notes
 
 The runtime remains designed for shadow/paper validation before increasing live size. The safest next larger cleanup is to inline these hooks into the source modules after local CI and one full market-session paper run.
+
+## Historical market-data validation and timestamp incident
+
+These are preserved historical test checklists and incident details; current code and CI determine present behavior.
+
+### Market data completion validation
+
+The market-data manager classifies stale required symbols; the polling decision
+helper evaluates that health state. `core/app.py` owns the polling supervisor,
+including activation and recovery cooldown. Polling remains a recovery path and
+must not replace fresher WebSocket FULL quotes.
+
+Run these checks locally before increasing live size:
+
+```bash
+python -m compileall -q src tests
+python -m pytest -q \
+  tests/streaming/test_market_data_hardening.py \
+  tests/data/test_market_data_hardening.py
+python -m pytest -q
+```
+
+Market-hours paper/live-small validation checklist:
+
+1. Confirm one `FIRST_TICK_RECEIVED` event per WS session and no duplicate-enqueue warnings.
+2. Confirm `MDM_CANDLE_FLUSH_TASK_STARTED` after the MDM event loop is wired.
+3. Watch for `MDM_CANDLE_CLOCK_FLUSHED` after idle one-minute buckets.
+4. Confirm stale/synthetic WS LTP does not arm hard trading readiness.
+5. Confirm fallback worker log appears only before the main asyncio loop is wired.
+6. Keep live order size minimal until one complete market session passes without feed-health degradation.
+
+### Future candle timestamp incident
+
+Root cause: a naive internal IST wall-clock candle could be interpreted as UTC and become a later stored candle. Valid current bars were then rejected as out-of-order.
+
+Fix:
+- localize naive market-data timestamps as Asia/Kolkata
+- convert aware timestamps to Asia/Kolkata
+- reject ahead-of-clock candles before store insertion
+- move overlap tolerance into CandleStore
+
+Validation:
+- python -m compileall -q src tests
+- python -m pytest -q tests/data/test_future_candle_guard.py tests/data/test_volume_zero_preservation.py tests/data/test_market_data_pipeline.py tests/data/test_pipeline_overlap_guard.py tests/data/test_candle_engine.py
