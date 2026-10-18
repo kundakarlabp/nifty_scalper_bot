@@ -167,6 +167,90 @@ def test_opening_above_target_has_known_first_touch_and_costed_profit(
     assert result["metrics"]["net_pnl"] == pytest.approx(trade["net_pnl"])
 
 
+def test_orb_cost_gate_reports_gross_payoff_eroded_by_transaction_costs(
+    tmp_path,
+):
+    from nifty_scalper_bot.backtesting.strategy_research import _scenario, load_archive
+    from nifty_scalper_bot.config.settings import get_settings
+
+    archive(tmp_path)
+
+    class Strategy:
+        name = "ORBPro"
+        last_no_vote_reason = "no_signal"
+
+        @property
+        def evaluation_health(self):
+            return {"healthy": True}
+
+        def generate_signal(self, symbol, indicators, current_price, position=None):
+            if symbol.endswith("CE") and indicators["history_count"] == 1:
+                # Gross 1.8R, but Rs 40+ round-trip brokerage and statutory
+                # charges erode net RR below the 1.5R minimum.
+                return SimpleNamespace(
+                    action="BUY", stop_loss=95, take_profit=109, metadata={}
+                )
+            return None
+
+    histories, instruments, _ = load_archive(tmp_path)
+    result = _scenario(
+        histories,
+        instruments,
+        get_settings().elite,
+        0,
+        components={"ORBPro"},
+        minimum_net_rr=1.5,
+        strategy_factory=lambda engine: [Strategy()],
+    )["strategies"]["ORBPro"]
+    assert result["entry_funnel"]["next_bar_intents"] == 1
+    assert result["entry_funnel"]["accepted_fills"] == 0
+    assert result["no_vote_reasons"]["cost_net_rr_rejected"] == 1
+    economics = result["orb_admission_economics"]
+    assert economics["evaluated"] == 1
+    assert economics["rejected"] == 1
+    assert economics["gross_pass_net_fail"] == 1
+    assert economics.get("gross_payoff_below_minimum", 0) == 0
+
+
+def test_terminal_orb_intent_cannot_disappear_without_an_execution_disposition(
+    tmp_path,
+):
+    from nifty_scalper_bot.backtesting.strategy_research import _scenario, load_archive
+    from nifty_scalper_bot.config.settings import get_settings
+
+    archive(tmp_path)
+
+    class Strategy:
+        name = "ORBPro"
+        last_no_vote_reason = "no_signal"
+
+        @property
+        def evaluation_health(self):
+            return {"healthy": True}
+
+        def generate_signal(self, symbol, indicators, current_price, position=None):
+            if symbol.endswith("CE") and indicators["history_count"] == 3:
+                return SimpleNamespace(
+                    action="BUY", stop_loss=95, take_profit=115, metadata={}
+                )
+            return None
+
+    histories, instruments, _ = load_archive(tmp_path)
+    result = _scenario(
+        histories,
+        instruments,
+        get_settings().elite,
+        0,
+        components={"ORBPro"},
+        minimum_net_rr=1.5,
+        strategy_factory=lambda engine: [Strategy()],
+    )["strategies"]["ORBPro"]
+    assert result["entry_funnel"]["signals_emitted"] == 1
+    assert result["entry_funnel"]["next_bar_intents"] == 1
+    assert result["entry_funnel"]["accepted_fills"] == 0
+    assert result["no_vote_reasons"]["next_minute_unavailable"] == 1
+
+
 def test_full_orb_research_uses_causal_regime_detector(tmp_path, monkeypatch):
     """The full baseline may not silently omit the regime used by compact ORB."""
     from nifty_scalper_bot.backtesting import strategy_research as research
