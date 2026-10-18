@@ -835,9 +835,10 @@ def summarize_orb_causal_gate_days(
             repaired_entries += candidate["orb_repaired_target_entries"]
         if repaired_entries > repaired_funnel["accepted_fills"]:
             raise ValueError("orb_repair_counterfactual_entries_exceed_fills")
-        if len(repaired_trades) + len(repaired_unresolved) != repaired_funnel[
-            "accepted_fills"
-        ]:
+        if (
+            len(repaired_trades) + len(repaired_unresolved)
+            != repaired_funnel["accepted_fills"]
+        ):
             raise ValueError("orb_repair_settlement_ledger_not_conserved")
         baseline = phase_results["without_three_vetoes"]
         repaired_metrics = summarize(repaired_trades)
@@ -863,9 +864,7 @@ def summarize_orb_causal_gate_days(
             "paired_net_pnl_difference": (
                 None
                 if repaired_unresolved or not baseline["primary_metrics_complete"]
-                else (
-                    repaired_metrics["net_pnl"] - baseline["metrics"]["net_pnl"]
-                )
+                else (repaired_metrics["net_pnl"] - baseline["metrics"]["net_pnl"])
             ),
             "interpretation": (
                 "modeled_bounded_target_repair_counterfactual_not_live_parity"
@@ -901,18 +900,12 @@ def review_orb_bounded_repair_evidence(
     fees = sum(row["metrics"]["fees"] for row in observed)
     net = sum(row["metrics"]["net_pnl"] for row in observed)
     if (
-        validation["metrics"]["trade_count"]
-        and validation["metrics"]["net_pnl"] <= 0
-    ) or (
-        final["metrics"]["trade_count"]
-        and final["metrics"]["net_pnl"] <= 0
-    ):
+        validation["metrics"]["trade_count"] and validation["metrics"]["net_pnl"] <= 0
+    ) or (final["metrics"]["trade_count"] and final["metrics"]["net_pnl"] <= 0):
         verdict = "REJECTED_NEGATIVE_VALIDATION_OR_FINAL_NET_PNL"
     elif unresolved:
         verdict = "INCONCLUSIVE_UNRESOLVED_EXITS"
-    elif not (
-        validation["metrics"]["trade_count"] and final["metrics"]["trade_count"]
-    ):
+    elif not (validation["metrics"]["trade_count"] and final["metrics"]["trade_count"]):
         verdict = "INSUFFICIENT_OUT_OF_SAMPLE_TRADES"
     else:
         verdict = "RESEARCH_ONLY_NOT_INDEPENDENTLY_VALIDATED"
@@ -1004,9 +997,7 @@ def run_orb_causal_gate_study(output: Path, workers: int) -> None:
                 "No strategy promotion, live settings or risk changes",
             ],
             "phases": phases,
-            "bounded_repair_evidence_gate": review_orb_bounded_repair_evidence(
-                phases
-            ),
+            "bounded_repair_evidence_gate": review_orb_bounded_repair_evidence(phases),
         },
     )
 
