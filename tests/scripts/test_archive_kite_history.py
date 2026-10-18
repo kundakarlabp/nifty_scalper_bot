@@ -534,3 +534,58 @@ def test_retained_session_conflicting_contract_identity_is_not_staged(
     )
     assert report["staged_session_dates"] == []
     assert report["staging_rejections"]["2026-10-12"] == expected_reason
+
+
+def test_retained_cache_rejects_a_candle_captured_before_its_minute_completed(
+    tmp_path,
+):
+    """A 09:33 bar is not completed at 09:33:20 despite a valid checksum."""
+    candles = tmp_path / "cache" / "candles"
+    candles.mkdir(parents=True)
+    payload = _retained_session_payload("NSE:NIFTY 50", "EQ", 100)
+    payload["captured_at"] = "2026-10-12T09:33:20+05:30"
+    (candles / "spot.json").write_text(json.dumps(payload))
+
+    report = collector.historical_cache_inventory(
+        tmp_path / "cache",
+        dt.date(2026, 10, 12),
+        dt.date(2026, 10, 12),
+        stage_dir=tmp_path / "staged",
+        min_synchronized_minutes=3,
+    )
+    assert report["corrupt_or_untrusted_files"] == 1
+    assert report["valid_cached_files"] == 0
+    assert report["staged_session_dates"] == []
+
+
+def test_retained_session_requires_contiguous_synchronized_minutes(tmp_path):
+    """Three scattered bars cannot satisfy three continuous warm-up minutes."""
+    candles = tmp_path / "cache" / "candles"
+    candles.mkdir(parents=True)
+    records = [
+        _retained_session_payload("NSE:NIFTY 50", "EQ", 100),
+        _retained_session_payload("NFO:NIFTY26OCTFUT", "FUT", 101, expiry="2026-10-27"),
+        _retained_session_payload("NFO:NIFTY26O1322500CE", "CE", 102, strike=22500),
+        _retained_session_payload("NFO:NIFTY26O1322500PE", "PE", 103, strike=22500),
+    ]
+    for index, payload in enumerate(records):
+        # Retain 09:30, 09:31 and 09:33 only. There is no three-minute run.
+        payload["candles"].pop(2)
+        payload["candles_sha256"] = collector._candle_digest(payload["candles"])
+        (candles / f"{index}.json").write_text(json.dumps(payload))
+
+    staging = tmp_path / "staged"
+    report = collector.historical_cache_inventory(
+        tmp_path / "cache",
+        dt.date(2026, 10, 12),
+        dt.date(2026, 10, 12),
+        stage_dir=staging,
+        min_synchronized_minutes=3,
+    )
+    assert report["corrupt_or_untrusted_files"] == 0
+    assert report["sessions"][0]["synchronized_contract_minutes"] == 3
+    assert report["staged_session_dates"] == []
+    assert report["staging_rejections"]["2026-10-12"] == (
+        "historical_minimum_synchronized_bars_missing"
+    )
+    assert not (staging / "2026-10-12").exists()

@@ -352,7 +352,9 @@ def historical_cache_inventory(
             parsed = [
                 dt.datetime.fromisoformat(str(row[0])).astimezone(IST) for row in rows
             ]
-            if captured < parsed[-1] or (
+            # Timestamps mark minute *starts*. A matching digest is not proof
+            # that the final observed minute had closed when it was captured.
+            if captured < parsed[-1] + dt.timedelta(minutes=1) or (
                 expiry is not None
                 and any(timestamp.date() > expiry for timestamp in parsed)
             ):
@@ -486,8 +488,13 @@ def historical_cache_inventory(
                 overlapping = set.intersection(
                     *(set(sources[symbol]["bars"]) for symbol in participants)
                 )
-                available = [stamp for stamp in overlapping if stamp >= anchor]
-                if len(available) < min_synchronized_minutes:
+                available = sorted(stamp for stamp in overlapping if stamp >= anchor)
+                # Scattered shared bars cannot stand in for contiguous causal
+                # option/futures/spot warm-up history beginning at the anchor.
+                if len(available) < min_synchronized_minutes or any(
+                    stamp != anchor + dt.timedelta(minutes=index)
+                    for index, stamp in enumerate(available[:min_synchronized_minutes])
+                ):
                     failure = "historical_minimum_synchronized_bars_missing"
                     continue
                 selected = (futures[0], ce, pe, anchor)
