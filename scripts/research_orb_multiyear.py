@@ -717,10 +717,7 @@ def summarize_orb_causal_gate_days(
                 # Same market observations and same contract identity across
                 # arms. Trade identity may differ because gating changes state.
                 "trade_keys": sorted(
-                    {
-                        (trade["symbol"], trade["entry_time"])
-                        for trade in trades
-                    }
+                    {(trade["symbol"], trade["entry_time"]) for trade in trades}
                 ),
             }
         reference = set(phase_results["production_reference"]["trade_keys"])
@@ -746,15 +743,10 @@ def run_orb_causal_gate_study(output: Path, workers: int) -> None:
         raise ValueError("research_history_unavailable")
     directory = output / "causal_gate_sessions"
     pending = [
-        (str(output), day)
-        for day in days
-        if not (directory / f"{day}.json").exists()
+        (str(output), day) for day in days if not (directory / f"{day}.json").exists()
     ]
     with ProcessPoolExecutor(max_workers=workers) as pool:
-        futures = {
-            pool.submit(run_orb_causal_gate_day, task): task
-            for task in pending
-        }
+        futures = {pool.submit(run_orb_causal_gate_day, task): task for task in pending}
         for future in as_completed(futures):
             row = future.result()
             if row["day"] != futures[future][1]:
