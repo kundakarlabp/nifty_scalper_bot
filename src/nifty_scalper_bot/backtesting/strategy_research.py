@@ -633,6 +633,10 @@ def _scenario(
     smc_post_signal_unattributed: Counter[str] = Counter()
     evaluated: Counter[str] = Counter()
     entry_funnels: dict[str, Counter[str]] = {}
+    # Per-session attribution is diagnostic only; never used for fills or
+    # strategy admission. Aggregate counters remain the accounting source.
+    vwap_daily_funnel: dict[str, Counter[str]] = {}
+    vwap_daily_rejections: dict[str, Counter[str]] = {}
     orb_replay_regimes: Counter[str] = Counter()
     orb_replay_coverage: Counter[str] = Counter()
     orb_direction_resolution_minutes: Counter[str] = Counter()
@@ -651,6 +655,16 @@ def _scenario(
     current_day = None
     last_bars: dict[str, dict[str, Any]] = {}
     slip = slippage_bps / 10000.0
+
+    def _record_vwap_stage(stage: str, observed_at: datetime) -> None:
+        day = observed_at.date().isoformat()
+        vwap_daily_funnel.setdefault(day, Counter())[stage] += 1
+
+    def _reject(name: str, reason: str, observed_at: datetime) -> None:
+        rejections[name][reason] += 1
+        if name == "VWAPPro":
+            day = observed_at.date().isoformat()
+            vwap_daily_rejections.setdefault(day, Counter())[reason] += 1
 
     def _record_smc_post_signal_rejection(
         name: str, setup_id: Any, reason: str
@@ -699,6 +713,8 @@ def _scenario(
         trade = _trade_record(key, position, bar["timestamp"], price, reason)
         outcomes[key[0]].append(trade)
         stress_outcomes[key[0]].append(dict(trade))
+        if key[0] == "VWAPPro":
+            _record_vwap_stage("resolved_trades", position["entry_time"])
 
     def mark_unresolved(
         key: tuple[str, str],
@@ -710,6 +726,8 @@ def _scenario(
     ) -> None:
         """Remove an unpriceable position without inventing a primary P&L."""
         position = positions.pop(key)
+        if key[0] == "VWAPPro":
+            _record_vwap_stage("unresolved_trades", position["entry_time"])
         unresolved_outcomes[key[0]].append(
             {
                 **position,
@@ -796,20 +814,20 @@ def _scenario(
             # An unfilled candidate must not consume a setup for other strikes.
             setup_id = str(intent.get("setup_id") or "").strip()
             if key[0] == "SMC" and setup_id in smc_filled_setups:
-                rejections[key[0]]["smc_setup_already_filled"] += 1
+                _reject(key[0], "smc_setup_already_filled", timestamp)
                 _record_smc_post_signal_rejection(
                     key[0], setup_id, "smc_setup_already_filled"
                 )
                 continue
             bar = bars.get(key[1])
             if bar is None or timestamp != intent["available_at"]:
-                rejections[key[0]]["next_minute_unavailable"] += 1
+                _reject(key[0], "next_minute_unavailable", timestamp)
                 _record_smc_post_signal_rejection(
                     key[0], intent.get("setup_id"), "next_minute_unavailable"
                 )
                 continue
             if strict_liquidity and bar["volume"] <= 0:
-                rejections[key[0]]["next_minute_has_no_trades"] += 1
+                _reject(key[0], "next_minute_has_no_trades", timestamp)
                 _record_smc_post_signal_rejection(
                     key[0], intent.get("setup_id"), "next_minute_has_no_trades"
                 )
@@ -834,7 +852,7 @@ def _scenario(
                 and take_profit is not None
                 and 0 < stop_loss < entry < take_profit
             ):
-                rejections[key[0]]["gap_invalidates_geometry"] += 1
+                _reject(key[0], "gap_invalidates_geometry", timestamp)
                 _record_smc_post_signal_rejection(
                     key[0], intent.get("setup_id"), "gap_invalidates_geometry"
                 )
@@ -848,12 +866,14 @@ def _scenario(
                     quantity=quantity,
                 )
                 if economics.net_rr < minimum_net_rr:
-                    rejections[key[0]]["cost_net_rr_rejected"] += 1
+                    _reject(key[0], "cost_net_rr_rejected", timestamp)
                     _record_smc_post_signal_rejection(
                         key[0], intent.get("setup_id"), "cost_net_rr_rejected"
                     )
                     continue
             entry_funnels[key[0]]["accepted_fills"] += 1
+            if key[0] == "VWAPPro":
+                _record_vwap_stage("accepted_fills", timestamp)
             if key[0] == "SMC" and intent.get("setup_id"):
                 smc_filled_setups.add(str(intent["setup_id"]))
             positions[key] = {
@@ -973,7 +993,7 @@ def _scenario(
                 )
                 if reason is not None:
                     for strategy in strategies:
-                        rejections[strategy.name][reason] += 1
+                        _reject(strategy.name, reason, timestamp)
                 else:
                     scoped_options.append(symbol)
             eligible_options = scoped_options
@@ -1061,6 +1081,8 @@ def _scenario(
                 if key in positions:
                     continue
                 evaluated[strategy.name] += 1
+                if strategy.name == "VWAPPro":
+                    _record_vwap_stage("evaluations", timestamp)
                 strategy_indicators = dict(indicators)
                 if strategy.name in {"ORBPro", "VWAPPro", "SMC"}:
                     strategy_indicators.update(underlying_context)
@@ -1108,7 +1130,7 @@ def _scenario(
                     smc_armed_setups.update(active_smc_setups)
                 if signal is None:
                     no_vote = getattr(strategy, "last_no_vote_reason", "no_signal")
-                    rejections[strategy.name][no_vote] += 1
+                    _reject(strategy.name, no_vote, timestamp)
                     if active_smc_setups:
                         smc_setup_rejections.setdefault(no_vote, set()).update(
                             active_smc_setups
@@ -1123,13 +1145,15 @@ def _scenario(
                             structural_gate_failures[reason] += 1
                     continue
                 entry_funnels[strategy.name]["signals_emitted"] += 1
+                if strategy.name == "VWAPPro":
+                    _record_vwap_stage("signals_emitted", timestamp)
                 metadata = dict(signal.metadata or {})
                 if strategy.name == "SMC" and metadata.get("setup_id"):
                     setup_id = str(metadata["setup_id"]).strip()
                     if setup_id:
                         smc_signaled_setups.add(setup_id)
                         if setup_id in smc_filled_setups:
-                            rejections[strategy.name]["smc_setup_already_filled"] += 1
+                            _reject(strategy.name, "smc_setup_already_filled", timestamp)
                             _record_smc_post_signal_rejection(
                                 strategy.name, setup_id, "smc_setup_already_filled"
                             )
@@ -1143,7 +1167,7 @@ def _scenario(
                     or take_profit is None
                     or not 0 < stop_loss < bar["close"] < take_profit
                 ):
-                    rejections[strategy.name]["invalid_signal_geometry"] += 1
+                    _reject(strategy.name, "invalid_signal_geometry", timestamp)
                     _record_smc_post_signal_rejection(
                         strategy.name,
                         metadata.get("setup_id"),
@@ -1151,13 +1175,15 @@ def _scenario(
                     )
                     continue
                 entry_funnels[strategy.name]["geometry_valid"] += 1
+                if strategy.name == "VWAPPro":
+                    _record_vwap_stage("geometry_valid", timestamp)
                 if require_option_premium_confirmation:
                     rejection = _option_premium_confirmation_reason(
                         bar,
                         histories[symbol].get(timestamp - timedelta(minutes=1)),
                     )
                     if rejection is not None:
-                        rejections[strategy.name][rejection] += 1
+                        _reject(strategy.name, rejection, timestamp)
                         _record_smc_post_signal_rejection(
                             strategy.name, metadata.get("setup_id"), rejection
                         )
@@ -1172,12 +1198,14 @@ def _scenario(
                             if rvol is None
                             else "opening_rvol_below_minimum"
                         )
-                        rejections[strategy.name][rejection] += 1
+                        _reject(strategy.name, rejection, timestamp)
                         _record_smc_post_signal_rejection(
                             strategy.name, metadata.get("setup_id"), rejection
                         )
                         continue
                 entry_funnels[strategy.name]["next_bar_intents"] += 1
+                if strategy.name == "VWAPPro":
+                    _record_vwap_stage("next_bar_intents", timestamp)
                 pending[key] = {
                     "available_at": timestamp + timedelta(minutes=1),
                     "stop_loss": stop_loss,
@@ -1346,6 +1374,36 @@ def _scenario(
                     "accepted_fills": entry_funnels[name]["accepted_fills"],
                 },
                 "no_vote_reasons": dict(rejections[name]),
+                "daily_diagnostics": (
+                    {
+                        day: {
+                            "entry_funnel": {
+                                stage: vwap_daily_funnel.get(day, Counter())[stage]
+                                for stage in (
+                                    "evaluations",
+                                    "signals_emitted",
+                                    "geometry_valid",
+                                    "next_bar_intents",
+                                    "accepted_fills",
+                                )
+                            },
+                            "no_vote_reasons": dict(
+                                sorted(vwap_daily_rejections.get(day, {}).items())
+                            ),
+                            "resolved_trades": vwap_daily_funnel.get(
+                                day, Counter()
+                            )["resolved_trades"],
+                            "unresolved_trades": vwap_daily_funnel.get(
+                                day, Counter()
+                            )["unresolved_trades"],
+                        }
+                        for day in sorted(
+                            vwap_daily_funnel.keys() | vwap_daily_rejections.keys()
+                        )
+                    }
+                    if name == "VWAPPro"
+                    else {}
+                ),
                 "smc_unique_setup_funnel": (
                     {
                         "armed_setups": len(smc_armed_setups),
