@@ -61,6 +61,42 @@ def test_kite_archive_chunks_resumes_and_preserves_raw_oi_and_identity(tmp_path)
     assert len(broker.calls) == 3
 
 
+def test_expanded_archive_paces_each_real_history_call_below_three_per_second(
+    tmp_path, monkeypatch
+):
+    clock = [100.0]
+    calls = []
+    broker = Broker()
+    original = broker.historical_data
+
+    def clocked_history(*args, **kwargs):
+        calls.append(clock[0])
+        return original(*args, **kwargs)
+
+    broker.historical_data = clocked_history
+
+    def advance(seconds):
+        assert seconds > 0
+        clock[0] += seconds
+
+    monkeypatch.setattr(collector.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(collector.time, "sleep", advance)
+    args = (
+        broker,
+        ["NFO:NIFTY26OCT25000CE"],
+        dt.date(2026, 8, 1),
+        dt.date(2026, 9, 30),
+        tmp_path,
+    )
+    first = archive_history(*args)
+    assert first["saved_requests"] == 3
+    assert first["history_request_min_spacing_seconds"] == 0.36
+    assert len(calls) == 3
+    assert all(b - a >= 0.36 - 1e-9 for a, b in zip(calls, calls[1:]))
+    assert archive_history(*args)["cached_requests"] == 3
+    assert len(calls) == 3
+
+
 def test_unavailable_contract_is_rejected_before_fetching(tmp_path):
     broker = Broker()
     with pytest.raises(ValueError, match="current instrument master"):
