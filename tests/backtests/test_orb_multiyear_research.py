@@ -117,6 +117,18 @@ def test_multiyear_research_preserves_zero_trade_stage_funnel(monkeypatch):
                 "next_bar_intents": 0,
                 "accepted_fills": 0,
             },
+            "orb_replay_regimes": {"RANGE": 2, "TREND": 1},
+            "data_quality": {
+                "orb_direction_resolution_minutes": {
+                    "spot_futures_agree": 2,
+                    "fresh_spot_futures_disagreement": 1,
+                },
+                "orb_replay_coverage": {
+                    "matched_market_minutes": 3,
+                    "missing_option_minutes": 1,
+                },
+            },
+            "structural_gate_failures": {"futures_vwap_slope_alignment": 1},
         }
 
     monkeypatch.setattr(research, "run_orb_session_research", fake_session)
@@ -153,6 +165,20 @@ def test_multiyear_research_preserves_zero_trade_stage_funnel(monkeypatch):
         "accepted_fills": 0,
     }
     assert result["no_vote_reasons"]["underlying_direction_unavailable"] == 6
+    diagnostics = result["context_diagnostics"]
+    assert diagnostics["basis"] == "one_observation_per_matched_market_minute"
+    assert diagnostics["matched_market_minutes"] == 6
+    assert diagnostics["attributed_direction_minutes"] == 6
+    assert diagnostics["attributed_regime_minutes"] == 6
+    assert diagnostics["direction_resolution_minutes"] == {
+        "spot_futures_agree": 4,
+        "fresh_spot_futures_disagreement": 2,
+    }
+    assert diagnostics["regime_minutes"] == {"RANGE": 4, "TREND": 2}
+    assert diagnostics["coverage_minutes"]["missing_option_minutes"] == 2
+    assert diagnostics["structural_gate_failures_by_option_evaluation"] == {
+        "futures_vwap_slope_alignment": 2
+    }
 
 
 def test_nested_csv_and_txt_copies_are_not_double_counted():

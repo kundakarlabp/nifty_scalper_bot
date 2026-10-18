@@ -354,6 +354,52 @@ def test_scenario_computes_shared_underlying_context_once_per_timestamp(
     assert len(calls) == 4
 
 
+def test_compact_orb_context_diagnostics_count_market_minutes_not_option_bars(
+    tmp_path, monkeypatch
+):
+    from nifty_scalper_bot.backtesting.strategy_research import _scenario, load_archive
+    from nifty_scalper_bot.config.settings import get_settings
+
+    archive(tmp_path)
+
+    class Strategy:
+        name = "ORBPro"
+
+        def generate_signal(self, symbol, indicators, current_price, position=None):
+            return None
+
+        @property
+        def evaluation_health(self):
+            return {"healthy": True}
+
+    monkeypatch.setattr(
+        "nifty_scalper_bot.backtesting.strategy_research._research_orb_structural_context",
+        lambda *args, **kwargs: {
+            "underlying_direction_bias": "CE",
+            "direction_bias": "CE",
+            "research_direction_resolution": "spot_futures_agree",
+            "context_fresh": True,
+        },
+    )
+    histories, instruments, _ = load_archive(tmp_path)
+    scenario = _scenario(
+        histories,
+        instruments,
+        get_settings().elite,
+        0,
+        components={"ORBPro"},
+        compact_orb_context=True,
+        strategy_factory=lambda engine: [Strategy()],
+    )
+    result = scenario["strategies"]["ORBPro"]
+
+    assert result["entry_funnel"]["evaluations"] == 8
+    quality = result["data_quality"]
+    assert quality["orb_replay_coverage"]["matched_market_minutes"] == 4
+    assert quality["orb_direction_resolution_minutes"] == {"spot_futures_agree": 4}
+    assert sum(scenario["orb_replay_regimes"].values()) == 4
+
+
 def test_research_structural_context_includes_futures_volume_ratio(tmp_path):
     from nifty_scalper_bot.backtesting.strategy_research import (
         IndicatorEngine,
