@@ -224,7 +224,6 @@ def test_canonical_deployment_scripts_do_not_embed_credentials() -> None:
             assert match.group(1) == "", f"credential literal found in {path}"
 
 
-
 def test_canonical_redeploy_path_replaces_two_unused_force_aliases() -> None:
     assert not (ROOT / "deploy/scripts/update_and_deploy.sh").exists()
     assert not (ROOT / "ops/redeploy.sh").exists()
