@@ -792,12 +792,18 @@ def test_nse_fo_holiday_cannot_be_staged_as_normal_smc_replay(tmp_path):
         _retained_session_payload("NSE:NIFTY 50", "EQ", 100),
         _retained_session_payload("NFO:NIFTY26OCTFUT", "FUT", 101, expiry="2026-10-27"),
         _retained_session_payload(
-            "NFO:NIFTY26O2722500CE", "CE", 102,
-            strike=22500, expiry="2026-10-27",
+            "NFO:NIFTY26O2722500CE",
+            "CE",
+            102,
+            strike=22500,
+            expiry="2026-10-27",
         ),
         _retained_session_payload(
-            "NFO:NIFTY26O2722500PE", "PE", 103,
-            strike=22500, expiry="2026-10-27",
+            "NFO:NIFTY26O2722500PE",
+            "PE",
+            103,
+            strike=22500,
+            expiry="2026-10-27",
         ),
     ]
     for index, payload in enumerate(contracts):
