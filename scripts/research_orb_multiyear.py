@@ -910,7 +910,9 @@ def review_orb_bounded_repair_evidence(
         verdict = "REJECTED_NEGATIVE_VALIDATION_OR_FINAL_NET_PNL"
     elif unresolved:
         verdict = "INCONCLUSIVE_UNRESOLVED_EXITS"
-    elif not validation["metrics"]["trade_count"] or not final["metrics"]["trade_count"]:
+    elif not (
+        validation["metrics"]["trade_count"] and final["metrics"]["trade_count"]
+    ):
         verdict = "INSUFFICIENT_OUT_OF_SAMPLE_TRADES"
     else:
         verdict = "RESEARCH_ONLY_NOT_INDEPENDENTLY_VALIDATED"
