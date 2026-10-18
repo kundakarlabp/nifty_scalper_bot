@@ -26,9 +26,6 @@ def test_runtime_config_has_no_retired_signal_scoring_knobs() -> None:
         encoding="utf-8"
     )
     env_source = (ROOT / ".env.example").read_text(encoding="utf-8")
-    strategy_profile = (ROOT / "config/strategy.yaml").read_text(encoding="utf-8")
-
     assert "SIGNAL_WEIGHT_" not in settings_source
     assert "SIGNAL_WEIGHT_" not in env_source
-    assert "min_score" not in strategy_profile
-    assert "lower_score_temp" not in strategy_profile
+    assert not (ROOT / "config").exists()

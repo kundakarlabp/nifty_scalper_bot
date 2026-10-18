@@ -40,6 +40,23 @@ def test_lightsail_uses_external_environment_file() -> None:
     )
 
 
+def test_retired_dashboard_and_adhoc_tooling_are_absent() -> None:
+    retired = (
+        "dashboard/operations_console.py",
+        "scripts/assess_all.sh",
+        "scripts/run_sync.sh",
+        "mypy.ini",
+        "config/defaults.yaml",
+        "config/events.yaml",
+        "config/order_execution.yaml",
+        "config/strategy.yaml",
+    )
+    assert [path for path in retired if (ROOT / path).exists()] == []
+    assert (ROOT / "dashboard/superlite_console.py").is_file()
+    assert (ROOT / "dashboard/streamlit_app.py").is_file()
+    assert (ROOT / "dashboard/log_export.py").is_file()
+
+
 def test_release_runner_validates_and_rolls_back() -> None:
     release = _text("deploy/lightsail_release.sh")
     assert "flock -n 9" in release
