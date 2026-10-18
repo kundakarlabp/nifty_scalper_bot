@@ -641,7 +641,7 @@ def _orb_bounded_target_repair_viable(
         target_price=repaired,
         quantity=quantity,
     )
-    return verified.net_rr + 1e-9 >= required_net_rr
+    return bool(verified.net_rr + 1e-9 >= required_net_rr)
 
 
 def _scenario(
