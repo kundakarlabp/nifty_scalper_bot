@@ -420,3 +420,31 @@ a conservative **descriptive** minimum, not a power-based proof; the
 holdout is still reused retrospective evidence. All comparisons remain
 non-promotable, cost-modeled research rather than historical quote-fill
 parity or reliable estimates of LIVE alpha.
+
+
+## 2026-10-18: per-session VWAP research bottleneck attribution
+
+The archive-level `no_vote_reasons` and `entry_funnel` aggregates previously
+combined multiple trading days, hiding whether the apparent scarcity of
+VWAP signals came from one anomalous session or occurred consistently.
+The canonical bar-research `_scenario` now records
+`strategies.VWAPPro.daily_diagnostics[YYYY-MM-DD]` for each actually
+evaluated session: evaluated option bars, emitted signals, valid geometry,
+next-minute intents, accepted fills, rejection reasons, and resolved versus
+unresolved exits. Exits are attributed to the *entry session* rather than
+the session boundary at which they are marked unresolved.
+
+These fields are read-only diagnostics of the same simulation; the
+existing aggregate metrics, canonical modeled fees, execution sequence,
+historical contract admission, signal thresholds and order geometry are
+unchanged. Rejections include both strategy no-votes and post-signal
+simulator exclusions; the field uses the legacy `no_vote_reasons` name
+for consistency. The stage totals reconcile with the corresponding
+overall funnel across dates. An emitted signal is not automatically a
+filled or economically profitable trade.
+
+The old completed production research archive admitted only two
+weekly near-ATM sessions and had no resolved VWAP trades. This new
+daily information can help distinguish data scarcity from structural
+strategy rejections **after the new research worker code is deployed**;
+it is not a claim of improved backtest expectancy or live profitability.
