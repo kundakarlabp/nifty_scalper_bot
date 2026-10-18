@@ -184,10 +184,10 @@ def test_multiyear_research_preserves_zero_trade_stage_funnel(monkeypatch):
 def test_causal_gate_ablation_preserves_identical_data_and_no_trade_abstention(
     monkeypatch, tmp_path
 ):
-    from scripts import research_orb_multiyear as study
     from nifty_scalper_bot.backtesting.directional_hypotheses import (
         ORB_CAUSAL_GATE_PROFILES,
     )
+    from scripts import research_orb_multiyear as study
 
     seen = []
 
