@@ -577,8 +577,7 @@ def historical_cache_inventory(
         [
             day
             for day in weekday_candidates
-            if dt.date.fromisoformat(day)
-            not in NSE_FO_HOLIDAYS_BY_YEAR[verified_year]
+            if dt.date.fromisoformat(day) not in NSE_FO_HOLIDAYS_BY_YEAR[verified_year]
         ]
         if verified_year is not None
         else None
