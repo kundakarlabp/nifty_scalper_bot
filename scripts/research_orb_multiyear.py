@@ -836,10 +836,17 @@ def summarize_orb_causal_gate_days(
         if repaired_entries > repaired_funnel["accepted_fills"]:
             raise ValueError("orb_repair_counterfactual_entries_exceed_fills")
         baseline = phase_results["without_three_vetoes"]
+        repaired_metrics = summarize(repaired_trades)
         phase_results["bounded_repair_counterfactual"] = {
             "session_count": len(sessions),
             "entry_funnel": dict(repaired_funnel),
-            "metrics": summarize(repaired_trades),
+            "metrics": repaired_metrics,
+            "exit_reasons": dict(
+                Counter(trade["exit_reason"] for trade in repaired_trades)
+            ),
+            "unresolved_exit_reasons": dict(
+                Counter(row["unresolved_reason"] for row in repaired_unresolved)
+            ),
             "unresolved_exit_count": len(repaired_unresolved),
             "primary_metrics_complete": not repaired_unresolved,
             "no_vote_reasons": dict(repaired_rejections),
@@ -853,8 +860,7 @@ def summarize_orb_causal_gate_days(
                 None
                 if repaired_unresolved or not baseline["primary_metrics_complete"]
                 else (
-                    summarize(repaired_trades)["net_pnl"]
-                    - baseline["metrics"]["net_pnl"]
+                    repaired_metrics["net_pnl"] - baseline["metrics"]["net_pnl"]
                 )
             ),
             "interpretation": (
@@ -871,6 +877,57 @@ def summarize_orb_causal_gate_days(
             result["counterfactual_only_entries"] = len(keys - reference)
         report[phase] = phase_results
     return report
+
+
+def review_orb_bounded_repair_evidence(
+    phases: dict[str, Any],
+) -> dict[str, Any]:
+    """Fail closed on negative/outstanding counterfactual research evidence.
+
+    The 2017–2020 years have been inspected repeatedly, so even favorable
+    numbers here cannot be described as a new untouched out-of-sample edge.
+    """
+    label = "bounded_repair_counterfactual"
+    observed = [phases[p][label] for p in ("development", "validation", "final")]
+    validation, final = observed[1:]
+    unresolved = sum(row["unresolved_exit_count"] for row in observed)
+    complete = unresolved == 0
+    resolved = sum(row["metrics"]["trade_count"] for row in observed)
+    gross = sum(row["metrics"]["gross_pnl"] for row in observed)
+    fees = sum(row["metrics"]["fees"] for row in observed)
+    net = sum(row["metrics"]["net_pnl"] for row in observed)
+    if resolved and (
+        validation["metrics"]["net_pnl"] <= 0
+        or final["metrics"]["net_pnl"] <= 0
+    ):
+        verdict = "REJECTED_NEGATIVE_VALIDATION_OR_FINAL_NET_PNL"
+    elif unresolved:
+        verdict = "INCONCLUSIVE_UNRESOLVED_EXITS"
+    elif not validation["metrics"]["trade_count"] or not final["metrics"]["trade_count"]:
+        verdict = "INSUFFICIENT_OUT_OF_SAMPLE_TRADES"
+    else:
+        verdict = "RESEARCH_ONLY_NOT_INDEPENDENTLY_VALIDATED"
+    return {
+        "verdict": verdict,
+        "promotion_eligible": False,
+        "outcomes_complete": complete,
+        "resolved_trades": resolved,
+        "unresolved_exits": unresolved,
+        "resolved_gross_pnl": gross,
+        "resolved_fees": fees,
+        "resolved_net_pnl": net,
+        "validation_net_pnl": validation["metrics"]["net_pnl"],
+        "final_net_pnl": final["metrics"]["net_pnl"],
+        "net_pnl_difference_vs_baseline": (
+            sum(row["paired_net_pnl_difference"] for row in observed)
+            if all(row["paired_net_pnl_difference"] is not None for row in observed)
+            else None
+        ),
+        "limitations": (
+            "Monthly-option OHLC, repeated historical inspection, no order-book "
+            "fills; unresolved trades excluded from resolved net PnL"
+        ),
+    }
 
 
 def run_orb_causal_gate_study(output: Path, workers: int) -> None:
@@ -897,6 +954,7 @@ def run_orb_causal_gate_study(output: Path, workers: int) -> None:
                 raise ValueError("orb_gate_session_identity_conflict")
             write_json(directory / f"{row['day']}.json", row)
     daily = [json.loads((directory / f"{day}.json").read_text()) for day in days]
+    phases = summarize_orb_causal_gate_days(daily)
     write_json(
         output / "orb_causal_gate_results.json",
         {
@@ -936,7 +994,10 @@ def run_orb_causal_gate_study(output: Path, workers: int) -> None:
                 "Past years previously inspected; not untouched held-out data",
                 "No strategy promotion, live settings or risk changes",
             ],
-            "phases": summarize_orb_causal_gate_days(daily),
+            "phases": phases,
+            "bounded_repair_evidence_gate": review_orb_bounded_repair_evidence(
+                phases
+            ),
         },
     )
 
