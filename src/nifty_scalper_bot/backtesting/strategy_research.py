@@ -1509,9 +1509,7 @@ def _vwap_retest_archive_coverage(
                 continue
             if timestamp.date() != active_day:
                 active_day = timestamp.date()
-                expected = timestamp.replace(
-                    hour=9, minute=15, second=0, microsecond=0
-                )
+                expected = timestamp.replace(hour=9, minute=15, second=0, microsecond=0)
                 intact = True
             bar = history[timestamp]
             intact = (
@@ -1544,9 +1542,7 @@ def _vwap_retest_archive_coverage(
 
             record(side, contract, "retest_eligible_option_bars")
             prior = timestamp - minute
-            opening = timestamp.replace(
-                hour=9, minute=15, second=0, microsecond=0
-            )
+            opening = timestamp.replace(hour=9, minute=15, second=0, microsecond=0)
             if opening not in history:
                 record(side, contract, "missing_session_open_option_bars")
             elif prior not in history:
@@ -1572,8 +1568,7 @@ def _vwap_retest_archive_coverage(
         },
         "by_contract": by_contract,
         "ready_share_of_eligible": (
-            counts["prior_vwap_ready_option_bars"] / eligible
-            if eligible else None
+            counts["prior_vwap_ready_option_bars"] / eligible if eligible else None
         ),
         "historical_selection_verified": False,
         "live_equivalent": False,
