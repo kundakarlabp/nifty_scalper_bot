@@ -515,7 +515,9 @@ def test_orb_causal_gate_profiles_change_only_predeclared_structural_vetoes(
     }
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     with pytest.raises(ValueError, match="orb_gate_ablation_requires_shadow_process"):
-        ORBCausalGateResearch(config, _HistoryEngine(_momentum_bars()), profile="combined_scaled")
+        ORBCausalGateResearch(
+            config, _HistoryEngine(_momentum_bars()), profile="combined_scaled"
+        )
 
     monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
     outcomes = {}
