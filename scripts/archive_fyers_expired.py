@@ -477,7 +477,24 @@ def main(argv: list[str] | None = None) -> int:
         help="Confirm FYERS minute label convention independently; never guess",
     )
     parser.add_argument("--max-intraday-requests", type=int, default=10)
+    parser.add_argument(
+        "--context-archive", type=Path,
+        help="Independent NSE spot and NIFTY futures archive for secondary replay",
+    )
+    parser.add_argument(
+        "--stage-output", type=Path,
+        help="Explicit destination for a validated secondary research session",
+    )
+    parser.add_argument("--historical-lot-size", type=int)
+    parser.add_argument("--lot-size-source")
     args = parser.parse_args(argv)
+    if args.context_archive is not None and (
+        args.start != args.end
+        or args.stage_output is None
+        or args.historical_lot_size is None
+        or not args.lot_size_source
+    ):
+        raise ValueError("fyers_research_stage_prerequisites_invalid")
     client_id = os.getenv("FYERS_CLIENT_ID", "")
     access_token = os.getenv("FYERS_ACCESS_TOKEN", "")
     if not client_id or not access_token:
@@ -499,12 +516,24 @@ def main(argv: list[str] | None = None) -> int:
         timestamp_convention=args.timestamp_convention,
         max_intraday_requests=args.max_intraday_requests,
     )
+    if args.context_archive is not None:
+        report["staged_secondary_research"] = stage_pair_with_verified_context(
+            args.outdir,
+            args.context_archive,
+            args.stage_output,
+            day=args.start,
+            expiry=args.expiry,
+            strike=args.strike,
+            lot_size=args.historical_lot_size,
+            lot_size_source=args.lot_size_source,
+        )
     print(
         json.dumps(
             {
                 "source": report["source"],
                 "expiry": report["expiry"],
                 "contracts": report["contracts"],
+                "staged_secondary_research": report.get("staged_secondary_research"),
                 "promotion_eligible": False,
             },
             sort_keys=True,
