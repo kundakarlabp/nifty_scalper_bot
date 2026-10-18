@@ -1608,6 +1608,7 @@ def test_research_archive_allows_token_reuse_after_expiry_on_a_later_date(tmp_pa
     assert later["symbol"] in instruments
     assert set(histories[old["symbol"]]).isdisjoint(histories[later["symbol"]])
 
+
 def test_vwap_retest_archive_coverage_distinguishes_causal_history_failures(tmp_path):
     """Count actual observed option bars, never synthetic historical trades."""
     from nifty_scalper_bot.backtesting.strategy_research import (
