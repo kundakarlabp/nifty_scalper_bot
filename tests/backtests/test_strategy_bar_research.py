@@ -2038,9 +2038,7 @@ def test_orb_weekly_atm_proxy_does_not_infer_missing_expiry_or_strike(
     assert result["evaluations"] == 8
 
 
-def test_vwap_research_isolates_all_inherited_variant_controls(
-    tmp_path, monkeypatch
-):
+def test_vwap_research_isolates_all_inherited_variant_controls(tmp_path, monkeypatch):
     """The named research arms must not inherit another run's entry thresholds."""
     import os
 
@@ -2083,8 +2081,7 @@ def test_vwap_research_isolates_all_inherited_variant_controls(
             for key in injected:
                 assert observation[key] == candidate["environment_overrides"].get(key)
     assert all(
-        report["baseline_environment"][key] == value
-        for key, value in injected.items()
+        report["baseline_environment"][key] == value for key, value in injected.items()
     )
     assert dict(os.environ) == before
 
