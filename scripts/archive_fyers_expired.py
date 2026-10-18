@@ -202,7 +202,11 @@ def collect_expired_pair(
     Selection of the strike is user-specified, NOT a proven historical ATM
     basket. Save provider evidence separate from the canonical replay tree.
     """
-    if not start <= end <= expiry or end >= dt.datetime.now(IST).date():
+    if (
+        not start <= end <= expiry
+        or expiry >= dt.datetime.now(IST).date()
+        or end >= dt.datetime.now(IST).date()
+    ):
         raise ValueError("fyers_historical_date_range_invalid")
     if type(max_intraday_requests) is not int or not 2 <= max_intraday_requests <= 100:
         raise ValueError("fyers_intraday_request_budget_invalid")
@@ -238,7 +242,8 @@ def collect_expired_pair(
                 or cached.get("expiry") != expiry.isoformat()
                 or cached.get("strike") != strike
                 or cached.get("requested_period") != report["requested_period"]
-                or cached.get("timestamp_convention") != timestamp_convention
+                or cached.get("source_timestamp_convention") != timestamp_convention
+                or cached.get("timestamp_convention") != "bar_start"
                 or cached.get("sha256") != _stable_digest(cached.get("candles"))
             ):
                 raise ValueError("fyers_historical_archive_conflict")
@@ -280,7 +285,10 @@ def collect_expired_pair(
             "strike": strike,
             "side": side,
             "requested_period": report["requested_period"],
-            "timestamp_convention": timestamp_convention,
+            # Normalized timestamps always mark completed-minute starts,
+            # independently of how the provider labelled its original epoch.
+            "source_timestamp_convention": timestamp_convention,
+            "timestamp_convention": "bar_start",
             "source_columns": response["columns"],
             "candles": candles,
             "sha256": _stable_digest(candles),
@@ -349,6 +357,8 @@ def stage_pair_with_verified_context(
             or payload.get("strike") != strike
             or payload.get("side") != side
             or payload.get("timestamp_convention") != "bar_start"
+            or payload.get("source_timestamp_convention")
+            != manifest["timestamp_convention"]
             or payload.get("sha256") != _stable_digest(payload.get("candles"))
         ):
             raise ValueError("fyers_research_stage_source_untrusted")
