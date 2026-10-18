@@ -5,7 +5,6 @@ import json
 from zoneinfo import ZoneInfo
 
 import pytest
-
 from scripts.archive_fyers_expired import (
     collect_expired_pair,
     discover_pair,
