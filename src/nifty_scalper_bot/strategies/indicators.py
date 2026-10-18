@@ -1090,9 +1090,7 @@ class IndicatorEngine:
             "stale": True,
         }
 
-    def get_session_vwap_at(
-        self, symbol: str, timestamp: datetime
-    ) -> float | None:
+    def get_session_vwap_at(self, symbol: str, timestamp: datetime) -> float | None:
         """Return completed-bar session VWAP *as of* this exact bar, never later.
 
         Used by the optional VWAP retest research path. Missing session-open
@@ -1115,15 +1113,14 @@ class IndicatorEngine:
                 stamp = row.get("timestamp")
                 if not isinstance(stamp, datetime):
                     continue
-                observed = stamp if stamp.tzinfo else stamp.replace(
-                    tzinfo=timezone.utc
-                )
+                observed = stamp if stamp.tzinfo else stamp.replace(tzinfo=timezone.utc)
                 observed = observed.astimezone(timezone.utc)
                 if not session_open <= observed <= at:
                     continue
-                if row.get("is_complete") is not True or row.get(
-                    "is_provisional"
-                ) is True:
+                if (
+                    row.get("is_complete") is not True
+                    or row.get("is_provisional") is True
+                ):
                     if observed == at:
                         return None
                     continue
