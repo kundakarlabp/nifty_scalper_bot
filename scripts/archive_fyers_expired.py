@@ -15,6 +15,7 @@ import json
 import math
 import os
 import re
+import tempfile
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -297,6 +298,159 @@ def collect_expired_pair(
     manifest = outdir / "fyers_expired" / expiry.isoformat() / "collection.json"
     manifest.write_text(json.dumps(report, indent=2, sort_keys=True))
     return report
+
+
+def stage_pair_with_verified_context(
+    provider_root: Path,
+    context_directory: Path,
+    destination: Path,
+    *,
+    day: dt.date,
+    expiry: dt.date,
+    strike: int,
+    lot_size: int,
+    lot_size_source: str,
+    min_synchronized_minutes: int = 60,
+) -> dict[str, Any]:
+    """Bridge imported options into the existing *secondary* bar research format.
+
+    Requires independent real spot and futures candles, a supplied historical
+    lot size with provenance, and synchronized completed-minute data. No
+    fabricated instruments/tokens or inferred historical ATM basket allowed.
+    """
+    from nifty_scalper_bot.backtesting.strategy_research import load_archive
+
+    if (
+        type(lot_size) is not int
+        or lot_size <= 0
+        or not lot_size_source.strip()
+        or not 1 <= min_synchronized_minutes <= 375
+        or not day <= expiry
+        or destination.exists()
+    ):
+        raise ValueError("fyers_research_stage_prerequisites_invalid")
+    manifest_file = provider_root / "fyers_expired" / expiry.isoformat() / "collection.json"
+    manifest = json.loads(manifest_file.read_text())
+    if manifest.get("expiry") != expiry.isoformat() or manifest.get("strike") != strike:
+        raise ValueError("fyers_research_stage_identity_conflict")
+    normalized: dict[str, dict[str, Any]] = {}
+    for side in ("CE", "PE"):
+        item = manifest["contracts"][side]
+        if item.get("status") not in {"archived", "cached"}:
+            raise ValueError("fyers_research_stage_option_data_missing")
+        path = provider_root / item["path"]
+        if path.resolve().is_relative_to(provider_root.resolve()) is False:
+            raise ValueError("fyers_research_stage_path_invalid")
+        payload = json.loads(path.read_text())
+        if (
+            payload.get("source") != "fyers_expired_fo"
+            or payload.get("symbol") != manifest["provider_contract_symbols"][side]
+            or payload.get("expiry") != expiry.isoformat()
+            or payload.get("strike") != strike
+            or payload.get("side") != side
+            or payload.get("timestamp_convention") != "bar_start"
+            or payload.get("sha256") != _stable_digest(payload.get("candles"))
+        ):
+            raise ValueError("fyers_research_stage_source_untrusted")
+        symbol = "NFO:" + payload["symbol"].split(":", 1)[1]
+        normalized[symbol] = {
+            "symbol": symbol,
+            "timestamp_convention": "bar_start",
+            "source": "fyers_expired_fo",
+            "provider_symbol": payload["symbol"],
+            "provider_sha256": payload["sha256"],
+            "instrument": {
+                "exchange": "NFO",
+                "tradingsymbol": symbol.split(":", 1)[1],
+                "instrument_type": side,
+                "name": "NIFTY",
+                "expiry": expiry.isoformat(),
+                "strike": strike,
+                "lot_size": lot_size,
+                "historical_lot_size_source": lot_size_source,
+            },
+            "candles": [
+                bar for bar in payload["candles"]
+                if dt.datetime.fromisoformat(bar[0]).date() == day
+            ],
+        }
+    context: dict[str, dict[str, Any]] = {}
+    for source in sorted((context_directory / "candles").glob("*.json")):
+        raw = json.loads(source.read_text())
+        symbol = raw.get("symbol")
+        if symbol != "NSE:NIFTY 50" and raw.get("instrument", {}).get(
+            "instrument_type"
+        ) != "FUT":
+            continue
+        if (
+            raw.get("timestamp_convention") != "bar_start"
+            or raw.get("instrument", {}).get("instrument_type") not in {"EQ", "FUT"}
+        ):
+            raise ValueError("fyers_research_context_untrusted")
+        if symbol in context:
+            raise ValueError("fyers_research_context_identity_ambiguous")
+        if raw["instrument"]["instrument_type"] == "FUT":
+            if not symbol.startswith("NFO:NIFTY") or dt.date.fromisoformat(
+                str(raw["instrument"]["expiry"])
+            ) < day:
+                raise ValueError("fyers_research_context_future_invalid")
+        context[symbol] = {
+            **raw,
+            "candles": [
+                bar for bar in raw["candles"]
+                if dt.datetime.fromisoformat(str(bar[0])).date() == day
+            ],
+        }
+    futures = [
+        symbol for symbol in context
+        if context[symbol]["instrument"]["instrument_type"] == "FUT"
+    ]
+    if len(futures) != 1 or "NSE:NIFTY 50" not in context:
+        raise ValueError("fyers_research_context_missing_or_ambiguous")
+    all_candles = {**context, **normalized}
+    if any(not payload["candles"] for payload in all_candles.values()):
+        raise ValueError("fyers_research_stage_empty_participant")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=destination.parent) as temporary:
+        staging = Path(temporary) / "session"
+        for symbol, payload in all_candles.items():
+            name = symbol.replace(":", "_").replace(" ", "_") + ".json"
+            _write_once(staging / "candles" / name, payload)
+        histories, _, digest = load_archive(staging)
+        synchronized = set.intersection(
+            *(set(history) for history in histories.values())
+        )
+        anchors = sorted(
+            stamp for stamp in synchronized
+            if stamp.date() == day
+            and dt.time(9, 30) <= stamp.time() <= dt.time(9, 45)
+        )
+        if not any(
+            all(
+                anchor + dt.timedelta(minutes=offset) in synchronized
+                for offset in range(min_synchronized_minutes)
+            )
+            for anchor in anchors
+        ):
+            raise ValueError("fyers_research_stage_synchronized_minutes_missing")
+        result = {
+            "source": "fyers_expired_fo_plus_independent_spot_future",
+            "evidence_label": "RESEARCH_CANDIDATE",
+            "session": day.isoformat(),
+            "expiry": expiry.isoformat(),
+            "strike": strike,
+            "lot_size": lot_size,
+            "lot_size_source": lot_size_source,
+            "data_sha256": digest,
+            "minimum_synchronized_minutes": min_synchronized_minutes,
+            "historical_atm_selection_verified": False,
+            "historical_order_book_depth_available": False,
+            "live_equivalent": False,
+            "promotion_eligible": False,
+        }
+        _write_once(staging / "provenance.json", result)
+        staging.rename(destination)
+    return result
 
 
 def main(argv: list[str] | None = None) -> int:
