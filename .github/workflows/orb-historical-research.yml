@@ -482,7 +482,7 @@ jobs:
             ${{ env.STUDY_DIR }}/data_manifest.json
             ${{ env.STUDY_DIR }}/fixed_hypothesis_results.json
 
-causal-orb-gate-study:
+  causal-orb-gate-study:
     # Research only: six predeclared counterfactuals on identical historical
     # option contracts. Never runs on live hosts or modifies settings.
     if: github.event_name == 'push'
