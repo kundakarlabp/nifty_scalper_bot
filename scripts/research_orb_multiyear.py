@@ -659,6 +659,7 @@ def run_orb_causal_gate_day(task: tuple[str, str]) -> dict[str, Any]:
                     "no_vote_reasons",
                     "structural_gate_failures",
                     "orb_admission_economics",
+                    "orb_bounded_target_repair",
                     "trades",
                     "unresolved_trades",
                 )
@@ -699,6 +700,7 @@ def summarize_orb_causal_gate_days(
             rejects: Counter[str] = Counter()
             structure: Counter[str] = Counter()
             economics: Counter[str] = Counter()
+            bounded_target_repair: Counter[str] = Counter()
             for session in sessions:
                 if set(session["arms"]) != set(ORB_CAUSAL_GATE_PROFILES):
                     raise ValueError("orb_gate_session_incomplete")
@@ -709,6 +711,9 @@ def summarize_orb_causal_gate_days(
                 rejects.update(observed["no_vote_reasons"])
                 structure.update(observed["structural_gate_failures"])
                 economics.update(observed.get("orb_admission_economics", {}))
+                bounded_target_repair.update(
+                    observed.get("orb_bounded_target_repair", {})
+                )
             # Every next-bar intent must terminate at exactly one documented
             # stage, never disappear at the session boundary. A missing stage
             # is a research-integrity failure, not an absence of opportunity.
@@ -736,6 +741,8 @@ def summarize_orb_causal_gate_days(
                 + economics["gross_payoff_below_minimum"]
             ):
                 raise ValueError("orb_economic_rejection_classification_incomplete")
+            if economics["rejected"] != sum(bounded_target_repair.values()):
+                raise ValueError("orb_cost_repair_diagnostic_not_conserved")
             phase_results[profile] = {
                 "session_count": len(sessions),
                 "entry_funnel": dict(funnel),
@@ -757,6 +764,18 @@ def summarize_orb_causal_gate_days(
                     "nonpositive_net_target_reward": economics[
                         "net_reward_nonpositive"
                     ],
+                    # Only theoretical bounded target viability, not simulated
+                    # fills, PnL or proof of reachable targets.
+                    "bounded_target_repair_viable": bounded_target_repair["viable"],
+                    "bounded_target_repair_not_viable": bounded_target_repair[
+                        "not_viable"
+                    ],
+                    "bounded_target_repair_threshold_mismatch": bounded_target_repair[
+                        "threshold_mismatch"
+                    ],
+                    "bounded_target_repair_scope": (
+                        "canonical_target_only_theoretical_viability_no_fill_claim"
+                    ),
                     "conserved": True,
                 },
                 "metrics": summarize(trades),
@@ -835,6 +854,7 @@ def run_orb_causal_gate_study(output: Path, workers: int) -> None:
                 "retest, futures-volume, VWAP slope and entry geometry filters",
                 "Monthly archive basket and timestamp identity not live-equivalent",
                 "Only 10-bps modeled fills; cannot validate execution quality",
+                "Target-repair viability is theoretical, not a target-hit simulation",
                 "Past years previously inspected; not untouched held-out data",
                 "No strategy promotion, live settings or risk changes",
             ],

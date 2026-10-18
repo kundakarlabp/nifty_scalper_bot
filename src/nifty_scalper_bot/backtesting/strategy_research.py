@@ -15,6 +15,7 @@ from collections import Counter
 from dataclasses import asdict, replace
 from datetime import datetime, time, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
@@ -31,7 +32,9 @@ from nifty_scalper_bot.core.underlying_direction import (
 from nifty_scalper_bot.risk.cost_model import (
     estimate_round_trip_cost,
     evaluate_net_reward_risk,
+    minimum_net_reward_risk,
 )
+from nifty_scalper_bot.risk.net_rr_gate import minimum_target_for_net_rr
 from nifty_scalper_bot.strategies.elite_strategies.builder import build_elite_strategies
 from nifty_scalper_bot.strategies.indicators import IndicatorEngine
 from nifty_scalper_bot.strategies.premium_risk_geometry import (
@@ -591,6 +594,56 @@ def _historical_weekly_atm_evaluability(
     }
 
 
+def _orb_bounded_target_repair_viable(
+    *,
+    symbol: str,
+    entry: float,
+    stop: float,
+    target: float,
+    quantity: int,
+    slippage: float,
+    required_net_rr: float,
+) -> bool | None:
+    """Diagnose *possible* canonical target repair without changing an entry.
+
+    Research's slippage is already embedded in the simulated entry and exit
+    prices. Pass those executed-price equivalents to the live target-repair
+    helper with an explicitly zero-spread synthetic quote to avoid charging
+    another spread. This is a bar-data viability diagnostic, NOT an executable
+    bid/ask quote or a claim that the higher target could be reached.
+
+    The live helper owns its configured minimum, so abstain rather than compare
+    against a different research-only threshold.
+    """
+    if abs(required_net_rr - minimum_net_reward_risk()) > 1e-9:
+        return None
+    stop_proceeds = stop * (1.0 - slippage)
+    target_proceeds = target * (1.0 - slippage)
+    if not 0.0 < stop_proceeds < entry < target_proceeds:
+        return False
+    # A quoted spread of zero is intentional: modeled OHLC-side slippage has
+    # already been applied to both reference exit prices.
+    probe = SimpleNamespace(
+        symbol=symbol,
+        action="BUY",
+        quantity=quantity,
+        entry_price=entry,
+        stop_loss=stop_proceeds,
+        take_profit=target_proceeds,
+        metadata={"bid": entry, "ask": entry},
+    )
+    repaired = minimum_target_for_net_rr(probe)
+    if repaired is None or repaired <= target_proceeds:
+        return False
+    verified = evaluate_net_reward_risk(
+        entry_price=entry,
+        stop_price=stop_proceeds,
+        target_price=repaired,
+        quantity=quantity,
+    )
+    return bool(verified.net_rr + 1e-9 >= required_net_rr)
+
+
 def _scenario(
     histories: dict[str, dict[datetime, dict[str, Any]]],
     instruments: dict[str, dict[str, Any]],
@@ -634,6 +687,7 @@ def _scenario(
     evaluated: Counter[str] = Counter()
     entry_funnels: dict[str, Counter[str]] = {}
     orb_admission_economics: Counter[str] = Counter()
+    orb_bounded_target_repair: Counter[str] = Counter()
     # Per-session attribution is diagnostic only; never used for fills or
     # strategy admission. Aggregate counters remain the accounting source.
     vwap_daily_funnel: dict[str, Counter[str]] = {}
@@ -893,6 +947,22 @@ def _scenario(
                             orb_admission_economics["gross_payoff_below_minimum"] += 1
                         if economics.net_reward <= 0:
                             orb_admission_economics["net_reward_nonpositive"] += 1
+                        viable = _orb_bounded_target_repair_viable(
+                            symbol=key[1],
+                            entry=entry,
+                            stop=stop_loss,
+                            target=take_profit,
+                            quantity=quantity,
+                            slippage=slip,
+                            required_net_rr=minimum_net_rr,
+                        )
+                        orb_bounded_target_repair[
+                            (
+                                "threshold_mismatch"
+                                if viable is None
+                                else "viable" if viable else "not_viable"
+                            )
+                        ] += 1
                     else:
                         orb_admission_economics["passed"] += 1
                 if economics.net_rr < minimum_net_rr:
@@ -1419,6 +1489,9 @@ def _scenario(
                 "no_vote_reasons": dict(rejections[name]),
                 "orb_admission_economics": (
                     dict(orb_admission_economics) if name == "ORBPro" else {}
+                ),
+                "orb_bounded_target_repair": (
+                    dict(orb_bounded_target_repair) if name == "ORBPro" else {}
                 ),
                 "daily_diagnostics": (
                     {

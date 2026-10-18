@@ -212,6 +212,87 @@ def test_orb_cost_gate_reports_gross_payoff_eroded_by_transaction_costs(
     assert economics.get("gross_payoff_below_minimum", 0) == 0
 
 
+def test_research_canonical_target_repair_is_diagnostic_not_a_trade(
+    tmp_path, monkeypatch
+):
+    from nifty_scalper_bot.backtesting.strategy_research import (
+        _orb_bounded_target_repair_viable,
+        _scenario,
+        load_archive,
+    )
+    from nifty_scalper_bot.config.settings import get_settings
+
+    monkeypatch.setenv("MIN_NET_REWARD_RISK", "1.5")
+    monkeypatch.delenv("MAX_NET_RR_TARGET_UPLIFT_R", raising=False)
+    monkeypatch.delenv("MAX_NET_RR_TARGET_UPLIFT_PCT", raising=False)
+
+    assert _orb_bounded_target_repair_viable(
+        symbol="NFO:NIFTY26O0622400CE",
+        entry=100,
+        stop=95,
+        target=109,
+        quantity=75,
+        slippage=0,
+        required_net_rr=1.5,
+    )
+    assert (
+        _orb_bounded_target_repair_viable(
+            symbol="NFO:NIFTY26O0622400CE",
+            entry=100,
+            stop=95,
+            target=109,
+            quantity=75,
+            slippage=0,
+            required_net_rr=2.0,
+        )
+        is None
+    )
+    monkeypatch.setenv("MAX_NET_RR_TARGET_UPLIFT_R", "0")
+    assert not _orb_bounded_target_repair_viable(
+        symbol="NFO:NIFTY26O0622400CE",
+        entry=100,
+        stop=95,
+        target=109,
+        quantity=75,
+        slippage=0,
+        required_net_rr=1.5,
+    )
+
+    # Restoring the canonical bound must leave the executed research ledger
+    # unchanged: a theoretically higher target is NOT a historical fill.
+    monkeypatch.delenv("MAX_NET_RR_TARGET_UPLIFT_R", raising=False)
+    archive(tmp_path)
+
+    class Strategy:
+        name = "ORBPro"
+
+        @property
+        def evaluation_health(self):
+            return {"healthy": True}
+
+        def generate_signal(self, symbol, indicators, current_price, position=None):
+            if symbol.endswith("CE") and indicators["history_count"] == 1:
+                return SimpleNamespace(
+                    action="BUY", stop_loss=95, take_profit=109, metadata={}
+                )
+            return None
+
+    histories, instruments, _ = load_archive(tmp_path)
+    result = _scenario(
+        histories,
+        instruments,
+        get_settings().elite,
+        0,
+        components={"ORBPro"},
+        minimum_net_rr=1.5,
+        strategy_factory=lambda engine: [Strategy()],
+    )["strategies"]["ORBPro"]
+    assert result["trades"] == []
+    assert result["entry_funnel"]["accepted_fills"] == 0
+    assert result["orb_admission_economics"]["rejected"] == 1
+    assert result["orb_bounded_target_repair"] == {"viable": 1}
+
+
 def test_terminal_orb_intent_cannot_disappear_without_an_execution_disposition(
     tmp_path,
 ):
