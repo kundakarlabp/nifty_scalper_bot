@@ -129,6 +129,7 @@ def test_historical_session_vwap_requires_exact_finalized_target_bar():
     assert engine.get_session_vwap_at(symbol, second[0] + timedelta(minutes=1)) is None
     assert engine.get_session_vwap_at(symbol, first[0]) == pytest.approx(100)
 
+
 def test_historical_session_vwap_rejects_missing_intermediate_minute():
     symbol = "NFO:NIFTY2680424400CE"
     bars = [_session_bar(0, 100.0, 100), _session_bar(2, 200.0, 100)]
