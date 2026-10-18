@@ -1692,7 +1692,6 @@ def test_vwap_comparison_exposes_archive_coverage_without_changing_scenario(
     )
     assert report["selection"]["promotion_eligible"] is False
 
-
 @pytest.mark.parametrize(
     ("days", "development_days", "holdout_days", "expected_status"),
     [

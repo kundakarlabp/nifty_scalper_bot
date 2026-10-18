@@ -361,7 +361,6 @@ confirmation of historical efficacy, rather than a suggestion to
 disable safety gates. This is engineering/data-quality work, not a
 claim of positive after-cost returns.
 
-
 ## 2026-10-18: block sparse-session VWAP research rankings
 
 A read-only check of the already completed production research job

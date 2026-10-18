@@ -675,3 +675,63 @@ def test_retained_stage_rejects_token_collision_in_unselected_option(tmp_path):
         "historical_source_untrusted_or_conflicting"
     )
     assert not (destination / "2026-10-12").exists()
+
+
+def test_retained_inventory_exposes_unobserved_weekdays_without_inventing_holidays(
+    tmp_path,
+):
+    """Observed-day-only summaries must not hide gaps in the requested range."""
+    candles = tmp_path / "cache" / "candles"
+    candles.mkdir(parents=True)
+    rows = [
+        _retained_session_payload("NSE:NIFTY 50", "EQ", 100),
+        _retained_session_payload("NFO:NIFTY26OCTFUT", "FUT", 101, expiry="2026-10-27"),
+        _retained_session_payload("NFO:NIFTY26O1322500CE", "CE", 102, strike=22500),
+        _retained_session_payload("NFO:NIFTY26O1322500PE", "PE", 103, strike=22500),
+    ]
+    for index, payload in enumerate(rows):
+        (candles / f"{index}.json").write_text(json.dumps(payload))
+
+    report = collector.historical_cache_inventory(
+        tmp_path / "cache",
+        dt.date(2026, 10, 12),
+        dt.date(2026, 10, 18),
+        stage_dir=tmp_path / "staged",
+        min_synchronized_minutes=3,
+    )
+    assert report["staged_session_dates"] == ["2026-10-12"]
+    assert report["weekday_candidate_dates"] == [
+        "2026-10-12",
+        "2026-10-13",
+        "2026-10-14",
+        "2026-10-15",
+        "2026-10-16",
+    ]
+    assert report["observed_weekday_dates"] == ["2026-10-12"]
+    assert report["unobserved_weekday_dates"] == [
+        "2026-10-13",
+        "2026-10-14",
+        "2026-10-15",
+        "2026-10-16",
+    ]
+    assert report["weekday_dates_without_replay_stage"] == [
+        "2026-10-13",
+        "2026-10-14",
+        "2026-10-15",
+        "2026-10-16",
+    ]
+    assert report["weekday_coverage_is_exchange_calendar"] is False
+    assert report["promotion_eligible"] is False
+
+
+def test_retained_inventory_empty_weekday_window_reports_absence(tmp_path):
+    report = collector.historical_cache_inventory(
+        tmp_path,
+        dt.date(2026, 10, 10),
+        dt.date(2026, 10, 13),
+    )
+    assert report["sessions"] == []
+    assert report["weekday_candidate_dates"] == ["2026-10-12", "2026-10-13"]
+    assert report["observed_weekday_dates"] == []
+    assert report["unobserved_weekday_dates"] == ["2026-10-12", "2026-10-13"]
+    assert report["weekday_dates_without_replay_stage"] is None
