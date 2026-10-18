@@ -245,9 +245,7 @@ def test_causal_gate_ablation_preserves_identical_data_and_no_trade_abstention(
         "gross_pass_net_fail": 2,
     }
     attributed = study.summarize_orb_causal_gate_days([row])
-    economics = attributed["development"]["without_three_vetoes"][
-        "admission_economics"
-    ]
+    economics = attributed["development"]["without_three_vetoes"]["admission_economics"]
     assert economics["conserved"] is True
     assert economics["cost_rejection_pct"] == pytest.approx(66.67)
     assert economics["gross_payoff_passed_but_net_failed"] == 2
