@@ -658,6 +658,7 @@ def run_orb_causal_gate_day(task: tuple[str, str]) -> dict[str, Any]:
                     "data_quality",
                     "no_vote_reasons",
                     "structural_gate_failures",
+                    "orb_admission_economics",
                     "trades",
                     "unresolved_trades",
                 )
@@ -697,6 +698,7 @@ def summarize_orb_causal_gate_days(
             funnel: Counter[str] = Counter()
             rejects: Counter[str] = Counter()
             structure: Counter[str] = Counter()
+            economics: Counter[str] = Counter()
             for session in sessions:
                 if set(session["arms"]) != set(ORB_CAUSAL_GATE_PROFILES):
                     raise ValueError("orb_gate_session_incomplete")
@@ -706,9 +708,59 @@ def summarize_orb_causal_gate_days(
                 funnel.update(observed["entry_funnel"])
                 rejects.update(observed["no_vote_reasons"])
                 structure.update(observed["structural_gate_failures"])
+                economics.update(observed.get("orb_admission_economics", {}))
+            # Every next-bar intent must terminate at exactly one documented
+            # stage, never disappear at the session boundary. A missing stage
+            # is a research-integrity failure, not an absence of opportunity.
+            post_signal_reasons = {
+                name: rejects[name]
+                for name in (
+                    "next_minute_unavailable",
+                    "next_minute_has_no_trades",
+                    "gap_invalidates_geometry",
+                    "cost_net_rr_rejected",
+                )
+            }
+            accepted = funnel["accepted_fills"]
+            intents = funnel["next_bar_intents"]
+            if intents != accepted + sum(post_signal_reasons.values()):
+                raise ValueError("orb_admission_funnel_not_conserved")
+            if economics["evaluated"] != (
+                economics["rejected"] + economics["passed"]
+            ):
+                raise ValueError("orb_economic_funnel_not_conserved")
+            if economics["rejected"] != post_signal_reasons["cost_net_rr_rejected"]:
+                raise ValueError("orb_economic_gate_rejection_mismatch")
+            if economics["passed"] != accepted:
+                raise ValueError("orb_economic_gate_pass_mismatch")
+            if economics["rejected"] != (
+                economics["gross_pass_net_fail"]
+                + economics["gross_payoff_below_minimum"]
+            ):
+                raise ValueError("orb_economic_rejection_classification_incomplete")
             phase_results[profile] = {
                 "session_count": len(sessions),
                 "entry_funnel": dict(funnel),
+                "admission_economics": {
+                    "post_signal_rejections": post_signal_reasons,
+                    "next_bar_intents": intents,
+                    "accepted_fills": accepted,
+                    "cost_rejection_pct": (
+                        round(100.0 * economics["rejected"] / intents, 2)
+                        if intents
+                        else None
+                    ),
+                    "gross_payoff_passed_but_net_failed": economics[
+                        "gross_pass_net_fail"
+                    ],
+                    "gross_payoff_below_minimum": economics[
+                        "gross_payoff_below_minimum"
+                    ],
+                    "nonpositive_net_target_reward": economics[
+                        "net_reward_nonpositive"
+                    ],
+                    "conserved": True,
+                },
                 "metrics": summarize(trades),
                 "unresolved_exit_count": len(unresolved),
                 "primary_metrics_complete": not unresolved,
