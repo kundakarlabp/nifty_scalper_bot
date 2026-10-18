@@ -1773,8 +1773,7 @@ def test_vwap_research_identifies_no_trades_without_zero_profitability_claim(
     report = strategy_research.run_vwap_comparison(tmp_path)
     assert report["sample_sufficiency"]["max_development_resolved_trades"] == 0
     assert (
-        "NO_RESOLVED_DEVELOPMENT_TRADES"
-        in report["sample_sufficiency"]["reason_codes"]
+        "NO_RESOLVED_DEVELOPMENT_TRADES" in report["sample_sufficiency"]["reason_codes"]
     )
     assert report["selection"]["development_ranking"] == []
     assert report["selection"]["selected_for_live"] is None
