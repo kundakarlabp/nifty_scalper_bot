@@ -1712,9 +1712,13 @@ def run_vwap_comparison(directory: Path) -> dict[str, Any]:
     holdout_days = quality.get("holdout_eligible_session_count")
     minimum_days, minimum_dev_days, minimum_hold_days = 10, 8, 2
     reason_codes = []
-    if any(
-        not isinstance(count, int) or isinstance(count, bool)
-        for count in (total_days, development_days, holdout_days)
+    if (
+        not isinstance(total_days, int)
+        or isinstance(total_days, bool)
+        or not isinstance(development_days, int)
+        or isinstance(development_days, bool)
+        or not isinstance(holdout_days, int)
+        or isinstance(holdout_days, bool)
     ):
         reason_codes.append("HISTORICAL_SESSION_COVERAGE_NOT_MEASURED")
         sample_status = "coverage_not_measured"
