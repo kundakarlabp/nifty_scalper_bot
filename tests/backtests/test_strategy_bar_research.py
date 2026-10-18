@@ -2763,3 +2763,79 @@ def test_smc_structural_exit_research_refuses_live_process(tmp_path, monkeypatch
             components={"SMC"},
             smc_exit_policy="structural_close_with_premium_guard",
         )
+
+
+def test_smc_structural_exit_global_minute_gap_cannot_credit_later_target(
+    tmp_path,
+):
+    """A missing entire minute must not silently erase a scheduled SMC exit."""
+    from nifty_scalper_bot.backtesting.strategy_research import _scenario, load_archive
+    from nifty_scalper_bot.config.settings import get_settings
+
+    archive(tmp_path)
+    for path in (tmp_path / "candles").glob("*.json"):
+        payload = json.loads(path.read_text())
+        kind = payload["instrument"]["instrument_type"]
+        if kind == "FUT":
+            payload["candles"][1][4] = 98.0
+        if kind == "CE":
+            payload["candles"][1][1:] = [100, 103, 97, 100, 1000]
+            payload["candles"][3][1:] = [100, 115, 95, 110, 1000]
+        # No contract or underlying has a candle for minute 09:32.
+        payload["candles"].pop(2)
+        path.write_text(json.dumps(payload))
+
+    class Strategy:
+        name = "SMC"
+
+        def generate_signal(self, symbol, indicators, current_price, position=None):
+            if not symbol.endswith("CE") or indicators["history_count"] != 1:
+                return None
+            return SimpleNamespace(
+                action="BUY",
+                stop_loss=90.0,
+                take_profit=110.0,
+                metadata={
+                    "setup_id": "smc-missing-global-minute",
+                    "structure_symbol": "NFO:NIFTY26OCTFUT",
+                    "contract_side": "CE",
+                    "underlying_invalidation_level": 99.0,
+                },
+            )
+
+        @property
+        def evaluation_health(self):
+            return {"healthy": True}
+
+        def notify_entry_accepted(self, side, *, setup_id=None):
+            pass
+
+    histories, instruments, _ = load_archive(tmp_path)
+
+    def evaluate(policy):
+        return _scenario(
+            histories,
+            instruments,
+            get_settings().elite,
+            0.0,
+            components={"SMC"},
+            strategy_factory=lambda engine: [Strategy()],
+            smc_exit_policy=policy,
+        )["strategies"]["SMC"]
+
+    baseline = evaluate("premium")
+    structural = evaluate("structural_close_with_premium_guard")
+
+    assert len(baseline["trades"]) == 1
+    assert baseline["trades"][0]["exit_reason"] == "target"
+    assert structural["entry_funnel"]["accepted_fills"] == 1
+    assert structural["trades"] == []
+    assert structural["data_quality"]["primary_metrics_complete"] is False
+    assert structural["data_quality"]["unresolved_exit_count"] == 1
+    assert structural["unresolved_trades"][0]["unresolved_reason"] == (
+        "smc_structural_exit_minute_gap_unresolved"
+    )
+    assert (
+        structural["smc_exit_diagnostics"]["structural_unpriced_exit_gaps"] == 1
+    )
+    assert structural["worst_case_stress_trades"][0]["net_pnl"] < 0
