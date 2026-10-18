@@ -82,3 +82,34 @@ def test_internal_code_does_not_import_legacy_backtest_namespace() -> None:
                 ):
                     offenders.append((str(path.relative_to(ROOT)), module))
     assert offenders == []
+
+
+def test_runtime_plotly_and_prometheus_do_not_resolve_to_local_stubs() -> None:
+    import plotly
+    import prometheus_client
+
+    for module in (plotly, prometheus_client):
+        location = Path(module.__file__).resolve()
+        assert not location.is_relative_to(ROOT / "src"), location
+
+
+def test_real_plotly_charts_and_prometheus_exposition_work() -> None:
+    from plotly import graph_objects as go
+    from plotly.offline import plot
+    from prometheus_client import CollectorRegistry, Counter, generate_latest
+
+    html = plot(
+        go.Figure(data=[go.Scatter(x=[0, 1], y=[1, 2])]),
+        include_plotlyjs="cdn",
+        output_type="div",
+    )
+    assert "Plotly.newPlot" in html
+
+    registry = CollectorRegistry()
+    metric = Counter(
+        "nifty_dependency_probe_total",
+        "Verifies real Prometheus output",
+        registry=registry,
+    )
+    metric.inc()
+    assert b"nifty_dependency_probe_total" in generate_latest(registry)

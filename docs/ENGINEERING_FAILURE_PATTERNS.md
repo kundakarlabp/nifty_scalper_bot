@@ -179,6 +179,34 @@ Focused test → adjacent suite → full suite. Compare the failure signature ac
 
 Run `scripts/agent_task.py merge-check --validated-base <sha> --validated-head <sha>` immediately before merge. It fails closed when the target base or validated head moved.
 
+### SEC-001 — Admin HTML includes unescaped user input
+
+**Failure signature:** Reflected XSS when query parameters such as `msg`
+or `contains` are interpolated into server-rendered HTML, including HTML
+attributes.
+
+**Prevention:** Escape every untrusted value with `html.escape()` at the HTML
+output boundary (including attributes). Prefer templates with contextual
+auto-escaping for new HTML surfaces. Do not assume authenticated operator
+inputs are safe.
+
+**Earliest detector:** A focused admin/dashboard test supplies HTML metacharacters
+in query strings and checks that the rendered response does not execute markup.
+
+### DEP-001 — Test stub shadows an installed runtime dependency
+
+**Failure signature:** A local `src/<third_party_package>/` package resolves
+before the real installed package and silently substitutes placeholder charts,
+empty metrics, or other test behavior in production or editable installs.
+
+**Prevention:** Keep third-party test fakes under test-only paths and inject them
+through explicit fixtures. Declare directly imported runtime libraries in
+`pyproject.toml`, and verify the real package resolves through the production
+import path. Do not place fake third-party packages under `src/`.
+
+**Earliest detector:** `tests/architecture/test_backtesting_namespace.py`
+verifies both import resolution and actual Plotly/Prometheus output.
+
 ## Recurring bot-engineering patterns
 
 These are routing fingerprints, not duplicated architecture specifications. Follow the linked owner/skill for the detailed procedure.

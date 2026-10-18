@@ -1,8 +1,11 @@
 # Nifty Scalper Bot — AWS Lightsail Operations
 
 AWS Lightsail is the production deployment authority. The trading engine runs as
-`niftybot` on port `8080`; the read-only Streamlit operations console runs as
-`niftybot-streamlit` on port `8501`.
+`niftybot` on port `8080`; the lightweight admin-control service runs as
+`niftybot-admin` on port `8081`; the separate read-only Streamlit operations
+console runs as `niftybot-streamlit` on port `8501`. Admin controls and the
+read-only review page are isolated processes; neither overwrites unspecified
+external environment settings.
 
 ## Secret-storage boundary
 
@@ -31,6 +34,11 @@ fi
 
 bash deploy/lightsail_setup.sh
 ```
+
+For a previously installed instance that only needs the isolated Streamlit
+console installed, run `bash deploy/scripts/install_streamlit_console.sh`
+after verifying the current engine release. Routine code updates must use the
+validated release runner below, not a separate ad-hoc deployment path.
 
 The setup script:
 

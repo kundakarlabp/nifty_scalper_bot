@@ -22,3 +22,6 @@ scripts/p0p1_chunks/
 
 compileall.log
 *.log
+
+# Generated synthetic replay dashboard report (not a research fixture)
+docs/deployment/nightly_replay_summary.json
