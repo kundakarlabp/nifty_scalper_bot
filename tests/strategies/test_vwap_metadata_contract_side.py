@@ -258,6 +258,75 @@ def test_vwap_penetration_only_requires_explicit_opt_in(monkeypatch):
     assert signal.metadata["vwap_event_confirmed"] is True
 
 
+def test_live_vwap_bearish_or_doji_hold_is_not_bullish_continuation(monkeypatch):
+    """Holding above VWAP is insufficient when premium cannot close bullish."""
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("VWAP_ALLOW_PENETRATION_ONLY_ENTRY", "false")
+    symbol = "NFO:NIFTY26FEB22500CE"
+
+    for open_price in (104.0, 103.0):
+        strategy = VWAPProStrategy(VWAPProStrategyConfig(), _DummyEngine())
+        assert strategy._evaluate_signal(
+            symbol,
+            _indicators(
+                open=100.0, high=101.0, low=98.0, close=99.0,
+                futures_volume_ratio=1.2,
+            ),
+            99.0,
+        ) is None
+        assert strategy.last_no_vote_reason == "vwap_thesis_reset"
+
+        signal = strategy._evaluate_signal(
+            symbol,
+            _indicators(
+                latest_bar_ts=BAR_TS + 60,
+                open=open_price,
+                high=105.0,
+                low=102.0,
+                close=103.0,
+                futures_volume_ratio=1.2,
+            ),
+            103.0,
+        )
+
+        assert signal is None
+        assert strategy.last_no_vote_reason == "vwap_penetration_only_disabled"
+
+
+def test_live_vwap_bullish_hold_remains_valid_without_momentum_body(monkeypatch):
+    """A traded bullish hold still qualifies without meeting body momentum."""
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("VWAP_ALLOW_PENETRATION_ONLY_ENTRY", "false")
+    symbol = "NFO:NIFTY26FEB22500CE"
+    strategy = VWAPProStrategy(VWAPProStrategyConfig(), _DummyEngine())
+
+    assert strategy._evaluate_signal(
+        symbol,
+        _indicators(
+            open=100.0, high=101.0, low=98.0, close=99.0,
+            futures_volume_ratio=1.2,
+        ),
+        99.0,
+    ) is None
+
+    signal = strategy._evaluate_signal(
+        symbol,
+        _indicators(
+            latest_bar_ts=BAR_TS + 60,
+            open=102.5,
+            high=104.0,
+            low=102.0,
+            close=103.0,
+            futures_volume_ratio=1.2,
+        ),
+        103.0,
+    )
+    assert signal is not None
+    assert signal.metadata["setup_type"] == "vwap_continuation"
+    assert signal.metadata["continuation_hold_confirmed"] is True
+    assert signal.metadata["momentum_continuation_confirmed"] is False
+
+
 def test_vwap_reclaim_momentum_has_distinct_structural_subtype(monkeypatch):
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     strategy = VWAPProStrategy(VWAPProStrategyConfig(), _DummyEngine())
