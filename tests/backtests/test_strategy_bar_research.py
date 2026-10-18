@@ -382,7 +382,7 @@ def test_compact_orb_context_diagnostics_count_market_minutes_not_option_bars(
         },
     )
     histories, instruments, _ = load_archive(tmp_path)
-    result = _scenario(
+    scenario = _scenario(
         histories,
         instruments,
         get_settings().elite,
@@ -390,7 +390,8 @@ def test_compact_orb_context_diagnostics_count_market_minutes_not_option_bars(
         components={"ORBPro"},
         compact_orb_context=True,
         strategy_factory=lambda engine: [Strategy()],
-    )["strategies"]["ORBPro"]
+    )
+    result = scenario["strategies"]["ORBPro"]
 
     assert result["entry_funnel"]["evaluations"] == 8
     quality = result["data_quality"]
@@ -398,7 +399,7 @@ def test_compact_orb_context_diagnostics_count_market_minutes_not_option_bars(
     assert quality["orb_direction_resolution_minutes"] == {
         "spot_futures_agree": 4
     }
-    assert sum(result["orb_replay_regimes"].values()) == 4
+    assert sum(scenario["orb_replay_regimes"].values()) == 4
 
 
 def test_research_structural_context_includes_futures_volume_ratio(tmp_path):
