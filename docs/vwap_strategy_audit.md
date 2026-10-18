@@ -309,3 +309,25 @@ comparison is engineering-correct within that model, but neither exact
 historical exchange-reference parity nor enhanced after-cost NIFTY
 options profitability has been established. The retest and momentum
 research toggles remain **default OFF** and are not promoted to LIVE.
+
+
+## 2026-10-18: require complete option-minute evidence for as-of retest VWAP
+
+The previous causal as-of reference correctly excluded *future* option bars,
+but accepted a historical sequence containing 09:15 and 09:17 without 09:16.
+It could therefore treat incomplete archived turnover as a valid session VWAP.
+A RED regression reproduced a numeric VWAP (150) from this gapped sequence.
+
+The existing `IndicatorEngine.get_session_vwap_at` now requires every one-minute
+timestamp between 09:15 IST and the requested completed bar, rejecting holes,
+unfinished/provisional intermediates, and off-grid observations. Complete
+zero-volume minute candles remain allowed, carrying continuity without adding
+fictitious volume. No historical gaps are filled with synthetic prices or
+assumed zero trading.
+
+This is deliberately strict: a missing candle might represent a no-trade
+minute or a data outage, but the stored OHLCV alone cannot distinguish them.
+When uncertain, the opt-in retest returns
+`trend_momentum_prior_vwap_unavailable`; it must not claim a valid reclaim.
+Default VWAP entry rules, exits, contract choice, risk and LIVE execution are
+unchanged. This integrity correction does not establish improved net expectancy.
