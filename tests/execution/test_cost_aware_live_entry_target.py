@@ -171,3 +171,35 @@ def test_runtime_never_moves_absolute_strategy_target(monkeypatch) -> None:
     adjusted = _cost_adjust_entry_target(manager, kwargs)
 
     assert adjusted == kwargs
+
+
+def test_target_repair_uses_same_executable_ask_spread_model_as_final_gate(
+    monkeypatch,
+) -> None:
+    """The repaired target must be minimal under the authoritative net-R gate."""
+    monkeypatch.setenv("MIN_NET_REWARD_RISK", "1.5")
+    monkeypatch.setenv("MAX_NET_RR_TARGET_UPLIFT_R", "2.0")
+    monkeypatch.setenv("MAX_NET_RR_TARGET_UPLIFT_PCT", "25")
+    signal = SimpleNamespace(
+        symbol=SYMBOL,
+        action="BUY",
+        quantity=65,
+        entry_price=80.20,
+        stop_loss=76.20,
+        take_profit=86.20,
+        metadata={"bid": 79.70, "ask": 80.20},
+    )
+
+    repaired_target = minimum_target_for_net_rr(signal)
+    assert repaired_target is not None
+    assert repaired_target > signal.take_profit
+
+    repaired = SimpleNamespace(**{**signal.__dict__, "take_profit": repaired_target})
+    final = evaluate_final_net_rr(repaired)
+    assert final is not None and final.allowed
+
+    previous_tick = SimpleNamespace(
+        **{**signal.__dict__, "take_profit": round(repaired_target - 0.05, 2)}
+    )
+    previous = evaluate_final_net_rr(previous_tick)
+    assert previous is not None and not previous.allowed
