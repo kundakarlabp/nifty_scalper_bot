@@ -59,6 +59,7 @@ EVENT_WORDS = {
     "POSITION", "BROKER", "AUTH", "READY", "BLOCKER", "RISK", "COOLDOWN",
     "ERROR", "FAIL", "WARN", "DEGRADED", "STARTUP", "SHUTDOWN", "HYDRATION",
     "SUBSCRIPTION", "RECONCIL", "CONTRACT_SSOT", "LIVE_READINESS",
+    "CANDIDATE_REJECTED",
     *HISTORY_DIAGNOSTICS,
 }
 NULLS = {"", "none", "null", "nil", "false", "0", "unknown", "n/a", "na"}
