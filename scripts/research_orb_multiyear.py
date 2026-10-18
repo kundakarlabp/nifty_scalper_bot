@@ -725,9 +725,7 @@ def summarize_orb_causal_gate_days(
             intents = funnel["next_bar_intents"]
             if intents != accepted + sum(post_signal_reasons.values()):
                 raise ValueError("orb_admission_funnel_not_conserved")
-            if economics["evaluated"] != (
-                economics["rejected"] + economics["passed"]
-            ):
+            if economics["evaluated"] != (economics["rejected"] + economics["passed"]):
                 raise ValueError("orb_economic_funnel_not_conserved")
             if economics["rejected"] != post_signal_reasons["cost_net_rr_rejected"]:
                 raise ValueError("orb_economic_gate_rejection_mismatch")
