@@ -905,3 +905,91 @@ def test_research_stages_only_exchange_valid_shifted_weekly_expiry(
         assert report["staged_session_dates"] == []
         assert report["staging_rejections"]["2026-10-19"] == expected_reason
         assert not (destination / "2026-10-19").exists()
+
+
+@pytest.mark.parametrize(
+    ("front_first_minute", "expected_staged"),
+    [(None, False), (31, True)],
+)
+def test_retained_research_never_substitutes_next_week_for_missing_front_week(
+    tmp_path, front_first_minute, expected_staged
+):
+    """Missing front-week observations cannot become next-week SMC trades."""
+    from nifty_scalper_bot.backtesting.strategy_research import load_archive
+
+    candles = tmp_path / "cache" / "candles"
+    candles.mkdir(parents=True)
+    rows = [
+        _retained_session_payload("NSE:NIFTY 50", "EQ", 100),
+        _retained_session_payload("NFO:NIFTY26OCTFUT", "FUT", 101, expiry="2026-10-27"),
+        _retained_session_payload(
+            "NFO:NIFTY26O1922500CE",
+            "CE",
+            104,
+            strike=22500,
+            expiry="2026-10-19",
+        ),
+        _retained_session_payload(
+            "NFO:NIFTY26O1922500PE",
+            "PE",
+            105,
+            strike=22500,
+            expiry="2026-10-19",
+        ),
+    ]
+    if front_first_minute is not None:
+        rows.extend(
+            [
+                _retained_session_payload(
+                    "NFO:NIFTY26O1322500CE",
+                    "CE",
+                    102,
+                    strike=22500,
+                    first_minute=front_first_minute,
+                ),
+                _retained_session_payload(
+                    "NFO:NIFTY26O1322500PE",
+                    "PE",
+                    103,
+                    strike=22500,
+                    first_minute=front_first_minute,
+                ),
+            ]
+        )
+    for index, payload in enumerate(rows):
+        for field in ("from", "to", "captured_at"):
+            payload[field] = payload[field].replace("2026-10-12", "2026-10-13")
+        payload["candles"] = [
+            [row[0].replace("2026-10-12", "2026-10-13"), *row[1:]]
+            for row in payload["candles"]
+        ]
+        payload["candles_sha256"] = collector._candle_digest(payload["candles"])
+        (candles / f"{index}.json").write_text(json.dumps(payload))
+
+    stage = tmp_path / "staged"
+    report = collector.historical_cache_inventory(
+        tmp_path / "cache",
+        dt.date(2026, 10, 13),
+        dt.date(2026, 10, 13),
+        stage_dir=stage,
+        min_synchronized_minutes=3,
+    )
+    if not expected_staged:
+        assert report["staged_session_dates"] == []
+        assert report["staging_rejections"]["2026-10-13"] == (
+            "historical_front_week_option_pair_missing"
+        )
+        assert not (stage / "2026-10-13").exists()
+    else:
+        assert report["staged_session_dates"] == ["2026-10-13"]
+        _, instruments, _ = load_archive(stage / "2026-10-13")
+        selected = {
+            symbol
+            for symbol, instrument in instruments.items()
+            if instrument["instrument_type"] in {"CE", "PE"}
+        }
+        assert selected == {
+            "NFO:NIFTY26O1322500CE",
+            "NFO:NIFTY26O1322500PE",
+        }
+    assert report["promotion_eligible"] is False

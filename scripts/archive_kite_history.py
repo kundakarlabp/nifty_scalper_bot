@@ -27,6 +27,19 @@ from nifty_scalper_bot.utils.nse_calendar import (
 IST = ZoneInfo("Asia/Kolkata")
 
 
+def _verified_nifty_weekly_expiry(day: dt.date) -> dt.date | None:
+    """Resolve front-week expiry from immutable NSE F&O holidays, if verified."""
+    nominal = day + dt.timedelta(days=(1 - day.weekday()) % 7)
+    if not (calendar_available(day.year) and calendar_available(nominal.year)):
+        return None
+    adjusted = nominal
+    while adjusted.weekday() >= 5 or adjusted in NSE_FO_HOLIDAYS_BY_YEAR[adjusted.year]:
+        adjusted -= dt.timedelta(days=1)
+        if not calendar_available(adjusted.year):
+            return None
+    return adjusted
+
+
 def _write_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(".tmp")
@@ -437,6 +450,7 @@ def historical_cache_inventory(
             if spot is None:
                 staging_rejections[label] = "historical_spot_unavailable"
                 continue
+            front_week_expiry = _verified_nifty_weekly_expiry(day)
             # Use the first *observed* joint bar in the entry window. No later
             # option or context bar is allowed to nominate an earlier contract.
             anchors = sorted(
@@ -476,18 +490,10 @@ def historical_cache_inventory(
                     # preceding regular trading day when Tuesday is a holiday.
                     # Require a verified built-in calendar for both years;
                     # mutable LIVE holiday overrides cannot rewrite research.
-                    if calendar_available(expiry.year):
-                        nominal = expiry + dt.timedelta(days=(1 - expiry.weekday()) % 7)
-                        if calendar_available(nominal.year):
-                            adjusted = nominal
-                            while (
-                                adjusted.weekday() >= 5
-                                or adjusted in NSE_FO_HOLIDAYS_BY_YEAR[adjusted.year]
-                            ):
-                                adjusted -= dt.timedelta(days=1)
-                            if expiry != adjusted:
-                                invalid_option_expiry = True
-                                continue
+                    valid_expiry = _verified_nifty_weekly_expiry(expiry)
+                    if valid_expiry is not None and expiry != valid_expiry:
+                        invalid_option_expiry = True
+                        continue
                     pair = observed_pairs.setdefault((expiry.isoformat(), strike), {})
                     if side in pair and pair[side] != symbol:
                         ambiguous_option = True
@@ -515,6 +521,15 @@ def historical_cache_inventory(
                 if not eligible:
                     if invalid_option_expiry:
                         failure = "historical_option_expiry_calendar_invalid"
+                    continue
+                # A missing front-week CE/PE quote is missing data, not
+                # permission to manufacture a next-week SMC opportunity.
+                # Continue scanning later causal anchors for the front-week pair.
+                if (
+                    front_week_expiry is not None
+                    and eligible[0][0] != front_week_expiry.isoformat()
+                ):
+                    failure = "historical_front_week_option_pair_missing"
                     continue
                 if len(eligible) > 1 and eligible[0][:3] == eligible[1][:3]:
                     failure = "historical_option_selection_ambiguous"
