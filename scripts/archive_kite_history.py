@@ -18,6 +18,11 @@ from dotenv import load_dotenv
 from nifty_scalper_bot.config.env_utils import parse_int_env
 from nifty_scalper_bot.data.rest.zerodha_client import ZerodhaKiteClient
 from nifty_scalper_bot.instruments.active_contracts import cap_option_universe
+from nifty_scalper_bot.utils.nse_calendar import (
+    NSE_FO_CALENDAR_SOURCES_BY_YEAR,
+    NSE_FO_HOLIDAYS_BY_YEAR,
+    calendar_available,
+)
 
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -417,6 +422,14 @@ def historical_cache_inventory(
     if stage_dir is not None:
         for label, sources in sorted(staged_sources.items()):
             day = dt.date.fromisoformat(label)
+            # Only verified years are rejected as non-regular sessions.
+            # Ignore mutable LIVE environment holiday overrides for replay.
+            if (
+                calendar_available(day.year)
+                and day in NSE_FO_HOLIDAYS_BY_YEAR[day.year]
+            ):
+                staging_rejections[label] = "historical_nse_fo_regular_holiday"
+                continue
             if corrupt or label in staging_conflicts:
                 staging_rejections[label] = "historical_source_untrusted_or_conflicting"
                 continue
@@ -553,7 +566,41 @@ def historical_cache_inventory(
     ]
     observed_dates = {session["date"] for session in sessions}
     staged_set = set(staged_dates)
+    # Complete only for years covered by the canonical NSE F&O notices.
+    # A mixed-year or unsupported period must not claim exchange accuracy.
+    verified_year = (
+        start.year
+        if start.year == end.year and calendar_available(start.year)
+        else None
+    )
+    regular_dates = (
+        [
+            day
+            for day in weekday_candidates
+            if dt.date.fromisoformat(day) not in NSE_FO_HOLIDAYS_BY_YEAR[verified_year]
+        ]
+        if verified_year is not None
+        else None
+    )
     return {
+        "nse_fo_regular_calendar_verified": regular_dates is not None,
+        "nse_fo_regular_calendar_sources": (
+            list(NSE_FO_CALENDAR_SOURCES_BY_YEAR[verified_year])
+            if verified_year is not None
+            else []
+        ),
+        "nse_fo_regular_session_dates": regular_dates,
+        "nse_fo_regular_session_unobserved_dates": (
+            [day for day in regular_dates if day not in observed_dates]
+            if regular_dates is not None
+            else None
+        ),
+        "nse_fo_regular_session_without_replay_stage": (
+            [day for day in regular_dates if day not in staged_set]
+            if regular_dates is not None and stage_dir is not None
+            else None
+        ),
+        "nse_fo_special_sessions_included": False,
         "weekday_candidate_dates": weekday_candidates,
         "observed_weekday_dates": [
             day for day in weekday_candidates if day in observed_dates

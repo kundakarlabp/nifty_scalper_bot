@@ -44,3 +44,22 @@ def test_market_hours_cache_key_changes_across_calendar_days() -> None:
     second = datetime(2026, 6, 29, 11, 52, tzinfo=market_hours.IST)
 
     assert market_hours._cache_minute_key(first) != market_hours._cache_minute_key(second)
+
+
+def test_2026_added_fno_holiday_is_in_canonical_calendar(monkeypatch) -> None:
+    """NSE/FAOP/72262 modifies the original NSE/FAOP/71777 holiday list."""
+    from datetime import date
+
+    from nifty_scalper_bot.utils.nse_calendar import (
+        NSE_FO_HOLIDAYS_BY_YEAR,
+        calendar_available,
+    )
+
+    monkeypatch.delenv("NSE_ADDITIONAL_HOLIDAYS", raising=False)
+    monkeypatch.delenv("NSE_REMOVED_HOLIDAYS", raising=False)
+    assert calendar_available(2026)
+    assert (
+        NSE_FO_HOLIDAYS_BY_YEAR[2026][date(2026, 1, 15)]
+        == "Municipal Corporation Election - Maharashtra"
+    )
+    assert is_holiday(date(2026, 1, 15)) is True
