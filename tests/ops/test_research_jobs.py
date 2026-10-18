@@ -585,6 +585,14 @@ def test_worker_completes_component_research_without_claiming_live_parity(
     request = validate_request({"id": "real-job"}, today=date(2026, 10, 2))
     result = worker.run_worker(request, tmp_path / "empty.env")
     assert captures[0][0] == ["NSE:NIFTY 50", "NFO:NIFTY26OCTFUT", "NFO:CE", "NFO:PE"]
+    assert result["historical_contract_selection"] == {
+        "scope": "current_master_only_not_past_point_in_time_universe",
+        "research_option_cap": 32,
+        "option_symbols_requested": 2,
+        "expired_contracts_recovered": False,
+        "historical_quote_depth_available": False,
+        "live_basket_cap_unchanged": True,
+    }
     assert result["state"] == "partial"
     assert result["backtest_completed"] is True
     assert result["component_backtest_completed"] is True
