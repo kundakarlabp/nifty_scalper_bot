@@ -1269,9 +1269,9 @@ def test_smc_research_bracket_anchors_at_actual_simulated_fill(
     for path in (tmp_path / "candles").glob("*.json"):
         payload = json.loads(path.read_text())
         if payload["instrument"]["instrument_type"] in {"CE", "PE"}:
-            # The second candle closes at 100 and emits the SMC vote.
-            # The next candle opens at 110, then hits the correctly anchored TP.
-            payload["candles"][2][1:5] = [110.0, 130.0, 109.0, 110.0]
+            # The first completed candle closes at 100 and emits SMC.
+            # The next candle opens at 110, then hits the anchored target.
+            payload["candles"][1][1:5] = [110.0, 130.0, 109.0, 110.0]
             path.write_text(json.dumps(payload))
 
     class Strategy:
