@@ -527,12 +527,13 @@ def test_orb_causal_gate_profiles_change_only_predeclared_structural_vetoes(
         )
         outcomes[profile] = candidate._structural_evidence(**inputs)[0]
         # Causal ablations must not permit absent volume or slope confirmations.
-        assert candidate._structural_evidence(
-            **{**inputs, "volume_ratio": 0.4}
-        )[0] is False
-        assert candidate._structural_evidence(
-            **{**inputs, "indicators": {}}
-        )[0] is False
+        assert (
+            candidate._structural_evidence(**{**inputs, "volume_ratio": 0.4})[0]
+            is False
+        )
+        assert (
+            candidate._structural_evidence(**{**inputs, "indicators": {}})[0] is False
+        )
 
     assert outcomes["production_reference"] is False
     assert all(
