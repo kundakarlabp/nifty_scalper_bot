@@ -79,6 +79,11 @@ def _evaluate(monkeypatch, *, side="CE", enabled=True, retest=False, **updates):
             ]
             return bars[-count:] if count is not None else bars
 
+        def get_session_vwap_at(self, _symbol, timestamp):
+            current = datetime.fromisoformat(indicators["latest_bar_ts"])
+            assert timestamp == current - timedelta(minutes=1)
+            return indicators.get("prior_session_vwap", 100.0)
+
     strategy = VWAPProStrategy(VWAPProStrategyConfig(), _CompletedBarEngine())
     signal = strategy._evaluate_signal(f"NFO:NIFTY2691523400{side}", indicators, 103.0)
     return strategy, signal
@@ -345,3 +350,31 @@ def test_finalized_signal_bar_gate_rejects_mismatched_ohlc(monkeypatch):
     strategy, signal = _evaluate(monkeypatch, enabled=False, history_high=99.0)
     assert signal is None
     assert strategy.last_no_vote_reason == "vwap_signal_bar_unconfirmed"
+
+
+def test_retest_compares_prior_candle_to_prior_asof_vwap(monkeypatch):
+    """A prior candle below its own VWAP cannot be rescued by later VWAP drift."""
+    strategy, signal = _evaluate(
+        monkeypatch, retest=True, low=100.0, prior_session_vwap=102.0
+    )
+    assert signal is None
+    assert strategy.last_no_vote_reason == "trend_momentum_retest_unconfirmed"
+
+
+def test_retest_fails_closed_without_timestamp_aligned_prior_vwap(monkeypatch):
+    strategy, signal = _evaluate(
+        monkeypatch, retest=True, low=100.0, prior_session_vwap=None
+    )
+    assert signal is None
+    assert strategy.last_no_vote_reason == "trend_momentum_prior_vwap_unavailable"
+
+
+def test_retest_preserves_genuine_prior_reclaim_when_prior_vwap_available(
+    monkeypatch,
+):
+    _, signal = _evaluate(
+        monkeypatch, retest=True, low=100.0, prior_session_vwap=100.0
+    )
+    assert signal is not None
+    assert signal.metadata["trend_momentum_retest_confirmed"] is True
+    assert signal.metadata["trend_momentum_prior_session_vwap"] == 100.0
