@@ -1553,6 +1553,13 @@ def run_orb_comparison(directory: Path) -> dict[str, Any]:
         ),
         ("retest_only", {"ORB_MOMENTUM_BRANCH_ENABLED": "false"}, None, 1.5, None),
         (
+            "retest_wick_guard_research",
+            {"ORB_RESEARCH_STRICT_RETEST_WICK": "true"},
+            None,
+            1.5,
+            None,
+        ),
+        (
             "early_entry_60",
             {"ORB_MAX_ENTRY_MINUTES_AFTER_RANGE": "60"},
             None,
@@ -1567,6 +1574,7 @@ def run_orb_comparison(directory: Path) -> dict[str, Any]:
     ]
     environment_keys = (
         "ORB_RESEARCH_ALLOW_RANGE_TRANSITION",
+        "ORB_RESEARCH_STRICT_RETEST_WICK",
         "ORB_MOMENTUM_BRANCH_ENABLED",
         "ORB_MAX_ENTRY_MINUTES_AFTER_RANGE",
         "ORB_TARGET_RR",
@@ -1581,10 +1589,15 @@ def run_orb_comparison(directory: Path) -> dict[str, Any]:
         # the calling research process has the feature flag in its environment.
         original = {
             key: os.environ.get(key)
-            for key in {"ORB_RESEARCH_ALLOW_RANGE_TRANSITION", *overrides}
+            for key in {
+                "ORB_RESEARCH_ALLOW_RANGE_TRANSITION",
+                "ORB_RESEARCH_STRICT_RETEST_WICK",
+                *overrides,
+            }
         }
         try:
             os.environ["ORB_RESEARCH_ALLOW_RANGE_TRANSITION"] = "false"
+            os.environ["ORB_RESEARCH_STRICT_RETEST_WICK"] = "false"
             os.environ.update(overrides)
             candidate_settings = (
                 replace(settings, orb=replace(settings.orb, orb_minutes=minutes))
