@@ -481,3 +481,79 @@ jobs:
           path: |
             ${{ env.STUDY_DIR }}/data_manifest.json
             ${{ env.STUDY_DIR }}/fixed_hypothesis_results.json
+
+causal-orb-gate-study:
+    # Research only: six predeclared counterfactuals on identical historical
+    # option contracts. Never runs on live hosts or modifies settings.
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      EXECUTION_MODE: SHADOW
+      LIVE_TRADING_ENABLED: "false"
+      PAPER_TRADING: "true"
+      BROKER_API_KEY: offline_research_unused
+      BROKER_API_SECRET: offline_research_unused
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set isolated causal-research paths
+        run: |
+          printf 'SOURCE_DIR=%s/orb-public-source\nSTUDY_DIR=%s/orb-causal-gates\n' \
+            "$RUNNER_TEMP" "$RUNNER_TEMP" >> "$GITHUB_ENV"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install research dependencies
+        run: python -m pip install -e '.[research]'
+      - name: Cache checksum-verified public archive
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.SOURCE_DIR }}
+          key: zenodo-10899828-717d15361af52d1d654b4909d998967e
+      - name: Verify and prepare identical point-in-time daily contracts
+        run: >-
+          python scripts/research_orb_multiyear.py prepare
+          --source "$SOURCE_DIR" --output "$STUDY_DIR"
+      - name: Paired causal gate study across historical periods
+        run: >-
+          python scripts/research_orb_multiyear.py causal-gates
+          --source "$SOURCE_DIR" --output "$STUDY_DIR" --workers 4
+      - name: Report actual admission bottleneck without promoting candidates
+        run: |
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          results = json.loads(
+              (Path(os.environ["STUDY_DIR"]) / "orb_causal_gate_results.json").read_text()
+          )
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as stream:
+              stream.write("## ORB causal-gate diagnostics (not live-validated)\n\n")
+              stream.write("| Period | Gate profile | Signals | Fills | Trades | Net P&L | Unresolved |\n")
+              stream.write("|---|---|---:|---:|---:|---:|---:|\n")
+              for period, profiles in results["phases"].items():
+                  for profile, row in profiles.items():
+                      funnel = row["entry_funnel"]
+                      metrics = row["metrics"]
+                      stream.write(
+                          f"| {period} | {profile} | {funnel.get('signals_emitted', 0)} | "
+                          f"{funnel.get('accepted_fills', 0)} | "
+                          f"{metrics['trade_count']} | {metrics['net_pnl']:.2f} | "
+                          f"{row['unresolved_exit_count']} |\n"
+                      )
+              stream.write(
+                  "\nMasked gates are hypothetical and retain other ORB restrictions. "
+                  "Monthly OHLC cannot prove executable weekly-option fills. "
+                  "No profile is authorized for live promotion.\n"
+              )
+          PY
+      - name: Save paired causal evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: orb-causal-gate-evidence-${{ github.sha }}
+          if-no-files-found: warn
+          retention-days: 30
+          path: |
+            ${{ env.STUDY_DIR }}/data_manifest.json
+            ${{ env.STUDY_DIR }}/orb_causal_gate_results.json
