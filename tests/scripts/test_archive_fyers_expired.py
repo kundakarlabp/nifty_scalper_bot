@@ -62,8 +62,14 @@ class FakeFyers:
                 "symbol": args["symbol"],
                 "resolution": "1",
                 "columns": [
-                    "timestamp", "open", "high", "low", "close", "volume",
-                    "open_interest", "iv",
+                    "timestamp",
+                    "open",
+                    "high",
+                    "low",
+                    "close",
+                    "volume",
+                    "open_interest",
+                    "iv",
                 ],
                 "candles": [],
             }
@@ -76,8 +82,14 @@ class FakeFyers:
             "symbol": args["symbol"],
             "resolution": "1",
             "columns": [
-                "timestamp", "open", "high", "low", "close", "volume",
-                "open_interest", "iv",
+                "timestamp",
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+                "open_interest",
+                "iv",
             ],
             "candles": rows,
         }
@@ -105,11 +117,12 @@ def test_verified_discovery_and_one_minute_provider_archive_with_nullable_oi(tmp
     assert result["intraday_requests_made"] == 2
     assert result["contracts"]["CE"]["bars"] == 2
     assert [kind for kind, _ in client.calls] == [
-        "expiry", "contracts", "candles", "candles"
+        "expiry",
+        "contracts",
+        "candles",
+        "candles",
     ]
-    stored = json.loads(
-        (tmp_path / result["contracts"]["CE"]["path"]).read_text()
-    )
+    stored = json.loads((tmp_path / result["contracts"]["CE"]["path"]).read_text())
     assert stored["symbol"] == "NSE:NIFTY25MAR23000CE"
     assert stored["source"] == "fyers_expired_fo"
     assert stored["candles"][0][0] == "2025-03-26T09:30:00+05:30"
@@ -168,8 +181,12 @@ def test_valid_no_data_is_reported_without_fabricating_a_candle(tmp_path):
 )
 def test_provider_schema_and_candle_integrity_fail_closed(field, value, error):
     response = FakeFyers().fno_historical_data(
-        {"resolution": "1", "include_oi": "1", "include_greeks": "0",
-         "symbol": "NSE:NIFTY25MAR23000CE"}
+        {
+            "resolution": "1",
+            "include_oi": "1",
+            "include_greeks": "0",
+            "symbol": "NSE:NIFTY25MAR23000CE",
+        }
     )
     response[field] = value
     with pytest.raises(ValueError, match=error):
@@ -185,8 +202,12 @@ def test_provider_schema_and_candle_integrity_fail_closed(field, value, error):
 
 def test_bar_end_is_shifted_once_and_never_guessed():
     response = FakeFyers().fno_historical_data(
-        {"resolution": "1", "include_oi": "1", "include_greeks": "0",
-         "symbol": "NSE:NIFTY25MAR23000CE"}
+        {
+            "resolution": "1",
+            "include_oi": "1",
+            "include_greeks": "0",
+            "symbol": "NSE:NIFTY25MAR23000CE",
+        }
     )
     output = normalize_option_candles(
         response,
@@ -199,8 +220,11 @@ def test_bar_end_is_shifted_once_and_never_guessed():
     assert output[0][0] == "2025-03-26T09:29:00+05:30"
     with pytest.raises(ValueError, match="fyers_timestamp_convention_unverified"):
         normalize_option_candles(
-            response, symbol="NSE:NIFTY25MAR23000CE",
-            expiry=EXPIRY, start=DAY, end=DAY,
+            response,
+            symbol="NSE:NIFTY25MAR23000CE",
+            expiry=EXPIRY,
+            start=DAY,
+            end=DAY,
             timestamp_convention="unknown",
         )
 
@@ -260,9 +284,15 @@ def _context_archive(tmp_path, count=65):
     ):
         rows = [
             [
-                (dt.datetime(2025, 3, 26, 9, 30, tzinfo=IST)
-                 + dt.timedelta(minutes=index)).isoformat(),
-                23000, 23020, 22980, 23005, 250,
+                (
+                    dt.datetime(2025, 3, 26, 9, 30, tzinfo=IST)
+                    + dt.timedelta(minutes=index)
+                ).isoformat(),
+                23000,
+                23020,
+                22980,
+                23005,
+                250,
             ]
             for index in range(count)
         ]
@@ -293,8 +323,12 @@ def test_imported_pair_bridges_into_existing_research_loader_only_with_context(
     context = _context_archive(tmp_path)
     destination = tmp_path / "staged" / DAY.isoformat()
     staged = stage_pair_with_verified_context(
-        tmp_path, context, destination,
-        day=DAY, expiry=EXPIRY, strike=23000,
+        tmp_path,
+        context,
+        destination,
+        day=DAY,
+        expiry=EXPIRY,
+        strike=23000,
         lot_size=75,
         lot_size_source="operator-attested historical NSE lot-size circular",
         min_synchronized_minutes=60,
@@ -311,9 +345,14 @@ def test_imported_pair_bridges_into_existing_research_loader_only_with_context(
     assert report["historical_atm_selection_verified"] is False
     with pytest.raises(ValueError, match="fyers_research_stage_prerequisites_invalid"):
         stage_pair_with_verified_context(
-            tmp_path, context, destination,
-            day=DAY, expiry=EXPIRY, strike=23000,
-            lot_size=75, lot_size_source="verified",
+            tmp_path,
+            context,
+            destination,
+            day=DAY,
+            expiry=EXPIRY,
+            strike=23000,
+            lot_size=75,
+            lot_size_source="verified",
         )
 
 
@@ -323,17 +362,27 @@ def test_incomplete_context_and_unverified_historical_lot_size_fail_closed(tmp_p
     destination = tmp_path / "stage"
     with pytest.raises(ValueError, match="fyers_research_stage_prerequisites_invalid"):
         stage_pair_with_verified_context(
-            tmp_path, context, destination,
-            day=DAY, expiry=EXPIRY, strike=23000,
-            lot_size=0, lot_size_source="",
+            tmp_path,
+            context,
+            destination,
+            day=DAY,
+            expiry=EXPIRY,
+            strike=23000,
+            lot_size=0,
+            lot_size_source="",
         )
     with pytest.raises(
         ValueError, match="fyers_research_stage_synchronized_minutes_missing"
     ):
         stage_pair_with_verified_context(
-            tmp_path, context, destination,
-            day=DAY, expiry=EXPIRY, strike=23000,
-            lot_size=75, lot_size_source="operator verified",
+            tmp_path,
+            context,
+            destination,
+            day=DAY,
+            expiry=EXPIRY,
+            strike=23000,
+            lot_size=75,
+            lot_size_source="operator verified",
             min_synchronized_minutes=60,
         )
     assert not destination.exists()
@@ -348,17 +397,27 @@ def test_option_payload_tampering_cannot_be_staged(tmp_path):
     option_file.write_text(json.dumps(payload))
     with pytest.raises(ValueError, match="fyers_research_stage_source_untrusted"):
         stage_pair_with_verified_context(
-            tmp_path, context, tmp_path / "staged",
-            day=DAY, expiry=EXPIRY, strike=23000,
-            lot_size=75, lot_size_source="operator verified",
+            tmp_path,
+            context,
+            tmp_path / "staged",
+            day=DAY,
+            expiry=EXPIRY,
+            strike=23000,
+            lot_size=75,
+            lot_size_source="operator verified",
         )
 
 
 def test_imported_bar_end_labels_are_normalized_before_research_stage(tmp_path):
     client = FakeFyers(bars=65)
     report = collect_expired_pair(
-        client, expiry=EXPIRY, strike=23000, start=DAY, end=DAY,
-        outdir=tmp_path, timestamp_convention="bar_end",
+        client,
+        expiry=EXPIRY,
+        strike=23000,
+        start=DAY,
+        end=DAY,
+        outdir=tmp_path,
+        timestamp_convention="bar_end",
     )
     record = json.loads((tmp_path / report["contracts"]["CE"]["path"]).read_text())
     assert record["source_timestamp_convention"] == "bar_end"
