@@ -27,7 +27,6 @@ def test_runtime_requires_captured_effective_configuration():
         )
 
 
-
 def test_replay_epoch_preflight_rejects_multiple_process_runs(tmp_path):
     from datetime import datetime, timedelta
 
