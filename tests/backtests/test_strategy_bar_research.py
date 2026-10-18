@@ -2191,9 +2191,10 @@ def test_vwap_research_reports_daily_rejections_without_changing_totals(
     assert daily["2026-10-01"]["no_vote_reasons"] == {"day_one_no_reclaim": 8}
     assert daily["2026-10-02"]["no_vote_reasons"] == {"day_two_no_trend": 8}
     assert result["evaluations"] == 16
-    assert sum(
-        row["entry_funnel"]["evaluations"] for row in daily.values()
-    ) == result["entry_funnel"]["evaluations"]
+    assert (
+        sum(row["entry_funnel"]["evaluations"] for row in daily.values())
+        == result["entry_funnel"]["evaluations"]
+    )
     assert result["no_vote_reasons"] == {
         "day_one_no_reclaim": 8,
         "day_two_no_trend": 8,
