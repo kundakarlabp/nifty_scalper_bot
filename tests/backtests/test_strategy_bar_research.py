@@ -405,9 +405,7 @@ def test_compact_orb_context_diagnostics_count_market_minutes_not_option_bars(
     assert sum(scenario["orb_replay_regimes"].values()) == 4
 
 
-def test_compact_orb_replay_does_not_lose_actual_stable_regime(
-    tmp_path, monkeypatch
-):
+def test_compact_orb_replay_does_not_lose_actual_stable_regime(tmp_path, monkeypatch):
     from nifty_scalper_bot.backtesting import strategy_research as research
     from nifty_scalper_bot.backtesting.strategy_research import _scenario, load_archive
     from nifty_scalper_bot.config.settings import get_settings
