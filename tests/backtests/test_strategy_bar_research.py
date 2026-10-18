@@ -212,6 +212,87 @@ def test_orb_cost_gate_reports_gross_payoff_eroded_by_transaction_costs(
     assert economics.get("gross_payoff_below_minimum", 0) == 0
 
 
+def test_research_canonical_target_repair_is_diagnostic_not_a_trade(
+    tmp_path, monkeypatch
+):
+    from nifty_scalper_bot.backtesting.strategy_research import (
+        _orb_bounded_target_repair_viable,
+        _scenario,
+        load_archive,
+    )
+    from nifty_scalper_bot.config.settings import get_settings
+
+    monkeypatch.setenv("MIN_NET_REWARD_RISK", "1.5")
+    monkeypatch.delenv("MAX_NET_RR_TARGET_UPLIFT_R", raising=False)
+    monkeypatch.delenv("MAX_NET_RR_TARGET_UPLIFT_PCT", raising=False)
+
+    assert _orb_bounded_target_repair_viable(
+        symbol="NFO:NIFTY26O0622400CE",
+        entry=100,
+        stop=95,
+        target=109,
+        quantity=75,
+        slippage=0,
+        required_net_rr=1.5,
+    )
+    assert (
+        _orb_bounded_target_repair_viable(
+            symbol="NFO:NIFTY26O0622400CE",
+            entry=100,
+            stop=95,
+            target=109,
+            quantity=75,
+            slippage=0,
+            required_net_rr=2.0,
+        )
+        is None
+    )
+    monkeypatch.setenv("MAX_NET_RR_TARGET_UPLIFT_R", "0")
+    assert not _orb_bounded_target_repair_viable(
+        symbol="NFO:NIFTY26O0622400CE",
+        entry=100,
+        stop=95,
+        target=109,
+        quantity=75,
+        slippage=0,
+        required_net_rr=1.5,
+    )
+
+    # Restoring the canonical bound must leave the executed research ledger
+    # unchanged: a theoretically higher target is NOT a historical fill.
+    monkeypatch.delenv("MAX_NET_RR_TARGET_UPLIFT_R", raising=False)
+    archive(tmp_path)
+
+    class Strategy:
+        name = "ORBPro"
+
+        @property
+        def evaluation_health(self):
+            return {"healthy": True}
+
+        def generate_signal(self, symbol, indicators, current_price, position=None):
+            if symbol.endswith("CE") and indicators["history_count"] == 1:
+                return SimpleNamespace(
+                    action="BUY", stop_loss=95, take_profit=109, metadata={}
+                )
+            return None
+
+    histories, instruments, _ = load_archive(tmp_path)
+    result = _scenario(
+        histories,
+        instruments,
+        get_settings().elite,
+        0,
+        components={"ORBPro"},
+        minimum_net_rr=1.5,
+        strategy_factory=lambda engine: [Strategy()],
+    )["strategies"]["ORBPro"]
+    assert result["trades"] == []
+    assert result["entry_funnel"]["accepted_fills"] == 0
+    assert result["orb_admission_economics"]["rejected"] == 1
+    assert result["orb_bounded_target_repair"] == {"viable": 1}
+
+
 def test_terminal_orb_intent_cannot_disappear_without_an_execution_disposition(
     tmp_path,
 ):
@@ -2385,3 +2466,56 @@ def test_vwap_daily_funnel_counts_fills_and_unresolved_exits(tmp_path):
     assert day["resolved_trades"] == 0
     assert day["unresolved_trades"] == 1
     assert result["data_quality"]["unresolved_exit_count"] == 1
+
+
+def test_vwap_expired_day_boundary_intent_is_rejected_on_signal_day(tmp_path):
+    """Unfilled prior-day signal must not contaminate tomorrow's no-vote funnel."""
+    from nifty_scalper_bot.backtesting.strategy_research import _scenario, load_archive
+
+    archive(tmp_path)
+    for path in (tmp_path / "candles").glob("*.json"):
+        payload = json.loads(path.read_text())
+        next_day = [
+            [(datetime.fromisoformat(row[0]) + timedelta(days=1)).isoformat(), *row[1:]]
+            for row in payload["candles"]
+        ]
+        payload["candles"].extend(next_day)
+        path.write_text(json.dumps(payload))
+
+    class SignalAtDayEnd:
+        name = "VWAPPro"
+        last_no_vote_reason = "no_new_setup"
+
+        def generate_signal(self, symbol, indicators, current_price, position=None):
+            if (
+                symbol.endswith("CE")
+                and indicators["bar_timestamp"].day == 1
+                and indicators["history_count"] == 4
+            ):
+                return SimpleNamespace(
+                    action="BUY", stop_loss=95, take_profit=105, metadata={}
+                )
+            return None
+
+        @property
+        def evaluation_health(self):
+            return {"healthy": True}
+
+    histories, instruments, _ = load_archive(tmp_path)
+    result = _scenario(
+        histories,
+        instruments,
+        None,
+        25,
+        components={"VWAPPro"},
+        strategy_factory=lambda engine: [SignalAtDayEnd()],
+    )["strategies"]["VWAPPro"]
+    daily = result["daily_diagnostics"]
+
+    assert result["entry_funnel"]["next_bar_intents"] == 1
+    assert result["entry_funnel"]["accepted_fills"] == 0
+    assert result["no_vote_reasons"]["next_minute_unavailable"] == 1
+    assert daily["2026-10-01"]["no_vote_reasons"]["next_minute_unavailable"] == 1
+    assert "next_minute_unavailable" not in daily["2026-10-02"]["no_vote_reasons"]
+    assert daily["2026-10-01"]["entry_funnel"]["next_bar_intents"] == 1
+    assert daily["2026-10-02"]["entry_funnel"]["next_bar_intents"] == 0

@@ -205,6 +205,7 @@ def test_causal_gate_ablation_preserves_identical_data_and_no_trade_abstention(
             "no_vote_reasons": {"underlying_direction_unavailable": 2},
             "structural_gate_failures": {"balanced_opening_range": 1},
             "orb_admission_economics": {},
+            "orb_bounded_target_repair": {},
             "trades": [],
             "unresolved_trades": [],
         }
@@ -244,11 +245,18 @@ def test_causal_gate_ablation_preserves_identical_data_and_no_trade_abstention(
         "passed": 0,
         "gross_pass_net_fail": 2,
     }
+    sample["orb_bounded_target_repair"] = {"viable": 1, "not_viable": 1}
     attributed = study.summarize_orb_causal_gate_days([row])
     economics = attributed["development"]["without_three_vetoes"]["admission_economics"]
     assert economics["conserved"] is True
     assert economics["cost_rejection_pct"] == pytest.approx(66.67)
     assert economics["gross_payoff_passed_but_net_failed"] == 2
+    assert economics["bounded_target_repair_viable"] == 1
+    assert economics["bounded_target_repair_not_viable"] == 1
+    sample["orb_bounded_target_repair"]["not_viable"] = 0
+    with pytest.raises(ValueError, match="orb_cost_repair_diagnostic_not_conserved"):
+        study.summarize_orb_causal_gate_days([row])
+    sample["orb_bounded_target_repair"]["not_viable"] = 1
     sample["no_vote_reasons"].pop("next_minute_unavailable")
     with pytest.raises(ValueError, match="orb_admission_funnel_not_conserved"):
         study.summarize_orb_causal_gate_days([row])
