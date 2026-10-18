@@ -405,10 +405,25 @@ def test_compact_orb_context_diagnostics_count_market_minutes_not_option_bars(
     assert sum(scenario["orb_replay_regimes"].values()) == 4
 
 
-def test_compact_orb_replay_does_not_lose_actual_stable_regime(tmp_path):
+def test_compact_orb_replay_does_not_lose_actual_stable_regime(
+    tmp_path, monkeypatch
+):
+    from nifty_scalper_bot.backtesting import strategy_research as research
     from nifty_scalper_bot.backtesting.strategy_research import _scenario, load_archive
     from nifty_scalper_bot.config.settings import get_settings
+    from nifty_scalper_bot.core.market_regime import RegimeSnapshot
 
+    class AlwaysTrend:
+        def evaluate(self, symbol, data):
+            return RegimeSnapshot(
+                symbol=symbol,
+                regime="trend",
+                confidence=0.95,
+                reason="fixture",
+                updated_at=0.0,
+            )
+
+    monkeypatch.setattr(research, "MarketRegimeDetector", AlwaysTrend)
     archive(tmp_path)
     histories, instruments, _ = load_archive(tmp_path)
 
@@ -434,7 +449,7 @@ def test_compact_orb_replay_does_not_lose_actual_stable_regime(tmp_path):
     )
     regimes = result["orb_replay_regimes"]
     assert sum(regimes.values()) == 4
-    assert sum(value for key, value in regimes.items() if key != "UNKNOWN") == 4
+    assert regimes == {"trend": 4}
 
 
 def test_research_structural_context_includes_futures_volume_ratio(tmp_path):
