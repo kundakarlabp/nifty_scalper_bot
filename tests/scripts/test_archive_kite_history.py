@@ -735,3 +735,91 @@ def test_retained_inventory_empty_weekday_window_reports_absence(tmp_path):
     assert report["observed_weekday_dates"] == []
     assert report["unobserved_weekday_dates"] == ["2026-10-12", "2026-10-13"]
     assert report["weekday_dates_without_replay_stage"] is None
+
+
+def test_nse_fo_2026_regular_session_coverage_omits_exchange_holiday(tmp_path):
+    """Dussehra on Tuesday is not a missing regular F&O trading session."""
+    report = collector.historical_cache_inventory(
+        tmp_path,
+        dt.date(2026, 10, 19),
+        dt.date(2026, 10, 21),
+    )
+    assert report["weekday_candidate_dates"] == [
+        "2026-10-19",
+        "2026-10-20",
+        "2026-10-21",
+    ]
+    assert report["nse_fo_regular_calendar_verified"] is True
+    assert report["nse_fo_regular_session_dates"] == [
+        "2026-10-19",
+        "2026-10-21",
+    ]
+    assert report["nse_fo_regular_session_unobserved_dates"] == [
+        "2026-10-19",
+        "2026-10-21",
+    ]
+    assert report["nse_fo_regular_session_without_replay_stage"] is None
+    assert "NSE/FAOP/71777" in report["nse_fo_regular_calendar_sources"][0]
+    assert "NSE/FAOP/72262" in report["nse_fo_regular_calendar_sources"][1]
+    assert report["nse_fo_special_sessions_included"] is False
+    assert report["promotion_eligible"] is False
+
+
+def test_nse_fo_regular_calendar_unknown_years_fail_open_reporting_only(tmp_path):
+    """Never promote unsupported years to an authoritative trading calendar."""
+    report = collector.historical_cache_inventory(
+        tmp_path,
+        dt.date(2025, 12, 30),
+        dt.date(2026, 1, 2),
+    )
+    assert report["nse_fo_regular_calendar_verified"] is False
+    assert report["nse_fo_regular_session_dates"] is None
+    assert report["nse_fo_regular_session_unobserved_dates"] is None
+    assert report["nse_fo_regular_calendar_sources"] == []
+    assert report["weekday_candidate_dates"] == [
+        "2025-12-30",
+        "2025-12-31",
+        "2026-01-01",
+        "2026-01-02",
+    ]
+
+
+def test_nse_fo_holiday_cannot_be_staged_as_normal_smc_replay(tmp_path):
+    """Checksum-correct fabricated regular-session candles must fail closed."""
+    source = tmp_path / "cache" / "candles"
+    source.mkdir(parents=True)
+    contracts = [
+        _retained_session_payload("NSE:NIFTY 50", "EQ", 100),
+        _retained_session_payload("NFO:NIFTY26OCTFUT", "FUT", 101, expiry="2026-10-27"),
+        _retained_session_payload(
+            "NFO:NIFTY26O2722500CE", "CE", 102,
+            strike=22500, expiry="2026-10-27",
+        ),
+        _retained_session_payload(
+            "NFO:NIFTY26O2722500PE", "PE", 103,
+            strike=22500, expiry="2026-10-27",
+        ),
+    ]
+    for index, payload in enumerate(contracts):
+        for name in ("from", "to", "captured_at"):
+            payload[name] = payload[name].replace("2026-10-12", "2026-10-20")
+        payload["candles"] = [
+            [row[0].replace("2026-10-12", "2026-10-20"), *row[1:]]
+            for row in payload["candles"]
+        ]
+        payload["candles_sha256"] = collector._candle_digest(payload["candles"])
+        (source / f"{index}.json").write_text(json.dumps(payload))
+    destination = tmp_path / "staged"
+    report = collector.historical_cache_inventory(
+        tmp_path / "cache",
+        dt.date(2026, 10, 20),
+        dt.date(2026, 10, 20),
+        stage_dir=destination,
+        min_synchronized_minutes=3,
+    )
+    assert report["valid_cached_files"] == 4
+    assert report["staged_session_dates"] == []
+    assert report["staging_rejections"]["2026-10-20"] == (
+        "historical_nse_fo_regular_holiday"
+    )
+    assert not (destination / "2026-10-20").exists()
