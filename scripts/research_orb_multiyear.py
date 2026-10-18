@@ -835,6 +835,10 @@ def summarize_orb_causal_gate_days(
             repaired_entries += candidate["orb_repaired_target_entries"]
         if repaired_entries > repaired_funnel["accepted_fills"]:
             raise ValueError("orb_repair_counterfactual_entries_exceed_fills")
+        if len(repaired_trades) + len(repaired_unresolved) != repaired_funnel[
+            "accepted_fills"
+        ]:
+            raise ValueError("orb_repair_settlement_ledger_not_conserved")
         baseline = phase_results["without_three_vetoes"]
         repaired_metrics = summarize(repaired_trades)
         phase_results["bounded_repair_counterfactual"] = {
@@ -896,9 +900,12 @@ def review_orb_bounded_repair_evidence(
     gross = sum(row["metrics"]["gross_pnl"] for row in observed)
     fees = sum(row["metrics"]["fees"] for row in observed)
     net = sum(row["metrics"]["net_pnl"] for row in observed)
-    if resolved and (
-        validation["metrics"]["net_pnl"] <= 0
-        or final["metrics"]["net_pnl"] <= 0
+    if (
+        validation["metrics"]["trade_count"]
+        and validation["metrics"]["net_pnl"] <= 0
+    ) or (
+        final["metrics"]["trade_count"]
+        and final["metrics"]["net_pnl"] <= 0
     ):
         verdict = "REJECTED_NEGATIVE_VALIDATION_OR_FINAL_NET_PNL"
     elif unresolved:
