@@ -589,3 +589,49 @@ def test_retained_session_requires_contiguous_synchronized_minutes(tmp_path):
         "historical_minimum_synchronized_bars_missing"
     )
     assert not (staging / "2026-10-12").exists()
+
+
+def test_retained_session_prioritizes_front_week_before_strike_proximity(tmp_path):
+    """A nearer strike must not switch an observed front-week pair to next week."""
+    from nifty_scalper_bot.backtesting.strategy_research import load_archive
+
+    candles = tmp_path / "cache" / "candles"
+    candles.mkdir(parents=True)
+    contracts = [
+        _retained_session_payload("NSE:NIFTY 50", "EQ", 100),
+        _retained_session_payload("NFO:NIFTY26OCTFUT", "FUT", 101, expiry="2026-10-27"),
+        # Front weekly expiry: 30 points from a 22530 spot close.
+        _retained_session_payload("NFO:NIFTY26O1322500CE", "CE", 102, strike=22500),
+        _retained_session_payload("NFO:NIFTY26O1322500PE", "PE", 103, strike=22500),
+        # The following expiry is 20 points away, but must not take precedence.
+        _retained_session_payload(
+            "NFO:NIFTY26O2022550CE", "CE", 104,
+            strike=22550, expiry="2026-10-20"
+        ),
+        _retained_session_payload(
+            "NFO:NIFTY26O2022550PE", "PE", 105,
+            strike=22550, expiry="2026-10-20"
+        ),
+    ]
+    for index, payload in enumerate(contracts):
+        (candles / f"{index}.json").write_text(json.dumps(payload))
+
+    stage = tmp_path / "staged"
+    report = collector.historical_cache_inventory(
+        tmp_path / "cache",
+        dt.date(2026, 10, 12),
+        dt.date(2026, 10, 12),
+        stage_dir=stage,
+        min_synchronized_minutes=3,
+    )
+    assert report["staged_session_dates"] == ["2026-10-12"]
+    _, instruments, _ = load_archive(stage / "2026-10-12")
+    option_symbols = {
+        symbol for symbol, row in instruments.items()
+        if row["instrument_type"] in {"CE", "PE"}
+    }
+    assert option_symbols == {
+        "NFO:NIFTY26O1322500CE",
+        "NFO:NIFTY26O1322500PE",
+    }
+    assert report["promotion_eligible"] is False
