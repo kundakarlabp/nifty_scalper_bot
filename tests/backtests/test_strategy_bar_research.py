@@ -2036,3 +2036,107 @@ def test_orb_weekly_atm_proxy_does_not_infer_missing_expiry_or_strike(
     assert proxy["eligible_minutes"] == 0
     assert proxy["rejection_reasons"] == {"archive_strike_missing": 8}
     assert result["evaluations"] == 8
+
+
+def test_vwap_research_isolates_all_inherited_variant_controls(tmp_path, monkeypatch):
+    """The named research arms must not inherit another run's entry thresholds."""
+    import os
+
+    from nifty_scalper_bot.backtesting import strategy_research
+
+    archive(tmp_path)
+    injected = {
+        "VWAP_TREND_QUALITY_MAX_DISTANCE_ATR": "9.0",
+        "VWAP_FUTURES_SLOPE_MIN_BPS": "77",
+        "VWAP_FUTURES_VOLUME_MIN_RATIO": "9",
+        "VWAP_ALLOW_PENETRATION_ONLY_ENTRY": "true",
+        "VWAP_TREND_MOMENTUM_OPTION_RVOL_MIN": "8",
+    }
+    for key, value in injected.items():
+        monkeypatch.setenv(key, value)
+    before = dict(os.environ)
+    observations = []
+
+    def fake_scenario(*args, **kwargs):
+        observations.append({key: os.getenv(key) for key in injected})
+        return {
+            "strategies": {
+                "VWAPPro": {
+                    "development_metrics": {"trade_count": 0, "expectancy": None},
+                    "holdout_metrics": {"trade_count": 0, "expectancy": None},
+                    "data_quality": {
+                        "development_unresolved_exit_count": 0,
+                        "holdout_unresolved_exit_count": 0,
+                    },
+                }
+            }
+        }
+
+    monkeypatch.setattr(strategy_research, "_scenario", fake_scenario)
+    report = strategy_research.run_vwap_comparison(tmp_path)
+
+    assert len(observations) == 27
+    for index, candidate in enumerate(report["candidates"]):
+        for observation in observations[index * 3 : (index + 1) * 3]:
+            for key in injected:
+                assert observation[key] == candidate["environment_overrides"].get(key)
+    assert all(
+        report["baseline_environment"][key] == value for key, value in injected.items()
+    )
+    assert dict(os.environ) == before
+
+
+@pytest.mark.parametrize(
+    ("days", "dev_days", "hold_days", "holdout_trades", "expected_eligible"),
+    [
+        (2, 1, 1, 15, False),
+        (10, 8, 2, 1, False),
+        (10, 8, 2, 10, True),
+    ],
+)
+def test_vwap_holdout_delta_requires_session_and_trade_sufficiency(
+    tmp_path, monkeypatch, days, dev_days, hold_days, holdout_trades, expected_eligible
+):
+    """One lucky holdout trade or two dates cannot establish a retest delta."""
+    import os
+
+    from nifty_scalper_bot.backtesting import strategy_research
+
+    archive(tmp_path)
+
+    def fake_scenario(*args, **kwargs):
+        retest = os.getenv("VWAP_TREND_REQUIRE_RETEST") == "true"
+        return {
+            "strategies": {
+                "VWAPPro": {
+                    "development_metrics": {
+                        "trade_count": 32 if retest else 40,
+                        "expectancy": 4.0 if retest else 2.0,
+                    },
+                    "holdout_metrics": {
+                        "trade_count": holdout_trades,
+                        "expectancy": 4.0 if retest else 2.0,
+                    },
+                    "data_quality": {
+                        "eligible_session_count": days,
+                        "development_eligible_session_count": dev_days,
+                        "holdout_eligible_session_count": hold_days,
+                        "development_unresolved_exit_count": 0,
+                        "holdout_unresolved_exit_count": 0,
+                    },
+                }
+            }
+        }
+
+    monkeypatch.setattr(strategy_research, "_scenario", fake_scenario)
+    report = strategy_research.run_vwap_comparison(tmp_path)
+    comparison = report["paired_comparisons"][0]
+    assert comparison["minimum_holdout_trades_per_arm"] == 10
+    for scenario in comparison["scenarios"]:
+        assert scenario["holdout_trade_count_control"] == holdout_trades
+        assert scenario["holdout_trade_count_treatment"] == holdout_trades
+        assert scenario["holdout_sample_eligible"] is expected_eligible
+        assert scenario["holdout_expectancy_delta"] == (
+            2.0 if expected_eligible else None
+        )
+    assert comparison["promotion_eligible"] is False
