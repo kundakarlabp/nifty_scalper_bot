@@ -187,9 +187,7 @@ def select_atm_pair(
         # bar start or end. Require that exact first trading minute; an
         # earlier or later traded bar must not substitute for opening evidence.
         opening_label = "09:15" if frame.attrs.get("bar_start_labels") else "09:16"
-        known = session[
-            (session["time"] == opening_label) & (session["volume"] > 0)
-        ]
+        known = session[(session["time"] == opening_label) & (session["volume"] > 0)]
         if known.empty:
             return None
         selected.append(session)
