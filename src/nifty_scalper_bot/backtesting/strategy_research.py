@@ -951,11 +951,11 @@ def _scenario(
                             required_net_rr=minimum_net_rr,
                         )
                         orb_bounded_target_repair[
-                            "threshold_mismatch"
-                            if viable is None
-                            else "viable"
-                            if viable
-                            else "not_viable"
+                            (
+                                "threshold_mismatch"
+                                if viable is None
+                                else "viable" if viable else "not_viable"
+                            )
                         ] += 1
                     else:
                         orb_admission_economics["passed"] += 1
