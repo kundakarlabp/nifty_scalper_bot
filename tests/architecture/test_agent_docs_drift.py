@@ -80,9 +80,7 @@ async def test_consolidated_incidents_retained_without_stale_fragment_files() ->
     )
     assert not [path for path in retired if (ROOT / path).exists()]
 
-    telegram = (ROOT / "docs/telegram_operator_console.md").read_text(
-        encoding="utf-8"
-    )
+    telegram = (ROOT / "docs/telegram_operator_console.md").read_text(encoding="utf-8")
     assert "TELEGRAM_POLLING_CONFLICT" in telegram
     assert "telegram_polling_transient" in telegram
     assert "five-minute monotonic repeat window" in telegram
