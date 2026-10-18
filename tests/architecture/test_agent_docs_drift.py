@@ -69,6 +69,7 @@ async def test_current_docs_replace_retired_prompt_and_deployment_duplicates() -
     ):
         assert (ROOT / canonical).is_file()
 
+
 async def test_consolidated_incidents_retained_without_stale_fragment_files() -> None:
     retired = (
         "docs/telegram_alert_handler_hygiene.md",
