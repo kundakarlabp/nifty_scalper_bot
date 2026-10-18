@@ -7,13 +7,14 @@ from dataclasses import dataclass
 from datetime import date, datetime, time
 from zoneinfo import ZoneInfo
 
-from dashboard.superlite_events import (
-    csv_bytes as csv_bytes,
-    deduplicate_events,
-    filter_events as filter_events,
-    parse_event,
-    SECRET,
-)
+from dashboard import superlite_events
+
+# Preserve the existing log_export API while keeping event behavior in one owner.
+SECRET = superlite_events.SECRET
+csv_bytes = superlite_events.csv_bytes
+deduplicate_events = superlite_events.deduplicate_events
+filter_events = superlite_events.filter_events
+parse_event = superlite_events.parse_event
 
 IST = ZoneInfo("Asia/Kolkata")
 MAX_EXPORT_BYTES = 24 * 1024 * 1024
