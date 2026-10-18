@@ -2681,9 +2681,10 @@ def test_smc_structural_research_exit_uses_next_option_open_not_breach_bar(
     assert premium_trade["exit_price"] == 110.0
     assert structural_trade["exit_reason"] == "smc_structural_invalidation_next_open"
     assert structural_trade["exit_price"] == option["candles"][expected_exit_minute][1]
-    assert structural_trade["exit_time"] == (
-        first + timedelta(minutes=expected_exit_minute + 1)
-    ).isoformat()
+    assert (
+        structural_trade["exit_time"]
+        == (first + timedelta(minutes=expected_exit_minute + 1)).isoformat()
+    )
     assert structural["smc_exit_diagnostics"]["structural_exits"] == 1
     assert structural_trade["fees"] > 0
 
