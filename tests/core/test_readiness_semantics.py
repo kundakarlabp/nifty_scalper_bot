@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from nifty_scalper_bot.core import app
+from nifty_scalper_bot.strategies.runner import RunnerState
 
 
 class _MDM:
@@ -91,3 +92,7 @@ async def test_off_market_data_ready_splits_execution_arming(monkeypatch) -> Non
 def test_bot_context_declares_readiness_blockers_field() -> None:
     """BotContext restricts attributes, so the blocker set must be a field."""
     assert "readiness_blockers" in app.BotContext.__dataclass_fields__
+
+
+def test_runner_booting_state_preserves_existing_numeric_contract() -> None:
+    assert RunnerState.BOOTING.value == 1

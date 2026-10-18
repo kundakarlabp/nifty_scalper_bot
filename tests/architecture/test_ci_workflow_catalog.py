@@ -1,3 +1,4 @@
+import ast
 from pathlib import Path
 
 import yaml
@@ -112,3 +113,38 @@ def test_quality_job_installs_python_only_when_python_changed() -> None:
     assert "has_production_python=true" in text
     assert "if: steps.changed.outputs.has_python == 'true'" in text
     assert "if: steps.changed.outputs.has_production_python == 'true'" in text
+
+
+def test_active_suite_has_no_empty_placeholders_or_module_level_skips() -> None:
+    """Prevent false-green test files from returning to the main CI matrix."""
+    for path in (ROOT / "tests").rglob("test_*.py"):
+        module = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for statement in module.body:
+            if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                assert not statement.name.startswith("test_placeholder"), str(path)
+                # A test whose sole body is 'assert True' is not a regression.
+                body = [
+                    item
+                    for item in statement.body
+                    if not (
+                        isinstance(item, ast.Expr)
+                        and isinstance(item.value, ast.Constant)
+                        and isinstance(item.value.value, str)
+                    )
+                ]
+                if len(body) == 1 and isinstance(body[0], ast.Assert):
+                    literal = body[0].test
+                    assert not (
+                        isinstance(literal, ast.Constant) and literal.value is True
+                    ), str(path)
+
+            if isinstance(statement, ast.Expr) and isinstance(
+                statement.value, ast.Call
+            ):
+                call = statement.value.func
+                assert not (
+                    isinstance(call, ast.Attribute)
+                    and isinstance(call.value, ast.Name)
+                    and call.value.id == "pytest"
+                    and call.attr == "skip"
+                ), str(path)
