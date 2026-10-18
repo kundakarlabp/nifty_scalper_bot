@@ -384,7 +384,8 @@ def stage_pair_with_verified_context(
                 "historical_lot_size_source": lot_size_source,
             },
             "candles": [
-                bar for bar in payload["candles"]
+                bar
+                for bar in payload["candles"]
                 if dt.datetime.fromisoformat(bar[0]).date() == day
             ],
         }
@@ -392,31 +393,34 @@ def stage_pair_with_verified_context(
     for source in sorted((context_directory / "candles").glob("*.json")):
         raw = json.loads(source.read_text())
         symbol = raw.get("symbol")
-        if symbol != "NSE:NIFTY 50" and raw.get("instrument", {}).get(
-            "instrument_type"
-        ) != "FUT":
-            continue
         if (
-            raw.get("timestamp_convention") != "bar_start"
-            or raw.get("instrument", {}).get("instrument_type") not in {"EQ", "FUT"}
+            symbol != "NSE:NIFTY 50"
+            and raw.get("instrument", {}).get("instrument_type") != "FUT"
         ):
+            continue
+        if raw.get("timestamp_convention") != "bar_start" or raw.get(
+            "instrument", {}
+        ).get("instrument_type") not in {"EQ", "FUT"}:
             raise ValueError("fyers_research_context_untrusted")
         if symbol in context:
             raise ValueError("fyers_research_context_identity_ambiguous")
         if raw["instrument"]["instrument_type"] == "FUT":
-            if not symbol.startswith("NFO:NIFTY") or dt.date.fromisoformat(
-                str(raw["instrument"]["expiry"])
-            ) < day:
+            if (
+                not symbol.startswith("NFO:NIFTY")
+                or dt.date.fromisoformat(str(raw["instrument"]["expiry"])) < day
+            ):
                 raise ValueError("fyers_research_context_future_invalid")
         context[symbol] = {
             **raw,
             "candles": [
-                bar for bar in raw["candles"]
+                bar
+                for bar in raw["candles"]
                 if dt.datetime.fromisoformat(str(bar[0])).date() == day
             ],
         }
     futures = [
-        symbol for symbol in context
+        symbol
+        for symbol in context
         if context[symbol]["instrument"]["instrument_type"] == "FUT"
     ]
     if len(futures) != 1 or "NSE:NIFTY 50" not in context:
@@ -435,9 +439,9 @@ def stage_pair_with_verified_context(
             *(set(history) for history in histories.values())
         )
         anchors = sorted(
-            stamp for stamp in synchronized
-            if stamp.date() == day
-            and dt.time(9, 30) <= stamp.time() <= dt.time(9, 45)
+            stamp
+            for stamp in synchronized
+            if stamp.date() == day and dt.time(9, 30) <= stamp.time() <= dt.time(9, 45)
         )
         if not any(
             all(
@@ -482,11 +486,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--max-intraday-requests", type=int, default=10)
     parser.add_argument(
-        "--context-archive", type=Path,
+        "--context-archive",
+        type=Path,
         help="Independent NSE spot and NIFTY futures archive for secondary replay",
     )
     parser.add_argument(
-        "--stage-output", type=Path,
+        "--stage-output",
+        type=Path,
         help="Explicit destination for a validated secondary research session",
     )
     parser.add_argument("--historical-lot-size", type=int)
