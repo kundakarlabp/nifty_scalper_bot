@@ -78,8 +78,19 @@ def _validate_candles(candles: list, first: dt.datetime, last: dt.datetime) -> N
         previous = timestamp
 
 
-def history_universe(rows: list[dict], selected: dict, future: str) -> list[str]:
-    """Mirror the live capped current-expiry basket; never infer past baskets."""
+def history_universe(
+    rows: list[dict],
+    selected: dict,
+    future: str,
+    *,
+    research_option_cap: int | None = None,
+) -> list[str]:
+    """Select current contracts for archiving without inferring past baskets.
+
+    The default preserves the exact active-basket cap. An explicit independent
+    research-only cap includes more live strikes without changing subscriptions,
+    trading settings or risk limits. It cannot recover expired contracts.
+    """
     nominated = ["NSE:NIFTY 50", future, selected["ce"], selected["pe"]]
     ce = next(
         (row for row in rows if f"NFO:{row.get('tradingsymbol')}" == selected["ce"]),
@@ -115,6 +126,15 @@ def history_universe(rows: list[dict], selected: dict, future: str) -> list[str]
         os.getenv("MAX_ACTIVE_OPTION_SYMBOLS") or os.getenv("MAX_LIVE_OPTION_SYMBOLS"),
         8,
     )
+    if research_option_cap is not None:
+        if (
+            type(research_option_cap) is not int
+            or research_option_cap < 8
+            or research_option_cap > 48
+            or research_option_cap % 2
+        ):
+            raise ValueError("historical_research_option_cap_invalid")
+        max_options = research_option_cap
     capped = cap_option_universe(
         option_items,
         selected_ce=selected["ce"],
