@@ -412,6 +412,15 @@ class VWAPProStrategy(EliteStrategy):
             ):
                 self._no_vote("invalid_option_market_data")
                 return None
+            # Completed premium OHLC must describe a possible candle before
+            # its high/low can arm a VWAP reclaim or its body a continuation.
+            # Flat-price traded bars remain valid (low == high).
+            if (
+                min(open_price, high, low, close) <= 0
+                or not (low <= open_price <= high and low <= close <= high)
+            ):
+                self._no_vote("invalid_option_candle_geometry")
+                return None
             # Futures volume can corroborate a traded option setup, but cannot
             # create a premium reclaim/continuation from an untraded candle.
             # Check before arming a thesis to avoid carrying stale price state

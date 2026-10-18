@@ -43,6 +43,29 @@ def _indicators(**updates):
     return payload
 
 
+def test_live_vwap_rejects_impossible_option_ohlc_before_arming_thesis(
+    monkeypatch,
+):
+    """Malformed premium candles must never create a reclaim or continuation."""
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    for invalid in (
+        {"high": 102.0},
+        {"low": 101.0},
+        {"open": 105.0},
+        {"low": -1.0},
+        {"high": 99.0, "low": 101.0},
+    ):
+        strategy = VWAPProStrategy(VWAPProStrategyConfig(), _DummyEngine())
+        signal = strategy._evaluate_signal(
+            "NFO:NIFTY26FEB22500CE",
+            _indicators(**invalid, futures_volume_ratio=1.2),
+            103.0,
+        )
+        assert signal is None, invalid
+        assert strategy.last_no_vote_reason == "invalid_option_candle_geometry"
+        assert strategy._thesis_anchor_by_scope == {}
+
+
 def test_live_vwap_blocks_untraded_option_candle_despite_strong_futures_volume(
     monkeypatch,
 ):
