@@ -209,7 +209,12 @@ def archive_history(
         "failed_requests": [],
         "contains_historical_bid_ask_depth": False,
         "coverage_is_request_level": True,
+        "history_request_min_spacing_seconds": 0.36,
     }
+    # Kite's historical endpoint permits three calls per second. This isolated
+    # worker may archive many more contracts than the live basket, so pace
+    # cache misses and retries without touching the live quote/order loops.
+    next_history_request_at = time.monotonic()
     _write_json(
         outdir / "instruments.json",
         {
@@ -269,6 +274,10 @@ def archive_history(
             else:
                 try:
                     for attempt in range(3):
+                        wait = next_history_request_at - time.monotonic()
+                        if wait > 0:
+                            time.sleep(wait)
+                        next_history_request_at = time.monotonic() + 0.36
                         try:
                             candles = client.historical_data(
                                 token,
