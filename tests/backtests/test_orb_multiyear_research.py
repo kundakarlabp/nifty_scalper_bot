@@ -2,6 +2,8 @@
 
 import io
 import json
+import logging
+import os
 import zipfile
 from datetime import datetime, timedelta
 from types import SimpleNamespace
@@ -179,6 +181,56 @@ def test_multiyear_research_preserves_zero_trade_stage_funnel(monkeypatch):
     assert diagnostics["structural_gate_failures_by_option_evaluation"] == {
         "futures_vwap_slope_alignment": 2
     }
+
+
+def test_causal_gate_ablation_preserves_identical_data_and_no_trade_abstention(
+    monkeypatch, tmp_path
+):
+    from scripts import research_orb_multiyear as study
+
+    seen = []
+
+    def fake_research(directory, *, causal_gate_profile, **kwargs):
+        seen.append((str(directory), causal_gate_profile, kwargs))
+        return {
+            "entry_funnel": {
+                "evaluations": 10,
+                "signals_emitted": 0,
+                "geometry_valid": 0,
+                "next_bar_intents": 0,
+                "accepted_fills": 0,
+            },
+            "metrics": {"trade_count": 0, "net_pnl": 0},
+            "data_quality": {"unresolved_exit_count": 0},
+            "no_vote_reasons": {"underlying_direction_unavailable": 2},
+            "structural_gate_failures": {"balanced_opening_range": 1},
+            "trades": [],
+            "unresolved_trades": [],
+        }
+
+    monkeypatch.setattr(study, "run_orb_session_research", fake_research)
+    previous_env = dict(os.environ)
+    previous_logging_level = logging.root.manager.disable
+    row = study.run_orb_causal_gate_day((str(tmp_path), "2017-01-02"))
+    assert dict(os.environ) == previous_env
+    assert logging.root.manager.disable == previous_logging_level
+    assert len(row["arms"]) == 6
+    assert len(seen) == 6
+    assert len({entry[0] for entry in seen}) == 1
+    assert {entry[2]["slippage_bps"] for entry in seen} == {10.0}
+    assert {entry[2]["minimum_net_rr"] for entry in seen} == {1.5}
+    report = study.summarize_orb_causal_gate_days([row])
+    for profile in row["arms"]:
+        observed = report["development"][profile]
+        assert observed["session_count"] == 1
+        assert observed["entry_funnel"]["evaluations"] == 10
+        assert observed["entry_funnel"]["signals_emitted"] == 0
+        assert observed["metrics"]["trade_count"] == 0
+        assert observed["paired_entry_overlap_with_reference"] == 0
+        assert observed["counterfactual_only_entries"] == 0
+    assert report["final"]["production_reference"]["session_count"] == 0
+    with pytest.raises(ValueError, match="orb_gate_duplicate_day"):
+        study.summarize_orb_causal_gate_days([row, row])
 
 
 def test_nested_csv_and_txt_copies_are_not_double_counted():

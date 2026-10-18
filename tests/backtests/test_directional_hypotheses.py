@@ -496,6 +496,55 @@ def test_orb_15minute_range_scaling_research_only() -> None:
     assert live_reference._structural_evidence(**evidence)[0] is False
 
 
+def test_orb_causal_gate_profiles_change_only_predeclared_structural_vetoes(
+    monkeypatch,
+) -> None:
+    from nifty_scalper_bot.backtesting.directional_hypotheses import (
+        ORB_CAUSAL_GATE_PROFILES,
+        ORBCausalGateResearch,
+    )
+
+    config = ORBProStrategyConfig(orb_minutes=15)
+    inputs = {
+        "side": "CE",
+        "direction": "CE",
+        "penetration_atr": 0.3,
+        "volume_ratio": 1.5,
+        "opening_range_atr": 3.5,
+        "indicators": {"futures_vwap_slope": 0.05},
+    }
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    with pytest.raises(ValueError, match="orb_gate_ablation_requires_shadow_process"):
+        ORBCausalGateResearch(
+            config, _HistoryEngine(_momentum_bars()), profile="combined_scaled"
+        )
+
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    outcomes = {}
+    for profile in ORB_CAUSAL_GATE_PROFILES:
+        candidate = ORBCausalGateResearch(
+            config, _HistoryEngine(_momentum_bars()), profile=profile
+        )
+        outcomes[profile] = candidate._structural_evidence(**inputs)[0]
+        # Causal ablations must not permit absent volume or slope confirmations.
+        assert (
+            candidate._structural_evidence(**{**inputs, "volume_ratio": 0.4})[0]
+            is False
+        )
+        assert (
+            candidate._structural_evidence(**{**inputs, "indicators": {}})[0] is False
+        )
+
+    assert outcomes["production_reference"] is False
+    assert all(
+        outcomes[profile]
+        for profile in ORB_CAUSAL_GATE_PROFILES
+        if profile != "production_reference"
+    )
+    with pytest.raises(ValueError, match="orb_gate_ablation_profile_invalid"):
+        ORBCausalGateResearch(config, _HistoryEngine(_momentum_bars()), profile="other")
+
+
 def test_exit_lifecycle_ablation_preserves_original_and_paired_entries() -> None:
     """Different holding durations must not masquerade as matched trade counts."""
     from scripts.research_orb_multiyear import summarize_exit_lifecycle_ablation

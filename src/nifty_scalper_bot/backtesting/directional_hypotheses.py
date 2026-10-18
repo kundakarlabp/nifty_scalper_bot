@@ -357,6 +357,112 @@ class ORBRangeScaledResearch(ORBProStrategy):
         return normalized
 
 
+# Predeclared, single-variable ORB causal-gate counterfactuals. Every arm
+# retains opening-bar integrity, actual futures breakouts, momentum/retests,
+# participation and VWAP-slope gates, plus identical option stops/costs/fills.
+# "without_three_vetoes" is NOT a pure raw-breakout strategy.
+ORB_CAUSAL_GATE_PROFILES: dict[str, tuple[bool, bool, str]] = {
+    "without_three_vetoes": (False, False, "off"),
+    "regime_only": (True, False, "off"),
+    "direction_only": (False, True, "off"),
+    "scaled_range_only": (False, False, "scaled"),
+    "combined_scaled": (True, True, "scaled"),
+    "production_reference": (True, True, "raw"),
+}
+
+
+class ORBCausalGateResearch(ORBRangeScaledResearch):
+    """Ablate research-facing ORB gates without modifying production strategy.
+
+    All counterfactual indicator masking is isolated in SHADOW research, and
+    never changes the actual futures OHLC observations or execution ledger.
+    """
+
+    def __init__(
+        self,
+        config: Any,
+        indicator_engine: IndicatorEngine,
+        *,
+        profile: str,
+    ) -> None:
+        if os.getenv("EXECUTION_MODE", "").strip().upper() != "SHADOW":
+            raise ValueError("orb_gate_ablation_requires_shadow_process")
+        if profile not in ORB_CAUSAL_GATE_PROFILES:
+            raise ValueError("orb_gate_ablation_profile_invalid")
+        super().__init__(config, indicator_engine)
+        self.profile = profile
+        self._require_regime, self._require_direction, self._range_rule = (
+            ORB_CAUSAL_GATE_PROFILES[profile]
+        )
+
+    def generate_signal(
+        self,
+        symbol: str,
+        indicators: Mapping[str, Any],
+        current_price: float,
+        position: Any = None,
+    ) -> Any:
+        # These values represent deliberately *disabled* gates for a
+        # counterfactual comparison, not inferred market observations.
+        research_inputs = dict(indicators)
+        if not self._require_regime:
+            research_inputs["regime"] = "TREND"
+        if not self._require_direction:
+            side = self._side_from_symbol(symbol)
+            if side:
+                research_inputs["underlying_direction_bias"] = side
+                research_inputs["direction_bias"] = side
+        signal = super().generate_signal(
+            symbol, research_inputs, current_price, position=position
+        )
+        if signal is not None:
+            signal.metadata["research_gate_ablation_profile"] = self.profile
+        return signal
+
+    def _structural_evidence(
+        self,
+        *,
+        side: str,
+        direction: str,
+        penetration_atr: float,
+        volume_ratio: float,
+        opening_range_atr: float,
+        indicators: Mapping[str, Any],
+    ) -> tuple[bool, list[str], bool, float, float]:
+        if self._range_rule == "scaled":
+            return super()._structural_evidence(
+                side=side,
+                direction=direction,
+                penetration_atr=penetration_atr,
+                volume_ratio=volume_ratio,
+                opening_range_atr=opening_range_atr,
+                indicators=indicators,
+            )
+        passed, reasons, balanced, low, high = ORBProStrategy._structural_evidence(
+            self,
+            side=side,
+            direction=direction,
+            penetration_atr=penetration_atr,
+            volume_ratio=volume_ratio,
+            opening_range_atr=opening_range_atr,
+            indicators=indicators,
+        )
+        if self._range_rule == "raw":
+            return passed, reasons, balanced, low, high
+        # Remove only the opening-range/one-minute-ATR balance veto.
+        # The remaining four production structural requirements stay intact.
+        required = (
+            "underlying_direction_alignment",
+            "underlying_volume_confirmation",
+            "normalized_breakout_penetration",
+            "futures_vwap_slope_alignment",
+        )
+        passed = all(reason in reasons for reason in required)
+        if "balanced_opening_range" not in reasons:
+            reasons.append("balanced_opening_range")
+        return passed, reasons, True, low, high
+
+
 def _research_strategies(
     engine: IndicatorEngine,
     *,
