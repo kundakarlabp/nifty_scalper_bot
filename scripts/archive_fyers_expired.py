@@ -24,7 +24,9 @@ IST = ZoneInfo("Asia/Kolkata")
 UTC = dt.timezone.utc
 UNDERLYING = "NSE:NIFTY50-INDEX"
 CORE_COLUMNS = ("timestamp", "open", "high", "low", "close", "volume")
-OPTION_NAME = re.compile(r"^NSE:NIFTY(?:\d{2}[A-Z]{3}|\d{2}[A-Z]\d{2})\d{4,6}(?:CE|PE)$")
+OPTION_NAME = re.compile(
+    r"^NSE:NIFTY(?:\d{2}[A-Z]{3}|\d{2}[A-Z]\d{2})\d{4,6}(?:CE|PE)$"
+)
 
 
 def _response_ok(response: Any, label: str) -> dict[str, Any]:
@@ -337,7 +339,9 @@ def stage_pair_with_verified_context(
         or destination.exists()
     ):
         raise ValueError("fyers_research_stage_prerequisites_invalid")
-    manifest_file = provider_root / "fyers_expired" / expiry.isoformat() / "collection.json"
+    manifest_file = (
+        provider_root / "fyers_expired" / expiry.isoformat() / "collection.json"
+    )
     manifest = json.loads(manifest_file.read_text())
     if manifest.get("expiry") != expiry.isoformat() or manifest.get("strike") != strike:
         raise ValueError("fyers_research_stage_identity_conflict")
