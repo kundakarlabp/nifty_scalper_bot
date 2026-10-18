@@ -370,6 +370,7 @@ def run_task(task: tuple[str, dict[str, Any], float, list[str]]) -> dict[str, An
     unresolved: list[dict[str, Any]] = []
     stress_trades: list[dict[str, Any]] = []
     reasons: Counter[str] = Counter()
+    funnel: Counter[str] = Counter()
     for index, day in enumerate(days):
         result = run_orb_session_research(
             Path(root) / "sessions" / day,
@@ -381,6 +382,7 @@ def run_task(task: tuple[str, dict[str, Any], float, list[str]]) -> dict[str, An
         unresolved.extend(result["unresolved_trades"])
         stress_trades.extend(result["worst_case_stress_trades"])
         reasons.update(result["no_vote_reasons"])
+        funnel.update(result.get("entry_funnel", {}))
         if (index + 1) % 100 == 0:
             print(
                 f"{candidate['name']} / {slippage} bps: "
@@ -410,6 +412,26 @@ def run_task(task: tuple[str, dict[str, Any], float, list[str]]) -> dict[str, An
             for year in sorted({day[:4] for day in days})
         },
         "no_vote_reasons": dict(reasons),
+        # Preserve the admission funnel across sessions. Without this, a
+        # zero-trade result discards whether signals never formed or were
+        # rejected after geometry / next-bar execution.
+        "entry_funnel": {
+            stage: int(funnel[stage])
+            for stage in (
+                "evaluations",
+                "signals_emitted",
+                "geometry_valid",
+                "next_bar_intents",
+                "accepted_fills",
+            )
+        },
+        "research_evidence_status": (
+            "NO_RESOLVED_TRADES_WITH_UNRESOLVED_EXITS"
+            if not trades and unresolved
+            else "NO_EXECUTABLE_TRADES"
+            if not trades
+            else "BAR_RESEARCH_ONLY"
+        ),
         "exit_reasons": dict(Counter(trade["exit_reason"] for trade in trades)),
         "unresolved_trades": unresolved,
         "trades": trades,
