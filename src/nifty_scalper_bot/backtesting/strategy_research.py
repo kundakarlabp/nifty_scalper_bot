@@ -661,10 +661,11 @@ def _scenario(
     require_option_premium_confirmation: bool = False,
     simulate_bounded_orb_target_repair: bool = False,
 ) -> dict[str, Any]:
-    if simulate_bounded_orb_target_repair and (
-        components != {"ORBPro"} or minimum_net_rr is None
-    ):
-        raise ValueError("orb_target_repair_requires_isolated_costed_orb")
+    if simulate_bounded_orb_target_repair:
+        if os.getenv("EXECUTION_MODE", "SHADOW").upper() != "SHADOW":
+            raise ValueError("orb_target_repair_requires_shadow_process")
+        if components != {"ORBPro"} or minimum_net_rr is None:
+            raise ValueError("orb_target_repair_requires_isolated_costed_orb")
     if compact_orb_context and components != {"ORBPro"}:
         raise ValueError("research_compact_context_requires_orb_only")
     options = sorted(
