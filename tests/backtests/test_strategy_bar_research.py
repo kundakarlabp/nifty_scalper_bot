@@ -2082,7 +2082,10 @@ def test_vwap_research_isolates_all_inherited_variant_controls(
         for observation in observations[index * 3 : (index + 1) * 3]:
             for key in injected:
                 assert observation[key] == candidate["environment_overrides"].get(key)
-    assert all(report["baseline_environment"][key] == value for key, value in injected.items())
+    assert all(
+        report["baseline_environment"][key] == value
+        for key, value in injected.items()
+    )
     assert dict(os.environ) == before
 
 
