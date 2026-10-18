@@ -105,6 +105,9 @@ The runner:
 10. reports console failure separately so a healthy trading engine is not disrupted.
 
 The automatic update timer runs the same release path every two minutes.
+Use this command directly for manual releases; obsolete `ops/redeploy.sh` and
+`deploy/scripts/update_and_deploy.sh` forwarding shortcuts are retired.
+Existing host-side shortcuts must be updated to call the canonical runner.
 
 ## Log exports
 

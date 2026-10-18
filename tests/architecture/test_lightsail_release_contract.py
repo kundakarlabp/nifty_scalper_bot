@@ -210,12 +210,10 @@ def test_release_delegates_research_manifest_to_persistent_admin() -> None:
     assert "200|202|409" in block
 
 
-def test_deploy_helpers_do_not_embed_credentials() -> None:
+def test_canonical_deployment_scripts_do_not_embed_credentials() -> None:
     paths = (
         "deploy/lightsail_setup.sh",
         "deploy/lightsail_release.sh",
-        "deploy/scripts/update_and_deploy.sh",
-        "ops/redeploy.sh",
     )
     assignment = re.compile(
         r"(?m)^(?:KITE|ZERODHA|BROKER)_(?:API_KEY|API_SECRET|ACCESS_TOKEN)=([^\s]*)$"
@@ -226,12 +224,21 @@ def test_deploy_helpers_do_not_embed_credentials() -> None:
             assert match.group(1) == "", f"credential literal found in {path}"
 
 
-def test_legacy_redeploy_entrypoints_delegate_to_canonical_runner() -> None:
-    for path in ("deploy/scripts/update_and_deploy.sh", "ops/redeploy.sh"):
-        text = _text(path)
-        assert "deploy/lightsail_release.sh" in text
-        assert "git reset --hard origin/main" not in text
-        assert "docker build" not in text
+
+def test_canonical_redeploy_path_replaces_two_unused_force_aliases() -> None:
+    assert not (ROOT / "deploy/scripts/update_and_deploy.sh").exists()
+    assert not (ROOT / "ops/redeploy.sh").exists()
+
+    setup = _text("deploy/lightsail_setup.sh")
+    release = _text("deploy/lightsail_release.sh")
+    guide = _text("deploy/LIGHTSAIL_SETUP.md")
+
+    # Automatic and documented manual operations both invoke the one
+    # validated release owner; there is no bypassing forwarding wrapper.
+    assert "deploy/lightsail_release.sh --auto" in setup
+    assert "bash deploy/lightsail_release.sh --force" in guide
+    assert "--force|--force-restart) FORCE_RESTART=true" in release
+    assert "git fetch --quiet origin main" in release
 
 
 def test_release_runner_publishes_exact_runtime_build_sha() -> None:
