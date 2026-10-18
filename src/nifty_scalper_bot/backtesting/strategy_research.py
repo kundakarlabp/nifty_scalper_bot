@@ -1153,7 +1153,9 @@ def _scenario(
                     if setup_id:
                         smc_signaled_setups.add(setup_id)
                         if setup_id in smc_filled_setups:
-                            _reject(strategy.name, "smc_setup_already_filled", timestamp)
+                            _reject(
+                                strategy.name, "smc_setup_already_filled", timestamp
+                            )
                             _record_smc_post_signal_rejection(
                                 strategy.name, setup_id, "smc_setup_already_filled"
                             )
