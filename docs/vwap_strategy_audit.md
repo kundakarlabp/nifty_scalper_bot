@@ -390,3 +390,33 @@ The report remains SHADOW-only, cannot promote LIVE settings, has no
 untouched holdout, and does not recreate unobserved contract history,
 executable depth or verified brokerage fills. Production configuration
 and broker order paths were not changed.
+
+
+## 2026-10-18: complete research environment isolation and holdout credibility
+
+The existing bounded VWAP component comparison previously cleared only the
+momentum, retest, and finalized-bar flags. If an operator had set
+`VWAP_TREND_QUALITY_MAX_DISTANCE_ATR`, `VWAP_FUTURES_SLOPE_MIN_BPS`,
+`VWAP_FUTURES_VOLUME_MIN_RATIO`, `VWAP_ALLOW_PENETRATION_ONLY_ENTRY`, or
+`VWAP_TREND_MOMENTUM_OPTION_RVOL_MIN` on the host, the supposed default
+`current_reference` (and many named variants) silently inherited those
+experimental settings. A RED test reproduced the baseline contamination.
+
+Each arm now clears **all eight prespecified VWAP comparison controls**,
+explicitly establishes the three default-off flags, and applies only its
+own variant overrides; the original environment is restored after every
+scenario group, even on exceptions. The raw host values remain in
+`baseline_environment` for provenance, not as causal baseline assumptions.
+Non-comparison LIVE flags are not changed or promoted.
+
+The prior paired VWAP holdout report could also expose a net expectancy
+difference with a single holdout trade or just two eligible sessions.
+`holdout_sample_eligible` now requires the **same >=10 eligible-session
+research preflight (>=8 development, >=2 holdout)** plus >=10 resolved
+holdout trades in *each* arm, zero unresolved holdout exits and defined
+net expectancy. Otherwise the holdout expectancy delta is `null`, while
+the observed trade counts remain available. This ten-trade bound is only
+a conservative **descriptive** minimum, not a power-based proof; the
+holdout is still reused retrospective evidence. All comparisons remain
+non-promotable, cost-modeled research rather than historical quote-fill
+parity or reliable estimates of LIVE alpha.

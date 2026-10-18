@@ -1720,17 +1720,15 @@ def run_vwap_comparison(directory: Path) -> dict[str, Any]:
     candidates: list[dict[str, Any]] = []
     for name, overrides in variants:
         # Keep the baseline independent of any inherited experimental toggle.
-        keys = {
-            "VWAP_TREND_MOMENTUM_ENABLED",
-            "VWAP_TREND_REQUIRE_RETEST",
-            "VWAP_REQUIRE_FINALIZED_SIGNAL_BAR",
-            *overrides,
-        }
-        original = {key: os.environ.get(key) for key in keys}
+        # Each named research arm owns its entire experimental environment.
+        # Inheriting unrelated LIVE/operator opt-ins would confound the
+        # current_reference baseline and cross-variant comparisons.
+        original = {key: os.environ.get(key) for key in environment_keys}
         try:
+            for key in environment_keys:
+                os.environ.pop(key, None)
             os.environ["VWAP_TREND_MOMENTUM_ENABLED"] = "false"
             os.environ["VWAP_TREND_REQUIRE_RETEST"] = "false"
-            # Research comparison must not inherit an unrelated host toggle.
             os.environ["VWAP_REQUIRE_FINALIZED_SIGNAL_BAR"] = "false"
             os.environ.update(overrides)
             scenarios: list[dict[str, Any]] = []
@@ -1866,9 +1864,14 @@ def run_vwap_comparison(directory: Path) -> dict[str, Any]:
             and base_dev["expectancy"] is not None
             and test_dev["expectancy"] is not None
         )
+        # A single lucky out-of-sample fill cannot be treated as a
+        # measurable retest effect; counts remain visible even when
+        # an expectancy difference is withheld.
+        minimum_holdout_trades = 10
         usable_holdout = (
-            base_hold.get("trade_count", 0) > 0
-            and test_hold.get("trade_count", 0) > 0
+            session_sample_ok
+            and base_hold.get("trade_count", 0) >= minimum_holdout_trades
+            and test_hold.get("trade_count", 0) >= minimum_holdout_trades
             and base_quality.get("holdout_unresolved_exit_count", 0) == 0
             and test_quality.get("holdout_unresolved_exit_count", 0) == 0
             and base_hold.get("expectancy") is not None
@@ -1887,6 +1890,7 @@ def run_vwap_comparison(directory: Path) -> dict[str, Any]:
                 ),
                 "holdout_trade_count_control": base_hold.get("trade_count", 0),
                 "holdout_trade_count_treatment": test_hold.get("trade_count", 0),
+                "holdout_sample_eligible": usable_holdout,
                 "holdout_expectancy_delta": (
                     test_hold["expectancy"] - base_hold["expectancy"]
                     if usable_holdout
@@ -1900,6 +1904,7 @@ def run_vwap_comparison(directory: Path) -> dict[str, Any]:
             "control": immediate["name"],
             "treatment": retest["name"],
             "only_changed_rule": "VWAP_TREND_REQUIRE_RETEST",
+            "minimum_holdout_trades_per_arm": 10,
             "scenarios": paired_scenarios,
             "selected_for_live": None,
             "promotion_eligible": False,
