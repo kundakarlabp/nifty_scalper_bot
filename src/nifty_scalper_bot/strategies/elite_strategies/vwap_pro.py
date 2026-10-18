@@ -672,8 +672,11 @@ class VWAPProStrategy(EliteStrategy):
                 premium_above_vwap
                 and penetration_atr >= self._min_penetration_atr
             )
+            # A static hold above VWAP does not prove bullish continuation
+            # when the traded premium candle closes flat or bearish.
             continuation_hold_confirmed = bool(
-                open_price >= vwap
+                close > open_price
+                and open_price >= vwap
                 and low >= vwap
                 and close >= vwap
                 and penetration_confirmed
