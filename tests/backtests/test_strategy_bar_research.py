@@ -1295,9 +1295,7 @@ def test_vwap_research_cannot_inherit_optional_finalized_bar_gate(
     )
 
 
-def test_vwap_research_reports_a_cost_matched_retest_ablation(
-    tmp_path, monkeypatch
-):
+def test_vwap_research_reports_a_cost_matched_retest_ablation(tmp_path, monkeypatch):
     """Immediate-vs-retest comparison must hold premium RVOL and fill costs fixed."""
     import os
 
@@ -1340,9 +1338,7 @@ def test_vwap_research_reports_a_cost_matched_retest_ablation(
     assert comparison["only_changed_rule"] == "VWAP_TREND_REQUIRE_RETEST"
     assert len(comparison["scenarios"]) == 3
     assert {
-        (momentum, retest, rvol)
-        for momentum, retest, rvol, _ in observed
-        if momentum
+        (momentum, retest, rvol) for momentum, retest, rvol, _ in observed if momentum
     } == {(True, False, "1.5"), (True, True, "1.5")}
     for scenario in comparison["scenarios"]:
         assert scenario["development_trade_count_control"] == 40
