@@ -1688,3 +1688,93 @@ def test_vwap_comparison_exposes_archive_coverage_without_changing_scenario(
         report["retest_archive_coverage"]["counts"]["weekly_atm_proxy_rejections"] == 8
     )
     assert report["selection"]["promotion_eligible"] is False
+
+
+@pytest.mark.parametrize(
+    ("days", "development_days", "holdout_days", "expected_status"),
+    [
+        (2, 1, 1, "insufficient_sessions"),
+        (10, 8, 2, "descriptive_only"),
+    ],
+)
+def test_vwap_research_blocks_development_ranking_on_sparse_session_coverage(
+    tmp_path, monkeypatch, days, development_days, holdout_days, expected_status
+):
+    """Many modeled trades on one day are not an independent historical sample."""
+    from nifty_scalper_bot.backtesting import strategy_research
+
+    archive(tmp_path)
+
+    def simulated_scenario(*args, **kwargs):
+        return {
+            "strategies": {
+                "VWAPPro": {
+                    "development_metrics": {"trade_count": 40, "expectancy": 1.5},
+                    "holdout_metrics": {"trade_count": 5, "expectancy": 0.5},
+                    "data_quality": {
+                        "eligible_session_count": days,
+                        "development_eligible_session_count": development_days,
+                        "holdout_eligible_session_count": holdout_days,
+                        "eligible_option_bar_count": 100,
+                        "development_unresolved_exit_count": 0,
+                        "holdout_unresolved_exit_count": 0,
+                    },
+                }
+            }
+        }
+
+    monkeypatch.setattr(strategy_research, "_scenario", simulated_scenario)
+    report = strategy_research.run_vwap_comparison(tmp_path)
+    sample = report["sample_sufficiency"]
+
+    assert sample["status"] == expected_status
+    assert sample["eligible_session_count"] == days
+    assert sample["development_eligible_session_count"] == development_days
+    assert sample["holdout_eligible_session_count"] == holdout_days
+    assert sample["minimum_total_sessions"] == 10
+    assert sample["minimum_development_sessions"] == 8
+    assert sample["minimum_holdout_sessions"] == 2
+    if days < 10:
+        assert "INSUFFICIENT_ELIGIBLE_SESSIONS" in sample["reason_codes"]
+        assert report["selection"]["development_ranking"] == []
+        assert report["selection"]["best_observed_research_candidate"] is None
+    else:
+        assert sample["reason_codes"] == []
+        assert report["selection"]["development_ranking"]
+    assert report["selection"]["promotion_eligible"] is False
+
+
+def test_vwap_research_identifies_no_trades_without_zero_profitability_claim(
+    tmp_path, monkeypatch
+):
+    from nifty_scalper_bot.backtesting import strategy_research
+
+    archive(tmp_path)
+
+    def simulated_scenario(*args, **kwargs):
+        return {
+            "strategies": {
+                "VWAPPro": {
+                    "development_metrics": {"trade_count": 0, "expectancy": None},
+                    "holdout_metrics": {"trade_count": 0, "expectancy": None},
+                    "data_quality": {
+                        "eligible_session_count": 2,
+                        "development_eligible_session_count": 1,
+                        "holdout_eligible_session_count": 1,
+                        "eligible_option_bar_count": 3300,
+                        "development_unresolved_exit_count": 0,
+                        "holdout_unresolved_exit_count": 0,
+                    },
+                }
+            }
+        }
+
+    monkeypatch.setattr(strategy_research, "_scenario", simulated_scenario)
+    report = strategy_research.run_vwap_comparison(tmp_path)
+    assert report["sample_sufficiency"]["max_development_resolved_trades"] == 0
+    assert (
+        "NO_RESOLVED_DEVELOPMENT_TRADES"
+        in report["sample_sufficiency"]["reason_codes"]
+    )
+    assert report["selection"]["development_ranking"] == []
+    assert report["selection"]["selected_for_live"] is None
