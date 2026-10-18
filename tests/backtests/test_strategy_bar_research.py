@@ -1323,6 +1323,9 @@ def test_vwap_research_reports_a_cost_matched_retest_ablation(tmp_path, monkeypa
                     },
                     "holdout_metrics": {"trade_count": 0, "expectancy": None},
                     "data_quality": {
+                        "eligible_session_count": 10,
+                        "development_eligible_session_count": 8,
+                        "holdout_eligible_session_count": 2,
                         "development_unresolved_exit_count": 0,
                         "holdout_unresolved_exit_count": 0,
                     },
@@ -1736,6 +1739,15 @@ def test_vwap_research_blocks_development_ranking_on_sparse_session_coverage(
     assert sample["minimum_holdout_sessions"] == 2
     if days < 10:
         assert "INSUFFICIENT_ELIGIBLE_SESSIONS" in sample["reason_codes"]
+        assert not report["paired_comparisons"][0]["scenarios"][0][
+            "development_sample_eligible"
+        ]
+        assert (
+            report["paired_comparisons"][0]["scenarios"][0][
+                "development_expectancy_delta"
+            ]
+            is None
+        )
         assert report["selection"]["development_ranking"] == []
         assert report["selection"]["best_observed_research_candidate"] is None
     else:
