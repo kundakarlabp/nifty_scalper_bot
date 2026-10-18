@@ -244,6 +244,17 @@ def test_causal_gate_ablation_preserves_identical_data_and_no_trade_abstention(
         ]
         == 0
     )
+    row["bounded_repair_counterfactual"]["unresolved_trades"] = [
+        {"unresolved_reason": "history_gap_unresolved"}
+    ]
+    incomplete = study.summarize_orb_causal_gate_days([row])
+    assert (
+        incomplete["development"]["bounded_repair_counterfactual"][
+            "paired_net_pnl_difference"
+        ]
+        is None
+    )
+    row["bounded_repair_counterfactual"]["unresolved_trades"] = []
 
     # A historical signal may be rejected for economics or absent next bar.
     # Every initiated next-bar intent must be accounted for exactly once.
