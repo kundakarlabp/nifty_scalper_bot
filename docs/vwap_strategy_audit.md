@@ -533,3 +533,28 @@ This is a production-code quality and safety correction, not evidence
 of improved trade expectancy. A lower number of invalid signals does
 not prove profitability; backtests and broker-quote execution checks
 remain necessary.
+
+
+## 2026-10-18: require bullish premium close for VWAP hold continuation
+
+A RED LIVE-strategy regression showed that `continuation_hold_confirmed`
+accepted a **bearish or doji option candle** entirely above option VWAP,
+provided its close was far enough above VWAP. On a previously armed
+thesis, that permitted a `vwap_continuation` BUY without a bullish
+candle close. The case is not covered by the strong-body momentum rule,
+which already requires `close > open`.
+
+The minimal default-on correction requires `close > open` also for the
+**hold-style continuation** branch. All other prerequisites remain:
+traded/valid premium OHLC, open and low held above VWAP, meaningful
+penetration, underlying/futures alignment and volume confirmation.
+A genuine but small-body bullish hold remains accepted, even if its
+body does not reach the separate 0.35-ATR momentum threshold.
+
+No numerical momentum or ATR threshold was tightened and no new
+indicator or state machine was added. The existing explicit
+penetration-only opt-in and low-below-VWAP reclaim path retain their
+own admission rules. This protects setup classification but does
+not prove better profitability until multi-session after-cost
+comparisons on real options data are available. Production was not
+redeployed as part of this change.
