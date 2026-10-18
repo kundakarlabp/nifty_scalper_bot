@@ -1534,9 +1534,7 @@ def test_orb_compact_replay_coverage_is_independent_of_option_strike_count(
     assert result["evaluations"] == 8
 
 
-def test_vwap_retest_archive_coverage_distinguishes_causal_history_failures(
-    tmp_path,
-):
+def test_vwap_retest_archive_coverage_distinguishes_causal_history_failures(tmp_path):
     """Count actual observed option bars, never synthetic historical trades."""
     from nifty_scalper_bot.backtesting.strategy_research import (
         _vwap_retest_archive_coverage,
@@ -1612,5 +1610,7 @@ def test_vwap_comparison_exposes_archive_coverage_without_changing_scenario(
 
     assert len(calls) == 27
     assert report["retest_archive_coverage"]["counts"]["observed_option_bars"] == 8
-    assert report["retest_archive_coverage"]["counts"]["weekly_atm_proxy_rejections"] == 8
+    assert (
+        report["retest_archive_coverage"]["counts"]["weekly_atm_proxy_rejections"] == 8
+    )
     assert report["selection"]["promotion_eligible"] is False
