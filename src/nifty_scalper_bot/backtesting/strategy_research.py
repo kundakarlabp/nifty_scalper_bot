@@ -1471,7 +1471,19 @@ def _vwap_retest_archive_coverage(
         if row.get("instrument_type") == "FUT"
     )
     spot = histories["NSE:NIFTY 50"]
-    counts: Counter[str] = Counter()
+    metrics = (
+        "observed_option_bars",
+        "missing_underlying_minutes",
+        "weekly_atm_proxy_rejections",
+        "zero_volume_option_bars",
+        "retest_eligible_option_bars",
+        "missing_session_open_option_bars",
+        "missing_prior_bar_option_bars",
+        "zero_volume_prior_option_bars",
+        "missing_prior_session_history_option_bars",
+        "prior_vwap_ready_option_bars",
+    )
+    counts: Counter[str] = Counter({key: 0 for key in metrics})
     by_side: dict[str, Counter[str]] = {
         "CE": Counter(),
         "PE": Counter(),
@@ -1479,9 +1491,7 @@ def _vwap_retest_archive_coverage(
     by_contract: dict[str, dict[str, int]] = {}
     sessions: set[tuple[str, str]] = set()
 
-    def record(
-        side: str, contract: Counter[str], reason: str
-    ) -> None:
+    def record(side: str, contract: Counter[str], reason: str) -> None:
         counts[reason] += 1
         by_side[side][reason] += 1
         contract[reason] += 1
