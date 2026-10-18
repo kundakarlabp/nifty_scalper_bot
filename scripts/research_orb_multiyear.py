@@ -620,6 +620,176 @@ def run_phase(output: Path, phase: str, workers: int) -> None:
         )
 
 
+def run_orb_causal_gate_day(task: tuple[str, str]) -> dict[str, Any]:
+    """Same preselected option basket, six independent research-only ORB arms."""
+    from nifty_scalper_bot.backtesting.directional_hypotheses import (
+        ORB_CAUSAL_GATE_PROFILES,
+    )
+
+    root, day = task
+    os.environ.update(
+        EXECUTION_MODE="SHADOW",
+        STRATEGY_MODE="directional_scalp",
+        ORB_ENABLED="true",
+        BROKER_API_KEY="offline_research_unused",
+        BROKER_API_SECRET="offline_research_unused",
+    )
+    logging.disable(logging.CRITICAL)
+    directory = Path(root) / "sessions" / day
+    arms: dict[str, dict[str, Any]] = {}
+    for profile in ORB_CAUSAL_GATE_PROFILES:
+        result = run_orb_session_research(
+            directory,
+            overrides={},
+            slippage_bps=10.0,
+            minimum_net_rr=1.5,
+            lifecycle_proxy=True,
+            causal_gate_profile=profile,
+        )
+        arms[profile] = {
+            field: result[field]
+            for field in (
+                "entry_funnel",
+                "metrics",
+                "data_quality",
+                "no_vote_reasons",
+                "structural_gate_failures",
+                "trades",
+                "unresolved_trades",
+            )
+        }
+    return {"day": day, "arms": arms}
+
+
+def summarize_orb_causal_gate_days(
+    daily: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Pair counterfactuals by *same-day* data; never select on held-out years."""
+    from nifty_scalper_bot.backtesting.directional_hypotheses import (
+        ORB_CAUSAL_GATE_PROFILES,
+    )
+
+    if len({row["day"] for row in daily}) != len(daily):
+        raise ValueError("orb_gate_duplicate_day")
+    phases = {
+        "development": {"2017", "2018"},
+        "validation": {"2019"},
+        "final": {"2020"},
+    }
+    report: dict[str, Any] = {}
+    for phase, years in phases.items():
+        sessions = [row for row in daily if row["day"][:4] in years]
+        phase_results: dict[str, Any] = {}
+        for profile in ORB_CAUSAL_GATE_PROFILES:
+            trades: list[dict[str, Any]] = []
+            unresolved: list[dict[str, Any]] = []
+            funnel: Counter[str] = Counter()
+            rejects: Counter[str] = Counter()
+            structure: Counter[str] = Counter()
+            for session in sessions:
+                if set(session["arms"]) != set(ORB_CAUSAL_GATE_PROFILES):
+                    raise ValueError("orb_gate_session_incomplete")
+                observed = session["arms"][profile]
+                trades.extend(observed["trades"])
+                unresolved.extend(observed["unresolved_trades"])
+                funnel.update(observed["entry_funnel"])
+                rejects.update(observed["no_vote_reasons"])
+                structure.update(observed["structural_gate_failures"])
+            phase_results[profile] = {
+                "session_count": len(sessions),
+                "entry_funnel": dict(funnel),
+                "metrics": summarize(trades),
+                "unresolved_exit_count": len(unresolved),
+                "primary_metrics_complete": not unresolved,
+                "no_vote_reasons": dict(rejects),
+                "structural_gate_failures": dict(structure),
+                # Same market observations and same contract identity across
+                # arms. Trade identity may differ because gating changes state.
+                "trade_keys": sorted(
+                    {
+                        (trade["symbol"], trade["entry_time"])
+                        for trade in trades
+                    }
+                ),
+            }
+        reference = set(phase_results["production_reference"]["trade_keys"])
+        for profile, result in phase_results.items():
+            keys = set(result.pop("trade_keys"))
+            result["paired_entry_overlap_with_reference"] = len(keys & reference)
+            result["counterfactual_only_entries"] = len(keys - reference)
+        report[phase] = phase_results
+    return report
+
+
+def run_orb_causal_gate_study(output: Path, workers: int) -> None:
+    """Re-evaluate gates; never rank or promote counterfactual trading rules."""
+    from nifty_scalper_bot.backtesting.directional_hypotheses import (
+        ORB_CAUSAL_GATE_PROFILES,
+    )
+
+    if os.getenv("EXECUTION_MODE", "").upper() != "SHADOW":
+        raise ValueError("research_requires_shadow_process")
+    manifest = json.loads((output / "data_manifest.json").read_text())
+    days = sorted(row["day"] for row in manifest["sessions"])
+    if not days:
+        raise ValueError("research_history_unavailable")
+    directory = output / "causal_gate_sessions"
+    pending = [
+        (str(output), day)
+        for day in days
+        if not (directory / f"{day}.json").exists()
+    ]
+    with ProcessPoolExecutor(max_workers=workers) as pool:
+        futures = {
+            pool.submit(run_orb_causal_gate_day, task): task
+            for task in pending
+        }
+        for future in as_completed(futures):
+            row = future.result()
+            if row["day"] != futures[future][1]:
+                raise ValueError("orb_gate_session_identity_conflict")
+            write_json(directory / f"{row['day']}.json", row)
+    daily = [json.loads((directory / f"{day}.json").read_text()) for day in days]
+    write_json(
+        output / "orb_causal_gate_results.json",
+        {
+            "scope": "research_only_orb_causal_gate_ablation",
+            "evidence_label": "RESEARCH_CANDIDATE",
+            "promotion_eligible": False,
+            "selected_for_live": None,
+            "slippage_bps_per_side": 10.0,
+            "minimum_net_rr": 1.5,
+            "lifecycle_proxy": True,
+            "profiles": {
+                key: {
+                    "require_regime": value[0],
+                    "require_direction": value[1],
+                    "range_rule": value[2],
+                }
+                for key, value in ORB_CAUSAL_GATE_PROFILES.items()
+            },
+            "coverage": {
+                "sessions": len(days),
+                "first_session": days[0],
+                "last_session": days[-1],
+            },
+            "data_manifest_sha256": hashlib.sha256(
+                (output / "data_manifest.json").read_bytes()
+            ).hexdigest(),
+            "limitations": [
+                "Counterfactual masked gates are not executable policies",
+                "The no-three-vetoes arm retains canonical breakout/momentum/",
+                "retest, futures-volume, VWAP slope and entry geometry filters",
+                "Monthly archive basket and timestamp identity not live-equivalent",
+                "Only 10-bps modeled fills; cannot validate execution quality",
+                "Past years previously inspected; not untouched held-out data",
+                "No strategy promotion, live settings or risk changes",
+            ],
+            "phases": summarize_orb_causal_gate_days(daily),
+        },
+    )
+
+
 def run_fixed_hypothesis_day(task: tuple[str, str]) -> dict[str, Any]:
     """Evaluate research-only signals and cost-gated ORB on one fixed daily basket."""
     from nifty_scalper_bot.backtesting.directional_hypotheses import (
@@ -1213,7 +1383,14 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "action",
-        choices=("prepare", "development", "validation", "final", "hypotheses"),
+        choices=(
+            "prepare",
+            "development",
+            "validation",
+            "final",
+            "hypotheses",
+            "causal-gates",
+        ),
     )
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -1229,6 +1406,8 @@ def main() -> None:
         )
     elif args.action == "hypotheses":
         run_fixed_hypothesis_study(args.output, args.workers)
+    elif args.action == "causal-gates":
+        run_orb_causal_gate_study(args.output, args.workers)
     else:
         run_phase(args.output, args.action, args.workers)
 
