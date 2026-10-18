@@ -247,6 +247,9 @@ def test_causal_gate_ablation_preserves_identical_data_and_no_trade_abstention(
     row["bounded_repair_counterfactual"]["unresolved_trades"] = [
         {"unresolved_reason": "history_gap_unresolved"}
     ]
+    with pytest.raises(ValueError, match="orb_repair_settlement_ledger_not_conserved"):
+        study.summarize_orb_causal_gate_days([row])
+    row["bounded_repair_counterfactual"]["entry_funnel"]["accepted_fills"] = 1
     incomplete = study.summarize_orb_causal_gate_days([row])
     assert (
         incomplete["development"]["bounded_repair_counterfactual"][
@@ -255,6 +258,7 @@ def test_causal_gate_ablation_preserves_identical_data_and_no_trade_abstention(
         is None
     )
     row["bounded_repair_counterfactual"]["unresolved_trades"] = []
+    row["bounded_repair_counterfactual"]["entry_funnel"]["accepted_fills"] = 0
 
     # A historical signal may be rejected for economics or absent next bar.
     # Every initiated next-bar intent must be accounted for exactly once.
@@ -289,9 +293,7 @@ def test_causal_gate_ablation_preserves_identical_data_and_no_trade_abstention(
         study.summarize_orb_causal_gate_days([row, row])
 
 
-def test_bounded_target_repair_rejects_negative_resolved_holdout_and_abstains(
-    monkeypatch, tmp_path
-):
+def test_bounded_target_repair_rejects_negative_resolved_holdout_and_abstains():
     from scripts import research_orb_multiyear as study
 
     def record(pnl, *, trades=1, unresolved=0, paired=None):
