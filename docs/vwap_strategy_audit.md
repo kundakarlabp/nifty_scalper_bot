@@ -464,3 +464,23 @@ Unfilled-intent expiry, trade execution, the existing aggregate
 `no_vote_reasons` and chronology remain unchanged. This prevents an
 apparently poor new trading session from inheriting yesterday's missed
 execution and does not add any market-data observations or alter LIVE logic.
+
+
+## 2026-10-18: require actual traded volume on prior VWAP retest bar
+
+A RED regression reproduced an opt-in VWAP trend-momentum BUY vote
+even though the prior candle whose low/close allegedly reclaimed the
+causal historical VWAP had **zero traded option volume**. A finalized
+OHLC candle without any trade cannot establish a genuine executed
+premium reclaim; stale historical OHLC can otherwise appear to
+confirm retests that the market never traded.
+
+The `VWAP_TREND_REQUIRE_RETEST=true` path now requires finite positive
+volume on the *contiguous, finalized previous option candle* before
+calling the existing `get_session_vwap_at` proof. Zero/invalid volume
+fails closed with `trend_momentum_prior_bar_no_trades`. This is
+consistent with the archive coverage diagnostic's existing
+`zero_volume_prior_option_bars` exclusion. The immediate momentum
+comparison arm, VWAP defaults, stop/target logic and broker order paths
+are not changed. It does not prove an improvement in after-cost
+expectancy and remains opt-in research.
