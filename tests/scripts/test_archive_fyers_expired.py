@@ -2,7 +2,6 @@
 
 import datetime as dt
 import json
-from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -135,14 +134,37 @@ def test_valid_no_data_is_reported_without_fabricating_a_candle(tmp_path):
     "field,value,error",
     [
         ("s", "error", "fyers_historical_data_unavailable"),
-        ("symbol", "NSE:NIFTY25MAR23000PE", "fyers_candle_contract_or_resolution_mismatch"),
+        (
+            "symbol",
+            "NSE:NIFTY25MAR23000PE",
+            "fyers_candle_contract_or_resolution_mismatch",
+        ),
         ("resolution", "5", "fyers_candle_contract_or_resolution_mismatch"),
         ("columns", ["timestamp", "low"], "fyers_candle_columns_invalid"),
-        ("candles", [[epoch(), 99, 94, 95, 99, 100, 1, None]], "fyers_candle_values_invalid"),
-        ("candles", [[epoch(), 100, 105, 95, 101, -1, 1, None]], "fyers_candle_values_invalid"),
-        ("candles", [[epoch(), 100, 105, 95, 101, 1, -1, None]], "fyers_open_interest_invalid"),
+        (
+            "candles",
+            [[epoch(), 99, 94, 95, 99, 100, 1, None]],
+            "fyers_candle_values_invalid",
+        ),
+        (
+            "candles",
+            [[epoch(), 100, 105, 95, 101, -1, 1, None]],
+            "fyers_candle_values_invalid",
+        ),
+        (
+            "candles",
+            [[epoch(), 100, 105, 95, 101, 1, -1, None]],
+            "fyers_open_interest_invalid",
+        ),
         ("candles", [[epoch(), 100, 105, 95, 101, 1]], "fyers_candle_shape_invalid"),
-        ("candles", [[epoch(31), 100, 105, 95, 101, 1, 2, None], [epoch(30), 100, 105, 95, 101, 1, 2, None]], "fyers_candle_timestamp_invalid"),
+        (
+            "candles",
+            [
+                [epoch(31), 100, 105, 95, 101, 1, 2, None],
+                [epoch(30), 100, 105, 95, 101, 1, 2, None],
+            ],
+            "fyers_candle_timestamp_invalid",
+        ),
     ],
 )
 def test_provider_schema_and_candle_integrity_fail_closed(field, value, error):
@@ -263,7 +285,9 @@ def _context_archive(tmp_path, count=65):
     return directory.parent
 
 
-def test_imported_pair_bridges_into_existing_research_loader_only_with_context(tmp_path):
+def test_imported_pair_bridges_into_existing_research_loader_only_with_context(
+    tmp_path,
+):
     from nifty_scalper_bot.backtesting.strategy_research import load_archive
 
     report = archive(FakeFyers(bars=65), tmp_path)
