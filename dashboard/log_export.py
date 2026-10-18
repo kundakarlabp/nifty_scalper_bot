@@ -9,9 +9,9 @@ from zoneinfo import ZoneInfo
 
 from dashboard.superlite_events import (
     SECRET,
-    csv_bytes,
+    csv_bytes as csv_bytes,
     deduplicate_events,
-    filter_events,
+    filter_events as filter_events,
     parse_event,
 )
 
