@@ -372,9 +372,7 @@ def test_retest_fails_closed_without_timestamp_aligned_prior_vwap(monkeypatch):
 def test_retest_preserves_genuine_prior_reclaim_when_prior_vwap_available(
     monkeypatch,
 ):
-    _, signal = _evaluate(
-        monkeypatch, retest=True, low=100.0, prior_session_vwap=100.0
-    )
+    _, signal = _evaluate(monkeypatch, retest=True, low=100.0, prior_session_vwap=100.0)
     assert signal is not None
     assert signal.metadata["trend_momentum_retest_confirmed"] is True
     assert signal.metadata["trend_momentum_prior_session_vwap"] == 100.0
