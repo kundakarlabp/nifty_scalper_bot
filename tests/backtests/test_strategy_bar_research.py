@@ -1252,3 +1252,98 @@ def test_smc_research_failed_candidate_does_not_consume_shared_setup(
     )
     assert result["entry_funnel"]["accepted_fills"] == 2
     assert result["smc_unique_setup_funnel"]["simulated_filled_setups"] == 2
+
+
+def test_vwap_research_cannot_inherit_optional_finalized_bar_gate(
+    tmp_path, monkeypatch
+):
+    """All research arms must share the documented candle-completion policy."""
+    import os
+
+    from nifty_scalper_bot.backtesting.strategy_research import run_vwap_comparison
+
+    archive(tmp_path)
+    monkeypatch.setenv("VWAP_REQUIRE_FINALIZED_SIGNAL_BAR", "true")
+    observed = []
+
+    def fake_scenario(*args, **kwargs):
+        observed.append(os.getenv("VWAP_REQUIRE_FINALIZED_SIGNAL_BAR"))
+        return {
+            "strategies": {
+                "VWAPPro": {
+                    "development_metrics": {"trade_count": 0, "expectancy": None},
+                    "holdout_metrics": {"trade_count": 0, "expectancy": None},
+                    "data_quality": {
+                        "development_unresolved_exit_count": 0,
+                        "holdout_unresolved_exit_count": 0,
+                    },
+                }
+            }
+        }
+
+    monkeypatch.setattr(
+        "nifty_scalper_bot.backtesting.strategy_research._scenario",
+        fake_scenario,
+    )
+    before = dict(os.environ)
+    report = run_vwap_comparison(tmp_path)
+
+    assert observed == ["false"] * 27
+    assert dict(os.environ) == before
+    assert report["baseline_environment"]["VWAP_REQUIRE_FINALIZED_SIGNAL_BAR"] == (
+        "true"
+    )
+
+
+def test_vwap_research_reports_a_cost_matched_retest_ablation(tmp_path, monkeypatch):
+    """Immediate-vs-retest comparison must hold premium RVOL and fill costs fixed."""
+    import os
+
+    from nifty_scalper_bot.backtesting.strategy_research import run_vwap_comparison
+
+    archive(tmp_path)
+    observed = []
+
+    def fake_scenario(*args, **kwargs):
+        momentum = os.getenv("VWAP_TREND_MOMENTUM_ENABLED") == "true"
+        retest = os.getenv("VWAP_TREND_REQUIRE_RETEST") == "true"
+        rvol = os.getenv("VWAP_TREND_MOMENTUM_OPTION_RVOL_MIN")
+        observed.append((momentum, retest, rvol, args[3]))
+        expectancy = (4.0 if retest else 2.0) if momentum else -1.0
+        count = (32 if retest else 40) if momentum else 0
+        return {
+            "strategies": {
+                "VWAPPro": {
+                    "development_metrics": {
+                        "trade_count": count,
+                        "expectancy": expectancy,
+                    },
+                    "holdout_metrics": {"trade_count": 0, "expectancy": None},
+                    "data_quality": {
+                        "development_unresolved_exit_count": 0,
+                        "holdout_unresolved_exit_count": 0,
+                    },
+                }
+            }
+        }
+
+    monkeypatch.setattr(
+        "nifty_scalper_bot.backtesting.strategy_research._scenario",
+        fake_scenario,
+    )
+    report = run_vwap_comparison(tmp_path)
+    comparison = report["paired_comparisons"][0]
+    assert comparison["control"] == "trend_premium_rvol_1_5"
+    assert comparison["treatment"] == "trend_premium_vwap_retest"
+    assert comparison["only_changed_rule"] == "VWAP_TREND_REQUIRE_RETEST"
+    assert len(comparison["scenarios"]) == 3
+    assert {
+        (momentum, retest, rvol) for momentum, retest, rvol, _ in observed if momentum
+    } == {(True, False, "1.5"), (True, True, "1.5")}
+    for scenario in comparison["scenarios"]:
+        assert scenario["development_trade_count_control"] == 40
+        assert scenario["development_trade_count_treatment"] == 32
+        assert scenario["development_expectancy_delta"] == 2.0
+        assert scenario["development_sample_eligible"] is True
+        assert scenario["holdout_expectancy_delta"] is None
+    assert comparison["selected_for_live"] is None
