@@ -2835,7 +2835,5 @@ def test_smc_structural_exit_global_minute_gap_cannot_credit_later_target(
     assert structural["unresolved_trades"][0]["unresolved_reason"] == (
         "smc_structural_exit_minute_gap_unresolved"
     )
-    assert (
-        structural["smc_exit_diagnostics"]["structural_unpriced_exit_gaps"] == 1
-    )
+    assert structural["smc_exit_diagnostics"]["structural_unpriced_exit_gaps"] == 1
     assert structural["worst_case_stress_trades"][0]["net_pnl"] < 0
