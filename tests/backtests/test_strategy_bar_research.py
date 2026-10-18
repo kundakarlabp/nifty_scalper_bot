@@ -1532,3 +1532,43 @@ def test_orb_compact_replay_coverage_is_independent_of_option_strike_count(
     assert coverage["matched_market_minutes"] == 4
     assert coverage["incomplete_opening_range_minutes"] == 4
     assert result["evaluations"] == 8
+
+
+@pytest.mark.parametrize(
+    ("defect", "reason"),
+    [
+        ("token_collision", "research_instrument_token_collision"),
+        ("mismatched_symbol", "research_instrument_symbol_mismatch"),
+        ("outer_token_mismatch", "research_instrument_token_mismatch"),
+    ],
+)
+def test_research_archive_rejects_conflicting_broker_instrument_identity(
+    tmp_path, defect, reason
+):
+    from nifty_scalper_bot.backtesting.strategy_research import load_archive
+
+    archive(tmp_path)
+    for token, path in enumerate(sorted((tmp_path / "candles").glob("*.json")), 101):
+        payload = json.loads(path.read_text())
+        payload["instrument"]["instrument_token"] = token
+        symbol = payload["symbol"]
+        payload["instrument"]["exchange"] = symbol.split(":", 1)[0]
+        payload["instrument"]["tradingsymbol"] = symbol.split(":", 1)[1]
+        path.write_text(json.dumps(payload))
+
+    ce_path = tmp_path / "candles" / "CE.json"
+    pe_path = tmp_path / "candles" / "PE.json"
+    ce = json.loads(ce_path.read_text())
+    pe = json.loads(pe_path.read_text())
+    if defect == "token_collision":
+        pe["instrument"]["instrument_token"] = ce["instrument"]["instrument_token"]
+        pe_path.write_text(json.dumps(pe))
+    elif defect == "mismatched_symbol":
+        ce["instrument"]["tradingsymbol"] = pe["instrument"]["tradingsymbol"]
+        ce_path.write_text(json.dumps(ce))
+    else:
+        ce["instrument_token"] = ce["instrument"]["instrument_token"] + 999
+        ce_path.write_text(json.dumps(ce))
+
+    with pytest.raises(ValueError, match=reason):
+        load_archive(tmp_path)
