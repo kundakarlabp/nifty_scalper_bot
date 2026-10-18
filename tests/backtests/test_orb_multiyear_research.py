@@ -69,7 +69,6 @@ def test_selection_rejects_tiny_stress_samples_and_missing_scenarios():
     assert select_candidate(contaminated) is None
 
 
-
 def test_multiyear_research_preserves_zero_trade_stage_funnel(monkeypatch):
     """No-trade results must disclose which admission stage lost candidates."""
     import logging
