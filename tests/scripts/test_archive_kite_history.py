@@ -612,18 +612,27 @@ def test_retained_session_prioritizes_front_week_before_strike_proximity(tmp_pat
         ),
     ]
     for index, payload in enumerate(contracts):
+        # On front-week expiry day, the following Tuesday is exactly seven
+        # days away, so both pairs pass the existing weekly eligibility gate.
+        for field in ("from", "to", "captured_at"):
+            payload[field] = payload[field].replace("2026-10-12", "2026-10-13")
+        payload["candles"] = [
+            [row[0].replace("2026-10-12", "2026-10-13"), *row[1:]]
+            for row in payload["candles"]
+        ]
+        payload["candles_sha256"] = collector._candle_digest(payload["candles"])
         (candles / f"{index}.json").write_text(json.dumps(payload))
 
     stage = tmp_path / "staged"
     report = collector.historical_cache_inventory(
         tmp_path / "cache",
-        dt.date(2026, 10, 12),
-        dt.date(2026, 10, 12),
+        dt.date(2026, 10, 13),
+        dt.date(2026, 10, 13),
         stage_dir=stage,
         min_synchronized_minutes=3,
     )
-    assert report["staged_session_dates"] == ["2026-10-12"]
-    _, instruments, _ = load_archive(stage / "2026-10-12")
+    assert report["staged_session_dates"] == ["2026-10-13"]
+    _, instruments, _ = load_archive(stage / "2026-10-13")
     option_symbols = {
         symbol
         for symbol, row in instruments.items()
