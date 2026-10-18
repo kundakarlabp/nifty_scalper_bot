@@ -229,7 +229,7 @@ def test_terminal_orb_intent_cannot_disappear_without_an_execution_disposition(
             return {"healthy": True}
 
         def generate_signal(self, symbol, indicators, current_price, position=None):
-            if symbol.endswith("CE") and indicators["history_count"] == 3:
+            if symbol.endswith("CE") and indicators["history_count"] == 4:
                 return SimpleNamespace(
                     action="BUY", stop_loss=95, take_profit=115, metadata={}
                 )
