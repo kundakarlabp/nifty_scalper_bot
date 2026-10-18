@@ -1624,6 +1624,7 @@ def run_orb_session_research(
     lifecycle_proxy: bool = False,
     normalize_opening_range: bool = False,
     causal_gate_profile: str | None = None,
+    simulate_bounded_orb_target_repair: bool = False,
 ) -> dict[str, Any]:
     """Replay a preselected historical basket in an isolated research process.
 
@@ -1638,6 +1639,10 @@ def run_orb_session_research(
         raise ValueError("research_slippage_invalid")
     if causal_gate_profile is not None and normalize_opening_range:
         raise ValueError("research_ablation_mode_conflict")
+    if simulate_bounded_orb_target_repair and (
+        causal_gate_profile != "without_three_vetoes" or minimum_net_rr is None
+    ):
+        raise ValueError("orb_repair_counterfactual_profile_invalid")
     if causal_gate_profile is not None:
         from nifty_scalper_bot.backtesting.directional_hypotheses import (
             ORB_CAUSAL_GATE_PROFILES,
@@ -1686,6 +1691,7 @@ def run_orb_session_research(
             strict_liquidity=True,
             lifecycle_proxy=lifecycle_proxy,
             strategy_factory=research_factory,
+            simulate_bounded_orb_target_repair=simulate_bounded_orb_target_repair,
         )
         return result["strategies"]["ORBPro"]
     finally:
