@@ -60,7 +60,9 @@ def load_archive(
         symbol = payload["symbol"]
         instrument = payload["instrument"]
         if "exchange" in instrument or "tradingsymbol" in instrument:
-            if symbol != f"{instrument.get('exchange')}:{instrument.get('tradingsymbol')}":
+            declared_exchange = instrument.get("exchange")
+            declared_name = instrument.get("tradingsymbol")
+            if symbol != f"{declared_exchange}:{declared_name}":
                 raise ValueError("research_instrument_symbol_mismatch")
         # Synthetic fixtures may omit tokens; real archived identities must
         # never alias two different symbols or contradict the outer payload.
