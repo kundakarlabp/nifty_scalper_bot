@@ -477,9 +477,7 @@ def historical_cache_inventory(
                     # Require a verified built-in calendar for both years;
                     # mutable LIVE holiday overrides cannot rewrite research.
                     if calendar_available(expiry.year):
-                        nominal = expiry + dt.timedelta(
-                            days=(1 - expiry.weekday()) % 7
-                        )
+                        nominal = expiry + dt.timedelta(days=(1 - expiry.weekday()) % 7)
                         if calendar_available(nominal.year):
                             adjusted = nominal
                             while (
