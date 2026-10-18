@@ -1556,8 +1556,7 @@ def test_vwap_retest_archive_coverage_distinguishes_causal_history_failures(tmp_
                 0 if kind == "PE" and i == 17 else 100,
             ]
             for i in range(19)
-            if not (kind == "CE" and i == 1)
-            and not (kind == "FUT" and i == 16)
+            if not (kind == "CE" and i == 1) and not (kind == "FUT" and i == 16)
         ]
         if kind in {"CE", "PE"}:
             payload["instrument"]["strike"] = 100
