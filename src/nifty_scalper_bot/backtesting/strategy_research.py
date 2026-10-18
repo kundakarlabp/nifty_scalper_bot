@@ -1485,12 +1485,142 @@ def opening_relative_volume(
     return volumes[-1] / mean if mean > 0 else None
 
 
+def _vwap_retest_archive_coverage(
+    histories: dict[str, dict[datetime, dict[str, Any]]],
+    instruments: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    """Measure causal prior-VWAP readiness using observed archived option bars.
+
+    The denominator is observed option candle opportunities, not an inferred
+    missing-contract universe. This is a diagnostic; it never gates a signal.
+    """
+    minute = timedelta(minutes=1)
+    options = sorted(
+        symbol
+        for symbol, row in instruments.items()
+        if row.get("instrument_type") in {"CE", "PE"}
+    )
+    future = next(
+        (
+            symbol
+            for symbol, row in instruments.items()
+            if row.get("instrument_type") == "FUT"
+        ),
+        None,
+    )
+    futures_bars = histories[future] if future is not None else {}
+    spot = histories.get("NSE:NIFTY 50", {})
+    metrics = (
+        "observed_option_bars",
+        "missing_underlying_minutes",
+        "weekly_atm_proxy_rejections",
+        "zero_volume_option_bars",
+        "retest_eligible_option_bars",
+        "missing_session_open_option_bars",
+        "missing_prior_bar_option_bars",
+        "zero_volume_prior_option_bars",
+        "missing_prior_session_history_option_bars",
+        "prior_vwap_ready_option_bars",
+    )
+    counts: Counter[str] = Counter({key: 0 for key in metrics})
+    by_side: dict[str, Counter[str]] = {
+        "CE": Counter(),
+        "PE": Counter(),
+    }
+    by_contract: dict[str, dict[str, int]] = {}
+    sessions: set[tuple[str, str]] = set()
+
+    def record(side: str, contract: Counter[str], reason: str) -> None:
+        counts[reason] += 1
+        by_side[side][reason] += 1
+        contract[reason] += 1
+
+    for symbol in options:
+        history = histories[symbol]
+        side = str(instruments[symbol]["instrument_type"])
+        contract: Counter[str] = Counter()
+        complete_prior: set[datetime] = set()
+        active_day = None
+        expected: datetime | None = None
+        intact = True
+        for timestamp in sorted(history):
+            if not time(9, 15) <= timestamp.time() < time(15, 30):
+                continue
+            if timestamp.date() != active_day:
+                active_day = timestamp.date()
+                expected = timestamp.replace(hour=9, minute=15, second=0, microsecond=0)
+                intact = True
+            bar = history[timestamp]
+            intact = (
+                intact
+                and timestamp == expected
+                and bar.get("is_complete") is True
+                and bar.get("is_provisional") is not True
+            )
+            if intact and bar["volume"] > 0:
+                complete_prior.add(timestamp)
+            expected = timestamp + minute
+
+        for timestamp in sorted(history):
+            if not time(9, 30) <= timestamp.time() < time(14, 59):
+                continue
+            sessions.add((symbol, timestamp.date().isoformat()))
+            record(side, contract, "observed_option_bars")
+            if timestamp not in futures_bars or timestamp not in spot:
+                record(side, contract, "missing_underlying_minutes")
+                continue
+            rejection = _archived_weekly_atm_rejection(
+                instruments[symbol], timestamp, spot[timestamp]["close"]
+            )
+            if rejection is not None:
+                record(side, contract, "weekly_atm_proxy_rejections")
+                continue
+            if history[timestamp]["volume"] <= 0:
+                record(side, contract, "zero_volume_option_bars")
+                continue
+
+            record(side, contract, "retest_eligible_option_bars")
+            prior = timestamp - minute
+            opening = timestamp.replace(hour=9, minute=15, second=0, microsecond=0)
+            if opening not in history:
+                record(side, contract, "missing_session_open_option_bars")
+            elif prior not in history:
+                record(side, contract, "missing_prior_bar_option_bars")
+            elif history[prior]["volume"] <= 0:
+                record(side, contract, "zero_volume_prior_option_bars")
+            elif prior not in complete_prior:
+                record(side, contract, "missing_prior_session_history_option_bars")
+            else:
+                record(side, contract, "prior_vwap_ready_option_bars")
+
+        by_contract[symbol] = dict(sorted(contract.items()))
+
+    eligible = counts["retest_eligible_option_bars"]
+    return {
+        "basis": "observed_option_bars_only",
+        "window": "09:30-14:58_IST",
+        "source_option_contract_sessions": len(sessions),
+        "counts": dict(sorted(counts.items())),
+        "by_side": {
+            side: dict(sorted(values.items()))
+            for side, values in sorted(by_side.items())
+        },
+        "by_contract": by_contract,
+        "ready_share_of_eligible": (
+            counts["prior_vwap_ready_option_bars"] / eligible if eligible else None
+        ),
+        "historical_selection_verified": False,
+        "live_equivalent": False,
+    }
+
+
 def run_vwap_comparison(directory: Path) -> dict[str, Any]:
     """Compare a small prespecified VWAP hypothesis set without live promotion."""
     if os.getenv("EXECUTION_MODE", "SHADOW").upper() != "SHADOW":
         raise ValueError("research_requires_shadow_process")
     histories, instruments, digest = load_archive(directory)
     settings = get_settings().elite
+    retest_archive_coverage = _vwap_retest_archive_coverage(histories, instruments)
     variants: list[tuple[str, dict[str, str]]] = [
         ("current_reference", {}),
         ("distance_2_atr", {"VWAP_TREND_QUALITY_MAX_DISTANCE_ATR": "2.0"}),
@@ -1665,6 +1795,7 @@ def run_vwap_comparison(directory: Path) -> dict[str, Any]:
     ]
     return {
         "scope": "bounded_vwap_active_contract_component_comparison",
+        "retest_archive_coverage": retest_archive_coverage,
         "paired_comparisons": paired_comparisons,
         "historical_eligibility": _historical_weekly_atm_evaluability(
             candidates[0]["scenarios"][0]
