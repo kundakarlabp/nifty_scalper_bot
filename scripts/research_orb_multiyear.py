@@ -428,9 +428,7 @@ def run_task(task: tuple[str, dict[str, Any], float, list[str]]) -> dict[str, An
         "research_evidence_status": (
             "NO_RESOLVED_TRADES_WITH_UNRESOLVED_EXITS"
             if not trades and unresolved
-            else "NO_EXECUTABLE_TRADES"
-            if not trades
-            else "BAR_RESEARCH_ONLY"
+            else "NO_EXECUTABLE_TRADES" if not trades else "BAR_RESEARCH_ONLY"
         ),
         "exit_reasons": dict(Counter(trade["exit_reason"] for trade in trades)),
         "unresolved_trades": unresolved,
