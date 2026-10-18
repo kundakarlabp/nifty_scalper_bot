@@ -107,7 +107,9 @@ def test_real_plotly_charts_and_prometheus_exposition_work() -> None:
 
     registry = CollectorRegistry()
     metric = Counter(
-        "nifty_dependency_probe_total", "Verifies real Prometheus output", registry=registry
+        "nifty_dependency_probe_total",
+        "Verifies real Prometheus output",
+        registry=registry,
     )
     metric.inc()
     assert b"nifty_dependency_probe_total" in generate_latest(registry)
