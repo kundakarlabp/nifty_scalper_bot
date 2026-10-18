@@ -1078,9 +1078,7 @@ def _scenario(
                     "take_profit": take_profit,
                     "signal_price": float(bar["close"]),
                     "research_anchor_signal": (
-                        replace(
-                            signal, stop_loss=stop_loss, take_profit=take_profit
-                        )
+                        replace(signal, stop_loss=stop_loss, take_profit=take_profit)
                         if (
                             strategy.name == "SMC"
                             and geometry_source == "canonical_option_premium_geometry"
