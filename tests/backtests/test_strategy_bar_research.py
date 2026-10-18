@@ -1466,6 +1466,7 @@ def test_orb_compact_replay_exposes_missing_market_data_separately_from_strategy
         "missing_spot_minutes": 1,
         "missing_option_minutes": 1,
         "matched_market_minutes": 1,
+        "pre_opening_range_end_minutes": 0,
         "complete_opening_range_minutes": 0,
         "incomplete_opening_range_minutes": 1,
     }
