@@ -292,7 +292,9 @@ def test_research_archive_can_widen_current_expiry_without_changing_live_cap(
     for invalid_cap in (0, 7, 9, 49, True, 12.0, "32"):
         with pytest.raises(ValueError, match="historical_research_option_cap_invalid"):
             history_universe(
-                rows, selected, "NFO:NIFTY26OCTFUT",
+                rows,
+                selected,
+                "NFO:NIFTY26OCTFUT",
                 research_option_cap=invalid_cap,
             )
 
