@@ -40,7 +40,6 @@ def test_opening_selection_cannot_use_later_contract_liquidity():
     assert select_atm_pair(10001, "2016-12-29", available, "2017-01-02") is None
 
 
-
 def test_opening_option_selection_uses_candle_label_metadata_not_ticker():
     """A 09:16 bar-end is eligible; a 09:16 bar-start is too late."""
     old_ce = option_frame("CE", ["09:16", "10:00"])
