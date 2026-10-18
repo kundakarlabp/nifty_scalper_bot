@@ -178,13 +178,18 @@ def test_full_orb_research_uses_causal_regime_detector(tmp_path, monkeypatch):
     class Detector:
         def evaluate(self, symbol, data):
             regime_calls.append(symbol)
+            return SimpleNamespace(regime="TREND")
 
     class RegimeManager:
         def __init__(self, detector):
             self.detector = detector
+            self.snapshot = None
+
+        def ingest_snapshot(self, snapshot):
+            self.snapshot = snapshot
 
         def get_latest_snapshot(self):
-            return SimpleNamespace(regime="TREND")
+            return self.snapshot
 
     class Strategy:
         name = "ORBPro"
@@ -398,6 +403,51 @@ def test_compact_orb_context_diagnostics_count_market_minutes_not_option_bars(
     assert quality["orb_replay_coverage"]["matched_market_minutes"] == 4
     assert quality["orb_direction_resolution_minutes"] == {"spot_futures_agree": 4}
     assert sum(scenario["orb_replay_regimes"].values()) == 4
+
+
+def test_compact_orb_replay_does_not_lose_actual_stable_regime(tmp_path, monkeypatch):
+    from nifty_scalper_bot.backtesting import strategy_research as research
+    from nifty_scalper_bot.backtesting.strategy_research import _scenario, load_archive
+    from nifty_scalper_bot.config.settings import get_settings
+    from nifty_scalper_bot.core.market_regime import RegimeSnapshot
+
+    class AlwaysTrend:
+        def evaluate(self, symbol, data):
+            return RegimeSnapshot(
+                symbol=symbol,
+                regime="trend",
+                confidence=0.95,
+                reason="fixture",
+                updated_at=0.0,
+            )
+
+    monkeypatch.setattr(research, "MarketRegimeDetector", AlwaysTrend)
+    archive(tmp_path)
+    histories, instruments, _ = load_archive(tmp_path)
+
+    class Strategy:
+        name = "ORBPro"
+        last_no_vote_reason = "no_vote"
+
+        @property
+        def evaluation_health(self):
+            return {"healthy": True}
+
+        def generate_signal(self, symbol, indicators, current_price, position=None):
+            return None
+
+    result = _scenario(
+        histories,
+        instruments,
+        get_settings().elite,
+        0,
+        components={"ORBPro"},
+        compact_orb_context=True,
+        strategy_factory=lambda engine: [Strategy()],
+    )
+    regimes = result["orb_replay_regimes"]
+    assert sum(regimes.values()) == 4
+    assert regimes == {"trend": 4}
 
 
 def test_research_structural_context_includes_futures_volume_ratio(tmp_path):
@@ -698,6 +748,9 @@ def test_compact_orb_replay_passes_range_regime_without_vwap_trend_flag(
     class Manager:
         def __init__(self, detector):
             self.detector = detector
+
+        def ingest_snapshot(self, snapshot):
+            pass
 
         def get_latest_snapshot(self):
             return SimpleNamespace(regime="RANGE")
