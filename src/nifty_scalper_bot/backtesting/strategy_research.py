@@ -1116,14 +1116,15 @@ def _scenario(
                 level = position.get("underlying_invalidation_level")
                 source = position.get("structure_symbol")
                 side = position.get("contract_side")
-                try:
-                    threshold = (
-                        float(level)
-                        if isinstance(level, (int, float, str)) and not isinstance(level, bool)
-                        else math.nan
-                    )
-                except ValueError:
+                if isinstance(level, bool) or not isinstance(
+                    level, (int, float, str)
+                ):
                     threshold = math.nan
+                else:
+                    try:
+                        threshold = float(level)
+                    except ValueError:
+                        threshold = math.nan
                 if (
                     not math.isfinite(threshold)
                     or threshold <= 0
