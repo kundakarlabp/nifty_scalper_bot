@@ -106,7 +106,6 @@ def test_component_replay_marks_intrabar_order_ambiguous_and_stresses_stop_first
     assert observed[:2] == [1, 1]
 
 
-
 def test_opening_above_target_has_known_first_touch_and_costed_profit(
     tmp_path, monkeypatch
 ):
