@@ -293,6 +293,95 @@ def test_research_canonical_target_repair_is_diagnostic_not_a_trade(
     assert result["orb_bounded_target_repair"] == {"viable": 1}
 
 
+def test_cost_repaired_target_requires_an_actual_modeled_price_touch(
+    tmp_path, monkeypatch
+):
+    from nifty_scalper_bot.backtesting.strategy_research import _scenario, load_archive
+    from nifty_scalper_bot.config.settings import get_settings
+    from nifty_scalper_bot.risk.net_rr_gate import minimum_target_for_net_rr
+
+    monkeypatch.setenv("MIN_NET_REWARD_RISK", "1.5")
+    monkeypatch.delenv("MAX_NET_RR_TARGET_UPLIFT_R", raising=False)
+    monkeypatch.delenv("MAX_NET_RR_TARGET_UPLIFT_PCT", raising=False)
+    archive(tmp_path)
+
+    class Strategy:
+        name = "ORBPro"
+        last_no_vote_reason = "no_signal"
+
+        @property
+        def evaluation_health(self):
+            return {"healthy": True}
+
+        def generate_signal(self, symbol, indicators, current_price, position=None):
+            if symbol.endswith("CE") and indicators["history_count"] == 1:
+                return SimpleNamespace(
+                    action="BUY", stop_loss=95, take_profit=109, metadata={}
+                )
+            return None
+
+        def notify_entry_accepted(self, side, *, setup_id=None):
+            pass
+
+    def replay(repair):
+        histories, instruments, _ = load_archive(tmp_path)
+        return _scenario(
+            histories,
+            instruments,
+            get_settings().elite,
+            0,
+            components={"ORBPro"},
+            minimum_net_rr=1.5,
+            simulate_bounded_orb_target_repair=repair,
+            strategy_factory=lambda engine: [Strategy()],
+        )["strategies"]["ORBPro"]
+
+    baseline = replay(False)
+    assert baseline["entry_funnel"]["accepted_fills"] == 0
+    assert baseline["trades"] == []
+
+    # Set the OHLC high strictly below the same canonical repaired target
+    # regardless of configured statutory fees; the baseline 109 target is not
+    # sufficient evidence for the higher counterfactual exit.
+    corrected_target = minimum_target_for_net_rr(
+        SimpleNamespace(
+            symbol="NFO:NIFTY26O0622400CE",
+            action="BUY",
+            quantity=75,
+            entry_price=100,
+            stop_loss=95,
+            take_profit=109,
+            metadata={"bid": 100, "ask": 100},
+        )
+    )
+    assert corrected_target is not None and corrected_target > 109
+    ce_path = tmp_path / "candles/CE.json"
+    payload = json.loads(ce_path.read_text())
+    for candle in payload["candles"][1:]:
+        candle[1:] = [100, (109 + corrected_target) / 2, 99, 100, 1000]
+    ce_path.write_text(json.dumps(payload))
+    not_reached = replay(True)
+    assert not_reached["orb_repaired_target_entries"] == 1
+    assert not_reached["entry_funnel"]["accepted_fills"] == 1
+    assert not_reached["trades"] == []
+    assert not_reached["data_quality"]["unresolved_exit_count"] == 1
+
+    # Holding the same signal, stop and fee model constant, only a genuine
+    # completed OHLC target touch can now settle the higher target profit.
+    payload = json.loads(ce_path.read_text())
+    payload["candles"][1][2] = 125
+    ce_path.write_text(json.dumps(payload))
+    reached = replay(True)
+    assert reached["orb_repaired_target_entries"] == 1
+    assert reached["metrics"]["trade_count"] == 1
+    trade = reached["trades"][0]
+    assert trade["take_profit"] > 109
+    assert trade["stop_loss"] == 95
+    assert trade["exit_reason"] == "target"
+    assert trade["net_pnl"] > 0
+    assert reached["data_quality"]["primary_metrics_complete"] is True
+
+
 def test_terminal_orb_intent_cannot_disappear_without_an_execution_disposition(
     tmp_path,
 ):

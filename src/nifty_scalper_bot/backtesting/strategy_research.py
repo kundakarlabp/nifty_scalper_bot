@@ -659,7 +659,13 @@ def _scenario(
     require_archived_weekly_atm: bool = False,
     strategy_factory: Callable[[IndicatorEngine], list[Any]] | None = None,
     require_option_premium_confirmation: bool = False,
+    simulate_bounded_orb_target_repair: bool = False,
 ) -> dict[str, Any]:
+    if simulate_bounded_orb_target_repair:
+        if os.getenv("EXECUTION_MODE", "SHADOW").upper() != "SHADOW":
+            raise ValueError("orb_target_repair_requires_shadow_process")
+        if components != {"ORBPro"} or minimum_net_rr is None:
+            raise ValueError("orb_target_repair_requires_isolated_costed_orb")
     if compact_orb_context and components != {"ORBPro"}:
         raise ValueError("research_compact_context_requires_orb_only")
     options = sorted(
@@ -688,6 +694,7 @@ def _scenario(
     entry_funnels: dict[str, Counter[str]] = {}
     orb_admission_economics: Counter[str] = Counter()
     orb_bounded_target_repair: Counter[str] = Counter()
+    orb_repaired_target_entries = 0
     # Per-session attribution is diagnostic only; never used for fills or
     # strategy admission. Aggregate counters remain the accounting source.
     vwap_daily_funnel: dict[str, Counter[str]] = {}
@@ -932,6 +939,46 @@ def _scenario(
                     target_price=take_profit * (1 - slip),
                     quantity=quantity,
                 )
+                if key[0] == "ORBPro" and simulate_bounded_orb_target_repair:
+                    # Isolated counterfactual ONLY. The original admission
+                    # ledger and its targets remain unchanged in baseline runs.
+                    # Model-side entry/exit slippage is retained on both arms.
+                    if economics.net_rr < minimum_net_rr:
+                        viable = _orb_bounded_target_repair_viable(
+                            symbol=key[1],
+                            entry=entry,
+                            stop=stop_loss,
+                            target=take_profit,
+                            quantity=quantity,
+                            slippage=slip,
+                            required_net_rr=minimum_net_rr,
+                        )
+                        if viable:
+                            executed_target = take_profit * (1 - slip)
+                            probe = SimpleNamespace(
+                                symbol=key[1],
+                                action="BUY",
+                                quantity=quantity,
+                                entry_price=entry,
+                                stop_loss=stop_loss * (1 - slip),
+                                take_profit=executed_target,
+                                metadata={"bid": entry, "ask": entry},
+                            )
+                            repaired_exit = minimum_target_for_net_rr(probe)
+                            if (
+                                repaired_exit is not None
+                                and repaired_exit > executed_target
+                            ):
+                                candidate = evaluate_net_reward_risk(
+                                    entry_price=entry,
+                                    stop_price=stop_loss * (1 - slip),
+                                    target_price=repaired_exit,
+                                    quantity=quantity,
+                                )
+                                if candidate.net_rr + 1e-9 >= minimum_net_rr:
+                                    take_profit = repaired_exit / (1 - slip)
+                                    economics = candidate
+                                    orb_repaired_target_entries += 1
                 if key[0] == "ORBPro":
                     orb_admission_economics["evaluated"] += 1
                     gross_rr = (
@@ -977,6 +1024,9 @@ def _scenario(
             if key[0] == "SMC" and intent.get("setup_id"):
                 smc_filled_setups.add(str(intent["setup_id"]))
             positions[key] = {
+                "research_bounded_target_execution_counterfactual": (
+                    key[0] == "ORBPro" and simulate_bounded_orb_target_repair
+                ),
                 "entry_time": timestamp,
                 "entry_price": entry,
                 "stop_loss": stop_loss,
@@ -1493,6 +1543,9 @@ def _scenario(
                 "orb_bounded_target_repair": (
                     dict(orb_bounded_target_repair) if name == "ORBPro" else {}
                 ),
+                "orb_repaired_target_entries": (
+                    orb_repaired_target_entries if name == "ORBPro" else 0
+                ),
                 "daily_diagnostics": (
                     {
                         day: {
@@ -1575,6 +1628,7 @@ def run_orb_session_research(
     lifecycle_proxy: bool = False,
     normalize_opening_range: bool = False,
     causal_gate_profile: str | None = None,
+    simulate_bounded_orb_target_repair: bool = False,
 ) -> dict[str, Any]:
     """Replay a preselected historical basket in an isolated research process.
 
@@ -1589,6 +1643,10 @@ def run_orb_session_research(
         raise ValueError("research_slippage_invalid")
     if causal_gate_profile is not None and normalize_opening_range:
         raise ValueError("research_ablation_mode_conflict")
+    if simulate_bounded_orb_target_repair and (
+        causal_gate_profile != "without_three_vetoes" or minimum_net_rr is None
+    ):
+        raise ValueError("orb_repair_counterfactual_profile_invalid")
     if causal_gate_profile is not None:
         from nifty_scalper_bot.backtesting.directional_hypotheses import (
             ORB_CAUSAL_GATE_PROFILES,
@@ -1637,6 +1695,7 @@ def run_orb_session_research(
             strict_liquidity=True,
             lifecycle_proxy=lifecycle_proxy,
             strategy_factory=research_factory,
+            simulate_bounded_orb_target_repair=simulate_bounded_orb_target_repair,
         )
         return result["strategies"]["ORBPro"]
     finally:
