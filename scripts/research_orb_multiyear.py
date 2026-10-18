@@ -182,12 +182,12 @@ def select_atm_pair(
         if frame is None:
             return None
         session = frame[frame["date"] == day]
-        # 09:16 is the assumed end of the opening minute. Later completeness
-        # cannot authorize selection; no fallback to a better hindsight strike.
-        cutoff = (
-            "09:15" if str(frame.iloc[0]["symbol"]).startswith("NIFTY") else "09:16"
-        )
-        known = session[(session["time"] <= cutoff) & (session["volume"] > 0)]
+        # The publication changes candle-label conventions in March 2018.
+        # Ticker formatting does NOT establish whether a label denotes the
+        # bar start or end. Require that exact first trading minute; an
+        # earlier or later traded bar must not substitute for opening evidence.
+        opening_label = "09:15" if frame.attrs.get("bar_start_labels") else "09:16"
+        known = session[(session["time"] == opening_label) & (session["volume"] > 0)]
         if known.empty:
             return None
         selected.append(session)
@@ -256,6 +256,12 @@ def prepare(source: Path, output: Path) -> dict[str, Any]:
             excluded["invalid_option_rows_removed"] += frame.attrs[
                 "invalid_rows_removed"
             ]
+            if frame.empty:
+                # Invalid/zero-volume-only contract files cannot establish
+                # identity or opening tradability, and must not abort all
+                # independent months of research with an IndexError.
+                excluded["empty_contract_after_filter"] += 1
+                continue
             label = str(frame.iloc[0]["symbol"]).strip()
             identity = re.fullmatch(r"(CE|PE)\s+(\d+)", label)
             compact = re.fullmatch(r"NIFTY(\d+)(CE|PE)", label)
