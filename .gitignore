@@ -25,3 +25,6 @@ compileall.log
 
 # Generated synthetic replay dashboard report (not a research fixture)
 docs/deployment/nightly_replay_summary.json
+
+# Local backups contain trading state and must never enter Git.
+backups/

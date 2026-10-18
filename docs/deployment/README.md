@@ -55,4 +55,14 @@ Run scheduled backups via:
 ./scripts/backup_data.sh
 ```
 
-Old backups (>14 days) are automatically rotated.
+Only existing `logs/` and `data/` directories are copied. The old root
+`config/` directory no longer exists; production credentials remain outside
+the checkout and are deliberately excluded from these backups. Local `backups/`
+is ignored by Git and Docker. Backups older than 14 days are rotated.
+
+## Broker and engine diagnostics
+
+Use the existing read-only engine endpoints (`/livez`, `/health/trading`,
+`/trading/status`) and operator console for health and broker-auth status.
+Retired standalone health launchers and AMO order-placement smoke scripts must
+not be used as alternative production or validation entrypoints.
