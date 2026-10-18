@@ -92,3 +92,41 @@ def test_vwap_pro_prefers_the_exchange_reference() -> None:
     rolling_match = re.search(r"indicators\.get\([\"']vwap[\"']\)", source)
     assert rolling_match is not None
     assert exchange < session < rolling_match.start()
+
+
+def test_historical_session_vwap_uses_only_completed_bars_as_of_timestamp():
+    symbol = "NFO:NIFTY2680424400CE"
+    bars = [
+        _session_bar(0, 100.0, 100),
+        _session_bar(1, 100.0, 100),
+        _session_bar(2, 180.0, 100),
+    ]
+    engine = _engine_with_bars(bars)
+    assert engine.get_session_vwap_at(symbol, bars[1][0]) == pytest.approx(100.0)
+    assert engine.get_session_vwap_at(symbol, bars[2][0]) == pytest.approx(
+        380.0 / 3.0
+    )
+    assert engine.get_session_vwap(symbol) == pytest.approx(380.0 / 3.0)
+
+
+def test_historical_session_vwap_fails_closed_without_opening_history():
+    symbol = "NFO:NIFTY2680424400CE"
+    engine = _engine_with_bars([_session_bar(5, 100.0, 100)])
+    assert engine.get_session_vwap_at(symbol, _session_bar(5, 100, 100)[0]) is None
+
+
+def test_historical_session_vwap_requires_exact_finalized_target_bar():
+    symbol = "NFO:NIFTY2680424400CE"
+    first = _session_bar(0, 100.0, 100)
+    second = _session_bar(1, 200.0, 300)
+    engine = _engine_with_bars([first])
+    engine.update_price(
+        symbol,
+        {"open": 200, "high": 200, "low": 200, "close": 200},
+        volume=300,
+        timestamp=second[0],
+        is_complete=False,
+    )
+    assert engine.get_session_vwap_at(symbol, second[0]) is None
+    assert engine.get_session_vwap_at(symbol, second[0] + timedelta(minutes=1)) is None
+    assert engine.get_session_vwap_at(symbol, first[0]) == pytest.approx(100)
