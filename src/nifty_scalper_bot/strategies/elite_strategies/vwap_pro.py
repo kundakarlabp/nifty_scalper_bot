@@ -874,6 +874,14 @@ class VWAPProStrategy(EliteStrategy):
                                 and current_ts - prior_ts == timedelta(minutes=1)
                             )
                             if contiguous:
+                                # A candle without traded premium cannot prove
+                                # a genuine reclaim, even with finalized OHLC.
+                                prior_volume = float(prior["volume"])
+                                if not (
+                                    math.isfinite(prior_volume) and prior_volume > 0
+                                ):
+                                    self._no_vote("trend_momentum_prior_bar_no_trades")
+                                    return None
                                 # This research-only retest must not compare a
                                 # prior candle to today's *current* VWAP.
                                 at_vwap = getattr(
