@@ -296,6 +296,7 @@ def historical_cache_inventory(
     staged_sources: dict[str, dict[str, dict]] = {}
     staging_conflicts: set[str] = set()
     staged_token_owners: dict[str, dict[int, str]] = {}
+    staged_token_conflicts: set[str] = set()
     option_minutes: dict[str, dict[tuple[str, float, dt.datetime], set[str]]] = {}
     context_minutes: dict[str, dict[str, set[dt.datetime]]] = {}
     valid_files = 0
@@ -374,7 +375,7 @@ def historical_cache_inventory(
             if stage_dir is not None:
                 owners = staged_token_owners.setdefault(label, {})
                 if owners.setdefault(token, symbol) != symbol:
-                    staging_conflicts.add(label)
+                    staged_token_conflicts.add(label)
                 sources = staged_sources.setdefault(label, {})
                 source = sources.setdefault(
                     symbol, {"token": token, "instrument": instrument, "bars": {}}
@@ -490,6 +491,11 @@ def historical_cache_inventory(
                 participants = ("NSE:NIFTY 50", futures[0], ce, pe)
                 if len({sources[symbol]["token"] for symbol in participants}) != 4:
                     failure = "historical_contract_token_collision"
+                    break
+                # Preserve the selected-participant collision code above;
+                # any other observed token collision also invalidates the day.
+                if label in staged_token_conflicts:
+                    failure = "historical_source_untrusted_or_conflicting"
                     break
                 overlapping = set.intersection(
                     *(set(sources[symbol]["bars"]) for symbol in participants)
