@@ -30,9 +30,7 @@ def test_backtrader_oracle_rejects_invalid_trade():
         backtrader_gross_pnl([{"entry_price": 0, "exit_price": 10, "quantity": 1}])
 
 
-def test_empty_oracle_ledger_is_not_reported_as_trade_validation(
-    tmp_path, monkeypatch
-):
+def test_empty_oracle_ledger_is_not_reported_as_trade_validation(tmp_path, monkeypatch):
     from scripts.external_backtrader_oracle import main
 
     study_dir = tmp_path / "study"
@@ -59,4 +57,3 @@ def test_empty_oracle_ledger_is_not_reported_as_trade_validation(
     assert report["all_rows_match"] is True
     assert report["trade_count_verified"] == 0
     assert report["trade_evidence_status"] == "NO_TRADES_VALIDATED"
-
