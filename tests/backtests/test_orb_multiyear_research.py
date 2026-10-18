@@ -204,6 +204,7 @@ def test_causal_gate_ablation_preserves_identical_data_and_no_trade_abstention(
             "data_quality": {"unresolved_exit_count": 0},
             "no_vote_reasons": {"underlying_direction_unavailable": 2},
             "structural_gate_failures": {"balanced_opening_range": 1},
+            "orb_admission_economics": {},
             "trades": [],
             "unresolved_trades": [],
         }
@@ -229,6 +230,29 @@ def test_causal_gate_ablation_preserves_identical_data_and_no_trade_abstention(
         assert observed["paired_entry_overlap_with_reference"] == 0
         assert observed["counterfactual_only_entries"] == 0
     assert report["final"]["production_reference"]["session_count"] == 0
+
+    # A historical signal may be rejected for economics or absent next bar.
+    # Every initiated next-bar intent must be accounted for exactly once.
+    sample = row["arms"]["without_three_vetoes"]
+    sample["entry_funnel"]["next_bar_intents"] = 3
+    sample["no_vote_reasons"].update(
+        {"cost_net_rr_rejected": 2, "next_minute_unavailable": 1}
+    )
+    sample["orb_admission_economics"] = {
+        "evaluated": 2,
+        "rejected": 2,
+        "passed": 0,
+        "gross_pass_net_fail": 2,
+    }
+    attributed = study.summarize_orb_causal_gate_days([row])
+    economics = attributed["development"]["without_three_vetoes"]["admission_economics"]
+    assert economics["conserved"] is True
+    assert economics["cost_rejection_pct"] == pytest.approx(66.67)
+    assert economics["gross_payoff_passed_but_net_failed"] == 2
+    sample["no_vote_reasons"].pop("next_minute_unavailable")
+    with pytest.raises(ValueError, match="orb_admission_funnel_not_conserved"):
+        study.summarize_orb_causal_gate_days([row])
+
     with pytest.raises(ValueError, match="orb_gate_duplicate_day"):
         study.summarize_orb_causal_gate_days([row, row])
 
