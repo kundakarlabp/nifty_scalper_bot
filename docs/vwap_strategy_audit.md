@@ -280,3 +280,32 @@ cannot establish historical ATM selection and lacks executable bid/ask/depth.
 Run this corrected report on sufficiently complete real archives, then reserve
 a chronologically later unseen sample and prospective recorded-feed replay.
 Until then, `selected_for_live=None` and `promotion_eligible=False`.
+
+
+## 2026-10-18: correct prior-bar retest VWAP look-ahead (research-only)
+
+The opt-in `VWAP_TREND_REQUIRE_RETEST=true` branch previously compared the
+**preceding completed candle** with the *current* VWAP, even though VWAP
+can change between those candles. This made retest classification depend on
+information unavailable at the earlier candle.
+
+A new `IndicatorEngine.get_session_vwap_at(symbol, prior_bar_timestamp)`
+supplies the preceding candle's own **completed-session typical-price
+volume-weighted VWAP**. It excludes later candles, requires an exact complete
+target candle and observed history starting from 09:15 IST, and returns no
+reference when the historical snapshot is unavailable or ambiguous. Only
+the opt-in retest uses this method; the existing current-vs-session/exchange
+VWAP admission order, ordinary VWAP signals and all execution/risk controls
+remain unchanged.
+
+The retest's prior low/close use prior as-of VWAP; its current candle still
+has to hold the current validated VWAP. Missing historical reference fails
+closed with `trend_momentum_prior_vwap_unavailable`. The emitted candidate
+records `trend_momentum_prior_session_vwap` for inspection.
+
+**Evidence limitations:** OHLC typical-price VWAP is a completed-bar proxy,
+not reconstructed exchange tick-by-tick VWAP. The previous-bar causal
+comparison is engineering-correct within that model, but neither exact
+historical exchange-reference parity nor enhanced after-cost NIFTY
+options profitability has been established. The retest and momentum
+research toggles remain **default OFF** and are not promoted to LIVE.
