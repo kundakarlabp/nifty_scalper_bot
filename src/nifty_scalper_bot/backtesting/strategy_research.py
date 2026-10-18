@@ -1012,7 +1012,7 @@ def _scenario(
             # Recompute from *already ingested* completed futures bars only.
             # Use the same detector and stable-state manager as production;
             # historical minute bars remain a lower-fidelity regime proxy.
-            regime_detector.evaluate(
+            regime_snapshot = regime_detector.evaluate(
                 future,
                 {
                     "price": bars[future]["close"],
@@ -1024,6 +1024,11 @@ def _scenario(
                     "volume_ratio": underlying_context.get("futures_volume_ratio"),
                 },
             )
+            # The isolated research manager is deliberately not started as a
+            # production background service. Feed the detector's completed-bar
+            # snapshot directly through the canonical stable-state transition
+            # method; otherwise get_latest_snapshot() stays None forever.
+            regime_manager.ingest_snapshot(regime_snapshot)
             stable_regime = regime_manager.get_latest_snapshot()
             if stable_regime is not None:
                 underlying_context["regime"] = stable_regime.regime
