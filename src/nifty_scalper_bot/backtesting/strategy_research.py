@@ -635,6 +635,11 @@ def _scenario(
     entry_funnels: dict[str, Counter[str]] = {}
     orb_replay_regimes: Counter[str] = Counter()
     orb_replay_coverage: Counter[str] = Counter()
+    orb_direction_resolution_minutes: Counter[str] = Counter()
+    orb_atm_proxy_rejections: Counter[str] = Counter()
+    orb_atm_proxy_candidate_bars = 0
+    orb_atm_proxy_eligible_bars = 0
+    orb_atm_proxy_eligible_minutes = 0
     eligible_option_days: set[str] = set()
     eligible_option_bars = 0
     pending: dict[tuple[str, str], dict[str, Any]] = {}
@@ -930,6 +935,23 @@ def _scenario(
         if future not in bars or "NSE:NIFTY 50" not in bars:
             continue
         eligible_options = [symbol for symbol in options if symbol in bars]
+        if compact_orb_context:
+            # This is only a retrospective expiry/strike proximity diagnostic,
+            # never proof that the contract was in the live ATM basket.
+            proxy_eligible_on_minute = False
+            spot_close = bars["NSE:NIFTY 50"]["close"]
+            for option_symbol in eligible_options:
+                orb_atm_proxy_candidate_bars += 1
+                reason = _archived_weekly_atm_rejection(
+                    instruments[option_symbol], timestamp, spot_close
+                )
+                if reason is None:
+                    orb_atm_proxy_eligible_bars += 1
+                    proxy_eligible_on_minute = True
+                else:
+                    orb_atm_proxy_rejections[reason] += 1
+            if proxy_eligible_on_minute:
+                orb_atm_proxy_eligible_minutes += 1
         if require_archived_weekly_atm:
             scoped_options = []
             for symbol in eligible_options:
@@ -967,6 +989,13 @@ def _scenario(
             spot_symbol="NSE:NIFTY 50",
             futures_symbol=future,
         )
+        if compact_orb_context:
+            # One observation per matched replay minute, not per CE/PE strike.
+            resolution = str(
+                underlying_context.get("research_direction_resolution")
+                or "unavailable"
+            )
+            orb_direction_resolution_minutes[resolution] += 1
         if regime_detector is not None and regime_manager is not None:
             # Recompute from *already ingested* completed futures bars only.
             # Use the same detector and stable-state manager as production;
@@ -1247,6 +1276,26 @@ def _scenario(
                         }
                         if compact_orb_context and name == "ORBPro"
                         else {}
+                    ),
+                    "orb_direction_resolution_minutes": (
+                        dict(orb_direction_resolution_minutes)
+                        if compact_orb_context and name == "ORBPro"
+                        else {}
+                    ),
+                    "orb_weekly_atm_proximity_proxy": (
+                        {
+                            "candidate_option_bars": orb_atm_proxy_candidate_bars,
+                            "eligible_option_bars": orb_atm_proxy_eligible_bars,
+                            "eligible_minutes": orb_atm_proxy_eligible_minutes,
+                            "rejection_reasons": dict(orb_atm_proxy_rejections),
+                        }
+                        if compact_orb_context and name == "ORBPro"
+                        else {}
+                    ),
+                    "historical_executable_quote_fidelity": (
+                        "ohlcv_only"
+                        if compact_orb_context and name == "ORBPro"
+                        else None
                     ),
                     "development_eligible_session_count": sum(
                         day < cutoff for day in days
