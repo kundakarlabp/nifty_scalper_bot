@@ -627,38 +627,49 @@ def run_orb_causal_gate_day(task: tuple[str, str]) -> dict[str, Any]:
     )
 
     root, day = task
-    os.environ.update(
-        EXECUTION_MODE="SHADOW",
-        STRATEGY_MODE="directional_scalp",
-        ORB_ENABLED="true",
-        BROKER_API_KEY="offline_research_unused",
-        BROKER_API_SECRET="offline_research_unused",
-    )
-    logging.disable(logging.CRITICAL)
-    directory = Path(root) / "sessions" / day
-    arms: dict[str, dict[str, Any]] = {}
-    for profile in ORB_CAUSAL_GATE_PROFILES:
-        result = run_orb_session_research(
-            directory,
-            overrides={},
-            slippage_bps=10.0,
-            minimum_net_rr=1.5,
-            lifecycle_proxy=True,
-            causal_gate_profile=profile,
-        )
-        arms[profile] = {
-            field: result[field]
-            for field in (
-                "entry_funnel",
-                "metrics",
-                "data_quality",
-                "no_vote_reasons",
-                "structural_gate_failures",
-                "trades",
-                "unresolved_trades",
+    isolated = {
+        "EXECUTION_MODE": "SHADOW",
+        "STRATEGY_MODE": "directional_scalp",
+        "ORB_ENABLED": "true",
+        "BROKER_API_KEY": "offline_research_unused",
+        "BROKER_API_SECRET": "offline_research_unused",
+    }
+    previous_env = {key: os.environ.get(key) for key in isolated}
+    previous_logging_level = logging.root.manager.disable
+    try:
+        os.environ.update(isolated)
+        logging.disable(logging.CRITICAL)
+        directory = Path(root) / "sessions" / day
+        arms: dict[str, dict[str, Any]] = {}
+        for profile in ORB_CAUSAL_GATE_PROFILES:
+            result = run_orb_session_research(
+                directory,
+                overrides={},
+                slippage_bps=10.0,
+                minimum_net_rr=1.5,
+                lifecycle_proxy=True,
+                causal_gate_profile=profile,
             )
-        }
-    return {"day": day, "arms": arms}
+            arms[profile] = {
+                field: result[field]
+                for field in (
+                    "entry_funnel",
+                    "metrics",
+                    "data_quality",
+                    "no_vote_reasons",
+                    "structural_gate_failures",
+                    "trades",
+                    "unresolved_trades",
+                )
+            }
+        return {"day": day, "arms": arms}
+    finally:
+        logging.disable(previous_logging_level)
+        for key, previous in previous_env.items():
+            if previous is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = previous
 
 
 def summarize_orb_causal_gate_days(
