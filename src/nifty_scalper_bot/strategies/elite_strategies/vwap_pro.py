@@ -741,6 +741,7 @@ class VWAPProStrategy(EliteStrategy):
             completed_option_rvol: float | None = None
             trend_momentum_volume_baseline_bars: int | None = None
             trend_momentum_retest_confirmed: bool | None = None
+            trend_momentum_prior_session_vwap: float | None = None
             if self._trend_momentum_enabled:
                 if trend_momentum_regime != MarketRegime.TREND:
                     self._no_vote("trend_momentum_regime_not_trend")
@@ -867,17 +868,41 @@ class VWAPProStrategy(EliteStrategy):
                             prior_ts = datetime.fromisoformat(
                                 _normalize_thesis_anchor(prior["timestamp"])
                             )
-                            trend_momentum_retest_confirmed = bool(
+                            contiguous = bool(
                                 prior.get("is_complete") is True
                                 and prior.get("is_provisional") is not True
                                 and current_ts - prior_ts == timedelta(minutes=1)
-                                and float(prior["low"]) < vwap
-                                and float(prior["close"]) >= vwap
-                                and confirmed_low >= vwap
-                                and open_price >= vwap
                             )
-                        except (KeyError, TypeError, ValueError):
-                            pass
+                            if contiguous:
+                                # This research-only retest must not compare a
+                                # prior candle to today's *current* VWAP.
+                                at_vwap = getattr(
+                                    self._indicator_engine, "get_session_vwap_at", None
+                                )
+                                reference = (
+                                    at_vwap(symbol, prior_ts)
+                                    if callable(at_vwap) else None
+                                )
+                                if reference is None or not (
+                                    math.isfinite(float(reference))
+                                    and float(reference) > 0
+                                ):
+                                    self._no_vote(
+                                        "trend_momentum_prior_vwap_unavailable"
+                                    )
+                                    return None
+                                trend_momentum_prior_session_vwap = float(reference)
+                                trend_momentum_retest_confirmed = bool(
+                                    float(prior["low"])
+                                    < trend_momentum_prior_session_vwap
+                                    and float(prior["close"])
+                                    >= trend_momentum_prior_session_vwap
+                                    and confirmed_low >= vwap
+                                    and open_price >= vwap
+                                )
+                        except (KeyError, TypeError, ValueError, OverflowError):
+                            self._no_vote("trend_momentum_prior_vwap_unavailable")
+                            return None
                     if not trend_momentum_retest_confirmed:
                         self._no_vote("trend_momentum_retest_unconfirmed")
                         return None
@@ -1086,6 +1111,7 @@ class VWAPProStrategy(EliteStrategy):
                 "trend_momentum_volume_baseline_bars": trend_momentum_volume_baseline_bars,
                 "trend_momentum_require_retest": self._trend_require_retest,
                 "trend_momentum_retest_confirmed": trend_momentum_retest_confirmed,
+                "trend_momentum_prior_session_vwap": trend_momentum_prior_session_vwap,
                 "days_to_expiry": indicators.get("days_to_expiry"),
                 "strike_distance_from_atm": indicators.get("strike_distance_from_atm"),
                 "minutes_since_open": indicators.get("minutes_since_open"),
