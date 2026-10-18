@@ -1117,8 +1117,12 @@ def _scenario(
                 source = position.get("structure_symbol")
                 side = position.get("contract_side")
                 try:
-                    threshold = float(level)
-                except (TypeError, ValueError):
+                    threshold = (
+                        float(level)
+                        if isinstance(level, (int, float, str)) and not isinstance(level, bool)
+                        else math.nan
+                    )
+                except ValueError:
                     threshold = math.nan
                 if (
                     not math.isfinite(threshold)
