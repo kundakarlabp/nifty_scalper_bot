@@ -117,7 +117,7 @@ def test_backup_runs_without_root_config_and_does_not_capture_env(
     bindir.mkdir()
     fake_rsync = bindir / "rsync"
     fake_rsync.write_text(
-        '#!/bin/sh\nset -eu\nmkdir -p "$4"\\ncp -R "$3/." "$4/"\n'
+        '#!/bin/sh\nset -eu\nmkdir -p "$4"\ncp -R "$3/." "$4/"\n'
     )
     fake_rsync.chmod(0o755)
     env = dict(os.environ)
