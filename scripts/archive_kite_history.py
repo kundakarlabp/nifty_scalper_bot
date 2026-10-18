@@ -431,6 +431,11 @@ def historical_cache_inventory(
             }
         )
     staged_dates: list[str] = []
+    # A generic 09:30+ replay can be stageable without the 09:15–09:29
+    # futures history needed to reconstruct the default 15-minute ORB.
+    orb_ready_staged_dates: list[str] = []
+    orb_incomplete_staged_dates: list[str] = []
+    orb_missing_futures_minutes: dict[str, int] = {}
     staging_rejections: dict[str, str] = {}
     if stage_dir is not None:
         for label, sources in sorted(staged_sources.items()):
@@ -562,6 +567,12 @@ def historical_cache_inventory(
                 staging_rejections[label] = failure
                 continue
             future, ce, pe, anchor = selected
+            opening_start = dt.datetime.combine(day, dt.time(9, 15), IST)
+            missing_opening = sum(
+                opening_start + dt.timedelta(minutes=minute)
+                not in sources[future]["bars"]
+                for minute in range(15)
+            )
             destination = stage_dir / label
             if destination.exists():
                 staging_rejections[label] = "historical_stage_destination_exists"
@@ -591,6 +602,11 @@ def historical_cache_inventory(
                     )
                 staging.rename(destination)
             staged_dates.append(label)
+            orb_missing_futures_minutes[label] = missing_opening
+            if missing_opening:
+                orb_incomplete_staged_dates.append(label)
+            else:
+                orb_ready_staged_dates.append(label)
     # Weekdays are only candidate dates: exchange holidays and exceptional
     # sessions require an authoritative NSE calendar not present in this cache.
     weekday_candidates = [
@@ -649,6 +665,12 @@ def historical_cache_inventory(
         ),
         "weekday_coverage_is_exchange_calendar": False,
         "staged_session_dates": staged_dates,
+        "orb_opening_range_minutes": 15,
+        "orb_opening_range_ready_staged_session_dates": orb_ready_staged_dates,
+        "orb_opening_range_incomplete_staged_session_dates": (
+            orb_incomplete_staged_dates
+        ),
+        "orb_opening_range_missing_futures_minutes": orb_missing_futures_minutes,
         "staging_rejections": staging_rejections,
         "staging_scope": "observed_contract_pair_only_no_full_historical_universe",
         "source": "retained_kite_minute_cache",
