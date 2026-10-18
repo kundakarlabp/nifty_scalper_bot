@@ -1124,9 +1124,12 @@ class IndicatorEngine:
                     if observed == at:
                         return None
                     continue
-                values = tuple(
-                    float(row[key])
-                    for key in ("open", "high", "low", "close", "volume")
+                values = (
+                    float(row["open"]),
+                    float(row["high"]),
+                    float(row["low"]),
+                    float(row["close"]),
+                    float(row["volume"]),
                 )
                 opening, high, low, close, volume = values
                 if (
