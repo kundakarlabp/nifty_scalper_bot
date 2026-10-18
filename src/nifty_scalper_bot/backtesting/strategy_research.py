@@ -1064,6 +1064,25 @@ def _scenario(
                     stress_reason="unpriced_gap_full_premium_stress",
                 )
                 continue
+            due_at = position.get("smc_structural_exit_due_at")
+            if (
+                key[0] == "SMC"
+                and smc_exit_policy == "structural_close_with_premium_guard"
+                and isinstance(due_at, datetime)
+                and timestamp > due_at
+            ):
+                # Every instrument can miss the scheduled minute entirely.
+                # A later option print cannot establish the intervening
+                # structural exit price or rule out an earlier stop/target.
+                # Do not credit a subsequent profitable premium target.
+                smc_exit_diagnostics["structural_unpriced_exit_gaps"] += 1
+                mark_unresolved(
+                    key,
+                    timestamp,
+                    "smc_structural_exit_minute_gap_unresolved",
+                    stress_reason="smc_structural_exit_unpriced_gap_stress",
+                )
+                continue
             stop, target = position["stop_loss"], position["take_profit"]
             initial_stop = position["initial_stop_loss"]
             stop_reason = "trailing_stop" if stop > initial_stop else "stop"
@@ -1644,6 +1663,9 @@ def _scenario(
                             "structural_breaches"
                         ],
                         "structural_exits": smc_exit_diagnostics["structural_exits"],
+                        "structural_unpriced_exit_gaps": smc_exit_diagnostics[
+                            "structural_unpriced_exit_gaps"
+                        ],
                         "missing_structural_metadata": smc_exit_diagnostics[
                             "missing_structural_metadata"
                         ],
