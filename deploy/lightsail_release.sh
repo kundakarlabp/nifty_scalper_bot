@@ -461,7 +461,7 @@ PYTHONPATH="$CANDIDATE/src" "$VENV/bin/python" -m compileall -q "$CANDIDATE/src"
   write_status validation_failed "source compile failed for ${AFTER:0:7}"; exit 1;
 }
 "$VENV/bin/python" -m py_compile \
-  "$CANDIDATE/dashboard/event_buffer.py" \
+  "$CANDIDATE/dashboard/superlite_events.py" \
   "$CANDIDATE/dashboard/log_export.py" \
   "$CANDIDATE/dashboard/superlite_console.py" || {
   write_status validation_failed "dashboard compile failed for ${AFTER:0:7}"; exit 1;
@@ -485,7 +485,7 @@ TARGETED_TESTS=(
   tests/execution/test_runtime_bracket_facade.py
   tests/execution/test_bracket_persistence_policy.py
   tests/integration/test_canonical_bo_end_to_end.py
-  tests/dashboard/test_event_buffer_truth.py
+  tests/dashboard/test_superlite_event_details.py
   tests/dashboard/test_log_export.py
   tests/data/test_datahub_bounded_persistence.py
   tests/data/test_mdm_tick_coalescing.py

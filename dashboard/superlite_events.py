@@ -6,7 +6,10 @@ import io
 import re
 from collections.abc import Iterable
 
-from dashboard.event_buffer import SECRET
+SECRET = re.compile(
+    r"(?i)(api[_ -]?key|api[_ -]?secret|access[_ -]?token|"
+    r"request[_ -]?token|password)\s*[:=]\s*\S+"
+)
 
 STAMP = re.compile(r"\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} IST)\]")
 FIELD = re.compile(r"\b([a-zA-Z][a-zA-Z0-9_]*)=([^\s,}]+)")
@@ -56,6 +59,7 @@ EVENT_WORDS = {
     "POSITION", "BROKER", "AUTH", "READY", "BLOCKER", "RISK", "COOLDOWN",
     "ERROR", "FAIL", "WARN", "DEGRADED", "STARTUP", "SHUTDOWN", "HYDRATION",
     "SUBSCRIPTION", "RECONCIL", "CONTRACT_SSOT", "LIVE_READINESS",
+    "CANDIDATE_REJECTED",
     *HISTORY_DIAGNOSTICS,
 }
 NULLS = {"", "none", "null", "nil", "false", "0", "unknown", "n/a", "na"}

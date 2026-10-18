@@ -69,6 +69,10 @@ def test_release_runner_validates_and_rolls_back() -> None:
     assert "tests/test_mdm_event_loop_consumer.py" in release
     assert "dashboard/superlite_console.py" in release
     assert "dashboard/operations_console.py" not in release
+    assert '"$CANDIDATE/dashboard/superlite_events.py"' in release
+    assert '"$CANDIDATE/dashboard/event_buffer.py"' not in release
+    assert "tests/dashboard/test_superlite_event_details.py" in release
+    assert not (ROOT / "dashboard/event_buffer.py").exists()
     assert '"bot_loaded"[[:space:]]*:[[:space:]]*true' in release
     assert '"engine_http_responsive"[[:space:]]*:[[:space:]]*true' in release
     assert '"quiet"[[:space:]]*:[[:space:]]*true' in release
