@@ -450,9 +450,7 @@ def run_task(task: tuple[str, dict[str, Any], float, list[str]]) -> dict[str, An
             "coverage_minutes": dict(coverage_minutes),
             "direction_resolution_minutes": dict(direction_minutes),
             "regime_minutes": dict(regime_minutes),
-            "structural_gate_failures_by_option_evaluation": dict(
-                structural_failures
-            ),
+            "structural_gate_failures_by_option_evaluation": dict(structural_failures),
             "attributed_direction_minutes": sum(direction_minutes.values()),
             "attributed_regime_minutes": sum(regime_minutes.values()),
             "matched_market_minutes": coverage_minutes["matched_market_minutes"],
