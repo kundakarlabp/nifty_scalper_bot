@@ -61,12 +61,18 @@ def test_duplicate_terminal_result_is_removed():
         {
             "timestamp_ist": "2026-06-25 15:00:00 IST",
             "type": "SIGNAL",
-            "message": "SIGNAL_EXECUTION_RESULT accepted=False reason=no_candidate trace_id=t1",
+            "message": (
+                "SIGNAL_EXECUTION_RESULT accepted=False "
+                "reason=no_candidate trace_id=t1"
+            ),
         },
         {
             "timestamp_ist": "2026-06-25 15:00:01 IST",
             "type": "TRADE",
-            "message": "SIGNAL_EXECUTION_RESULT accepted=False reason=no_candidate trace_id=t1",
+            "message": (
+                "SIGNAL_EXECUTION_RESULT accepted=False "
+                "reason=no_candidate trace_id=t1"
+            ),
         },
     ]
     assert len(deduplicate_events(rows)) == 1
@@ -81,7 +87,6 @@ def test_superlite_none_failure_reason_is_not_error():
     assert event["type"] == "SYSTEM"
 
 
-
 def test_no_combined_signal_is_a_system_decision_not_a_signal() -> None:
     line = (
         "[2026-08-06 14:40:38 IST] "
@@ -90,10 +95,8 @@ def test_no_combined_signal_is_a_system_decision_not_a_signal() -> None:
     )
 
     event = parse_event(line)
-    superlite_event = parse_event(line)
 
     assert event is not None and event["type"] == "SYSTEM"
-    assert superlite_event is not None and superlite_event["type"] == "SYSTEM"
 
 
 def test_non_gating_option_context_history_miss_is_system_not_error():
@@ -108,11 +111,7 @@ def test_non_gating_option_context_history_miss_is_system_not_error():
     event = parse_event(line)
     assert event is not None
     assert event["type"] == "SYSTEM"
-
-    superlite_event = parse_event(line)
-    assert superlite_event is not None
-    assert superlite_event["type"] == "SYSTEM"
-    assert superlite_event["failure_reason"] == "broker_fetch_not_allowed"
+    assert event["failure_reason"] == "broker_fetch_not_allowed"
 
 
 def test_non_gating_runner_history_short_is_system_not_error():
@@ -126,11 +125,7 @@ def test_non_gating_runner_history_short_is_system_not_error():
     event = parse_event(line)
     assert event is not None
     assert event["type"] == "SYSTEM"
-
-    superlite_event = parse_event(line)
-    assert superlite_event is not None
-    assert superlite_event["type"] == "SYSTEM"
-    assert superlite_event["failure_reason"] == "source_history_short"
+    assert event["failure_reason"] == "source_history_short"
 
 
 def test_selected_option_runner_history_short_remains_error():
@@ -142,26 +137,21 @@ def test_selected_option_runner_history_short_remains_error():
     )
 
     event = parse_event(line)
-    superlite_event = parse_event(line)
 
     assert event is not None and event["type"] == "ERROR"
-    assert superlite_event is not None and superlite_event["type"] == "ERROR"
 
 
 def test_selected_option_history_failure_remains_error():
     line = (
         "[2026-07-08 01:13:00 IST] CANONICAL_HISTORY_RESULT "
         "symbol=NFO:NIFTY2671424400CE role=selected_option required_bars=30 "
-        "mdm_bars=1 runner_bars=1 indicator_bars=1 failure_reason=broker_fetch_not_allowed"
+        "mdm_bars=1 runner_bars=1 indicator_bars=1 "
+        "failure_reason=broker_fetch_not_allowed"
     )
 
     event = parse_event(line)
     assert event is not None
     assert event["type"] == "ERROR"
-
-    superlite_event = parse_event(line)
-    assert superlite_event is not None
-    assert superlite_event["type"] == "ERROR"
 
 
 def test_superlite_indicator_error_is_visible():
@@ -184,8 +174,13 @@ def test_superlite_services_are_independent_and_bounded():
 
 
 def test_readiness_and_candle_warnings_are_not_trade_events() -> None:
-    readiness = parse_event("[2026-07-01 09:10:00 IST] ORDER_READINESS_REJECTED reason=selected_option_quote_missing")
-    candle = parse_event("[2026-07-01 09:11:00 IST] Dropping out-of-order candle symbol=NFO:X")
+    readiness = parse_event(
+        "[2026-07-01 09:10:00 IST] ORDER_READINESS_REJECTED "
+        "reason=selected_option_quote_missing"
+    )
+    candle = parse_event(
+        "[2026-07-01 09:11:00 IST] Dropping out-of-order candle symbol=NFO:X"
+    )
     assert readiness is not None and readiness["type"] != "TRADE"
     assert candle is not None and candle["type"] != "TRADE"
 
@@ -197,10 +192,8 @@ def test_strategy_no_vote_failed_reason_is_not_process_error() -> None:
     )
 
     event = parse_event(line)
-    superlite_event = parse_event(line)
 
     assert event is not None and event["type"] == "SYSTEM"
-    assert superlite_event is not None and superlite_event["type"] == "SYSTEM"
 
 
 def test_no_combined_signal_failed_reason_is_not_process_error() -> None:
@@ -211,10 +204,8 @@ def test_no_combined_signal_failed_reason_is_not_process_error() -> None:
     )
 
     event = parse_event(line)
-    superlite_event = parse_event(line)
 
     assert event is not None and event["type"] == "SYSTEM"
-    assert superlite_event is not None and superlite_event["type"] == "SYSTEM"
 
 
 def test_hard_error_precedence_survives_strategy_rejection_markers() -> None:
@@ -225,10 +216,8 @@ def test_hard_error_precedence_survives_strategy_rejection_markers() -> None:
     )
 
     event = parse_event(line)
-    superlite_event = parse_event(line)
 
     assert event is not None and event["type"] == "ERROR"
-    assert superlite_event is not None and superlite_event["type"] == "ERROR"
 
 def test_trade_event_is_kept() -> None:
     event = parse_event("[2026-06-23 09:35:00 IST] ORDER_SENT NIFTY CE")
