@@ -245,8 +245,10 @@ def test_compact_context_preserves_actual_orb_trades(monkeypatch, tmp_path):
     )["strategies"]["ORBPro"]
     assert compact["metrics"] == baseline["metrics"]
     assert len(compact["trades"]) == len(baseline["trades"])
-    if not baseline["trades"]:
-        return
+    assert baseline["trades"], (
+        "ORB full/compact parity fixture produced zero trades: matching two "
+        "empty ledgers is not a meaningful execution-parity test"
+    )
 
     economic_fields = (
         "entry_time",
