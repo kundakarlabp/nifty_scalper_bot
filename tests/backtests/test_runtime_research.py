@@ -27,6 +27,75 @@ def test_runtime_requires_captured_effective_configuration():
         )
 
 
+
+def test_replay_epoch_preflight_rejects_multiple_process_runs(tmp_path):
+    from datetime import datetime, timedelta
+
+    from nifty_scalper_bot.backtesting.runtime_research import validate_replay_epochs
+    from nifty_scalper_bot.storage.replay_archive import ReplayArchive
+
+    now = datetime.fromisoformat("2026-10-01T10:00:00+05:30")
+    snapshot = {
+        "instruments": [{"instrument_token": 100}],
+        "basket": {"selected_ce": "CE"},
+        "effective_settings": {"risk": {"enabled": True}},
+        "runner_config": {"some_value": True},
+        "initial_balance": 100000.0,
+        "initial_positions": [],
+    }
+    first = ReplayArchive(tmp_path)
+    first.record("snapshot", snapshot, now)
+    first.close()
+    second = ReplayArchive(tmp_path)
+    second.record("snapshot", snapshot, now + timedelta(minutes=1))
+    second.close()
+
+    with pytest.raises(ValueError, match="replay_multiple_runs_unrestored_state"):
+        validate_replay_epochs(tmp_path / "2026-10-01.jsonl")
+
+
+def test_replay_epoch_preflight_rejects_changed_settings_but_allows_basket(
+    tmp_path,
+):
+    from datetime import datetime, timedelta
+
+    from nifty_scalper_bot.backtesting.runtime_research import validate_replay_epochs
+    from nifty_scalper_bot.storage.replay_archive import ReplayArchive
+
+    now = datetime.fromisoformat("2026-10-01T10:00:00+05:30")
+    snapshot = {
+        "instruments": [{"instrument_token": 100}],
+        "basket": {"selected_ce": "CE"},
+        "effective_settings": {"risk": {"enabled": True}},
+        "runner_config": {"some_value": True},
+        "initial_balance": 100000.0,
+        "initial_positions": [],
+    }
+    archive = ReplayArchive(tmp_path)
+    archive.record("snapshot", snapshot, now)
+    archive.record(
+        "snapshot",
+        {**snapshot, "basket": {"selected_ce": "CE", "selected_pe": "PE"}},
+        now + timedelta(minutes=1),
+    )
+    archive.close()
+    path = tmp_path / "2026-10-01.jsonl"
+    count, first_snapshot, snapshots = validate_replay_epochs(path)
+    assert (count, snapshots) == (2, 2)
+    assert first_snapshot == snapshot
+
+    other = ReplayArchive(tmp_path / "changed")
+    other.record("snapshot", snapshot, now)
+    other.record(
+        "snapshot",
+        {**snapshot, "effective_settings": {"risk": {"enabled": False}}},
+        now + timedelta(minutes=1),
+    )
+    other.close()
+    with pytest.raises(ValueError, match="replay_snapshot_configuration_changed"):
+        validate_replay_epochs(tmp_path / "changed/2026-10-01.jsonl")
+
+
 def test_recorded_feed_bootstraps_real_production_owners(tmp_path, monkeypatch):
     import json
     from datetime import datetime, timedelta
