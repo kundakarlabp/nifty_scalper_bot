@@ -11,6 +11,7 @@ from scripts.archive_fyers_expired import (
     collect_expired_pair,
     discover_pair,
     normalize_option_candles,
+    stage_pair_with_verified_context,
 )
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -19,7 +20,8 @@ DAY = dt.date(2025, 3, 26)
 
 
 def epoch(minute=30):
-    return int(dt.datetime(2025, 3, 26, 9, minute, tzinfo=IST).timestamp())
+    start = dt.datetime(2025, 3, 26, 9, 0, tzinfo=IST)
+    return int((start + dt.timedelta(minutes=minute)).timestamp())
 
 
 class FakeFyers:
@@ -226,3 +228,116 @@ def test_budget_and_date_checks_prevent_unbounded_calls(tmp_path):
             timestamp_convention="bar_start",
         )
     assert client.calls == []
+
+
+def _context_archive(tmp_path, count=65):
+    directory = tmp_path / "existing_context" / "candles"
+    directory.mkdir(parents=True)
+    for symbol, kind, expiry in (
+        ("NSE:NIFTY 50", "EQ", None),
+        ("NFO:NIFTY25MARFUT", "FUT", "2025-03-27"),
+    ):
+        rows = [
+            [
+                (dt.datetime(2025, 3, 26, 9, 30, tzinfo=IST)
+                 + dt.timedelta(minutes=index)).isoformat(),
+                23000, 23020, 22980, 23005, 250,
+            ]
+            for index in range(count)
+        ]
+        (directory / f"{kind}.json").write_text(
+            json.dumps(
+                {
+                    "symbol": symbol,
+                    "timestamp_convention": "bar_start",
+                    "instrument": {
+                        "name": "NIFTY",
+                        "instrument_type": kind,
+                        "expiry": expiry,
+                        "lot_size": 75,
+                    },
+                    "candles": rows,
+                }
+            )
+        )
+    return directory.parent
+
+
+def test_imported_pair_bridges_into_existing_research_loader_only_with_context(tmp_path):
+    from nifty_scalper_bot.backtesting.strategy_research import load_archive
+
+    report = archive(FakeFyers(bars=65), tmp_path)
+    context = _context_archive(tmp_path)
+    destination = tmp_path / "staged" / DAY.isoformat()
+    staged = stage_pair_with_verified_context(
+        tmp_path, context, destination,
+        day=DAY, expiry=EXPIRY, strike=23000,
+        lot_size=75,
+        lot_size_source="operator-attested historical NSE lot-size circular",
+        min_synchronized_minutes=60,
+    )
+    assert staged["promotion_eligible"] is False
+    assert staged["historical_atm_selection_verified"] is False
+    assert staged["historical_order_book_depth_available"] is False
+    histories, instruments, digest = load_archive(destination)
+    assert len(histories) == 4
+    assert len(histories["NFO:NIFTY25MAR23000CE"]) == 65
+    assert len(histories["NFO:NIFTY25MAR23000PE"]) == 65
+    assert instruments["NFO:NIFTY25MAR23000CE"]["lot_size"] == 75
+    assert staged["data_sha256"] == digest
+    assert report["historical_atm_selection_verified"] is False
+    with pytest.raises(ValueError, match="fyers_research_stage_prerequisites_invalid"):
+        stage_pair_with_verified_context(
+            tmp_path, context, destination,
+            day=DAY, expiry=EXPIRY, strike=23000,
+            lot_size=75, lot_size_source="verified",
+        )
+
+
+def test_incomplete_context_and_unverified_historical_lot_size_fail_closed(tmp_path):
+    archive(FakeFyers(bars=65), tmp_path)
+    context = _context_archive(tmp_path, count=3)
+    destination = tmp_path / "stage"
+    with pytest.raises(ValueError, match="fyers_research_stage_prerequisites_invalid"):
+        stage_pair_with_verified_context(
+            tmp_path, context, destination,
+            day=DAY, expiry=EXPIRY, strike=23000,
+            lot_size=0, lot_size_source="",
+        )
+    with pytest.raises(
+        ValueError, match="fyers_research_stage_synchronized_minutes_missing"
+    ):
+        stage_pair_with_verified_context(
+            tmp_path, context, destination,
+            day=DAY, expiry=EXPIRY, strike=23000,
+            lot_size=75, lot_size_source="operator verified",
+            min_synchronized_minutes=60,
+        )
+    assert not destination.exists()
+
+
+def test_option_payload_tampering_cannot_be_staged(tmp_path):
+    report = archive(FakeFyers(bars=65), tmp_path)
+    context = _context_archive(tmp_path)
+    option_file = tmp_path / report["contracts"]["CE"]["path"]
+    payload = json.loads(option_file.read_text())
+    payload["candles"][0][4] = 500
+    option_file.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="fyers_research_stage_source_untrusted"):
+        stage_pair_with_verified_context(
+            tmp_path, context, tmp_path / "staged",
+            day=DAY, expiry=EXPIRY, strike=23000,
+            lot_size=75, lot_size_source="operator verified",
+        )
+
+
+def test_imported_bar_end_labels_are_normalized_before_research_stage(tmp_path):
+    client = FakeFyers(bars=65)
+    report = collect_expired_pair(
+        client, expiry=EXPIRY, strike=23000, start=DAY, end=DAY,
+        outdir=tmp_path, timestamp_convention="bar_end",
+    )
+    record = json.loads((tmp_path / report["contracts"]["CE"]["path"]).read_text())
+    assert record["source_timestamp_convention"] == "bar_end"
+    assert record["timestamp_convention"] == "bar_start"
+    assert record["candles"][0][0] == "2025-03-26T09:29:00+05:30"
