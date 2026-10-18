@@ -2385,3 +2385,56 @@ def test_vwap_daily_funnel_counts_fills_and_unresolved_exits(tmp_path):
     assert day["resolved_trades"] == 0
     assert day["unresolved_trades"] == 1
     assert result["data_quality"]["unresolved_exit_count"] == 1
+
+
+def test_vwap_expired_day_boundary_intent_is_rejected_on_signal_day(tmp_path):
+    """Unfilled prior-day signal must not contaminate tomorrow's no-vote funnel."""
+    from nifty_scalper_bot.backtesting.strategy_research import _scenario, load_archive
+
+    archive(tmp_path)
+    for path in (tmp_path / "candles").glob("*.json"):
+        payload = json.loads(path.read_text())
+        next_day = [
+            [(datetime.fromisoformat(row[0]) + timedelta(days=1)).isoformat(), *row[1:]]
+            for row in payload["candles"]
+        ]
+        payload["candles"].extend(next_day)
+        path.write_text(json.dumps(payload))
+
+    class SignalAtDayEnd:
+        name = "VWAPPro"
+        last_no_vote_reason = "no_new_setup"
+
+        def generate_signal(self, symbol, indicators, current_price, position=None):
+            if (
+                symbol.endswith("CE")
+                and indicators["bar_timestamp"].day == 1
+                and indicators["history_count"] == 4
+            ):
+                return SimpleNamespace(
+                    action="BUY", stop_loss=95, take_profit=105, metadata={}
+                )
+            return None
+
+        @property
+        def evaluation_health(self):
+            return {"healthy": True}
+
+    histories, instruments, _ = load_archive(tmp_path)
+    result = _scenario(
+        histories,
+        instruments,
+        None,
+        25,
+        components={"VWAPPro"},
+        strategy_factory=lambda engine: [SignalAtDayEnd()],
+    )["strategies"]["VWAPPro"]
+    daily = result["daily_diagnostics"]
+
+    assert result["entry_funnel"]["next_bar_intents"] == 1
+    assert result["entry_funnel"]["accepted_fills"] == 0
+    assert result["no_vote_reasons"]["next_minute_unavailable"] == 1
+    assert daily["2026-10-01"]["no_vote_reasons"]["next_minute_unavailable"] == 1
+    assert "next_minute_unavailable" not in daily["2026-10-02"]["no_vote_reasons"]
+    assert daily["2026-10-01"]["entry_funnel"]["next_bar_intents"] == 1
+    assert daily["2026-10-02"]["entry_funnel"]["next_bar_intents"] == 0
