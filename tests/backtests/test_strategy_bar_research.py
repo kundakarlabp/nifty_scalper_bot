@@ -2608,3 +2608,158 @@ def test_vwap_expired_day_boundary_intent_is_rejected_on_signal_day(tmp_path):
     assert "next_minute_unavailable" not in daily["2026-10-02"]["no_vote_reasons"]
     assert daily["2026-10-01"]["entry_funnel"]["next_bar_intents"] == 1
     assert daily["2026-10-02"]["entry_funnel"]["next_bar_intents"] == 0
+
+
+@pytest.mark.parametrize(
+    ("breach_minute", "expected_exit_minute"),
+    [(1, 2), (2, 3)],
+)
+def test_smc_structural_research_exit_uses_next_option_open_not_breach_bar(
+    tmp_path, breach_minute, expected_exit_minute
+):
+    from nifty_scalper_bot.backtesting.strategy_research import _scenario, load_archive
+    from nifty_scalper_bot.config.settings import get_settings
+
+    first = archive(tmp_path)
+    future_path = tmp_path / "candles" / "FUT.json"
+    future = json.loads(future_path.read_text())
+    future["candles"][breach_minute][4] = 98.0
+    future_path.write_text(json.dumps(future))
+    option_path = tmp_path / "candles" / "CE.json"
+    option = json.loads(option_path.read_text())
+    option["candles"][1][1:] = [100, 103, 97, 100, 1000]
+    option["candles"][2][1:] = [102, 104, 96, 102, 1000]
+    option["candles"][3][1:] = [100, 115, 95, 110, 1000]
+    option_path.write_text(json.dumps(option))
+
+    class Strategy:
+        name = "SMC"
+
+        def generate_signal(self, symbol, indicators, current_price, position=None):
+            if not symbol.endswith("CE") or indicators["history_count"] != 1:
+                return None
+            return SimpleNamespace(
+                action="BUY",
+                stop_loss=90.0,
+                take_profit=110.0,
+                metadata={
+                    "setup_id": "smc-structural-test",
+                    "structure_symbol": "NFO:NIFTY26OCTFUT",
+                    "contract_side": "CE",
+                    "underlying_invalidation_level": 99.0,
+                },
+            )
+
+        @property
+        def evaluation_health(self):
+            return {"healthy": True}
+
+        def notify_entry_accepted(self, side, *, setup_id=None):
+            pass
+
+    histories, instruments, _ = load_archive(tmp_path)
+
+    def evaluate(policy):
+        return _scenario(
+            histories,
+            instruments,
+            get_settings().elite,
+            0.0,
+            components={"SMC"},
+            strategy_factory=lambda engine: [Strategy()],
+            smc_exit_policy=policy,
+        )["strategies"]["SMC"]
+
+    baseline = evaluate("premium")
+    structural = evaluate("structural_close_with_premium_guard")
+    assert baseline["entry_funnel"]["accepted_fills"] == 1
+    assert structural["entry_funnel"]["accepted_fills"] == 1
+    premium_trade = baseline["trades"][0]
+    structural_trade = structural["trades"][0]
+    assert premium_trade["entry_time"] == structural_trade["entry_time"]
+    assert premium_trade["exit_reason"] == "target"
+    assert premium_trade["exit_price"] == 110.0
+    assert structural_trade["exit_reason"] == "smc_structural_invalidation_next_open"
+    assert structural_trade["exit_price"] == option["candles"][expected_exit_minute][1]
+    assert (
+        structural_trade["exit_time"]
+        == (first + timedelta(minutes=expected_exit_minute + 1)).isoformat()
+    )
+    assert structural["smc_exit_diagnostics"]["structural_exits"] == 1
+    assert structural_trade["fees"] > 0
+
+
+def test_smc_structural_research_does_not_override_protective_gap_stop(
+    tmp_path,
+):
+    from nifty_scalper_bot.backtesting.strategy_research import _scenario, load_archive
+    from nifty_scalper_bot.config.settings import get_settings
+
+    archive(tmp_path)
+    futures = tmp_path / "candles" / "FUT.json"
+    fp = json.loads(futures.read_text())
+    fp["candles"][1][4] = 98.0
+    futures.write_text(json.dumps(fp))
+    ce_path = tmp_path / "candles" / "CE.json"
+    cp = json.loads(ce_path.read_text())
+    cp["candles"][1][1:] = [100, 103, 97, 100, 1000]
+    cp["candles"][2][1:] = [88, 90, 86, 87, 1000]
+    ce_path.write_text(json.dumps(cp))
+
+    class Strategy:
+        name = "SMC"
+
+        def generate_signal(self, symbol, indicators, current_price, position=None):
+            if not symbol.endswith("CE") or indicators["history_count"] != 1:
+                return None
+            return SimpleNamespace(
+                action="BUY",
+                stop_loss=90.0,
+                take_profit=110.0,
+                metadata={
+                    "setup_id": "smc-gap-protection",
+                    "contract_side": "CE",
+                    "structure_symbol": "NFO:NIFTY26OCTFUT",
+                    "underlying_invalidation_level": 99.0,
+                },
+            )
+
+        @property
+        def evaluation_health(self):
+            return {"healthy": True}
+
+        def notify_entry_accepted(self, side, *, setup_id=None):
+            pass
+
+    histories, instruments, _ = load_archive(tmp_path)
+    result = _scenario(
+        histories,
+        instruments,
+        get_settings().elite,
+        0.0,
+        components={"SMC"},
+        strategy_factory=lambda engine: [Strategy()],
+        smc_exit_policy="structural_close_with_premium_guard",
+    )["strategies"]["SMC"]
+    assert len(result["trades"]) == 1
+    assert result["trades"][0]["exit_reason"] == "gap_stop"
+    assert result["trades"][0]["exit_price"] == 88.0
+    assert result["smc_exit_diagnostics"]["structural_exits"] == 0
+
+
+def test_smc_structural_exit_research_refuses_live_process(tmp_path, monkeypatch):
+    from nifty_scalper_bot.backtesting.strategy_research import _scenario, load_archive
+    from nifty_scalper_bot.config.settings import get_settings
+
+    archive(tmp_path)
+    histories, instruments, _ = load_archive(tmp_path)
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    with pytest.raises(ValueError, match="smc_structural_exit_requires_shadow"):
+        _scenario(
+            histories,
+            instruments,
+            get_settings().elite,
+            0.0,
+            components={"SMC"},
+            smc_exit_policy="structural_close_with_premium_guard",
+        )

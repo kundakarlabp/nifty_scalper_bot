@@ -660,7 +660,15 @@ def _scenario(
     strategy_factory: Callable[[IndicatorEngine], list[Any]] | None = None,
     require_option_premium_confirmation: bool = False,
     simulate_bounded_orb_target_repair: bool = False,
+    smc_exit_policy: str = "premium",
 ) -> dict[str, Any]:
+    if smc_exit_policy not in {"premium", "structural_close_with_premium_guard"}:
+        raise ValueError("smc_exit_policy_invalid")
+    if smc_exit_policy != "premium":
+        if os.getenv("EXECUTION_MODE", "SHADOW").upper() != "SHADOW":
+            raise ValueError("smc_structural_exit_requires_shadow")
+        if components != {"SMC"}:
+            raise ValueError("smc_structural_exit_requires_isolated_smc")
     if simulate_bounded_orb_target_repair:
         if os.getenv("EXECUTION_MODE", "SHADOW").upper() != "SHADOW":
             raise ValueError("orb_target_repair_requires_shadow_process")
@@ -690,6 +698,7 @@ def _scenario(
     smc_setup_rejections: dict[str, set[tuple[str, str, str]]] = {}
     smc_post_signal_rejections: dict[str, set[str]] = {}
     smc_post_signal_unattributed: Counter[str] = Counter()
+    smc_exit_diagnostics: Counter[str] = Counter()
     evaluated: Counter[str] = Counter()
     entry_funnels: dict[str, Counter[str]] = {}
     orb_admission_economics: Counter[str] = Counter()
@@ -1069,6 +1078,16 @@ def _scenario(
                 # target/stop hits ambiguous. Credit only the limit price:
                 # better opening execution is not guaranteed by OHLC candles.
                 close(key, bar, target, "gap_target")
+            elif (
+                key[0] == "SMC"
+                and smc_exit_policy == "structural_close_with_premium_guard"
+                and position.get("smc_structural_exit_due_at") == timestamp
+            ):
+                # The underlying breach was known only after the preceding
+                # completed minute. Exit at the next option open, not the
+                # same-bar low or the underlying's price.
+                close(key, bar, bar["open"], "smc_structural_invalidation_next_open")
+                smc_exit_diagnostics["structural_exits"] += 1
             elif lifecycle_proxy and _bar_lifecycle_time_stop_due(position, timestamp):
                 close(key, bar, bar["open"], "time_stop")
             elif hit_stop and hit_target:
@@ -1088,6 +1107,45 @@ def _scenario(
             elif lifecycle_proxy:
                 prior_atr = engine.get_atr(key[1])
                 _apply_bar_lifecycle_proxy(position, bar, prior_atr=prior_atr)
+        if smc_exit_policy == "structural_close_with_premium_guard":
+            # Schedule on completed underlying OHLC only. The protective
+            # premium stop/target continue to own all resting exits.
+            for key, position in positions.items():
+                if key[0] != "SMC" or position.get("smc_structural_exit_due_at"):
+                    continue
+                level = position.get("underlying_invalidation_level")
+                source = position.get("structure_symbol")
+                side = position.get("contract_side")
+                if isinstance(level, bool) or not isinstance(level, (int, float, str)):
+                    threshold = math.nan
+                else:
+                    try:
+                        threshold = float(level)
+                    except ValueError:
+                        threshold = math.nan
+                if (
+                    not math.isfinite(threshold)
+                    or threshold <= 0
+                    or side not in {"CE", "PE"}
+                    or not isinstance(source, str)
+                    or not source
+                ):
+                    smc_exit_diagnostics["missing_structural_metadata"] += 1
+                    continue
+                underlying_bar = bars.get(source)
+                if underlying_bar is None:
+                    smc_exit_diagnostics["underlying_bar_unavailable"] += 1
+                    continue
+                breached = (
+                    float(underlying_bar["close"]) <= threshold
+                    if side == "CE"
+                    else float(underlying_bar["close"]) >= threshold
+                )
+                if breached:
+                    position["smc_structural_exit_due_at"] = timestamp + timedelta(
+                        minutes=1
+                    )
+                    smc_exit_diagnostics["structural_breaches"] += 1
         for symbol, bar in bars.items():
             engine.ingest_historical_bar(symbol, bar)
             last_bars[symbol] = bar
@@ -1384,6 +1442,9 @@ def _scenario(
                             field: metadata.get(field)
                             for field in (
                                 "setup_id",
+                                "structure_symbol",
+                                "contract_side",
+                                "underlying_invalidation_level",
                                 "setup_name",
                                 "setup_type",
                                 "signal_family",
@@ -1574,6 +1635,23 @@ def _scenario(
                         )
                     }
                     if name == "VWAPPro"
+                    else {}
+                ),
+                "smc_exit_diagnostics": (
+                    {
+                        "exit_policy": smc_exit_policy,
+                        "structural_breaches": smc_exit_diagnostics[
+                            "structural_breaches"
+                        ],
+                        "structural_exits": smc_exit_diagnostics["structural_exits"],
+                        "missing_structural_metadata": smc_exit_diagnostics[
+                            "missing_structural_metadata"
+                        ],
+                        "underlying_bar_unavailable": smc_exit_diagnostics[
+                            "underlying_bar_unavailable"
+                        ],
+                    }
+                    if name == "SMC"
                     else {}
                 ),
                 "smc_unique_setup_funnel": (
