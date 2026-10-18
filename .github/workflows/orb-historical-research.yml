@@ -541,10 +541,20 @@ jobs:
                           f"{metrics['trade_count']} | {metrics['net_pnl']:.2f} | "
                           f"{row['unresolved_exit_count']} |\n"
                       )
+              gate = results["bounded_repair_evidence_gate"]
+              stream.write("\n### Bounded target-repair evidence gate\n\n")
               stream.write(
-                  "\nMasked gates are hypothetical and retain other ORB restrictions. "
-                  "Monthly OHLC cannot prove executable weekly-option fills. "
-                  "No profile is authorized for live promotion.\n"
+                  f"**{gate['verdict']}** — never live promotion. "
+                  f"Resolved {gate['resolved_trades']} trades; "
+                  f"{gate['unresolved_exits']} unresolved. "
+                  f"Gross P&L {gate['resolved_gross_pnl']:.2f}; "
+                  f"fees {gate['resolved_fees']:.2f}; "
+                  f"net {gate['resolved_net_pnl']:.2f}.\n\n"
+              )
+              stream.write(
+                  "Masked gates are hypothetical. Historical monthly OHLC "
+                  "cannot prove executable weekly-option fills, and "
+                  "unresolved positions invalidate complete P&L comparisons.\n"
               )
           PY
       - name: Save paired causal evidence

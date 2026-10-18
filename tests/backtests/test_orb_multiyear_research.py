@@ -247,6 +247,9 @@ def test_causal_gate_ablation_preserves_identical_data_and_no_trade_abstention(
     row["bounded_repair_counterfactual"]["unresolved_trades"] = [
         {"unresolved_reason": "history_gap_unresolved"}
     ]
+    with pytest.raises(ValueError, match="orb_repair_settlement_ledger_not_conserved"):
+        study.summarize_orb_causal_gate_days([row])
+    row["bounded_repair_counterfactual"]["entry_funnel"]["accepted_fills"] = 1
     incomplete = study.summarize_orb_causal_gate_days([row])
     assert (
         incomplete["development"]["bounded_repair_counterfactual"][
@@ -255,6 +258,7 @@ def test_causal_gate_ablation_preserves_identical_data_and_no_trade_abstention(
         is None
     )
     row["bounded_repair_counterfactual"]["unresolved_trades"] = []
+    row["bounded_repair_counterfactual"]["entry_funnel"]["accepted_fills"] = 0
 
     # A historical signal may be rejected for economics or absent next bar.
     # Every initiated next-bar intent must be accounted for exactly once.
@@ -287,6 +291,65 @@ def test_causal_gate_ablation_preserves_identical_data_and_no_trade_abstention(
 
     with pytest.raises(ValueError, match="orb_gate_duplicate_day"):
         study.summarize_orb_causal_gate_days([row, row])
+
+
+def test_bounded_target_repair_rejects_negative_resolved_holdout_and_abstains():
+    from scripts import research_orb_multiyear as study
+
+    def record(pnl, *, trades=1, unresolved=0, paired=None):
+        return {
+            "metrics": {
+                "trade_count": trades,
+                "gross_pnl": pnl + 20,
+                "fees": 20,
+                "net_pnl": pnl,
+            },
+            "unresolved_exit_count": unresolved,
+            "paired_net_pnl_difference": paired,
+        }
+
+    def phases(dev, val, final):
+        return {
+            name: {"bounded_repair_counterfactual": sample}
+            for name, sample in zip(
+                ("development", "validation", "final"),
+                (dev, val, final),
+                strict=True,
+            )
+        }
+
+    negative = study.review_orb_bounded_repair_evidence(
+        phases(record(-100, unresolved=1), record(-40), record(-60))
+    )
+    assert negative["verdict"] == "REJECTED_NEGATIVE_VALIDATION_OR_FINAL_NET_PNL"
+    assert negative["promotion_eligible"] is False
+    assert negative["outcomes_complete"] is False
+    assert negative["resolved_net_pnl"] == -200
+    assert negative["resolved_gross_pnl"] == -140
+    assert negative["resolved_fees"] == 60
+    assert negative["net_pnl_difference_vs_baseline"] is None
+
+    missing = study.review_orb_bounded_repair_evidence(
+        phases(record(10), record(20, unresolved=1), record(30))
+    )
+    assert missing["verdict"] == "INCONCLUSIVE_UNRESOLVED_EXITS"
+    assert missing["promotion_eligible"] is False
+
+    no_trades = study.review_orb_bounded_repair_evidence(
+        phases(record(0, trades=0), record(0, trades=0), record(0, trades=0))
+    )
+    assert no_trades["verdict"] == "INSUFFICIENT_OUT_OF_SAMPLE_TRADES"
+
+    favorable = study.review_orb_bounded_repair_evidence(
+        phases(
+            record(10, paired=5),
+            record(20, paired=10),
+            record(30, paired=15),
+        )
+    )
+    assert favorable["verdict"] == "RESEARCH_ONLY_NOT_INDEPENDENTLY_VALIDATED"
+    assert favorable["net_pnl_difference_vs_baseline"] == 30
+    assert favorable["promotion_eligible"] is False
 
 
 def test_nested_csv_and_txt_copies_are_not_double_counted():
