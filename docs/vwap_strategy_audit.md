@@ -448,3 +448,19 @@ weekly near-ATM sessions and had no resolved VWAP trades. This new
 daily information can help distinguish data scarcity from structural
 strategy rejections **after the new research worker code is deployed**;
 it is not a claim of improved backtest expectancy or live profitability.
+
+
+## 2026-10-18: prevent cross-session rejection misattribution
+
+Per-session VWAP diagnostics previously counted an intent that expired at
+the following session opening as `next_minute_unavailable` on the *new*
+session, even though it was generated during the prior session. A two-day
+RED regression reproduced this mismatch while the aggregate rejection
+count remained correct.
+
+The existing replay now dates only this **daily diagnostic rejection** to
+the origin signal's minute (`intent.available_at - 1 minute`).
+Unfilled-intent expiry, trade execution, the existing aggregate
+`no_vote_reasons` and chronology remain unchanged. This prevents an
+apparently poor new trading session from inheriting yesterday's missed
+execution and does not add any market-data observations or alter LIVE logic.
