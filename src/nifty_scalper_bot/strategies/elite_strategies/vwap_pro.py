@@ -412,6 +412,13 @@ class VWAPProStrategy(EliteStrategy):
             ):
                 self._no_vote("invalid_option_market_data")
                 return None
+            # Futures volume can corroborate a traded option setup, but cannot
+            # create a premium reclaim/continuation from an untraded candle.
+            # Check before arming a thesis to avoid carrying stale price state
+            # into a later legitimate option bar.
+            if vol <= 0:
+                self._no_vote("option_candle_no_trades")
+                return None
             spot_ctx = (
                 indicators.get("spot_context")
                 if isinstance(indicators.get("spot_context"), dict)

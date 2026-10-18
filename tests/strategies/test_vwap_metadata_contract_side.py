@@ -43,6 +43,69 @@ def _indicators(**updates):
     return payload
 
 
+def test_live_vwap_blocks_untraded_option_candle_despite_strong_futures_volume(
+    monkeypatch,
+):
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("VWAP_ALLOW_PENETRATION_ONLY_ENTRY", "false")
+    for volume in (0.0, -1.0):
+        strategy = VWAPProStrategy(VWAPProStrategyConfig(), _DummyEngine())
+        signal = strategy._evaluate_signal(
+            "NFO:NIFTY26FEB22500CE",
+            _indicators(
+                volume=volume,
+                avg_volume=900.0,
+                futures_volume_ratio=1.2,
+            ),
+            103.0,
+        )
+        assert signal is None
+        assert strategy.last_no_vote_reason == "option_candle_no_trades"
+        # A stale untraded premium touch must not prime the next signal.
+        assert strategy._thesis_anchor_by_scope == {}
+
+
+def test_live_vwap_penetration_opt_in_does_not_bypass_traded_premium(monkeypatch):
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("VWAP_ALLOW_PENETRATION_ONLY_ENTRY", "true")
+    strategy = VWAPProStrategy(VWAPProStrategyConfig(), _DummyEngine())
+
+    signal = strategy._evaluate_signal(
+        "NFO:NIFTY26FEB22500CE",
+        _indicators(
+            close=100.80,
+            open=99.80,
+            high=100.85,
+            low=99.50,
+            volume=0.0,
+            avg_volume=0.0,
+            futures_volume_ratio=1.2,
+        ),
+        100.80,
+    )
+
+    assert signal is None
+    assert strategy.last_no_vote_reason == "option_candle_no_trades"
+    assert strategy._thesis_anchor_by_scope == {}
+
+
+def test_live_vwap_futures_confirmation_preserved_on_thin_traded_option(monkeypatch):
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    strategy = VWAPProStrategy(VWAPProStrategyConfig(), _DummyEngine())
+    signal = strategy._evaluate_signal(
+        "NFO:NIFTY26FEB22500CE",
+        _indicators(
+            volume=10.0,
+            avg_volume=900.0,
+            futures_volume_ratio=1.2,
+        ),
+        103.0,
+    )
+
+    assert signal is not None
+    assert signal.metadata["volume_confirmation_source"] == "futures"
+
+
 def test_live_vwap_skips_invalid_primary_reference_and_uses_valid_session(
     monkeypatch,
 ):
@@ -113,8 +176,8 @@ def test_live_vwap_rejects_threshold_pass_from_small_noise(monkeypatch):
             open=100.04,
             high=100.10,
             low=99.90,
-            volume=0.0,
-            avg_volume=0.0,
+            volume=1000.0,
+            avg_volume=900.0,
             futures_volume_ratio=1.2,
         ),
         100.05,
@@ -136,8 +199,8 @@ def test_live_vwap_rejects_penetration_only_by_default(monkeypatch):
             open=99.80,
             high=100.85,
             low=99.50,
-            volume=0.0,
-            avg_volume=0.0,
+            volume=1000.0,
+            avg_volume=900.0,
             futures_volume_ratio=1.2,
         ),
         100.80,
@@ -159,8 +222,8 @@ def test_vwap_penetration_only_requires_explicit_opt_in(monkeypatch):
             open=99.80,
             high=100.85,
             low=99.50,
-            volume=0.0,
-            avg_volume=0.0,
+            volume=1000.0,
+            avg_volume=900.0,
             futures_volume_ratio=1.2,
         ),
         100.80,
