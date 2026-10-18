@@ -40,6 +40,7 @@ def test_bare_data_integrity_event_is_marked_as_missing_details() -> None:
     assert row["reason"] == "missing_structured_details"
     assert row["source"] == "journal_message"
 
+
 def test_expected_candidate_rejection_is_not_process_error():
     event = parse_event(
         "[2026-06-25 15:00:00 IST] CANDIDATE_REJECTED symbol=X reason=tick_stale"
@@ -218,6 +219,7 @@ def test_hard_error_precedence_survives_strategy_rejection_markers() -> None:
     event = parse_event(line)
 
     assert event is not None and event["type"] == "ERROR"
+
 
 def test_trade_event_is_kept() -> None:
     event = parse_event("[2026-06-23 09:35:00 IST] ORDER_SENT NIFTY CE")
