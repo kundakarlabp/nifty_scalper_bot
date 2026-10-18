@@ -14,3 +14,17 @@ def test_single_candidate_screen_uses_canonical_tick_age_resolver() -> None:
 
     assert "resolve_tick_age_ms(" in block
     assert "lone.get(\"tick_age_s\")" not in block
+
+
+def test_execution_candidate_readiness_uses_canonical_tick_age_resolver() -> None:
+    source = Path("src/nifty_scalper_bot/strategies/runner.py").read_text(
+        encoding="utf-8"
+    )
+    start = source.index(
+        "# Dedup improvement is based on executable economics/market quality"
+    )
+    end = source.index("depth_available = bool(", start)
+    block = source[start:end]
+
+    assert "resolve_tick_age_ms(" in block
+    assert "999000.0" not in block
