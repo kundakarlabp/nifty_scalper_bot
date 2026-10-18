@@ -850,7 +850,12 @@ def summarize_orb_causal_gate_days(
             ),
             "baseline_net_pnl": baseline["metrics"]["net_pnl"],
             "paired_net_pnl_difference": (
-                summarize(repaired_trades)["net_pnl"] - baseline["metrics"]["net_pnl"]
+                None
+                if repaired_unresolved or not baseline["primary_metrics_complete"]
+                else (
+                    summarize(repaired_trades)["net_pnl"]
+                    - baseline["metrics"]["net_pnl"]
+                )
             ),
             "interpretation": (
                 "modeled_bounded_target_repair_counterfactual_not_live_parity"
