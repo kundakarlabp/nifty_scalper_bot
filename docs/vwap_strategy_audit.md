@@ -331,3 +331,33 @@ When uncertain, the opt-in retest returns
 `trend_momentum_prior_vwap_unavailable`; it must not claim a valid reclaim.
 Default VWAP entry rules, exits, contract choice, risk and LIVE execution are
 unchanged. This integrity correction does not establish improved net expectancy.
+
+
+## 2026-10-18: measurable historical retest evidence coverage
+
+The bounded SHADOW-only `run_vwap_comparison` now reports a separate
+`retest_archive_coverage` block computed once per archive (not 27 times
+for the nine candidates × three slippage levels). It records observed
+contract/minute opportunities from 09:30 to 14:58 IST, missing matching
+spot/futures bars, weekly near-ATM proxy exclusions, untraded option
+candles, and the remaining opportunities classified by the historical
+VWAP proof: missing session opening, missing previous minute, untraded
+previous minute, gaps since the session opening, or valid as-of
+historical session VWAP. Totals, CE/PE splits and contract splits are
+available with an eligible-denominator ready fraction; a zero eligible
+denominator produces `null`.
+
+All archived candles pass the existing strict normalized OHLC/date checks;
+readiness is calculated causally by walking each contract's completed
+09:15-to-prior-minute history exactly once. The previous candle must
+have positive traded volume; completed intermediate zero-volume candles
+preserve continuity. The report does **not** invent prices, retroactively
+recreate missing ATM contracts, assume historical quote/depth fills, or
+count unavailable contracts in the observed-bars denominator.
+
+The diagnostic does not affect strategy signals, trade simulations,
+costs, entry ranking, risk settings or deployment. A low coverage ratio
+is a reason **not** to interpret simulated retest expectancy as
+confirmation of historical efficacy, rather than a suggestion to
+disable safety gates. This is engineering/data-quality work, not a
+claim of positive after-cost returns.
