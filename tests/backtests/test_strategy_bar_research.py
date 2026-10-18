@@ -339,12 +339,27 @@ def test_cost_repaired_target_requires_an_actual_modeled_price_touch(
     assert baseline["entry_funnel"]["accepted_fills"] == 0
     assert baseline["trades"] == []
 
-    # High remains below any legal repaired target, so the alternative may
-    # admit an entry but CANNOT invent a historical target-price execution.
+    # Set the OHLC high strictly below the same canonical repaired target
+    # regardless of configured statutory fees; the baseline 109 target is not
+    # sufficient evidence for the higher counterfactual exit.
+    from nifty_scalper_bot.risk.net_rr_gate import minimum_target_for_net_rr
+
+    corrected_target = minimum_target_for_net_rr(
+        SimpleNamespace(
+            symbol="NFO:NIFTY26O0622400CE",
+            action="BUY",
+            quantity=75,
+            entry_price=100,
+            stop_loss=95,
+            take_profit=109,
+            metadata={"bid": 100, "ask": 100},
+        )
+    )
+    assert corrected_target is not None and corrected_target > 109
     ce_path = tmp_path / "candles/CE.json"
     payload = json.loads(ce_path.read_text())
     for candle in payload["candles"][1:]:
-        candle[1:] = [100, 110, 99, 100, 1000]
+        candle[1:] = [100, (109 + corrected_target) / 2, 99, 100, 1000]
     ce_path.write_text(json.dumps(payload))
     not_reached = replay(True)
     assert not_reached["orb_repaired_target_entries"] == 1
