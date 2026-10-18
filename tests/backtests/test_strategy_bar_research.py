@@ -1789,3 +1789,102 @@ def test_vwap_research_identifies_no_trades_without_zero_profitability_claim(
     )
     assert report["selection"]["development_ranking"] == []
     assert report["selection"]["selected_for_live"] is None
+
+
+def test_orb_research_attributes_direction_once_per_replay_minute(
+    tmp_path, monkeypatch
+) -> None:
+    """Option-strike fan-out must not multiply underlying direction evidence."""
+    from nifty_scalper_bot.backtesting import strategy_research
+    from nifty_scalper_bot.config.settings import get_settings
+
+    archive(tmp_path)
+    observations = []
+
+    def prepared_context(engine, *, spot_symbol, futures_symbol):
+        del engine, spot_symbol, futures_symbol
+        observations.append(True)
+        return {
+            "research_direction_resolution": "spot_futures_conflict",
+            "underlying_direction_bias": None,
+            "direction_bias": None,
+            "context_fresh": True,
+            "futures_vwap_slope": 0.25,
+            "futures_volume_ratio": 1.5,
+        }
+
+    monkeypatch.setattr(
+        strategy_research,
+        "_research_orb_structural_context",
+        prepared_context,
+    )
+    histories, instruments, _ = strategy_research.load_archive(tmp_path)
+    data = strategy_research._scenario(
+        histories,
+        instruments,
+        get_settings().elite,
+        10.0,
+        components={"ORBPro"},
+        compact_orb_context=True,
+    )["strategies"]["ORBPro"]["data_quality"]
+
+    assert len(observations) == 4
+    assert data["orb_direction_resolution_minutes"] == {"spot_futures_conflict": 4}
+    assert data["orb_replay_coverage"]["matched_market_minutes"] == 4
+    assert data["eligible_option_bar_count"] == 8
+    assert data["historical_executable_quote_fidelity"] == "ohlcv_only"
+
+
+def test_orb_weekly_atm_proximity_reports_rejected_historical_basket_without_filter(
+    tmp_path,
+) -> None:
+    from nifty_scalper_bot.backtesting.strategy_research import _scenario, load_archive
+    from nifty_scalper_bot.config.settings import get_settings
+
+    archive(tmp_path)
+    histories, instruments, _ = load_archive(tmp_path)
+    ce = "NFO:NIFTY26O0622400CE"
+    pe = "NFO:NIFTY26O0622400PE"
+    instruments[ce]["strike"] = 100
+    instruments[pe]["strike"] = 350
+    data = _scenario(
+        histories,
+        instruments,
+        get_settings().elite,
+        10.0,
+        components={"ORBPro"},
+        compact_orb_context=True,
+    )["strategies"]["ORBPro"]["data_quality"]
+
+    proxy = data["orb_weekly_atm_proximity_proxy"]
+    assert proxy["candidate_option_bars"] == 8
+    assert proxy["eligible_option_bars"] == 4
+    assert proxy["eligible_minutes"] == 4
+    assert proxy["rejection_reasons"] == {"archive_strike_outside_atm_basket": 4}
+    assert data["eligible_option_bar_count"] == 8
+    assert data["historical_executable_quote_fidelity"] == "ohlcv_only"
+
+
+def test_orb_weekly_atm_proxy_does_not_infer_missing_expiry_or_strike(
+    tmp_path,
+) -> None:
+    from nifty_scalper_bot.backtesting.strategy_research import _scenario, load_archive
+    from nifty_scalper_bot.config.settings import get_settings
+
+    archive(tmp_path)
+    histories, instruments, _ = load_archive(tmp_path)
+    result = _scenario(
+        histories,
+        instruments,
+        get_settings().elite,
+        25.0,
+        components={"ORBPro"},
+        compact_orb_context=True,
+    )["strategies"]["ORBPro"]
+    proxy = result["data_quality"]["orb_weekly_atm_proximity_proxy"]
+
+    assert proxy["candidate_option_bars"] == 8
+    assert proxy["eligible_option_bars"] == 0
+    assert proxy["eligible_minutes"] == 0
+    assert proxy["rejection_reasons"] == {"archive_strike_missing": 8}
+    assert result["evaluations"] == 8
