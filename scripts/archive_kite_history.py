@@ -544,7 +544,29 @@ def historical_cache_inventory(
                     )
                 staging.rename(destination)
             staged_dates.append(label)
+    # Weekdays are only candidate dates: exchange holidays and exceptional
+    # sessions require an authoritative NSE calendar not present in this cache.
+    weekday_candidates = [
+        (start + dt.timedelta(days=offset)).isoformat()
+        for offset in range((end - start).days + 1)
+        if (start + dt.timedelta(days=offset)).weekday() < 5
+    ]
+    observed_dates = {session["date"] for session in sessions}
+    staged_set = set(staged_dates)
     return {
+        "weekday_candidate_dates": weekday_candidates,
+        "observed_weekday_dates": [
+            day for day in weekday_candidates if day in observed_dates
+        ],
+        "unobserved_weekday_dates": [
+            day for day in weekday_candidates if day not in observed_dates
+        ],
+        "weekday_dates_without_replay_stage": (
+            [day for day in weekday_candidates if day not in staged_set]
+            if stage_dir is not None
+            else None
+        ),
+        "weekday_coverage_is_exchange_calendar": False,
         "staged_session_dates": staged_dates,
         "staging_rejections": staging_rejections,
         "staging_scope": "observed_contract_pair_only_no_full_historical_universe",
