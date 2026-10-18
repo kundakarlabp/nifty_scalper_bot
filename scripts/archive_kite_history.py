@@ -462,10 +462,12 @@ def historical_cache_inventory(
                     failure = "historical_option_selection_ambiguous"
                     break
                 spot_close = float(spot["bars"][anchor][4])
+                # Select the observed front-week contract first; a
+                # marginally closer strike next week is not the active expiry.
                 eligible = sorted(
                     (
-                        abs(strike - spot_close),
                         expiry,
+                        abs(strike - spot_close),
                         strike,
                         sides["CE"],
                         sides["PE"],
