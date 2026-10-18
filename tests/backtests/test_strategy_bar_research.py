@@ -1532,3 +1532,85 @@ def test_orb_compact_replay_coverage_is_independent_of_option_strike_count(
     assert coverage["matched_market_minutes"] == 4
     assert coverage["incomplete_opening_range_minutes"] == 4
     assert result["evaluations"] == 8
+
+
+def test_vwap_retest_archive_coverage_distinguishes_causal_history_failures(
+    tmp_path,
+):
+    """Count actual observed option bars, never synthetic historical trades."""
+    from nifty_scalper_bot.backtesting.strategy_research import (
+        _vwap_retest_archive_coverage,
+        load_archive,
+    )
+
+    archive(tmp_path)
+    for file in (tmp_path / "candles").glob("*.json"):
+        payload = json.loads(file.read_text())
+        kind = payload["instrument"]["instrument_type"]
+        first = datetime.fromisoformat("2026-10-01T09:15:00+05:30")
+        payload["candles"] = [
+            [
+                (first + timedelta(minutes=i)).isoformat(),
+                100,
+                101,
+                99,
+                100,
+                0 if kind == "PE" and i == 17 else 100,
+            ]
+            for i in range(19)
+            if not (kind == "CE" and i == 1)
+            and not (kind == "FUT" and i == 16)
+        ]
+        if kind in {"CE", "PE"}:
+            payload["instrument"]["strike"] = 100
+        file.write_text(json.dumps(payload))
+
+    histories, instruments, _ = load_archive(tmp_path)
+    coverage = _vwap_retest_archive_coverage(histories, instruments)
+    counts = coverage["counts"]
+
+    assert counts["observed_option_bars"] == 8
+    assert counts["missing_underlying_minutes"] == 2
+    assert counts["weekly_atm_proxy_rejections"] == 0
+    assert counts["zero_volume_option_bars"] == 1
+    assert counts["retest_eligible_option_bars"] == 5
+    assert counts["prior_vwap_ready_option_bars"] == 1
+    assert counts["missing_prior_session_history_option_bars"] == 3
+    assert counts["zero_volume_prior_option_bars"] == 1
+    assert counts["missing_prior_bar_option_bars"] == 0
+    assert coverage["ready_share_of_eligible"] == pytest.approx(0.2)
+    assert sum(coverage["by_side"]["CE"].values()) > 0
+    assert sum(coverage["by_side"]["PE"].values()) > 0
+    assert coverage["historical_selection_verified"] is False
+
+
+def test_vwap_comparison_exposes_archive_coverage_without_changing_scenario(
+    tmp_path, monkeypatch
+):
+    from nifty_scalper_bot.backtesting import strategy_research
+
+    archive(tmp_path)
+    calls = []
+
+    def fake_scenario(*args, **kwargs):
+        calls.append((args[3], kwargs["components"]))
+        return {
+            "strategies": {
+                "VWAPPro": {
+                    "development_metrics": {"trade_count": 0, "expectancy": None},
+                    "holdout_metrics": {"trade_count": 0, "expectancy": None},
+                    "data_quality": {
+                        "development_unresolved_exit_count": 0,
+                        "holdout_unresolved_exit_count": 0,
+                    },
+                }
+            }
+        }
+
+    monkeypatch.setattr(strategy_research, "_scenario", fake_scenario)
+    report = strategy_research.run_vwap_comparison(tmp_path)
+
+    assert len(calls) == 27
+    assert report["retest_archive_coverage"]["counts"]["observed_option_bars"] == 8
+    assert report["retest_archive_coverage"]["counts"]["weekly_atm_proxy_rejections"] == 8
+    assert report["selection"]["promotion_eligible"] is False
