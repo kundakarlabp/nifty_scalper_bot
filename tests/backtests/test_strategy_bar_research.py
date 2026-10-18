@@ -2193,3 +2193,111 @@ def test_vwap_holdout_delta_requires_session_and_trade_sufficiency(
             2.0 if expected_eligible else None
         )
     assert comparison["promotion_eligible"] is False
+
+
+def test_vwap_research_reports_daily_rejections_without_changing_totals(
+    tmp_path, monkeypatch
+):
+    """Do not conflate option-bar counts from different trading sessions."""
+    from nifty_scalper_bot.backtesting.strategy_research import _scenario, load_archive
+
+    archive(tmp_path)
+    for filename in (tmp_path / "candles").glob("*.json"):
+        payload = json.loads(filename.read_text())
+        following = [
+            [(datetime.fromisoformat(row[0]) + timedelta(days=1)).isoformat(), *row[1:]]
+            for row in payload["candles"]
+        ]
+        payload["candles"].extend(following)
+        filename.write_text(json.dumps(payload))
+
+    class NoVoteStrategy:
+        name = "VWAPPro"
+        last_no_vote_reason = "not_evaluated"
+
+        def generate_signal(self, symbol, indicators, current_price, position=None):
+            self.last_no_vote_reason = (
+                "day_one_no_reclaim"
+                if indicators["bar_timestamp"].day == 1
+                else "day_two_no_trend"
+            )
+            return None
+
+        @property
+        def evaluation_health(self):
+            return {"healthy": True}
+
+    histories, instruments, _ = load_archive(tmp_path)
+    result = _scenario(
+        histories,
+        instruments,
+        None,
+        25,
+        components={"VWAPPro"},
+        strategy_factory=lambda engine: [NoVoteStrategy()],
+    )["strategies"]["VWAPPro"]
+    daily = result["daily_diagnostics"]
+
+    assert sorted(daily) == ["2026-10-01", "2026-10-02"]
+    assert daily["2026-10-01"]["entry_funnel"]["evaluations"] == 8
+    assert daily["2026-10-02"]["entry_funnel"]["evaluations"] == 8
+    assert daily["2026-10-01"]["no_vote_reasons"] == {"day_one_no_reclaim": 8}
+    assert daily["2026-10-02"]["no_vote_reasons"] == {"day_two_no_trend": 8}
+    assert result["evaluations"] == 16
+    assert (
+        sum(row["entry_funnel"]["evaluations"] for row in daily.values())
+        == result["entry_funnel"]["evaluations"]
+    )
+    assert result["no_vote_reasons"] == {
+        "day_one_no_reclaim": 8,
+        "day_two_no_trend": 8,
+    }
+    assert all(row["resolved_trades"] == 0 for row in daily.values())
+    assert all(row["unresolved_trades"] == 0 for row in daily.values())
+
+
+def test_vwap_daily_funnel_counts_fills_and_unresolved_exits(tmp_path):
+    from nifty_scalper_bot.backtesting.strategy_research import _scenario, load_archive
+
+    archive(tmp_path)
+    for filename in (tmp_path / "candles").glob("*.json"):
+        payload = json.loads(filename.read_text())
+        payload["candles"] = [
+            [row[0], 100, 103, 97, 100, 1000] for row in payload["candles"]
+        ]
+        filename.write_text(json.dumps(payload))
+
+    class OneSignal:
+        name = "VWAPPro"
+        last_no_vote_reason = "no_new_setup"
+
+        def generate_signal(self, symbol, indicators, current_price, position=None):
+            if indicators["history_count"] == 1 and symbol.endswith("CE"):
+                return SimpleNamespace(
+                    action="BUY", stop_loss=95, take_profit=105, metadata={}
+                )
+            return None
+
+        @property
+        def evaluation_health(self):
+            return {"healthy": True}
+
+        def notify_entry_accepted(self, side, *, setup_id=None):
+            pass
+
+    histories, instruments, _ = load_archive(tmp_path)
+    result = _scenario(
+        histories,
+        instruments,
+        None,
+        0,
+        components={"VWAPPro"},
+        strategy_factory=lambda engine: [OneSignal()],
+    )["strategies"]["VWAPPro"]
+    day = result["daily_diagnostics"]["2026-10-01"]
+    assert day["entry_funnel"]["signals_emitted"] == 1
+    assert day["entry_funnel"]["next_bar_intents"] == 1
+    assert day["entry_funnel"]["accepted_fills"] == 1
+    assert day["resolved_trades"] == 0
+    assert day["unresolved_trades"] == 1
+    assert result["data_quality"]["unresolved_exit_count"] == 1
