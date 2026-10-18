@@ -1090,6 +1090,72 @@ class IndicatorEngine:
             "stale": True,
         }
 
+    def get_session_vwap_at(
+        self, symbol: str, timestamp: datetime
+    ) -> float | None:
+        """Return completed-bar session VWAP *as of* this exact bar, never later.
+
+        Used by the optional VWAP retest research path. Missing session-open
+        history, an unfinished target bar or ambiguous history fails closed,
+        rather than approximating a historical value using today's final VWAP.
+        """
+        if not isinstance(timestamp, datetime):
+            return None
+        at = timestamp if timestamp.tzinfo else timestamp.replace(tzinfo=timezone.utc)
+        at = at.astimezone(timezone.utc)
+        session_open, session_close = self._session_bounds(at)
+        if not session_open <= at < session_close:
+            return None
+        rows = self.get_history(symbol, field="bars")
+        cumulative_turnover = cumulative_volume = 0.0
+        found_open = found_target = False
+        seen: dict[datetime, tuple[float, float, float, float, float]] = {}
+        try:
+            for row in rows:
+                stamp = row.get("timestamp")
+                if not isinstance(stamp, datetime):
+                    continue
+                observed = stamp if stamp.tzinfo else stamp.replace(
+                    tzinfo=timezone.utc
+                )
+                observed = observed.astimezone(timezone.utc)
+                if not session_open <= observed <= at:
+                    continue
+                if row.get("is_complete") is not True or row.get(
+                    "is_provisional"
+                ) is True:
+                    if observed == at:
+                        return None
+                    continue
+                values = tuple(
+                    float(row[key])
+                    for key in ("open", "high", "low", "close", "volume")
+                )
+                opening, high, low, close, volume = values
+                if (
+                    not all(np.isfinite(value) for value in values)
+                    or min(opening, high, low, close) <= 0
+                    or not low <= min(opening, close) <= max(opening, close) <= high
+                    or volume < 0
+                ):
+                    return None
+                prior = seen.get(observed)
+                if prior is not None:
+                    if prior != values:
+                        return None
+                    continue
+                seen[observed] = values
+                found_open |= observed == session_open
+                found_target |= observed == at and volume > 0
+                if volume > 0:
+                    cumulative_turnover += ((high + low + close) / 3.0) * volume
+                    cumulative_volume += volume
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return None
+        if not (found_open and found_target and cumulative_volume > 0):
+            return None
+        return cumulative_turnover / cumulative_volume
+
     def get_session_vwap(self, symbol: str) -> float | None:
         """Return the session-anchored VWAP for *symbol*. NEVER raises.
 
