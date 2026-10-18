@@ -462,6 +462,7 @@ def historical_cache_inventory(
                     continue
                 observed_pairs: dict[tuple[str, float], dict[str, str]] = {}
                 ambiguous_option = False
+                invalid_option_expiry = False
                 for symbol, source in sources.items():
                     instrument = source["instrument"]
                     side = str(instrument["instrument_type"])
@@ -471,6 +472,22 @@ def historical_cache_inventory(
                     strike = float(instrument["strike"])
                     if not 0 <= (expiry - day).days <= 7:
                         continue
+                    # NSE NIFTY weekly expiry is Tuesday, advanced to the last
+                    # preceding regular trading day when Tuesday is a holiday.
+                    # Require a verified built-in calendar for both years;
+                    # mutable LIVE holiday overrides cannot rewrite research.
+                    if calendar_available(expiry.year):
+                        nominal = expiry + dt.timedelta(days=(1 - expiry.weekday()) % 7)
+                        if calendar_available(nominal.year):
+                            adjusted = nominal
+                            while (
+                                adjusted.weekday() >= 5
+                                or adjusted in NSE_FO_HOLIDAYS_BY_YEAR[adjusted.year]
+                            ):
+                                adjusted -= dt.timedelta(days=1)
+                            if expiry != adjusted:
+                                invalid_option_expiry = True
+                                continue
                     pair = observed_pairs.setdefault((expiry.isoformat(), strike), {})
                     if side in pair and pair[side] != symbol:
                         ambiguous_option = True
@@ -496,6 +513,8 @@ def historical_cache_inventory(
                     and abs(strike - spot_close) <= 100
                 )
                 if not eligible:
+                    if invalid_option_expiry:
+                        failure = "historical_option_expiry_calendar_invalid"
                     continue
                 if len(eligible) > 1 and eligible[0][:3] == eligible[1][:3]:
                     failure = "historical_option_selection_ambiguous"
