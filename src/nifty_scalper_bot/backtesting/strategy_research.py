@@ -1638,7 +1638,19 @@ def _scenario(
                     else {}
                 ),
                 "smc_exit_diagnostics": (
-                    {"exit_policy": smc_exit_policy, **dict(smc_exit_diagnostics)}
+                    {
+                        "exit_policy": smc_exit_policy,
+                        "structural_breaches": smc_exit_diagnostics[
+                            "structural_breaches"
+                        ],
+                        "structural_exits": smc_exit_diagnostics["structural_exits"],
+                        "missing_structural_metadata": smc_exit_diagnostics[
+                            "missing_structural_metadata"
+                        ],
+                        "underlying_bar_unavailable": smc_exit_diagnostics[
+                            "underlying_bar_unavailable"
+                        ],
+                    }
                     if name == "SMC"
                     else {}
                 ),
