@@ -484,3 +484,28 @@ consistent with the archive coverage diagnostic's existing
 comparison arm, VWAP defaults, stop/target logic and broker order paths
 are not changed. It does not prove an improvement in after-cost
 expectancy and remains opt-in research.
+
+
+## 2026-10-18: require traded option premium for all VWAP entry branches
+
+A RED regression demonstrated that **default LIVE VWAPPro** could issue
+a BUY from an option candle with zero traded volume because strong futures
+RVOL alone satisfied `volume_confirmation`. A completed or indicative
+zero-volume premium OHLC observation does not prove a traded VWAP reclaim,
+continuation, or penetration. Such observations must not arm a thesis that
+can trigger an entry on a later bar.
+
+The existing `VWAPProStrategy._evaluate_signal` now fails closed on
+nonpositive option candle volume with `option_candle_no_trades` **before**
+thesis arming. This also applies to explicit penetration opt-in. Crucially,
+**thin but genuinely traded** options may still use the existing
+futures-only volume confirmation: the change does not require the
+option-volume ratio to exceed the usual threshold. The higher-quality
+trend-momentum research path and previous-candle retest retain their own
+separate RVOL and causality checks.
+
+This is a deliberate LIVE safety/entry-quality correction to reject
+untraded premium evidence. Existing reclaim, continuation and penetration
+capabilities remain available on traded option candles. The minimum
+positive-volume test is not proof of liquidity, executable bid/ask depth,
+or better profitability; broker execution risk filters remain necessary.
