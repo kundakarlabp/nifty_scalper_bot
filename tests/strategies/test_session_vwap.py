@@ -103,9 +103,7 @@ def test_historical_session_vwap_uses_only_completed_bars_as_of_timestamp():
     ]
     engine = _engine_with_bars(bars)
     assert engine.get_session_vwap_at(symbol, bars[1][0]) == pytest.approx(100.0)
-    assert engine.get_session_vwap_at(symbol, bars[2][0]) == pytest.approx(
-        380.0 / 3.0
-    )
+    assert engine.get_session_vwap_at(symbol, bars[2][0]) == pytest.approx(380.0 / 3.0)
     assert engine.get_session_vwap(symbol) == pytest.approx(380.0 / 3.0)
 
 
