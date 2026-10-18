@@ -745,7 +745,11 @@ def _scenario(
                 )
             pending.clear()
             engine = IndicatorEngine()
-            if compact_orb_context or os.getenv(
+            # ORB must consume the same causal regime authority in full
+            # component and compact research; otherwise a baseline with no
+            # regime can silently yield zero trades while a compact run trades.
+            orb_in_scope = components is None or "ORBPro" in components
+            if orb_in_scope or os.getenv(
                 "VWAP_TREND_MOMENTUM_ENABLED", ""
             ).lower() in {"1", "true", "yes", "on"}:
                 # A RANGE ablation without completed-bar regime data is inert.
@@ -886,6 +890,12 @@ def _scenario(
             hit_target = bar["high"] >= target
             if bar["open"] <= stop:
                 close(key, bar, bar["open"], gap_reason)
+            elif bar["open"] >= target:
+                # A resting sell-limit target is already marketable at the
+                # opening print. A later same-bar low cannot make the order of
+                # target/stop hits ambiguous. Credit only the limit price:
+                # better opening execution is not guaranteed by OHLC candles.
+                close(key, bar, target, "gap_target")
             elif lifecycle_proxy and _bar_lifecycle_time_stop_due(position, timestamp):
                 close(key, bar, bar["open"], "time_stop")
             elif hit_stop and hit_target:
