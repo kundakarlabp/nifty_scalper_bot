@@ -360,3 +360,33 @@ is a reason **not** to interpret simulated retest expectancy as
 confirmation of historical efficacy, rather than a suggestion to
 disable safety gates. This is engineering/data-quality work, not a
 claim of positive after-cost returns.
+
+## 2026-10-18: block sparse-session VWAP research rankings
+
+A read-only check of the already completed production research job
+`research-20261017-retained-five-30d-01` (2026-09-17 through 2026-10-16;
+old deployed revision `a7fd5db7`) found only **2 admitted weekly near-ATM
+option sessions**, 3,300 admitted option-bar evaluations and **zero resolved
+VWAP trades across all nine research variants**. Neither previous prices nor
+NIFTY option profitability can be established from these results; the completed
+job predates the as-of VWAP and coverage corrections already merged to main.
+
+The canonical `run_vwap_comparison` report now includes an explicit
+`sample_sufficiency` preflight with **at least 10 distinct eligible sessions
+(8 development, 2 chronological holdout)** required before even *descriptively*
+ranking variants. This prevents many model fills on one day from satisfying
+the existing 30-trade threshold while lacking cross-day variation. The
+minimum-session counts are **operational conservatism, not statistically
+derived power calculations**. Missing source session counts also block ranking;
+resolved-trade scarcity is separately surfaced as a reason code.
+
+The same preflight suppresses immediate-versus-retest development expectancy
+deltas on sparse-session archives; paired trade counts and assumed slippage
+remain visible for transparent auditing. Missing or undefined expectancy
+cannot silently enter the ranking. No new archive collection, execution or
+research worker is launched merely by reporting this preflight.
+
+The report remains SHADOW-only, cannot promote LIVE settings, has no
+untouched holdout, and does not recreate unobserved contract history,
+executable depth or verified brokerage fills. Production configuration
+and broker order paths were not changed.

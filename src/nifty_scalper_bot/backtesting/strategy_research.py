@@ -1702,11 +1702,67 @@ def run_vwap_comparison(directory: Path) -> dict[str, Any]:
                 else:
                     os.environ[key] = value
 
+    # Resolved trade count alone does not establish an independent sample:
+    # many fills can be concentrated in one or two archived sessions.
+    # These conservative counts are descriptive preflight thresholds only,
+    # not statistical-power estimates or a route to LIVE promotion.
+    quality = candidates[0]["scenarios"][0].get("data_quality") or {}
+    total_days = quality.get("eligible_session_count")
+    development_days = quality.get("development_eligible_session_count")
+    holdout_days = quality.get("holdout_eligible_session_count")
+    minimum_days, minimum_dev_days, minimum_hold_days = 10, 8, 2
+    reason_codes = []
+    if (
+        not isinstance(total_days, int)
+        or isinstance(total_days, bool)
+        or not isinstance(development_days, int)
+        or isinstance(development_days, bool)
+        or not isinstance(holdout_days, int)
+        or isinstance(holdout_days, bool)
+    ):
+        reason_codes.append("HISTORICAL_SESSION_COVERAGE_NOT_MEASURED")
+        sample_status = "coverage_not_measured"
+    else:
+        if total_days < minimum_days:
+            reason_codes.append("INSUFFICIENT_ELIGIBLE_SESSIONS")
+        if development_days < minimum_dev_days:
+            reason_codes.append("INSUFFICIENT_DEVELOPMENT_SESSIONS")
+        if holdout_days < minimum_hold_days:
+            reason_codes.append("INSUFFICIENT_HOLDOUT_SESSIONS")
+        sample_status = "insufficient_sessions" if reason_codes else "descriptive_only"
+    maximum_trades = max(
+        (
+            int(row["development_metrics"].get("trade_count") or 0)
+            for candidate in candidates
+            for row in candidate["scenarios"]
+        ),
+        default=0,
+    )
+    if maximum_trades == 0:
+        reason_codes.append("NO_RESOLVED_DEVELOPMENT_TRADES")
+    # Empty or missing chronological session coverage must not produce a
+    # winning parameter set even if a replay shows 30+ trades on one date.
+    session_sample_ok = sample_status == "descriptive_only"
+    sample_sufficiency = {
+        "status": sample_status,
+        "reason_codes": reason_codes,
+        "eligible_session_count": total_days,
+        "development_eligible_session_count": development_days,
+        "holdout_eligible_session_count": holdout_days,
+        "max_development_resolved_trades": maximum_trades,
+        "minimum_total_sessions": minimum_days,
+        "minimum_development_sessions": minimum_dev_days,
+        "minimum_holdout_sessions": minimum_hold_days,
+        "descriptive_session_thresholds_not_statistical_power": True,
+        "promotion_eligible": False,
+    }
     eligible = [
         candidate
         for candidate in candidates
-        if all(
+        if session_sample_ok
+        and all(
             row["development_metrics"]["trade_count"] >= 30
+            and row["development_metrics"].get("expectancy") is not None
             and row["data_quality"]["development_unresolved_exit_count"] == 0
             for row in candidate["scenarios"]
         )
@@ -1741,7 +1797,8 @@ def run_vwap_comparison(directory: Path) -> dict[str, Any]:
         base_quality = control["data_quality"]
         test_quality = treatment["data_quality"]
         adequate_dev = (
-            base_dev["trade_count"] >= 30
+            session_sample_ok
+            and base_dev["trade_count"] >= 30
             and test_dev["trade_count"] >= 30
             and base_quality["development_unresolved_exit_count"] == 0
             and test_quality["development_unresolved_exit_count"] == 0
@@ -1795,6 +1852,7 @@ def run_vwap_comparison(directory: Path) -> dict[str, Any]:
     ]
     return {
         "scope": "bounded_vwap_active_contract_component_comparison",
+        "sample_sufficiency": sample_sufficiency,
         "retest_archive_coverage": retest_archive_coverage,
         "paired_comparisons": paired_comparisons,
         "historical_eligibility": _historical_weekly_atm_evaluability(
@@ -1812,7 +1870,8 @@ def run_vwap_comparison(directory: Path) -> dict[str, Any]:
             "ranking_rule": (
                 "worst_development_expectancy_across_slippage; "
                 ">=30 resolved development trades per scenario; "
-                "zero unresolved development exits"
+                "zero unresolved development exits; "
+                ">=10 observed eligible sessions (>=8 development, >=2 holdout)"
             ),
             "development_ranking": [candidate["name"] for candidate in ranked],
             "best_observed_research_candidate": ranked[0]["name"] if ranked else None,
