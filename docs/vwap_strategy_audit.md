@@ -236,3 +236,47 @@ No entry thresholds, signal score, position size, ATR risk geometry, setup
 identity schema, broker order route, or LIVE environment variables change.
 Use existing focused VWAP tests, full CI and final merged-head verification.
 These engineering regressions do not demonstrate higher post-cost expectancy.
+
+
+## 2026-10-18: paired VWAP retest research integrity
+
+**Scope:** SHADOW-only `run_vwap_comparison` research reporting. No trading
+strategy, admission setting, premium risk geometry, broker fill, or LIVE
+configuration is changed in this batch.
+
+The existing scenario matrix already includes both
+`trend_premium_rvol_1_5` and `trend_premium_vwap_retest`. This is the
+correct comparison for the **incremental** prior-bar retest requirement:
+comparing the ordinary `current_reference` baseline directly to retest
+would simultaneously change trend, underlying-quality and independent option
+volume confirmation, making the apparent retest effect unidentifiable.
+
+Corrections and prespecified interpretation:
+
+- Every scenario now explicitly turns off the unrelated
+  `VWAP_REQUIRE_FINALIZED_SIGNAL_BAR` switch, even if inherited as enabled
+  from an operator environment. Existing environment values are restored
+  exactly after each replay. The original environment remains recorded as
+  provenance, not as the effective isolated research configuration.
+- The canonical comparison returns an explicit side-by-side,
+  same-slippage contrast at **10, 25 and 50 bps per side**, showing control
+  and treatment development trade counts, whether each arm has at least 30
+  resolved development trades with zero unresolved exits, and the
+  **treatment-minus-control net expectancy** only when evaluable.
+- The descriptive chronological holdout delta is null when an arm has no
+  resolved holdout trades or any unresolved holdout exits. It remains
+  **retrospective and reused**: never claim untouched confirmation.
+- The component runner keeps next-minute-open execution, the canonical cost
+  estimator, its existing stop/target and 0.6R lifecycle proxy. **No
+  dataset or profitable result is manufactured** by these code checks.
+
+### Remaining blockers before any retest LIVE promotion
+
+The prior-bar retest test in the existing opt-in strategy currently compares
+the *preceding candle* to the *current* VWAP. A true timestamp-aligned
+historical VWAP for the preceding bar must be verified before making causal
+performance claims about the retest rule. The archived contract basket also
+cannot establish historical ATM selection and lacks executable bid/ask/depth.
+Run this corrected report on sufficiently complete real archives, then reserve
+a chronologically later unseen sample and prospective recorded-feed replay.
+Until then, `selected_for_live=None` and `promotion_eligible=False`.
