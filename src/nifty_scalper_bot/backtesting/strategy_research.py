@@ -992,8 +992,7 @@ def _scenario(
         if compact_orb_context:
             # One observation per matched replay minute, not per CE/PE strike.
             resolution = str(
-                underlying_context.get("research_direction_resolution")
-                or "unavailable"
+                underlying_context.get("research_direction_resolution") or "unavailable"
             )
             orb_direction_resolution_minutes[resolution] += 1
         if regime_detector is not None and regime_manager is not None:
