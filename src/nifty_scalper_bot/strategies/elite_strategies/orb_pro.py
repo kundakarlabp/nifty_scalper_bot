@@ -593,7 +593,7 @@ class ORBProStrategy(EliteStrategy):
         breakout_ts = event["breakout_timestamp"]
         # Completed-bar excursion records the depth of the retest; it is
         # observable even in the unchanged baseline and is never a live gate.
-        retest_excursion_atr = None
+        retest_excursion_atr: float | None = None
         if branch == "retest":
             excursion_points = (
                 boundary - float(snapshot["current"]["low"])
@@ -772,9 +772,10 @@ class ORBProStrategy(EliteStrategy):
             return None
         # This ablation is enabled only in offline SHADOW research, never by
         # a flag alone in LIVE/PAPER or in the normal SHADOW baseline.
-        strict_retest_wick = (
-            os.getenv("EXECUTION_MODE", "SHADOW").strip().upper() == "SHADOW"
-            and _env_bool("ORB_RESEARCH_STRICT_RETEST_WICK", False)
+        strict_retest_wick = os.getenv(
+            "EXECUTION_MODE", "SHADOW"
+        ).strip().upper() == "SHADOW" and _env_bool(
+            "ORB_RESEARCH_STRICT_RETEST_WICK", False
         )
         # Do not burn this bar while asynchronous direction context is unusable.
         self._last_bar_by_key[key] = current_ts
