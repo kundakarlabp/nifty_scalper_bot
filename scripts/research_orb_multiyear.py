@@ -621,7 +621,7 @@ def run_phase(output: Path, phase: str, workers: int) -> None:
 
 
 def run_orb_causal_gate_day(task: tuple[str, str]) -> dict[str, Any]:
-    """Same preselected option basket, six independent research-only ORB arms."""
+    """Six unchanged ORB arms plus one paired bounded-target counterfactual."""
     from nifty_scalper_bot.backtesting.directional_hypotheses import (
         ORB_CAUSAL_GATE_PROFILES,
     )
@@ -664,7 +664,32 @@ def run_orb_causal_gate_day(task: tuple[str, str]) -> dict[str, Any]:
                     "unresolved_trades",
                 )
             }
-        return {"day": day, "arms": arms}
+        repaired = run_orb_session_research(
+            directory,
+            overrides={},
+            slippage_bps=10.0,
+            minimum_net_rr=1.5,
+            lifecycle_proxy=True,
+            causal_gate_profile="without_three_vetoes",
+            simulate_bounded_orb_target_repair=True,
+        )
+        return {
+            "day": day,
+            "arms": arms,
+            "bounded_repair_counterfactual": {
+                field: repaired[field]
+                for field in (
+                    "entry_funnel",
+                    "metrics",
+                    "data_quality",
+                    "no_vote_reasons",
+                    "orb_admission_economics",
+                    "orb_repaired_target_entries",
+                    "trades",
+                    "unresolved_trades",
+                )
+            },
+        }
     finally:
         logging.disable(previous_logging_level)
         for key, previous in previous_env.items():
@@ -789,6 +814,56 @@ def summarize_orb_causal_gate_days(
                     {(trade["symbol"], trade["entry_time"]) for trade in trades}
                 ),
             }
+        # This arm was predeclared before evaluating the historical periods.
+        # It differs from without_three_vetoes ONLY at the bounded canonical
+        # target-repair decision. Strategy state may subsequently diverge.
+        repaired_trades: list[dict[str, Any]] = []
+        repaired_unresolved: list[dict[str, Any]] = []
+        repaired_funnel: Counter[str] = Counter()
+        repaired_economics: Counter[str] = Counter()
+        repaired_rejections: Counter[str] = Counter()
+        repaired_entries = 0
+        for session in sessions:
+            candidate = session.get("bounded_repair_counterfactual")
+            if not isinstance(candidate, dict):
+                raise ValueError("orb_repair_counterfactual_session_missing")
+            repaired_trades.extend(candidate["trades"])
+            repaired_unresolved.extend(candidate["unresolved_trades"])
+            repaired_funnel.update(candidate["entry_funnel"])
+            repaired_economics.update(candidate["orb_admission_economics"])
+            repaired_rejections.update(candidate["no_vote_reasons"])
+            repaired_entries += candidate["orb_repaired_target_entries"]
+        if repaired_entries > repaired_funnel["accepted_fills"]:
+            raise ValueError("orb_repair_counterfactual_entries_exceed_fills")
+        baseline = phase_results["without_three_vetoes"]
+        phase_results["bounded_repair_counterfactual"] = {
+            "session_count": len(sessions),
+            "entry_funnel": dict(repaired_funnel),
+            "metrics": summarize(repaired_trades),
+            "unresolved_exit_count": len(repaired_unresolved),
+            "primary_metrics_complete": not repaired_unresolved,
+            "no_vote_reasons": dict(repaired_rejections),
+            "orb_admission_economics": dict(repaired_economics),
+            "target_repaired_fills": repaired_entries,
+            "baseline_accepted_fills": baseline["entry_funnel"].get(
+                "accepted_fills", 0
+            ),
+            "baseline_net_pnl": baseline["metrics"]["net_pnl"],
+            "paired_net_pnl_difference": (
+                None
+                if repaired_unresolved or not baseline["primary_metrics_complete"]
+                else (
+                    summarize(repaired_trades)["net_pnl"]
+                    - baseline["metrics"]["net_pnl"]
+                )
+            ),
+            "interpretation": (
+                "modeled_bounded_target_repair_counterfactual_not_live_parity"
+            ),
+            "trade_keys": sorted(
+                {(trade["symbol"], trade["entry_time"]) for trade in repaired_trades}
+            ),
+        }
         reference = set(phase_results["production_reference"]["trade_keys"])
         for profile, result in phase_results.items():
             keys = set(result.pop("trade_keys"))
@@ -855,6 +930,9 @@ def run_orb_causal_gate_study(output: Path, workers: int) -> None:
                 "Monthly archive basket and timestamp identity not live-equivalent",
                 "Only 10-bps modeled fills; cannot validate execution quality",
                 "Target-repair viability is theoretical, not a target-hit simulation",
+                "Repaired-target counterfactual uses modelled OHLC events, not quotes",
+                "Signal state can diverge after a counterfactual fill",
+                "A simultaneous OHLC stop/target touch remains unresolved",
                 "Past years previously inspected; not untouched held-out data",
                 "No strategy promotion, live settings or risk changes",
             ],

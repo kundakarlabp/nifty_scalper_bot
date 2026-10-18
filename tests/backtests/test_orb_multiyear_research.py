@@ -206,6 +206,7 @@ def test_causal_gate_ablation_preserves_identical_data_and_no_trade_abstention(
             "structural_gate_failures": {"balanced_opening_range": 1},
             "orb_admission_economics": {},
             "orb_bounded_target_repair": {},
+            "orb_repaired_target_entries": 0,
             "trades": [],
             "unresolved_trades": [],
         }
@@ -217,8 +218,10 @@ def test_causal_gate_ablation_preserves_identical_data_and_no_trade_abstention(
     assert dict(os.environ) == previous_env
     assert logging.root.manager.disable == previous_logging_level
     assert len(row["arms"]) == 6
-    assert len(seen) == 6
+    assert len(seen) == 7
     assert len({entry[0] for entry in seen}) == 1
+    assert seen[-1][1] == "without_three_vetoes"
+    assert seen[-1][2]["simulate_bounded_orb_target_repair"] is True
     assert {entry[2]["slippage_bps"] for entry in seen} == {10.0}
     assert {entry[2]["minimum_net_rr"] for entry in seen} == {1.5}
     report = study.summarize_orb_causal_gate_days([row])
@@ -231,6 +234,27 @@ def test_causal_gate_ablation_preserves_identical_data_and_no_trade_abstention(
         assert observed["paired_entry_overlap_with_reference"] == 0
         assert observed["counterfactual_only_entries"] == 0
     assert report["final"]["production_reference"]["session_count"] == 0
+    assert (
+        report["development"]["bounded_repair_counterfactual"]["target_repaired_fills"]
+        == 0
+    )
+    assert (
+        report["development"]["bounded_repair_counterfactual"][
+            "paired_net_pnl_difference"
+        ]
+        == 0
+    )
+    row["bounded_repair_counterfactual"]["unresolved_trades"] = [
+        {"unresolved_reason": "history_gap_unresolved"}
+    ]
+    incomplete = study.summarize_orb_causal_gate_days([row])
+    assert (
+        incomplete["development"]["bounded_repair_counterfactual"][
+            "paired_net_pnl_difference"
+        ]
+        is None
+    )
+    row["bounded_repair_counterfactual"]["unresolved_trades"] = []
 
     # A historical signal may be rejected for economics or absent next bar.
     # Every initiated next-bar intent must be accounted for exactly once.
