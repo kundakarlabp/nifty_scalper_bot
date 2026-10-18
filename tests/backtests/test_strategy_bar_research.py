@@ -106,6 +106,108 @@ def test_component_replay_marks_intrabar_order_ambiguous_and_stresses_stop_first
     assert observed[:2] == [1, 1]
 
 
+def test_opening_above_target_has_known_first_touch_and_costed_profit(
+    tmp_path, monkeypatch
+):
+    """Positive round trip: next-bar fill, target at next open, exact net ledger."""
+    from nifty_scalper_bot.backtesting.strategy_research import _scenario, load_archive
+
+    first = archive(tmp_path)
+    ce_path = tmp_path / "candles/CE.json"
+    payload = json.loads(ce_path.read_text())
+    # At 09:31 a filled trade has no stop/target touch. At 09:32 the
+    # opening print is already beyond its resting limit target; the later
+    # low crosses the stop but cannot precede that opening execution.
+    payload["candles"][1][1:] = [100, 103, 97, 100, 1000]
+    payload["candles"][2][1:] = [110, 112, 94, 106, 1000]
+    ce_path.write_text(json.dumps(payload))
+
+    class Strategy:
+        name = "ORBPro"
+
+        def generate_signal(self, symbol, indicators, current_price, position=None):
+            if symbol.endswith("CE") and indicators["history_count"] == 1:
+                return SimpleNamespace(
+                    action="BUY", stop_loss=95.0, take_profit=105.0, metadata={}
+                )
+            return None
+
+        @property
+        def evaluation_health(self):
+            return {"healthy": True}
+
+        def notify_entry_accepted(self, side, *, setup_id=None):
+            pass
+
+    histories, instruments, _ = load_archive(tmp_path)
+    from nifty_scalper_bot.config.settings import get_settings
+
+    result = _scenario(
+        histories,
+        instruments,
+        get_settings().elite,
+        0,
+        components={"ORBPro"},
+        strategy_factory=lambda engine: [Strategy()],
+    )["strategies"]["ORBPro"]
+
+    assert result["entry_funnel"]["accepted_fills"] == 1
+    assert result["data_quality"]["unresolved_exit_count"] == 0
+    assert result["metrics"]["trade_count"] == 1
+    trade = result["trades"][0]
+    assert trade["entry_time"] == (first + timedelta(minutes=1)).isoformat()
+    assert trade["exit_time"] == (first + timedelta(minutes=3)).isoformat()
+    assert trade["entry_price"] == 100.0
+    assert trade["exit_price"] == 105.0
+    assert trade["exit_reason"] == "gap_target"
+    assert trade["quantity"] == 75
+    assert trade["gross_pnl"] == pytest.approx(375.0)
+    assert trade["fees"] > 0
+    assert trade["net_pnl"] == pytest.approx(375.0 - trade["fees"])
+    assert result["metrics"]["net_pnl"] == pytest.approx(trade["net_pnl"])
+
+
+def test_full_orb_research_uses_causal_regime_detector(tmp_path, monkeypatch):
+    """The full baseline may not silently omit the regime used by compact ORB."""
+    from nifty_scalper_bot.backtesting import strategy_research as research
+
+    archive(tmp_path)
+    evaluations = []
+    regime_calls = []
+
+    class Detector:
+        def evaluate(self, symbol, data):
+            regime_calls.append(symbol)
+
+    class RegimeManager:
+        def __init__(self, detector):
+            self.detector = detector
+
+        def get_latest_snapshot(self):
+            return SimpleNamespace(regime="TREND")
+
+    class Strategy:
+        name = "ORBPro"
+
+        def generate_signal(self, symbol, indicators, current_price, position=None):
+            evaluations.append(indicators.get("regime"))
+            return None
+
+        @property
+        def evaluation_health(self):
+            return {"healthy": True}
+
+    monkeypatch.setattr(research, "MarketRegimeDetector", Detector)
+    monkeypatch.setattr(research, "MarketRegimeManager", RegimeManager)
+    monkeypatch.setattr(
+        research, "build_elite_strategies", lambda settings, engine: [Strategy()]
+    )
+    research.run_archived_research(tmp_path, slippage_bps=0)
+    assert regime_calls
+    assert evaluations
+    assert all(value == "TREND" for value in evaluations)
+
+
 def test_missing_next_minute_never_creates_a_delayed_entry(tmp_path, monkeypatch):
     from nifty_scalper_bot.backtesting.strategy_research import run_archived_research
 

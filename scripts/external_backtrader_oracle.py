@@ -121,8 +121,18 @@ def main() -> int:
             phases[phase] = validate_result_file(path)
     if not phases:
         raise ValueError("external_oracle_results_unavailable")
+    verified_trade_count = sum(
+        row["trade_count"] for rows in phases.values() for row in rows
+    )
     report = {
         "engine": "backtrader",
+        "trade_count_verified": verified_trade_count,
+        # An empty ledger can agree with itself but cannot validate trade P&L.
+        "trade_evidence_status": (
+            "GROSS_LEDGER_PARITY_ONLY"
+            if verified_trade_count
+            else "NO_TRADES_VALIDATED"
+        ),
         "scope": "independent_resolved_trade_gross_pnl_oracle",
         "signal_generation_independent": False,
         "fee_model_independent": False,

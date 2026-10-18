@@ -69,6 +69,63 @@ def test_selection_rejects_tiny_stress_samples_and_missing_scenarios():
     assert select_candidate(contaminated) is None
 
 
+def test_multiyear_research_preserves_zero_trade_stage_funnel(monkeypatch):
+    """No-trade results must disclose which admission stage lost candidates."""
+    import logging
+
+    from scripts import research_orb_multiyear as research
+
+    def fake_session(*args, **kwargs):
+        return {
+            "trades": [],
+            "unresolved_trades": [],
+            "worst_case_stress_trades": [],
+            "no_vote_reasons": {"underlying_direction_unavailable": 3},
+            "entry_funnel": {
+                "evaluations": 4,
+                "signals_emitted": 1,
+                "geometry_valid": 0,
+                "next_bar_intents": 0,
+                "accepted_fills": 0,
+            },
+        }
+
+    monkeypatch.setattr(research, "run_orb_session_research", fake_session)
+    # run_task intentionally configures isolated research mode in its worker.
+    for key in (
+        "EXECUTION_MODE",
+        "STRATEGY_MODE",
+        "ORB_ENABLED",
+        "BROKER_API_KEY",
+        "BROKER_API_SECRET",
+    ):
+        monkeypatch.setenv(key, "offline_research_test")
+    previous_logging_level = logging.root.manager.disable
+    try:
+        result = research.run_task(
+            (
+                "/not-used",
+                {"name": "raw_reference", "overrides": {}, "minimum_net_rr": None},
+                10.0,
+                ["2017-01-02", "2017-01-03"],
+            )
+        )
+    finally:
+        logging.disable(previous_logging_level)
+
+    assert result["metrics"]["trade_count"] == 0
+    assert result["metrics"]["expectancy"] is None
+    assert result["research_evidence_status"] == "NO_EXECUTABLE_TRADES"
+    assert result["entry_funnel"] == {
+        "evaluations": 8,
+        "signals_emitted": 2,
+        "geometry_valid": 0,
+        "next_bar_intents": 0,
+        "accepted_fills": 0,
+    }
+    assert result["no_vote_reasons"]["underlying_direction_unavailable"] == 6
+
+
 def test_nested_csv_and_txt_copies_are_not_double_counted():
     inner = io.BytesIO()
     with zipfile.ZipFile(inner, "w") as archive:
@@ -187,8 +244,10 @@ def test_compact_context_preserves_actual_orb_trades(monkeypatch, tmp_path):
     )["strategies"]["ORBPro"]
     assert compact["metrics"] == baseline["metrics"]
     assert len(compact["trades"]) == len(baseline["trades"])
-    if not baseline["trades"]:
-        return
+    assert baseline["trades"], (
+        "ORB full/compact parity fixture produced zero trades: matching two "
+        "empty ledgers is not a meaningful execution-parity test"
+    )
 
     economic_fields = (
         "entry_time",
