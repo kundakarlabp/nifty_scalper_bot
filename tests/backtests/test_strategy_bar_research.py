@@ -1534,6 +1534,80 @@ def test_orb_compact_replay_coverage_is_independent_of_option_strike_count(
     assert result["evaluations"] == 8
 
 
+@pytest.mark.parametrize(
+    ("defect", "reason"),
+    [
+        ("token_collision", "research_instrument_token_collision"),
+        ("mismatched_symbol", "research_instrument_symbol_mismatch"),
+        ("outer_token_mismatch", "research_instrument_token_mismatch"),
+    ],
+)
+def test_research_archive_rejects_conflicting_broker_instrument_identity(
+    tmp_path, defect, reason
+):
+    from nifty_scalper_bot.backtesting.strategy_research import load_archive
+
+    archive(tmp_path)
+    for token, path in enumerate(sorted((tmp_path / "candles").glob("*.json")), 101):
+        payload = json.loads(path.read_text())
+        payload["instrument"]["instrument_token"] = token
+        symbol = payload["symbol"]
+        payload["instrument"]["exchange"] = symbol.split(":", 1)[0]
+        payload["instrument"]["tradingsymbol"] = symbol.split(":", 1)[1]
+        path.write_text(json.dumps(payload))
+
+    ce_path = tmp_path / "candles" / "CE.json"
+    pe_path = tmp_path / "candles" / "PE.json"
+    ce = json.loads(ce_path.read_text())
+    pe = json.loads(pe_path.read_text())
+    if defect == "token_collision":
+        pe["instrument"]["instrument_token"] = ce["instrument"]["instrument_token"]
+        pe_path.write_text(json.dumps(pe))
+    elif defect == "mismatched_symbol":
+        ce["instrument"]["tradingsymbol"] = pe["instrument"]["tradingsymbol"]
+        ce_path.write_text(json.dumps(ce))
+    else:
+        ce["instrument_token"] = ce["instrument"]["instrument_token"] + 999
+        ce_path.write_text(json.dumps(ce))
+
+    with pytest.raises(ValueError, match=reason):
+        load_archive(tmp_path)
+
+
+def test_research_archive_allows_token_reuse_after_expiry_on_a_later_date(tmp_path):
+    """Broker tokens are not lifetime identifiers for expired derivatives."""
+    from nifty_scalper_bot.backtesting.strategy_research import load_archive
+
+    archive(tmp_path)
+    ce_path = tmp_path / "candles" / "CE.json"
+    old = json.loads(ce_path.read_text())
+    old["instrument"].update(
+        exchange="NFO",
+        tradingsymbol=old["symbol"].split(":", 1)[1],
+        instrument_token=13579,
+    )
+    ce_path.write_text(json.dumps(old))
+
+    later = json.loads(json.dumps(old))
+    later["symbol"] = "NFO:NIFTY26O1322400CE"
+    later["instrument"].update(
+        expiry="2026-10-13",
+        tradingsymbol="NIFTY26O1322400CE",
+    )
+    later["candles"] = [
+        [
+            (datetime.fromisoformat(row[0]) + timedelta(days=7)).isoformat(),
+            *row[1:],
+        ]
+        for row in later["candles"]
+    ]
+    (tmp_path / "candles" / "later_CE.json").write_text(json.dumps(later))
+
+    histories, instruments, _ = load_archive(tmp_path)
+    assert old["symbol"] in instruments
+    assert later["symbol"] in instruments
+    assert set(histories[old["symbol"]]).isdisjoint(histories[later["symbol"]])
+
 def test_vwap_retest_archive_coverage_distinguishes_causal_history_failures(tmp_path):
     """Count actual observed option bars, never synthetic historical trades."""
     from nifty_scalper_bot.backtesting.strategy_research import (

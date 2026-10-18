@@ -332,7 +332,6 @@ When uncertain, the opt-in retest returns
 Default VWAP entry rules, exits, contract choice, risk and LIVE execution are
 unchanged. This integrity correction does not establish improved net expectancy.
 
-
 ## 2026-10-18: measurable historical retest evidence coverage
 
 The bounded SHADOW-only `run_vwap_comparison` now reports a separate

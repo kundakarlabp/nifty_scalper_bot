@@ -643,3 +643,35 @@ def test_retained_session_prioritizes_front_week_before_strike_proximity(tmp_pat
         "NFO:NIFTY26O1322500PE",
     }
     assert report["promotion_eligible"] is False
+
+
+def test_retained_stage_rejects_token_collision_in_unselected_option(tmp_path):
+    """Even off-basket observed contracts cannot alias a selected Kite token."""
+    candles = tmp_path / "cache" / "candles"
+    candles.mkdir(parents=True)
+    records = [
+        _retained_session_payload("NSE:NIFTY 50", "EQ", 100),
+        _retained_session_payload("NFO:NIFTY26OCTFUT", "FUT", 101, expiry="2026-10-27"),
+        _retained_session_payload("NFO:NIFTY26O1322500CE", "CE", 102, strike=22500),
+        _retained_session_payload("NFO:NIFTY26O1322500PE", "PE", 103, strike=22500),
+        # This other strike is not a complete CE/PE pair, so it is not
+        # selected, but its conflicting instrument token remains untrusted.
+        _retained_session_payload("NFO:NIFTY26O1322550CE", "CE", 102, strike=22550),
+    ]
+    for index, payload in enumerate(records):
+        (candles / f"{index}.json").write_text(json.dumps(payload))
+
+    destination = tmp_path / "staged"
+    report = collector.historical_cache_inventory(
+        tmp_path / "cache",
+        dt.date(2026, 10, 12),
+        dt.date(2026, 10, 12),
+        stage_dir=destination,
+        min_synchronized_minutes=3,
+    )
+    assert report["valid_cached_files"] == 5
+    assert report["staged_session_dates"] == []
+    assert report["staging_rejections"]["2026-10-12"] == (
+        "historical_source_untrusted_or_conflicting"
+    )
+    assert not (destination / "2026-10-12").exists()
