@@ -65,6 +65,7 @@ def test_filter_events_supports_type_and_text() -> None:
     ]
     assert log_export.filter_events(rows, "TRADE", "nifty") == [rows[0]]
 
+
 def test_actionable_export_uses_canonical_parser_and_redacts_credentials(
     monkeypatch,
 ) -> None:
