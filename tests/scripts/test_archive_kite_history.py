@@ -61,6 +61,42 @@ def test_kite_archive_chunks_resumes_and_preserves_raw_oi_and_identity(tmp_path)
     assert len(broker.calls) == 3
 
 
+def test_expanded_archive_paces_each_real_history_call_below_three_per_second(
+    tmp_path, monkeypatch
+):
+    clock = [100.0]
+    calls = []
+    broker = Broker()
+    original = broker.historical_data
+
+    def clocked_history(*args, **kwargs):
+        calls.append(clock[0])
+        return original(*args, **kwargs)
+
+    broker.historical_data = clocked_history
+
+    def advance(seconds):
+        assert seconds > 0
+        clock[0] += seconds
+
+    monkeypatch.setattr(collector.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(collector.time, "sleep", advance)
+    args = (
+        broker,
+        ["NFO:NIFTY26OCT25000CE"],
+        dt.date(2026, 8, 1),
+        dt.date(2026, 9, 30),
+        tmp_path,
+    )
+    first = archive_history(*args)
+    assert first["saved_requests"] == 3
+    assert first["history_request_min_spacing_seconds"] == 0.36
+    assert len(calls) == 3
+    assert all(b - a >= 0.36 - 1e-9 for a, b in zip(calls, calls[1:]))
+    assert archive_history(*args)["cached_requests"] == 3
+    assert len(calls) == 3
+
+
 def test_unavailable_contract_is_rejected_before_fetching(tmp_path):
     broker = Broker()
     with pytest.raises(ValueError, match="current instrument master"):
@@ -239,6 +275,64 @@ def test_history_universe_matches_canonical_active_expiry_and_option_cap(monkeyp
     assert len(option_symbols) == 8
     assert all("NIFTY26O13" in symbol for symbol in option_symbols)
     assert not any("NIFTY26O20" in symbol for symbol in option_symbols)
+
+
+def test_research_archive_can_widen_current_expiry_without_changing_live_cap(
+    monkeypatch,
+):
+    from scripts.archive_kite_history import history_universe
+
+    monkeypatch.setenv("MAX_ACTIVE_OPTION_SYMBOLS", "8")
+    rows = []
+    for strike in range(22100, 22901, 50):
+        for side in ("CE", "PE"):
+            rows.append(
+                {
+                    "exchange": "NFO",
+                    "tradingsymbol": f"NIFTY26O132{strike}{side}",
+                    "name": "NIFTY",
+                    "instrument_type": side,
+                    "instrument_token": len(rows) + 1000,
+                    "expiry": "2026-10-13",
+                    "strike": strike,
+                }
+            )
+    for side in ("CE", "PE"):
+        rows.append(
+            {
+                "exchange": "NFO",
+                "tradingsymbol": f"NIFTY26O2022500{side}",
+                "name": "NIFTY",
+                "instrument_type": side,
+                "instrument_token": len(rows) + 1000,
+                "expiry": "2026-10-20",
+                "strike": 22500,
+            }
+        )
+    selected = {
+        "ce": "NFO:NIFTY26O13222500CE",
+        "pe": "NFO:NIFTY26O13222500PE",
+    }
+    live = history_universe(rows, selected, "NFO:NIFTY26OCTFUT")
+    archive = history_universe(
+        rows, selected, "NFO:NIFTY26OCTFUT", research_option_cap=24
+    )
+    live_options = [x for x in live if x.endswith(("CE", "PE"))]
+    archived_options = [x for x in archive if x.endswith(("CE", "PE"))]
+    assert len(live_options) == 8
+    assert len(archived_options) == 24
+    assert set(live_options).issubset(archived_options)
+    assert all("NIFTY26O13" in x for x in archived_options)
+    assert len({x[:-2] for x in archived_options}) == 12
+    assert selected["ce"] in archived_options and selected["pe"] in archived_options
+    for invalid_cap in (0, 7, 9, 49, True, 12.0, "32"):
+        with pytest.raises(ValueError, match="historical_research_option_cap_invalid"):
+            history_universe(
+                rows,
+                selected,
+                "NFO:NIFTY26OCTFUT",
+                research_option_cap=invalid_cap,
+            )
 
 
 def test_checksum_valid_but_out_of_range_cached_candles_are_not_trusted(tmp_path):

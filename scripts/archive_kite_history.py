@@ -78,8 +78,19 @@ def _validate_candles(candles: list, first: dt.datetime, last: dt.datetime) -> N
         previous = timestamp
 
 
-def history_universe(rows: list[dict], selected: dict, future: str) -> list[str]:
-    """Mirror the live capped current-expiry basket; never infer past baskets."""
+def history_universe(
+    rows: list[dict],
+    selected: dict,
+    future: str,
+    *,
+    research_option_cap: int | None = None,
+) -> list[str]:
+    """Select current contracts for archiving without inferring past baskets.
+
+    The default preserves the exact active-basket cap. An explicit independent
+    research-only cap includes more live strikes without changing subscriptions,
+    trading settings or risk limits. It cannot recover expired contracts.
+    """
     nominated = ["NSE:NIFTY 50", future, selected["ce"], selected["pe"]]
     ce = next(
         (row for row in rows if f"NFO:{row.get('tradingsymbol')}" == selected["ce"]),
@@ -115,6 +126,15 @@ def history_universe(rows: list[dict], selected: dict, future: str) -> list[str]
         os.getenv("MAX_ACTIVE_OPTION_SYMBOLS") or os.getenv("MAX_LIVE_OPTION_SYMBOLS"),
         8,
     )
+    if research_option_cap is not None:
+        if (
+            type(research_option_cap) is not int
+            or research_option_cap < 8
+            or research_option_cap > 48
+            or research_option_cap % 2
+        ):
+            raise ValueError("historical_research_option_cap_invalid")
+        max_options = research_option_cap
     capped = cap_option_universe(
         option_items,
         selected_ce=selected["ce"],
@@ -189,7 +209,12 @@ def archive_history(
         "failed_requests": [],
         "contains_historical_bid_ask_depth": False,
         "coverage_is_request_level": True,
+        "history_request_min_spacing_seconds": 0.36,
     }
+    # Kite's historical endpoint permits three calls per second. This isolated
+    # worker may archive many more contracts than the live basket, so pace
+    # cache misses and retries without touching the live quote/order loops.
+    next_history_request_at = time.monotonic()
     _write_json(
         outdir / "instruments.json",
         {
@@ -249,6 +274,10 @@ def archive_history(
             else:
                 try:
                     for attempt in range(3):
+                        wait = next_history_request_at - time.monotonic()
+                        if wait > 0:
+                            time.sleep(wait)
+                        next_history_request_at = time.monotonic() + 0.36
                         try:
                             candles = client.historical_data(
                                 token,

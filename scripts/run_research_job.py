@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from datetime import date
@@ -117,6 +118,7 @@ def run_worker(request: dict[str, Any], env_file: Path) -> dict[str, Any]:
         run_orb_comparison,
         run_vwap_comparison,
     )
+    from nifty_scalper_bot.config.env_utils import parse_int_env
     from nifty_scalper_bot.config.paths import get_data_dir
     from nifty_scalper_bot.data.rest.zerodha_client import ZerodhaKiteClient
     from nifty_scalper_bot.instruments.active_contracts import (
@@ -145,9 +147,25 @@ def run_worker(request: dict[str, Any], env_file: Path) -> dict[str, Any]:
         future = resolve_active_nifty_future_from_instruments(rows).symbol
         if not future:
             raise ValueError("active_nifty_future_unavailable")
+        research_option_cap = parse_int_env(
+            os.getenv("RESEARCH_HISTORY_OPTION_CAP"), 32
+        )
+        archive_symbols = history_universe(
+            rows, selected, future, research_option_cap=research_option_cap
+        )
+        status["historical_contract_selection"] = {
+            "scope": "current_master_only_not_past_point_in_time_universe",
+            "research_option_cap": research_option_cap,
+            "option_symbols_requested": sum(
+                symbol.endswith(("CE", "PE")) for symbol in archive_symbols
+            ),
+            "expired_contracts_recovered": False,
+            "historical_quote_depth_available": False,
+            "live_basket_cap_unchanged": True,
+        }
         coverage = archive_history(
             client,
-            history_universe(rows, selected, future),
+            archive_symbols,
             date.fromisoformat(request["start"]),
             date.fromisoformat(request["end"]),
             directory / "history",
