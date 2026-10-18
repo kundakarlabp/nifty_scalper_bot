@@ -1,21 +1,21 @@
 """Bounded, timezone-correct journal exports for the read-only console."""
 from __future__ import annotations
 
-import csv
-import io
-import re
 import subprocess
 import tempfile
 from dataclasses import dataclass
 from datetime import date, datetime, time
 from zoneinfo import ZoneInfo
 
-from dashboard.event_buffer import deduplicate_events, parse_event
+from dashboard.superlite_events import (
+    SECRET,
+    csv_bytes,
+    deduplicate_events,
+    filter_events,
+    parse_event,
+)
 
 IST = ZoneInfo("Asia/Kolkata")
-SECRET_VALUE = re.compile(
-    r"(?i)(api[_ -]?key|api[_ -]?secret|access[_ -]?token|request[_ -]?token|password)\s*[:=]\s*\S+"
-)
 MAX_EXPORT_BYTES = 24 * 1024 * 1024
 
 
@@ -84,7 +84,7 @@ def read_raw_logs(
     needle = contains.strip().lower()
     if needle:
         lines = [line for line in lines if needle in line.lower()]
-    lines = [SECRET_VALUE.sub(r"\1=[REDACTED]", line) for line in lines]
+    lines = [SECRET.sub(r"\1=[REDACTED]", line) for line in lines]
     payload = ("\n".join(lines) + ("\n" if lines else "")).encode("utf-8")
     return JournalResult(payload, len(lines), result.truncated)
 
@@ -105,20 +105,3 @@ def read_actionable_events(
     ]
     rows = deduplicate_events(rows)
     return rows, JournalResult(b"", len(rows), result.truncated)
-
-
-def filter_events(rows: list[dict[str, str]], event_type: str, query: str) -> list[dict[str, str]]:
-    if event_type != "ALL":
-        rows = [row for row in rows if row.get("type") == event_type]
-    needle = query.strip().lower()
-    if needle:
-        rows = [row for row in rows if needle in row.get("message", "").lower()]
-    return rows
-
-
-def csv_bytes(rows: list[dict[str, str]]) -> bytes:
-    target = io.StringIO()
-    writer = csv.DictWriter(target, fieldnames=["timestamp_ist", "type", "message"])
-    writer.writeheader()
-    writer.writerows(rows)
-    return target.getvalue().encode("utf-8-sig")

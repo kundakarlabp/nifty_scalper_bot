@@ -64,3 +64,39 @@ def test_filter_events_supports_type_and_text() -> None:
         {"timestamp_ist": "y", "type": "ERROR", "message": "broker timeout"},
     ]
     assert log_export.filter_events(rows, "TRADE", "nifty") == [rows[0]]
+
+def test_actionable_export_uses_canonical_parser_and_redacts_credentials(
+    monkeypatch,
+) -> None:
+    raw = (
+        "[2026-08-18 15:06:06 IST] RUNNER_ON_TICK_ERROR "
+        "symbol=NFO:X error=boom api_key=test-placeholder\n"
+    ).encode()
+    monkeypatch.setattr(
+        log_export,
+        "run_journal",
+        lambda _: log_export.JournalResult(raw, 1, False),
+    )
+    rows, result = log_export.read_actionable_events(
+        "niftybot", date(2026, 8, 18), time(9, 15), time(15, 30)
+    )
+    assert result.count == 1
+    assert rows[0]["type"] == "ERROR"
+    assert rows[0]["symbol"] == "NFO:X"
+    assert "test-placeholder" not in rows[0]["message"]
+    assert "symbol" in log_export.csv_bytes(rows).decode("utf-8-sig").splitlines()[0]
+
+
+def test_raw_journal_export_redacts_credentials(monkeypatch) -> None:
+    raw = b"2026-08-18T10:01:00+05:30 RUNNER api_key=test-placeholder\n"
+    monkeypatch.setattr(
+        log_export,
+        "run_journal",
+        lambda _: log_export.JournalResult(raw, 1, False),
+    )
+    result = log_export.read_raw_logs(
+        "niftybot", date(2026, 8, 18), time(9, 15), time(15, 30)
+    )
+    assert result.error is None
+    assert b"api_key=[REDACTED]" in result.data
+    assert b"test-placeholder" not in result.data
