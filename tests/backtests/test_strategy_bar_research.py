@@ -396,9 +396,7 @@ def test_compact_orb_context_diagnostics_count_market_minutes_not_option_bars(
     assert result["entry_funnel"]["evaluations"] == 8
     quality = result["data_quality"]
     assert quality["orb_replay_coverage"]["matched_market_minutes"] == 4
-    assert quality["orb_direction_resolution_minutes"] == {
-        "spot_futures_agree": 4
-    }
+    assert quality["orb_direction_resolution_minutes"] == {"spot_futures_agree": 4}
     assert sum(scenario["orb_replay_regimes"].values()) == 4
 
 
