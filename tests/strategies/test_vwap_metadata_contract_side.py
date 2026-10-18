@@ -266,14 +266,18 @@ def test_live_vwap_bearish_or_doji_hold_is_not_bullish_continuation(monkeypatch)
 
     for open_price in (104.0, 103.0):
         strategy = VWAPProStrategy(VWAPProStrategyConfig(), _DummyEngine())
-        assert strategy._evaluate_signal(
+        reset_signal = strategy._evaluate_signal(
             symbol,
             _indicators(
-                open=100.0, high=101.0, low=98.0, close=99.0,
+                open=100.0,
+                high=101.0,
+                low=98.0,
+                close=99.0,
                 futures_volume_ratio=1.2,
             ),
             99.0,
-        ) is None
+        )
+        assert reset_signal is None
         assert strategy.last_no_vote_reason == "vwap_thesis_reset"
 
         signal = strategy._evaluate_signal(
@@ -300,14 +304,18 @@ def test_live_vwap_bullish_hold_remains_valid_without_momentum_body(monkeypatch)
     symbol = "NFO:NIFTY26FEB22500CE"
     strategy = VWAPProStrategy(VWAPProStrategyConfig(), _DummyEngine())
 
-    assert strategy._evaluate_signal(
+    reset_signal = strategy._evaluate_signal(
         symbol,
         _indicators(
-            open=100.0, high=101.0, low=98.0, close=99.0,
+            open=100.0,
+            high=101.0,
+            low=98.0,
+            close=99.0,
             futures_volume_ratio=1.2,
         ),
         99.0,
-    ) is None
+    )
+    assert reset_signal is None
 
     signal = strategy._evaluate_signal(
         symbol,
