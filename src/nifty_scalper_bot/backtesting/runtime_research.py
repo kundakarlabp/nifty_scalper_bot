@@ -42,6 +42,47 @@ def validate_snapshot(snapshot: Mapping[str, Any]) -> None:
         raise ValueError("replay_contract_basket_missing")
 
 
+def validate_replay_epochs(path: Path) -> tuple[int, dict[str, Any], int]:
+    """Reject session files that silently combine incompatible runtime states.
+
+    A new process run does not restore the previous process' positions, risk
+    counters, indicators or execution history. A later snapshot may update the
+    basket, but cannot change the captured runtime owners and configuration.
+    """
+    count = 0
+    snapshots = 0
+    run_id: str | None = None
+    first_snapshot: dict[str, Any] | None = None
+    immutable = (
+        "instruments",
+        "effective_settings",
+        "runner_config",
+        "configuration",
+        "app_risk",
+        "initial_balance",
+        "quote_stale_threshold_ms",
+        "code_revision",
+    )
+    for event in iter_session(path):
+        count += 1
+        if run_id is None:
+            run_id = event["run_id"]
+        elif event["run_id"] != run_id:
+            raise ValueError("replay_multiple_runs_unrestored_state")
+        if event["kind"] != "snapshot":
+            continue
+        snapshots += 1
+        payload = event["payload"]
+        validate_snapshot(payload)
+        if first_snapshot is None:
+            first_snapshot = payload
+        elif any(payload.get(key) != first_snapshot.get(key) for key in immutable):
+            raise ValueError("replay_snapshot_configuration_changed")
+    if first_snapshot is None:
+        raise ValueError("replay_initial_snapshot_missing")
+    return count, first_snapshot, snapshots
+
+
 def _restore_settings(current: Any, captured: Any) -> Any:
     if (
         is_dataclass(current)
@@ -256,12 +297,13 @@ def run_runtime_session(
         raise ValueError("replay_requires_isolated_process")
     if not math.isfinite(slippage_bps) or not 0 <= slippage_bps <= 100:
         raise ValueError("replay_slippage_invalid")
-    # First pass validates integrity without holding a session in RAM.
-    event_count = sum(1 for _ in iter_session(path))
+    # Validate archive integrity and process-epoch consistency before creating
+    # any production owner. A valid JSONL file is not necessarily a faithful
+    # single-run market-state replay.
+    event_count, snapshot, snapshot_count = validate_replay_epochs(path)
+    archive_sha = archive_fingerprint(path)
     events = iter_session(path)
     first_event = next(events)
-    snapshot = first_event["payload"]
-    validate_snapshot(snapshot)
     from freezegun import freeze_time
 
     output.mkdir(parents=True, exist_ok=True)
@@ -485,12 +527,16 @@ def run_runtime_session(
                 equity = broker.account()["net_equity_pnl"]
                 equity_peak = max(equity_peak, equity)
                 max_drawdown = max(max_drawdown, equity_peak - equity)
+            if archive_fingerprint(path) != archive_sha:
+                raise ValueError("replay_archive_changed_during_execution")
             orders = broker.get_orders()
             report = {
                 "scope": "production_composition_recorded_feed_replay",
                 "live_equivalent": False,
                 "evidence_label": "RESEARCH_CANDIDATE",
                 "events_processed": event_count,
+                "snapshots_processed": snapshot_count,
+                "run_epochs_processed": 1,
                 "candle_counts": {
                     symbol: len(ctx.market_data_manager.get_ohlc_bars(symbol))
                     for symbol in (snapshot["basket"].get("all_symbols") or [])
@@ -505,7 +551,7 @@ def run_runtime_session(
                         "position_manager",
                     )
                 },
-                "archive_sha256": archive_fingerprint(path),
+                "archive_sha256": archive_sha,
                 "captured_revision": snapshot.get("code_revision"),
                 "slippage_bps_per_side": slippage_bps,
                 "orders": to_json_safe(orders),
