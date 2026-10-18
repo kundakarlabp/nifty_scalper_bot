@@ -40,6 +40,47 @@ def test_opening_selection_cannot_use_later_contract_liquidity():
     assert select_atm_pair(10001, "2016-12-29", available, "2017-01-02") is None
 
 
+
+def test_opening_option_selection_uses_candle_label_metadata_not_ticker():
+    """A 09:16 bar-end is eligible; a 09:16 bar-start is too late."""
+    old_ce = option_frame("CE", ["09:16", "10:00"])
+    old_pe = option_frame("PE", ["09:16", "10:00"])
+    # Older archive can use compact ticker labels without changing time semantics.
+    old_ce["symbol"] = "NIFTY10000CE"
+    old_pe["symbol"] = "NIFTY10000PE"
+    old_ce.attrs["bar_start_labels"] = False
+    old_pe.attrs["bar_start_labels"] = False
+    assert select_atm_pair(
+        10001, "2017-01-25", {(10000, "CE"): old_ce, (10000, "PE"): old_pe},
+        "2017-01-02",
+    ) is not None
+
+    newer_ce = option_frame("CE", ["09:16", "10:00"])
+    newer_pe = option_frame("PE", ["09:15", "10:00"])
+    newer_ce.attrs["bar_start_labels"] = True
+    newer_pe.attrs["bar_start_labels"] = True
+    assert select_atm_pair(
+        10001, "2018-03-29",
+        {(10000, "CE"): newer_ce, (10000, "PE"): newer_pe},
+        "2017-01-02",
+    ) is None
+    newer_ce.loc[newer_ce["time"] == "09:16", "time"] = "09:15"
+    assert select_atm_pair(
+        10001, "2018-03-29",
+        {(10000, "CE"): newer_ce, (10000, "PE"): newer_pe},
+        "2017-01-02",
+    ) is not None
+
+
+def test_opening_pair_does_not_substitute_preopening_trade():
+    ce = option_frame("CE", ["09:14", "10:00"])
+    pe = option_frame("PE", ["09:16", "10:00"])
+    assert select_atm_pair(
+        10001, "2017-01-25", {(10000, "CE"): ce, (10000, "PE"): pe},
+        "2017-01-02",
+    ) is None
+
+
 def test_selection_rejects_tiny_stress_samples_and_missing_scenarios():
     results = [
         {
