@@ -993,3 +993,88 @@ def test_retained_research_never_substitutes_next_week_for_missing_front_week(
             "NFO:NIFTY26O1322500PE",
         }
     assert report["promotion_eligible"] is False
+
+
+@pytest.mark.parametrize(
+    ("missing_futures_minute", "missing_count"),
+    [(None, 0), (22, 1)],
+)
+def test_retained_staging_reports_orb_opening_range_readiness(
+    tmp_path, missing_futures_minute, missing_count
+):
+    """Post-09:30 replay continuity alone cannot establish a 15-minute ORB."""
+    source = tmp_path / "cache" / "candles"
+    source.mkdir(parents=True)
+    records = [
+        _retained_session_payload("NSE:NIFTY 50", "EQ", 100),
+        _retained_session_payload("NFO:NIFTY26OCTFUT", "FUT", 101, expiry="2026-10-27"),
+        _retained_session_payload("NFO:NIFTY26O1322500CE", "CE", 102, strike=22500),
+        _retained_session_payload("NFO:NIFTY26O1322500PE", "PE", 103, strike=22500),
+    ]
+    future = records[1]
+    opening = [
+        [
+            dt.datetime(2026, 10, 12, 9, minute, tzinfo=collector.IST).isoformat(),
+            22525,
+            22535,
+            22520,
+            22530,
+            1000,
+            12000,
+        ]
+        for minute in range(15, 30)
+        if minute != missing_futures_minute
+    ]
+    future["candles"] = opening + future["candles"]
+    future["candles_sha256"] = collector._candle_digest(future["candles"])
+    for index, payload in enumerate(records):
+        (source / f"{index}.json").write_text(json.dumps(payload))
+
+    staged = tmp_path / "staged"
+    result = collector.historical_cache_inventory(
+        tmp_path / "cache",
+        dt.date(2026, 10, 12),
+        dt.date(2026, 10, 12),
+        stage_dir=staged,
+        min_synchronized_minutes=3,
+    )
+    assert result["staged_session_dates"] == ["2026-10-12"]
+    assert result["orb_opening_range_minutes"] == 15
+    assert result["orb_opening_range_missing_futures_minutes"] == {
+        "2026-10-12": missing_count
+    }
+    if missing_count:
+        assert result["orb_opening_range_ready_staged_session_dates"] == []
+        assert result["orb_opening_range_incomplete_staged_session_dates"] == [
+            "2026-10-12"
+        ]
+    else:
+        assert result["orb_opening_range_ready_staged_session_dates"] == ["2026-10-12"]
+        assert result["orb_opening_range_incomplete_staged_session_dates"] == []
+    assert result["promotion_eligible"] is False
+
+
+def test_retained_staging_without_opening_futures_bars_stays_reportable_not_orb_ready(
+    tmp_path,
+):
+    source = tmp_path / "cache" / "candles"
+    source.mkdir(parents=True)
+    records = [
+        _retained_session_payload("NSE:NIFTY 50", "EQ", 100),
+        _retained_session_payload("NFO:NIFTY26OCTFUT", "FUT", 101, expiry="2026-10-27"),
+        _retained_session_payload("NFO:NIFTY26O1322500CE", "CE", 102, strike=22500),
+        _retained_session_payload("NFO:NIFTY26O1322500PE", "PE", 103, strike=22500),
+    ]
+    for index, payload in enumerate(records):
+        (source / f"{index}.json").write_text(json.dumps(payload))
+    result = collector.historical_cache_inventory(
+        tmp_path / "cache",
+        dt.date(2026, 10, 12),
+        dt.date(2026, 10, 12),
+        stage_dir=tmp_path / "staged",
+        min_synchronized_minutes=3,
+    )
+    assert result["staged_session_dates"] == ["2026-10-12"]
+    assert result["orb_opening_range_ready_staged_session_dates"] == []
+    assert result["orb_opening_range_incomplete_staged_session_dates"] == ["2026-10-12"]
+    assert result["orb_opening_range_missing_futures_minutes"] == {"2026-10-12": 15}
