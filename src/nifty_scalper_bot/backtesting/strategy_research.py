@@ -1392,12 +1392,12 @@ def _scenario(
                             "no_vote_reasons": dict(
                                 sorted(vwap_daily_rejections.get(day, {}).items())
                             ),
-                            "resolved_trades": vwap_daily_funnel.get(
-                                day, Counter()
-                            )["resolved_trades"],
-                            "unresolved_trades": vwap_daily_funnel.get(
-                                day, Counter()
-                            )["unresolved_trades"],
+                            "resolved_trades": vwap_daily_funnel.get(day, Counter())[
+                                "resolved_trades"
+                            ],
+                            "unresolved_trades": vwap_daily_funnel.get(day, Counter())[
+                                "unresolved_trades"
+                            ],
                         }
                         for day in sorted(
                             vwap_daily_funnel.keys() | vwap_daily_rejections.keys()
