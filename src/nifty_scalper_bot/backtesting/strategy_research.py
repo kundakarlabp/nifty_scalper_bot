@@ -913,9 +913,7 @@ def _scenario(
             continue
         if compact_orb_context:
             orb_replay_coverage["matched_market_minutes"] += 1
-            opening = timestamp.replace(
-                hour=9, minute=15, second=0, microsecond=0
-            )
+            opening = timestamp.replace(hour=9, minute=15, second=0, microsecond=0)
             range_minutes = settings.orb.orb_minutes
             range_end = opening + timedelta(minutes=range_minutes)
             if timestamp < range_end:
@@ -1211,8 +1209,6 @@ def _scenario(
                                 "complete_opening_range_minutes",
                                 "incomplete_opening_range_minutes",
                             )
-                            if key != "pre_opening_range_end_minutes"
-                            or orb_replay_coverage[key]
                         }
                         if compact_orb_context and name == "ORBPro"
                         else {}
