@@ -295,6 +295,7 @@ def historical_cache_inventory(
     # remains streaming/bounded rather than copying 90-day option history.
     staged_sources: dict[str, dict[str, dict]] = {}
     staging_conflicts: set[str] = set()
+    staged_token_owners: dict[str, dict[int, str]] = {}
     option_minutes: dict[str, dict[tuple[str, float, dt.datetime], set[str]]] = {}
     context_minutes: dict[str, dict[str, set[dt.datetime]]] = {}
     valid_files = 0
@@ -371,6 +372,9 @@ def historical_cache_inventory(
                 continue
             label = day.isoformat()
             if stage_dir is not None:
+                owners = staged_token_owners.setdefault(label, {})
+                if owners.setdefault(token, symbol) != symbol:
+                    staging_conflicts.add(label)
                 sources = staged_sources.setdefault(label, {})
                 source = sources.setdefault(
                     symbol, {"token": token, "instrument": instrument, "bars": {}}
