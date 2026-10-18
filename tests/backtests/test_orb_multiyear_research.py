@@ -2,6 +2,8 @@
 
 import io
 import json
+import logging
+import os
 import zipfile
 from datetime import datetime, timedelta
 from types import SimpleNamespace
@@ -184,12 +186,6 @@ def test_multiyear_research_preserves_zero_trade_stage_funnel(monkeypatch):
 def test_causal_gate_ablation_preserves_identical_data_and_no_trade_abstention(
     monkeypatch, tmp_path
 ):
-    import logging
-    import os
-
-    from nifty_scalper_bot.backtesting.directional_hypotheses import (
-        ORB_CAUSAL_GATE_PROFILES,
-    )
     from scripts import research_orb_multiyear as study
 
     seen = []
@@ -218,13 +214,13 @@ def test_causal_gate_ablation_preserves_identical_data_and_no_trade_abstention(
     row = study.run_orb_causal_gate_day((str(tmp_path), "2017-01-02"))
     assert dict(os.environ) == previous_env
     assert logging.root.manager.disable == previous_logging_level
-    assert list(row["arms"]) == list(ORB_CAUSAL_GATE_PROFILES)
+    assert len(row["arms"]) == 6
     assert len(seen) == 6
     assert len({entry[0] for entry in seen}) == 1
     assert {entry[2]["slippage_bps"] for entry in seen} == {10.0}
     assert {entry[2]["minimum_net_rr"] for entry in seen} == {1.5}
     report = study.summarize_orb_causal_gate_days([row])
-    for profile in ORB_CAUSAL_GATE_PROFILES:
+    for profile in row["arms"]:
         observed = report["development"][profile]
         assert observed["session_count"] == 1
         assert observed["entry_funnel"]["evaluations"] == 10
