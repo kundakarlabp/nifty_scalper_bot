@@ -184,6 +184,9 @@ def test_multiyear_research_preserves_zero_trade_stage_funnel(monkeypatch):
 def test_causal_gate_ablation_preserves_identical_data_and_no_trade_abstention(
     monkeypatch, tmp_path
 ):
+    import logging
+    import os
+
     from nifty_scalper_bot.backtesting.directional_hypotheses import (
         ORB_CAUSAL_GATE_PROFILES,
     )
@@ -208,9 +211,6 @@ def test_causal_gate_ablation_preserves_identical_data_and_no_trade_abstention(
             "trades": [],
             "unresolved_trades": [],
         }
-
-    import logging
-    import os
 
     monkeypatch.setattr(study, "run_orb_session_research", fake_research)
     previous_env = dict(os.environ)
