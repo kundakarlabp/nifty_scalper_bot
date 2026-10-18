@@ -35,6 +35,7 @@ from nifty_scalper_bot.risk.cost_model import (
 from nifty_scalper_bot.strategies.elite_strategies.builder import build_elite_strategies
 from nifty_scalper_bot.strategies.indicators import IndicatorEngine
 from nifty_scalper_bot.strategies.premium_risk_geometry import (
+    anchor_option_geometry_to_execution,
     validate_option_premium_geometry,
 )
 
@@ -766,7 +767,25 @@ def _scenario(
                 )
                 continue
             entry = bar["open"] * (1 + slip)
-            if not intent["stop_loss"] < entry < intent["take_profit"]:
+            stop_loss = intent["stop_loss"]
+            take_profit = intent["take_profit"]
+            anchor_signal = intent.get("research_anchor_signal")
+            if key[0] == "SMC" and anchor_signal is not None:
+                anchored = anchor_option_geometry_to_execution(
+                    None,
+                    anchor_signal,
+                    signal_price=intent["signal_price"],
+                    execution_price=entry,
+                    entry_side="BUY",
+                    atr=0.0,
+                )
+                stop_loss = anchored.stop_loss
+                take_profit = anchored.take_profit
+            if not (
+                stop_loss is not None
+                and take_profit is not None
+                and 0 < stop_loss < entry < take_profit
+            ):
                 rejections[key[0]]["gap_invalidates_geometry"] += 1
                 _record_smc_post_signal_rejection(
                     key[0], intent.get("setup_id"), "gap_invalidates_geometry"
@@ -776,8 +795,8 @@ def _scenario(
             if minimum_net_rr is not None:
                 economics = evaluate_net_reward_risk(
                     entry_price=entry,
-                    stop_price=intent["stop_loss"] * (1 - slip),
-                    target_price=intent["take_profit"] * (1 - slip),
+                    stop_price=stop_loss * (1 - slip),
+                    target_price=take_profit * (1 - slip),
                     quantity=quantity,
                 )
                 if economics.net_rr < minimum_net_rr:
@@ -792,9 +811,9 @@ def _scenario(
             positions[key] = {
                 "entry_time": timestamp,
                 "entry_price": entry,
-                "stop_loss": intent["stop_loss"],
-                "initial_stop_loss": intent["stop_loss"],
-                "take_profit": intent["take_profit"],
+                "stop_loss": stop_loss,
+                "initial_stop_loss": stop_loss,
+                "take_profit": take_profit,
                 "quantity": quantity,
                 "high_water": entry,
                 "trail_updates": 0,
@@ -1057,6 +1076,17 @@ def _scenario(
                     "available_at": timestamp + timedelta(minutes=1),
                     "stop_loss": stop_loss,
                     "take_profit": take_profit,
+                    "signal_price": float(bar["close"]),
+                    "research_anchor_signal": (
+                        replace(
+                            signal, stop_loss=stop_loss, take_profit=take_profit
+                        )
+                        if (
+                            strategy.name == "SMC"
+                            and geometry_source == "canonical_option_premium_geometry"
+                        )
+                        else None
+                    ),
                     "strategy": strategy,
                     "setup_id": metadata.get("setup_id"),
                     "research_signal_metadata": {
