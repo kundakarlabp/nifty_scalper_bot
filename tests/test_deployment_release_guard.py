@@ -39,18 +39,39 @@ def test_redundant_double_deploy_workflow_is_absent() -> None:
     assert not Path(".github/workflows/railway-redeploy.yml").exists()
 
 
-def test_compose_and_entrypoint_use_liveness_not_trading_readiness() -> None:
+def test_compose_and_dockerfile_use_canonical_release_liveness() -> None:
     compose = Path("docker-compose.yml").read_text(encoding="utf-8")
-    entrypoint = Path("deploy/scripts/entrypoint.sh").read_text(encoding="utf-8")
     dockerfile = Path("Dockerfile").read_text(encoding="utf-8")
 
     assert "http://localhost:8080/releasez" in compose
     assert "http://localhost:8080/readyz" not in compose
-    assert 'APP_MODULE="nifty_scalper_bot.deployment_main:app"' in entrypoint
-    assert 'curl -sf "http://localhost:$APP_PORT/releasez"' in entrypoint
-    assert 'curl -sf "http://localhost:$APP_PORT/livez"' in entrypoint
-    assert 'curl -sf "http://localhost:$APP_PORT/readyz"' not in entrypoint
+    assert "http://localhost:${PORT:-8080}/releasez" in dockerfile
+    assert "nifty_scalper_bot.deployment_main:app" in dockerfile
     assert "${PORT:-8080}" in dockerfile
     assert '"--port", "8080"' in compose
     assert "nifty_scalper_bot.app" not in compose
-    assert "nifty_scalper_bot.app" not in entrypoint
+    assert not Path("deploy/scripts/entrypoint.sh").exists()
+
+
+def test_retired_entrypoints_and_standalone_helpers_stay_absent() -> None:
+    retired = (
+        "deploy/install.sh",
+        "deploy/setup_swap.sh",
+        "deploy/systemd/nifty-admin.service",
+        "deploy/systemd/nifty-scalper.service",
+        "scripts/start_bot_morning.sh",
+        "scripts/stop_bot_evening.sh",
+        "deploy/scripts/entrypoint.sh",
+        "config/__init__.py",
+        "data/__init__.py",
+        "tools/normalize_subscription_symbols.py",
+        "tools/async_await_audit.py",
+        "tools/nightly_replay.py",
+        "src/nifty_scalper_bot/admin_ops_dashboard.py",
+    )
+    assert [path for path in retired if Path(path).exists()] == []
+    assert Path("deploy/lightsail_setup.sh").is_file()
+    assert Path("deploy/lightsail_release.sh").is_file()
+    assert Path("deploy/systemd/niftybot-admin.service").is_file()
+    assert Path("src/nifty_scalper_bot/superlite_admin.py").is_file()
+    assert Path("dashboard/superlite_console.py").is_file()
