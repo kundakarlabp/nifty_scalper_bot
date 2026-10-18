@@ -829,3 +829,79 @@ def test_nse_fo_holiday_cannot_be_staged_as_normal_smc_replay(tmp_path):
         "historical_nse_fo_regular_holiday"
     )
     assert not (destination / "2026-10-20").exists()
+
+
+@pytest.mark.parametrize(
+    ("option_expiry", "expected_staged", "expected_reason"),
+    [
+        ("2026-10-19", True, None),
+        (
+            "2026-10-20",
+            False,
+            "historical_option_expiry_calendar_invalid",
+        ),
+        (
+            "2026-10-26",
+            False,
+            "historical_option_expiry_calendar_invalid",
+        ),
+    ],
+)
+def test_research_stages_only_exchange_valid_shifted_weekly_expiry(
+    tmp_path, option_expiry, expected_staged, expected_reason
+):
+    """20 Oct is a holiday: the weekly options must expire on Monday 19 Oct."""
+    from nifty_scalper_bot.backtesting.strategy_research import load_archive
+
+    source = tmp_path / "cache" / "candles"
+    source.mkdir(parents=True)
+    rows = [
+        _retained_session_payload("NSE:NIFTY 50", "EQ", 100),
+        _retained_session_payload("NFO:NIFTY26OCTFUT", "FUT", 101, expiry="2026-10-27"),
+        _retained_session_payload(
+            f"NFO:NIFTYTEST{option_expiry.replace('-', '')}CE",
+            "CE",
+            102,
+            strike=22500,
+            expiry=option_expiry,
+        ),
+        _retained_session_payload(
+            f"NFO:NIFTYTEST{option_expiry.replace('-', '')}PE",
+            "PE",
+            103,
+            strike=22500,
+            expiry=option_expiry,
+        ),
+    ]
+    for index, payload in enumerate(rows):
+        for field in ("from", "to", "captured_at"):
+            payload[field] = payload[field].replace("2026-10-12", "2026-10-19")
+        payload["candles"] = [
+            [row[0].replace("2026-10-12", "2026-10-19"), *row[1:]]
+            for row in payload["candles"]
+        ]
+        payload["candles_sha256"] = collector._candle_digest(payload["candles"])
+        (source / f"{index}.json").write_text(json.dumps(payload))
+
+    destination = tmp_path / "staged"
+    report = collector.historical_cache_inventory(
+        tmp_path / "cache",
+        dt.date(2026, 10, 19),
+        dt.date(2026, 10, 19),
+        stage_dir=destination,
+        min_synchronized_minutes=3,
+    )
+    if expected_staged:
+        assert report["staged_session_dates"] == ["2026-10-19"]
+        _, instruments, _ = load_archive(destination / "2026-10-19")
+        options = {
+            symbol: instrument
+            for symbol, instrument in instruments.items()
+            if instrument["instrument_type"] in {"CE", "PE"}
+        }
+        assert len(options) == 2
+        assert {row["expiry"] for row in options.values()} == {"2026-10-19"}
+    else:
+        assert report["staged_session_dates"] == []
+        assert report["staging_rejections"]["2026-10-19"] == expected_reason
+        assert not (destination / "2026-10-19").exists()
