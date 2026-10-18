@@ -965,7 +965,10 @@ def _scenario(
                                 metadata={"bid": entry, "ask": entry},
                             )
                             repaired_exit = minimum_target_for_net_rr(probe)
-                            if repaired_exit is not None and repaired_exit > executed_target:
+                            if (
+                                repaired_exit is not None
+                                and repaired_exit > executed_target
+                            ):
                                 candidate = evaluate_net_reward_risk(
                                     entry_price=entry,
                                     stop_price=stop_loss * (1 - slip),
