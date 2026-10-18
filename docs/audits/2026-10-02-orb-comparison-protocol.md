@@ -78,3 +78,23 @@ Because this is an additional experiment on historically reused archives,
 the expanded comparison still has **no promotion eligibility**. Existing
 archived option-basket selection, depth reconstruction and replay-parity
 limitations persist.
+
+
+## 18 October 2026 — Retrospective evidence-fidelity diagnostics
+
+The existing compact ORB replay now reports `orb_direction_resolution_minutes`
+once per matched futures/spot/option minute (rather than once per strike),
+and `orb_weekly_atm_proximity_proxy` counts archived candidate/eligible
+option bars and reasons why each option falls outside a same-minute
+expiry/strike proximity test. These are descriptive counters only: they do
+not suppress signals, change historical contract selection, repair missing
+bars, or relax underlying direction requirements.
+
+`historical_executable_quote_fidelity=ohlcv_only` explicitly records that
+the normalized Kite OHLCV archive contains **no historical executable bid/ask
+depth**. A 0-to-7-day expiry and +/-100-point ATM proximity is not proof of
+the actual then-listed weekly contract or basket rotation. All comparisons
+remain retrospective research proxies. Results with zero fills cannot
+support a profitability or live-promotion decision. Obtain historical
+contract-selection records and executable quote/depth observations before
+validating entry costs and a genuinely untouched chronological holdout.
