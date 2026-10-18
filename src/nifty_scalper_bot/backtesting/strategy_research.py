@@ -633,6 +633,7 @@ def _scenario(
     smc_post_signal_unattributed: Counter[str] = Counter()
     evaluated: Counter[str] = Counter()
     entry_funnels: dict[str, Counter[str]] = {}
+    orb_admission_economics: Counter[str] = Counter()
     # Per-session attribution is diagnostic only; never used for fills or
     # strategy admission. Aggregate counters remain the accounting source.
     vwap_daily_funnel: dict[str, Counter[str]] = {}
@@ -761,6 +762,12 @@ def _scenario(
                     "session_data_end_unresolved",
                     stress_reason="unpriced_session_end_stress",
                 )
+            # Outstanding intents must be accounted for before day reset.
+            for key, intent in list(pending.items()):
+                _reject(key[0], "next_minute_unavailable", timestamp)
+                _record_smc_post_signal_rejection(
+                    key[0], intent.get("setup_id"), "next_minute_unavailable"
+                )
             pending.clear()
             engine = IndicatorEngine()
             # ORB must consume the same causal regime authority in full
@@ -865,6 +872,23 @@ def _scenario(
                     target_price=take_profit * (1 - slip),
                     quantity=quantity,
                 )
+                if key[0] == "ORBPro":
+                    orb_admission_economics["evaluated"] += 1
+                    gross_rr = (
+                        economics.gross_reward / economics.gross_risk
+                        if economics.gross_risk > 0
+                        else 0.0
+                    )
+                    if economics.net_rr < minimum_net_rr:
+                        orb_admission_economics["rejected"] += 1
+                        if gross_rr >= minimum_net_rr:
+                            orb_admission_economics["gross_pass_net_fail"] += 1
+                        else:
+                            orb_admission_economics["gross_payoff_below_minimum"] += 1
+                        if economics.net_reward <= 0:
+                            orb_admission_economics["net_reward_nonpositive"] += 1
+                    else:
+                        orb_admission_economics["passed"] += 1
                 if economics.net_rr < minimum_net_rr:
                     _reject(key[0], "cost_net_rr_rejected", timestamp)
                     _record_smc_post_signal_rejection(
@@ -1273,6 +1297,12 @@ def _scenario(
             "session_data_end_unresolved",
             stress_reason="unpriced_session_end_stress",
         )
+    for key, intent in list(pending.items()):
+        _reject(key[0], "next_minute_unavailable", timestamps[-1])
+        _record_smc_post_signal_rejection(
+            key[0], intent.get("setup_id"), "next_minute_unavailable"
+        )
+    pending.clear()
     source_days = sorted(
         {ts.date().isoformat() for symbol in options for ts in histories[symbol]}
     )
@@ -1381,6 +1411,9 @@ def _scenario(
                     "accepted_fills": entry_funnels[name]["accepted_fills"],
                 },
                 "no_vote_reasons": dict(rejections[name]),
+                "orb_admission_economics": (
+                    dict(orb_admission_economics) if name == "ORBPro" else {}
+                ),
                 "daily_diagnostics": (
                     {
                         day: {
