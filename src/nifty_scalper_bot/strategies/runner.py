@@ -5755,9 +5755,12 @@ class StrategyRunner:
                 "runner_state": str(self._runner_state),
                 "active_symbols": sorted(self._active_symbols),
                 "symbols": symbols,
-                "candidate_generated_count": getattr(self, "_candidate_total_count", 0),
+                "candidate_generated_count": getattr(
+                    self, "_candidate_total_count", getattr(self, "_candidate_counter", 0)
+                ),
                 "approved_candidate_count": getattr(
-                    self, "_structural_approved_total_count", 0
+                    self, "_structural_approved_total_count",
+                    getattr(self, "_structural_approved_counter", 0)
                 ),
                 "candidate_generated_window_count": getattr(self, "_candidate_counter", 0),
                 "approved_candidate_window_count": getattr(
