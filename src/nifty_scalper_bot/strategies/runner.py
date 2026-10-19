@@ -1289,6 +1289,10 @@ class StrategyRunner:
         self._phase9_eval_counter = 0
         self._candidate_counter = 0
         self._structural_approved_counter = 0
+        # Keep interval metrics for ENGINE_SUMMARY, but preserve cumulative
+        # counters for health/no-trade reporting across minute boundaries.
+        self._candidate_total_count = 0
+        self._structural_approved_total_count = 0
         self._regime_block_counter = 0
         self._capital_block_counter = 0
         self._last_candle_eval: dict[str, float] = {}
@@ -5751,8 +5755,15 @@ class StrategyRunner:
                 "runner_state": str(self._runner_state),
                 "active_symbols": sorted(self._active_symbols),
                 "symbols": symbols,
-                "candidate_generated_count": getattr(self, "_candidate_counter", 0),
+                "candidate_generated_count": getattr(
+                    self, "_candidate_total_count", getattr(self, "_candidate_counter", 0)
+                ),
                 "approved_candidate_count": getattr(
+                    self, "_structural_approved_total_count",
+                    getattr(self, "_structural_approved_counter", 0)
+                ),
+                "candidate_generated_window_count": getattr(self, "_candidate_counter", 0),
+                "approved_candidate_window_count": getattr(
                     self, "_structural_approved_counter", 0
                 ),
                 "setup_lifecycle": lifecycle,
@@ -16656,6 +16667,9 @@ class StrategyRunner:
                     self._strategy_window_symbols.add(symbol)
                     if signal is not None:
                         self._candidate_counter += 1
+                        self._candidate_total_count = (
+                            getattr(self, "_candidate_total_count", 0) + 1
+                        )
                         self._strategy_window_signals += 1
 
                         # --- Objective 8: Prometheus metrics ---
@@ -19824,6 +19838,9 @@ class StrategyRunner:
             )
             self._structural_approved_counter = (
                 getattr(self, "_structural_approved_counter", 0) + 1
+            )
+            self._structural_approved_total_count = (
+                getattr(self, "_structural_approved_total_count", 0) + 1
             )
             self._logger.info(
                 "SIGNAL_APPROVED symbol=%s strategy=%s side=%s "
