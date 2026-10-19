@@ -419,13 +419,13 @@ auto_release_should_defer
         )
 
 
-def test_intraday_guard_requires_authoritative_flat_broker_and_engine(tmp_path) -> None:
+def test_intraday_guard_requires_authoritative_flat_broker_and_engine() -> None:
     """Run only the read-only Python guard, with injected offline Kite replies."""
     import json
 
     release = _text("deploy/lightsail_release.sh")
-    guard = release.split("<<'PY_FLAT_GUARD'\\n", 1)[1].split(
-        "\\nPY_FLAT_GUARD", 1
+    guard = release.split("<<'PY_FLAT_GUARD'\n", 1)[1].split(
+        "\nPY_FLAT_GUARD", 1
     )[0]
     harness = """
 import io
