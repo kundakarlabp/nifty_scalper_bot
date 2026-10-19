@@ -674,9 +674,9 @@ class RiskManager:
             numeric = float(payload)
         if numeric is not None and math.isfinite(numeric) and numeric >= 0:
             return numeric
-        fallback_balance = getattr(self, "_cached_balance", 0.0)
-        if fallback_balance and fallback_balance > 0:
-            return float(fallback_balance)
+        # A malformed or missing broker payload is not evidence of funds.
+        # Cache fallback belongs in refresh_account_balance and must retain
+        # its unverified source label; never reclassify cache as live here.
         return None
 
     def _resolve_mapping_path(
