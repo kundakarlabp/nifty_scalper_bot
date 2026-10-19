@@ -618,8 +618,7 @@ def _no_trade_diagnostics(signals, affordability):  # noqa: ANN001
     risk_limited = sorted(
         str(symbol)
         for symbol, evidence in (affordability or {}).items()
-        if isinstance(evidence, dict)
-        and evidence.get("capacity_blocker") == "risk"
+        if isinstance(evidence, dict) and evidence.get("capacity_blocker") == "risk"
     )
     return {
         "reason": reason,
