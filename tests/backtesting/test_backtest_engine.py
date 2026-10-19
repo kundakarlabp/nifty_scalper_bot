@@ -337,8 +337,10 @@ def test_signal_causality_audit_rejects_future_price_leak(tmp_path: Path) -> Non
             return (data["close"].shift(-1) > data["close"]).fillna(False).astype(int)
 
     data = pd.DataFrame(
-        {"open": [100.0, 110.0, 120.0, 130.0, 140.0],
-         "close": [100.0, 110.0, 120.0, 130.0, 140.0]},
+        {
+            "open": [100.0, 110.0, 120.0, 130.0, 140.0],
+            "close": [100.0, 110.0, 120.0, 130.0, 140.0],
+        },
         index=pd.date_range("2026-10-05T09:30:00+05:30", periods=5, freq="min"),
     )
     engine = BacktestEngine(
@@ -365,8 +367,10 @@ def test_signal_causality_audit_accepts_past_only_strategy(tmp_path: Path) -> No
             return data["close"].diff().gt(0).fillna(False).astype(int)
 
     data = pd.DataFrame(
-        {"open": [100.0, 110.0, 120.0, 130.0, 140.0],
-         "close": [100.0, 110.0, 120.0, 130.0, 140.0]},
+        {
+            "open": [100.0, 110.0, 120.0, 130.0, 140.0],
+            "close": [100.0, 110.0, 120.0, 130.0, 140.0],
+        },
         index=pd.date_range("2026-10-05T09:30:00+05:30", periods=5, freq="min"),
     )
     result = BacktestEngine(
