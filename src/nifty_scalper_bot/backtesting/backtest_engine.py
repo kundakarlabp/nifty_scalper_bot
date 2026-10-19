@@ -1943,9 +1943,7 @@ def run_quick_backtest(
                 "QUICK_BACKTEST_LEGACY_EXECUTION no_open_column: "
                 "same-bar close fills may overstate realized performance"
             )
-        config = BacktestConfig(
-            generate_visualizations=False, execution_timing=timing
-        )
+        config = BacktestConfig(generate_visualizations=False, execution_timing=timing)
         engine = BacktestEngine(data, strategy, config)
         result = engine.run()
         total_pnl = float(sum(trade.pnl for trade in result.trades))
