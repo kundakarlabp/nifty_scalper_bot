@@ -26,6 +26,7 @@ Safe-edit notes:
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import os
 import threading
@@ -34,7 +35,7 @@ from collections import defaultdict, deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-from math import sqrt
+from math import isfinite, sqrt
 from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, Mapping, Optional
 
 import pandas as pd
@@ -2253,43 +2254,64 @@ class DataHub:
         mdm_fn = getattr(self._mdm, "get_available_balance", None)
         if callable(mdm_fn):
             try:
-                return mdm_fn(force=force)
-            except TypeError:
                 try:
-                    return mdm_fn()
-                except Exception as exc:  # noqa: BLE001
-                    LOGGER.debug("get_available_balance fallback failed: %s", exc)
+                    raw = mdm_fn(force=force)
+                except TypeError:
+                    raw = mdm_fn()
             except Exception as exc:  # noqa: BLE001
-                LOGGER.debug("get_available_balance delegate failed: %s", exc)
-        snapshot = self.get_account_snapshot(force=False)
+                LOGGER.warning("get_available_balance delegate failed: %s", exc)
+                # A failed broker refresh must not turn an old cached margin
+                # figure into an apparently verified positive balance.
+                return None
+            if inspect.isawaitable(raw):
+                closer = getattr(raw, "close", None)
+                if callable(closer):
+                    closer()
+                return None
+            try:
+                value = float(raw) if raw is not None else None
+            except (TypeError, ValueError):
+                return None
+            return value if value is not None and isfinite(value) and value >= 0 else None
+
+        snapshot = self.get_account_snapshot(force=force)
         for key in ("available", "available_cash", "net", "cash"):
             value = snapshot.get(key)
             try:
-                if value is not None:
-                    return float(value)
+                numeric = float(value) if value is not None else None
             except (TypeError, ValueError):
                 continue
+            if numeric is not None and isfinite(numeric) and numeric >= 0:
+                return numeric
         return None
 
     def get_account_snapshot(self, *, force: bool = False) -> Dict[str, Any]:
         mdm = self._mdm
         cached = getattr(mdm, "_account_snapshot", None)
-        if isinstance(cached, dict):
-            snapshot = dict(cached)
-        else:
-            snapshot = {}
+        snapshot = dict(cached) if isinstance(cached, dict) else {}
         refresher = getattr(mdm, "get_account_snapshot", None)
-        if callable(refresher):
+        if not callable(refresher):
+            return {} if force else snapshot
+        # The MDM snapshot accessor may be async. Never manufacture an
+        # unawaited coroutine or certify its old cache as a force-refresh.
+        if inspect.iscoroutinefunction(refresher):
+            return {} if force else snapshot
+        try:
             try:
-                return dict(refresher(force=force) or snapshot)
+                result = refresher(force=force)
             except TypeError:
-                try:
-                    return dict(refresher() or snapshot)
-                except Exception:  # noqa: BLE001
-                    return snapshot
-            except Exception:  # noqa: BLE001
-                return snapshot
-        return snapshot
+                result = refresher()
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.debug("get_account_snapshot delegate failed: %s", exc)
+            return {} if force else snapshot
+        if inspect.isawaitable(result):
+            closer = getattr(result, "close", None)
+            if callable(closer):
+                closer()
+            return {} if force else snapshot
+        if isinstance(result, Mapping) and result:
+            return dict(result)
+        return {} if force else snapshot
 
     def is_ready(self, symbol: Optional[Any] = None) -> bool:
         mdm_fn = getattr(self._mdm, "is_ready", None)
