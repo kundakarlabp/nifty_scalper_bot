@@ -15,6 +15,7 @@ import socket
 import sys
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 from dotenv import load_dotenv
@@ -587,7 +588,9 @@ def _signal_observability(ctx):  # noqa: ANN001
     }
 
 
-def _no_trade_diagnostics(signals, affordability):  # noqa: ANN001
+def _no_trade_diagnostics(
+    signals: dict[str, Any], affordability: dict[str, Any] | None
+) -> dict[str, Any]:
     """Explain no-entry telemetry without changing live admission policy."""
     if not signals:
         return {"reason": "strategy_telemetry_unavailable", "basis": "unknown"}
