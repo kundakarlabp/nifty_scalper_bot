@@ -211,3 +211,31 @@ def test_deposit_after_trade_cannot_bypass_frozen_daily_loss_switch() -> None:
     risk._switches.record_pnl(-3.50)
     assert risk._check_daily_loss_limit() is False
     assert risk._breaker_tripped is True
+
+
+def test_malformed_margin_payload_never_impersonates_verified_cash() -> None:
+    risk = RiskManager(
+        settings=RiskSettings(daily_loss_pct=5.0),
+        position_manager=_Positions(),
+        account_balance=15_059.20,
+    )
+    assert risk._extract_balance_from_payload({"available": "unknown"}) is None
+
+
+def test_failed_force_refresh_does_not_expand_frozen_risk_cap() -> None:
+    class _UnavailableHub:
+        def get_available_balance(self, *, force=False):
+            return None
+
+        def get_account_snapshot(self, *, force=False):
+            return {}
+
+    risk = RiskManager(
+        settings=RiskSettings(daily_loss_pct=5.0),
+        position_manager=_Positions(),
+        account_balance=59.20,
+    )
+    risk._data_hub = _UnavailableHub()
+    assert risk.refresh_account_balance(force=True) == pytest.approx(59.20)
+    assert risk.balance_source_label() == "cache"
+    assert risk._switches.max_day_loss == pytest.approx(2.96)
