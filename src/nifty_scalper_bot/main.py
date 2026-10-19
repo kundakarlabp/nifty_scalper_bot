@@ -571,6 +571,8 @@ def _signal_observability(ctx):  # noqa: ANN001
         "runner_state": status.get("runner_state"),
         "candidate_generated_count": status.get("candidate_generated_count"),
         "approved_candidate_count": status.get("approved_candidate_count"),
+        "candidate_generated_window_count": status.get("candidate_generated_window_count"),
+        "approved_candidate_window_count": status.get("approved_candidate_window_count"),
         "completed_strategy_evaluations_window": status.get(
             "completed_strategy_evaluations_window", {}
         ),
