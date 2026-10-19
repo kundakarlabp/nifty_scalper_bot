@@ -42,6 +42,36 @@ def test_lightsail_uses_external_environment_file() -> None:
     )
 
 
+def test_sudoers_policy_authorizes_exact_automation_controls() -> None:
+    setup = _text("deploy/lightsail_setup.sh")
+    release = _text("deploy/lightsail_release.sh")
+
+    assert 'if [ "${1:-}" = "--repair-control-sudoers" ]; then' in setup
+    assert "sudo -n visudo -cf" in setup
+    assert "sudo -n install -m 0440" in setup
+    assert "ubuntu ALL=(root) NOPASSWD:" in setup
+    for service in (
+        "niftybot",
+        "niftybot-admin",
+        "niftybot-streamlit",
+        "niftybot-autodeploy.service",
+    ):
+        assert service in setup
+    assert 'rules+=("$executable restart --no-block $service")' in setup
+    assert "--repair-control-sudoers" in release
+    assert "control_sudoers_v2_installed" in release
+    repair = release.index("--repair-control-sudoers")
+    early_gate = release.index("if auto_release_should_defer; then")
+    assert repair < early_gate
+    assert (
+        subprocess.run(
+            ["bash", "-n", str(ROOT / "deploy/lightsail_setup.sh")],
+            check=False,
+        ).returncode
+        == 0
+    )
+
+
 def test_retired_dashboard_and_adhoc_tooling_are_absent() -> None:
     retired = (
         "dashboard/operations_console.py",
