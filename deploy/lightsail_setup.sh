@@ -16,6 +16,39 @@ STREAMLIT_PORT="8501"
 
 log() { printf '[lightsail-setup] %s\n' "$*"; }
 
+# Single least-privilege policy for the dashboard and release runner.
+# The optional mode repairs an existing host without reinstalling packages
+# or stopping the trading engine.
+repair_control_sudoers() {
+  local tmp rules=() executable service joined
+  tmp="$(mktemp)" || return 1
+  for executable in /bin/systemctl /usr/bin/systemctl; do
+    for service in niftybot niftybot-streamlit niftybot-admin niftybot-autodeploy.service; do
+      rules+=("$executable restart $service")
+      rules+=("$executable restart --no-block $service")
+    done
+  done
+  joined="$(printf '%s, ' "${rules[@]}")"
+  printf 'ubuntu ALL=(root) NOPASSWD: %s\n' "${joined%, }" > "$tmp"
+  if ! sudo -n visudo -cf "$tmp" >/dev/null 2>&1; then
+    rm -f "$tmp"
+    log "ERROR: cannot validate restricted systemctl permissions"
+    return 1
+  fi
+  if ! sudo -n install -m 0440 "$tmp" /etc/sudoers.d/niftybot; then
+    rm -f "$tmp"
+    log "ERROR: cannot install restricted systemctl permissions"
+    return 1
+  fi
+  rm -f "$tmp"
+}
+
+if [ "${1:-}" = "--repair-control-sudoers" ]; then
+  repair_control_sudoers
+  exit $?
+fi
+
+
 ensure_env_default() {
   local key="$1" value="$2"
   if ! grep -qE "^${key}=" "$ENV_FILE"; then printf '%s=%s\n' "$key" "$value" >> "$ENV_FILE"; fi
@@ -128,10 +161,8 @@ PrivateTmp=true
 WantedBy=multi-user.target
 EOF_UNIT
 
-# The deployment runner and browser dashboard may restart only these two services.
-echo "ubuntu ALL=(ALL) NOPASSWD: /bin/systemctl restart ${SERVICE}, /usr/bin/systemctl restart ${SERVICE}, /bin/systemctl restart --no-block ${SERVICE}, /usr/bin/systemctl restart --no-block ${SERVICE}, /bin/systemctl restart ${STREAMLIT_SERVICE}, /usr/bin/systemctl restart ${STREAMLIT_SERVICE}" | \
-  sudo tee /etc/sudoers.d/niftybot >/dev/null
-sudo chmod 440 /etc/sudoers.d/niftybot
+# Exact sudoers permissions for the engine, admin, deployer and console.
+repair_control_sudoers
 
 sudo systemctl daemon-reload
 sudo systemctl enable --quiet ${SERVICE}

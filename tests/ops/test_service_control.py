@@ -12,20 +12,54 @@ def test_restart_service_rejects_invalid_name() -> None:
     assert result.command == ()
 
 
-def test_restart_service_uses_bounded_systemctl_command(monkeypatch) -> None:
+def test_restart_service_requires_systemd_acceptance(monkeypatch) -> None:
     calls: list[list[str]] = []
 
-    def fake_popen(command, **kwargs):
+    def fake_run(command, **kwargs):
         calls.append(list(command))
-        assert kwargs["start_new_session"] is True
-        return SimpleNamespace(pid=123)
+        assert kwargs["timeout"] == 8
+        assert kwargs["capture_output"] is True
+        assert kwargs["check"] is False
+        return SimpleNamespace(returncode=0)
 
-    monkeypatch.setattr(sc.subprocess, "Popen", fake_popen)
-
-    result = sc.restart_service("niftybot", action="restart_bot")
+    monkeypatch.setattr(sc.subprocess, "run", fake_run)
+    result = sc.restart_service(
+        "niftybot-autodeploy.service", action="restart_deployer"
+    )
 
     assert result.ok is True
-    assert calls == [["sudo", "systemctl", "restart", "--no-block", "niftybot"]]
+    assert calls == [
+        [
+            "sudo",
+            "-n",
+            "systemctl",
+            "restart",
+            "--no-block",
+            "niftybot-autodeploy.service",
+        ]
+    ]
+
+
+def test_restart_service_rejects_failed_sudo(monkeypatch) -> None:
+    monkeypatch.setattr(
+        sc.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=1, stderr="private error"),
+    )
+    result = sc.restart_service("niftybot", action="restart_bot")
+    assert result.ok is False
+    assert result.message == "systemd rejected restart (exit 1)"
+    assert "private error" not in result.message
+
+
+def test_restart_service_timeout_fails_closed(monkeypatch) -> None:
+    def timeout(*args, **kwargs):
+        raise TimeoutError("service restart timed out")
+
+    monkeypatch.setattr(sc.subprocess, "run", timeout)
+    result = sc.restart_service("niftybot", action="restart_bot")
+    assert result.ok is False
+    assert "TimeoutError" in result.message
 
 
 def test_memory_snapshot_parses_proc_meminfo(tmp_path) -> None:

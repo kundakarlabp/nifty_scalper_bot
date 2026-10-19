@@ -430,6 +430,19 @@ if [ ! -d .git ]; then
   write_status repository_missing "Git repository missing at $APP_DIR"; exit 1
 fi
 
+# Upgrade the browser controls on already-provisioned hosts. This changes
+# sudoers only; it neither replaces the environment nor restarts a service.
+# It runs before the auto-release no-change/market-window short circuits.
+if [ ! -f "$CONFIG_DIR/control_sudoers_v2_installed" ]; then
+  if bash "$APP_DIR/deploy/lightsail_setup.sh" --repair-control-sudoers; then
+    mkdir -p "$CONFIG_DIR"
+    : > "$CONFIG_DIR/control_sudoers_v2_installed"
+    log "dashboard/release sudoers permissions repaired"
+  else
+    log "WARNING: dashboard/release sudoers permissions need operator repair"
+  fi
+fi
+
 # Auto mode checks remote revisions without mutating the local runtime.
 # Preserve health recovery and independent research polling when a release waits.
 if [ "$AUTO_MODE" = true ]; then
