@@ -2272,7 +2272,9 @@ class DataHub:
                 value = float(raw) if raw is not None else None
             except (TypeError, ValueError):
                 return None
-            return value if value is not None and isfinite(value) and value >= 0 else None
+            if value is not None and isfinite(value) and value >= 0:
+                return value
+            return None
 
         snapshot = self.get_account_snapshot(force=force)
         for key in ("available", "available_cash", "net", "cash"):
