@@ -53,9 +53,14 @@ def restart_service(service: str, *, action: str) -> ControlResult:
     if result.returncode != 0:
         # Do not forward sudo error output, which may contain host-local paths.
         return ControlResult(
-            False, action, f"systemd rejected restart (exit {result.returncode})", command
+            False,
+            action,
+            f"systemd rejected restart (exit {result.returncode})",
+            command,
         )
-    return ControlResult(True, action, f"restart accepted by systemd for {service}", command)
+    return ControlResult(
+        True, action, f"restart accepted by systemd for {service}", command
+    )
 
 
 def restart_bot() -> ControlResult:
