@@ -327,3 +327,86 @@ def test_backtest_rejects_duplicate_timestamps_before_strategy_eval() -> None:
     data = pd.DataFrame({"close": [100.0, 100.0]}, index=[stamp, stamp])
     with pytest.raises(ValueError, match="duplicate timestamps"):
         BacktestEngine(data, _NoEvaluate())
+
+
+def test_signal_causality_audit_rejects_future_price_leak(tmp_path: Path) -> None:
+    class _LookAhead:
+        name = "future_leak"
+
+        def generate_signals(self, data: pd.DataFrame) -> pd.Series:
+            return (data["close"].shift(-1) > data["close"]).fillna(False).astype(int)
+
+    data = pd.DataFrame(
+        {"open": [100.0, 110.0, 120.0, 130.0, 140.0],
+         "close": [100.0, 110.0, 120.0, 130.0, 140.0]},
+        index=pd.date_range("2026-10-05T09:30:00+05:30", periods=5, freq="min"),
+    )
+    engine = BacktestEngine(
+        data,
+        _LookAhead(),
+        be.BacktestConfig(
+            execution_timing="next_bar_open",
+            signal_causality_check=True,
+            signal_causality_min_prefix=2,
+            signal_causality_max_checks=4,
+            generate_visualizations=False,
+            output_directory=tmp_path,
+        ),
+    )
+    with pytest.raises(ValueError, match="signal_lookahead_detected"):
+        engine.run()
+
+
+def test_signal_causality_audit_accepts_past_only_strategy(tmp_path: Path) -> None:
+    class _Causal:
+        name = "past_only"
+
+        def generate_signals(self, data: pd.DataFrame) -> pd.Series:
+            return data["close"].diff().gt(0).fillna(False).astype(int)
+
+    data = pd.DataFrame(
+        {"open": [100.0, 110.0, 120.0, 130.0, 140.0],
+         "close": [100.0, 110.0, 120.0, 130.0, 140.0]},
+        index=pd.date_range("2026-10-05T09:30:00+05:30", periods=5, freq="min"),
+    )
+    result = BacktestEngine(
+        data,
+        _Causal(),
+        be.BacktestConfig(
+            execution_timing="next_bar_open",
+            signal_causality_check=True,
+            signal_causality_min_prefix=2,
+            signal_causality_max_checks=4,
+            generate_visualizations=False,
+            output_directory=tmp_path,
+        ),
+    ).run()
+    assert result.analytics["signal_causality"] == {
+        "status": "sampled_prefixes_passed",
+        "prefixes_checked": 3,
+    }
+
+
+def test_signal_causality_audit_rejects_uncheckable_history(tmp_path: Path) -> None:
+    class _Flat:
+        name = "flat"
+
+        def generate_signals(self, data: pd.DataFrame) -> pd.Series:
+            return pd.Series(0, index=data.index)
+
+    data = pd.DataFrame(
+        {"open": [100.0, 101.0], "close": [100.0, 101.0]},
+        index=pd.date_range("2026-10-05T09:30:00+05:30", periods=2, freq="min"),
+    )
+    engine = BacktestEngine(
+        data,
+        _Flat(),
+        be.BacktestConfig(
+            signal_causality_check=True,
+            signal_causality_min_prefix=2,
+            generate_visualizations=False,
+            output_directory=tmp_path,
+        ),
+    )
+    with pytest.raises(ValueError, match="signal_causality_insufficient_history"):
+        engine.run()
