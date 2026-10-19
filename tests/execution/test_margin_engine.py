@@ -370,7 +370,10 @@ def test_broker_verified_zero_cash_cannot_reuse_nonzero_margin_input() -> None:
     assert decision.quantity == 0
 
 
-def test_missing_broker_funds_fails_closed_when_data_hub_exists() -> None:
+def test_missing_broker_funds_fails_closed_when_data_hub_exists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     engine = MarginEngine(
         broker=object(),
         data_hub=_FundsHub(amount=None),
@@ -384,7 +387,10 @@ def test_missing_broker_funds_fails_closed_when_data_hub_exists() -> None:
 
 
 def test_zero_cash_in_broker_snapshot_is_authoritative() -> None:
-    hub = _FundsHub(amount=None, snapshot={"equity": {"available": {"live_balance": 0.0}}})
+    hub = _FundsHub(
+        amount=None,
+        snapshot={"equity": {"available": {"live_balance": 0.0}}},
+    )
     engine = MarginEngine(
         broker=object(), data_hub=hub, lot_size_resolver=None, clock=lambda: 0.0
     )
