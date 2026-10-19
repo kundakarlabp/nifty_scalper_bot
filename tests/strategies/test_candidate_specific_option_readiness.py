@@ -342,7 +342,7 @@ def test_entry_path_allows_ready_ce_candidate_and_submits_order(
         datetime.now(timezone.utc),
         trace_id="t",
     )
-    assert calls["gate"] == 1
+    assert calls["gate"] == 1, (result.reason, result.details)
     assert result.accepted is True
     assert len(runner._order_manager.plans) == 1
     assert runner._order_manager.plans[0].symbol == "NFO:CE"
