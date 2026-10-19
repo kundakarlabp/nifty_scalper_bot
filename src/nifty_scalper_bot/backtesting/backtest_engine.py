@@ -79,6 +79,11 @@ class BacktestConfig:
     # Legacy same-bar fills are retained for existing reports only. Use
     # next_bar_open for causal bar-close research and production comparisons.
     execution_timing: str = "same_bar_legacy"
+    # Explicit opt-in: compare historical signal prefixes against full-series
+    # output to detect future-data leakage in a vectorized strategy.
+    signal_causality_check: bool = False
+    signal_causality_max_checks: int = 12
+    signal_causality_min_prefix: int = 20
 
     def validate(self) -> None:
         if self.initial_cash <= 0:
@@ -87,6 +92,10 @@ class BacktestConfig:
             raise ValueError(
                 "execution_timing must be next_bar_open or same_bar_legacy"
             )
+        if self.signal_causality_max_checks < 1:
+            raise ValueError("signal_causality_max_checks must be positive")
+        if self.signal_causality_min_prefix < 2:
+            raise ValueError("signal_causality_min_prefix must be at least 2")
         if not 0 <= self.slippage_pct < 0.05:
             raise ValueError("slippage_pct must be between 0 and 0.05")
         if not 0 <= self.commission_pct < 0.05:
@@ -649,6 +658,11 @@ class BacktestEngine:
             self._order_latencies.clear()
             self._last_order_timestamp = None
             signals = self._prepare_signals(self.strategy.generate_signals(self.data))
+            checked_prefixes = (
+                self._assert_signal_causality(signals)
+                if self.config.signal_causality_check
+                else 0
+            )
             equity_curve = self._simulate_orders(signals)
             performance = self._calculate_performance(equity_curve)
             analytics = self._build_analytics(equity_curve)
@@ -657,6 +671,14 @@ class BacktestEngine:
             analytics["execution_timing_causal"] = (
                 self.config.execution_timing == "next_bar_open"
             )
+            analytics["signal_causality"] = {
+                "status": (
+                    "sampled_prefixes_passed"
+                    if self.config.signal_causality_check
+                    else "not_tested"
+                ),
+                "prefixes_checked": checked_prefixes,
+            }
             if parity is not None:
                 parity_summary = self._run_pipeline_parity(parity, parity_frame)
                 analytics["pipeline_parity"] = parity_summary
@@ -718,6 +740,53 @@ class BacktestEngine:
         if invalid:
             raise ValueError(f"Signals contain unsupported values: {invalid}")
         return signals.astype(int)
+
+    def _assert_signal_causality(self, full_signals: pd.Series) -> int:
+        """Reject vector signals that change when future candles are withheld.
+
+        This bounded sampled-prefix check is a research diagnostic, not proof
+        that every timestamp is causal. It must not run in production trading.
+        """
+        last_prefix = len(self.data) - 1
+        first_prefix = self.config.signal_causality_min_prefix
+        if last_prefix < first_prefix:
+            raise ValueError("signal_causality_insufficient_history")
+        count = min(
+            self.config.signal_causality_max_checks,
+            last_prefix - first_prefix + 1,
+        )
+        checkpoints = sorted(
+            {
+                first_prefix
+                + round(
+                    (last_prefix - first_prefix) * sample / max(count - 1, 1)
+                )
+                for sample in range(count)
+            }
+        )
+        for end in checkpoints:
+            prefix = self.data.iloc[:end].copy()
+            try:
+                raw = self.strategy.generate_signals(prefix)
+                if not isinstance(raw, pd.Series):
+                    raise TypeError("prefix strategy signals must be a Series")
+                sample = raw.reindex(prefix.index).fillna(0)
+                if not sample.isin((-1, 0, 1)).all():
+                    raise ValueError("prefix signals have invalid actions")
+                sample = sample.astype(int)
+            except Exception as exc:
+                raise ValueError(
+                    f"signal_causality_prefix_error at {prefix.index[-1]}"
+                ) from exc
+            expected = full_signals.iloc[:end]
+            mismatches = sample.ne(expected)
+            if bool(mismatches.any()):
+                timestamp = mismatches.index[mismatches.argmax()]
+                raise ValueError(
+                    f"signal_lookahead_detected at {timestamp} "
+                    f"prefix_end={prefix.index[-1]}"
+                )
+        return len(checkpoints)
 
     def _simulate_orders(self, signals: pd.Series) -> pd.DataFrame:
         cash = self.config.initial_cash
