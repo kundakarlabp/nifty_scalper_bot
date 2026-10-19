@@ -403,6 +403,8 @@ auto_release_should_defer
         ("true", "1", "1425", "false", True),
         ("true", "1", "0930", "true", False),
         ("true", "1", "1545", "true", False),
+        ("true", "1", "2580", "true", True),
+        ("true", "", "", "true", True),
         ("true", "1", "1546", "false", False),
         ("true", "6", "1100", "false", False),
         ("false", "1", "1425", "false", False),
