@@ -222,7 +222,8 @@ def evaluate_minimum_lot_affordability(
     one explicit cash reserve. The margin-factor setting remains observable for
     legacy non-option fallback paths but is not stacked onto a fully paid option
     BUY. Risk-budget fields remain diagnostic unless the caller supplies the
-    materialized entry and stop. In particular,
+    materialized entry and stop, except where even a one-tick stop on one
+    option lot exceeds the known daily budget. In particular,
     ``candidate_min_risk_distance`` is a transaction-cost/net-R:R modelling
     quantity, not an actual strategy stop, so it must never veto a contract.
     The final materialized stop is still enforced by MarginEngine and
@@ -339,6 +340,15 @@ def evaluate_minimum_lot_affordability(
         if minimum_viable_risk_distance is not None
         else None
     )
+    # Unlike the transaction-cost R:R model above, this is an impossibility
+    # proof: no valid NFO option stop can be smaller than one price tick.
+    # Final live admission still checks the actual stop plus estimated costs.
+    tick_size = _finite_float(_field(quote, "tick_size"), minimum=0.0) or 0.05
+    one_tick_stop_unaffordable = bool(
+        normalized_symbol.upper().startswith("NFO:")
+        and effective_one_lot_risk_budget is not None
+        and effective_one_lot_risk_budget + 1e-9 < tick_size * lot_size
+    )
     risk_floor_affordable: bool | None = None
     if one_lot_minimum_risk is not None and effective_one_lot_risk_budget is not None:
         risk_floor_affordable = bool(
@@ -392,6 +402,10 @@ def evaluate_minimum_lot_affordability(
             if plan_risk_affordable is False
             else "risk_budget_unavailable"
         )
+        capacity_blocker = "risk"
+    elif one_tick_stop_unaffordable:
+        affordable = False
+        reason = "minimum_lot_one_tick_risk_unaffordable"
         capacity_blocker = "risk"
     else:
         affordable = True
