@@ -342,3 +342,52 @@ def test_option_affordability_uses_selected_premium_not_underlying() -> None:
     assert decision.ok
     assert decision.quantity == 65
     assert decision.est_required == pytest.approx(7_800.0)
+
+
+
+class _FundsHub:
+    def __init__(self, amount=None, snapshot=None):
+        self.amount = amount
+        self.snapshot = snapshot
+
+    def get_available_balance(self, *, force=False):
+        return self.amount
+
+    def get_account_snapshot(self, *, force=False):
+        return self.snapshot or {}
+
+
+def test_broker_verified_zero_cash_cannot_reuse_nonzero_margin_input() -> None:
+    engine = MarginEngine(
+        broker=object(),
+        data_hub=_FundsHub(amount=0.0),
+        lot_size_resolver=None,
+        clock=lambda: 0.0,
+    )
+    decision = engine.plan(_opt_inputs(balance=15_059.20))
+    assert not decision.ok
+    assert decision.available == pytest.approx(0.0)
+    assert decision.quantity == 0
+
+
+def test_missing_broker_funds_fails_closed_when_data_hub_exists() -> None:
+    engine = MarginEngine(
+        broker=object(),
+        data_hub=_FundsHub(amount=None),
+        lot_size_resolver=None,
+        clock=lambda: 0.0,
+    )
+    decision = engine.plan(_opt_inputs(balance=15_059.20))
+    assert not decision.ok
+    assert decision.available == pytest.approx(0.0)
+    assert decision.quantity == 0
+
+
+def test_zero_cash_in_broker_snapshot_is_authoritative() -> None:
+    hub = _FundsHub(amount=None, snapshot={"equity": {"available": {"live_balance": 0.0}}})
+    engine = MarginEngine(
+        broker=object(), data_hub=hub, lot_size_resolver=None, clock=lambda: 0.0
+    )
+    decision = engine.plan(_opt_inputs(balance=15_059.20))
+    assert not decision.ok
+    assert decision.available == pytest.approx(0.0)
