@@ -27,7 +27,11 @@ def test_indicator_history_missing_market_open_emits_info(monkeypatch, caplog):
 
     monkeypatch.setattr(market_hours, "is_market_open_now", lambda: True)
     engine = IndicatorEngine()
-    with caplog.at_level(logging.INFO):
+    # Other tests may set an explicit level on this named logger; changing
+    # only the root level does not override that setting in full-suite runs.
+    with caplog.at_level(
+        logging.INFO, logger="nifty_scalper_bot.strategies.indicators"
+    ):
         result = engine.get_history("NSE:NIFTY")
 
     assert result == []
