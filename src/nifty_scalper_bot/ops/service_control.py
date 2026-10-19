@@ -33,24 +33,29 @@ def _valid_service_name(service: str) -> bool:
     return bool(service and _SERVICE.fullmatch(service))
 
 
-def _popen(command: list[str]) -> None:
-    subprocess.Popen(
-        command,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
-
-
 def restart_service(service: str, *, action: str) -> ControlResult:
+    """Confirm systemd accepted the queued restart, not merely that sudo spawned."""
     if not _valid_service_name(service):
         return ControlResult(False, action, f"invalid systemd service name: {service!r}")
-    command = ("sudo", "systemctl", "restart", "--no-block", service)
+    command = ("sudo", "-n", "systemctl", "restart", "--no-block", service)
     try:
-        _popen(list(command))
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=8,
+        )
     except Exception as exc:  # noqa: BLE001 - operator boundary
-        return ControlResult(False, action, f"restart failed: {type(exc).__name__}: {exc}", command)
-    return ControlResult(True, action, f"restart requested for {service}", command)
+        return ControlResult(
+            False, action, f"restart failed: {type(exc).__name__}", command
+        )
+    if result.returncode != 0:
+        # Do not forward sudo error output, which may contain host-local paths.
+        return ControlResult(
+            False, action, f"systemd rejected restart (exit {result.returncode})", command
+        )
+    return ControlResult(True, action, f"restart accepted by systemd for {service}", command)
 
 
 def restart_bot() -> ControlResult:
