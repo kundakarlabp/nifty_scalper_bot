@@ -169,3 +169,45 @@ def test_open_breaker_cannot_be_relaxed_by_balance_reconciliation() -> None:
     risk.refresh_account_balance(force=True)
 
     assert risk._switches.max_day_loss == pytest.approx(2.96)
+
+
+def test_verified_zero_cash_never_uses_stale_positive_balance() -> None:
+    risk = RiskManager(
+        settings=RiskSettings(daily_loss_pct=5.0),
+        position_manager=_Positions(),
+        account_balance=15_059.20,
+    )
+    risk._data_hub = _VerifiedHub(0.0)
+
+    assert risk.refresh_account_balance(force=True) == pytest.approx(0.0)
+    assert risk.account_balance == pytest.approx(0.0)
+    assert risk.available_balance == pytest.approx(0.0)
+    assert risk.balance_source_label() == "live"
+
+
+def test_zero_cash_in_valid_margin_payload_is_not_replaced_by_cached_cash() -> None:
+    risk = RiskManager(
+        settings=RiskSettings(daily_loss_pct=5.0),
+        position_manager=_Positions(),
+        account_balance=15_059.20,
+    )
+
+    assert risk._extract_balance_from_payload(
+        {"equity": {"available": {"live_balance": 0.0}}}
+    ) == pytest.approx(0.0)
+
+
+def test_deposit_after_trade_cannot_bypass_frozen_daily_loss_switch() -> None:
+    risk = RiskManager(
+        settings=RiskSettings(daily_loss_pct=5.0),
+        position_manager=_Positions(trades=1),
+        account_balance=59.20,
+    )
+    risk._data_hub = _VerifiedHub(15_059.20)
+    risk.refresh_account_balance(force=True)
+    assert risk.account_balance == pytest.approx(15_059.20)
+    assert risk._switches.max_day_loss == pytest.approx(2.96)
+
+    risk._switches.record_pnl(-3.50)
+    assert risk._check_daily_loss_limit() is False
+    assert risk._breaker_tripped is True

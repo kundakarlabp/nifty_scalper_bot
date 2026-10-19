@@ -487,7 +487,11 @@ class RiskManager:
             if balance is None:
                 snapshot = hub.get_account_snapshot(force=force)
                 balance = self._extract_balance_from_payload(snapshot)
-            if balance is not None and balance > 0:
+            if (
+                balance is not None
+                and math.isfinite(float(balance))
+                and float(balance) >= 0.0
+            ):
                 self.account_balance = float(balance)
                 self._cached_balance = self.account_balance
                 self._available_balance = float(self._cached_balance)
@@ -657,14 +661,18 @@ class RiskManager:
             ]
             for path in candidates:
                 value = self._resolve_mapping_path(payload, path)
-                if value is not None and value > 0:
+                if value is not None and math.isfinite(value) and value >= 0:
                     return value
-        if isinstance(payload, (int, float)) and payload > 0:
+        if (
+            isinstance(payload, (int, float))
+            and math.isfinite(float(payload))
+            and payload >= 0
+        ):
             return float(payload)
         numeric: float | None = None
         with suppress(Exception):
             numeric = float(payload)
-        if numeric is not None and numeric > 0:
+        if numeric is not None and math.isfinite(numeric) and numeric >= 0:
             return numeric
         fallback_balance = getattr(self, "_cached_balance", 0.0)
         if fallback_balance and fallback_balance > 0:
@@ -690,7 +698,7 @@ class RiskManager:
                 numeric = float(current)
             if numeric is None:
                 return None
-        if numeric > 0:
+        if math.isfinite(numeric) and numeric >= 0:
             return numeric
         return None
 
@@ -1442,17 +1450,10 @@ class RiskManager:
 
     def _check_daily_loss_limit(self) -> bool:  # pragma: no cover
         loss = self._switches.day_loss()
-        pct_cap = max(self.account_balance, 0.0) * (
-            self._daily_loss_limit_pct() / 100.0
-        )
-        abs_cap = max(
-            float(getattr(self.settings, "max_daily_loss_absolute", 0.0)), 0.0
-        )
-        if pct_cap > 0 and abs_cap > 0:
-            cap = min(pct_cap, abs_cap)
-        else:
-            cap = max(pct_cap, abs_cap)
-        cap = max(cap, self._switches.max_day_loss)
+        # The reconciled per-day switch is the canonical loss limit. Recomputing
+        # from current broker funds here would silently relax a frozen cap after
+        # an intraday deposit despite the explicit post-trade rebase guard.
+        cap = max(float(self._switches.max_day_loss), 0.0)
         if cap <= 0:
             return True
         if loss >= cap:
