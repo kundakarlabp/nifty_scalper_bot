@@ -410,6 +410,10 @@ auto_release_should_defer() {
   local weekday hhmm
   weekday="$(TZ=Asia/Kolkata date +%u)" || return 0
   hhmm="$(TZ=Asia/Kolkata date +%H%M)" || return 0
+  # An unreadable or malformed clock can never authorize an auto restart.
+  if ! [[ "$weekday" =~ ^[1-7]$ && "$hhmm" =~ ^([01][0-9]|2[0-3])[0-5][0-9]$ ]]; then
+    return 0
+  fi
   if ! market_session_protected "$weekday" "$hhmm"; then
     return 1
   fi
