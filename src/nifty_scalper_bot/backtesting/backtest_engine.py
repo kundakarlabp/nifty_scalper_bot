@@ -76,10 +76,17 @@ class BacktestConfig:
     percent_of_equity: float = 0.1
     output_directory: Path = Path("backtest_reports")
     generate_visualizations: bool = True
+    # Legacy same-bar fills are retained for existing reports only. Use
+    # next_bar_open for causal bar-close research and production comparisons.
+    execution_timing: str = "same_bar_legacy"
 
     def validate(self) -> None:
         if self.initial_cash <= 0:
             raise ValueError("initial_cash must be positive")
+        if self.execution_timing not in {"same_bar_legacy", "next_bar_open"}:
+            raise ValueError(
+                "execution_timing must be next_bar_open or same_bar_legacy"
+            )
         if not 0 <= self.slippage_pct < 0.05:
             raise ValueError("slippage_pct must be between 0 and 0.05")
         if not 0 <= self.commission_pct < 0.05:
@@ -595,6 +602,15 @@ class BacktestEngine:
         self.strategy = strategy
         self.config = config or BacktestConfig()
         self.config.validate()
+        if self.data.index.has_duplicates:
+            raise ValueError("Market data contains duplicate timestamps")
+        if self.config.execution_timing == "next_bar_open":
+            if "open" not in self.data.columns:
+                raise ValueError("next_bar_open requires an observed open column")
+            if not pd.to_numeric(self.data["open"], errors="coerce").gt(0).all():
+                raise ValueError(
+                    "next_bar_open requires positive observed opening prices"
+                )
         self.orders: List[Order] = []
         self.trades: List[Trade] = []
         self._current_trade: Optional[Trade] = None
@@ -637,6 +653,10 @@ class BacktestEngine:
             performance = self._calculate_performance(equity_curve)
             analytics = self._build_analytics(equity_curve)
             analytics["max_drawdown"] = performance.get("max_drawdown", 0.0)
+            analytics["execution_timing"] = self.config.execution_timing
+            analytics["execution_timing_causal"] = (
+                self.config.execution_timing == "next_bar_open"
+            )
             if parity is not None:
                 parity_summary = self._run_pipeline_parity(parity, parity_frame)
                 analytics["pipeline_parity"] = parity_summary
@@ -704,14 +724,27 @@ class BacktestEngine:
         position = 0
         equity_history: List[Tuple[pd.Timestamp, float, float, int]] = []
         previous_timestamp: pd.Timestamp | None = None
+        # Bar-complete signals may not fill at that bar's closing price.
+        # One-bar delayed mode executes against the next observed open;
+        # the legacy mode remains explicit for historical report parity.
+        executable_signals = (
+            signals.shift(1, fill_value=0)
+            if self.config.execution_timing == "next_bar_open"
+            else signals
+        )
         for timestamp, row in self.data.iterrows():
             if previous_timestamp is not None:
                 latency = (timestamp - previous_timestamp).total_seconds()
                 if latency >= 0:
                     self._tick_latencies.append(latency)
             previous_timestamp = timestamp
-            signal = signals.loc[timestamp]
-            price = float(row[self.config.price_column])
+            signal = executable_signals.loc[timestamp]
+            mark_price = float(row[self.config.price_column])
+            price = (
+                float(row["open"])
+                if self.config.execution_timing == "next_bar_open"
+                else mark_price
+            )
             target_position = self._target_position(signal, cash, position, price)
 
             if (
@@ -731,7 +764,7 @@ class BacktestEngine:
                 cash = self.orders[-1].cash_balance
                 position = target_position
 
-            equity = cash + position * price
+            equity = cash + position * mark_price
             equity_history.append((timestamp, equity, cash, position))
 
         equity_df = pd.DataFrame(
@@ -1902,7 +1935,15 @@ def run_quick_backtest(
         )
         data = _load_market_data(symbol, days, history_dir)
         strategy = _RSIMeanReversionBridge(symbol)
-        config = BacktestConfig(generate_visualizations=False)
+        # Use the causally available next opening price when supplied;
+        # never invent historical bid/ask or an opening quote.
+        timing = "next_bar_open" if "open" in data.columns else "same_bar_legacy"
+        if timing == "same_bar_legacy":
+            LOGGER.warning(
+                "QUICK_BACKTEST_LEGACY_EXECUTION no_open_column: "
+                "same-bar close fills may overstate realized performance"
+            )
+        config = BacktestConfig(generate_visualizations=False, execution_timing=timing)
         engine = BacktestEngine(data, strategy, config)
         result = engine.run()
         total_pnl = float(sum(trade.pnl for trade in result.trades))

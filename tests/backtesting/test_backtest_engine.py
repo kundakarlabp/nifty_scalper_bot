@@ -263,3 +263,67 @@ def test_load_market_data_filters_symbol_and_localises_timezone(tmp_path: Path) 
     assert loaded.index.tz == timezone.utc
     assert "symbol" not in loaded.columns
     assert "close" in loaded.columns
+
+
+def test_causal_next_bar_open_never_fills_signal_on_its_own_bar(tmp_path: Path) -> None:
+    class _Signal:
+        name = "causal_fill"
+
+        def generate_signals(self, data: pd.DataFrame) -> pd.Series:
+            return pd.Series([1, 0, 0, 0], index=data.index)
+
+    data = pd.DataFrame(
+        {
+            "open": [98.0, 115.0, 135.0, 145.0],
+            "close": [100.0, 120.0, 140.0, 150.0],
+        },
+        index=pd.date_range("2026-09-24T09:30:00+05:30", periods=4, freq="min"),
+    )
+    result = BacktestEngine(
+        data,
+        _Signal(),
+        be.BacktestConfig(
+            execution_timing="next_bar_open",
+            commission_pct=0.0,
+            slippage_pct=0.0,
+            fixed_quantity=10,
+            output_directory=tmp_path,
+            generate_visualizations=False,
+        ),
+    ).run()
+    assert len(result.orders) == 2
+    assert result.orders[0].timestamp == data.index[1]
+    assert result.orders[0].price == pytest.approx(115.0)
+    assert result.orders[1].timestamp == data.index[2]
+    assert result.orders[1].price == pytest.approx(135.0)
+    assert result.analytics["execution_timing_causal"] is True
+
+
+def test_causal_next_bar_open_rejects_missing_open_without_strategy_eval() -> None:
+    class _NoEvaluate:
+        name = "must_not_evaluate"
+
+        def generate_signals(self, data: pd.DataFrame) -> pd.Series:
+            raise AssertionError("invalid data reached strategy")
+
+    data = pd.DataFrame(
+        {"close": [100.0, 110.0]},
+        index=pd.date_range("2026-09-24T09:30:00+05:30", periods=2, freq="min"),
+    )
+    with pytest.raises(ValueError, match="observed open column"):
+        BacktestEngine(
+            data, _NoEvaluate(), be.BacktestConfig(execution_timing="next_bar_open")
+        )
+
+
+def test_backtest_rejects_duplicate_timestamps_before_strategy_eval() -> None:
+    class _NoEvaluate:
+        name = "duplicates"
+
+        def generate_signals(self, data: pd.DataFrame) -> pd.Series:
+            raise AssertionError("invalid data reached strategy")
+
+    stamp = pd.Timestamp("2026-09-24T09:30:00+05:30")
+    data = pd.DataFrame({"close": [100.0, 100.0]}, index=[stamp, stamp])
+    with pytest.raises(ValueError, match="duplicate timestamps"):
+        BacktestEngine(data, _NoEvaluate())
