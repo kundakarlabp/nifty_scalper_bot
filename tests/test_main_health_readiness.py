@@ -959,7 +959,6 @@ def test_no_trade_diagnostics_does_not_fabricate_a_strategy_evaluation() -> None
     assert diagnosis["reason"] == "awaiting_strategy_evaluations"
 
 
-
 def test_no_trade_diagnostics_uses_cumulative_candidates_across_windows() -> None:
     signals = {
         "completed_strategy_evaluations_window": {"SMC": 8},
