@@ -758,9 +758,7 @@ class BacktestEngine:
         checkpoints = sorted(
             {
                 first_prefix
-                + round(
-                    (last_prefix - first_prefix) * sample / max(count - 1, 1)
-                )
+                + round((last_prefix - first_prefix) * sample / max(count - 1, 1))
                 for sample in range(count)
             }
         )
