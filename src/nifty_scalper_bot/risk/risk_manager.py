@@ -663,7 +663,11 @@ class RiskManager:
                 value = self._resolve_mapping_path(payload, path)
                 if value is not None and math.isfinite(value) and value >= 0:
                     return value
-        if isinstance(payload, (int, float)) and math.isfinite(float(payload)) and payload >= 0:
+        if (
+            isinstance(payload, (int, float))
+            and math.isfinite(float(payload))
+            and payload >= 0
+        ):
             return float(payload)
         numeric: float | None = None
         with suppress(Exception):
