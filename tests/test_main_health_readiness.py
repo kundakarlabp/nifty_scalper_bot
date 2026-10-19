@@ -973,7 +973,6 @@ def test_no_trade_diagnostics_uses_cumulative_candidates_across_windows() -> Non
     assert diagnostics["candidate_approved_since_start"] == 2
 
 
-
 def test_no_trade_diagnostics_reports_ranked_rejection_funnel() -> None:
     diagnostic = main._no_trade_diagnostics(
         {
