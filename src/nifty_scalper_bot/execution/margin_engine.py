@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import os
 from datetime import datetime, time
 from typing import Any, Literal, Mapping
 
@@ -257,8 +258,10 @@ class MarginEngine:
                 pass
         # A configured DataHub that cannot report usable funds must not
         # silently fall back to the caller's potentially stale balance.
-        if hub is not None:
+        if hub is not None and os.getenv("EXECUTION_MODE", "").upper() == "LIVE":
             return 0.0
+        # Legacy offline/PAPER harnesses may intentionally supply a static
+        # simulation balance in the absence of a broker-funds authority.
         return max(float(fallback), 0.0)
 
     def _extract_balance_from_snapshot(self, snapshot: object) -> float | None:
