@@ -16667,7 +16667,9 @@ class StrategyRunner:
                     self._strategy_window_symbols.add(symbol)
                     if signal is not None:
                         self._candidate_counter += 1
-                        self._candidate_total_count += 1
+                        self._candidate_total_count = (
+                            getattr(self, "_candidate_total_count", 0) + 1
+                        )
                         self._strategy_window_signals += 1
 
                         # --- Objective 8: Prometheus metrics ---
@@ -19837,7 +19839,9 @@ class StrategyRunner:
             self._structural_approved_counter = (
                 getattr(self, "_structural_approved_counter", 0) + 1
             )
-            self._structural_approved_total_count += 1
+            self._structural_approved_total_count = (
+                getattr(self, "_structural_approved_total_count", 0) + 1
+            )
             self._logger.info(
                 "SIGNAL_APPROVED symbol=%s strategy=%s side=%s "
                 "approval_path=%s trace_id=%s",
