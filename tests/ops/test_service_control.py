@@ -23,11 +23,20 @@ def test_restart_service_requires_systemd_acceptance(monkeypatch) -> None:
         return SimpleNamespace(returncode=0)
 
     monkeypatch.setattr(sc.subprocess, "run", fake_run)
-    result = sc.restart_service("niftybot-autodeploy.service", action="restart_deployer")
+    result = sc.restart_service(
+        "niftybot-autodeploy.service", action="restart_deployer"
+    )
 
     assert result.ok is True
     assert calls == [
-        ["sudo", "-n", "systemctl", "restart", "--no-block", "niftybot-autodeploy.service"]
+        [
+            "sudo",
+            "-n",
+            "systemctl",
+            "restart",
+            "--no-block",
+            "niftybot-autodeploy.service",
+        ]
     ]
 
 
