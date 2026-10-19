@@ -148,10 +148,10 @@ class MarginEngine:
             )
 
         available = self._resolve_available_margin(fallback_balance)
-        effective_inputs = replace(
-            inputs,
-            balance=available if available > 0 else fallback_balance,
-        )
+        # The resolved balance is authoritative, including a verified zero.
+        # Falling back to an earlier positive balance could size a BUY after
+        # the broker has reported that available cash was depleted.
+        effective_inputs = replace(inputs, balance=available)
         max_units = self._max_qty_from_risk(effective_inputs)
         max_lot_qty = lot_size * max(int(inputs.max_lots_per_trade), 0)
         if max_lot_qty > 0:
@@ -243,7 +243,7 @@ class MarginEngine:
             try:
                 raw = hub.get_available_balance(force=force)
                 available = float(raw) if raw is not None else 0.0
-                if available > 0:
+                if 0.0 <= available < float("inf"):
                     return available
             except Exception:  # noqa: BLE001
                 pass
@@ -255,6 +255,10 @@ class MarginEngine:
                     return extracted
             except Exception:  # noqa: BLE001
                 pass
+        # A configured DataHub that cannot report usable funds must not
+        # silently fall back to the caller's potentially stale balance.
+        if hub is not None:
+            return 0.0
         return max(float(fallback), 0.0)
 
     def _extract_balance_from_snapshot(self, snapshot: object) -> float | None:
@@ -284,7 +288,7 @@ class MarginEngine:
                     parsed = float(value)  # type: ignore[arg-type]
                 except (TypeError, ValueError):
                     continue
-                if parsed > 0:
+                if 0.0 <= parsed < float("inf"):
                     return parsed
         return None
 
