@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -377,6 +379,132 @@ auto_release_should_defer
             check=False,
         )
         assert (result.returncode == 0) is defer, (mode, weekday, result.stderr)
+
+
+def test_auto_release_allows_intraday_only_with_broker_flat_proof() -> None:
+    helpers = _market_session_release_helpers()
+    shell = helpers + """
+AUTO_MODE="$1"
+FAKE_DAY="$2"
+FAKE_CLOCK="$3"
+SAFE="$4"
+date() {
+  case "$1" in
+    +%u) printf '%s' "$FAKE_DAY";;
+    +%H%M) printf '%s' "$FAKE_CLOCK";;
+    *) return 1;;
+  esac
+}
+intraday_flat_broker_confirmed() { [ "$SAFE" = "true" ]; }
+auto_release_should_defer
+"""
+    cases = (
+        ("true", "1", "1425", "true", False),
+        ("true", "1", "1425", "false", True),
+        ("true", "1", "0930", "true", False),
+        ("true", "1", "1545", "true", False),
+        ("true", "1", "2580", "true", True),
+        ("true", "", "", "true", True),
+        ("true", "1", "1546", "false", False),
+        ("true", "6", "1100", "false", False),
+        ("false", "1", "1425", "false", False),
+    )
+    for mode, day, clock, safe, defer in cases:
+        result = subprocess.run(
+            ["bash", "-c", shell, "fixture", mode, day, clock, safe],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert (result.returncode == 0) is defer, (
+            mode,
+            day,
+            clock,
+            safe,
+            result.stderr,
+        )
+
+
+def test_intraday_guard_requires_authoritative_flat_broker_and_engine() -> None:
+    """Run only the read-only Python guard, with injected offline Kite replies."""
+    import json
+
+    release = _text("deploy/lightsail_release.sh")
+    guard = release.split("<<'PY_FLAT_GUARD'\n", 1)[1].split("\nPY_FLAT_GUARD", 1)[0]
+    harness = """
+import io
+import json
+import os
+import sys
+import time
+import types
+import urllib.request
+
+class FakeKite:
+    def __init__(self, **kwargs):
+        pass
+
+    def set_access_token(self, token):
+        pass
+
+    def positions(self):
+        return json.loads(os.environ["TEST_POSITIONS"])
+
+    def orders(self):
+        return json.loads(os.environ["TEST_ORDERS"])
+
+def fake_urlopen(url, timeout=3):
+    return io.BytesIO(os.environ["TEST_HEALTH"].encode())
+
+sys.modules["kiteconnect"] = types.SimpleNamespace(KiteConnect=FakeKite)
+urllib.request.urlopen = fake_urlopen
+time.sleep = lambda seconds: None
+exec(compile(os.environ["TEST_GUARD"], "<flat-guard>", "exec"))
+"""
+    healthy = {
+        "live_orders_armed": True,
+        "broker": {"authenticated": True},
+        "reconciliation": {
+            "completed": True,
+            "failed": False,
+            "unprotected_positions": [],
+        },
+    }
+    flat = {"net": [{"quantity": 0}], "day": [{"quantity": 0}]}
+    cases = (
+        (healthy, flat, [], True),
+        (healthy, {"net": [{"quantity": 65}], "day": []}, [], False),
+        (healthy, flat, [{"status": "TRIGGER PENDING"}], False),
+        (healthy, flat, [{"status": "COMPLETE"}], True),
+        (healthy, {"net": [{}], "day": []}, [], False),
+        ({**healthy, "reconciliation": {"completed": False}}, flat, [], False),
+        ({**healthy, "broker": {"authenticated": False}}, flat, [], False),
+        (healthy, {"net": []}, [], False),
+    )
+    for health, positions, orders, expected in cases:
+        result = subprocess.run(
+            [sys.executable, "-c", harness],
+            env={
+                **os.environ,
+                "TEST_GUARD": guard,
+                "TEST_HEALTH": json.dumps(health),
+                "TEST_POSITIONS": json.dumps(positions),
+                "TEST_ORDERS": json.dumps(orders),
+                "BOT_RELEASE_KITE_API_KEY": "fake",
+                "BOT_RELEASE_KITE_ACCESS_TOKEN": "fake",
+                "BOT_RELEASE_LOCAL_PORT": "8080",
+            },
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=8,
+        )
+        assert (result.returncode == 0) is expected, (
+            health,
+            positions,
+            orders,
+            result.stderr,
+        )
 
 
 def test_auto_market_gate_preserves_health_recovery_and_research_poll() -> None:
