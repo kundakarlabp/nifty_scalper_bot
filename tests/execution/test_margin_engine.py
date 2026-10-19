@@ -344,7 +344,6 @@ def test_option_affordability_uses_selected_premium_not_underlying() -> None:
     assert decision.est_required == pytest.approx(7_800.0)
 
 
-
 class _FundsHub:
     def __init__(self, amount=None, snapshot=None):
         self.amount = amount
