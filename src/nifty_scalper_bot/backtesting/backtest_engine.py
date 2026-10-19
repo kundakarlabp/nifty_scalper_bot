@@ -84,7 +84,9 @@ class BacktestConfig:
         if self.initial_cash <= 0:
             raise ValueError("initial_cash must be positive")
         if self.execution_timing not in {"same_bar_legacy", "next_bar_open"}:
-            raise ValueError("execution_timing must be next_bar_open or same_bar_legacy")
+            raise ValueError(
+                "execution_timing must be next_bar_open or same_bar_legacy"
+            )
         if not 0 <= self.slippage_pct < 0.05:
             raise ValueError("slippage_pct must be between 0 and 0.05")
         if not 0 <= self.commission_pct < 0.05:
@@ -606,7 +608,9 @@ class BacktestEngine:
             if "open" not in self.data.columns:
                 raise ValueError("next_bar_open requires an observed open column")
             if not pd.to_numeric(self.data["open"], errors="coerce").gt(0).all():
-                raise ValueError("next_bar_open requires positive observed opening prices")
+                raise ValueError(
+                    "next_bar_open requires positive observed opening prices"
+                )
         self.orders: List[Order] = []
         self.trades: List[Trade] = []
         self._current_trade: Optional[Trade] = None
