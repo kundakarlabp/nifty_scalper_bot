@@ -265,7 +265,6 @@ def test_load_market_data_filters_symbol_and_localises_timezone(tmp_path: Path) 
     assert "close" in loaded.columns
 
 
-
 def test_causal_next_bar_open_never_fills_signal_on_its_own_bar(tmp_path: Path) -> None:
     class _Signal:
         name = "causal_fill"
