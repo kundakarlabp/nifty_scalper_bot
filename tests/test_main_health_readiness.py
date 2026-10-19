@@ -971,3 +971,44 @@ def test_no_trade_diagnostics_uses_cumulative_candidates_across_windows() -> Non
     assert diagnostics["reason"] == "approved_candidate_seen_since_start"
     assert diagnostics["candidate_generated_since_start"] == 5
     assert diagnostics["candidate_approved_since_start"] == 2
+
+
+
+def test_no_trade_diagnostics_reports_ranked_rejection_funnel() -> None:
+    diagnostic = main._no_trade_diagnostics(
+        {
+            "completed_strategy_evaluations_window": {"ORBPro": 5, "SMC": 5},
+            "no_vote_reason_counts_by_strategy_window": {
+                "ORBPro": {"non_breakout_regime": 4, "history_cold": 1},
+                "SMC": {"history_cold": 2, "underlying_no_liquidity_sweep": 3},
+            },
+            "candidate_generated_count": 0,
+            "approved_candidate_count": 0,
+        },
+        {},
+    )
+
+    assert diagnostic["basis"] == "recent_window"
+    assert diagnostic["dominant_rejection_reasons"] == [
+        {"reason": "non_breakout_regime", "occurrences": 4},
+        {"reason": "history_cold", "occurrences": 3},
+        {"reason": "underlying_no_liquidity_sweep", "occurrences": 3},
+    ]
+    assert diagnostic["rejection_counts_semantics"].endswith("_not_trades")
+
+
+def test_no_trade_diagnostics_ignores_invalid_or_empty_rejection_counts() -> None:
+    diagnostic = main._no_trade_diagnostics(
+        {
+            "completed_strategy_evaluations_total": {"SMC": 4},
+            "no_vote_reason_counts_by_strategy_total": {
+                "SMC": {"unknown": -3, "bad_count": "5", "yes": True},
+            },
+            "candidate_generated_count": 0,
+        },
+        None,
+    )
+
+    assert diagnostic["basis"] == "since_start"
+    assert diagnostic["dominant_rejection_reasons"] == []
+    assert diagnostic["top_no_vote_reason_by_strategy"] == {}
