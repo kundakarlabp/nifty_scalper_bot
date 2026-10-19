@@ -415,7 +415,11 @@ auto_release_should_defer
             check=False,
         )
         assert (result.returncode == 0) is defer, (
-            mode, day, clock, safe, result.stderr,
+            mode,
+            day,
+            clock,
+            safe,
+            result.stderr,
         )
 
 
@@ -424,9 +428,7 @@ def test_intraday_guard_requires_authoritative_flat_broker_and_engine() -> None:
     import json
 
     release = _text("deploy/lightsail_release.sh")
-    guard = release.split("<<'PY_FLAT_GUARD'\n", 1)[1].split(
-        "\nPY_FLAT_GUARD", 1
-    )[0]
+    guard = release.split("<<'PY_FLAT_GUARD'\n", 1)[1].split("\nPY_FLAT_GUARD", 1)[0]
     harness = """
 import io
 import json
@@ -496,7 +498,10 @@ exec(compile(os.environ["TEST_GUARD"], "<flat-guard>", "exec"))
             timeout=8,
         )
         assert (result.returncode == 0) is expected, (
-            health, positions, orders, result.stderr,
+            health,
+            positions,
+            orders,
+            result.stderr,
         )
 
 
