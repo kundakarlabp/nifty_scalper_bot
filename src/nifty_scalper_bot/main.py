@@ -608,10 +608,31 @@ def _no_trade_diagnostics(
         reasons = signals.get("no_vote_reason_counts_by_strategy_total") or {}
         basis = "since_start"
     top_reasons = {}
+    reason_occurrences: dict[str, int] = {}
     for strategy, counts in reasons.items():
-        if isinstance(counts, dict) and counts:
-            reason, count = max(counts.items(), key=lambda item: item[1])
-            top_reasons[strategy] = {"reason": reason, "count": count}
+        if not isinstance(counts, dict):
+            continue
+        positive_counts = {
+            str(reason): count
+            for reason, value in counts.items()
+            if not isinstance(value, bool)
+            and isinstance(value, int)
+            and (count := value) > 0
+        }
+        if not positive_counts:
+            continue
+        reason, count = max(
+            positive_counts.items(), key=lambda item: (item[1], item[0])
+        )
+        top_reasons[str(strategy)] = {"reason": reason, "count": count}
+        for key, value in positive_counts.items():
+            reason_occurrences[key] = reason_occurrences.get(key, 0) + value
+    dominant_rejection_reasons = [
+        {"reason": key, "occurrences": count}
+        for key, count in sorted(
+            reason_occurrences.items(), key=lambda item: (-item[1], item[0])
+        )[:8]
+    ]
     candidates = signals.get("candidate_generated_count")
     approved = signals.get("approved_candidate_count")
     if not evaluated:
@@ -634,6 +655,8 @@ def _no_trade_diagnostics(
         "basis": basis,
         "strategy_evaluations": evaluated,
         "top_no_vote_reason_by_strategy": top_reasons,
+        "dominant_rejection_reasons": dominant_rejection_reasons,
+        "rejection_counts_semantics": "per_strategy_evaluation_occurrences_not_trades",
         "candidate_generated_since_start": candidates,
         "candidate_approved_since_start": approved,
         "risk_limited_contracts": risk_limited,
