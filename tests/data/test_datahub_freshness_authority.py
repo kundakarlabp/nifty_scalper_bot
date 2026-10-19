@@ -92,3 +92,39 @@ def test_is_fresh_preserves_datahub_cache_fallback_without_mdm_tick() -> None:
 
     assert fresh is True
     assert float(meta["effective_ms"]) < 1_000.0
+
+
+class _AsyncAccountMDM:
+    def __init__(self, *, live=None, raises=False):
+        self.live = live
+        self.raises = raises
+        self._account_snapshot = {"available": 8000.0}
+
+    def attach_tick_bus(self, _bus):
+        return None
+
+    def get_available_balance(self, *, force=False):
+        if self.raises:
+            raise RuntimeError("broker unavailable")
+        return self.live
+
+    async def get_account_snapshot(self, *, force=False):
+        return {"available": 9000.0}
+
+
+def test_force_snapshot_does_not_use_async_mdm_cache_as_live_funds() -> None:
+    hub = DataHub(_AsyncAccountMDM(live=None))
+    assert hub.get_available_balance(force=True) is None
+    assert hub.get_account_snapshot(force=True) == {}
+    assert hub.get_account_snapshot(force=False) == {"available": 8000.0}
+
+
+def test_funds_delegate_failure_does_not_resurrect_cached_balance() -> None:
+    hub = DataHub(_AsyncAccountMDM(raises=True))
+    assert hub.get_available_balance(force=True) is None
+    assert hub.get_available_balance(force=False) is None
+
+
+def test_real_zero_cash_overrides_stale_positive_snapshot() -> None:
+    hub = DataHub(_AsyncAccountMDM(live=0.0))
+    assert hub.get_available_balance(force=True) == 0.0
