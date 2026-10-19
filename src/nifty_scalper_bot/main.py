@@ -15,6 +15,7 @@ import socket
 import sys
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 from dotenv import load_dotenv
@@ -587,6 +588,54 @@ def _signal_observability(ctx):  # noqa: ANN001
     }
 
 
+def _no_trade_diagnostics(
+    signals: dict[str, Any], affordability: dict[str, Any] | None
+) -> dict[str, Any]:
+    """Explain no-entry telemetry without changing live admission policy."""
+    if not signals:
+        return {"reason": "strategy_telemetry_unavailable", "basis": "unknown"}
+    evaluated = signals.get("completed_strategy_evaluations_window") or {}
+    reasons = signals.get("no_vote_reason_counts_by_strategy_window") or {}
+    basis = "recent_window"
+    if not evaluated:
+        evaluated = signals.get("completed_strategy_evaluations_total") or {}
+        reasons = signals.get("no_vote_reason_counts_by_strategy_total") or {}
+        basis = "since_start"
+    top_reasons = {}
+    for strategy, counts in reasons.items():
+        if isinstance(counts, dict) and counts:
+            reason, count = max(counts.items(), key=lambda item: item[1])
+            top_reasons[strategy] = {"reason": reason, "count": count}
+    candidates = signals.get("candidate_generated_count")
+    approved = signals.get("approved_candidate_count")
+    if not evaluated:
+        reason = "awaiting_strategy_evaluations"
+    elif candidates == 0:
+        reason = "no_valid_strategy_trigger_since_start"
+    elif approved == 0:
+        reason = "candidates_not_approved_since_start"
+    else:
+        reason = "approved_candidate_seen_since_start"
+    # Cash affordability is not stop-risk affordability; report known risk
+    # failures separately rather than claiming a broker or engine outage.
+    risk_limited = sorted(
+        str(symbol)
+        for symbol, evidence in (affordability or {}).items()
+        if isinstance(evidence, dict) and evidence.get("capacity_blocker") == "risk"
+    )
+    return {
+        "reason": reason,
+        "basis": basis,
+        "strategy_evaluations": evaluated,
+        "top_no_vote_reason_by_strategy": top_reasons,
+        "candidate_generated_since_start": candidates,
+        "candidate_approved_since_start": approved,
+        "risk_limited_contracts": risk_limited,
+        "risk_limit_is_independent_of_signal_generation": True,
+        "setup_lifecycle": signals.get("setup_lifecycle") or {},
+    }
+
+
 def _bar_minute_identity(row):  # noqa: ANN001
     """Canonical UTC minute key for observational candle comparison."""
     from datetime import datetime, timezone
@@ -972,6 +1021,10 @@ def health_trading():
     reconciliation_completed = bool(
         getattr(ctx, "position_reconciliation_completed", False)
     )
+    signal_observability = _signal_observability(ctx)
+    no_trade_diagnostics = _no_trade_diagnostics(
+        signal_observability, structured_status.get("minimum_lot_affordability")
+    )
     return JSONResponse(
         status_code=200,
         content={
@@ -1013,7 +1066,8 @@ def health_trading():
                     )
                 ),
             },
-            "signal_observability": _signal_observability(ctx),
+            "signal_observability": signal_observability,
+            "no_trade_diagnostics": no_trade_diagnostics,
             "live_order_readiness": live_order_readiness,
             "reconciliation": {
                 "started": bool(getattr(ctx, "position_reconciliation_started", False)),

@@ -9,6 +9,12 @@ from nifty_scalper_bot.risk.risk_manager import OrderSignal, RiskManager
 
 
 class _Positions:
+    def __init__(self, trades: int = 0) -> None:
+        self._trades = trades
+
+    def trades_today(self) -> int:
+        return self._trades
+
     def get_all_positions(self):
         return []
 
@@ -102,3 +108,64 @@ def test_daily_risk_rejection_reports_full_cap_when_no_loss_today(monkeypatch) -
     assert risk._last_rejection == "DAILY_RISK_BUDGET"
     assert risk._switches.day_loss() == pytest.approx(0.0)
     assert risk._switches.max_day_loss == pytest.approx(311.792)
+
+
+class _VerifiedHub:
+    def __init__(self, available: float) -> None:
+        self.available = available
+
+    def get_available_balance(self, *, force: bool = False) -> float:
+        return self.available
+
+
+def test_verified_broker_funds_repair_startup_day_cap_before_first_trade() -> None:
+    risk = RiskManager(
+        settings=RiskSettings(daily_loss_pct=5.0, per_trade_risk_pct=5.0),
+        position_manager=_Positions(),
+        account_balance=59.20,
+    )
+    assert risk._switches.max_day_loss == pytest.approx(2.96)
+    risk._data_hub = _VerifiedHub(15_059.20)
+
+    assert risk.refresh_account_balance(force=True) == pytest.approx(15_059.20)
+    assert risk._switches.max_day_loss == pytest.approx(752.96)
+    assert risk._switches.day_loss() == pytest.approx(0.0)
+
+
+def test_verified_deposit_cannot_increase_day_cap_after_a_trade() -> None:
+    risk = RiskManager(
+        settings=RiskSettings(daily_loss_pct=5.0),
+        position_manager=_Positions(trades=1),
+        account_balance=59.20,
+    )
+    risk._data_hub = _VerifiedHub(15_059.20)
+
+    assert risk.refresh_account_balance(force=True) == pytest.approx(15_059.20)
+    assert risk._switches.max_day_loss == pytest.approx(2.96)
+
+
+def test_verified_balance_decrease_tightens_risk_even_after_trade() -> None:
+    risk = RiskManager(
+        settings=RiskSettings(daily_loss_pct=5.0),
+        position_manager=_Positions(trades=1),
+        account_balance=15_059.20,
+    )
+    risk._data_hub = _VerifiedHub(10_000.0)
+
+    risk.refresh_account_balance(force=True)
+
+    assert risk._switches.max_day_loss == pytest.approx(500.0)
+
+
+def test_open_breaker_cannot_be_relaxed_by_balance_reconciliation() -> None:
+    risk = RiskManager(
+        settings=RiskSettings(daily_loss_pct=5.0),
+        position_manager=_Positions(),
+        account_balance=59.20,
+    )
+    risk._breaker_tripped = True
+    risk._data_hub = _VerifiedHub(15_059.20)
+
+    risk.refresh_account_balance(force=True)
+
+    assert risk._switches.max_day_loss == pytest.approx(2.96)

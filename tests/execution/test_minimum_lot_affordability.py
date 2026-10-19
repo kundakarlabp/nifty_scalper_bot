@@ -104,3 +104,48 @@ def test_missing_ask_fails_closed_without_ltp_substitution() -> None:
     assert result.determinate is False
     assert result.affordable is False
     assert result.reason == "executable_quote_unavailable"
+
+
+def test_known_day_cap_below_one_tick_makes_an_option_lot_non_executable() -> None:
+    manager = _LiveOrderManager()
+    manager._risk_manager = SimpleNamespace(
+        account_balance=59.20,
+        settings=SimpleNamespace(per_trade_risk_pct=5.0),
+        _switches=SimpleNamespace(max_day_loss=2.96, day_loss=lambda: 0.0),
+        _completed_trade_costs_today=0.0,
+    )
+
+    result = evaluate_minimum_lot_affordability(
+        symbol="NFO:NIFTY26O1922850CE",
+        quote={"bid": 45.8, "ask": 45.85, "tick_size": 0.05},
+        order_manager=manager,
+        data_hub=_Hub(15_059.20),
+    )
+
+    assert result.cash_affordable is True
+    assert result.remaining_daily_risk_budget == 2.96
+    assert result.max_stop_distance_one_lot < 0.05
+    assert result.affordable is False
+    assert result.capacity_blocker == "risk"
+    assert result.reason == "minimum_lot_one_tick_risk_unaffordable"
+
+
+def test_no_materialized_stop_remains_eligible_with_adequate_day_cap() -> None:
+    manager = _LiveOrderManager()
+    manager._risk_manager = SimpleNamespace(
+        account_balance=15_059.20,
+        settings=SimpleNamespace(per_trade_risk_pct=5.0),
+        _switches=SimpleNamespace(max_day_loss=752.96, day_loss=lambda: 0.0),
+        _completed_trade_costs_today=0.0,
+    )
+
+    result = evaluate_minimum_lot_affordability(
+        symbol="NFO:NIFTY26O1922850CE",
+        quote={"bid": 45.8, "ask": 45.85, "tick_size": 0.05},
+        order_manager=manager,
+        data_hub=_Hub(15_059.20),
+    )
+
+    assert result.affordable is True
+    assert result.capacity_blocker is None
+    assert result.plan_risk_affordable is None

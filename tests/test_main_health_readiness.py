@@ -911,3 +911,49 @@ def test_health_trading_exposes_signal_observability_without_changing_readiness(
     )
     assert observability["last_trigger_qualified_age_sec"] == 42.5
     assert body["live_order_readiness"]["ready"] is True
+    diagnostic = body["no_trade_diagnostics"]
+    assert diagnostic["reason"] == "candidates_not_approved_since_start"
+    assert diagnostic["basis"] == "recent_window"
+    assert diagnostic["top_no_vote_reason_by_strategy"]["ORBPro"] == {
+        "reason": "non_breakout_regime",
+        "count": 4,
+    }
+
+
+def test_no_trade_diagnostics_separates_missing_signal_from_risk_gate() -> None:
+    signals = {
+        "completed_strategy_evaluations_window": {"SMC": 12},
+        "no_vote_reason_counts_by_strategy_window": {
+            "SMC": {"underlying_no_liquidity_sweep": 12}
+        },
+        "candidate_generated_count": 0,
+        "approved_candidate_count": 0,
+        "setup_lifecycle": {"terminal_counts": {"EXPIRED": 1}},
+    }
+    affordability = {
+        "NFO:NIFTY26O1922850PE": {
+            "cash_affordable": True,
+            "capacity_blocker": "risk",
+            "reason": "minimum_lot_one_tick_risk_unaffordable",
+        }
+    }
+
+    diagnosis = main._no_trade_diagnostics(signals, affordability)
+
+    assert diagnosis["reason"] == "no_valid_strategy_trigger_since_start"
+    assert diagnosis["risk_limited_contracts"] == ["NFO:NIFTY26O1922850PE"]
+    assert diagnosis["top_no_vote_reason_by_strategy"]["SMC"]["count"] == 12
+    assert diagnosis["setup_lifecycle"]["terminal_counts"]["EXPIRED"] == 1
+
+
+def test_no_trade_diagnostics_does_not_fabricate_a_strategy_evaluation() -> None:
+    diagnosis = main._no_trade_diagnostics(
+        {
+            "completed_strategy_evaluations_window": {},
+            "completed_strategy_evaluations_total": {},
+            "candidate_generated_count": 0,
+        },
+        {},
+    )
+
+    assert diagnosis["reason"] == "awaiting_strategy_evaluations"
