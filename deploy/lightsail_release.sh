@@ -326,9 +326,9 @@ poll_research_request() {
 }
 
 
-# Routine updates must never restart live trading or protective-order management
-# during the market session. Use an explicit manual release for emergencies.
-# The buffer covers pre-open preparation and post-close exit reconciliation.
+# The trading window is not a blanket auto-deployment ban. During it,
+# demand broker-confirmed flatness and reconciled engine state at every mutation
+# boundary. No proof = defer; never terminate an active protective-order manager.
 market_session_protected() {
   local weekday="$1" hhmm="$2"
   # An unreadable clock fails closed for automatic releases.
@@ -338,12 +338,84 @@ market_session_protected() {
   [[ "$weekday" =~ ^[1-5]$ && "$hhmm" > "0759" && "$hhmm" < "1546" ]]
 }
 
+intraday_flat_broker_confirmed() {
+  local api_key access_token
+  api_key="$(first_nonempty_env BROKER_API_KEY ZERODHA_API_KEY KITE_API_KEY 2>/dev/null || true)"
+  access_token="$(first_nonempty_env BROKER_ACCESS_TOKEN ZERODHA_ACCESS_TOKEN KITE_ACCESS_TOKEN 2>/dev/null || true)"
+  if [ -z "$api_key" ] || [ -z "$access_token" ] || [ ! -x "$VENV/bin/python" ]; then
+    log "intraday_release_guard_blocked: broker credentials or Python unavailable"
+    return 1
+  fi
+  BOT_RELEASE_KITE_API_KEY="$api_key" BOT_RELEASE_KITE_ACCESS_TOKEN="$access_token" \
+    BOT_RELEASE_LOCAL_PORT="$PORT" "$VENV/bin/python" - <<'PY_FLAT_GUARD'
+import json
+import os
+import sys
+import time
+import urllib.request
+
+from kiteconnect import KiteConnect
+
+TERMINAL = {"COMPLETE", "CANCELLED", "REJECTED", "LAPSED"}
+port = int(os.environ["BOT_RELEASE_LOCAL_PORT"])
+kite = KiteConnect(api_key=os.environ["BOT_RELEASE_KITE_API_KEY"], timeout=5)
+kite.set_access_token(os.environ["BOT_RELEASE_KITE_ACCESS_TOKEN"])
+
+def is_safe() -> bool:
+    with urllib.request.urlopen(f"http://127.0.0.1:{port}/health/trading", timeout=3) as response:
+        health = json.load(response)
+    reconciliation = health.get("reconciliation") or {}
+    if (
+        health.get("live_orders_armed") is not True
+        or reconciliation.get("completed") is not True
+        or reconciliation.get("failed") is True
+        or reconciliation.get("unprotected_positions")
+        or (health.get("broker") or {}).get("authenticated") is not True
+    ):
+        return False
+    positions = kite.positions()
+    orders = kite.orders()
+    if (
+        not isinstance(positions, dict)
+        or not isinstance(positions.get("net"), list)
+        or not isinstance(positions.get("day"), list)
+        or not isinstance(orders, list)
+    ):
+        return False
+    for row in positions["net"] + positions["day"]:
+        if not isinstance(row, dict) or "quantity" not in row:
+            return False
+        if float(row["quantity"]) != 0:
+            return False
+    for row in orders:
+        if not isinstance(row, dict) or str(row.get("status") or "").upper() not in TERMINAL:
+            return False
+    return True
+
+try:
+    # Two independent authoritative snapshots reduce the restart/entry race.
+    if not is_safe():
+        sys.exit(1)
+    time.sleep(1)
+    if not is_safe():
+        sys.exit(1)
+except Exception as exc:
+    print(f"intraday_release_guard_blocked: {type(exc).__name__}", file=sys.stderr)
+    sys.exit(1)
+PY_FLAT_GUARD
+}
+
 auto_release_should_defer() {
   [ "$AUTO_MODE" = true ] || return 1
   local weekday hhmm
   weekday="$(TZ=Asia/Kolkata date +%u)" || return 0
   hhmm="$(TZ=Asia/Kolkata date +%H%M)" || return 0
-  market_session_protected "$weekday" "$hhmm"
+  if ! market_session_protected "$weekday" "$hhmm"; then
+    return 1
+  fi
+  # A validated, flat broker account can update even during market hours.
+  intraday_flat_broker_confirmed && return 1
+  return 0
 }
 
 exec 9>"$LOCK_FILE"
@@ -393,8 +465,8 @@ if [ "$AUTO_MODE" = true ]; then
     fi
     poll_research_request
     if [ "$BEFORE" != "$AFTER" ]; then
-      write_status deferred_market_window "unvalidated revision ${AFTER:0:7} pending after 15:45 IST; current ${BEFORE:0:7} retained"
-      log "Automatic release deferred during weekday 08:00-15:45 IST; current revision retained"
+      write_status deferred_market_window "unvalidated revision ${AFTER:0:7} waiting for broker-flat safe restart; current ${BEFORE:0:7} retained"
+      log "Automatic release deferred: open exposure, pending broker order, or unavailable safety proof"
     else
       write_status current "running ${BEFORE:0:7}; no pending revision"
     fi
@@ -521,7 +593,7 @@ if auto_release_should_defer; then
     : > "$RESTART_PENDING_FILE"
   fi
   poll_research_request
-  write_status deferred_market_window "candidate ${AFTER:0:7} validated; checkout untouched; release deferred until after 15:45 IST"
+  write_status deferred_market_window "candidate ${AFTER:0:7} validated; checkout untouched until broker-flat safety proof"
   exit 0
 fi
 
