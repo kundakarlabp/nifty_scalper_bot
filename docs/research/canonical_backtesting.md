@@ -147,3 +147,14 @@ settings. Historical contract identity, point-in-time expiry and lot-size
 calendars, execution-quality quotes and prospective recorded-feed replay remain
 separate prerequisites. Keep the private data and any exports private; no
 production credentials, services, settings or live trading code are modified.
+
+### Verified first release coverage (20 October 2026)
+
+The first ten-shard Dhan validator reports 38,076,038 normalized market
+observations, of which 37,612,552 are rolling option observations, with 70
+empty tasks and **zero futures observations**. Its rolling intraday readiness
+flag must therefore **not** be interpreted as NIFTY futures-context or
+contract-execution readiness. The offline reader distinguishes the conservative
+four-stream component gate from a separate spot+ATM CE/PE observation gate;
+missing futures remain explicit and cannot be reconstructed from the option
+premium or present-day instrument master. Both gates are research-only.

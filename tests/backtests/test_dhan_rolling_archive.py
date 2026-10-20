@@ -21,7 +21,7 @@ def _bytes(obj):
     ).encode()
 
 
-def _fixture(root: Path, *, switch=False):
+def _fixture(root: Path, *, switch=False, empty_future=False):
     date_text = "2025-01-02"
     base_epoch = int(
         datetime(2025, 1, 2, 9, 15, tzinfo=ZoneInfo("Asia/Kolkata")).timestamp()
@@ -52,15 +52,17 @@ def _fixture(root: Path, *, switch=False):
             "relative_strike": "ATM" if kind == "option" else None,
             "option_side": side,
         }
-        series = {key: [100.0] * 61 for key in ("open", "high", "low", "close")}
-        series.update(timestamp=epochs, volume=[20] * 61)
+        current_epochs = [] if empty_future and kind == "future" else epochs
+        size = len(current_epochs)
+        series = {key: [100.0] * size for key in ("open", "high", "low", "close")}
+        series.update(timestamp=current_epochs, volume=[20] * size)
         if kind == "option":
             series.update(
                 strike=[23000 if i < 30 or not switch else 23050 for i in range(61)]
             )
         normalized = {
             "task": task,
-            "quality": {"rows": 61},
+            "quality": {"rows": size},
             "series": series,
         }
         rel = f"normalized/{idx:05d}.json.gz"
@@ -77,11 +79,17 @@ def _fixture(root: Path, *, switch=False):
                 "task": task,
                 "shard": shard,
                 "normalized_path": rel,
-                "backtest_eligible": True,
-                "rows": 61,
+                "backtest_eligible": bool(size),
+                "documented_provider_scope": True,
+                "empty": not size,
+                "rows": size,
             }
         )
-        bounds = [(0, 29), (30, 60)] if kind == "option" and switch else [(0, 60)]
+        bounds = (
+            []
+            if not size
+            else [(0, 29), (30, 60)] if kind == "option" and switch else [(0, 60)]
+        )
         for n, (start, end) in enumerate(bounds):
             segments.append(
                 {
@@ -194,3 +202,25 @@ def test_missing_segment_is_rejected(tmp_path):
     )
     with pytest.raises(ValueError, match="row_segment_missing"):
         load_dhan_rolling_day(shards, readiness, date(2025, 1, 2))
+
+
+def test_absent_future_does_not_invent_data_or_block_spot_option_research(tmp_path):
+    shards, readiness = _fixture(tmp_path, empty_future=True)
+    report = load_dhan_rolling_day(shards, readiness, date(2025, 1, 2))
+    assert report["missing_streams"] == ["future"]
+    assert report["streams"]["future"] == []
+    assert report["aligned_minutes"] == 0
+    assert report["component_research_eligible"] is False
+    assert report["spot_option_aligned_minutes"] == 61
+    assert report["spot_option_longest_contiguous_minutes"] == 61
+    assert report["spot_option_research_eligible"] is True
+    assert report["live_equivalent"] is False
+
+
+def test_missing_future_with_strike_switch_stays_ineligible(tmp_path):
+    shards, readiness = _fixture(tmp_path, switch=True, empty_future=True)
+    report = load_dhan_rolling_day(shards, readiness, date(2025, 1, 2))
+    assert report["missing_streams"] == ["future"]
+    assert report["spot_option_longest_contiguous_minutes"] == 31
+    assert report["spot_option_research_eligible"] is False
+    assert report["component_research_eligible"] is False
