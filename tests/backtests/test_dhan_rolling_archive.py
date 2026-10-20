@@ -88,9 +88,7 @@ def _fixture(root: Path, *, switch=False, empty_future=False):
         bounds = (
             []
             if not size
-            else [(0, 29), (30, 60)]
-            if kind == "option" and switch
-            else [(0, 60)]
+            else [(0, 29), (30, 60)] if kind == "option" and switch else [(0, 60)]
         )
         for n, (start, end) in enumerate(bounds):
             segments.append(
