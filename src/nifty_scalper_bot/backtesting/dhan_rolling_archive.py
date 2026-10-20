@@ -85,7 +85,10 @@ def load_dhan_rolling_day(
                 segments.setdefault(key, []).append(segment)
 
     streams: dict[str, list[dict[str, Any]]] = {
-        "spot": [], "future": [], "CALL": [], "PUT": []
+        "spot": [],
+        "future": [],
+        "CALL": [],
+        "PUT": [],
     }
     for entry in catalog["tasks"]:
         task = entry["task"]
@@ -126,7 +129,8 @@ def load_dhan_rolling_day(
             if timestamp.date() != trading_date:
                 continue
             matching = [
-                item for item in segments.get((shard, index), [])
+                item
+                for item in segments.get((shard, index), [])
                 if item["backtest_eligible"]
                 and item["first_provider_epoch"] <= epoch <= item["last_provider_epoch"]
             ]
@@ -137,11 +141,13 @@ def load_dhan_rolling_day(
                 for name, values in series.items()
                 if name != "timestamp"
             }
-            row.update({
-                "provider_epoch": epoch,
-                "available_epoch": epoch + 60,
-                "segment_id": matching[0]["segment_id"],
-            })
+            row.update(
+                {
+                    "provider_epoch": epoch,
+                    "available_epoch": epoch + 60,
+                    "segment_id": matching[0]["segment_id"],
+                }
+            )
             streams[stream].append(row)
 
     for stream, rows in streams.items():
@@ -164,9 +170,7 @@ def load_dhan_rolling_day(
         )
         run = (
             run + 1
-            if previous is not None
-            and epoch - previous == 60
-            and pair == last_segments
+            if previous is not None and epoch - previous == 60 and pair == last_segments
             else 1
         )
         longest = max(longest, run)
