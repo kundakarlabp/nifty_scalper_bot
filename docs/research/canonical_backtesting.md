@@ -104,3 +104,46 @@ the staging arguments only with independently verified historical spot and
 futures data and exchange-derived historical lot-size provenance. Do not
 equate a successful importer regression suite with a downloaded or profitable
 2025–2026 weekly-options backtest.
+
+
+## Dhan five-year rolling-options archive (offline component research)
+
+The separate **private** repository \`kundakarlabp/Nifty_options_backtest_data\`
+stores checksum-locked Dhan near- and next-expiry ATM-relative NIFTY series
+(2021–2026). Rolling ATM is **not** a historically identified option contract:
+an actual strike can switch within a session. Do not convert these rows into
+invented Zerodha symbols, tokens, expiries, lots, broker quotes, or fills.
+
+Once its independent validation workflow publishes the
+\`backtest-quality-report.json\`, \`backtest-catalog.json\`,
+\`backtest-segments.jsonl.gz\`, \`source-archive-sha256.txt\` and
+\`backtest-readiness.sha256\` release assets, extract the ten private half-year
+shards into one private local directory. The research-only reader can export
+one near-expiry ATM context session (spot, near future, call and put):
+
+~~~bash
+python -m nifty_scalper_bot.backtesting.dhan_rolling_archive \
+  --shards /private/dhan-extracted \
+  --readiness /private/dhan-readiness \
+  --date 2025-01-02 \
+  --output /private/dhan-session-research.json
+~~~
+
+The reader verifies the five readiness assets, each selected normalized task
+against its receipt digest and every session row's segment membership. It
+retains the real strike and provider timestamp, delays signal availability at
+least 60 seconds, and reports synchronized observed minutes plus the longest
+contiguous unswitched CE/PE interval. It rejects missing or corrupted inputs.
+\`component_research_eligible\` requires at least 60 such synchronized minutes;
+it does **not** mean the market was executable, signal generation passed, or
+P&L was established.
+
+**Evidence boundary:** \`RESEARCH_CANDIDATE\` only. The output is suitable for
+offline signal-context studies, debugging strategy no-trade funnels and
+identifying candidate days. It is not input to \`load_archive\`, which correctly
+requires named historical NFO contracts. Never use it for order-level backtests,
+overnight holding, exact-contract return attribution, or promotion of live
+settings. Historical contract identity, point-in-time expiry and lot-size
+calendars, execution-quality quotes and prospective recorded-feed replay remain
+separate prerequisites. Keep the private data and any exports private; no
+production credentials, services, settings or live trading code are modified.
