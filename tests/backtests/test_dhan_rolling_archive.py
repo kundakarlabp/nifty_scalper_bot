@@ -203,6 +203,7 @@ def test_missing_segment_is_rejected(tmp_path):
     with pytest.raises(ValueError, match="row_segment_missing"):
         load_dhan_rolling_day(shards, readiness, date(2025, 1, 2))
 
+
 def test_absent_future_does_not_invent_data_or_block_spot_option_research(tmp_path):
     shards, readiness = _fixture(tmp_path, empty_future=True)
     report = load_dhan_rolling_day(shards, readiness, date(2025, 1, 2))
