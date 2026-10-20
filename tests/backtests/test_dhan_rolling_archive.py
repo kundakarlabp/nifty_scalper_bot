@@ -52,17 +52,11 @@ def _fixture(root: Path, *, switch=False):
             "relative_strike": "ATM" if kind == "option" else None,
             "option_side": side,
         }
-        series = {
-            key: [100.0] * 61
-            for key in ("open", "high", "low", "close")
-        }
+        series = {key: [100.0] * 61 for key in ("open", "high", "low", "close")}
         series.update(timestamp=epochs, volume=[20] * 61)
         if kind == "option":
             series.update(
-                strike=[
-                    23000 if i < 30 or not switch else 23050
-                    for i in range(61)
-                ]
+                strike=[23000 if i < 30 or not switch else 23050 for i in range(61)]
             )
         normalized = {
             "task": task,
@@ -78,56 +72,60 @@ def _fixture(root: Path, *, switch=False):
             "normalized_sha256": _canonical_sha(normalized),
         }
         (directory / "receipts" / f"{idx:05d}.json").write_bytes(_bytes(receipt))
-        tasks.append({
-            "task": task,
-            "shard": shard,
-            "normalized_path": rel,
-            "backtest_eligible": True,
-            "rows": 61,
-        })
-        bounds = (
-            [(0, 29), (30, 60)]
-            if kind == "option" and switch
-            else [(0, 60)]
-        )
-        for n, (start, end) in enumerate(bounds):
-            segments.append({
+        tasks.append(
+            {
+                "task": task,
                 "shard": shard,
-                "task_index": idx,
-                "trading_date": date_text,
-                "segment_id": f"{kind}{side or ''}-{n}",
+                "normalized_path": rel,
                 "backtest_eligible": True,
-                "first_provider_epoch": epochs[start],
-                "last_provider_epoch": epochs[end],
-            })
-    (readiness / "backtest-quality-report.json").write_bytes(_bytes({
-        "source": "DhanHQ v2",
-        "readiness": {
-            "rolling_intraday_component_research": True,
-            "immutable_contract_backtest": False,
-            "historical_execution_replay": False,
-            "live_equivalent": False,
-        },
-    }))
-    (readiness / "backtest-catalog.json").write_bytes(_bytes({
-        "profile": "dhan_rolling_intraday_v1",
-        "availability_policy": "provider_epoch_plus_60_seconds",
-        "cross_segment_positions_allowed": False,
-        "tasks": tasks,
-    }))
+                "rows": 61,
+            }
+        )
+        bounds = [(0, 29), (30, 60)] if kind == "option" and switch else [(0, 60)]
+        for n, (start, end) in enumerate(bounds):
+            segments.append(
+                {
+                    "shard": shard,
+                    "task_index": idx,
+                    "trading_date": date_text,
+                    "segment_id": f"{kind}{side or ''}-{n}",
+                    "backtest_eligible": True,
+                    "first_provider_epoch": epochs[start],
+                    "last_provider_epoch": epochs[end],
+                }
+            )
+    (readiness / "backtest-quality-report.json").write_bytes(
+        _bytes(
+            {
+                "source": "DhanHQ v2",
+                "readiness": {
+                    "rolling_intraday_component_research": True,
+                    "immutable_contract_backtest": False,
+                    "historical_execution_replay": False,
+                    "live_equivalent": False,
+                },
+            }
+        )
+    )
+    (readiness / "backtest-catalog.json").write_bytes(
+        _bytes(
+            {
+                "profile": "dhan_rolling_intraday_v1",
+                "availability_policy": "provider_epoch_plus_60_seconds",
+                "cross_segment_positions_allowed": False,
+                "tasks": tasks,
+            }
+        )
+    )
     with gzip.open(readiness / "backtest-segments.jsonl.gz", "wt") as handle:
         for segment in segments:
             handle.write(json.dumps(segment) + "\n")
-    (readiness / "source-archive-sha256.txt").write_text(
-        "synthetic fixture only\n"
-    )
+    (readiness / "source-archive-sha256.txt").write_text("synthetic fixture only\n")
     lines = []
     for path in sorted(readiness.iterdir()):
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
         lines.append(f"{digest}  {path.name}")
-    (readiness / "backtest-readiness.sha256").write_text(
-        "\n".join(lines) + "\n"
-    )
+    (readiness / "backtest-readiness.sha256").write_text("\n".join(lines) + "\n")
     return root / "extracted", readiness
 
 
@@ -185,9 +183,11 @@ def test_missing_segment_is_rejected(tmp_path):
     checksum = hashlib.sha256(segments_path.read_bytes()).hexdigest()
     sha_path.write_text(
         "\n".join(
-            f"{checksum}  backtest-segments.jsonl.gz"
-            if "backtest-segments.jsonl.gz" in line
-            else line
+            (
+                f"{checksum}  backtest-segments.jsonl.gz"
+                if "backtest-segments.jsonl.gz" in line
+                else line
+            )
             for line in entries
         )
         + "\n"
