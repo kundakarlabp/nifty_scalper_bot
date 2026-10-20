@@ -158,3 +158,65 @@ contract-execution readiness. The offline reader distinguishes the conservative
 four-stream component gate from a separate spot+ATM CE/PE observation gate;
 missing futures remain explicit and cannot be reconstructed from the option
 premium or present-day instrument master. Both gates are research-only.
+
+### Identified futures supplement (20 October 2026)
+
+The rolling reader accepts `--futures-archive` pointing to an extracted private
+`nifty-contract-futures-history/nifty-future-<expiry>.json.gz` release asset,
+with its same-name `.sha256` companion. This connects the already collected
+identified Dhan futures minutes to the rolling spot/CE/PE context on dates
+actually observed in both sources. Example (paths refer to privately downloaded
+and checksum-validated releases):
+
+~~~bash
+python -m nifty_scalper_bot.backtesting.dhan_rolling_archive \
+  --shards /private/dhan-extracted --readiness /private/dhan-readiness \
+  --date 2026-10-16 \
+  --futures-archive /private/futures/nifty-future-2026-10-27.json.gz \
+  --output /private/session-research.json
+~~~
+
+The optional supplement must match the identified-minute profile and file expiry;
+spot security ID 13, duplicate timestamps, invalid OHLC/volume/OI, altered bytes,
+future-dated records and conflicting base futures are rejected. Every candle
+becomes available at provider timestamp plus 60 seconds. The source's 15:30
+boundary observation is counted and excluded from regular minute research.
+Missing minutes are never filled. A four-stream 60-minute interval may unlock
+component context research only. Rolling options still lack immutable contract
+identity; historical basket selection and executable quotes remain unverified.
+No symbols, broker tokens, lots, bids, asks or fills are fabricated.
+
+### Free-source research correction and acquisition boundary
+
+An Upstox Plus entitlement requirement is **not evidence of a mandatory monthly
+subscription charge**. Official Plus terms state initially free activation,
+with notice if this becomes chargeable. The expired futures/options catalogue
+and historical minute endpoints require that entitlement and an authorized
+account/token. Verify the individual tariff before activation. Neither an
+Upstox nor ICICI credential is available in this research workspace, so neither
+broker's historical coverage has been downloaded or verified here.
+
+- Plus terms: https://upstox.com/files/terms-and-condition/plus-pack.pdf
+- Expired futures: https://upstox.com/developer/api-documentation/get-expired-future-contracts/
+- Expired candles: https://upstox.com/developer/api-documentation/get-expired-historical-candle-data/
+- Breeze free customer F&O history: https://www.icicidirect.com/futures-and-options/api/breeze
+
+A newly identified public candidate is
+`thetrademarkk/india-index-options-1m` on Hugging Face, revision
+`0f4800e43e6f96cec0794369d78eb4d3c4211ef5`. It advertises expiry-partitioned
+NIFTY option minute OHLCV/OI and spot, under CC-BY-NC-4.0 with an educational-use
+notice, sparse-strike caveat and no accuracy warranty. Its catalogue does not
+supply NIFTY futures or historical executable depth. Inspect actual partitions,
+hashes, timestamps and identities, and compare overlapping records with existing
+Dhan/NSE references before admitting it to research. Dataset labels alone cannot
+establish historical lot sizes, listing availability, broker-token identity or
+fills. Do not rename these public bars into Zerodha contracts or feed them into
+production-composition replay.
+
+The free Zenodo 2017–2020 context archive was downloaded and matched its
+published MD5 `240aecc77a7275ec2f05a092b976bf91` during this audit. The four
+`NIFTY_F1` files contain 371,783 raw observations, including out-of-session
+records, with no explicit per-row expiry. The existing public-data preparation
+path already filters session times and declares unverified roll/timestamp
+assumptions. It is older continuous-futures research, not a backfill for missing
+2021–2026 identified futures minutes.
