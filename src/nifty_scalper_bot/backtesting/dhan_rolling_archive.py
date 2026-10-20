@@ -183,6 +183,28 @@ def load_dhan_rolling_day(
         )
         longest = max(longest, run)
         previous, last_segments = epoch, pair
+    spot_option_epochs = sorted(
+        set(by_stream["spot"]) & set(by_stream["CALL"]) & set(by_stream["PUT"])
+    )
+    spot_option_longest = option_run = 0
+    last_option_epoch: int | None = None
+    last_option_segments: tuple[str, str, str] | None = None
+    for epoch in spot_option_epochs:
+        option_segments = tuple(
+            by_stream[stream][epoch]["segment_id"]
+            for stream in ("spot", "CALL", "PUT")
+        )
+        option_run = (
+            option_run + 1
+            if last_option_epoch is not None
+            and epoch - last_option_epoch == 60
+            and option_segments == last_option_segments
+            else 1
+        )
+        spot_option_longest = max(spot_option_longest, option_run)
+        last_option_epoch = epoch
+        last_option_segments = option_segments
+    missing_streams = sorted(name for name, rows in streams.items() if not rows)
     return {
         "trading_date": trading_date.isoformat(),
         "source": quality["source"],
@@ -193,6 +215,10 @@ def load_dhan_rolling_day(
         "aligned_minutes": len(aligned),
         "longest_contiguous_unswitched_aligned_minutes": longest,
         "component_research_eligible": longest >= 60,
+        "spot_option_aligned_minutes": len(spot_option_epochs),
+        "spot_option_longest_contiguous_minutes": spot_option_longest,
+        "spot_option_research_eligible": spot_option_longest >= 60,
+        "missing_streams": missing_streams,
         "streams": streams,
     }
 
