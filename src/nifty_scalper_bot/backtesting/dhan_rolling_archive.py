@@ -190,9 +190,10 @@ def load_dhan_rolling_day(
     last_option_epoch: int | None = None
     last_option_segments: tuple[str, str, str] | None = None
     for epoch in spot_option_epochs:
-        option_segments = tuple(
-            by_stream[stream][epoch]["segment_id"]
-            for stream in ("spot", "CALL", "PUT")
+        option_segments = (
+            by_stream["spot"][epoch]["segment_id"],
+            by_stream["CALL"][epoch]["segment_id"],
+            by_stream["PUT"][epoch]["segment_id"],
         )
         option_run = (
             option_run + 1
