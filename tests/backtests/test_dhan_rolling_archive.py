@@ -216,3 +216,12 @@ def test_absent_future_does_not_invent_data_or_block_spot_option_research(tmp_pa
     assert report["spot_option_longest_contiguous_minutes"] == 61
     assert report["spot_option_research_eligible"] is True
     assert report["live_equivalent"] is False
+
+
+def test_missing_future_with_strike_switch_stays_ineligible(tmp_path):
+    shards, readiness = _fixture(tmp_path, switch=True, empty_future=True)
+    report = load_dhan_rolling_day(shards, readiness, date(2025, 1, 2))
+    assert report["missing_streams"] == ["future"]
+    assert report["spot_option_longest_contiguous_minutes"] == 31
+    assert report["spot_option_research_eligible"] is False
+    assert report["component_research_eligible"] is False
