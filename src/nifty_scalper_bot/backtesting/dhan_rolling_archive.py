@@ -103,7 +103,15 @@ def load_dhan_rolling_day(
             continue
         if not (task["first"] <= trading_date.isoformat() < task["stop"]):
             continue
-        if not entry["backtest_eligible"] or stream not in streams:
+        if stream not in streams:
+            raise ValueError("dhan_selected_stream_unknown")
+        if not entry["backtest_eligible"]:
+            if (
+                entry.get("documented_provider_scope") is True
+                and entry.get("empty") is True
+                and entry.get("rows") == 0
+            ):
+                continue
             raise ValueError("dhan_selected_stream_quarantined")
         shard = entry["shard"]
         index = task["index"]
