@@ -354,9 +354,10 @@ def test_auto_release_market_window_boundary_and_failure_modes() -> None:
     helpers = _market_session_release_helpers()
     cases = [
         ("1", "0759", False),
-        ("1", "0800", True),
-        ("1", "0844", True),
-        ("1", "0845", True),
+        ("1", "0800", False),
+        ("1", "0844", False),
+        ("1", "0914", False),
+        ("1", "0915", True),
         ("5", "1230", True),
         ("5", "1545", True),
         ("5", "1546", False),
@@ -395,6 +396,7 @@ date() {
     *) return 1;;
   esac
 }
+intraday_flat_broker_confirmed() { [ "$FAKE_DAY" = "6" ]; }
 auto_release_should_defer
 """
     for mode, weekday, hhmm, defer in (
@@ -411,7 +413,7 @@ auto_release_should_defer
         assert (result.returncode == 0) is defer, (mode, weekday, result.stderr)
 
 
-def test_auto_release_allows_intraday_only_with_broker_flat_proof() -> None:
+def test_auto_release_catches_up_only_outside_session_with_broker_flat_proof() -> None:
     helpers = _market_session_release_helpers()
     shell = helpers + """
 AUTO_MODE="$1"
@@ -429,14 +431,17 @@ intraday_flat_broker_confirmed() { [ "$SAFE" = "true" ]; }
 auto_release_should_defer
 """
     cases = (
-        ("true", "1", "1425", "true", False),
-        ("true", "1", "1425", "false", True),
-        ("true", "1", "0930", "true", False),
-        ("true", "1", "1545", "true", False),
+        ("true", "1", "1425", "true", True),
+        ("true", "1", "0930", "true", True),
+        ("true", "1", "0914", "true", False),
+        ("true", "1", "0914", "false", True),
+        ("true", "1", "1545", "true", True),
+        ("true", "1", "1546", "true", False),
+        ("true", "1", "1546", "false", True),
         ("true", "1", "2580", "true", True),
         ("true", "", "", "true", True),
-        ("true", "1", "1546", "false", False),
-        ("true", "6", "1100", "false", False),
+        ("true", "6", "1100", "true", False),
+        ("true", "6", "1100", "false", True),
         ("false", "1", "1425", "false", False),
     )
     for mode, day, clock, safe, defer in cases:
@@ -492,7 +497,7 @@ time.sleep = lambda seconds: None
 exec(compile(os.environ["TEST_GUARD"], "<flat-guard>", "exec"))
 """
     healthy = {
-        "live_orders_armed": True,
+        "live_orders_armed": False,
         "broker": {"authenticated": True},
         "reconciliation": {
             "completed": True,
@@ -509,6 +514,8 @@ exec(compile(os.environ["TEST_GUARD"], "<flat-guard>", "exec"))
         (healthy, {"net": [{}], "day": []}, [], False),
         ({**healthy, "reconciliation": {"completed": False}}, flat, [], False),
         ({**healthy, "broker": {"authenticated": False}}, flat, [], False),
+        ({**healthy, "live_orders_armed": True}, flat, [], False),
+        ({**healthy, "live_orders_armed": None}, flat, [], False),
         (healthy, {"net": []}, [], False),
     )
     for health, positions, orders, expected in cases:
@@ -544,13 +551,13 @@ def test_auto_market_gate_preserves_health_recovery_and_research_poll() -> None:
     assert release.index("exec 9>") < release.index('cd "$APP_DIR"') < gate
     assert release.index("git fetch --quiet origin main") < gate
     assert "service_healthy_confirmed" in protected
-    assert 'sudo -n systemctl restart "$SERVICE"' in protected
-    assert "runtime_recovery_failed" in protected
+    assert 'sudo -n systemctl restart "$SERVICE"' not in protected
+    assert "deferred_unsafe_recovery" in protected
     assert "runtime_checkout_mismatch" in protected
     assert 'current_runtime_sha" != "$BEFORE"' in protected
     assert '"http://127.0.0.1:${PORT}/releasez"' in protected
     assert protected.index("runtime_checkout_mismatch") < protected.index(
-        'sudo -n systemctl restart "$SERVICE"'
+        "deferred_unsafe_recovery"
     )
     assert "unvalidated revision" in protected
     assert "poll_research_request" in protected
