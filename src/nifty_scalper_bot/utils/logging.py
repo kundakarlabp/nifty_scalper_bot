@@ -538,7 +538,13 @@ def setup_logging(level: str = "INFO") -> None:
         bot_file.addFilter(_BotLogRoutingFilter())
         strategy_file.addFilter(_LoggerPrefixFilter("nifty_scalper_bot.strategies", "nifty_scalper_bot.core.strategy_manager"))
         execution_file.addFilter(_LoggerPrefixFilter("nifty_scalper_bot.execution"))
-        handlers: list[logging.Handler] = [stdout_handler, stderr_handler, bot_file, strategy_file, execution_file]
+        handlers: list[logging.Handler] = [
+            stdout_handler,
+            stderr_handler,
+            bot_file,
+            strategy_file,
+            execution_file,
+        ]
         for handler in handlers:
             handler.addFilter(EventEnricher())
 
