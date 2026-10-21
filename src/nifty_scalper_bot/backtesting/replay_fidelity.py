@@ -140,7 +140,9 @@ def audit_session(path: Path, *, gap_seconds: float = 120) -> dict[str, Any]:
             "positive_ltp_ticks": c["positive_ltp_ticks"],
             "gaps_over_threshold": c["gaps_over_threshold"],
             "longest_observed_intertick_gap_seconds": max_gap[role] if n > 1 else None,
-            "share_with_five_level_depth": c["five_level_depth_ticks"] / n if n else None,
+            "share_with_five_level_depth": (
+                c["five_level_depth_ticks"] / n if n else None
+            ),
         }
     # Sufficient *observed* context is still not evidence that all quote
     # events were delivered to the bot or that any modeled order was filled.
