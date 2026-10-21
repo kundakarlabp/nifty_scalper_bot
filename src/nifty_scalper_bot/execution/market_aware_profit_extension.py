@@ -1279,10 +1279,7 @@ def tighten_adaptive_profit_lock(manager: Any, bracket: Any, ltp: float) -> bool
                 recent.append([at, price])
     recent.append([now, round(bid, 2)])
     config["_adaptive_profit_recent_bids"] = recent[-32:]
-    moves = [
-        abs(recent[i][1] - recent[i - 1][1])
-        for i in range(1, len(recent))
-    ]
+    moves = [abs(recent[i][1] - recent[i - 1][1]) for i in range(1, len(recent))]
     micro_noise = statistics.median(moves) if moves else 0.0
 
     fractions = {"STRONG": 0.40, "NORMAL": 0.50, "WEAK": 0.65}
