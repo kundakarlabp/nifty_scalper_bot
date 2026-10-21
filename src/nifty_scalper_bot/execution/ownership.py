@@ -253,7 +253,20 @@ class BoundBracketManager(RuntimeBracketManager):
                 exc,
             )
             market_changed = False
-        return canonical_changed or market_changed
+        try:
+            adaptive_changed = _profit_extension.tighten_adaptive_profit_lock(
+                self,
+                bracket,
+                ltp,
+            )
+        except Exception as exc:  # noqa: BLE001 - preserve canonical stop
+            _profit_extension.LOGGER.warning(
+                "ADAPTIVE_PROFIT_LOCK_SKIPPED symbol=%s error_type=%s",
+                getattr(bracket, "symbol", ""),
+                type(exc).__name__,
+            )
+            adaptive_changed = False
+        return canonical_changed or market_changed or adaptive_changed
 
     def confirm_entry_fill(
         self,
