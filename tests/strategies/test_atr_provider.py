@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from nifty_scalper_bot.indicators.atr_provider import SafeATRProvider
+from nifty_scalper_bot.indicators.atr_provider import ATRSnapshot, SafeATRProvider
 
 
 class DummyEngine:
@@ -26,3 +26,8 @@ def test_get_atr_uses_underlying_fallback() -> None:
     assert snapshot is not None
     assert snapshot.value == 12.5
     assert snapshot.source == "underlying"
+
+
+def test_atr_snapshot_exposes_current_atr_alias() -> None:
+    snapshot = ATRSnapshot(value=12.5, timestamp=123.0)
+    assert snapshot.current_atr == 12.5
