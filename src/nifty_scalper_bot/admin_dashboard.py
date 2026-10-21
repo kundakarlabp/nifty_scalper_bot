@@ -27,7 +27,7 @@ from nifty_scalper_bot.ops.service_control import (
     restart_deployer,
 )
 
-from fastapi import APIRouter, Form, Request
+from fastapi import APIRouter, Form, Request, Response
 from fastapi.responses import HTMLResponse, RedirectResponse, PlainTextResponse, JSONResponse
 
 router = APIRouter()
@@ -475,7 +475,7 @@ def reset_daily_risk(request: Request, confirm: str = Form("")) -> RedirectRespo
 
 
 @router.post("/admin/restart")
-def restart(request: Request) -> RedirectResponse | JSONResponse:
+def restart(request: Request) -> Response:
     _check_auth(request)
     result = queue_validated_restart()
     if "application/json" in request.headers.get("accept", ""):
@@ -496,7 +496,7 @@ def restart(request: Request) -> RedirectResponse | JSONResponse:
 
 
 @router.post("/admin/update")
-def update_from_github(request: Request) -> RedirectResponse | JSONResponse:
+def update_from_github(request: Request) -> Response:
     _check_auth(request)
     ok, message = _git_update()
     if "application/json" in request.headers.get("accept", ""):
