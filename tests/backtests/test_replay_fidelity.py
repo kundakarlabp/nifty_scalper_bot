@@ -57,7 +57,8 @@ def _record(tmp_path, *, quote=True, changed=False):
         recorder.record("tick", tick, t + timedelta(seconds=1))
     if changed:
         recorder.record(
-            "snapshot", _snapshot("NFO:NIFTY26OCT23200CE"),
+            "snapshot",
+            _snapshot("NFO:NIFTY26OCT23200CE"),
             t + timedelta(minutes=1),
         )
     recorder.close()
@@ -110,7 +111,8 @@ def test_symbol_or_depth_missing_cannot_confer_replay_fidelity(tmp_path):
     now = datetime(2026, 10, 21, 10, 0, tzinfo=IST)
     recorder.record("snapshot", _snapshot(), now)
     recorder.record(
-        "tick", {"symbol": CE, "ltp": 90, "source": "ws"},
+        "tick",
+        {"symbol": CE, "ltp": 90, "source": "ws"},
         now + timedelta(seconds=1),
     )
     recorder.close()
