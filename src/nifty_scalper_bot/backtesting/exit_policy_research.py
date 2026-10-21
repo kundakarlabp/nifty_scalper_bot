@@ -77,7 +77,11 @@ def compare_trade(
         observed_costs = trade.get("effective_costs")
         if observed_costs is None:
             outcome = trade.get("outcome")
-            effective = outcome.get("effective_costs") if isinstance(outcome, Mapping) else None
+            effective = (
+                outcome.get("effective_costs")
+                if isinstance(outcome, Mapping)
+                else None
+            )
             observed_costs = (
                 effective.get("total") if isinstance(effective, Mapping)
                 else trade.get("estimated_costs")
@@ -130,7 +134,10 @@ def compare_trade(
     }
     if not valid_coverage:
         result["outcomes"] = {
-            key: {"status": "UNRESOLVED", "reason": "insufficient_executable_bid_coverage"}
+            key: {
+                "status": "UNRESOLVED",
+                "reason": "insufficient_executable_bid_coverage",
+            }
             for key in _POLICIES
         }
         return result
@@ -151,7 +158,10 @@ def compare_trade(
                 # Exchange SL-LIMIT can remain unfilled through a large gap;
                 # conservatively mark this alternative as unresolved.
                 if bid < stop * 0.95:
-                    simulated = {"status": "UNRESOLVED", "reason": "stop_limit_gap_risk"}
+                    simulated = {
+                        "status": "UNRESOLVED",
+                        "reason": "stop_limit_gap_risk",
+                    }
                 else:
                     exit_price = bid - slippage_points
                     simulated = {
@@ -190,7 +200,10 @@ def compare_trade(
             simulated = (
                 {"status": "UNCHANGED_ACTUAL", "net": round(net, 2)}
                 if is_target else
-                {"status": "UNRESOLVED", "reason": "hypothetical_position_survives_observed_exit"}
+                {
+                    "status": "UNRESOLVED",
+                    "reason": "hypothetical_position_survives_observed_exit",
+                }
             )
         result["outcomes"][policy] = simulated
     return result
@@ -257,7 +270,8 @@ def run_exit_comparison(
             "no trading beyond actual observed exit",
             "requires complete captured bid depth and lot quantity",
             "single-position comparisons do not replay subsequent entries",
-            "tier-1 and tier-2 rules are quote-level approximations, not production parity",
+            "tier-1 and tier-2 rules are quote-level approximations; "
+            "not production parity",
         ],
     }
 
