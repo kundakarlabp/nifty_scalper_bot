@@ -608,7 +608,8 @@ def test_adaptive_atr_does_not_silently_override_strong_giveback(monkeypatch):
         extend=True,
         evidence_count=5,
         positive=(
-            "premium_momentum", "underlying_vwap_alignment",
+            "premium_momentum",
+            "underlying_vwap_alignment",
             "futures_volume_confirmation",
         ),
         negative=(),
@@ -695,7 +696,9 @@ def test_single_exchange_stop_sync_after_all_trail_proposals(monkeypatch):
     manager = object.__new__(BoundBracketManager)
     manager._trail_sync_context = threading.local()
     bracket = SimpleNamespace(
-        symbol=SYMBOL, last_ltp=115.0, sl_trigger_price=101.0,
+        symbol=SYMBOL,
+        last_ltp=115.0,
+        sl_trigger_price=101.0,
     )
     calls = []
 
