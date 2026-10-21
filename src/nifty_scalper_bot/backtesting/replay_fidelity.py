@@ -59,9 +59,14 @@ def _selected(snapshot: Mapping[str, Any]) -> dict[str, str]:
     ce = basket.get("selected_ce")
     pe = basket.get("selected_pe")
     future = basket.get("futures_symbol")
-    if not (isinstance(ce, str) and ce
-            and isinstance(pe, str) and pe
-            and isinstance(future, str) and future):
+    if not (
+        isinstance(ce, str)
+        and ce
+        and isinstance(pe, str)
+        and pe
+        and isinstance(future, str)
+        and future
+    ):
         return {}
     selected: dict[str, str] = {
         "CE": ce,
