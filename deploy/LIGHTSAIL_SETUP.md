@@ -136,6 +136,39 @@ Use this command directly for manual releases; obsolete `ops/redeploy.sh` and
 `deploy/scripts/update_and_deploy.sh` forwarding shortcuts are retired.
 Existing host-side shortcuts must be updated to call the canonical runner.
 
+## Recover a stale installed validator (one-time bootstrap)
+
+If the systemd timer keeps reporting `validation_failed` because the installed
+release script attempts to compile a helper that was legitimately deleted on
+`main` (for example `dashboard/event_buffer.py`), **do not recreate the
+retired helper**, run `git reset --hard`, or force-restart the engine.
+
+The installed release script validates a detached candidate **before** changing
+the checkout, so it cannot deploy its own validation fix. A one-time,
+operator-approved bootstrap can run the **GitHub-reviewed, CI-validated** release
+runner directly from its pinned `main` commit without changing the current
+checkout first. This is an exceptional host recovery procedure, not a second
+deployment mechanism:
+
+1. Confirm the exact main SHA has passed final GitHub CI and is authorized.
+2. Stop only `niftybot-autodeploy.timer` temporarily to prevent concurrent
+   invocations; do not stop or restart the trading engine.
+3. `git fetch origin main` without changing HEAD, write
+   `git show <validated-sha>:deploy/lightsail_release.sh` to a temporary file,
+   and check `bash -n`. Never execute an unreviewed PR runner.
+4. Invoke the temporary validated runner as the existing `ubuntu` service
+   user with `--auto`. It still validates the candidate and checks
+   broker-flat/disarmed safety before mutating the checkout or restarting.
+5. Restore the timer even on failure. Verify the running `/releasez` SHA,
+   all service health endpoints, and the timer. A deferred/failed release is
+   not a successful deployment and must be investigated from its status and
+   journal.
+
+Routine updates must continue through the single canonical
+`deploy/lightsail_release.sh` installed in the repo; the dashboard validator
+compiles the actual candidate dashboard tree rather than pinning retired
+internal helper filenames.
+
 ## Log exports
 
 The console supports:
