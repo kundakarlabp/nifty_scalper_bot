@@ -565,6 +565,15 @@ class MarketRegimeDetector:
                 return direct_snapshot
 
             indicators = self._extract_indicators_from_tick(tick)
+            if not indicators:
+                self._logger.debug(
+                    "Condition met: regime_tick_insufficient_features",
+                    extra={
+                        "event": "regime_tick_insufficient_features",
+                        "symbol": symbol,
+                    },
+                )
+                return None
             # Price-only quote ticks do not establish a market regime. Treating
             # them as range evidence can overwrite a genuine trend and suppress
             # breakout setups while the price feed itself remains healthy.
@@ -585,16 +594,6 @@ class MarketRegimeDetector:
                     "REGIME_TICK_INSUFFICIENT_EVIDENCE symbol=%s", symbol
                 )
                 return None
-            if not indicators:
-                self._logger.debug(
-                    "Condition met: regime_tick_insufficient_features",
-                    extra={
-                        "event": "regime_tick_insufficient_features",
-                        "symbol": symbol,
-                    },
-                )
-                return None
-
             previous = self.get_snapshot(symbol)
             reference: Dict[str, float | Sequence[float]] | None = None
             if previous is not None and isinstance(previous.adjustments, Mapping):
