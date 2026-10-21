@@ -326,19 +326,10 @@ poll_research_request() {
 }
 
 
-# Never automatically restart while the engine may enter a new position or
-# manage intraday exits. A flat broker snapshot is not an atomic entry lock.
-# Pre-open and post-close releases require two independent broker-flat samples
-# AND a reconciled, disarmed engine (see intraday_flat_broker_confirmed).
-market_session_protected() {
-  local weekday="$1" hhmm="$2"
-  # An unreadable clock fails closed for automatic releases.
-  if ! [[ "$weekday" =~ ^[1-7]$ && "$hhmm" =~ ^([01][0-9]|2[0-3])[0-5][0-9]$ ]]; then
-    return 0
-  fi
-  [[ "$weekday" =~ ^[1-5]$ && "$hhmm" > "0914" && "$hhmm" < "1546" ]]
-}
-
+# No market-hours ban: a validated release may restart at any clock time.
+# The exposure guard still requires two independent broker-flat samples
+# AND a reconciled, disarmed engine. Merely seeing a flat account while the
+# strategy runner is armed is not an atomic lock against a new entry.
 intraday_flat_broker_confirmed() {
   local api_key access_token
   api_key="$(first_nonempty_env BROKER_API_KEY ZERODHA_API_KEY KITE_API_KEY 2>/dev/null || true)"
@@ -420,13 +411,6 @@ PY_FLAT_GUARD
 
 auto_release_should_defer() {
   [ "$AUTO_MODE" = true ] || return 1
-  local weekday hhmm
-  weekday="$(TZ=Asia/Kolkata date +%u)" || return 0
-  hhmm="$(TZ=Asia/Kolkata date +%H%M)" || return 0
-  # An unreadable or malformed clock can never authorize an auto restart.
-  if ! [[ "$weekday" =~ ^[1-7]$ && "$hhmm" =~ ^([01][0-9]|2[0-3])[0-5][0-9]$ ]]; then
-    return 0
-  fi
   # Already-current, healthy builds require no broker requests. Route through
   # the no-change branch, which still confirms the deployed SHA and reports
   # status; do not poll Kite positions/orders every two minutes unnecessarily.
@@ -436,11 +420,8 @@ auto_release_should_defer() {
     && service_healthy_confirmed "$BEFORE"; then
     return 0
   fi
-  # No restart across live entry/exit hours. A closed session alone also
-  # cannot prove that a position or pending order has been resolved.
-  if market_session_protected "$weekday" "$hhmm"; then
-    return 0
-  fi
+  # An automatic release is independent of market hours, but it must never
+  # interrupt open broker exposure or a runtime capable of entering a trade.
   intraday_flat_broker_confirmed && return 1
   return 0
 }
@@ -455,7 +436,7 @@ fi
 
 # Upgrade the browser controls on already-provisioned hosts. This changes
 # sudoers only; it neither replaces the environment nor restarts a service.
-# It runs before the auto-release no-change/market-window short circuits.
+# It runs before the auto-release no-change/exposure-safety short circuits.
 if [ ! -f "$CONFIG_DIR/control_sudoers_v2_installed" ]; then
   if bash "$APP_DIR/deploy/lightsail_setup.sh" --repair-control-sudoers; then
     mkdir -p "$CONFIG_DIR"
@@ -482,7 +463,7 @@ if [ "$AUTO_MODE" = true ]; then
     if [[ ! "$current_runtime_sha" =~ ^[0-9a-fA-F]{40}$ ]] || [ "$current_runtime_sha" != "$BEFORE" ]; then
       poll_research_request
       write_status runtime_checkout_mismatch "recovery blocked: checkout ${BEFORE:0:7} differs from confirmed runtime build; manual reconciliation required"
-      log "Recovery blocked: do not restart an unverified checkout during trading"
+      log "Recovery blocked: do not restart an unverified checkout"
       exit 1
     fi
     live_release_json="$(curl -fsS --max-time 3 "http://127.0.0.1:${PORT}/releasez" 2>/dev/null || true)"
@@ -501,8 +482,8 @@ if [ "$AUTO_MODE" = true ]; then
     fi
     poll_research_request
     if [ "$BEFORE" != "$AFTER" ]; then
-      write_status deferred_market_window "pending main ${AFTER:0:7}; deployed ${BEFORE:0:7}; retry when session inactive and broker-flat"
-      log "Automatic release deferred: live session, broker exposure/order, or unavailable safety proof"
+      write_status deferred_broker_exposure "pending main ${AFTER:0:7}; deployed ${BEFORE:0:7}; retry when broker-flat and engine disarmed"
+      log "Automatic release deferred: broker exposure, armed engine, or unavailable safety proof"
     else
       write_status current "running ${BEFORE:0:7}; no pending revision"
     fi
@@ -529,7 +510,7 @@ ensure_env_default SUPABASE_LOG_ARCHIVE_URL "https://dehdptgkqbrkyzyodicd.supaba
 ensure_env_default SUPABASE_LOG_ARCHIVE_INTERVAL_SECONDS 300
 if [ "$RUNTIME_ENV_CHANGED" = true ]; then FORCE_RESTART=true; fi
 # A prior pre-open operation may have persisted environment or unit changes but
-# deferred its restart at the protected boundary; carry it to after-hours.
+# deferred its restart for unsafe broker state; retry as soon as safe.
 if [ -f "$RESTART_PENDING_FILE" ]; then FORCE_RESTART=true; fi
 migrate_systemd_entrypoint
 migrate_autodeploy_entrypoint
@@ -621,15 +602,15 @@ if [ "${#EXISTING_TESTS[@]}" -gt 0 ]; then
   }
 fi
 
-# A release started before the protected window must not cross into live hours.
-# Keep this recheck after candidate validation, immediately before checkout mutation.
+# Recheck broker exposure and entry arming after candidate validation,
+# immediately before checkout mutation (at any hour).
 if auto_release_should_defer; then
   if [ "$FORCE_RESTART" = true ]; then
     mkdir -p "$CONFIG_DIR"
     : > "$RESTART_PENDING_FILE"
   fi
   poll_research_request
-  write_status deferred_market_window "candidate ${AFTER:0:7} validated; checkout untouched until broker-flat safety proof"
+  write_status deferred_broker_exposure "candidate ${AFTER:0:7} validated; checkout untouched until broker-flat and disarmed"
   exit 0
 fi
 
@@ -660,8 +641,8 @@ if ! set_runtime_build_sha "$AFTER"; then
   write_status env_update_failed "could not publish runtime build SHA ${AFTER:0:7}"
   exit 1
 fi
-# Final boundary check: never restart the engine for an automatic release
-# that has crossed into the protected window. Restore the prior checkout.
+# Final broker/arming boundary check before automatic restart, regardless of
+# market hours. Restore the prior checkout if the proof no longer holds.
 if auto_release_should_defer; then
   if [ "$FORCE_RESTART" = true ]; then
     mkdir -p "$CONFIG_DIR"
@@ -681,7 +662,7 @@ if auto_release_should_defer; then
     write_status runtime_restore_failed "retained revision build provenance restoration failed; manual recovery required"
     exit 1
   fi
-  write_status deferred_market_window "market boundary reached before engine restart; current revision ${BEFORE:0:7} restored"
+  write_status deferred_broker_exposure "broker/arming state changed before engine restart; current revision ${BEFORE:0:7} restored"
   poll_research_request
   exit 0
 fi
