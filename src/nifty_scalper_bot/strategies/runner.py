@@ -9418,22 +9418,17 @@ class StrategyRunner:
                         self._market_data, "_check_zombie_ticks", None
                     )
                     if callable(check_zombie_ticks):
-                        # MDM owns the actual per-symbol recovery.  Delegating
-                        # its periodic assessment is normal, not a separate
-                        # WebSocket failure or reason to alarm every 30 seconds.
-                        log_throttled(
-                            self._logger,
-                            "watchdog_required_symbol_assessment",
-                            "WATCHDOG_STALE_SYMBOL_ASSESSMENT stale_count=%d"
-                            % stale_count,
-                            interval_sec=300.0,
-                            level=logging.INFO,
-                            extra={
-                                "event": "WATCHDOG_STALE_SYMBOL_ASSESSMENT",
-                                "stale_count": stale_count,
-                                "symbols": sorted_stale_symbols[:32],
-                            },
-                        )
+                        # Preserve the first warning on state transition and
+                        # throttle identical follow-ups per Runner instance.
+                        # MDM still performs every scheduled recovery assessment.
+                        if self._should_log_throttled(
+                            f"watchdog_stale_symbol_delegate:{stale_count}",
+                            300.0,
+                        ):
+                            self._logger.warning(
+                                "🔎 Watchdog delegating stale-symbol recovery assessment (%d symbols stale)",
+                                stale_count,
+                            )
                         check_zombie_ticks()
                     else:
                         self._logger.warning(
