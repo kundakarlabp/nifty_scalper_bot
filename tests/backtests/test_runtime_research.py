@@ -1,6 +1,14 @@
+import json
+from importlib import import_module
+from pathlib import Path
+from types import SimpleNamespace
+
 import pytest
 
 from nifty_scalper_bot.backtesting.runtime_research import validate_snapshot
+from nifty_scalper_bot.storage import replay_archive as archive
+
+worker = import_module("scripts.run_runtime_replay")
 
 
 def test_full_runtime_rejects_missing_identity_and_live_positions():
@@ -310,3 +318,168 @@ def test_exit_research_invalid_trade_geometry_or_slippage_fails_closed() -> None
         _exit_research().compare_trade(trade, [])
     with pytest.raises(ValueError, match="exit_replay_invalid_slippage"):
         _exit_research().compare_trade(_exit_trade(), [], slippage_points=-1)
+
+
+def _paired_report(*, net=200.0, price=102.0, symbol="NFO:NIFTY26OCT23100CE"):
+    return {
+        "archive_sha256": "verified_sha",
+        "events_processed": 12,
+        "snapshots_processed": 1,
+        "captured_revision": "run_sha",
+        "positions": [],
+        "orders": [
+            {
+                "transaction_type": "BUY",
+                "symbol": symbol,
+                "status": "complete",
+                "filled_quantity": 65,
+                "average_price": price,
+                "timestamp": 101.0,
+            }
+        ],
+        "modeled_account": {"net_equity_pnl": net, "fees": 74.0},
+        "max_equity_drawdown": 45.0,
+    }
+
+
+def _paired_fidelity():
+    return {
+        "archive_integrity_verified": True,
+        "observed_selected_context_available": True,
+        "capture_sha256": "verified_sha",
+    }
+
+
+def test_paired_adaptive_runtime_comparison_uses_identical_completed_entries():
+    observed = _paired_report(net=200)
+    adaptive = _paired_report(net=260)
+    comparison = worker.compare_paired_reports(
+        observed,
+        adaptive,
+        _paired_fidelity(),
+        expected_sha="verified_sha",
+        slippage_bps=25,
+    )
+    assert comparison["state"] == "MODELED_PAIRED_COMPARISON"
+    assert comparison["net_delta"] == 60
+    assert comparison["entry_parity"] is True
+    assert comparison["promotion_eligible"] is False
+
+
+def test_paired_adaptive_runtime_blocks_lookahead_and_different_entries():
+    observed = _paired_report()
+    divergent = _paired_report(symbol="NFO:NIFTY26OCT23000CE")
+    comparison = worker.compare_paired_reports(
+        observed,
+        divergent,
+        _paired_fidelity(),
+        expected_sha="verified_sha",
+        slippage_bps=10,
+    )
+    assert comparison["state"] == "UNRESOLVED"
+    assert comparison["net_delta"] is None
+    assert comparison["entry_parity"] is False
+
+    bad_sha = worker.compare_paired_reports(
+        observed,
+        observed,
+        _paired_fidelity(),
+        expected_sha="tampered",
+        slippage_bps=10,
+    )
+    assert bad_sha["blocker"] == "paired_replay_input_parity_mismatch"
+
+
+def test_paired_adaptive_runtime_blocks_missing_depth_and_open_positions():
+    row = _paired_report()
+    poor_fidelity = {**_paired_fidelity(), "observed_selected_context_available": False}
+    invalid = worker.compare_paired_reports(
+        row, row, poor_fidelity, expected_sha="verified_sha", slippage_bps=10
+    )
+    assert invalid["blocker"] == "incomplete_captured_quote_fidelity"
+    has_position = {**row, "positions": [{"quantity": 65}]}
+    exposed = worker.compare_paired_reports(
+        row,
+        has_position,
+        _paired_fidelity(),
+        expected_sha="verified_sha",
+        slippage_bps=10,
+    )
+    assert exposed["blocker"] == "paired_replay_open_position"
+
+
+def test_paired_adaptive_rejects_unfinished_and_empty_buy_fills():
+    row = _paired_report()
+    partial = _paired_report()
+    partial["orders"][0]["status"] = "open"
+    result = worker.compare_paired_reports(
+        row,
+        partial,
+        _paired_fidelity(),
+        expected_sha="verified_sha",
+        slippage_bps=10,
+    )
+    assert result["blocker"] == "paired_replay_partial_entry"
+    no_entries = _paired_report()
+    no_entries["orders"] = []
+    result = worker.compare_paired_reports(
+        no_entries,
+        no_entries,
+        _paired_fidelity(),
+        expected_sha="verified_sha",
+        slippage_bps=10,
+    )
+    assert result["blocker"] == "paired_replay_entry_divergence_or_no_fills"
+
+
+def test_paired_run_uses_sanitized_isolated_offline_workers(monkeypatch, tmp_path):
+    session = tmp_path / "2026-10-21.jsonl"
+    session.write_text("immutable archive")
+    monkeypatch.setenv("REAL_BROKER_PASSWORD", "do-not-inherit")
+    monkeypatch.setattr(archive, "archive_fingerprint", lambda _path: "verified_sha")
+    monkeypatch.setattr(
+        worker, "write_capture_preflight", lambda *_: _paired_fidelity()
+    )
+    calls = []
+
+    def fake_run(command, *, cwd, env, stdout, stderr, timeout, check):
+        del cwd, stdout, stderr, timeout, check
+        calls.append((env.copy(), command[:]))
+        assert env["ALLOW_NETWORK"] == "false"
+        assert "REAL_BROKER_PASSWORD" not in env
+        output = command[command.index("--output") + 1]
+        report = _paired_report(
+            net=260 if env["ADAPTIVE_PROFIT_LOCK_ENABLED"] == "true" else 200
+        )
+        Path(output, "report.json").write_text(json.dumps(report))
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(worker.subprocess, "run", fake_run)
+    report = worker.run_paired_replays(session, tmp_path / "out", stress_bps=(10, 25))
+    assert report["state"] == "MODELED_COMPARISON_ONLY"
+    assert [x[0]["ADAPTIVE_PROFIT_LOCK_ENABLED"] for x in calls] == [
+        "false",
+        "true",
+        "false",
+        "true",
+    ]
+    assert [r["net_delta"] for r in report["stress"]] == [60, 60]
+    assert report["promotion_eligible"] is False
+
+
+def test_paired_run_missing_capture_refuses_subprocess(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        worker,
+        "write_capture_preflight",
+        lambda *_: {"archive_integrity_verified": False},
+    )
+    monkeypatch.setattr(
+        worker.subprocess,
+        "run",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            AssertionError("must not run with invalid archive")
+        ),
+    )
+    report = worker.run_paired_replays(tmp_path / "missing.jsonl", tmp_path / "output")
+    assert report["state"] == "BLOCKED"
+    assert report["blocker"] == "no_usable_archived_depth_session"

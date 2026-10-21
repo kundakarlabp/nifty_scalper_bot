@@ -65,3 +65,56 @@ the archived JSONL bytes. Therefore the current day's raw depth fidelity
 cannot be declared validated based on HTTP status alone. The automatic
 preflight gives the existing on-demand replay path a consistent place to
 record that evidence whenever a completed session is processed.
+
+
+## Paired adaptive trailing-stop replay — research only
+
+The same existing offline worker can now compare the current canonical
+trailing policy against the optional adaptive profit-lock controller, using
+the exact same checksum-verified recorded session and paper fill engine.
+No new production service, broker connection, password or paid data
+subscription is required.
+
+On the machine holding the real session and its integrity sidecars, run:
+
+```sh
+python scripts/run_runtime_replay.py \
+  --session /private/replay_archive/2026-10-21.jsonl \
+  --output /private/research/paired-2026-10-21 \
+  --compare-adaptive \
+  --stress-bps 10 25 50
+```
+
+This command is strictly **on demand**. Each scenario runs two isolated,
+credential-sanitized no-network subprocesses of the production-composition
+replay: `ADAPTIVE_PROFIT_LOCK_ENABLED=false` (the current policy) versus
+`true` (the research candidate). Environment and entry/exit choices remain
+under the same captured strategy, risk and session policy. Replaying the
+session does **not** activate adaptive trailing in the production engine.
+
+Reports:
+
+- `capture-fidelity.json`: the existing strict archive integrity and
+  selected CE/PE/spot/futures quote-fidelity preflight;
+- `baseline-10bps/report.json` and `adaptive-10bps/report.json` (and
+  corresponding stress settings): modeled full-engine orders, costs and
+  equity; and
+- `paired-comparison.json`: matched-entry, matched-archive comparison
+  with explicit blocker codes.
+
+A numeric adaptive-vs-baseline delta is presented only if both runs use
+identical archive SHA, event count, captured revision, **identical completed
+BUY entries** (symbol, quantity, price and submission timestamp), have
+complete observed selected quote context, and finish broker-simulation
+flat. Different entries or open/partially filled positions are **UNRESOLVED**,
+not silently dropped. A missing/incomplete replay tape blocks the comparison;
+OHLC, MFE or a live-server status screenshot never substitutes for depth.
+
+The actual paper broker model supplies order fees and adverse slippage. The
+summary reports matched-entry net P&L, fees, modeled drawdown and sensitivity
+to per-side slippage. This is still **not** validated exchange SL-LIMIT
+execution, modification latency, queue-position feasibility, or proof of
+broker-fill parity. It cannot be promoted automatically, even if all its
+scenarios show a positive modeled delta. Require chronological non-overlapping
+holdout days, validated costs, stop-limit gaps/partial-fill stress, and
+independent live-market observation before considering live activation.
