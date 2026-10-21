@@ -264,9 +264,7 @@ class BoundBracketManager(RuntimeBracketManager):
             if ltp is None:
                 return canonical_changed
             market_changed = False
-            if not _profit_extension._env_bool(
-                "ADAPTIVE_PROFIT_LOCK_ENABLED", False
-            ):
+            if not _profit_extension._env_bool("ADAPTIVE_PROFIT_LOCK_ENABLED", False):
                 try:
                     market_changed = _profit_extension.tighten_market_aware_floor(
                         self, bracket, ltp
