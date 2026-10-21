@@ -616,6 +616,22 @@ class MarketRegimeManager:
                 )
                 return
 
+            # Fresh price alone cannot establish a new RANGE regime.
+            # Preserve the existing stable state until an actual classifier
+            # feature is available.
+            has_regime_features = any(
+                data.get(key) is not None
+                for key in ("adx", "atr", "volume_spike_ratio")
+            ) or (
+                data.get("ema_fast") is not None
+                and data.get("ema_slow") is not None
+            )
+            if not has_regime_features:
+                logger.debug(
+                    "REGIME_REFRESH_SKIPPED reason=insufficient_regime_features"
+                )
+                return
+
             # 3. Map to detector schema
             enrichment = {
                 "trend_score": data.get("adx"),
