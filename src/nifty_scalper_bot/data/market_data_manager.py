@@ -10907,17 +10907,29 @@ class MarketDataManager:
                     continue
                 dispatched_symbols.append(sym)
                 self._last_symbol_level_recovery_mono = now_mono
-                log_throttled(
-                    self._logger,
-                    f"ws_symbol_stale_recovery:{sym}",
+                # Per-manager throttling preserves the FIRST structured
+                # warning for each stale symbol (including in fresh sessions)
+                # without repeating an unchanged incident every 30 seconds.
+                last_warning_by_symbol = getattr(
+                    self, "_stale_recovery_warning_mono", None
+                )
+                if not isinstance(last_warning_by_symbol, dict):
+                    last_warning_by_symbol = {}
+                    self._stale_recovery_warning_mono = last_warning_by_symbol
+                last_warning = last_warning_by_symbol.get(sym)
+                if (
+                    last_warning is not None
+                    and now_mono - float(last_warning) < 300.0
+                ):
+                    continue
+                last_warning_by_symbol[sym] = now_mono
+                self._logger.warning(
                     "WS_SYMBOL_STALE_RECOVERY symbol=%s required=%s stale_age_s=%s heartbeat_age_s=%s reason=%s",
                     sym,
                     sym in required,
                     age,
                     heartbeat_age,
                     recovery_reason,
-                    interval_sec=300.0,
-                    level=logging.WARNING,
                     extra={
                         "event": "WS_SYMBOL_STALE_RECOVERY",
                         "symbol": sym,
