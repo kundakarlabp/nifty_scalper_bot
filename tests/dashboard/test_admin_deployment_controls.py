@@ -20,20 +20,15 @@ def test_restart_returns_queue_evidence_not_immediate_restart(monkeypatch) -> No
     monkeypatch.setattr(
         admin,
         "queue_validated_restart",
-        lambda: actions.append("deployer") or ControlResult(
-            True, "restart_bot", "safe restart queued"
-        ),
+        lambda: actions.append("deployer")
+        or ControlResult(True, "restart_bot", "safe restart queued"),
     )
     monkeypatch.setattr(
         admin,
         "_restart_service",
-        lambda: (_ for _ in ()).throw(
-            AssertionError("unsafe engine restart called")
-        ),
+        lambda: (_ for _ in ()).throw(AssertionError("unsafe engine restart called")),
     )
-    response = _client().post(
-        "/admin/restart", headers={"accept": "application/json"}
-    )
+    response = _client().post("/admin/restart", headers={"accept": "application/json"})
 
     assert response.status_code == 202
     assert response.json() == {
@@ -50,9 +45,7 @@ def test_restart_reports_failed_dispatch_not_success(monkeypatch) -> None:
         "queue_validated_restart",
         lambda: ControlResult(False, "restart_bot", "systemd rejected"),
     )
-    response = _client().post(
-        "/admin/restart", headers={"accept": "application/json"}
-    )
+    response = _client().post("/admin/restart", headers={"accept": "application/json"})
     assert response.status_code == 503
     assert response.json()["ok"] is False
     assert response.json()["state"] == "failed"
@@ -73,21 +66,15 @@ def test_update_action_does_not_claim_code_was_deployed(monkeypatch) -> None:
     monkeypatch.setattr(
         admin, "_git_update", lambda: (True, "service restart accepted")
     )
-    response = _client().post(
-        "/admin/update", headers={"accept": "application/json"}
-    )
+    response = _client().post("/admin/update", headers={"accept": "application/json"})
     assert response.status_code == 202
     assert response.json()["state"] == "queued"
     assert "not yet verified" in response.json()["message"]
 
 
 def test_update_failure_propagates_operator_error(monkeypatch) -> None:
-    monkeypatch.setattr(
-        admin, "_git_update", lambda: (False, "systemd rejected")
-    )
-    response = _client().post(
-        "/admin/update", headers={"accept": "application/json"}
-    )
+    monkeypatch.setattr(admin, "_git_update", lambda: (False, "systemd rejected"))
+    response = _client().post("/admin/update", headers={"accept": "application/json"})
     assert response.status_code == 503
     assert response.json() == {
         "ok": False,
