@@ -1062,6 +1062,243 @@ def extend_final_target_if_supported(
     return None
 
 
+def _adaptive_positive_env(name: str, default: float, cap: float) -> float:
+    """Bound experimental monetary tolerances even under malformed env input."""
+    value = _as_float(os.getenv(name))
+    if value is None:
+        value = default
+    return min(cap, max(0.0, value))
+
+
+def _adaptive_executable_bid(
+    manager: Any, bracket: Any
+) -> tuple[float, float, dict[str, Any]] | None:
+    """Require recent FULL-size bid depth, not last-trade-price excursions."""
+    quote = _quote(manager, str(getattr(bracket, "symbol", "")))
+    age = _quote_age_seconds(quote)
+    if age is None or age > _adaptive_positive_env(
+        "ADAPTIVE_PROFIT_QUOTE_MAX_AGE_SEC", 3.0, 5.0
+    ):
+        return None
+    depth = quote.get("depth")
+    if not isinstance(depth, Mapping):
+        return None
+    buys = depth.get("buy")
+    if not isinstance(buys, list) or not buys or not isinstance(buys[0], Mapping):
+        return None
+    bid = _positive(buys[0].get("price"))
+    visible = _as_float(buys[0].get("quantity"))
+    ask = _positive(quote.get("ask"))
+    quantity = int(getattr(bracket, "remaining_quantity", 0) or 0)
+    if (
+        bid is None
+        or ask is None
+        or visible is None
+        or quantity <= 0
+        or visible < quantity
+        or ask < bid
+    ):
+        return None
+    spread = ask - bid
+    top_bid = _positive(quote.get("bid"))
+    if top_bid is not None and abs(top_bid - bid) > max(0.10, spread * 1.5):
+        return None
+    if spread / ((bid + ask) / 2) * 100 > _adaptive_positive_env(
+        "ADAPTIVE_PROFIT_MAX_SPREAD_PCT", 1.5, 2.0
+    ):
+        return None
+    return bid, spread, quote
+
+
+def _adaptive_continuation_state(decision: ContinuationDecision, bracket: Any) -> str:
+    """One vote per independent market family; correlated indicators do not stack."""
+    positives = set(decision.positive)
+    negatives = set(decision.negative)
+    premium_support = bool(
+        positives & {"premium_momentum", "premium_vwap_hold", "premium_ema_support"}
+    )
+    underlying_support = bool(
+        positives
+        & {
+            "underlying_vwap_alignment",
+            "underlying_ema_alignment",
+            "underlying_direction_context",
+        }
+    )
+    activity_support = bool(
+        positives & {"futures_volume_confirmation", "premium_volume_expansion"}
+    )
+    premium_conflict = bool(
+        negatives
+        & {
+            "premium_momentum_reversal",
+            "premium_vwap_lost",
+            "premium_ema_weak",
+            "premium_adx_weak",
+        }
+    )
+    underlying_conflict = bool(
+        negatives
+        & {
+            "underlying_vwap_conflict",
+            "underlying_ema_conflict",
+            "underlying_direction_conflict",
+        }
+    )
+    activity_conflict = bool(negatives & {"futures_volume_fade", "premium_volume_fade"})
+    provenance = getattr(bracket, "trade_provenance", {})
+    provenance = provenance if isinstance(provenance, Mapping) else {}
+    entry_invalid = any(
+        isinstance(provenance.get(key), Mapping)
+        and provenance[key].get("passed") is False
+        for key in ("direction_contract", "setup_contract", "confirmation_contract")
+    )
+    regime = normalize_regime(decision.snapshot.get("regime"))
+    if (
+        entry_invalid
+        or underlying_conflict
+        or sum((premium_conflict, underlying_conflict, activity_conflict)) >= 2
+        or regime in {MarketRegime.RANGE, MarketRegime.LOW_ACTIVITY}
+    ):
+        return "WEAK"
+    if (
+        regime is MarketRegime.TREND
+        and premium_support
+        and underlying_support
+        and activity_support
+        and not decision.critical_block
+    ):
+        return "STRONG"
+    return "NORMAL"
+
+
+def tighten_adaptive_profit_lock(manager: Any, bracket: Any, ltp: float) -> bool:
+    """Opt-in adaptive profit lock, subordinate to the canonical broker stop.
+
+    Current settings remain unchanged by default. No new order authority:
+    _ratchet_stop is the only mutation path and syncs existing exchange stops.
+    """
+    if not _env_bool("ADAPTIVE_PROFIT_LOCK_ENABLED", False):
+        return False
+    if str(getattr(bracket, "side", "")).upper() != "BUY":
+        return False
+    if not bool(getattr(bracket, "trailing_enabled", True)):
+        return False
+    if (
+        not bool(getattr(bracket, "active", True))
+        or getattr(bracket, "exit_pending", False)
+        or getattr(bracket, "exit_executed", False)
+        or getattr(bracket, "exchange_stop_degraded_reason", None)
+    ):
+        return False
+    live_mode = getattr(manager, "_is_live_execution", None)
+    if (
+        callable(live_mode)
+        and live_mode()
+        and not getattr(bracket, "exchange_stop_order_id", None)
+    ):
+        return False
+
+    entry = _positive(getattr(bracket, "entry_price", None))
+    initial_stop = _positive(getattr(bracket, "initial_sl_trigger_price", None))
+    if entry is None or initial_stop is None or initial_stop >= entry:
+        return False
+    risk = entry - initial_stop
+    executable = _adaptive_executable_bid(manager, bracket)
+    if executable is None:
+        return False
+    bid, spread, quote = executable
+    if bid <= entry:
+        return False
+
+    config = getattr(bracket, "trailing_config", None)
+    if not isinstance(config, dict):
+        return False
+    prior = _positive(config.get("_adaptive_profit_executable_high")) or entry
+    high = max(prior, bid)
+    config["_adaptive_profit_executable_high"] = _round_tick(high)
+    mfe = max(0.0, high - entry)
+    if mfe < risk * 0.60:
+        return False
+
+    decision = _cached_assessment(manager, bracket, float(ltp))
+    # A regime change needs two distinct delivered quote observations.
+    sample = (
+        quote.get("received_at")
+        or quote.get("timestamp")
+        or quote.get("exchange_timestamp")
+    )
+    if sample is None:
+        return False
+    observed = str(sample)
+    state = str(config.get("_adaptive_profit_state") or "NORMAL")
+    wanted = _adaptive_continuation_state(decision, bracket)
+    if observed != config.get("_adaptive_profit_last_sample"):
+        config["_adaptive_profit_last_sample"] = observed
+        pending = str(config.get("_adaptive_profit_pending") or "")
+        count = (
+            int(config.get("_adaptive_profit_pending_count") or 0) + 1
+            if pending == wanted
+            else 1
+        )
+        config["_adaptive_profit_pending"] = wanted
+        config["_adaptive_profit_pending_count"] = min(2, count)
+        if count >= 2:
+            state = wanted
+            config["_adaptive_profit_state"] = wanted
+
+    fractions = {"STRONG": 0.40, "NORMAL": 0.50, "WEAK": 0.65}
+    atr_factors = {"STRONG": 2.0, "NORMAL": 1.5, "WEAK": 1.0}
+    cost = _cost_floor(manager, bracket)
+    slippage = _adaptive_positive_env("ADAPTIVE_PROFIT_SLIPPAGE_POINTS", 0.50, 3.0)
+    fixed = _adaptive_positive_env("ADAPTIVE_PROFIT_MIN_POINTS", 1.0, 3.0)
+    floor = entry + cost + slippage + max(fixed, risk * 0.10)
+    candidate = floor
+    atr = None
+    if mfe >= risk:
+        candidate = max(candidate, entry + fractions.get(state, 0.50) * mfe)
+        indicators = _indicator_snapshot(
+            manager, str(getattr(bracket, "symbol", "")), ("atr",)
+        )
+        atr = _positive(indicators.get("atr"))
+        indicator_age = _as_float(indicators.get("context_age_seconds"))
+        if (
+            atr is not None
+            and atr <= entry * 0.25
+            and (indicator_age is None or 0 <= indicator_age <= 60)
+        ):
+            candidate = max(candidate, high - atr_factors.get(state, 1.5) * atr)
+
+    room = max(_TICK_SIZE, spread * 1.5, (atr or 0.0) * 0.10)
+    candidate = _round_tick(min(candidate, bid - room))
+    if candidate < floor - _TICK_SIZE:
+        return False
+    old = float(getattr(bracket, "sl_trigger_price", 0.0) or 0.0)
+    min_delta = max(0.50, old * 0.0025)
+    if candidate < old + min_delta:
+        return False
+    if not _ratchet_stop(
+        manager, bracket, candidate, bid, reason="adaptive_profit_lock"
+    ):
+        return False
+    provenance = getattr(bracket, "trade_provenance", None)
+    if isinstance(provenance, dict):
+        provenance["adaptive_profit_lock"] = {
+            "state": state,
+            "highest_executable_bid": round(high, 2),
+            "bid": round(bid, 2),
+            "mfe_r": round(mfe / risk, 4),
+            "virtual_stop": round(candidate, 2),
+            "positive_families": list(decision.positive),
+            "negative_families": list(decision.negative),
+        }
+    saver = getattr(manager, "save_state", None)
+    if callable(saver):
+        with suppress(Exception):
+            saver()
+    return True
+
+
 def tighten_market_aware_floor(manager: Any, bracket: Any, ltp: float) -> bool:
     """Tighten an already-profitable trade when continuation evidence deteriorates."""
     if not _env_bool("MARKET_AWARE_PROFIT_TIGHTEN_ENABLED", True):
@@ -1116,4 +1353,5 @@ __all__ = [
     "capture_entry_market_baseline",
     "extend_final_target_if_supported",
     "tighten_market_aware_floor",
+    "tighten_adaptive_profit_lock",
 ]
