@@ -130,3 +130,33 @@ def test_replay_checks_digest_without_exposing_tick_contents(tmp_path):
     assert CE not in json.dumps(result)
     assert PE not in json.dumps(result)
     assert FUT not in json.dumps(result)
+
+
+def test_on_demand_runtime_runner_automatically_writes_observed_quality(tmp_path):
+    from scripts.run_runtime_replay import write_capture_preflight
+
+    recording = tmp_path / "raw"
+    recording.mkdir()
+    path = _record(recording)
+    report = write_capture_preflight(path, tmp_path / "results")
+    saved = json.loads((tmp_path / "results" / "capture-fidelity.json").read_text())
+    assert saved["archive_integrity_verified"] is True
+    assert saved["observed_selected_context_available"] is True
+    assert saved["capture_sha256"] == report["capture_sha256"]
+    assert saved["account_pnl"] is None
+
+
+def test_failed_audit_does_not_generate_fictitious_price_or_execution(tmp_path):
+    from scripts.run_runtime_replay import write_capture_preflight
+
+    recording = tmp_path / "raw"
+    recording.mkdir()
+    path = _record(recording)
+    path.write_text(path.read_text().splitlines()[0] + "\n")
+    report = write_capture_preflight(path, tmp_path / "results")
+    assert report["state"] == "unavailable"
+    assert report["error_code"] == "replay_capture_fidelity_preflight_unavailable"
+    assert report["archive_integrity_verified"] is False
+    assert report["promotion_eligible"] is False
+    assert report["account_pnl"] is None
+    assert "price" not in json.dumps(report)

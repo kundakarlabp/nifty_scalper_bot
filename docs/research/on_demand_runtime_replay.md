@@ -41,3 +41,27 @@ are reported rather than replaced with invented quotes. Full historical fidelity
 starts with data captured after this release; older component tests retain their
 separate scope. Changing strategy parameters and demonstrating profitability requires
 chronological holdout evaluation after valid session data is available.
+
+
+## Automatic read-only quote-fidelity preflight
+
+Every invocation of `scripts/run_runtime_replay.py` now writes
+`capture-fidelity.json` beside the existing modeled replay report **before**
+running the unchanged production-composition replay. This is on-demand only;
+the live trading loop, broker access, strategy settings and order flow remain
+untouched. The preflight reads the already captured session and validates
+writer integrity, process epochs, four-stream selected option/futures/spot
+coverage, websocket provenance, two-sided bid/ask and five-level depth.
+
+A missing, partial or corrupt archive produces a structured
+`replay_capture_fidelity_preflight_unavailable` diagnostic, **not**
+fabricated quote or fill data. The runtime replay still applies its original
+strict checks and its own success/failure outcome. Even a high-quality
+preflight is not broker-executable P&L and does not imply all exchange
+messages arrived.
+
+The production status relay only confirms writer counters; it does not expose
+the archived JSONL bytes. Therefore the current day's raw depth fidelity
+cannot be declared validated based on HTTP status alone. The automatic
+preflight gives the existing on-demand replay path a consistent place to
+record that evidence whenever a completed session is processed.
