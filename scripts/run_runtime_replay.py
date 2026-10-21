@@ -168,8 +168,10 @@ def run_paired_replays(
     """Run two isolated production-composition workers per slippage scenario."""
     from nifty_scalper_bot.storage.replay_archive import archive_fingerprint
 
-    if not stress_bps or len(stress_bps) > 5 or any(
-        not math.isfinite(v) or not 0 <= v <= 100 for v in stress_bps
+    if (
+        not stress_bps
+        or len(stress_bps) > 5
+        or any(not math.isfinite(v) or not 0 <= v <= 100 for v in stress_bps)
     ):
         raise ValueError("paired_replay_invalid_stress")
     output.mkdir(parents=True, exist_ok=True)
@@ -229,10 +231,14 @@ def run_paired_replays(
                 BROKER_ACCESS_TOKEN="offline_replay",
             )
             command = [
-                sys.executable, str(Path(__file__).resolve()),
-                "--session", str(session.resolve()),
-                "--output", str(destination.resolve()),
-                "--slippage-bps", str(bps),
+                sys.executable,
+                str(Path(__file__).resolve()),
+                "--session",
+                str(session.resolve()),
+                "--output",
+                str(destination.resolve()),
+                "--slippage-bps",
+                str(bps),
             ]
             try:
                 process = subprocess.run(
@@ -273,7 +279,8 @@ def run_paired_replays(
     result["stress"] = statuses
     result["state"] = (
         "MODELED_COMPARISON_ONLY"
-        if statuses and len(statuses) == len(stress_bps)
+        if statuses
+        and len(statuses) == len(stress_bps)
         and all(row["state"] == "MODELED_PAIRED_COMPARISON" for row in statuses)
         else "BLOCKED"
     )
@@ -311,9 +318,11 @@ def main() -> int:
                 json.dumps(
                     {
                         "state": "BLOCKED",
-                        "error_code": str(exc)
-                        if str(exc).startswith("paired_replay_")
-                        else "paired_replay_preflight_failed",
+                        "error_code": (
+                            str(exc)
+                            if str(exc).startswith("paired_replay_")
+                            else "paired_replay_preflight_failed"
+                        ),
                         "promotion_eligible": False,
                         "live_settings_modified": False,
                     }
