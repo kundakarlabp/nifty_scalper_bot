@@ -14,11 +14,9 @@ from nifty_scalper_bot.admin_install_proof_display import install_proof_display
 from nifty_scalper_bot.ops.service_control import memory_snapshot, restart_deployer
 from nifty_scalper_bot.superlite_admin_core import (
     APP_DIR,
-    ENGINE_SERVICE,
     _http_json,
     bounded_logs,
     read_env,
-    restart,
     same_origin,
     status_snapshot,
     write_env,
@@ -72,7 +70,7 @@ def _flash(request: Request) -> str:
     if request.query_params.get("upd") == "ok":
         return (
             '<div class="flash ok">Update check accepted by systemd. '
-            "Intraday releases require broker-flat safety confirmation. "
+            "Releases require broker-flat and disarmed-engine confirmation. "
             "This is not deployment completion; check release status.</div>"
         )
     return _ORIGINAL_FLASH(request)
@@ -105,7 +103,6 @@ dashboard._read_env = read_env
 dashboard._write_env = write_env
 dashboard._git_update = _validated_update
 dashboard._gather_logs = _logs
-dashboard._restart_service = lambda: restart(ENGINE_SERVICE)
 dashboard._flash = _flash
 dashboard._CSS = STYLE
 dashboard.FIELDS = [(label, key, True) for label, key, _secret in dashboard.FIELDS]
