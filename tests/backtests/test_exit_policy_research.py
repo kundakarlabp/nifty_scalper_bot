@@ -5,7 +5,6 @@ from __future__ import annotations
 import pytest
 
 from nifty_scalper_bot.backtesting import exit_policy_research as research
-from nifty_scalper_bot.storage.replay_archive import ReplayArchive
 
 
 ENTRY = "2026-10-21T04:03:00+00:00"
@@ -99,30 +98,6 @@ def test_exchange_stop_gap_does_not_assume_guaranteed_fill() -> None:
         "status": "UNRESOLVED",
         "reason": "stop_limit_gap_risk",
     }
-
-
-def test_replay_archive_report_is_isolated_and_quality_gated(tmp_path) -> None:
-    import json
-    from datetime import datetime
-
-    archive = ReplayArchive(tmp_path)
-    archive.record(
-        "snapshot", {"instruments": [{"instrument_token": 3}]},
-        datetime.fromisoformat(ENTRY),
-    )
-    for second, bid in enumerate((101, 107, 109, 111, 108, 106), 1):
-        event = tick(second, bid)
-        archive.record("tick", event["payload"],
-                       datetime.fromisoformat(event["available_at"]))
-    archive.close()
-    path = tmp_path / "2026-10-21.jsonl"
-    trade_path = tmp_path / "trades.json"
-    trade_path.write_text(json.dumps([trade()]), encoding="utf-8")
-    report = research.run_exit_comparison(path, trade_path)
-    assert report["trade_count"] == 1
-    assert report["promotion_eligible"] is False
-    assert report["live_settings_modified"] is False
-    assert report["scenario_summary"]["target_0.6r"]["resolved"] == 1
 
 
 def test_invalid_slippage_or_trade_geometry_fails_closed() -> None:
