@@ -109,25 +109,26 @@ are not deployed until merged into `main` (unreviewed PR heads must never
 replace production). When a new main SHA is available, the updater validates
 the candidate in a detached worktree before attempting a release.
 
-Automatic restarts are **deferred between 09:15 and 15:45 IST** on weekdays,
-regardless of a momentarily flat account: the runner could otherwise enter a
-new trade between broker probes and the restart. At all other times, including
-08:00–09:14 pre-market and after the close, a release still requires a
-reconciled, **disarmed** engine and two broker-confirmed snapshots with **no**
-positions or outstanding orders. If the bot is in its canonical off-hours
-**QUIET** mode (trading stack unloaded), the updater verifies that mode through
-`/livez` and still requires the same two broker snapshots. If the broker
-cannot prove flatness, a session
-token has expired, tests fail, or a trade remains open after close, the pending
-SHA stays queued; the same timer retries without forcing a restart. Candidate
-checkout and engine restart each have a fresh safety check. Never reset a risk
-limit or cancel protective orders to accelerate deployment.
+There is **no market-hours restart blackout**: automatic updates may run
+during an NSE session as soon as the safety check passes. Before changing the
+checkout or restarting the engine, the updater still requires a reconciled,
+**disarmed** engine and two broker-confirmed snapshots with **no** positions
+or outstanding orders. A flat account alone is insufficient while live entries
+are armed, because a new entry could be submitted between checks. The updater
+does not automatically disarm the engine or interrupt a protective exit.
+When in canonical off-hours **QUIET** mode (trading stack unloaded), the
+updater verifies that mode via `/livez` and still requires the same broker
+proof. If any safety proof fails, session credentials expire, validation fails,
+or exposure is active, the pending SHA remains queued and is retried by the
+timer irrespective of market time. Candidate checkout and engine restart
+each have a fresh exposure check. Never reset a risk limit or cancel
+protective orders to accelerate deployment.
 
 See `data/auto_update_status.json` or the Admin status page for
-`deferred_market_window`, `deferred_unsafe_recovery`, validation failures,
+`deferred_broker_exposure`, `deferred_unsafe_recovery`, validation failures,
 and `deployed` status. A deferred release is not proof that the bot is down.
 The **Update from GitHub** button requests the same safe updater; it does not
-bypass the protection window. If the timer is disabled or consistently failing,
+bypass broker-state and engine-arming protection. If the timer is disabled or consistently failing,
 restore `niftybot-autodeploy.timer` through the existing setup; a Git commit
 alone cannot start an inactive host service.
 

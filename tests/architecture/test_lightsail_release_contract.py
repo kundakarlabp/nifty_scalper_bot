@@ -339,129 +339,114 @@ def test_release_health_separates_candidate_integrity_from_broker_auth() -> None
     assert "deployed_dependency_degraded" in release
 
 
-def _market_session_release_helpers() -> str:
-    """Execute only the pure time-gate functions, never the deployment body."""
+def _auto_release_helpers() -> str:
+    """Execute only the broker-exposure gate, never the deployment body."""
     release = _text("deploy/lightsail_release.sh")
-    assert release.count("market_session_protected() {") == 1
+    assert "market_session_protected" not in release
+    assert "TZ=Asia/Kolkata date +%H%M" not in release
+    assert "TZ=Asia/Kolkata date +%u" not in release
     assert release.count("auto_release_should_defer() {") == 1
     return (
-        "market_session_protected() {"
-        + release.split("market_session_protected() {", 1)[1].split("\nexec 9>", 1)[0]
+        "intraday_flat_broker_confirmed() {"
+        + release.split("intraday_flat_broker_confirmed() {", 1)[1].split(
+            "\nexec 9>", 1
+        )[0]
     )
 
 
-def test_auto_release_market_window_boundary_and_failure_modes() -> None:
-    helpers = _market_session_release_helpers()
-    cases = [
-        ("1", "0759", False),
-        ("1", "0800", False),
-        ("1", "0844", False),
-        ("1", "0914", False),
-        ("1", "0915", True),
-        ("5", "1230", True),
-        ("5", "1545", True),
-        ("5", "1546", False),
-        ("6", "1230", False),
-        ("7", "1230", False),
-        ("", "", True),
-        ("5", "2580", True),
-    ]
-    for weekday, hhmm, defer in cases:
-        result = subprocess.run(
-            [
-                "bash",
-                "-c",
-                helpers + '\nmarket_session_protected "$1" "$2"',
-                "fixture",
-                weekday,
-                hhmm,
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        assert (result.returncode == 0) is defer, (weekday, hhmm, result.stderr)
-
-
-def test_auto_release_only_and_manual_emergency_bypass() -> None:
-    helpers = _market_session_release_helpers()
+def test_auto_release_has_no_market_hours_blackout() -> None:
+    helpers = _auto_release_helpers()
     shell = helpers + """
-AUTO_MODE="$1"
-FAKE_DAY="$2"
-FAKE_CLOCK="$3"
-date() {
-  case "$1" in
-    +%u) printf '%s' "$FAKE_DAY";;
-    +%H%M) printf '%s' "$FAKE_CLOCK";;
-    *) return 1;;
-  esac
-}
-intraday_flat_broker_confirmed() { [ "$FAKE_DAY" = "6" ]; }
-auto_release_should_defer
-"""
-    for mode, weekday, hhmm, defer in (
-        ("true", "5", "1225", True),
-        ("true", "6", "1225", False),
-        ("false", "5", "1225", False),
-    ):
-        result = subprocess.run(
-            ["bash", "-c", shell, "fixture", mode, weekday, hhmm],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        assert (result.returncode == 0) is defer, (mode, weekday, result.stderr)
-
-
-def test_auto_release_catches_up_only_outside_session_with_broker_flat_proof() -> None:
-    helpers = _market_session_release_helpers()
-    shell = helpers + """
-AUTO_MODE="$1"
-FAKE_DAY="$2"
-FAKE_CLOCK="$3"
-SAFE="$4"
-date() {
-  case "$1" in
-    +%u) printf '%s' "$FAKE_DAY";;
-    +%H%M) printf '%s' "$FAKE_CLOCK";;
-    *) return 1;;
-  esac
-}
+AUTO_MODE=true
+BEFORE=oldrevision
+AFTER=newrevision
+SAFE="$1"
+date() { return 1; }
 intraday_flat_broker_confirmed() { [ "$SAFE" = "true" ]; }
 auto_release_should_defer
 """
-    cases = (
-        ("true", "1", "1425", "true", True),
-        ("true", "1", "0930", "true", True),
-        ("true", "1", "0914", "true", False),
-        ("true", "1", "0914", "false", True),
-        ("true", "1", "1545", "true", True),
-        ("true", "1", "1546", "true", False),
-        ("true", "1", "1546", "false", True),
-        ("true", "1", "2580", "true", True),
-        ("true", "", "", "true", True),
-        ("true", "6", "1100", "true", False),
-        ("true", "6", "1100", "false", True),
-        ("false", "1", "1425", "false", False),
-    )
-    for mode, day, clock, safe, defer in cases:
+    for safe, defer in (("true", False), ("false", True)):
         result = subprocess.run(
-            ["bash", "-c", shell, "fixture", mode, day, clock, safe],
+            ["bash", "-c", shell, "fixture", safe],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert (result.returncode == 0) is defer, (safe, result.stderr)
+
+
+def test_auto_release_and_manual_restart_have_independent_exposure_policy() -> None:
+    helpers = _auto_release_helpers()
+    shell = helpers + """
+AUTO_MODE="$1"
+SAFE="$2"
+BEFORE=oldrevision
+AFTER=newrevision
+intraday_flat_broker_confirmed() { [ "$SAFE" = "true" ]; }
+auto_release_should_defer
+"""
+    for mode, safe, defer in (
+        ("true", "true", False),
+        ("true", "false", True),
+        ("false", "false", False),
+    ):
+        result = subprocess.run(
+            ["bash", "-c", shell, "fixture", mode, safe],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert (result.returncode == 0) is defer, (mode, safe, result.stderr)
+
+
+def test_auto_release_probes_broker_regardless_of_market_clock() -> None:
+    helpers = _auto_release_helpers()
+    shell = helpers + """
+AUTO_MODE=true
+BEFORE=oldrevision
+AFTER=newrevision
+SAFE="$3"
+DATE_CALLED=false
+date() {
+  printf 'CLOCK_ACCESSED\\n' >&2
+  return 1
+}
+intraday_flat_broker_confirmed() {
+  printf 'BROKER_PROBED\\n' >&2
+  [ "$SAFE" = "true" ]
+}
+auto_release_should_defer
+"""
+    for weekday, hhmm, safe, defer in (
+        ("1", "0914", "true", False),
+        ("1", "0915", "true", False),
+        ("5", "1230", "true", False),
+        ("5", "1545", "true", False),
+        ("5", "1546", "true", False),
+        ("7", "1230", "true", False),
+        ("", "", "true", False),
+        ("5", "2580", "true", False),
+        ("1", "0930", "false", True),
+        ("6", "1100", "false", True),
+    ):
+        result = subprocess.run(
+            ["bash", "-c", shell, "fixture", weekday, hhmm, safe],
             capture_output=True,
             text=True,
             check=False,
         )
         assert (result.returncode == 0) is defer, (
-            mode,
-            day,
-            clock,
+            weekday,
+            hhmm,
             safe,
             result.stderr,
         )
+        assert "BROKER_PROBED" in result.stderr
+        assert "CLOCK_ACCESSED" not in result.stderr
 
 
 def test_already_current_healthy_release_skips_broker_exposure_poll() -> None:
-    helpers = _market_session_release_helpers()
+    helpers = _auto_release_helpers()
     shell = helpers + """
 AUTO_MODE=true
 BEFORE="$1"
@@ -600,7 +585,7 @@ exec(compile(os.environ["TEST_GUARD"], "<flat-guard>", "exec"))
         )
 
 
-def test_auto_market_gate_preserves_health_recovery_and_research_poll() -> None:
+def test_auto_exposure_gate_preserves_health_recovery_and_research_poll() -> None:
     release = _text("deploy/lightsail_release.sh")
     gate = release.index("if auto_release_should_defer; then")
     protected = release[gate : release.index("\nchmod +x", gate)]
@@ -618,14 +603,15 @@ def test_auto_market_gate_preserves_health_recovery_and_research_poll() -> None:
     assert "pending main" in protected
     assert "poll_research_request" in protected
     assert 'if [ "$BEFORE" != "$AFTER" ]; then' in protected
-    assert "write_status deferred_market_window" in protected
+    assert "write_status deferred_broker_exposure" in protected
     assert "write_status current" in protected
     assert gate < release.index("\nvalidate_environment\n", gate)
-    assert "TZ=Asia/Kolkata date +%u" in release
-    assert "TZ=Asia/Kolkata date +%H%M" in release
+    assert "market_session_protected()" not in release
+    assert "TZ=Asia/Kolkata date +%u" not in release
+    assert "TZ=Asia/Kolkata date +%H%M" not in release
 
 
-def test_auto_market_guard_rechecks_before_checkout_and_restart() -> None:
+def test_auto_exposure_guard_rechecks_before_checkout_and_restart() -> None:
     release = _text("deploy/lightsail_release.sh")
     validated = release.index('write_status validating "validating')
     after_candidate = release.index("if auto_release_should_defer; then", validated)
@@ -647,7 +633,7 @@ def test_auto_market_guard_rechecks_before_checkout_and_restart() -> None:
     )
 
 
-def test_forced_restart_survives_market_boundary_deferral() -> None:
+def test_forced_restart_survives_broker_exposure_deferral() -> None:
     release = _text("deploy/lightsail_release.sh")
     assert (
         'RESTART_PENDING_FILE="${CONFIG_DIR}/auto_release_restart_pending"' in release
@@ -660,16 +646,16 @@ def test_forced_restart_survives_market_boundary_deferral() -> None:
     )
 
 
-def test_auto_release_fails_closed_if_intraday_restore_fails() -> None:
+def test_auto_release_fails_closed_if_exposure_restore_fails() -> None:
     release = _text("deploy/lightsail_release.sh")
-    boundary = release.split("# Final boundary check:", 1)[1].split(
+    boundary = release.split("# Final broker/arming boundary check", 1)[1].split(
         'sudo systemctl restart "$SERVICE"', 1
     )[0]
     assert 'if ! git reset --hard --quiet "$BEFORE"; then' in boundary
     assert 'if ! "$VENV/bin/python" -m pip install --quiet -e .; then' in boundary
     assert 'if ! set_runtime_build_sha "$BEFORE"; then' in boundary
     assert boundary.count("write_status runtime_restore_failed") == 3
-    assert "write_status deferred_market_window" in boundary
+    assert "write_status deferred_broker_exposure" in boundary
     assert boundary.index("write_status runtime_restore_failed") < boundary.index(
-        "write_status deferred_market_window"
+        "write_status deferred_broker_exposure"
     )
