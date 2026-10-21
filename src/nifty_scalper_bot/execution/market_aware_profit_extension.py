@@ -1062,7 +1062,6 @@ def extend_final_target_if_supported(
     return None
 
 
-
 def _adaptive_positive_env(name: str, default: float, cap: float) -> float:
     """Bound experimental monetary tolerances even under malformed env input."""
     value = _as_float(os.getenv(name))
@@ -1108,9 +1107,7 @@ def _adaptive_executable_bid(
     return bid, spread, quote
 
 
-def _adaptive_continuation_state(
-    decision: ContinuationDecision, bracket: Any
-) -> str:
+def _adaptive_continuation_state(decision: ContinuationDecision, bracket: Any) -> str:
     """One vote per independent market family; correlated indicators do not stack."""
     positives = set(decision.positive)
     negatives = set(decision.negative)
@@ -1145,9 +1142,7 @@ def _adaptive_continuation_state(
             "underlying_direction_conflict",
         }
     )
-    activity_conflict = bool(
-        negatives & {"futures_volume_fade", "premium_volume_fade"}
-    )
+    activity_conflict = bool(negatives & {"futures_volume_fade", "premium_volume_fade"})
     provenance = getattr(bracket, "trade_provenance", {})
     provenance = provenance if isinstance(provenance, Mapping) else {}
     entry_invalid = any(
@@ -1215,8 +1210,10 @@ def tighten_adaptive_profit_lock(manager: Any, bracket: Any, ltp: float) -> bool
 
     decision = _cached_assessment(manager, bracket, float(ltp))
     # A regime change needs two distinct delivered quote observations.
-    sample = quote.get("received_at") or quote.get("timestamp") or quote.get(
-        "exchange_timestamp"
+    sample = (
+        quote.get("received_at")
+        or quote.get("timestamp")
+        or quote.get("exchange_timestamp")
     )
     if sample is None:
         return False
@@ -1257,9 +1254,7 @@ def tighten_adaptive_profit_lock(manager: Any, bracket: Any, ltp: float) -> bool
             and atr <= entry * 0.25
             and (indicator_age is None or 0 <= indicator_age <= 60)
         ):
-            candidate = max(
-                candidate, high - atr_factors.get(state, 1.5) * atr
-            )
+            candidate = max(candidate, high - atr_factors.get(state, 1.5) * atr)
 
     room = max(_TICK_SIZE, spread * 1.5, (atr or 0.0) * 0.10)
     candidate = _round_tick(min(candidate, bid - room))
