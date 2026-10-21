@@ -202,3 +202,27 @@ def test_regime_manager_defaults_match_production_safety_contract() -> None:
     assert manager.stale_after_seconds == 300.0
     assert manager.fail_closed is True
     assert manager.transition_confirmations == 2
+
+
+def test_price_only_tick_cannot_replace_confirmed_trend_with_range() -> None:
+    detector = MarketRegimeDetector()
+    manager = MarketRegimeManager(detector)
+    manager.ingest_snapshot(_make_snapshot("trend", 0.8))
+
+    assert detector.ingest_tick({"symbol": "NIFTY", "price": 22750.0}) is None
+    assert detector.ingest_tick({"symbol": "NIFTY", "ltp": 22748.5}) is None
+    assert manager.get_current_regime() == "trend"
+    assert manager.get_raw_snapshot().regime == "trend"
+
+
+def test_feature_bearing_tick_can_update_regime_normally() -> None:
+    detector = MarketRegimeDetector()
+    manager = MarketRegimeManager(detector)
+
+    snapshot = detector.ingest_tick(
+        {"symbol": "NIFTY", "adx": 32.0, "price": 22750.0, "atr": 14.0}
+    )
+
+    assert snapshot is not None
+    assert snapshot.regime == "trend"
+    assert manager.get_current_regime() == "trend"
