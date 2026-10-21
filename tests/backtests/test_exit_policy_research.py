@@ -2,15 +2,12 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
 import json
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from nifty_scalper_bot.backtesting.exit_policy_research import (
-    compare_trade,
-    run_exit_comparison,
-)
+from nifty_scalper_bot.backtesting import exit_policy_research as research
 from nifty_scalper_bot.storage.replay_archive import ReplayArchive
 
 
@@ -49,7 +46,7 @@ def tick(second: int, bid: float, *, qty: int = 65, symbol: str = SYMBOL) -> dic
 def test_target_overlays_use_causal_visible_bid_and_costs() -> None:
     data = [tick(1, 101), tick(2, 106), tick(3, 108.2), tick(4, 110.2),
             tick(5, 109), tick(6, 107)]
-    report = compare_trade(trade(), data)
+    report = research.compare_trade(trade(), data)
     assert report["coverage_ready"]
     assert report["outcomes"]["target_0.6r"]["status"] == "MODELED_TARGET"
     assert report["outcomes"]["target_0.6r"]["exit_price"] == 105.5
@@ -62,7 +59,7 @@ def test_target_overlays_use_causal_visible_bid_and_costs() -> None:
 def test_lock_fractions_act_after_peak_and_bounded_by_real_exit() -> None:
     data = [tick(1, 101), tick(2, 105), tick(3, 111), tick(4, 108),
             tick(5, 105), tick(6, 104)]
-    report = compare_trade(trade(), data)
+    report = research.compare_trade(trade(), data)
     assert report["outcomes"]["lock_40pct"]["status"] == "MODELED_STOP"
     assert report["outcomes"]["lock_50pct"]["status"] == "MODELED_STOP"
     assert report["outcomes"]["lock_60pct"]["status"] == "MODELED_STOP"
@@ -71,7 +68,7 @@ def test_lock_fractions_act_after_peak_and_bounded_by_real_exit() -> None:
 
 def test_ltp_without_observed_executable_bid_is_never_used() -> None:
     data = [tick(1, 120, qty=1), tick(2, 120, qty=0), tick(3, 110, qty=1)]
-    report = compare_trade(trade(), data)
+    report = research.compare_trade(trade(), data)
     assert report["coverage_ready"] is False
     assert all(
         value["status"] == "UNRESOLVED"
@@ -81,7 +78,7 @@ def test_ltp_without_observed_executable_bid_is_never_used() -> None:
 
 def test_missing_quotes_reject_fake_profit_from_unobserved_gap() -> None:
     data = [tick(1, 101), tick(2, 102), tick(30, 115)]
-    report = compare_trade(trade(), data)
+    report = research.compare_trade(trade(), data)
     assert not report["coverage_ready"]
     assert report["outcomes"]["target_0.6r"]["status"] == "UNRESOLVED"
 
@@ -89,7 +86,7 @@ def test_missing_quotes_reject_fake_profit_from_unobserved_gap() -> None:
 def test_future_quote_outside_actual_holding_window_cannot_satisfy_target() -> None:
     data = [tick(1, 100), tick(2, 101), tick(3, 102), tick(4, 103),
             tick(5, 102), tick(6, 101), tick(7, 120)]
-    report = compare_trade(trade(), data)
+    report = research.compare_trade(trade(), data)
     assert report["outcomes"]["target_0.8r"] == {
         "status": "UNCHANGED_ACTUAL",
         "net": 200,
@@ -100,7 +97,7 @@ def test_future_quote_outside_actual_holding_window_cannot_satisfy_target() -> N
 def test_exchange_stop_gap_does_not_assume_guaranteed_fill() -> None:
     data = [tick(1, 101), tick(2, 111), tick(3, 110),
             tick(4, 85), tick(5, 85), tick(6, 85)]
-    report = compare_trade(trade(), data)
+    report = research.compare_trade(trade(), data)
     assert report["outcomes"]["lock_60pct"] == {
         "status": "UNRESOLVED",
         "reason": "stop_limit_gap_risk",
@@ -118,7 +115,7 @@ def test_replay_archive_report_is_isolated_and_quality_gated(tmp_path) -> None:
     path = tmp_path / "2026-10-21.jsonl"
     trade_path = tmp_path / "trades.json"
     trade_path.write_text(json.dumps([trade()]), encoding="utf-8")
-    report = run_exit_comparison(path, trade_path)
+    report = research.run_exit_comparison(path, trade_path)
     assert report["trade_count"] == 1
     assert report["promotion_eligible"] is False
     assert report["live_settings_modified"] is False
@@ -127,15 +124,15 @@ def test_replay_archive_report_is_isolated_and_quality_gated(tmp_path) -> None:
 
 def test_invalid_slippage_or_trade_geometry_fails_closed() -> None:
     with pytest.raises(ValueError, match="exit_replay_invalid_slippage"):
-        compare_trade(trade(), [], slippage_points=-1)
+        research.compare_trade(trade(), [], slippage_points=-1)
     damaged = trade()
     damaged["initial_stop"] = None
     with pytest.raises(ValueError, match="exit_replay_invalid_trade_geometry"):
-        compare_trade(damaged, [])
+        research.compare_trade(damaged, [])
 
 
 def test_replay_session_requires_ledger_trade_list(tmp_path) -> None:
     path = tmp_path / "rows.json"
     path.write_text('{"trade_id": "invalid"}', encoding="utf-8")
     with pytest.raises(ValueError, match="exit_replay_trade_list_required"):
-        run_exit_comparison(tmp_path / "absent.jsonl", path)
+        research.run_exit_comparison(tmp_path / "absent.jsonl", path)
