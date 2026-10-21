@@ -558,3 +558,28 @@ def test_adaptive_live_mode_requires_existing_exchange_protection(monkeypatch):
     assert profit_extension.tighten_adaptive_profit_lock(manager, bracket, 115)
     assert bracket.sl_trigger_price > 94.0
     assert "virtual_stop" in bracket.trade_provenance["adaptive_profit_lock"]
+
+
+def test_adaptive_ignores_disabled_trailing_and_missing_initial_risk(monkeypatch):
+    monkeypatch.setenv("ADAPTIVE_PROFIT_LOCK_ENABLED", "true")
+    manager = FakeManager(strong=True)
+    _adaptive_market(manager)
+    disabled = _bracket(protected=False)
+    disabled.trailing_enabled = False
+    assert not profit_extension.tighten_adaptive_profit_lock(manager, disabled, 115)
+    assert disabled.sl_trigger_price == 94.0
+
+    missing = _bracket(protected=False)
+    missing.initial_sl_trigger_price = 0
+    assert not profit_extension.tighten_adaptive_profit_lock(manager, missing, 115)
+    assert missing.sl_trigger_price == 94.0
+
+
+def test_adaptive_rejects_contradictory_top_of_book_quote(monkeypatch):
+    monkeypatch.setenv("ADAPTIVE_PROFIT_LOCK_ENABLED", "true")
+    manager = FakeManager(strong=True)
+    bracket = _bracket(protected=False)
+    quote = _adaptive_market(manager)
+    quote["bid"] = 140.0
+    assert not profit_extension.tighten_adaptive_profit_lock(manager, bracket, 115)
+    assert bracket.sl_trigger_price == 94.0
