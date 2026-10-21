@@ -7,6 +7,7 @@ import os
 import re
 import subprocess
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, time
 from zoneinfo import ZoneInfo
@@ -18,7 +19,13 @@ from nifty_scalper_bot.admin_install_proof_display import install_proof_display
 
 IST = ZoneInfo("Asia/Kolkata")
 ADMIN_API = os.getenv("BOT_ADMIN_API_URL", "http://127.0.0.1:8081").rstrip("/")
-ADMIN_PUBLIC = os.getenv("BOT_ADMIN_PUBLIC_URL", "http://15.206.3.6:8081/admin")
+_configured_admin = os.getenv("BOT_ADMIN_PUBLIC_URL", "").strip()
+# Older systemd units override the environment file with a retired static IP.
+# Recover that exact legacy default without changing an operator-set custom URL.
+if not _configured_admin or urllib.parse.urlsplit(_configured_admin).hostname == "15.206.3.6":
+    ADMIN_PUBLIC = "http://" + os.getenv("BOT_PUBLIC_IP", "65.0.255.84") + ":8081/admin"
+else:
+    ADMIN_PUBLIC = _configured_admin
 SERVICE = os.getenv("BOT_SERVICE_NAME", "niftybot")
 LOW_MEMORY_MODE = os.getenv("BOT_CONSOLE_LOW_MEMORY_MODE", "true").strip().lower() in {"1", "true", "yes", "on"}
 STATUS_TTL = max(3, int(os.getenv("BOT_CONSOLE_STATUS_TTL_SECONDS", "10" if LOW_MEMORY_MODE else "6")))
@@ -49,13 +56,29 @@ def _get_json(path: str) -> dict:
         return {"engine_http_status": "ADMIN API UNREACHABLE"}
 
 
-def _post(path: str) -> bool:
+def _post(path: str) -> tuple[bool, str]:
+    """Read the operator service's actual verdict, not its HTTP redirect."""
+    request = urllib.request.Request(
+        ADMIN_API + path,
+        data=b"",
+        method="POST",
+        headers={"Accept": "application/json"},
+    )
     try:
-        request = urllib.request.Request(ADMIN_API + path, data=b"", method="POST")
-        with urllib.request.urlopen(request, timeout=2.5):
-            return True
-    except (OSError, urllib.error.URLError, TimeoutError):
-        return False
+        with urllib.request.urlopen(request, timeout=5.0) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        try:
+            payload = json.loads(exc.read().decode("utf-8"))
+        except (OSError, ValueError):
+            return False, f"Control rejected (HTTP {exc.code})"
+        return False, str(payload.get("message") or f"Control rejected (HTTP {exc.code})")
+    except (OSError, urllib.error.URLError, TimeoutError, ValueError):
+        return False, "Admin control service unreachable or invalid response"
+    if not isinstance(payload, dict):
+        return False, "Admin returned invalid control response"
+    ok = payload.get("ok") is True and payload.get("state") == "queued"
+    return ok, str(payload.get("message") or "Unknown request status")
 
 
 @st.cache_data(ttl=STATUS_TTL, show_spinner=False)
@@ -180,12 +203,17 @@ row_limit = controls[4].selectbox("Rows", row_choices, index=1)
 trade_only = controls[5].toggle("Trade events", value=False)
 controls[6].link_button("Open admin", ADMIN_PUBLIC, width="stretch")
 
-ops = st.columns([1, 1, 2.5], gap="small")
-if ops[0].button("Restart bot", type="primary", width="stretch"):
+ops = st.columns([1.1, 1.2, 1.1, 2.3], gap="small")
+if ops[0].button("Queue safe restart", type="secondary", width="stretch"):
     st.cache_data.clear()
-    st.toast("Bot restart requested" if _post("/admin/restart") else "Restart request failed")
-ops[1].link_button("Hard admin", ADMIN_PUBLIC, width="stretch")
-ops[2].caption("For a fully frozen bot, use this independent console or the Admin page. Instance stop remains outside the bot UI to avoid accidental host shutdown.")
+    accepted, message = _post("/admin/restart")
+    (st.info if accepted else st.error)(message)
+if ops[1].button("Check GitHub update", type="primary", width="stretch"):
+    st.cache_data.clear()
+    accepted, message = _post("/admin/update")
+    (st.info if accepted else st.error)(message)
+ops[2].link_button("Hard admin", ADMIN_PUBLIC, width="stretch")
+ops[3].caption("Controls request the validated deployment service; updates and restarts wait for market-session and broker-flat safety checks. A queued request is not a completed deployment.")
 
 
 def render() -> None:
