@@ -12,7 +12,6 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 
-
 def write_capture_preflight(session: Path, output: Path) -> dict[str, object]:
     """Report replay evidence quality; never alter the existing replay decision."""
     from nifty_scalper_bot.backtesting.replay_fidelity import audit_session
