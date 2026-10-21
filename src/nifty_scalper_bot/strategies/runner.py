@@ -9422,8 +9422,7 @@ class StrategyRunner:
                         # throttle identical follow-ups per Runner instance.
                         # MDM still performs every scheduled recovery assessment.
                         if self._should_log_throttled(
-                            f"watchdog_stale_symbol_delegate:{stale_count}",
-                            300.0,
+                            f"watchdog_stale_symbol_delegate:{stale_count}", 300.0
                         ):
                             self._logger.warning(
                                 "🔎 Watchdog delegating stale-symbol recovery assessment (%d symbols stale)",
