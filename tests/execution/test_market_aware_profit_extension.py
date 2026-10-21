@@ -542,3 +542,19 @@ def test_adaptive_lock_respects_regime_and_original_entry_context(monkeypatch):
     quote["received_at"] += 0.1
     profit_extension.tighten_adaptive_profit_lock(manager, degraded, 115)
     assert degraded.sl_trigger_price > baseline.sl_trigger_price
+
+
+def test_adaptive_live_mode_requires_existing_exchange_protection(monkeypatch):
+    monkeypatch.setenv("ADAPTIVE_PROFIT_LOCK_ENABLED", "true")
+    manager = FakeManager(strong=True)
+    manager._is_live_execution = lambda: True
+    bracket = _bracket(protected=False)
+    _adaptive_market(manager)
+
+    assert not profit_extension.tighten_adaptive_profit_lock(manager, bracket, 115)
+    assert bracket.sl_trigger_price == 94.0
+
+    bracket.exchange_stop_order_id = "protected-stop-1"
+    assert profit_extension.tighten_adaptive_profit_lock(manager, bracket, 115)
+    assert bracket.sl_trigger_price > 94.0
+    assert "virtual_stop" in bracket.trade_provenance["adaptive_profit_lock"]
