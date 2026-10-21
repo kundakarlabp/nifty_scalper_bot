@@ -436,7 +436,10 @@ auto_release_should_defer
             check=False,
         )
         assert (result.returncode == 0) is defer, (
-            weekday, hhmm, safe, result.stderr,
+            weekday,
+            hhmm,
+            safe,
+            result.stderr,
         )
         assert "BROKER_PROBED" in result.stderr
         assert "CLOCK_ACCESSED" not in result.stderr
