@@ -755,3 +755,37 @@ def test_exchange_sync_coalescer_is_thread_scoped(monkeypatch):
     )
     assert manager._apply_trailing_math(bracket)
     assert calls == [90.0, 101.0]
+
+
+def test_adaptive_enabled_skips_competing_legacy_market_stop(monkeypatch):
+    monkeypatch.setenv("ADAPTIVE_PROFIT_LOCK_ENABLED", "true")
+    manager = object.__new__(BoundBracketManager)
+    manager._trail_sync_context = threading.local()
+    bracket = SimpleNamespace(
+        symbol=SYMBOL, last_ltp=115.0, sl_trigger_price=101.0,
+    )
+    calls = []
+    monkeypatch.setattr(
+        RuntimeBracketManager, "_apply_trailing_math", lambda *_: False
+    )
+    monkeypatch.setattr(
+        profit_extension,
+        "tighten_market_aware_floor",
+        lambda *_: (_ for _ in ()).throw(
+            AssertionError("legacy market stop is not allowed in adaptive mode")
+        ),
+    )
+
+    def adaptive(owner, target, _ltp):
+        target.sl_trigger_price = 105
+        owner._sync_exchange_protective_stop(target)
+        return True
+
+    monkeypatch.setattr(profit_extension, "tighten_adaptive_profit_lock", adaptive)
+    monkeypatch.setattr(
+        RuntimeBracketManager,
+        "_sync_exchange_protective_stop",
+        lambda _self, target: calls.append(target.sl_trigger_price) or True,
+    )
+    assert manager._apply_trailing_math(bracket)
+    assert calls == [105]
