@@ -276,25 +276,34 @@ def _topbar(live_on: bool) -> str:
 def _flash(request: Request) -> str:
     q = request.query_params
     if q.get("saved"): return '<div class="flash ok">Settings saved. Restart to apply.</div>'
-    if q.get("token") == "ok": return '<div class="flash ok">Zerodha token verified and saved; validated engine restart queued, not yet applied.</div>'
+    if q.get("token") == "ok":
+        return (
+            '<div class="flash ok">Zerodha token verified and saved; '
+            "validated engine restart queued, not yet applied.</div>"
+        )
     if q.get("token") == "saved_not_applied":
         return (
             '<div class="flash err">Zerodha token saved, but restart not queued: '
-            f'{html.escape(q.get("msg", ""))}. Engine may still use the prior token.</div>'
+            f'{html.escape(q.get("msg", ""))}. '
+            "Engine may still use the prior token.</div>"
         )
     if q.get("token") == "err": return f'<div class="flash err">Zerodha session failed: {html.escape(q.get("msg", ""))}</div>'
     if q.get("mode") == "err": return '<div class="flash err">Cannot go LIVE: enter API key, secret and access token first.</div>'
     if q.get("mode") == "queued":
-        return '<div class="flash ok">Mode setting saved; validated restart queued, not yet applied.</div>'
+        return (
+            '<div class="flash ok">Mode setting saved; '
+            "validated restart queued, not yet applied.</div>"
+        )
     if q.get("mode") == "saved_not_applied":
         return (
             '<div class="flash err">Mode setting saved, but restart not queued: '
-            f'{html.escape(q.get("msg", ""))}. Running mode has not been verified.</div>'
+            f'{html.escape(q.get("msg", ""))}. '
+            "Running mode has not been verified.</div>"
         )
     if q.get("restart") == "queued":
         return (
             '<div class="flash ok">Validated bot restart queued. '
-            "Restart will execute only after broker-flat and disarmed-engine verification; "
+            "Restart requires broker-flat and disarmed-engine confirmation; "
             "queued does not mean completed.</div>"
         )
     if q.get("restart") == "err":
@@ -342,7 +351,10 @@ def dashboard(request: Request) -> HTMLResponse:
         rows += f'<label>{label} <span class=badge>{key}</span></label><input name="{key}" value="{html.escape(shown, quote=True)}" placeholder="(unchanged)">'
     body = f"""{_topbar(live_on)}<div class=wrap>{_flash(request)}
     <div class="card session"><h2>Daily Zerodha Session</h2>
-    <p><b>Recommended:</b> click Authenticate Zerodha, complete the official Zerodha login/TOTP screen, and return automatically. The server exchanges, verifies and saves the access token, then queues a validated restart. Check the running engine status to confirm application.</p>
+    <p><b>Recommended:</b> click Authenticate Zerodha, complete the official
+    Zerodha login/TOTP screen, and return. The server verifies and saves the
+    token, then queues a validated restart. Confirm the running engine status
+    before assuming that the new token is active.</p>
     {login_button}
     <p class=muted style="margin-top:12px">For automatic return, set the Kite app redirect URL to this server's <b>/admin/kite/callback</b> endpoint.</p>
     <form method=post action="/admin/token">
@@ -383,8 +395,10 @@ def dashboard(request: Request) -> HTMLResponse:
     or profitability. Report includes coverage and limitations.</p></div>
 
     <div class=card><h2>Controls</h2><div class=row>
-    <form method=post action="/admin/update"><button class=blu type=submit>Check GitHub update</button></form>
-    <form method=post action="/admin/restart"><button class=amb type=submit>Queue safe restart</button></form>
+    <form method=post action="/admin/update">
+    <button class=blu type=submit>Check GitHub update</button></form>
+    <form method=post action="/admin/restart">
+    <button class=amb type=submit>Queue safe restart</button></form>
     <a class="btn gray" href="/health">Health</a></div></div></div>"""
     return HTMLResponse(_page(body))
 
