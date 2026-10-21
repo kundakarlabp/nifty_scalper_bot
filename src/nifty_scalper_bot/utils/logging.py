@@ -353,7 +353,7 @@ class DedupLogger:
         self._cooldown = cooldown_seconds
         self._last_messages: dict[str, float] = {}
 
-    def info(self, msg: object, *args: object, **kwargs: object) -> None:
+    def info(self, msg: object, *args: object, **kwargs: Any) -> None:
         extra = kwargs.get("extra") or {}
         if isinstance(extra, dict) and bool(extra.get("bypass_filters")):
             self._logger.info(msg, *args, **kwargs)
@@ -369,13 +369,13 @@ class DedupLogger:
         self._last_messages[key] = now
         self._logger.info(msg, *args, **kwargs)
 
-    def debug(self, msg: object, *args: object, **kwargs: object) -> None:
+    def debug(self, msg: object, *args: object, **kwargs: Any) -> None:
         self._logger.debug(msg, *args, **kwargs)
 
-    def warning(self, msg: object, *args: object, **kwargs: object) -> None:
+    def warning(self, msg: object, *args: object, **kwargs: Any) -> None:
         self._logger.warning(msg, *args, **kwargs)
 
-    def error(self, msg: object, *args: object, **kwargs: object) -> None:
+    def error(self, msg: object, *args: object, **kwargs: Any) -> None:
         self._logger.error(msg, *args, **kwargs)
 
     def __getattr__(self, item: str) -> Any:
@@ -538,7 +538,7 @@ def setup_logging(level: str = "INFO") -> None:
         bot_file.addFilter(_BotLogRoutingFilter())
         strategy_file.addFilter(_LoggerPrefixFilter("nifty_scalper_bot.strategies", "nifty_scalper_bot.core.strategy_manager"))
         execution_file.addFilter(_LoggerPrefixFilter("nifty_scalper_bot.execution"))
-        handlers = [stdout_handler, stderr_handler, bot_file, strategy_file, execution_file]
+        handlers: list[logging.Handler] = [stdout_handler, stderr_handler, bot_file, strategy_file, execution_file]
         for handler in handlers:
             handler.addFilter(EventEnricher())
 
