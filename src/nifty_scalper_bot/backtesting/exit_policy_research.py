@@ -91,6 +91,8 @@ def compare_trade(
                 if isinstance(effective, Mapping)
                 else trade.get("estimated_costs")
             )
+        if observed_costs is None:
+            raise ValueError("exit_replay_cost_evidence_missing")
         costs = float(observed_costs)
         entry_at = _timestamp(trade["entry_filled_at"])
         exit_at = _timestamp(trade["exit_filled_at"])
@@ -154,7 +156,7 @@ def compare_trade(
         target = entry + risk * target_r if target_r is not None else None
         watermark = entry
         stop = initial_sl
-        simulated = None
+        simulated: dict[str, Any] | None = None
         for at, bid in bids:
             # The working stop was set on an earlier observation. Check it
             # BEFORE advancing the current tick's favorable watermark.
