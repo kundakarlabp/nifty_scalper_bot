@@ -2,16 +2,13 @@
 
 from __future__ import annotations
 
-import json
-from datetime import datetime, timedelta, timezone
-
 import pytest
 
 from nifty_scalper_bot.backtesting import exit_policy_research as research
 from nifty_scalper_bot.storage.replay_archive import ReplayArchive
 
 
-ENTRY = datetime(2026, 10, 21, 4, 3, tzinfo=timezone.utc)
+ENTRY = "2026-10-21T04:03:00+00:00"
 SYMBOL = "NFO:NIFTY26OCT23100CE"
 
 
@@ -26,15 +23,15 @@ def trade() -> dict:
         "net_pnl": 200,
         "effective_costs": 70,
         "ledger_complete": True,
-        "entry_filled_at": ENTRY.isoformat(),
-        "exit_filled_at": (ENTRY + timedelta(seconds=6)).isoformat(),
+        "entry_filled_at": ENTRY,
+        "exit_filled_at": "2026-10-21T04:03:06+00:00",
     }
 
 
 def tick(second: int, bid: float, *, qty: int = 65, symbol: str = SYMBOL) -> dict:
     return {
         "kind": "tick",
-        "available_at": (ENTRY + timedelta(seconds=second)).isoformat(),
+        "available_at": f"2026-10-21T04:03:{second:02d}+00:00",
         "payload": {
             "symbol": symbol,
             "ltp": bid + 1.0,
@@ -105,8 +102,14 @@ def test_exchange_stop_gap_does_not_assume_guaranteed_fill() -> None:
 
 
 def test_replay_archive_report_is_isolated_and_quality_gated(tmp_path) -> None:
+    import json
+    from datetime import datetime
+
     archive = ReplayArchive(tmp_path)
-    archive.record("snapshot", {"instruments": [{"instrument_token": 3}]}, ENTRY)
+    archive.record(
+        "snapshot", {"instruments": [{"instrument_token": 3}]},
+        datetime.fromisoformat(ENTRY),
+    )
     for second, bid in enumerate((101, 107, 109, 111, 108, 106), 1):
         event = tick(second, bid)
         archive.record("tick", event["payload"],
