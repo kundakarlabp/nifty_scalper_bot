@@ -77,3 +77,55 @@ def test_memory_snapshot_parses_proc_meminfo(tmp_path) -> None:
     assert snapshot["available"] is True
     assert snapshot["mem_used_pct"] == 75.0
     assert snapshot["swap_used_mb"] > 0
+
+
+def test_queued_restart_creates_marker_and_requests_only_deployer(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("NIFTYBOT_CONFIG_DIR", str(tmp_path))
+    calls = []
+    monkeypatch.setattr(
+        sc,
+        "restart_deployer",
+        lambda: calls.append("autodeploy") or sc.ControlResult(
+            True, "restart_deployer", "systemd accepted", ("systemctl",)
+        ),
+    )
+    result = sc.queue_validated_restart()
+
+    assert result.ok is True
+    assert result.action == "restart_bot"
+    assert "queued" in result.message.lower()
+    assert calls == ["autodeploy"]
+    assert (tmp_path / "auto_release_restart_pending").is_file()
+
+
+def test_queued_restart_rejects_unwritable_state(monkeypatch, tmp_path) -> None:
+    missing = tmp_path / "does-not-exist"
+    monkeypatch.setenv("NIFTYBOT_CONFIG_DIR", str(missing))
+    monkeypatch.setattr(
+        sc, "restart_deployer", lambda: (_ for _ in ()).throw(
+            AssertionError("must never invoke deployer without marker")
+        ),
+    )
+    result = sc.queue_validated_restart()
+
+    assert not result.ok
+    assert "marker" in result.message.lower()
+
+
+def test_queued_restart_reports_dispatch_failure_without_claiming_restart(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("NIFTYBOT_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        sc,
+        "restart_deployer",
+        lambda: sc.ControlResult(False, "restart_deployer", "systemd rejected"),
+    )
+
+    result = sc.queue_validated_restart()
+
+    assert result.ok is False
+    assert "systemd rejected" in result.message
+    assert (tmp_path / "auto_release_restart_pending").exists()
