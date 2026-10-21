@@ -224,3 +224,148 @@ def test_missing_future_with_strike_switch_stays_ineligible(tmp_path):
     assert report["spot_option_longest_contiguous_minutes"] == 31
     assert report["spot_option_research_eligible"] is False
     assert report["component_research_eligible"] is False
+
+
+def _future_fixture(root, *, gap=False, close_boundary=False):
+    epoch = int(
+        datetime(2025, 1, 2, 9, 15, tzinfo=ZoneInfo("Asia/Kolkata")).timestamp()
+    )
+    candles = [
+        {
+            "timestamp": epoch + i * 60,
+            "open": 100,
+            "high": 101,
+            "low": 99,
+            "close": 100,
+            "volume": 25,
+            "open_interest": 50,
+        }
+        for i in range(61)
+        if not (gap and i == 30)
+    ]
+    if close_boundary:
+        candles.append({**candles[-1], "timestamp": epoch + 375 * 60})
+    payload = {
+        "profile": "nifty_identified_future_v1",
+        "source": "synthetic fixture, not market data",
+        "identity": {
+            "security_id": "100",
+            "symbol": "NIFTY25JANFUT",
+            "expiry": "2025-01-30",
+        },
+        "historical_contract_identity_verified": True,
+        "historical_execution_quotes_available": False,
+        "timestamp_convention": (
+            "provider_epoch_interpreted_as_completed_minute_open_time"
+        ),
+        "collected_through": "2025-01-02",
+        "rows": len(candles),
+        "candles": candles,
+    }
+    path = root / "nifty-future-2025-01-30.json.gz"
+    _save_future(path, payload)
+    return path, payload
+
+
+def _save_future(path, payload):
+    path.write_bytes(gzip.compress(_bytes(payload)))
+    path.with_name(path.name + ".sha256").write_text(
+        f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}\n"
+    )
+
+
+def test_identified_future_supplements_only_observed_context(tmp_path):
+    shards, readiness = _fixture(tmp_path, empty_future=True)
+    path, _ = _future_fixture(tmp_path)
+    report = load_dhan_rolling_day(
+        shards, readiness, date(2025, 1, 2), futures_archive=path
+    )
+    assert report["component_research_eligible"] is True
+    assert report["aligned_minutes"] == 61
+    assert report["missing_streams"] == []
+    assert report["futures_context_identity_verified"] is True
+    assert report["futures_supplement"]["identity"]["expiry"] == "2025-01-30"
+    assert report["futures_supplement"]["historical_basket_selection_verified"] is False
+    assert report["immutable_contract_identity_verified"] is False
+    assert report["historical_execution_replay_supported"] is False
+    assert report["live_equivalent"] is False
+    assert all(
+        r["available_epoch"] == r["provider_epoch"] + 60
+        for r in report["streams"]["future"]
+    )
+    assert not any("bid" in r or "ask" in r for r in report["streams"]["future"])
+
+
+def test_future_gap_does_not_get_interpolated(tmp_path):
+    shards, readiness = _fixture(tmp_path, empty_future=True)
+    path, _ = _future_fixture(tmp_path, gap=True)
+    report = load_dhan_rolling_day(
+        shards, readiness, date(2025, 1, 2), futures_archive=path
+    )
+    assert report["aligned_minutes"] == 60
+    assert report["longest_contiguous_unswitched_aligned_minutes"] == 30
+    assert report["component_research_eligible"] is False
+
+
+def test_future_close_boundary_preserved_in_source_excluded_from_minutes(tmp_path):
+    shards, readiness = _fixture(tmp_path, empty_future=True)
+    path, _ = _future_fixture(tmp_path, close_boundary=True)
+    report = load_dhan_rolling_day(
+        shards, readiness, date(2025, 1, 2), futures_archive=path
+    )
+    assert len(report["streams"]["future"]) == 61
+    assert report["futures_supplement"]["excluded_close_boundary_rows"] == 1
+
+
+def test_supplement_does_not_silently_replace_existing_future(tmp_path):
+    shards, readiness = _fixture(tmp_path)
+    path, _ = _future_fixture(tmp_path)
+    with pytest.raises(ValueError, match="future_sources_conflict"):
+        load_dhan_rolling_day(shards, readiness, date(2025, 1, 2), futures_archive=path)
+
+
+@pytest.mark.parametrize(
+    "defect",
+    [
+        "checksum",
+        "spot_alias",
+        "expiry",
+        "profile",
+        "daily",
+        "duplicate",
+        "nan",
+        "geometry",
+        "negative_volume",
+        "later_candle",
+        "rows",
+    ],
+)
+def test_invalid_future_supplement_fails_closed(tmp_path, defect):
+    shards, readiness = _fixture(tmp_path, empty_future=True)
+    path, payload = _future_fixture(tmp_path)
+    if defect == "checksum":
+        path.write_bytes(b"corrupted")
+    else:
+        if defect == "spot_alias":
+            payload["identity"]["security_id"] = "13"
+        elif defect == "expiry":
+            payload["identity"]["expiry"] = "2025-01-01"
+        elif defect == "profile":
+            payload["profile"] = "daily_future"
+        elif defect == "daily":
+            payload["timestamp_convention"] = "day"
+        elif defect == "duplicate":
+            payload["candles"][1]["timestamp"] = payload["candles"][0]["timestamp"]
+        elif defect == "nan":
+            payload["candles"][0]["close"] = float("nan")
+        elif defect == "geometry":
+            payload["candles"][0]["high"] = 1
+        elif defect == "negative_volume":
+            payload["candles"][0]["volume"] = -1
+        elif defect == "later_candle":
+            payload["candles"][-1]["timestamp"] += 86400
+        elif defect == "rows":
+            payload["rows"] += 1
+        _save_future(path, payload)
+    with pytest.raises(ValueError, match="dhan_future_"):
+        load_dhan_rolling_day(shards, readiness, date(2025, 1, 2), futures_archive=path)

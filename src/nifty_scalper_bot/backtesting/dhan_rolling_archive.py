@@ -10,6 +10,7 @@ import argparse
 import gzip
 import hashlib
 import json
+import math
 import re
 from datetime import date, datetime
 from pathlib import Path
@@ -66,8 +67,115 @@ def _verified_readiness(directory: Path) -> tuple[dict[str, Any], dict[str, Any]
     return quality, catalog
 
 
+def _identified_future_day(
+    path: Path, trading_date: date
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Validate the private identified-contract release without inventing quotes.
+
+    A sidecar verifies bytes, not independent exchange authenticity. Contract
+    selection remains the caller's explicit choice, not a reconstructed basket.
+    """
+    raw = path.read_bytes()
+    checksum = hashlib.sha256(raw).hexdigest()
+    manifest = path.with_name(path.name + ".sha256").read_text().splitlines()
+    if len(manifest) != 1 or manifest[0].split() != [checksum, path.name]:
+        raise ValueError("dhan_future_checksum_mismatch")
+    payload = json.loads(gzip.decompress(raw))
+    identity = payload.get("identity", {})
+    security = identity.get("security_id", "")
+    symbol = identity.get("symbol", "")
+    expiry = date.fromisoformat(identity.get("expiry", ""))
+    collected = date.fromisoformat(payload.get("collected_through", ""))
+    if (
+        payload.get("profile") != "nifty_identified_future_v1"
+        or payload.get("historical_contract_identity_verified") is not True
+        or payload.get("historical_execution_quotes_available") is not False
+        or payload.get("timestamp_convention")
+        != "provider_epoch_interpreted_as_completed_minute_open_time"
+        or not isinstance(security, str)
+        or not security.isdigit()
+        or int(security) <= 0
+        or security == "13"
+        or not isinstance(symbol, str)
+        or not re.fullmatch(r"NIFTY(?=\d|-).*FUT", symbol, re.IGNORECASE)
+        or path.name != f"nifty-future-{expiry}.json.gz"
+        or not trading_date <= collected <= expiry
+    ):
+        raise ValueError("dhan_future_identity_invalid")
+    candles = payload.get("candles")
+    if (
+        not isinstance(candles, list)
+        or not candles
+        or payload.get("rows") != len(candles)
+    ):
+        raise ValueError("dhan_future_rows_invalid")
+    result = []
+    close_boundary_rows = 0
+    previous = None
+    for row in candles:
+        epoch = row.get("timestamp")
+        if type(epoch) is not int or (previous is not None and epoch <= previous):
+            raise ValueError("dhan_future_timestamp_invalid")
+        timestamp = datetime.fromtimestamp(epoch, IST)
+        if (
+            timestamp.second != 0
+            or not "09:15" <= timestamp.strftime("%H:%M") <= "15:30"
+            or timestamp.date() > min(collected, expiry)
+        ):
+            raise ValueError("dhan_future_session_invalid")
+        values = [row.get(key) for key in ("open", "high", "low", "close", "volume")]
+        if any(
+            type(value) not in (int, float) or not math.isfinite(value)
+            for value in values
+        ):
+            raise ValueError("dhan_future_numeric_invalid")
+        op, high, low, close, volume = values
+        oi = row.get("open_interest", row.get("oi"))
+        if (
+            min(op, high, low, close) <= 0
+            or not low <= min(op, close) <= max(op, close) <= high
+            or volume < 0
+            or (
+                oi is not None
+                and (type(oi) not in (int, float) or not math.isfinite(oi) or oi < 0)
+            )
+        ):
+            raise ValueError("dhan_future_bar_invalid")
+        previous = epoch
+        if timestamp.date() == trading_date and timestamp.strftime("%H:%M") == "15:30":
+            close_boundary_rows += 1
+        elif timestamp.date() == trading_date:
+            result.append(
+                {
+                    **{
+                        key: row[key]
+                        for key in ("open", "high", "low", "close", "volume")
+                    },
+                    "open_interest": oi,
+                    "provider_epoch": epoch,
+                    "available_epoch": epoch + 60,
+                    "segment_id": (
+                        f"identified-future:{security}:{expiry}:{trading_date}"
+                    ),
+                }
+            )
+    return result, {
+        "source": payload.get("source"),
+        "sha256": checksum,
+        "identity": identity,
+        "selected_session_rows": len(result),
+        "excluded_close_boundary_rows": close_boundary_rows,
+        "historical_basket_selection_verified": False,
+        "contains_bid_ask_depth": False,
+    }
+
+
 def load_dhan_rolling_day(
-    archive_root: Path, readiness_dir: Path, trading_date: date
+    archive_root: Path,
+    readiness_dir: Path,
+    trading_date: date,
+    *,
+    futures_archive: Path | None = None,
 ) -> dict[str, Any]:
     """Load verified spot/future/near-ATM CE+PE minute rows for one session.
 
@@ -158,6 +266,14 @@ def load_dhan_rolling_day(
             )
             streams[stream].append(row)
 
+    future_provenance = None
+    if futures_archive is not None:
+        if streams["future"]:
+            raise ValueError("dhan_future_sources_conflict")
+        streams["future"], future_provenance = _identified_future_day(
+            futures_archive, trading_date
+        )
+
     for stream, rows in streams.items():
         rows.sort(key=lambda row: row["provider_epoch"])
         if len({row["provider_epoch"] for row in rows}) != len(rows):
@@ -220,6 +336,9 @@ def load_dhan_rolling_day(
         "spot_option_longest_contiguous_minutes": spot_option_longest,
         "spot_option_research_eligible": spot_option_longest >= 60,
         "missing_streams": missing_streams,
+        "futures_supplement": future_provenance,
+        "futures_context_identity_verified": future_provenance is not None
+        and bool(streams["future"]),
         "streams": streams,
     }
 
@@ -230,8 +349,11 @@ def main() -> None:
     parser.add_argument("--readiness", type=Path, required=True)
     parser.add_argument("--date", type=date.fromisoformat, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--futures-archive", type=Path)
     args = parser.parse_args()
-    result = load_dhan_rolling_day(args.shards, args.readiness, args.date)
+    result = load_dhan_rolling_day(
+        args.shards, args.readiness, args.date, futures_archive=args.futures_archive
+    )
     args.output.write_text(json.dumps(result, sort_keys=True))
     print(json.dumps({key: value for key, value in result.items() if key != "streams"}))
 
