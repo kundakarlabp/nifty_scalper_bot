@@ -217,7 +217,7 @@ def test_dashboard_candidate_compilation_survives_retired_helper_removal(
     )
     failure = subprocess.run(compile_cmd, capture_output=True, text=True, check=False)
     assert failure.returncode != 0
-    assert "SyntaxError" in failure.stderr
+    assert "SyntaxError" in (failure.stdout + failure.stderr)
 
 
 def test_release_health_accepts_only_loaded_or_explicit_quiet_runtime() -> None:
