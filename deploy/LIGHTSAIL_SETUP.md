@@ -104,7 +104,30 @@ The runner:
 9. rolls code back if the trading engine fails health validation;
 10. reports console failure separately so a healthy trading engine is not disrupted.
 
-The automatic update timer runs the same release path every two minutes.
+The automatic update timer fetches `origin/main` every two minutes. PR commits
+are not deployed until merged into `main` (unreviewed PR heads must never
+replace production). When a new main SHA is available, the updater validates
+the candidate in a detached worktree before attempting a release.
+
+Automatic restarts are **deferred between 09:15 and 15:45 IST** on weekdays,
+regardless of a momentarily flat account: the runner could otherwise enter a
+new trade between broker probes and the restart. At all other times, including
+08:00–09:14 pre-market and after the close, a release still requires a
+reconciled, **disarmed** engine and two broker-confirmed snapshots with **no**
+positions or outstanding orders. If the broker cannot prove flatness, a session
+token has expired, tests fail, or a trade remains open after close, the pending
+SHA stays queued; the same timer retries without forcing a restart. Candidate
+checkout and engine restart each have a fresh safety check. Never reset a risk
+limit or cancel protective orders to accelerate deployment.
+
+See `data/auto_update_status.json` or the Admin status page for
+`deferred_market_window`, `deferred_unsafe_recovery`, validation failures,
+and `deployed` status. A deferred release is not proof that the bot is down.
+The **Update from GitHub** button requests the same safe updater; it does not
+bypass the protection window. If the timer is disabled or consistently failing,
+restore `niftybot-autodeploy.timer` through the existing setup; a Git commit
+alone cannot start an inactive host service.
+
 Use this command directly for manual releases; obsolete `ops/redeploy.sh` and
 `deploy/scripts/update_and_deploy.sh` forwarding shortcuts are retired.
 Existing host-side shortcuts must be updated to call the canonical runner.
