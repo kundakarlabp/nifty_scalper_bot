@@ -47,10 +47,11 @@ def main() -> int:
     args = parser.parse_args()
     from nifty_scalper_bot.backtesting.runtime_research import run_runtime_session
 
-    # On-demand OFFLINE quality telemetry. Does not block or alter existing
-    # runtime replay outcomes, and never reads live broker credentials.
-    write_capture_preflight(args.session, args.output)
+    # On-demand OFFLINE quality telemetry. Does not alter live execution,
+    # strategy behavior or broker calls. Preflight IO errors are handled by
+    # the same outer failure/report boundary as the existing replay worker.
     try:
+        write_capture_preflight(args.session, args.output)
         run_runtime_session(args.session, args.output, slippage_bps=args.slippage_bps)
     except Exception as exc:
         # Only stable locally-owned codes are surfaced, never upstream payloads.
