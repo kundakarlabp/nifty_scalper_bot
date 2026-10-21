@@ -1265,13 +1265,24 @@ def tighten_adaptive_profit_lock(manager: Any, bracket: Any, ltp: float) -> bool
             state = wanted
             config["_adaptive_profit_state"] = wanted
 
-    # Short-window premium bid movement is a noise guard, not a directional
-    # forecast. This history contains only fresh, quantity-supported quotes.
+    # Recent delivered bid volatility is a liquidity/noise allowance, not a
+    # direction forecast. Time-bound samples; do not treat eight rapid ticks
+    # as eight seconds of market behavior.
     history = config.get("_adaptive_profit_recent_bids")
-    bids = list(history[-7:]) if isinstance(history, list) else []
-    bids.append(round(bid, 2))
-    config["_adaptive_profit_recent_bids"] = bids
-    moves = [abs(bids[i] - bids[i - 1]) for i in range(1, len(bids))]
+    recent: list[list[float]] = []
+    if isinstance(history, list):
+        for row in history[-32:]:
+            if not isinstance(row, (list, tuple)) or len(row) != 2:
+                continue
+            at, price = _as_float(row[0]), _positive(row[1])
+            if at is not None and price is not None and 0 <= now - at <= 8.0:
+                recent.append([at, price])
+    recent.append([now, round(bid, 2)])
+    config["_adaptive_profit_recent_bids"] = recent[-32:]
+    moves = [
+        abs(recent[i][1] - recent[i - 1][1])
+        for i in range(1, len(recent))
+    ]
     micro_noise = statistics.median(moves) if moves else 0.0
 
     fractions = {"STRONG": 0.40, "NORMAL": 0.50, "WEAK": 0.65}
