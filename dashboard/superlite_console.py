@@ -220,7 +220,7 @@ if ops[1].button("Check GitHub update", type="primary", width="stretch"):
 ops[2].link_button("Hard admin", ADMIN_PUBLIC, width="stretch")
 ops[3].caption(
     "Controls request the validated deployment service. "
-    "Updates and restarts wait for market-session and broker-flat safety checks. "
+    "Updates and restarts wait for broker-flat and disarmed-engine safety checks. "
     "A queued request is not a completed deployment."
 )
 
