@@ -87,7 +87,8 @@ def test_queued_restart_creates_marker_and_requests_only_deployer(
     monkeypatch.setattr(
         sc,
         "restart_deployer",
-        lambda: calls.append("autodeploy") or sc.ControlResult(
+        lambda: calls.append("autodeploy")
+        or sc.ControlResult(
             True, "restart_deployer", "systemd accepted", ("systemctl",)
         ),
     )
@@ -104,7 +105,9 @@ def test_queued_restart_rejects_unwritable_state(monkeypatch, tmp_path) -> None:
     missing = tmp_path / "does-not-exist"
     monkeypatch.setenv("NIFTYBOT_CONFIG_DIR", str(missing))
     monkeypatch.setattr(
-        sc, "restart_deployer", lambda: (_ for _ in ()).throw(
+        sc,
+        "restart_deployer",
+        lambda: (_ for _ in ()).throw(
             AssertionError("must never invoke deployer without marker")
         ),
     )
