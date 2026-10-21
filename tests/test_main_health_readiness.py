@@ -1011,3 +1011,38 @@ def test_no_trade_diagnostics_ignores_invalid_or_empty_rejection_counts() -> Non
     assert diagnostic["basis"] == "since_start"
     assert diagnostic["dominant_rejection_reasons"] == []
     assert diagnostic["top_no_vote_reason_by_strategy"] == {}
+
+
+def test_signal_health_includes_canonical_regime_evidence() -> None:
+    stable = SimpleNamespace(
+        symbol="NIFTY",
+        regime="range",
+        confidence=0.71,
+        reason="adx_low",
+        updated_at=1780000100.0,
+    )
+    raw = SimpleNamespace(
+        symbol="NIFTY",
+        regime="trend",
+        confidence=0.75,
+        reason="adx_trending",
+        updated_at=1780000110.0,
+    )
+    regime_manager = SimpleNamespace(
+        get_latest_snapshot=lambda: stable,
+        get_raw_snapshot=lambda: raw,
+    )
+    runner = SimpleNamespace(
+        get_status=lambda: {"tick_count": 10},
+        _strategy_manager=SimpleNamespace(_regime_manager=regime_manager),
+    )
+
+    signals = main._signal_observability(SimpleNamespace(strategy_runner=runner))
+
+    evidence = signals["regime_evidence"]
+    assert evidence["stable_regime"] == "range"
+    assert evidence["raw_regime"] == "trend"
+    assert evidence["stable_reason"] == "adx_low"
+    assert evidence["raw_reason"] == "adx_trending"
+    assert evidence["stable_updated_at"] == 1780000100.0
+    assert signals["runner_tick_count"] == 10
