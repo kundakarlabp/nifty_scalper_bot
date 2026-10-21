@@ -199,11 +199,11 @@ def test_dashboard_candidate_compilation_survives_retired_helper_removal(
     dashboard = tmp_path / "dashboard"
     dashboard.mkdir()
     (dashboard / "superlite_console.py").write_text(
-        'from superlite_events import parse_event\\n',
+        'from superlite_events import parse_event\n',
         encoding="utf-8",
     )
     (dashboard / "superlite_events.py").write_text(
-        'def parse_event(value): return value\\n',
+        'def parse_event(value): return value\n',
         encoding="utf-8",
     )
     assert not (dashboard / "event_buffer.py").exists()
@@ -213,7 +213,7 @@ def test_dashboard_candidate_compilation_survives_retired_helper_removal(
 
     # A newly introduced syntax error must still block the validated release.
     (dashboard / "new_dashboard_helper.py").write_text(
-        "def new_helper(:\\n", encoding="utf-8"
+        "def new_helper(:\n", encoding="utf-8"
     )
     failure = subprocess.run(compile_cmd, capture_output=True, text=True, check=False)
     assert failure.returncode != 0
