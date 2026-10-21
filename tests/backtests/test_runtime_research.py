@@ -282,10 +282,7 @@ def test_exit_research_rejects_ltp_without_sufficient_depth() -> None:
     quotes = [_exit_quote(i, 120, qty=1) for i in range(1, 7)]
     result = _exit_research().compare_trade(_exit_trade(), quotes)
     assert result["coverage_ready"] is False
-    assert all(
-        value["status"] == "UNRESOLVED"
-        for value in result["outcomes"].values()
-    )
+    assert all(value["status"] == "UNRESOLVED" for value in result["outcomes"].values())
 
 
 def test_exit_research_future_quotes_cannot_trigger_past_targets() -> None:
@@ -299,9 +296,9 @@ def test_exit_research_future_quotes_cannot_trigger_past_targets() -> None:
 
 
 def test_exit_research_stop_limit_gap_cannot_claim_fill() -> None:
-    quotes = [_exit_quote(i, bid) for i, bid in enumerate(
-        (101, 111, 110, 85, 85, 85), 1
-    )]
+    quotes = [
+        _exit_quote(i, bid) for i, bid in enumerate((101, 111, 110, 85, 85, 85), 1)
+    ]
     result = _exit_research().compare_trade(_exit_trade(), quotes)
     assert result["outcomes"]["lock_60pct"]["reason"] == "stop_limit_gap_risk"
 
