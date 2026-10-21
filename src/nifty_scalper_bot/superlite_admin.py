@@ -14,7 +14,6 @@ from nifty_scalper_bot.admin_install_proof_display import install_proof_display
 from nifty_scalper_bot.ops.service_control import memory_snapshot, restart_deployer
 from nifty_scalper_bot.superlite_admin_core import (
     APP_DIR,
-    ENGINE_SERVICE,
     _http_json,
     bounded_logs,
     read_env,
