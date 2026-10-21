@@ -434,16 +434,33 @@ if [ ! -d .git ]; then
   write_status repository_missing "Git repository missing at $APP_DIR"; exit 1
 fi
 
-# Upgrade the browser controls on already-provisioned hosts. This changes
-# sudoers only; it neither replaces the environment nor restarts a service.
-# It runs before the auto-release no-change/exposure-safety short circuits.
+# A newly fetched release script can run while the checkout still contains a
+# legacy setup script. Never pass a repair flag to an installer which cannot
+# recognize it: the legacy script would run the ENTIRE bootstrap and restart
+# the live bot. A validated candidate can repair permissions before mutation.
+control_sudoers_repair_supported() {
+  local installer="$1"
+  [ -f "$installer" ] && grep -Fqx 'if [ "${1:-}" = "--repair-control-sudoers" ]; then' "$installer"
+}
+
+repair_control_sudoers_from() {
+  local installer="$1"
+  control_sudoers_repair_supported "$installer" || return 1
+  bash "$installer" --repair-control-sudoers || return 1
+  mkdir -p "$CONFIG_DIR"
+  : > "$CONFIG_DIR/control_sudoers_v2_installed"
+  log "dashboard/release sudoers permissions repaired"
+}
+
+# Repair on a current checkout without launching apt, reinstallation or engine
+# restarts. If the checkout predates the repair-only mode, defer this step
+# until the candidate has passed release validation.
 if [ ! -f "$CONFIG_DIR/control_sudoers_v2_installed" ]; then
-  if bash "$APP_DIR/deploy/lightsail_setup.sh" --repair-control-sudoers; then
-    mkdir -p "$CONFIG_DIR"
-    : > "$CONFIG_DIR/control_sudoers_v2_installed"
-    log "dashboard/release sudoers permissions repaired"
+  if control_sudoers_repair_supported "$APP_DIR/deploy/lightsail_setup.sh"; then
+    repair_control_sudoers_from "$APP_DIR/deploy/lightsail_setup.sh" || \
+      log "WARNING: sudoers repair failed; release candidate may need operator recovery"
   else
-    log "WARNING: dashboard/release sudoers permissions need operator repair"
+    log "Legacy setup has no repair-only mode; deferring sudoers repair until validated candidate"
   fi
 fi
 
@@ -612,6 +629,16 @@ if auto_release_should_defer; then
   poll_research_request
   write_status deferred_broker_exposure "candidate ${AFTER:0:7} validated; checkout untouched until broker-flat and disarmed"
   exit 0
+fi
+
+# Permission repair is required before checkout changes or any service
+# restart. Use only the *validated candidate* installer; never run the legacy
+# full-setup script with a flag it does not understand.
+if [ ! -f "$CONFIG_DIR/control_sudoers_v2_installed" ]; then
+  if ! repair_control_sudoers_from "$CANDIDATE/deploy/lightsail_setup.sh"; then
+    write_status control_permissions_failed "validated release blocked: restricted sudoers repair failed; operator recovery required"
+    exit 1
+  fi
 fi
 
 mkdir -p "$CONFIG_DIR/backups"

@@ -72,6 +72,75 @@ def test_sudoers_policy_authorizes_exact_automation_controls() -> None:
     )
 
 
+def test_legacy_installer_never_executes_full_setup_as_sudoers_repair(
+    tmp_path,
+) -> None:
+    """Legacy scripts silently ignored unknown flags and ran full provisioning."""
+    release = _text("deploy/lightsail_release.sh")
+    start = release.index("control_sudoers_repair_supported() {")
+    end = release.index("\n# Repair on a current checkout", start)
+    helpers = release[start:end]
+    legacy = tmp_path / "legacy-setup.sh"
+    legacy.write_text(
+        """#!/usr/bin/env bash
+printf BAD > "$SENTINEL"
+""",
+        encoding="utf-8",
+    )
+    safe = tmp_path / "current-setup.sh"
+    safe.write_text(
+        """#!/usr/bin/env bash
+if [ "${1:-}" = "--repair-control-sudoers" ]; then
+  printf REPAIR_ONLY > "$SENTINEL"
+  exit 0
+fi
+exit 5
+""",
+        encoding="utf-8",
+    )
+    import os
+
+    sentinel = tmp_path / "actions.log"
+    env = dict(os.environ, SENTINEL=str(sentinel))
+    cmd = helpers + """
+CONFIG_DIR="$3"
+log() { :; }
+repair_control_sudoers_from "$1"
+"""
+    for installer, expected in (
+        (legacy, False),
+        (safe, True),
+    ):
+        sentinel.unlink(missing_ok=True)
+        result = subprocess.run(
+            ["bash", "-c", cmd, "fixture", str(installer), "ignored", str(tmp_path)],
+            capture_output=True,
+            text=True,
+            check=False,
+            env=env,
+        )
+        assert (result.returncode == 0) is expected
+        if expected:
+            assert sentinel.read_text() == "REPAIR_ONLY"
+            assert (tmp_path / "control_sudoers_v2_installed").exists()
+        else:
+            assert not sentinel.exists()
+
+
+def test_repair_only_uses_validated_candidate_before_checkout_mutation() -> None:
+    release = _text("deploy/lightsail_release.sh")
+    validated = release.index('write_status validating "validating')
+    late_repair = release.index(
+        'repair_control_sudoers_from "$CANDIDATE/deploy/lightsail_setup.sh"',
+        validated,
+    )
+    checkout = release.index('git reset --hard --quiet "$AFTER"', late_repair)
+    guard = release.index("if auto_release_should_defer; then", validated)
+    assert validated < guard < late_repair < checkout
+    assert "control_permissions_failed" in release
+    assert "market_session_protected()" not in release
+
+
 def test_retired_dashboard_and_adhoc_tooling_are_absent() -> None:
     retired = (
         "dashboard/operations_console.py",
