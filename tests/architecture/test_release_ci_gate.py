@@ -98,3 +98,22 @@ def test_ci_verifier_queries_exact_main_sha_and_push_run(monkeypatch) -> None:
     assert f"head_sha={SHA}" in url
     assert "event=push" in url
     assert timeout <= 10
+
+
+def test_release_ci_gate_precedes_validation_checkout_and_preserves_exposure_guard() -> None:
+    from pathlib import Path
+
+    release = (
+        Path(__file__).resolve().parents[2] / "deploy/lightsail_release.sh"
+    ).read_text(encoding="utf-8")
+    # Even a valid PR/head SHA is not enough: post-merge push CI must pass.
+    gate = release.index('verify_release_ci.py" "$AFTER"')
+    candidate = release.index('CANDIDATE="/tmp/niftybot-candidate-')
+    checkout = release.index('git reset --hard --quiet "$AFTER"')
+    assert gate < candidate < checkout
+    assert "deferred_ci" in release
+    assert "ci_failed" in release
+    assert "ci_unavailable" in release
+    assert "intraday_flat_broker_confirmed" in release
+    assert "auto_release_should_defer" in release
+    assert "tests/architecture/test_release_ci_gate.py" in release
