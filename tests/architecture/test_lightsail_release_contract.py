@@ -170,7 +170,10 @@ def test_release_runner_validates_and_rolls_back() -> None:
     assert "tests/test_mdm_event_loop_consumer.py" in release
     assert "dashboard/superlite_console.py" in release
     assert "dashboard/operations_console.py" not in release
-    assert '"$CANDIDATE/dashboard/superlite_events.py"' in release
+    assert '[ ! -f "$CANDIDATE/dashboard/superlite_console.py" ]' in release
+    assert '"$VENV/bin/python" -m compileall -q "$CANDIDATE/dashboard"' in release
+    assert 'required dashboard entrypoint missing' in release
+    assert '"$VENV/bin/python" -m py_compile' not in release
     assert '"$CANDIDATE/dashboard/event_buffer.py"' not in release
     assert "tests/dashboard/test_superlite_event_details.py" in release
     assert not (ROOT / "dashboard/event_buffer.py").exists()
@@ -187,6 +190,34 @@ def test_release_runner_validates_and_rolls_back() -> None:
     assert "/readyz" not in health_block
     assert 'git reset --hard --quiet "$BEFORE"' in release
     assert 'sudo systemctl restart "$SERVICE"' in release
+
+
+def test_dashboard_candidate_compilation_survives_retired_helper_removal(
+    tmp_path: Path,
+) -> None:
+    """The release must not demand a removed, hard-coded helper module."""
+    dashboard = tmp_path / "dashboard"
+    dashboard.mkdir()
+    (dashboard / "superlite_console.py").write_text(
+        'from superlite_events import parse_event\\n',
+        encoding="utf-8",
+    )
+    (dashboard / "superlite_events.py").write_text(
+        'def parse_event(value): return value\\n',
+        encoding="utf-8",
+    )
+    assert not (dashboard / "event_buffer.py").exists()
+    compile_cmd = [sys.executable, "-m", "compileall", "-q", str(dashboard)]
+    success = subprocess.run(compile_cmd, capture_output=True, text=True, check=False)
+    assert success.returncode == 0, success.stderr
+
+    # A newly introduced syntax error must still block the validated release.
+    (dashboard / "new_dashboard_helper.py").write_text(
+        "def new_helper(:\\n", encoding="utf-8"
+    )
+    failure = subprocess.run(compile_cmd, capture_output=True, text=True, check=False)
+    assert failure.returncode != 0
+    assert "SyntaxError" in failure.stderr
 
 
 def test_release_health_accepts_only_loaded_or_explicit_quiet_runtime() -> None:
