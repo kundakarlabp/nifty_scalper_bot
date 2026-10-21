@@ -22,7 +22,10 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from nifty_scalper_bot.ops.service_control import restart_deployer
+from nifty_scalper_bot.ops.service_control import (
+    queue_validated_restart,
+    restart_deployer,
+)
 
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, PlainTextResponse, JSONResponse
@@ -275,7 +278,10 @@ def _flash(request: Request) -> str:
     if q.get("token") == "err": return f'<div class="flash err">Zerodha session failed: {html.escape(q.get("msg", ""))}</div>'
     if q.get("mode") == "err": return '<div class="flash err">Cannot go LIVE: enter API key, secret and access token first.</div>'
     if q.get("mode"): return '<div class="flash ok">Mode changed and bot restarted.</div>'
-    if q.get("restart"): return '<div class="flash ok">Bot restarting…</div>'
+    if q.get("restart") == "queued":
+        return '<div class="flash ok">Validated bot restart queued. The engine will NOT restart during the protected market window; release requires broker-flat confirmation.</div>'
+    if q.get("restart") == "err":
+        return f'<div class="flash err">Restart request failed: {html.escape(q.get("msg", ""))}</div>'
     if q.get("riskreset") == "ok":
         return (
             '<div class="flash ok">Daily risk allowance rebased. '
@@ -284,7 +290,8 @@ def _flash(request: Request) -> str:
     if q.get("riskreset") == "err":
         msg = html.escape(q.get("msg", ""))
         return f'<div class="flash err">Risk reset failed: {msg}</div>'
-    if q.get("upd") == "ok": return '<div class="flash ok">Updated from GitHub and restarted.</div>'
+    if q.get("upd") in {"queued", "ok"}:
+        return '<div class="flash ok">GitHub update check requested. This is NOT deployment completion; check release status for deferred, failed or deployed results.</div>'
     if q.get("upd") == "err": return f'<div class="flash err">Update failed: {html.escape(q.get("msg", ""))}</div>'
     return ""
 
@@ -457,19 +464,40 @@ def reset_daily_risk(request: Request, confirm: str = Form("")) -> RedirectRespo
 
 
 @router.post("/admin/restart")
-def restart(request: Request) -> RedirectResponse:
+def restart(request: Request) -> RedirectResponse | JSONResponse:
     _check_auth(request)
-    _restart_service()
-    return RedirectResponse("/admin?restart=1", status_code=303)
+    result = queue_validated_restart()
+    if "application/json" in request.headers.get("accept", ""):
+        return JSONResponse(
+            {"ok": result.ok, "state": "queued" if result.ok else "failed",
+             "message": result.message},
+            status_code=202 if result.ok else 503,
+        )
+    if result.ok:
+        return RedirectResponse("/admin?restart=queued", status_code=303)
+    return RedirectResponse(
+        "/admin?restart=err&msg=" + urllib.parse.quote(result.message[:120]),
+        status_code=303,
+    )
 
 
 @router.post("/admin/update")
-def update_from_github(request: Request) -> RedirectResponse:
+def update_from_github(request: Request) -> RedirectResponse | JSONResponse:
     _check_auth(request)
-    ok, log = _git_update()
+    ok, message = _git_update()
+    if "application/json" in request.headers.get("accept", ""):
+        return JSONResponse(
+            {"ok": ok, "state": "queued" if ok else "failed",
+             "message": ("Deployment check queued; completion is not yet verified"
+                         if ok else message)},
+            status_code=202 if ok else 503,
+        )
     if ok:
-        return RedirectResponse("/admin?upd=ok", status_code=303)
-    return RedirectResponse(f"/admin?upd=err&msg={urllib.parse.quote(log[:120])}", status_code=303)
+        return RedirectResponse("/admin?upd=queued", status_code=303)
+    return RedirectResponse(
+        "/admin?upd=err&msg=" + urllib.parse.quote(message[:120]),
+        status_code=303,
+    )
 
 
 _STATUS_CACHE: dict[str, object] = {"at": 0.0, "label": "running", "color": "#3fb950"}
