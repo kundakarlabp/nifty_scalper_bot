@@ -32,9 +32,9 @@ def test_streamlit_control_links_follow_current_host_and_do_not_mask_failures() 
     review = (ROOT / "deploy/systemd/niftybot-streamlit.service").read_text(
         encoding="utf-8"
     )
-    installer = (
-        ROOT / "deploy/scripts/install_streamlit_console.sh"
-    ).read_text(encoding="utf-8")
+    installer = (ROOT / "deploy/scripts/install_streamlit_console.sh").read_text(
+        encoding="utf-8"
+    )
 
     assert '"Accept": "application/json"' in console
     assert 'Check GitHub update' in console
