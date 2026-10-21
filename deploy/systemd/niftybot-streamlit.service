@@ -10,7 +10,6 @@ Group=ubuntu
 WorkingDirectory=/home/ubuntu/nifty_scalper_bot
 EnvironmentFile=/home/ubuntu/.config/niftybot/niftybot.env
 Environment=BOT_ADMIN_API_URL=http://127.0.0.1:8081
-Environment=BOT_ADMIN_PUBLIC_URL=http://15.206.3.6:8081/admin
 Environment=BOT_SERVICE_NAME=niftybot
 Environment=BOT_APP_DIR=/home/ubuntu/nifty_scalper_bot
 Environment=DEPLOYMENT_PLATFORM=aws_lightsail
