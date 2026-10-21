@@ -279,9 +279,16 @@ def _flash(request: Request) -> str:
     if q.get("mode") == "err": return '<div class="flash err">Cannot go LIVE: enter API key, secret and access token first.</div>'
     if q.get("mode"): return '<div class="flash ok">Mode changed and bot restarted.</div>'
     if q.get("restart") == "queued":
-        return '<div class="flash ok">Validated bot restart queued. The engine will NOT restart during the protected market window; release requires broker-flat confirmation.</div>'
+        return (
+            '<div class="flash ok">Validated bot restart queued. '
+            "The engine will NOT restart during the protected market window; "
+            "release requires broker-flat confirmation.</div>"
+        )
     if q.get("restart") == "err":
-        return f'<div class="flash err">Restart request failed: {html.escape(q.get("msg", ""))}</div>'
+        return (
+            '<div class="flash err">Restart request failed: '
+            f'{html.escape(q.get("msg", ""))}</div>'
+        )
     if q.get("riskreset") == "ok":
         return (
             '<div class="flash ok">Daily risk allowance rebased. '
@@ -291,7 +298,11 @@ def _flash(request: Request) -> str:
         msg = html.escape(q.get("msg", ""))
         return f'<div class="flash err">Risk reset failed: {msg}</div>'
     if q.get("upd") in {"queued", "ok"}:
-        return '<div class="flash ok">GitHub update check requested. This is NOT deployment completion; check release status for deferred, failed or deployed results.</div>'
+        return (
+            '<div class="flash ok">GitHub update check requested. '
+            "This is NOT deployment completion; check release status for "
+            "deferred, failed or deployed results.</div>"
+        )
     if q.get("upd") == "err": return f'<div class="flash err">Update failed: {html.escape(q.get("msg", ""))}</div>'
     return ""
 
