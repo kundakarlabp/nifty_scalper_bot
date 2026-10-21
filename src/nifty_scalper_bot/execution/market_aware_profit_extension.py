@@ -1100,6 +1100,9 @@ def _adaptive_executable_bid(
     ):
         return None
     spread = ask - bid
+    top_bid = _positive(quote.get("bid"))
+    if top_bid is not None and abs(top_bid - bid) > max(0.10, spread * 1.5):
+        return None
     if spread / ((bid + ask) / 2) * 100 > _adaptive_positive_env(
         "ADAPTIVE_PROFIT_MAX_SPREAD_PCT", 1.5, 2.0
     ):
@@ -1179,6 +1182,8 @@ def tighten_adaptive_profit_lock(manager: Any, bracket: Any, ltp: float) -> bool
         return False
     if str(getattr(bracket, "side", "")).upper() != "BUY":
         return False
+    if not bool(getattr(bracket, "trailing_enabled", True)):
+        return False
     if (
         not bool(getattr(bracket, "active", True))
         or getattr(bracket, "exit_pending", False)
@@ -1194,10 +1199,11 @@ def tighten_adaptive_profit_lock(manager: Any, bracket: Any, ltp: float) -> bool
     ):
         return False
 
-    risk = _initial_risk(bracket)
     entry = _positive(getattr(bracket, "entry_price", None))
-    if entry is None or risk <= 0:
+    initial_stop = _positive(getattr(bracket, "initial_sl_trigger_price", None))
+    if entry is None or initial_stop is None or initial_stop >= entry:
         return False
+    risk = entry - initial_stop
     executable = _adaptive_executable_bid(manager, bracket)
     if executable is None:
         return False
