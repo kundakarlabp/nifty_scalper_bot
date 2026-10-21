@@ -83,17 +83,13 @@ def queue_validated_restart() -> ControlResult:
     honors market-session and broker-flat guards before consuming this marker.
     """
     action = "restart_bot"
-    config = Path(
-        os.getenv("NIFTYBOT_CONFIG_DIR", "/home/ubuntu/.config/niftybot")
-    )
+    config = Path(os.getenv("NIFTYBOT_CONFIG_DIR", "/home/ubuntu/.config/niftybot"))
     marker = config / "auto_release_restart_pending"
     if not config.is_dir() or config.is_symlink():
         return ControlResult(False, action, "restart marker directory unavailable")
     descriptor = None
     try:
-        descriptor = os.open(
-            marker, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600
-        )
+        descriptor = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
         if not stat.S_ISREG(os.fstat(descriptor).st_mode):
             return ControlResult(False, action, "restart marker is not a regular file")
         os.fchmod(descriptor, 0o600)
