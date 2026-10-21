@@ -22,7 +22,10 @@ ADMIN_API = os.getenv("BOT_ADMIN_API_URL", "http://127.0.0.1:8081").rstrip("/")
 _configured_admin = os.getenv("BOT_ADMIN_PUBLIC_URL", "").strip()
 # Older systemd units override the environment file with a retired static IP.
 # Recover that exact legacy default without changing an operator-set custom URL.
-if not _configured_admin or urllib.parse.urlsplit(_configured_admin).hostname == "15.206.3.6":
+if (
+    not _configured_admin
+    or urllib.parse.urlsplit(_configured_admin).hostname == "15.206.3.6"
+):
     ADMIN_PUBLIC = "http://" + os.getenv("BOT_PUBLIC_IP", "65.0.255.84") + ":8081/admin"
 else:
     ADMIN_PUBLIC = _configured_admin
@@ -72,7 +75,9 @@ def _post(path: str) -> tuple[bool, str]:
             payload = json.loads(exc.read().decode("utf-8"))
         except (OSError, ValueError):
             return False, f"Control rejected (HTTP {exc.code})"
-        return False, str(payload.get("message") or f"Control rejected (HTTP {exc.code})")
+        return False, str(
+            payload.get("message") or f"Control rejected (HTTP {exc.code})"
+        )
     except (OSError, urllib.error.URLError, TimeoutError, ValueError):
         return False, "Admin control service unreachable or invalid response"
     if not isinstance(payload, dict):
@@ -213,7 +218,11 @@ if ops[1].button("Check GitHub update", type="primary", width="stretch"):
     accepted, message = _post("/admin/update")
     (st.info if accepted else st.error)(message)
 ops[2].link_button("Hard admin", ADMIN_PUBLIC, width="stretch")
-ops[3].caption("Controls request the validated deployment service; updates and restarts wait for market-session and broker-flat safety checks. A queued request is not a completed deployment.")
+ops[3].caption(
+    "Controls request the validated deployment service. "
+    "Updates and restarts wait for market-session and broker-flat safety checks. "
+    "A queued request is not a completed deployment."
+)
 
 
 def render() -> None:
@@ -257,14 +266,22 @@ def render() -> None:
         + card("Trade events", sum(row.get("type") == "TRADE" for row in rows))
         + card("Signal events", sum(row.get("type") == "SIGNAL" for row in rows))
         + card("Engine SHA", status.get("running") or "—")
-        + card("Cached main", status.get("remote") or "—", "warn" if status.get("stale") else "")
+        + card(
+            "Cached main",
+            status.get("remote") or "—",
+            "warn" if status.get("stale") else "",
+        )
         + '</div><div class="cards">'
         + card("ATM", selected.get("atm") or "—")
         + card("Selected CE", selected.get("ce") or "—")
         + card("Selected PE", selected.get("pe") or "—")
         + card("Mode", status.get("mode") or status.get("execution_mode") or "—")
         + card("Selected source", status.get("selected_source") or "—")
-        + card("Updater", (status.get("updater") or {}).get("state") or "unknown", "warn" if status.get("stale") else "")
+        + card(
+            "Updater",
+            (status.get("updater") or {}).get("state") or "unknown",
+            "warn" if status.get("stale") else "",
+        )
         + "</div>" + feed_html(rows),
         unsafe_allow_html=True,
     )
