@@ -1,5 +1,11 @@
+import json
+from pathlib import Path
+from types import SimpleNamespace
+
 import pytest
 
+import nifty_scalper_bot.storage.replay_archive as archive
+import scripts.run_runtime_replay as worker
 from nifty_scalper_bot.backtesting.runtime_research import validate_snapshot
 
 
@@ -343,11 +349,9 @@ def _paired_fidelity():
 
 
 def test_paired_adaptive_runtime_comparison_uses_identical_completed_entries():
-    from scripts.run_runtime_replay import compare_paired_reports
-
     observed = _paired_report(net=200)
     adaptive = _paired_report(net=260)
-    comparison = compare_paired_reports(
+    comparison = worker.compare_paired_reports(
         observed,
         adaptive,
         _paired_fidelity(),
@@ -361,11 +365,9 @@ def test_paired_adaptive_runtime_comparison_uses_identical_completed_entries():
 
 
 def test_paired_adaptive_runtime_blocks_lookahead_and_different_entries():
-    from scripts.run_runtime_replay import compare_paired_reports
-
     observed = _paired_report()
     divergent = _paired_report(symbol="NFO:NIFTY26OCT23000CE")
-    comparison = compare_paired_reports(
+    comparison = worker.compare_paired_reports(
         observed,
         divergent,
         _paired_fidelity(),
@@ -376,7 +378,7 @@ def test_paired_adaptive_runtime_blocks_lookahead_and_different_entries():
     assert comparison["net_delta"] is None
     assert comparison["entry_parity"] is False
 
-    bad_sha = compare_paired_reports(
+    bad_sha = worker.compare_paired_reports(
         observed,
         observed,
         _paired_fidelity(),
@@ -387,16 +389,14 @@ def test_paired_adaptive_runtime_blocks_lookahead_and_different_entries():
 
 
 def test_paired_adaptive_runtime_blocks_missing_depth_and_open_positions():
-    from scripts.run_runtime_replay import compare_paired_reports
-
     row = _paired_report()
     poor_fidelity = {**_paired_fidelity(), "observed_selected_context_available": False}
-    invalid = compare_paired_reports(
+    invalid = worker.compare_paired_reports(
         row, row, poor_fidelity, expected_sha="verified_sha", slippage_bps=10
     )
     assert invalid["blocker"] == "incomplete_captured_quote_fidelity"
     has_position = {**row, "positions": [{"quantity": 65}]}
-    exposed = compare_paired_reports(
+    exposed = worker.compare_paired_reports(
         row, has_position, _paired_fidelity(), expected_sha="verified_sha",
         slippage_bps=10,
     )
@@ -404,19 +404,17 @@ def test_paired_adaptive_runtime_blocks_missing_depth_and_open_positions():
 
 
 def test_paired_adaptive_rejects_unfinished_and_empty_buy_fills():
-    from scripts.run_runtime_replay import compare_paired_reports
-
     row = _paired_report()
     partial = _paired_report()
     partial["orders"][0]["status"] = "open"
-    result = compare_paired_reports(
+    result = worker.compare_paired_reports(
         row, partial, _paired_fidelity(), expected_sha="verified_sha",
         slippage_bps=10,
     )
     assert result["blocker"] == "paired_replay_partial_entry"
     no_entries = _paired_report()
     no_entries["orders"] = []
-    result = compare_paired_reports(
+    result = worker.compare_paired_reports(
         no_entries, no_entries, _paired_fidelity(), expected_sha="verified_sha",
         slippage_bps=10,
     )
@@ -424,15 +422,13 @@ def test_paired_adaptive_rejects_unfinished_and_empty_buy_fills():
 
 
 def test_paired_run_uses_sanitized_isolated_offline_workers(monkeypatch, tmp_path):
-    from types import SimpleNamespace
-    import nifty_scalper_bot.storage.replay_archive as archive
-    import scripts.run_runtime_replay as worker
-
     session = tmp_path / "2026-10-21.jsonl"
     session.write_text("immutable archive")
     monkeypatch.setenv("REAL_BROKER_PASSWORD", "do-not-inherit")
     monkeypatch.setattr(archive, "archive_fingerprint", lambda _path: "verified_sha")
-    monkeypatch.setattr(worker, "write_capture_preflight", lambda *_: _paired_fidelity())
+    monkeypatch.setattr(
+        worker, "write_capture_preflight", lambda *_: _paired_fidelity()
+    )
     calls = []
 
     def fake_run(command, *, cwd, env, stdout, stderr, timeout, check):
@@ -441,12 +437,10 @@ def test_paired_run_uses_sanitized_isolated_offline_workers(monkeypatch, tmp_pat
         assert env["ALLOW_NETWORK"] == "false"
         assert "REAL_BROKER_PASSWORD" not in env
         output = command[command.index("--output") + 1]
-        from pathlib import Path
-
         report = _paired_report(
             net=260 if env["ADAPTIVE_PROFIT_LOCK_ENABLED"] == "true" else 200
         )
-        Path(output, "report.json").write_text(__import__("json").dumps(report))
+        Path(output, "report.json").write_text(json.dumps(report))
         return SimpleNamespace(returncode=0)
 
     monkeypatch.setattr(worker.subprocess, "run", fake_run)
@@ -460,8 +454,6 @@ def test_paired_run_uses_sanitized_isolated_offline_workers(monkeypatch, tmp_pat
 
 
 def test_paired_run_missing_capture_refuses_subprocess(monkeypatch, tmp_path):
-    import scripts.run_runtime_replay as worker
-
     monkeypatch.setattr(
         worker, "write_capture_preflight",
         lambda *_: {"archive_integrity_verified": False},
