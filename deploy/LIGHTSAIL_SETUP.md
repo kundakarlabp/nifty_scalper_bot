@@ -114,7 +114,10 @@ regardless of a momentarily flat account: the runner could otherwise enter a
 new trade between broker probes and the restart. At all other times, including
 08:00–09:14 pre-market and after the close, a release still requires a
 reconciled, **disarmed** engine and two broker-confirmed snapshots with **no**
-positions or outstanding orders. If the broker cannot prove flatness, a session
+positions or outstanding orders. If the bot is in its canonical off-hours
+**QUIET** mode (trading stack unloaded), the updater verifies that mode through
+`/livez` and still requires the same two broker snapshots. If the broker
+cannot prove flatness, a session
 token has expired, tests fail, or a trade remains open after close, the pending
 SHA stays queued; the same timer retries without forcing a restart. Candidate
 checkout and engine restart each have a fresh safety check. Never reset a risk
