@@ -566,10 +566,15 @@ write_status validating "validating ${AFTER:0:7}"
 PYTHONPATH="$CANDIDATE/src" "$VENV/bin/python" -m compileall -q "$CANDIDATE/src" || {
   write_status validation_failed "source compile failed for ${AFTER:0:7}"; exit 1;
 }
-"$VENV/bin/python" -m py_compile \
-  "$CANDIDATE/dashboard/superlite_events.py" \
-  "$CANDIDATE/dashboard/log_export.py" \
-  "$CANDIDATE/dashboard/superlite_console.py" || {
+# Validate the canonical console entrypoint but compile *all present* dashboard
+# modules. Hard-coding a helper filename here deadlocks deployment after legitimate
+# file consolidation: the old validator rejects the new revision containing
+# its own fix before it can install that fix.
+if [ ! -f "$CANDIDATE/dashboard/superlite_console.py" ]; then
+  write_status validation_failed "required dashboard entrypoint missing for ${AFTER:0:7}"
+  exit 1
+fi
+"$VENV/bin/python" -m compileall -q "$CANDIDATE/dashboard" || {
   write_status validation_failed "dashboard compile failed for ${AFTER:0:7}"; exit 1;
 }
 
