@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 from typing import Any
 
@@ -75,6 +76,46 @@ def restart_deployer() -> ControlResult:
     )
 
 
+def queue_validated_restart() -> ControlResult:
+    """Request a safe deferred engine restart through the only release owner.
+
+    Never restart the trading engine from an HTTP request. The release runner
+    honors market-session and broker-flat guards before consuming this marker.
+    """
+    action = "restart_bot"
+    config = Path(os.getenv("NIFTYBOT_CONFIG_DIR", "/home/ubuntu/.config/niftybot"))
+    marker = config / "auto_release_restart_pending"
+    if not config.is_dir() or config.is_symlink():
+        return ControlResult(False, action, "restart marker directory unavailable")
+    descriptor = None
+    try:
+        descriptor = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            return ControlResult(False, action, "restart marker is not a regular file")
+        os.fchmod(descriptor, 0o600)
+    except OSError:
+        return ControlResult(False, action, "restart marker could not be written")
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+    triggered = restart_deployer()
+    if not triggered.ok:
+        return ControlResult(
+            False,
+            action,
+            f"restart marker saved; deployment trigger failed: {triggered.message}",
+            triggered.command,
+        )
+    return ControlResult(
+        True,
+        action,
+        "Validated restart queued; release runner will wait until "
+        "outside the protected market window and broker-flat",
+        triggered.command,
+    )
+
+
 def restart_console() -> ControlResult:
     return restart_service(
         os.getenv("BOT_STREAMLIT_SERVICE_NAME", "niftybot-streamlit"),
@@ -123,6 +164,7 @@ __all__ = [
     "instance_stop_disabled",
     "memory_snapshot",
     "restart_bot",
+    "queue_validated_restart",
     "restart_console",
     "restart_deployer",
     "restart_service",

@@ -305,7 +305,14 @@ def status_snapshot() -> dict[str, Any]:
     recent = bounded_logs(180)
     selected_options = _extract_selected_from_structured(trading, mode) or _extract_selected_from_logs(recent)
     selected_source = selected_options.pop("_source", None) if isinstance(selected_options, dict) else None
-    running, remote = _git_ref("HEAD"), _git_ref("origin/main")
+    checkout, remote = _git_ref("HEAD"), _git_ref("origin/main")
+    runtime_sha = str(trading.get("build_sha") or mode.get("build_sha") or "").strip()
+    running = runtime_sha[:7] if runtime_sha else checkout
+    runtime_checkout_mismatch = bool(
+        runtime_sha
+        and checkout not in {"", "—"}
+        and not runtime_sha.startswith(checkout)
+    )
     data = {
         "service_process_known": _service_process_known(),
         "process_up": bool(livez) and engine_http_responsive,
@@ -331,7 +338,11 @@ def status_snapshot() -> dict[str, Any]:
         "selected": selected_options,
         "selected_source": selected_source,
         "running": running,
+        "runtime_sha": runtime_sha,
+        "checkout_sha": checkout,
         "remote": remote,
+        "remote_source": "cached_local_origin/main",
+        "runtime_checkout_mismatch": runtime_checkout_mismatch,
         "stale": running not in {"—", ""} and remote not in {"—", ""} and running != remote,
         "updater": _update_state(),
     }
