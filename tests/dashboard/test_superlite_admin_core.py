@@ -291,7 +291,9 @@ def test_dashboard_runtime_sha_differs_from_checkout(monkeypatch) -> None:
         "_git_ref",
         lambda ref: "1234abc" if ref == "HEAD" else "a4d9a58",
     )
-    monkeypatch.setattr(core, "_update_state", lambda: {"state": "deferred_market_window"})
+    monkeypatch.setattr(
+        core, "_update_state", lambda: {"state": "deferred_market_window"}
+    )
     monkeypatch.setattr(core, "bounded_logs", lambda *_args, **_kwargs: "")
     core.STATUS_CACHE.update({"at": 0.0, "data": {}})
 
