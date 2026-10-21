@@ -1187,8 +1187,10 @@ def tighten_adaptive_profit_lock(manager: Any, bracket: Any, ltp: float) -> bool
     ):
         return False
     live_mode = getattr(manager, "_is_live_execution", None)
-    if callable(live_mode) and live_mode() and not getattr(
-        bracket, "exchange_stop_order_id", None
+    if (
+        callable(live_mode)
+        and live_mode()
+        and not getattr(bracket, "exchange_stop_order_id", None)
     ):
         return False
 
