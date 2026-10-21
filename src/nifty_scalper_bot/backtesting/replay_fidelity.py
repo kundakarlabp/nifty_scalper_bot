@@ -4,6 +4,7 @@ Strictly validate archive writer counters, unbroken sequence and immutable
 runtime snapshot using the bot's existing validators. This does not
 retroactively recover order-book messages, exchange fills, or missing quotes.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -36,9 +37,12 @@ def _depth(tick: Mapping[str, Any]) -> tuple[bool, bool]:
         if not isinstance(levels, list) or not levels:
             return False, False
         valid = [
-            row for row in levels[:5]
-            if isinstance(row, dict) and _number(row.get("price"))
-            and type(row.get("quantity")) is int and row["quantity"] > 0
+            row
+            for row in levels[:5]
+            if isinstance(row, dict)
+            and _number(row.get("price"))
+            and type(row.get("quantity")) is int
+            and row["quantity"] > 0
         ]
         if len(valid) != min(len(levels), 5):
             return False, False
@@ -60,8 +64,10 @@ def _selected(snapshot: Mapping[str, Any]) -> dict[str, str]:
     }
     if not all(isinstance(v, str) and v for v in selected.values()):
         return {}
-    if not all(selected[k].startswith("NFO:") and selected[k].endswith(k)
-               for k in ("CE", "PE", "FUT")):
+    if not all(
+        selected[k].startswith("NFO:") and selected[k].endswith(k)
+        for k in ("CE", "PE", "FUT")
+    ):
         return {}
     return selected
 
@@ -183,11 +189,15 @@ def main() -> None:
     report = audit_session(args.session, gap_seconds=args.gap_seconds)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
-    print(json.dumps({
-        "events": report["event_count"],
-        "context_available": report["observed_selected_context_available"],
-        "live_equivalent": False,
-    }))
+    print(
+        json.dumps(
+            {
+                "events": report["event_count"],
+                "context_available": report["observed_selected_context_available"],
+                "live_equivalent": False,
+            }
+        )
+    )
 
 
 if __name__ == "__main__":
