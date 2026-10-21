@@ -30,25 +30,36 @@ improved profit or expectancy.
     + max(fixed net profit points, 0.10R)`.
    Initial research values: fixed profit 1.0 premium point/unit, slippage
    0.50 premium point/unit. Both are bounded, do not imply guaranteed fills.
-4. Past 1R, select candidate
-   `max(minimum floor, entry + locked_fraction * executable_bid_MFE,
-        executable_bid_high - ATR_multiplier * option_ATR)`.
-   An unavailable/implausible ATR is omitted, not synthesized. Standard
-   values are STRONG: 40%/2.0ATR; NORMAL: 50%/1.5ATR;
-   WEAK: 65%/1.0ATR. These are **untested hypotheses**, not optimal values.
+4. Past 1R, determine a **single giveback allowance**, not the tightest
+   of independent percentage and ATR stop candidates:
+   `allowance = max((1-lock_fraction)*MFE, regime_ATR*ATR,
+   3*median_abs_recent_bid_change)`; then
+   `stop = max(cost_adjusted_floor, executable_bid_peak - allowance)`.
+   The allowance is widened by volatility, never inadvertently tightened
+   by a competing ATR expression. Unavailable or unproven-fresh ATR is omitted,
+   not synthesized. STRONG uses 40%/2ATR; NORMAL 50%/1.5ATR;
+   WEAK 65%/1ATR, **research hypotheses only**.
 5. STRONG requires separate premium, underlying, and market-activity
    evidence plus trend regime. WEAK arises from range/low-activity,
    invalidated entry contract or independently conflicting evidence.
-   Repeated correlated indicators within one family are not multiple votes.
-   A quality-state change requires **two distinct delivered quotes**.
-6. Preserve a buffer below live executable bid of at least
-   `max(0.05, 1.5*spread, 0.1*ATR)`. Require a meaningful >=0.50 point or
-   0.25% stop improvement. Never lower an already ratcheted stop.
-7. Refuse speculative stop changes when execution is pending, broker stop
-   status is degraded/unverified, or in live mode without an existing
-   exchange protective stop. Route any accepted virtual improvement through
-   the same `_ratchet_stop` -> broker-stop sync. Confirmation/modify budget
-   are still owned by the canonical broker-stop mechanism.
+   Correlated indicators within one family are not multiple votes.
+   A quality-state change requires **two distinct market assessments**,
+   not multiple ticks using the same cached assessment.
+6. Track a bounded rolling history of full-size executable bids; use
+   median absolute successive bid change as a short-horizon noise estimate.
+   With peak age >=8 seconds, WEAK quality and independent premium plus
+   underlying/activity deterioration, increase retention by up to 10%
+   (maximum 75%). Preserve a live-bid buffer of at least
+   `max(0.05, 1.5*spread, 1.5*short_bid_noise)`. Require >=0.50
+   point or 0.25% stop improvement. Never lower a ratcheted stop.
+7. Refuse speculative stop changes when costs are not positively verified,
+   execution is pending, broker stop status is degraded/unverified, or
+   live mode lacks an exchange protective stop. Route any accepted virtual
+   improvement through the same `_ratchet_stop` -> broker-stop sync.
+   Canonical fallback, market-aware and adaptive proposals now share a
+   **single broker sync attempt per position evaluation**. Other threads,
+   other positions and protection placement are not deferred. Confirmations
+   and modification budgets remain with the broker-stop owner.
 
 ## Replays before activation
 
@@ -80,6 +91,7 @@ trades available in October 2026.
 | `ADAPTIVE_PROFIT_SLIPPAGE_POINTS` | 0.50 | 3.0 |
 | `ADAPTIVE_PROFIT_QUOTE_MAX_AGE_SEC` | 3.0 | 5.0 |
 | `ADAPTIVE_PROFIT_MAX_SPREAD_PCT` | 1.5 | 2.0 |
+| `ADAPTIVE_PROFIT_STALL_SECONDS` | 8.0 | 30.0 |
 
 No new scheduled research worker, paid market data, broker credentials,
 deployment or automated live policy promotion is introduced.
