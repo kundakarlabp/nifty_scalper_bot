@@ -23,6 +23,7 @@ import urllib.request
 from pathlib import Path
 
 from nifty_scalper_bot.ops.service_control import (
+    ControlResult,
     queue_validated_restart,
     restart_deployer,
 )
@@ -157,13 +158,13 @@ def _verify_access_token(api_key: str, access_token: str) -> tuple[bool, str]:
         return False, str(exc)
 
 
-def _activate_access_token(access_token: str) -> None:
+def _activate_access_token(access_token: str) -> ControlResult:
     _write_env({
         "KITE_ACCESS_TOKEN": access_token,
         "ZERODHA_ACCESS_TOKEN": access_token,
         "BROKER_ACCESS_TOKEN": access_token,
     })
-    _restart_service()
+    return _restart_service()
 
 
 def _complete_kite_session(request_token: str) -> RedirectResponse:
@@ -178,8 +179,14 @@ def _complete_kite_session(request_token: str) -> RedirectResponse:
     verified, detail = _verify_access_token(api_key, result)
     if not verified:
         return RedirectResponse(f"/admin?token=err&msg={urllib.parse.quote(('verification failed: ' + detail)[:120])}", status_code=303)
-    _activate_access_token(result)
-    return RedirectResponse("/admin?token=ok", status_code=303)
+    restart_result = _activate_access_token(result)
+    if restart_result.ok:
+        return RedirectResponse("/admin?token=ok", status_code=303)
+    return RedirectResponse(
+        "/admin?token=saved_not_applied&msg="
+        + urllib.parse.quote(restart_result.message[:120]),
+        status_code=303,
+    )
 
 
 # ---------------- log/host helpers ----------------
@@ -235,14 +242,9 @@ def _gather_logs(lines: int, since: str = "", until: str = "", contains: str = "
     return _gather_logs_window(max(50, min(int(lines or 400), 20000)), since, until, contains, clean)
 
 
-def _restart_service() -> None:
-    try:
-        subprocess.Popen(
-            ["sudo", "systemctl", "restart", "--no-block", SERVICE_NAME],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
-        )
-    except Exception:
-        os._exit(0)
+def _restart_service() -> ControlResult:
+    """Queue the validated release, never restart a live engine from HTTP."""
+    return queue_validated_restart()
 
 
 def _git_update() -> tuple[bool, str]:
@@ -274,15 +276,26 @@ def _topbar(live_on: bool) -> str:
 def _flash(request: Request) -> str:
     q = request.query_params
     if q.get("saved"): return '<div class="flash ok">Settings saved. Restart to apply.</div>'
-    if q.get("token") == "ok": return '<div class="flash ok">Zerodha authenticated. Access token verified, saved and bot restart requested.</div>'
+    if q.get("token") == "ok": return '<div class="flash ok">Zerodha token verified and saved; validated engine restart queued, not yet applied.</div>'
+    if q.get("token") == "saved_not_applied":
+        return (
+            '<div class="flash err">Zerodha token saved, but restart not queued: '
+            f'{html.escape(q.get("msg", ""))}. Engine may still use the prior token.</div>'
+        )
     if q.get("token") == "err": return f'<div class="flash err">Zerodha session failed: {html.escape(q.get("msg", ""))}</div>'
     if q.get("mode") == "err": return '<div class="flash err">Cannot go LIVE: enter API key, secret and access token first.</div>'
-    if q.get("mode"): return '<div class="flash ok">Mode changed and bot restarted.</div>'
+    if q.get("mode") == "queued":
+        return '<div class="flash ok">Mode setting saved; validated restart queued, not yet applied.</div>'
+    if q.get("mode") == "saved_not_applied":
+        return (
+            '<div class="flash err">Mode setting saved, but restart not queued: '
+            f'{html.escape(q.get("msg", ""))}. Running mode has not been verified.</div>'
+        )
     if q.get("restart") == "queued":
         return (
             '<div class="flash ok">Validated bot restart queued. '
-            "The engine will NOT restart during the protected market window; "
-            "release requires broker-flat confirmation.</div>"
+            "Restart will execute only after broker-flat and disarmed-engine verification; "
+            "queued does not mean completed.</div>"
         )
     if q.get("restart") == "err":
         return (
@@ -329,7 +342,7 @@ def dashboard(request: Request) -> HTMLResponse:
         rows += f'<label>{label} <span class=badge>{key}</span></label><input name="{key}" value="{html.escape(shown, quote=True)}" placeholder="(unchanged)">'
     body = f"""{_topbar(live_on)}<div class=wrap>{_flash(request)}
     <div class="card session"><h2>Daily Zerodha Session</h2>
-    <p><b>Recommended:</b> click Authenticate Zerodha, complete the official Zerodha login/TOTP screen, and return automatically. The server then exchanges, verifies and saves the access token and restarts the bot.</p>
+    <p><b>Recommended:</b> click Authenticate Zerodha, complete the official Zerodha login/TOTP screen, and return automatically. The server exchanges, verifies and saves the access token, then queues a validated restart. Check the running engine status to confirm application.</p>
     {login_button}
     <p class=muted style="margin-top:12px">For automatic return, set the Kite app redirect URL to this server's <b>/admin/kite/callback</b> endpoint.</p>
     <form method=post action="/admin/token">
@@ -370,8 +383,8 @@ def dashboard(request: Request) -> HTMLResponse:
     or profitability. Report includes coverage and limitations.</p></div>
 
     <div class=card><h2>Controls</h2><div class=row>
-    <form method=post action="/admin/update"><button class=blu type=submit>Update from GitHub</button></form>
-    <form method=post action="/admin/restart"><button class=amb type=submit>Restart Bot</button></form>
+    <form method=post action="/admin/update"><button class=blu type=submit>Check GitHub update</button></form>
+    <form method=post action="/admin/restart"><button class=amb type=submit>Queue safe restart</button></form>
     <a class="btn gray" href="/health">Health</a></div></div></div>"""
     return HTMLResponse(_page(body))
 
@@ -404,8 +417,14 @@ def update_token(request: Request, request_token: str = Form(""), access_token: 
     verified, detail = _verify_access_token(api_key, acc_tok)
     if not verified:
         return RedirectResponse(f"/admin?token=err&msg={urllib.parse.quote(('verification failed: ' + detail)[:120])}", status_code=303)
-    _activate_access_token(acc_tok)
-    return RedirectResponse("/admin?token=ok", status_code=303)
+    restart_result = _activate_access_token(acc_tok)
+    if restart_result.ok:
+        return RedirectResponse("/admin?token=ok", status_code=303)
+    return RedirectResponse(
+        "/admin?token=saved_not_applied&msg="
+        + urllib.parse.quote(restart_result.message[:120]),
+        status_code=303,
+    )
 
 
 @router.post("/admin/mode")
@@ -421,8 +440,14 @@ def set_mode(request: Request, mode: str = Form(...)) -> RedirectResponse:
         _write_env({"ENABLE_LIVE": "true", "EXECUTION_MODE": "LIVE"})
     else:
         _write_env({"ENABLE_LIVE": "false", "EXECUTION_MODE": "SHADOW"})
-    _restart_service()
-    return RedirectResponse("/admin?mode=1", status_code=303)
+    restart_result = _restart_service()
+    if restart_result.ok:
+        return RedirectResponse("/admin?mode=queued", status_code=303)
+    return RedirectResponse(
+        "/admin?mode=saved_not_applied&msg="
+        + urllib.parse.quote(restart_result.message[:120]),
+        status_code=303,
+    )
 
 
 @router.post("/admin/save")
