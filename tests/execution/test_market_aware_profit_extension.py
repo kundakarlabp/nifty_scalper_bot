@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -477,6 +478,7 @@ def test_adaptive_lock_uses_independent_continuation_families(monkeypatch):
 
     assert profit_extension.tighten_adaptive_profit_lock(strong, strong_bracket, 115)
     profit_extension.tighten_adaptive_profit_lock(weak, weak_bracket, 115)
+    weak_bracket._profit_extension_assessed_mono = 0.0
     weak_quote["received_at"] += 0.1
     profit_extension.tighten_adaptive_profit_lock(weak, weak_bracket, 115)
     assert weak_bracket.sl_trigger_price > strong_bracket.sl_trigger_price
@@ -538,6 +540,7 @@ def test_adaptive_lock_respects_regime_and_original_entry_context(monkeypatch):
     _adaptive_market(manager)
     profit_extension.tighten_adaptive_profit_lock(manager, baseline, 115)
     profit_extension.tighten_adaptive_profit_lock(manager, degraded, 115)
+    degraded._profit_extension_assessed_mono = 0.0
     quote = manager._market_data.quotes[SYMBOL]
     quote["received_at"] += 0.1
     profit_extension.tighten_adaptive_profit_lock(manager, degraded, 115)
@@ -583,3 +586,206 @@ def test_adaptive_rejects_contradictory_top_of_book_quote(monkeypatch):
     quote["bid"] = 140.0
     assert not profit_extension.tighten_adaptive_profit_lock(manager, bracket, 115)
     assert bracket.sl_trigger_price == 94.0
+
+
+def test_adaptive_requires_verified_positive_cost_evidence(monkeypatch):
+    monkeypatch.setenv("ADAPTIVE_PROFIT_LOCK_ENABLED", "true")
+    manager = FakeManager(strong=True)
+    manager._breakeven_cost_per_unit = lambda _bracket: 0.0
+    bracket = _bracket(protected=False)
+    _adaptive_market(manager, bid=115)
+    assert not profit_extension.tighten_adaptive_profit_lock(manager, bracket, 115)
+    assert bracket.sl_trigger_price == 94.0
+
+
+def test_adaptive_atr_does_not_silently_override_strong_giveback(monkeypatch):
+    monkeypatch.setenv("ADAPTIVE_PROFIT_LOCK_ENABLED", "true")
+    manager = FakeManager(strong=True)
+    bracket = _bracket(protected=False)
+    bracket.trailing_config["_adaptive_profit_state"] = "STRONG"
+    _adaptive_market(manager, bid=115)
+    strong = ContinuationDecision(
+        extend=True,
+        evidence_count=5,
+        positive=(
+            "premium_momentum",
+            "underlying_vwap_alignment",
+            "futures_volume_confirmation",
+        ),
+        negative=(),
+        critical_block=False,
+        snapshot={"regime": "TREND_UP"},
+    )
+    monkeypatch.setattr(profit_extension, "assess_continuation", lambda *_: strong)
+    quote = manager._market_data.quotes[SYMBOL]
+    profit_extension.tighten_adaptive_profit_lock(manager, bracket, 115)
+    quote["received_at"] += 0.1
+    profit_extension.tighten_adaptive_profit_lock(manager, bracket, 115)
+    # 40% of a 15-point MFE = 6 points. ATR=3 must widen, not
+    # silently convert it into a 60%-plus lock via high - ATR.
+    assert bracket.sl_trigger_price <= 106.5
+
+
+def test_adaptive_does_not_confirm_state_from_cached_market_assessment(
+    monkeypatch,
+):
+    monkeypatch.setenv("ADAPTIVE_PROFIT_LOCK_ENABLED", "true")
+    manager = FakeManager(strong=True)
+    bracket = _bracket(protected=False)
+    quote = _adaptive_market(manager, bid=115)
+    evaluations = []
+    normal = ContinuationDecision(
+        extend=False,
+        evidence_count=4,
+        positive=(),
+        negative=(),
+        critical_block=False,
+        snapshot={"regime": "UNKNOWN"},
+    )
+    monkeypatch.setattr(
+        profit_extension,
+        "assess_continuation",
+        lambda *_: evaluations.append(1) or normal,
+    )
+    profit_extension.tighten_adaptive_profit_lock(manager, bracket, 115)
+    assert len(evaluations) == 1
+    assert bracket.trailing_config["_adaptive_profit_pending_count"] == 1
+    assert not profit_extension.tighten_adaptive_profit_lock(manager, bracket, 115)
+    assert len(evaluations) == 1
+    quote["received_at"] += 0.1
+    profit_extension.tighten_adaptive_profit_lock(manager, bracket, 115)
+    assert len(evaluations) == 1
+    bracket._profit_extension_assessed_mono = 0.0
+    quote["received_at"] += 0.1
+    profit_extension.tighten_adaptive_profit_lock(manager, bracket, 115)
+    assert len(evaluations) == 2
+
+
+def test_adaptive_peak_age_requires_deterioration_before_tightening(monkeypatch):
+    monkeypatch.setenv("ADAPTIVE_PROFIT_LOCK_ENABLED", "true")
+    monkeypatch.setenv("ADAPTIVE_PROFIT_STALL_SECONDS", "8")
+    manager = FakeManager(strong=False)
+    bracket = _bracket(protected=False)
+    quote = _adaptive_market(manager, bid=115)
+    clock = [1000.0]
+    monkeypatch.setattr(profit_extension.time, "monotonic", lambda: clock[0])
+    weakening = ContinuationDecision(
+        extend=False,
+        evidence_count=5,
+        positive=(),
+        negative=("premium_momentum_reversal", "futures_volume_fade"),
+        critical_block=False,
+        snapshot={"regime": "RANGE"},
+    )
+    monkeypatch.setattr(profit_extension, "assess_continuation", lambda *_: weakening)
+    profit_extension.tighten_adaptive_profit_lock(manager, bracket, 115)
+    initial = bracket.sl_trigger_price
+    quote["bid"] = 113.5
+    quote["ask"] = 113.7
+    quote["ltp"] = 113.55
+    quote["depth"]["buy"][0]["price"] = 113.5
+    quote["received_at"] += 0.1
+    clock[0] += 9
+    profit_extension.tighten_adaptive_profit_lock(manager, bracket, 113.55)
+    assert bracket.trailing_config["_adaptive_profit_peak_age_seconds"] >= 8
+    assert bracket.sl_trigger_price > initial
+    assert bracket.sl_trigger_price < 113.5
+
+
+def test_single_exchange_stop_sync_after_all_trail_proposals(monkeypatch):
+    manager = object.__new__(BoundBracketManager)
+    manager._trail_sync_context = threading.local()
+    bracket = SimpleNamespace(
+        symbol=SYMBOL,
+        last_ltp=115.0,
+        sl_trigger_price=101.0,
+    )
+    calls = []
+
+    def canonical(owner, target):
+        target.sl_trigger_price = 103
+        owner._sync_exchange_protective_stop(target)
+        return True
+
+    def market(owner, target, _ltp):
+        target.sl_trigger_price = 105
+        owner._sync_exchange_protective_stop(target)
+        return True
+
+    def adaptive(owner, target, _ltp):
+        target.sl_trigger_price = 108
+        owner._sync_exchange_protective_stop(target)
+        return True
+
+    monkeypatch.setattr(RuntimeBracketManager, "_apply_trailing_math", canonical)
+    monkeypatch.setattr(
+        RuntimeBracketManager,
+        "_sync_exchange_protective_stop",
+        lambda _self, target: calls.append(target.sl_trigger_price) or True,
+    )
+    monkeypatch.setattr(profit_extension, "tighten_market_aware_floor", market)
+    monkeypatch.setattr(profit_extension, "tighten_adaptive_profit_lock", adaptive)
+    assert manager._apply_trailing_math(bracket)
+    assert calls == [108]
+
+
+def test_exchange_sync_coalescer_is_thread_scoped(monkeypatch):
+    manager = object.__new__(BoundBracketManager)
+    manager._trail_sync_context = threading.local()
+    bracket = SimpleNamespace(symbol=SYMBOL, last_ltp=115.0, sl_trigger_price=101.0)
+    other = SimpleNamespace(symbol=SYMBOL, last_ltp=115.0, sl_trigger_price=90.0)
+    calls = []
+    monkeypatch.setattr(
+        RuntimeBracketManager,
+        "_sync_exchange_protective_stop",
+        lambda _self, target: calls.append(target.sl_trigger_price) or True,
+    )
+
+    def canonical(owner, target):
+        owner._sync_exchange_protective_stop(target)
+        owner._sync_exchange_protective_stop(other)
+        return True
+
+    monkeypatch.setattr(RuntimeBracketManager, "_apply_trailing_math", canonical)
+    monkeypatch.setattr(
+        profit_extension, "tighten_market_aware_floor", lambda *_: False
+    )
+    monkeypatch.setattr(
+        profit_extension, "tighten_adaptive_profit_lock", lambda *_: False
+    )
+    assert manager._apply_trailing_math(bracket)
+    assert calls == [90.0, 101.0]
+
+
+def test_adaptive_enabled_skips_competing_legacy_market_stop(monkeypatch):
+    monkeypatch.setenv("ADAPTIVE_PROFIT_LOCK_ENABLED", "true")
+    manager = object.__new__(BoundBracketManager)
+    manager._trail_sync_context = threading.local()
+    bracket = SimpleNamespace(
+        symbol=SYMBOL,
+        last_ltp=115.0,
+        sl_trigger_price=101.0,
+    )
+    calls = []
+    monkeypatch.setattr(RuntimeBracketManager, "_apply_trailing_math", lambda *_: False)
+    monkeypatch.setattr(
+        profit_extension,
+        "tighten_market_aware_floor",
+        lambda *_: (_ for _ in ()).throw(
+            AssertionError("legacy market stop is not allowed in adaptive mode")
+        ),
+    )
+
+    def adaptive(owner, target, _ltp):
+        target.sl_trigger_price = 105
+        owner._sync_exchange_protective_stop(target)
+        return True
+
+    monkeypatch.setattr(profit_extension, "tighten_adaptive_profit_lock", adaptive)
+    monkeypatch.setattr(
+        RuntimeBracketManager,
+        "_sync_exchange_protective_stop",
+        lambda _self, target: calls.append(target.sl_trigger_price) or True,
+    )
+    assert manager._apply_trailing_math(bracket)
+    assert calls == [105]

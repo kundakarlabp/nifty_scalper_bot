@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 import logging
 import math
 import os
+import statistics
 import time
 from typing import Any
 
@@ -1173,19 +1174,17 @@ def _adaptive_continuation_state(decision: ContinuationDecision, bracket: Any) -
 
 
 def tighten_adaptive_profit_lock(manager: Any, bracket: Any, ltp: float) -> bool:
-    """Opt-in adaptive profit lock, subordinate to the canonical broker stop.
+    """Propose one cost-aware, quality-scaled giveback stop from executable bids.
 
-    Current settings remain unchanged by default. No new order authority:
-    _ratchet_stop is the only mutation path and syncs existing exchange stops.
+    Only the canonical BracketManager can submit the resulting modification.
+    Research-only: disabled unless explicitly enabled after replay validation.
     """
     if not _env_bool("ADAPTIVE_PROFIT_LOCK_ENABLED", False):
         return False
-    if str(getattr(bracket, "side", "")).upper() != "BUY":
-        return False
-    if not bool(getattr(bracket, "trailing_enabled", True)):
-        return False
     if (
-        not bool(getattr(bracket, "active", True))
+        str(getattr(bracket, "side", "")).upper() != "BUY"
+        or not bool(getattr(bracket, "trailing_enabled", True))
+        or not bool(getattr(bracket, "active", True))
         or getattr(bracket, "exit_pending", False)
         or getattr(bracket, "exit_executed", False)
         or getattr(bracket, "exchange_stop_degraded_reason", None)
@@ -1198,31 +1197,26 @@ def tighten_adaptive_profit_lock(manager: Any, bracket: Any, ltp: float) -> bool
         and not getattr(bracket, "exchange_stop_order_id", None)
     ):
         return False
-
     entry = _positive(getattr(bracket, "entry_price", None))
     initial_stop = _positive(getattr(bracket, "initial_sl_trigger_price", None))
     if entry is None or initial_stop is None or initial_stop >= entry:
         return False
-    risk = entry - initial_stop
+    cost = _cost_floor(manager, bracket)
+    if not math.isfinite(cost) or cost <= 0.0:
+        # A zero/failed cost estimate cannot establish a minimum NET lock.
+        return False
     executable = _adaptive_executable_bid(manager, bracket)
     if executable is None:
         return False
     bid, spread, quote = executable
     if bid <= entry:
         return False
-
     config = getattr(bracket, "trailing_config", None)
     if not isinstance(config, dict):
         return False
-    prior = _positive(config.get("_adaptive_profit_executable_high")) or entry
-    high = max(prior, bid)
-    config["_adaptive_profit_executable_high"] = _round_tick(high)
-    mfe = max(0.0, high - entry)
-    if mfe < risk * 0.60:
-        return False
 
-    decision = _cached_assessment(manager, bracket, float(ltp))
-    # A regime change needs two distinct delivered quote observations.
+    # Quote identity is required before updating MFE or accumulating evidence.
+    # Re-evaluation of a cached snapshot must not fabricate fresh observations.
     sample = (
         quote.get("received_at")
         or quote.get("timestamp")
@@ -1230,11 +1224,35 @@ def tighten_adaptive_profit_lock(manager: Any, bracket: Any, ltp: float) -> bool
     )
     if sample is None:
         return False
-    observed = str(sample)
-    state = str(config.get("_adaptive_profit_state") or "NORMAL")
+    identity = str(sample)
+    if identity == config.get("_adaptive_profit_last_sample"):
+        return False
+    config["_adaptive_profit_last_sample"] = identity
+    now = time.monotonic()
+    prior = _positive(config.get("_adaptive_profit_executable_high")) or entry
+    high = max(prior, bid)
+    config["_adaptive_profit_executable_high"] = _round_tick(high)
+    peak_at = _as_float(config.get("_adaptive_profit_peak_at_mono"))
+    if high > prior + (_TICK_SIZE / 2) or peak_at is None or peak_at > now:
+        peak_at = now
+        config["_adaptive_profit_peak_at_mono"] = now
+    peak_age = max(0.0, now - peak_at)
+    config["_adaptive_profit_peak_age_seconds"] = round(peak_age, 2)
+    mfe = max(0.0, high - entry)
+    risk = entry - initial_stop
+    if mfe < risk * 0.60:
+        return False
+
+    # The shared assessment cache is retained for rate control. Two quality
+    # confirmations need distinct assessments, not just distinct option ticks.
+    decision = _cached_assessment(manager, bracket, float(ltp))
+    assessment_at = _as_float(getattr(bracket, "_profit_extension_assessed_mono", None))
     wanted = _adaptive_continuation_state(decision, bracket)
-    if observed != config.get("_adaptive_profit_last_sample"):
-        config["_adaptive_profit_last_sample"] = observed
+    state = str(config.get("_adaptive_profit_state") or "NORMAL")
+    if assessment_at is not None and assessment_at != config.get(
+        "_adaptive_profit_last_assessment_mono"
+    ):
+        config["_adaptive_profit_last_assessment_mono"] = assessment_at
         pending = str(config.get("_adaptive_profit_pending") or "")
         count = (
             int(config.get("_adaptive_profit_pending_count") or 0) + 1
@@ -1247,35 +1265,90 @@ def tighten_adaptive_profit_lock(manager: Any, bracket: Any, ltp: float) -> bool
             state = wanted
             config["_adaptive_profit_state"] = wanted
 
+    # Recent delivered bid volatility is a liquidity/noise allowance, not a
+    # direction forecast. Time-bound samples; do not treat eight rapid ticks
+    # as eight seconds of market behavior.
+    history = config.get("_adaptive_profit_recent_bids")
+    recent: list[list[float]] = []
+    if isinstance(history, list):
+        for row in history[-32:]:
+            if not isinstance(row, (list, tuple)) or len(row) != 2:
+                continue
+            at, price = _as_float(row[0]), _positive(row[1])
+            if at is not None and price is not None and 0 <= now - at <= 8.0:
+                recent.append([at, price])
+    recent.append([now, round(bid, 2)])
+    config["_adaptive_profit_recent_bids"] = recent[-32:]
+    moves = [abs(recent[i][1] - recent[i - 1][1]) for i in range(1, len(recent))]
+    micro_noise = statistics.median(moves) if moves else 0.0
+
     fractions = {"STRONG": 0.40, "NORMAL": 0.50, "WEAK": 0.65}
     atr_factors = {"STRONG": 2.0, "NORMAL": 1.5, "WEAK": 1.0}
-    cost = _cost_floor(manager, bracket)
+    fraction = fractions.get(state, 0.50)
+    negatives = set(decision.negative)
+    premium_reverse = bool(
+        negatives
+        & {
+            "premium_momentum_reversal",
+            "premium_vwap_lost",
+            "premium_ema_weak",
+        }
+    )
+    other_reverse = bool(
+        negatives
+        & {
+            "underlying_direction_conflict",
+            "underlying_vwap_conflict",
+            "underlying_ema_conflict",
+            "futures_volume_fade",
+            "premium_volume_fade",
+        }
+    )
+    stall_seconds = max(
+        5.0,
+        _adaptive_positive_env("ADAPTIVE_PROFIT_STALL_SECONDS", 8.0, 30.0),
+    )
+    stalled = bool(
+        state == "WEAK"
+        and peak_age >= stall_seconds
+        and premium_reverse
+        and other_reverse
+    )
+    if stalled:
+        fraction = min(0.75, fraction + 0.10)
+
     slippage = _adaptive_positive_env("ADAPTIVE_PROFIT_SLIPPAGE_POINTS", 0.50, 3.0)
     fixed = _adaptive_positive_env("ADAPTIVE_PROFIT_MIN_POINTS", 1.0, 3.0)
     floor = entry + cost + slippage + max(fixed, risk * 0.10)
-    candidate = floor
+
+    # An ATR limit is an allowance for noise, NOT a competing tight stop.
+    # Use the larger giveback distance, respecting the selected quality lock.
     atr = None
     if mfe >= risk:
-        candidate = max(candidate, entry + fractions.get(state, 0.50) * mfe)
         indicators = _indicator_snapshot(
             manager, str(getattr(bracket, "symbol", "")), ("atr",)
         )
-        atr = _positive(indicators.get("atr"))
+        value = _positive(indicators.get("atr"))
         indicator_age = _as_float(indicators.get("context_age_seconds"))
         if (
-            atr is not None
-            and atr <= entry * 0.25
-            and (indicator_age is None or 0 <= indicator_age <= 60)
+            value is not None
+            and value <= entry * 0.25
+            and indicator_age is not None
+            and 0 <= indicator_age <= 60
         ):
-            candidate = max(candidate, high - atr_factors.get(state, 1.5) * atr)
-
-    room = max(_TICK_SIZE, spread * 1.5, (atr or 0.0) * 0.10)
+            atr = value
+    allowance = max(
+        (1.0 - fraction) * mfe,
+        (atr_factors.get(state, 1.5) * atr) if atr is not None else 0.0,
+        micro_noise * 3.0,
+    )
+    candidate = max(floor, high - allowance) if mfe >= risk else floor
+    room = max(_TICK_SIZE, spread * 1.5, micro_noise * 1.5)
     candidate = _round_tick(min(candidate, bid - room))
     if candidate < floor - _TICK_SIZE:
         return False
     old = float(getattr(bracket, "sl_trigger_price", 0.0) or 0.0)
-    min_delta = max(0.50, old * 0.0025)
-    if candidate < old + min_delta:
+    if candidate < old + max(0.50, old * 0.0025):
         return False
     if not _ratchet_stop(
         manager, bracket, candidate, bid, reason="adaptive_profit_lock"
@@ -1288,9 +1361,12 @@ def tighten_adaptive_profit_lock(manager: Any, bracket: Any, ltp: float) -> bool
             "highest_executable_bid": round(high, 2),
             "bid": round(bid, 2),
             "mfe_r": round(mfe / risk, 4),
+            "retention": round(fraction, 2),
+            "giveback_allowance": round(allowance, 2),
+            "micro_noise": round(micro_noise, 3),
+            "peak_age_sec": round(peak_age, 2),
+            "stalled": stalled,
             "virtual_stop": round(candidate, 2),
-            "positive_families": list(decision.positive),
-            "negative_families": list(decision.negative),
         }
     saver = getattr(manager, "save_state", None)
     if callable(saver):

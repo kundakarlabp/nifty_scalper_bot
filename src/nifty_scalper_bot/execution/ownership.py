@@ -232,41 +232,74 @@ class BoundBracketManager(RuntimeBracketManager):
             )
             return action
 
+    def _sync_exchange_protective_stop(self, bracket: Any) -> bool:
+        """Only batch same-position trailing proposals in this thread.
+
+        Other threads, positions and emergency protection calls continue to
+        reach the canonical broker owner without being deferred.
+        """
+        local = getattr(self, "_trail_sync_context", None)
+        batch = getattr(local, "batch", None) if local is not None else None
+        if batch is not None and batch["bracket"] is bracket:
+            batch["requested"] = True
+            return False
+        return bool(super()._sync_exchange_protective_stop(bracket))
+
     def _apply_trailing_math(self, bracket: Any) -> bool:
-        """Preserve canonical trailing, then optionally tighten profitable trades."""
-        canonical_changed = bool(super()._apply_trailing_math(bracket))
-        ltp = _profit_extension._positive(getattr(bracket, "last_ltp", None))
-        if ltp is None:
-            return canonical_changed
+        """Collect canonical, market-aware and adaptive proposals before sync.
+
+        Ratchets remain monotonic. Synchronize once after all proposals even if
+        an optional assessment errors; never hold the bracket lock across I/O.
+        """
+        local = getattr(self, "_trail_sync_context", None)
+        if local is None:
+            local = threading.local()
+            self._trail_sync_context = local
+        previous = getattr(local, "batch", None)
+        batch = {"bracket": bracket, "requested": False}
+        local.batch = batch
         try:
-            market_changed = _profit_extension.tighten_market_aware_floor(
-                self,
-                bracket,
-                ltp,
-            )
-        except (
-            Exception
-        ) as exc:  # noqa: BLE001 - canonical trailing remains authoritative
-            _profit_extension.LOGGER.debug(
-                "PROFIT_TIGHTEN_EVALUATION_FAILED symbol=%s error=%s",
-                getattr(bracket, "symbol", ""),
-                exc,
-            )
+            canonical_changed = bool(super()._apply_trailing_math(bracket))
+            ltp = _profit_extension._positive(getattr(bracket, "last_ltp", None))
+            if ltp is None:
+                return canonical_changed
             market_changed = False
-        try:
-            adaptive_changed = _profit_extension.tighten_adaptive_profit_lock(
-                self,
-                bracket,
-                ltp,
-            )
-        except Exception as exc:  # noqa: BLE001 - preserve canonical stop
-            _profit_extension.LOGGER.warning(
-                "ADAPTIVE_PROFIT_LOCK_SKIPPED symbol=%s error_type=%s",
-                getattr(bracket, "symbol", ""),
-                type(exc).__name__,
-            )
-            adaptive_changed = False
-        return canonical_changed or market_changed or adaptive_changed
+            if not _profit_extension._env_bool("ADAPTIVE_PROFIT_LOCK_ENABLED", False):
+                try:
+                    market_changed = _profit_extension.tighten_market_aware_floor(
+                        self, bracket, ltp
+                    )
+                except Exception as exc:  # noqa: BLE001 - preserve canonical SL
+                    _profit_extension.LOGGER.warning(
+                        "PROFIT_TIGHTEN_EVALUATION_FAILED symbol=%s error_type=%s",
+                        getattr(bracket, "symbol", ""),
+                        type(exc).__name__,
+                    )
+            try:
+                adaptive_changed = _profit_extension.tighten_adaptive_profit_lock(
+                    self, bracket, ltp
+                )
+            except Exception as exc:  # noqa: BLE001 - preserve canonical SL
+                _profit_extension.LOGGER.warning(
+                    "ADAPTIVE_PROFIT_LOCK_SKIPPED symbol=%s error_type=%s",
+                    getattr(bracket, "symbol", ""),
+                    type(exc).__name__,
+                )
+                adaptive_changed = False
+            return canonical_changed or market_changed or adaptive_changed
+        finally:
+            local.batch = previous
+            if batch["requested"]:
+                try:
+                    # The resting exchange order remains authoritative until
+                    # a broker-confirmed modification replaces its trigger.
+                    super()._sync_exchange_protective_stop(bracket)
+                except Exception as exc:  # noqa: BLE001
+                    _profit_extension.LOGGER.error(
+                        "TRAIL_BATCH_EXCHANGE_SYNC_FAILED symbol=%s error_type=%s",
+                        getattr(bracket, "symbol", ""),
+                        type(exc).__name__,
+                    )
 
     def confirm_entry_fill(
         self,
@@ -304,6 +337,7 @@ class BoundBracketManager(RuntimeBracketManager):
         # dedicated market-data watchdog is started only after canonical bracket
         # construction is complete and only when the market-data owner exposes
         # the canonical freshness/recovery contract.
+        self._trail_sync_context = threading.local()
         self._bracket_stale_refresh_at: dict[str, float] = {}
         try:
             refresh_interval = float(
