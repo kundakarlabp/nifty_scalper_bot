@@ -527,6 +527,8 @@ class FakeKite:
         return json.loads(os.environ["TEST_ORDERS"])
 
 def fake_urlopen(url, timeout=3):
+    if url.endswith("/livez"):
+        return io.BytesIO(os.environ["TEST_LIVEZ"].encode())
     return io.BytesIO(os.environ["TEST_HEALTH"].encode())
 
 sys.modules["kiteconnect"] = types.SimpleNamespace(KiteConnect=FakeKite)
@@ -544,25 +546,34 @@ exec(compile(os.environ["TEST_GUARD"], "<flat-guard>", "exec"))
         },
     }
     flat = {"net": [{"quantity": 0}], "day": [{"quantity": 0}]}
+    active = {"engine_http_responsive": True, "bot_loaded": True}
+    quiet = {"engine_http_responsive": True, "bot_loaded": False, "quiet": True}
     cases = (
-        (healthy, flat, [], True),
-        (healthy, {"net": [{"quantity": 65}], "day": []}, [], False),
-        (healthy, flat, [{"status": "TRIGGER PENDING"}], False),
-        (healthy, flat, [{"status": "COMPLETE"}], True),
-        (healthy, {"net": [{}], "day": []}, [], False),
-        ({**healthy, "reconciliation": {"completed": False}}, flat, [], False),
-        ({**healthy, "broker": {"authenticated": False}}, flat, [], False),
-        ({**healthy, "live_orders_armed": True}, flat, [], False),
-        ({**healthy, "live_orders_armed": None}, flat, [], False),
-        (healthy, {"net": []}, [], False),
+        (active, healthy, flat, [], True),
+        (active, healthy, {"net": [{"quantity": 65}], "day": []}, [], False),
+        (active, healthy, flat, [{"status": "TRIGGER PENDING"}], False),
+        (active, healthy, flat, [{"status": "COMPLETE"}], True),
+        (active, healthy, {"net": [{}], "day": []}, [], False),
+        (active, {**healthy, "reconciliation": {"completed": False}}, flat, [], False),
+        (active, {**healthy, "broker": {"authenticated": False}}, flat, [], False),
+        (active, {**healthy, "live_orders_armed": True}, flat, [], False),
+        (active, {**healthy, "live_orders_armed": None}, flat, [], False),
+        (active, healthy, {"net": []}, [], False),
+        (quiet, {}, flat, [], True),
+        (quiet, {}, flat, [{"status": "TRIGGER PENDING"}], False),
+        (quiet, {}, {"net": [{"quantity": 65}], "day": []}, [], False),
+        ({**quiet, "bot_loaded": True}, {}, flat, [], False),
+        ({"engine_http_responsive": False, "bot_loaded": True}, healthy, flat, [], False),
+        ({"engine_http_responsive": True, "bot_loaded": False}, {}, flat, [], False),
     )
-    for health, positions, orders, expected in cases:
+    for livez, health, positions, orders, expected in cases:
         result = subprocess.run(
             [sys.executable, "-c", harness],
             env={
                 **os.environ,
                 "TEST_GUARD": guard,
                 "TEST_HEALTH": json.dumps(health),
+                "TEST_LIVEZ": json.dumps(livez),
                 "TEST_POSITIONS": json.dumps(positions),
                 "TEST_ORDERS": json.dumps(orders),
                 "BOT_RELEASE_KITE_API_KEY": "fake",
@@ -575,6 +586,7 @@ exec(compile(os.environ["TEST_GUARD"], "<flat-guard>", "exec"))
             timeout=8,
         )
         assert (result.returncode == 0) is expected, (
+            livez,
             health,
             positions,
             orders,
