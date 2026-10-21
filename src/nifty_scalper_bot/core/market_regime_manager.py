@@ -622,10 +622,7 @@ class MarketRegimeManager:
             has_regime_features = any(
                 data.get(key) is not None
                 for key in ("adx", "atr", "volume_spike_ratio")
-            ) or (
-                data.get("ema_fast") is not None
-                and data.get("ema_slow") is not None
-            )
+            ) or (data.get("ema_fast") is not None and data.get("ema_slow") is not None)
             if not has_regime_features:
                 logger.debug(
                     "REGIME_REFRESH_SKIPPED reason=insufficient_regime_features"
