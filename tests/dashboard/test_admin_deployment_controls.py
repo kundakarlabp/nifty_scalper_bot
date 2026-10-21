@@ -125,7 +125,7 @@ def test_verified_token_reports_restart_dispatch_failure(monkeypatch) -> None:
     assert "systemd%20rejected" in response.headers["location"]
 
 
-def test_verified_callback_token_queues_restart_without_false_success(monkeypatch) -> None:
+def test_verified_callback_reports_failed_restart(monkeypatch) -> None:
     monkeypatch.setattr(
         admin,
         "_read_env",
