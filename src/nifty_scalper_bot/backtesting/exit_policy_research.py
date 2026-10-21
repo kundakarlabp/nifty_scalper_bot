@@ -16,8 +16,14 @@ from typing import Any, Iterable, Mapping
 
 from nifty_scalper_bot.storage.replay_archive import iter_session
 
-_POLICIES = ("target_0.6r", "target_0.8r", "target_1.0r",
-             "lock_40pct", "lock_50pct", "lock_60pct")
+_POLICIES = (
+    "target_0.6r",
+    "target_0.8r",
+    "target_1.0r",
+    "lock_40pct",
+    "lock_50pct",
+    "lock_60pct",
+)
 
 
 def _timestamp(value: Any) -> datetime:
@@ -78,12 +84,11 @@ def compare_trade(
         if observed_costs is None:
             outcome = trade.get("outcome")
             effective = (
-                outcome.get("effective_costs")
-                if isinstance(outcome, Mapping)
-                else None
+                outcome.get("effective_costs") if isinstance(outcome, Mapping) else None
             )
             observed_costs = (
-                effective.get("total") if isinstance(effective, Mapping)
+                effective.get("total")
+                if isinstance(effective, Mapping)
                 else trade.get("estimated_costs")
             )
         costs = float(observed_costs)
@@ -115,8 +120,7 @@ def compare_trade(
     # but holes invalidate even the modeled quote-level overlay.
     # Preserve observation sequence; sorting by timestamp would use a later
     # delivery retroactively and create causal leakage.
-    gaps = [(bids[i][0] - bids[i - 1][0]).total_seconds()
-            for i in range(1, len(bids))]
+    gaps = [(bids[i][0] - bids[i - 1][0]).total_seconds() for i in range(1, len(bids))]
     valid_coverage = (
         len(bids) >= 3
         and (bids[0][0] - entry_at).total_seconds() <= max_quote_gap_seconds
@@ -199,8 +203,8 @@ def compare_trade(
         if simulated is None:
             simulated = (
                 {"status": "UNCHANGED_ACTUAL", "net": round(net, 2)}
-                if is_target else
-                {
+                if is_target
+                else {
                     "status": "UNRESOLVED",
                     "reason": "hypothetical_position_survives_observed_exit",
                 }
@@ -243,15 +247,21 @@ def run_exit_comparison(
         results.append(compared)
     scenarios = {}
     for policy in _POLICIES:
-        resolved = [r["outcomes"][policy] for r in results
-                    if r["outcomes"][policy]["status"] in
-                    {"MODELED_TARGET", "MODELED_STOP", "UNCHANGED_ACTUAL"}]
+        resolved = [
+            r["outcomes"][policy]
+            for r in results
+            if r["outcomes"][policy]["status"]
+            in {"MODELED_TARGET", "MODELED_STOP", "UNCHANGED_ACTUAL"}
+        ]
         unresolved = len(results) - len(resolved)
         scenarios[policy] = {
             "resolved": len(resolved),
             "unresolved": unresolved,
-            "net_sum_if_complete": round(sum(x["net"] for x in resolved), 2)
-                                   if not unresolved and resolved else None,
+            "net_sum_if_complete": (
+                round(sum(x["net"] for x in resolved), 2)
+                if not unresolved and resolved
+                else None
+            ),
             "promotion_eligible": False,
         }
     return {
