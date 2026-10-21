@@ -103,3 +103,13 @@ def test_market_regime_detector_realized_volatility_flags_volatile() -> None:
         "atr_above_volatile",
         "momentum_spike",
     }
+
+
+def test_missing_regime_features_are_unknown_not_range() -> None:
+    detector = MarketRegimeDetector(RegimeParameters())
+
+    snapshot = detector.evaluate("NIFTY", {"price": 22750.0})
+
+    assert snapshot.regime == "unknown"
+    assert snapshot.confidence == 0.0
+    assert snapshot.reason == "insufficient_regime_features"
