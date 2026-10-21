@@ -388,12 +388,25 @@ class WebSocketManager:
         return False
 
     def resubscribe(self, tokens: list[int]) -> None:
-        """Compatibility replay helper that delegates token-set reconciliation."""
+        """Reassert a subset of subscriptions without replacing the full token set.
+
+        set_tokens reconciles the entire token universe. A symbol-level retry
+        must not pass a partial universe to it, since that unsubscribes every
+        other active instrument, including selected options.
+        """
 
         try:
-            if not tokens:
+            requested = {int(token) for token in tokens if int(token) > 0}
+            if not requested:
                 return
-            self.set_tokens(tokens)
+            # New tokens are additions, not a replacement of existing intent.
+            existing = sorted(requested & self._tokens)
+            missing = sorted(requested - self._tokens)
+            if missing:
+                self.add_tokens(missing)
+            ticker = self._ticker
+            if existing and ticker is not None and self._connected.is_set():
+                self._schedule_blocking(lambda: self._subscribe_full(ticker, existing))
         except Exception as e:
             self._logger.error("WebSocket resubscribe failed: %s", e, exc_info=True)
 

@@ -9418,10 +9418,23 @@ class StrategyRunner:
                         self._market_data, "_check_zombie_ticks", None
                     )
                     if callable(check_zombie_ticks):
-                        self._logger.warning(
-                            "🔎 Watchdog delegating stale-symbol recovery assessment (%d symbols stale)",
-                            stale_count,
+                        # Preserve the first warning on state transition and
+                        # throttle identical follow-ups per Runner instance.
+                        # MDM still performs every scheduled recovery assessment.
+                        delegation_logs = getattr(
+                            self, "_watchdog_delegate_log_mono", None
                         )
+                        if not isinstance(delegation_logs, dict):
+                            delegation_logs = {}
+                            self._watchdog_delegate_log_mono = delegation_logs
+                        warning_at = delegation_logs.get(stale_count)
+                        now_mono = time.monotonic()
+                        if warning_at is None or now_mono - float(warning_at) >= 300.0:
+                            delegation_logs[stale_count] = now_mono
+                            self._logger.warning(
+                                "🔎 Watchdog delegating stale-symbol recovery assessment (%d symbols stale)",
+                                stale_count,
+                            )
                         check_zombie_ticks()
                     else:
                         self._logger.warning(
