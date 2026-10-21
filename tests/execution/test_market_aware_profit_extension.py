@@ -475,9 +475,7 @@ def test_adaptive_lock_uses_independent_continuation_families(monkeypatch):
     _adaptive_market(strong, bid=115)
     weak_quote = _adaptive_market(weak, bid=115)
 
-    assert profit_extension.tighten_adaptive_profit_lock(
-        strong, strong_bracket, 115
-    )
+    assert profit_extension.tighten_adaptive_profit_lock(strong, strong_bracket, 115)
     profit_extension.tighten_adaptive_profit_lock(weak, weak_bracket, 115)
     weak_quote["received_at"] += 0.1
     profit_extension.tighten_adaptive_profit_lock(weak, weak_bracket, 115)
