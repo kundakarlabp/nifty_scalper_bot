@@ -423,3 +423,124 @@ def test_target_extension_accepts_matching_broker_profit_protection() -> None:
 
     assert result is None
     assert bracket.tp_trigger_price > 118.0
+
+
+def _adaptive_market(manager, *, bid=115.0, quantity=65, spread=0.2, age=0.0):
+    from time import time
+
+    quote = manager._market_data.quotes[SYMBOL]
+    quote.update(
+        {
+            "bid": bid,
+            "ask": bid + spread,
+            "ltp": bid + 0.05,
+            "depth": {"buy": [{"price": bid, "quantity": quantity}]},
+            "received_at": time() - age,
+        }
+    )
+    return quote
+
+
+def test_adaptive_lock_opt_in_preserves_existing_trailing(monkeypatch):
+    monkeypatch.delenv("ADAPTIVE_PROFIT_LOCK_ENABLED", raising=False)
+    manager = FakeManager(strong=False)
+    bracket = _bracket(protected=False)
+    _adaptive_market(manager)
+    before = bracket.sl_trigger_price
+
+    assert profit_extension.tighten_adaptive_profit_lock(manager, bracket, 115) is False
+    assert bracket.sl_trigger_price == before
+
+
+def test_adaptive_lock_protects_cost_and_fixed_points_before_one_r(monkeypatch):
+    monkeypatch.setenv("ADAPTIVE_PROFIT_LOCK_ENABLED", "true")
+    monkeypatch.setenv("ADAPTIVE_PROFIT_MIN_POINTS", "1.0")
+    monkeypatch.setenv("ADAPTIVE_PROFIT_SLIPPAGE_POINTS", "0.5")
+    manager = FakeManager(strong=True)
+    bracket = _bracket(protected=False)
+    quote = _adaptive_market(manager, bid=107.0)
+
+    assert profit_extension.tighten_adaptive_profit_lock(manager, bracket, 107)
+    assert bracket.sl_trigger_price >= 102.3
+    assert bracket.sl_trigger_price < quote["bid"]
+    assert bracket.sl_trigger_price > 94
+
+
+def test_adaptive_lock_uses_independent_continuation_families(monkeypatch):
+    monkeypatch.setenv("ADAPTIVE_PROFIT_LOCK_ENABLED", "true")
+    strong = FakeManager(strong=True)
+    weak = FakeManager(strong=False)
+    strong_bracket = _bracket(protected=False)
+    weak_bracket = _bracket(protected=False)
+    _adaptive_market(strong, bid=115)
+    weak_quote = _adaptive_market(weak, bid=115)
+
+    assert profit_extension.tighten_adaptive_profit_lock(
+        strong, strong_bracket, 115
+    )
+    profit_extension.tighten_adaptive_profit_lock(weak, weak_bracket, 115)
+    weak_quote["received_at"] += 0.1
+    profit_extension.tighten_adaptive_profit_lock(weak, weak_bracket, 115)
+    assert weak_bracket.sl_trigger_price > strong_bracket.sl_trigger_price
+    assert weak_bracket.sl_trigger_price <= 114.5
+
+
+@pytest.mark.parametrize("invalid", ["stale", "missing_depth", "small_qty", "wide"])
+def test_adaptive_lock_skips_unexecutable_or_stale_quotes(monkeypatch, invalid):
+    monkeypatch.setenv("ADAPTIVE_PROFIT_LOCK_ENABLED", "true")
+    manager = FakeManager(strong=False)
+    bracket = _bracket(protected=False)
+    quote = _adaptive_market(manager)
+    if invalid == "stale":
+        quote["received_at"] -= 25
+    elif invalid == "missing_depth":
+        quote.pop("depth")
+    elif invalid == "small_qty":
+        quote["depth"]["buy"][0]["quantity"] = 20
+    elif invalid == "wide":
+        quote["ask"] = quote["bid"] + 5
+
+    assert not profit_extension.tighten_adaptive_profit_lock(manager, bracket, 115)
+    assert bracket.sl_trigger_price == 94.0
+
+
+def test_adaptive_lock_never_reuses_one_quote_as_multiple_confirmations(monkeypatch):
+    monkeypatch.setenv("ADAPTIVE_PROFIT_LOCK_ENABLED", "true")
+    manager = FakeManager(strong=False)
+    bracket = _bracket(protected=False)
+    quote = _adaptive_market(manager, bid=115)
+    profit_extension.tighten_adaptive_profit_lock(manager, bracket, 115)
+    first_stop = bracket.sl_trigger_price
+    assert profit_extension.tighten_adaptive_profit_lock(manager, bracket, 115) is False
+    assert bracket.sl_trigger_price == first_stop
+
+    quote["received_at"] += 0.1
+    profit_extension.tighten_adaptive_profit_lock(manager, bracket, 115)
+    assert bracket.sl_trigger_price >= first_stop
+
+
+def test_adaptive_lock_defers_when_exchange_stop_is_unverified(monkeypatch):
+    monkeypatch.setenv("ADAPTIVE_PROFIT_LOCK_ENABLED", "true")
+    manager = FakeManager(strong=False)
+    bracket = _bracket(protected=False)
+    bracket.exchange_stop_degraded_reason = (
+        "broker_stop_status_unverified:MODIFY PENDING"
+    )
+    _adaptive_market(manager)
+    assert not profit_extension.tighten_adaptive_profit_lock(manager, bracket, 115)
+    assert bracket.sl_trigger_price == 94.0
+
+
+def test_adaptive_lock_respects_regime_and_original_entry_context(monkeypatch):
+    monkeypatch.setenv("ADAPTIVE_PROFIT_LOCK_ENABLED", "true")
+    manager = FakeManager(strong=True)
+    baseline = _bracket(protected=False)
+    degraded = _bracket(protected=False)
+    degraded.trade_provenance["direction_contract"] = {"passed": False}
+    _adaptive_market(manager)
+    profit_extension.tighten_adaptive_profit_lock(manager, baseline, 115)
+    profit_extension.tighten_adaptive_profit_lock(manager, degraded, 115)
+    quote = manager._market_data.quotes[SYMBOL]
+    quote["received_at"] += 0.1
+    profit_extension.tighten_adaptive_profit_lock(manager, degraded, 115)
+    assert degraded.sl_trigger_price > baseline.sl_trigger_price
