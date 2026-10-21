@@ -100,7 +100,7 @@ def test_ci_verifier_queries_exact_main_sha_and_push_run(monkeypatch) -> None:
     assert timeout <= 10
 
 
-def test_release_ci_gate_precedes_validation_checkout_and_preserves_exposure_guard() -> None:
+def test_release_ci_gate_precedes_checkout_and_keeps_exposure_guard() -> None:
     from pathlib import Path
 
     release = (
