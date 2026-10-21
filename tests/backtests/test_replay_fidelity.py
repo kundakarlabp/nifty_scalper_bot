@@ -125,4 +125,6 @@ def test_replay_checks_digest_without_exposing_tick_contents(tmp_path):
     result = audit_session(path)
     assert len(result["capture_sha256"]) == 64
     assert "instruments" not in result
-    assert "symbol" not in json.dumps(result)
+    assert CE not in json.dumps(result)
+    assert PE not in json.dumps(result)
+    assert FUT not in json.dumps(result)
