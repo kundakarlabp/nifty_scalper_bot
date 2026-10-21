@@ -460,6 +460,44 @@ auto_release_should_defer
         )
 
 
+def test_already_current_healthy_release_skips_broker_exposure_poll() -> None:
+    helpers = _market_session_release_helpers()
+    shell = helpers + """
+AUTO_MODE=true
+BEFORE="$1"
+AFTER="$2"
+HEALTHY="$3"
+FORCE_RESTART=false
+RESTART_PENDING_FILE=/tmp/nonexistent-nifty-release-pending-test
+date() {
+  case "$1" in
+    +%u) printf '1';;
+    +%H%M) printf '0830';;
+    *) return 1;;
+  esac
+}
+service_healthy_confirmed() { [ "$HEALTHY" = "true" ]; }
+intraday_flat_broker_confirmed() {
+  printf 'BROKER_PROBED\\n' >&2
+  return 1
+}
+auto_release_should_defer
+"""
+    for before, after, healthy, probed in (
+        ("abc123", "abc123", "true", False),
+        ("abc123", "def456", "true", True),
+        ("abc123", "abc123", "false", True),
+    ):
+        result = subprocess.run(
+            ["bash", "-c", shell, "fixture", before, after, healthy],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0
+        assert ("BROKER_PROBED" in result.stderr) is probed
+
+
 def test_intraday_guard_requires_authoritative_flat_broker_and_engine() -> None:
     """Run only the read-only Python guard, with injected offline Kite replies."""
     import json
