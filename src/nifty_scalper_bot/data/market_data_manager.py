@@ -10917,10 +10917,7 @@ class MarketDataManager:
                     last_warning_by_symbol = {}
                     self._stale_recovery_warning_mono = last_warning_by_symbol
                 last_warning = last_warning_by_symbol.get(sym)
-                if (
-                    last_warning is not None
-                    and now_mono - float(last_warning) < 300.0
-                ):
+                if last_warning is not None and now_mono - float(last_warning) < 300.0:
                     continue
                 last_warning_by_symbol[sym] = now_mono
                 self._logger.warning(
