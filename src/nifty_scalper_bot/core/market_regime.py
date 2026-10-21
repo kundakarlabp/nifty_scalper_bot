@@ -574,7 +574,26 @@ class MarketRegimeDetector:
                     },
                 )
                 return None
-
+            # Price-only quote ticks do not establish a market regime. Treating
+            # them as range evidence can overwrite a genuine trend and suppress
+            # breakout setups while the price feed itself remains healthy.
+            regime_keys = (
+                "trend_score",
+                "adx",
+                "atr",
+                "volume_ratio",
+                "event_score",
+                "event_flag",
+                "realized_volatility",
+                "historical_volatility",
+                "price_series",
+                "close_series",
+            )
+            if not any(indicators.get(key) is not None for key in regime_keys):
+                self._logger.debug(
+                    "REGIME_TICK_INSUFFICIENT_EVIDENCE symbol=%s", symbol
+                )
+                return None
             previous = self.get_snapshot(symbol)
             reference: Dict[str, float | Sequence[float]] | None = None
             if previous is not None and isinstance(previous.adjustments, Mapping):
@@ -1103,6 +1122,19 @@ class MarketRegimeDetector:
         Raises:
             None.
         """
+
+        # A missing observation is not evidence of a sideways market. Keep
+        # UNKNOWN fail-closed rather than manufacturing a RANGE classification.
+        if (
+            trend_score is None
+            and (ema_fast is None or ema_slow is None)
+            and atr is None
+            and volume_ratio is None
+            and event_signal is None
+            and price_momentum is None
+            and realized_vol is None
+        ):
+            return "unknown", 0.0, "insufficient_regime_features"
 
         scores, reasons = self._compute_feature_scores(
             params,

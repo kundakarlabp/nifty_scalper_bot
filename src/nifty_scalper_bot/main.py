@@ -562,7 +562,33 @@ def _signal_observability(ctx):  # noqa: ANN001
         status = dict(getter() or {})
     except Exception:
         return {}
+    # Read the same central regime authority used by the strategy manager.
+    # Without this, "non_breakout_regime" cannot be differentiated from stale
+    # or under-evidenced regime state in the production health response.
+    regime_evidence: dict[str, Any] = {}
+    strategy_manager = getattr(runner, "_strategy_manager", None)
+    regime_manager = getattr(strategy_manager, "_regime_manager", None)
+    if regime_manager is not None:
+        try:
+            stable = regime_manager.get_latest_snapshot()
+            raw_getter = getattr(regime_manager, "get_raw_snapshot", None)
+            raw = raw_getter() if callable(raw_getter) else None
+            regime_evidence = {
+                "stable_regime": getattr(stable, "regime", None),
+                "stable_symbol": getattr(stable, "symbol", None),
+                "stable_confidence": getattr(stable, "confidence", None),
+                "stable_reason": getattr(stable, "reason", None),
+                "stable_updated_at": getattr(stable, "updated_at", None),
+                "raw_regime": getattr(raw, "regime", None),
+                "raw_symbol": getattr(raw, "symbol", None),
+                "raw_confidence": getattr(raw, "confidence", None),
+                "raw_reason": getattr(raw, "reason", None),
+                "raw_updated_at": getattr(raw, "updated_at", None),
+            }
+        except Exception:
+            regime_evidence = {"diagnostic_error": "regime_snapshot_unavailable"}
     return {
+        "regime_evidence": regime_evidence,
         "runner_tick_count": status.get("tick_count"),
         "phase9_evaluation_count": status.get("phase9_evaluation_count"),
         "legacy_activity_count": status.get("legacy_activity_count"),
