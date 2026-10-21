@@ -46,7 +46,8 @@ improved profit or expectancy.
    A quality-state change requires **two distinct market assessments**,
    not multiple ticks using the same cached assessment.
 6. Track a bounded rolling history of full-size executable bids; use
-   median absolute successive bid change as a short-horizon noise estimate.
+   median absolute successive bid change over a bounded eight-second
+   window as a short-horizon noise estimate.
    With peak age >=8 seconds, WEAK quality and independent premium plus
    underlying/activity deterioration, increase retention by up to 10%
    (maximum 75%). Preserve a live-bid buffer of at least
@@ -57,7 +58,10 @@ improved profit or expectancy.
    live mode lacks an exchange protective stop. Route any accepted virtual
    improvement through the same `_ratchet_stop` -> broker-stop sync.
    Canonical fallback, market-aware and adaptive proposals now share a
-   **single broker sync attempt per position evaluation**. Other threads,
+   **single broker sync attempt per position evaluation**. When the
+   research policy is enabled, it replaces the legacy standalone market-aware
+   tightening proposal; the canonical baseline and target-extension safety
+   checks remain. Other threads,
    other positions and protection placement are not deferred. Confirmations
    and modification budgets remain with the broker-stop owner.
 
