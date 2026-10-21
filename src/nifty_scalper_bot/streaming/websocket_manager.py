@@ -406,9 +406,7 @@ class WebSocketManager:
                 self.add_tokens(missing)
             ticker = self._ticker
             if existing and ticker is not None and self._connected.is_set():
-                self._schedule_blocking(
-                    lambda: self._subscribe_full(ticker, existing)
-                )
+                self._schedule_blocking(lambda: self._subscribe_full(ticker, existing))
         except Exception as e:
             self._logger.error("WebSocket resubscribe failed: %s", e, exc_info=True)
 
