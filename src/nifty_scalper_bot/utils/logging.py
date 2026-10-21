@@ -227,7 +227,10 @@ class _BurstDedupFilter(logging.Filter):
         super().__init__()
         self._window = max(float(window_sec), 0.0)
         self._last_seen: dict[str, float] = {}
-        self._lock = threading.Lock()
+        # Python can emit asyncio exception logs reentrantly while a handler
+        # filter is inside its cache critical section (CI shard 2, Oct 2026).
+        # A plain Lock deadlocks the logging thread on that nested record.
+        self._lock = threading.RLock()
 
     def filter(self, record: logging.LogRecord) -> bool:  # type: ignore[override]
         if getattr(record, "bypass_filters", False):
