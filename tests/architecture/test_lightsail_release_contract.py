@@ -563,7 +563,13 @@ exec(compile(os.environ["TEST_GUARD"], "<flat-guard>", "exec"))
         (quiet, {}, flat, [{"status": "TRIGGER PENDING"}], False),
         (quiet, {}, {"net": [{"quantity": 65}], "day": []}, [], False),
         ({**quiet, "bot_loaded": True}, {}, flat, [], False),
-        ({"engine_http_responsive": False, "bot_loaded": True}, healthy, flat, [], False),
+        (
+            {"engine_http_responsive": False, "bot_loaded": True},
+            healthy,
+            flat,
+            [],
+            False,
+        ),
         ({"engine_http_responsive": True, "bot_loaded": False}, {}, flat, [], False),
     )
     for livez, health, positions, orders, expected in cases:
