@@ -167,9 +167,7 @@ def test_mode_change_is_saved_but_not_claimed_running_on_dispatch_failure(
         "/admin/mode", data={"mode": "shadow"}, follow_redirects=False
     )
     assert response.status_code == 303
-    assert response.headers["location"].startswith(
-        "/admin?mode=saved_not_applied&msg="
-    )
+    assert response.headers["location"].startswith("/admin?mode=saved_not_applied&msg=")
     assert writes == [{"ENABLE_LIVE": "false", "EXECUTION_MODE": "SHADOW"}]
 
 
