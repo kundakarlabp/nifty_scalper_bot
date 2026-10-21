@@ -415,6 +415,15 @@ auto_release_should_defer() {
   if ! [[ "$weekday" =~ ^[1-7]$ && "$hhmm" =~ ^([01][0-9]|2[0-3])[0-5][0-9]$ ]]; then
     return 0
   fi
+  # Already-current, healthy builds require no broker requests. Route through
+  # the no-change branch, which still confirms the deployed SHA and reports
+  # status; do not poll Kite positions/orders every two minutes unnecessarily.
+  if [ -n "${BEFORE:-}" ] && [ "$BEFORE" = "${AFTER:-}" ] \
+    && [ "${FORCE_RESTART:-false}" = false ] \
+    && [ ! -f "${RESTART_PENDING_FILE:-}" ] \
+    && service_healthy_confirmed "$BEFORE"; then
+    return 0
+  fi
   # No restart across live entry/exit hours. A closed session alone also
   # cannot prove that a position or pending order has been resolved.
   if market_session_protected "$weekday" "$hhmm"; then
