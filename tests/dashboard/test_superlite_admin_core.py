@@ -272,7 +272,7 @@ def test_status_selected_falls_back_to_dynamic_basket_log(monkeypatch) -> None:
     assert status["selected_source"] == "journal:active_dynamic_basket"
 
 
-def test_dashboard_distinguishes_running_engine_build_from_checkout(monkeypatch) -> None:
+def test_dashboard_runtime_sha_differs_from_checkout(monkeypatch) -> None:
     import nifty_scalper_bot.superlite_admin_core as core
 
     def payload(path: str):
