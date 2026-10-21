@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -691,12 +692,9 @@ def test_adaptive_peak_age_requires_deterioration_before_tightening(monkeypatch)
 
 
 def test_single_exchange_stop_sync_after_all_trail_proposals(monkeypatch):
-    from types import SimpleNamespace as Namespace
-    import threading
-
     manager = object.__new__(BoundBracketManager)
     manager._trail_sync_context = threading.local()
-    bracket = Namespace(
+    bracket = SimpleNamespace(
         symbol=SYMBOL, last_ltp=115.0, sl_trigger_price=101.0,
     )
     calls = []
@@ -729,13 +727,10 @@ def test_single_exchange_stop_sync_after_all_trail_proposals(monkeypatch):
 
 
 def test_exchange_sync_coalescer_is_thread_scoped(monkeypatch):
-    from types import SimpleNamespace as Namespace
-    import threading
-
     manager = object.__new__(BoundBracketManager)
     manager._trail_sync_context = threading.local()
-    bracket = Namespace(symbol=SYMBOL, last_ltp=115.0, sl_trigger_price=101.0)
-    other = Namespace(symbol=SYMBOL, last_ltp=115.0, sl_trigger_price=90.0)
+    bracket = SimpleNamespace(symbol=SYMBOL, last_ltp=115.0, sl_trigger_price=101.0)
+    other = SimpleNamespace(symbol=SYMBOL, last_ltp=115.0, sl_trigger_price=90.0)
     calls = []
     monkeypatch.setattr(
         RuntimeBracketManager,
