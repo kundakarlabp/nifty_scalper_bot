@@ -56,14 +56,19 @@ def _selected(snapshot: Mapping[str, Any]) -> dict[str, str]:
     basket = snapshot.get("basket")
     if not isinstance(basket, dict):
         return {}
-    selected = {
-        "CE": basket.get("selected_ce"),
-        "PE": basket.get("selected_pe"),
-        "FUT": basket.get("futures_symbol"),
+    ce = basket.get("selected_ce")
+    pe = basket.get("selected_pe")
+    future = basket.get("futures_symbol")
+    if not (isinstance(ce, str) and ce
+            and isinstance(pe, str) and pe
+            and isinstance(future, str) and future):
+        return {}
+    selected: dict[str, str] = {
+        "CE": ce,
+        "PE": pe,
+        "FUT": future,
         "SPOT": "NSE:NIFTY 50",
     }
-    if not all(isinstance(v, str) and v for v in selected.values()):
-        return {}
     if not all(
         selected[k].startswith("NFO:") and selected[k].endswith(k)
         for k in ("CE", "PE", "FUT")
@@ -82,7 +87,7 @@ def audit_session(path: Path, *, gap_seconds: float = 120) -> dict[str, Any]:
     counts: dict[str, Counter[str]] = defaultdict(Counter)
     minutes: dict[str, set[str]] = defaultdict(set)
     previous: dict[str, datetime] = {}
-    max_gap = defaultdict(float)
+    max_gap: dict[str, float] = defaultdict(float)
     basket_versions: set[tuple[str, str, str]] = set()
     unmatched = 0
     missing_symbol = 0
@@ -94,7 +99,7 @@ def audit_session(path: Path, *, gap_seconds: float = 120) -> dict[str, Any]:
             active = _selected(event["payload"])
             if not active:
                 raise ValueError("replay_audit_snapshot_basket_unidentified")
-            basket_versions.add(tuple(active[k] for k in ("CE", "PE", "FUT")))
+            basket_versions.add((active["CE"], active["PE"], active["FUT"]))
             previous.clear()
             continue
         tick = event["payload"]
