@@ -74,7 +74,15 @@ def compare_trade(
         initial_sl = float(trade["initial_stop"])
         qty = int(trade["quantity"])
         net = float(trade["net_pnl"])
-        costs = float(trade["effective_costs"])
+        observed_costs = trade.get("effective_costs")
+        if observed_costs is None:
+            outcome = trade.get("outcome")
+            effective = outcome.get("effective_costs") if isinstance(outcome, Mapping) else None
+            observed_costs = (
+                effective.get("total") if isinstance(effective, Mapping)
+                else trade.get("estimated_costs")
+            )
+        costs = float(observed_costs)
         entry_at = _timestamp(trade["entry_filled_at"])
         exit_at = _timestamp(trade["exit_filled_at"])
     except (KeyError, TypeError, ValueError) as exc:
@@ -101,7 +109,8 @@ def compare_trade(
 
     # Strict data-quality gate: short gaps alone do not prove fill feasibility,
     # but holes invalidate even the modeled quote-level overlay.
-    bids.sort(key=lambda x: x[0])
+    # Preserve observation sequence; sorting by timestamp would use a later
+    # delivery retroactively and create causal leakage.
     gaps = [(bids[i][0] - bids[i - 1][0]).total_seconds()
             for i in range(1, len(bids))]
     valid_coverage = (
@@ -165,9 +174,16 @@ def compare_trade(
                 break
             if not is_target and lock_pct is not None:
                 watermark = max(watermark, bid)
-                if watermark - entry >= risk:  # tier-2 1R activation
+                # Approximate the canonical tier-1 rule (0.6R activation):
+                # recover round-trip fees and lock 0.10R before tier 2.
+                cost_per_unit = costs / qty
+                if watermark - entry >= 0.6 * risk:
+                    floor = entry + cost_per_unit + 0.10 * risk
+                    if floor < bid - cost_per_unit:
+                        stop = max(stop, floor)
+                if watermark - entry >= risk:  # 1R tier-2 lock
                     proposed = entry + lock_pct * (watermark - entry)
-                    if proposed < bid:
+                    if proposed < bid - cost_per_unit:
                         stop = max(stop, proposed)
 
         if simulated is None:
@@ -191,8 +207,27 @@ def run_exit_comparison(
     if not isinstance(raw, list):
         raise ValueError("exit_replay_trade_list_required")
     events = list(iter_session(session))
-    results = [compare_trade(row, events, slippage_points=slippage_points)
-               for row in raw]
+    results = []
+    excluded_dates = 0
+    for row in raw:
+        if not isinstance(row, Mapping):
+            raise ValueError("exit_replay_trade_row_invalid")
+        if str(row.get("trading_date") or "") not in {"", session.stem}:
+            excluded_dates += 1
+            continue
+        try:
+            compared = compare_trade(row, events, slippage_points=slippage_points)
+        except ValueError as exc:
+            compared = {
+                "trade_id": str(row.get("trade_id") or ""),
+                "coverage_ready": False,
+                "observed_net": row.get("net_pnl"),
+                "outcomes": {
+                    policy: {"status": "UNRESOLVED", "reason": str(exc)}
+                    for policy in _POLICIES
+                },
+            }
+        results.append(compared)
     scenarios = {}
     for policy in _POLICIES:
         resolved = [r["outcomes"][policy] for r in results
@@ -210,6 +245,7 @@ def run_exit_comparison(
         "scope": "single-position-causal-bid-exit-overlay",
         "session": session.name,
         "trade_count": len(results),
+        "excluded_other_dates": excluded_dates,
         "slippage_points": slippage_points,
         "scenario_summary": scenarios,
         "trades": results,
@@ -221,6 +257,7 @@ def run_exit_comparison(
             "no trading beyond actual observed exit",
             "requires complete captured bid depth and lot quantity",
             "single-position comparisons do not replay subsequent entries",
+            "tier-1 and tier-2 rules are quote-level approximations, not production parity",
         ],
     }
 
