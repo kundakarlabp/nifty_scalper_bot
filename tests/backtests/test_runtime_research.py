@@ -399,7 +399,10 @@ def test_paired_adaptive_runtime_blocks_missing_depth_and_open_positions():
     assert invalid["blocker"] == "incomplete_captured_quote_fidelity"
     has_position = {**row, "positions": [{"quantity": 65}]}
     exposed = worker.compare_paired_reports(
-        row, has_position, _paired_fidelity(), expected_sha="verified_sha",
+        row,
+        has_position,
+        _paired_fidelity(),
+        expected_sha="verified_sha",
         slippage_bps=10,
     )
     assert exposed["blocker"] == "paired_replay_open_position"
@@ -410,14 +413,20 @@ def test_paired_adaptive_rejects_unfinished_and_empty_buy_fills():
     partial = _paired_report()
     partial["orders"][0]["status"] = "open"
     result = worker.compare_paired_reports(
-        row, partial, _paired_fidelity(), expected_sha="verified_sha",
+        row,
+        partial,
+        _paired_fidelity(),
+        expected_sha="verified_sha",
         slippage_bps=10,
     )
     assert result["blocker"] == "paired_replay_partial_entry"
     no_entries = _paired_report()
     no_entries["orders"] = []
     result = worker.compare_paired_reports(
-        no_entries, no_entries, _paired_fidelity(), expected_sha="verified_sha",
+        no_entries,
+        no_entries,
+        _paired_fidelity(),
+        expected_sha="verified_sha",
         slippage_bps=10,
     )
     assert result["blocker"] == "paired_replay_entry_divergence_or_no_fills"
@@ -449,7 +458,10 @@ def test_paired_run_uses_sanitized_isolated_offline_workers(monkeypatch, tmp_pat
     report = worker.run_paired_replays(session, tmp_path / "out", stress_bps=(10, 25))
     assert report["state"] == "MODELED_COMPARISON_ONLY"
     assert [x[0]["ADAPTIVE_PROFIT_LOCK_ENABLED"] for x in calls] == [
-        "false", "true", "false", "true",
+        "false",
+        "true",
+        "false",
+        "true",
     ]
     assert [r["net_delta"] for r in report["stress"]] == [60, 60]
     assert report["promotion_eligible"] is False
@@ -457,17 +469,17 @@ def test_paired_run_uses_sanitized_isolated_offline_workers(monkeypatch, tmp_pat
 
 def test_paired_run_missing_capture_refuses_subprocess(monkeypatch, tmp_path):
     monkeypatch.setattr(
-        worker, "write_capture_preflight",
+        worker,
+        "write_capture_preflight",
         lambda *_: {"archive_integrity_verified": False},
     )
     monkeypatch.setattr(
-        worker.subprocess, "run",
+        worker.subprocess,
+        "run",
         lambda *_a, **_k: (_ for _ in ()).throw(
             AssertionError("must not run with invalid archive")
         ),
     )
-    report = worker.run_paired_replays(
-        tmp_path / "missing.jsonl", tmp_path / "output"
-    )
+    report = worker.run_paired_replays(tmp_path / "missing.jsonl", tmp_path / "output")
     assert report["state"] == "BLOCKED"
     assert report["blocker"] == "no_usable_archived_depth_session"
