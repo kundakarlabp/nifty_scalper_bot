@@ -363,17 +363,29 @@ kite = KiteConnect(api_key=os.environ["BOT_RELEASE_KITE_API_KEY"], timeout=5)
 kite.set_access_token(os.environ["BOT_RELEASE_KITE_ACCESS_TOKEN"])
 
 def is_safe() -> bool:
-    with urllib.request.urlopen(f"http://127.0.0.1:{port}/health/trading", timeout=3) as response:
-        health = json.load(response)
-    reconciliation = health.get("reconciliation") or {}
-    if (
-        health.get("live_orders_armed") is not False
-        or reconciliation.get("completed") is not True
-        or reconciliation.get("failed") is True
-        or reconciliation.get("unprotected_positions")
-        or (health.get("broker") or {}).get("authenticated") is not True
-    ):
+    with urllib.request.urlopen(f"http://127.0.0.1:{port}/livez", timeout=3) as response:
+        live = json.load(response)
+    if live.get("engine_http_responsive") is not True:
         return False
+    if live.get("quiet") is True:
+        # The canonical off-hours control plane has no trading stack and no
+        # live entry worker. Broker positions/orders remain authoritative.
+        if live.get("bot_loaded") is not False:
+            return False
+    else:
+        if live.get("bot_loaded") is not True:
+            return False
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/health/trading", timeout=3) as response:
+            health = json.load(response)
+        reconciliation = health.get("reconciliation") or {}
+        if (
+            health.get("live_orders_armed") is not False
+            or reconciliation.get("completed") is not True
+            or reconciliation.get("failed") is True
+            or reconciliation.get("unprotected_positions")
+            or (health.get("broker") or {}).get("authenticated") is not True
+        ):
+            return False
     positions = kite.positions()
     orders = kite.orders()
     if (
