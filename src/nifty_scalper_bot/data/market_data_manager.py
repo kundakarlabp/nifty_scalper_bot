@@ -10874,21 +10874,29 @@ class MarketDataManager:
                         recovery.get("reason") or "symbol_subscription_stale"
                     )
                 else:
-                    # A REST refresh cannot establish a missing WebSocket
-                    # subscription. Reassert the current required option once;
-                    # further checks use fallback while awaiting a new WS tick.
-                    if (
-                        sym in missing_symbols
-                        and sym in required
-                        and sym not in self._symbol_recovery_attempt_state
-                    ):
-                        self._attempt_symbol_subscription_recovery(
-                            sym,
-                            reason="required_option_first_tick_missing",
-                            now_mono=now_mono,
+                    # REST refreshes do not restore WebSocket subscriptions.
+                    # Reassert a required option whether it has never ticked
+                    # OR its previously valid WS tick has become stale. Keep
+                    # the fallback request for safe quote/recovery handling,
+                    # but never treat REST data as proof of WS freshness.
+                    subscription_recovery: dict[str, Any] = {}
+                    if sym in required and sym.endswith(("CE", "PE")):
+                        subscription_recovery = (
+                            self._attempt_symbol_subscription_recovery(
+                                sym,
+                                reason=(
+                                    "required_option_first_tick_missing"
+                                    if sym in missing_symbols
+                                    else "required_option_ws_tick_stale"
+                                ),
+                                now_mono=now_mono,
+                            )
                         )
-                    dispatched = self.request_fallback_refresh(
+                    fallback_dispatched = self.request_fallback_refresh(
                         sym, reason="ws_symbol_stale_recovery"
+                    )
+                    dispatched = bool(
+                        fallback_dispatched or subscription_recovery.get("attempted")
                     )
                     recovery_reason = (
                         "missing_first_ws_tick"
@@ -10899,13 +10907,17 @@ class MarketDataManager:
                     continue
                 dispatched_symbols.append(sym)
                 self._last_symbol_level_recovery_mono = now_mono
-                self._logger.warning(
+                log_throttled(
+                    self._logger,
+                    f"ws_symbol_stale_recovery:{sym}",
                     "WS_SYMBOL_STALE_RECOVERY symbol=%s required=%s stale_age_s=%s heartbeat_age_s=%s reason=%s",
                     sym,
                     sym in required,
                     age,
                     heartbeat_age,
                     recovery_reason,
+                    interval_sec=300.0,
+                    level=logging.WARNING,
                     extra={
                         "event": "WS_SYMBOL_STALE_RECOVERY",
                         "symbol": sym,
@@ -10935,7 +10947,7 @@ class MarketDataManager:
                 "ws_global_restart_suppressed_symbol_recovery",
                 "WS_GLOBAL_RESTART_SUPPRESSED stale_symbols=%d missing_symbols=%d heartbeat_age_s=%s reason=symbol_level_recovery"
                 % (len(stale_symbols), len(missing_symbols), heartbeat_age),
-                interval_sec=30.0,
+                interval_sec=300.0,
                 level=logging.WARNING,
                 extra={
                     "event": "WS_GLOBAL_RESTART_SUPPRESSED",
