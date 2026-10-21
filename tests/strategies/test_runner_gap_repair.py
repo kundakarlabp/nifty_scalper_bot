@@ -98,3 +98,25 @@ def test_backfill_skips_in_progress_partial_minute_and_dedupes() -> None:
          "low": 1, "close": 1, "volume": 0}
     )
     assert seen == [closed_ts]
+
+
+def test_overlapping_historical_backfill_cannot_duplicate_live_runner_minute() -> None:
+    """Delayed history callbacks are idempotent against an already closed bar."""
+    import logging
+
+    runner = StrategyRunner.__new__(StrategyRunner)
+    runner._logger = logging.getLogger("test_runner_backfill_identity")
+    runner._should_log_throttled = lambda *_a: False
+    minute = datetime(2026, 10, 21, 3, 52, tzinfo=timezone.utc)
+    recent = _bar(minute, 120.0)
+    symbol = "NFO:NIFTY26OCT23100CE"
+    runner._last_bar_ts = {symbol: minute}
+    runner._symbol_history = {symbol: [recent]}
+
+    runner._ingest_bar(symbol, _bar(minute, 121.0), is_backfill=True)
+    runner._ingest_bar(
+        symbol, _bar(minute - timedelta(minutes=1), 119.0), is_backfill=True
+    )
+
+    assert runner._symbol_history[symbol] == [recent]
+    assert runner._last_bar_ts[symbol] == minute
