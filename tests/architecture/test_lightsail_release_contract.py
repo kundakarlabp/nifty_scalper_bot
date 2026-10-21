@@ -354,9 +354,10 @@ def test_auto_release_market_window_boundary_and_failure_modes() -> None:
     helpers = _market_session_release_helpers()
     cases = [
         ("1", "0759", False),
-        ("1", "0800", True),
-        ("1", "0844", True),
-        ("1", "0845", True),
+        ("1", "0800", False),
+        ("1", "0844", False),
+        ("1", "0914", False),
+        ("1", "0915", True),
         ("5", "1230", True),
         ("5", "1545", True),
         ("5", "1546", False),
@@ -395,6 +396,7 @@ date() {
     *) return 1;;
   esac
 }
+intraday_flat_broker_confirmed() { [ "$FAKE_DAY" = "6" ]; }
 auto_release_should_defer
 """
     for mode, weekday, hhmm, defer in (
@@ -411,7 +413,7 @@ auto_release_should_defer
         assert (result.returncode == 0) is defer, (mode, weekday, result.stderr)
 
 
-def test_auto_release_allows_intraday_only_with_broker_flat_proof() -> None:
+def test_auto_release_catches_up_only_outside_session_with_broker_flat_proof() -> None:
     helpers = _market_session_release_helpers()
     shell = helpers + """
 AUTO_MODE="$1"
@@ -429,14 +431,17 @@ intraday_flat_broker_confirmed() { [ "$SAFE" = "true" ]; }
 auto_release_should_defer
 """
     cases = (
-        ("true", "1", "1425", "true", False),
-        ("true", "1", "1425", "false", True),
-        ("true", "1", "0930", "true", False),
-        ("true", "1", "1545", "true", False),
+        ("true", "1", "1425", "true", True),
+        ("true", "1", "0930", "true", True),
+        ("true", "1", "0914", "true", False),
+        ("true", "1", "0914", "false", True),
+        ("true", "1", "1545", "true", True),
+        ("true", "1", "1546", "true", False),
+        ("true", "1", "1546", "false", True),
         ("true", "1", "2580", "true", True),
         ("true", "", "", "true", True),
-        ("true", "1", "1546", "false", False),
-        ("true", "6", "1100", "false", False),
+        ("true", "6", "1100", "true", False),
+        ("true", "6", "1100", "false", True),
         ("false", "1", "1425", "false", False),
     )
     for mode, day, clock, safe, defer in cases:
@@ -453,6 +458,44 @@ auto_release_should_defer
             safe,
             result.stderr,
         )
+
+
+def test_already_current_healthy_release_skips_broker_exposure_poll() -> None:
+    helpers = _market_session_release_helpers()
+    shell = helpers + """
+AUTO_MODE=true
+BEFORE="$1"
+AFTER="$2"
+HEALTHY="$3"
+FORCE_RESTART=false
+RESTART_PENDING_FILE=/tmp/nonexistent-nifty-release-pending-test
+date() {
+  case "$1" in
+    +%u) printf '1';;
+    +%H%M) printf '0830';;
+    *) return 1;;
+  esac
+}
+service_healthy_confirmed() { [ "$HEALTHY" = "true" ]; }
+intraday_flat_broker_confirmed() {
+  printf 'BROKER_PROBED\\n' >&2
+  return 1
+}
+auto_release_should_defer
+"""
+    for before, after, healthy, probed in (
+        ("abc123", "abc123", "true", False),
+        ("abc123", "def456", "true", True),
+        ("abc123", "abc123", "false", True),
+    ):
+        result = subprocess.run(
+            ["bash", "-c", shell, "fixture", before, after, healthy],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0
+        assert ("BROKER_PROBED" in result.stderr) is probed
 
 
 def test_intraday_guard_requires_authoritative_flat_broker_and_engine() -> None:
@@ -484,6 +527,8 @@ class FakeKite:
         return json.loads(os.environ["TEST_ORDERS"])
 
 def fake_urlopen(url, timeout=3):
+    if url.endswith("/livez"):
+        return io.BytesIO(os.environ["TEST_LIVEZ"].encode())
     return io.BytesIO(os.environ["TEST_HEALTH"].encode())
 
 sys.modules["kiteconnect"] = types.SimpleNamespace(KiteConnect=FakeKite)
@@ -492,7 +537,7 @@ time.sleep = lambda seconds: None
 exec(compile(os.environ["TEST_GUARD"], "<flat-guard>", "exec"))
 """
     healthy = {
-        "live_orders_armed": True,
+        "live_orders_armed": False,
         "broker": {"authenticated": True},
         "reconciliation": {
             "completed": True,
@@ -501,23 +546,40 @@ exec(compile(os.environ["TEST_GUARD"], "<flat-guard>", "exec"))
         },
     }
     flat = {"net": [{"quantity": 0}], "day": [{"quantity": 0}]}
+    active = {"engine_http_responsive": True, "bot_loaded": True}
+    quiet = {"engine_http_responsive": True, "bot_loaded": False, "quiet": True}
     cases = (
-        (healthy, flat, [], True),
-        (healthy, {"net": [{"quantity": 65}], "day": []}, [], False),
-        (healthy, flat, [{"status": "TRIGGER PENDING"}], False),
-        (healthy, flat, [{"status": "COMPLETE"}], True),
-        (healthy, {"net": [{}], "day": []}, [], False),
-        ({**healthy, "reconciliation": {"completed": False}}, flat, [], False),
-        ({**healthy, "broker": {"authenticated": False}}, flat, [], False),
-        (healthy, {"net": []}, [], False),
+        (active, healthy, flat, [], True),
+        (active, healthy, {"net": [{"quantity": 65}], "day": []}, [], False),
+        (active, healthy, flat, [{"status": "TRIGGER PENDING"}], False),
+        (active, healthy, flat, [{"status": "COMPLETE"}], True),
+        (active, healthy, {"net": [{}], "day": []}, [], False),
+        (active, {**healthy, "reconciliation": {"completed": False}}, flat, [], False),
+        (active, {**healthy, "broker": {"authenticated": False}}, flat, [], False),
+        (active, {**healthy, "live_orders_armed": True}, flat, [], False),
+        (active, {**healthy, "live_orders_armed": None}, flat, [], False),
+        (active, healthy, {"net": []}, [], False),
+        (quiet, {}, flat, [], True),
+        (quiet, {}, flat, [{"status": "TRIGGER PENDING"}], False),
+        (quiet, {}, {"net": [{"quantity": 65}], "day": []}, [], False),
+        ({**quiet, "bot_loaded": True}, {}, flat, [], False),
+        (
+            {"engine_http_responsive": False, "bot_loaded": True},
+            healthy,
+            flat,
+            [],
+            False,
+        ),
+        ({"engine_http_responsive": True, "bot_loaded": False}, {}, flat, [], False),
     )
-    for health, positions, orders, expected in cases:
+    for livez, health, positions, orders, expected in cases:
         result = subprocess.run(
             [sys.executable, "-c", harness],
             env={
                 **os.environ,
                 "TEST_GUARD": guard,
                 "TEST_HEALTH": json.dumps(health),
+                "TEST_LIVEZ": json.dumps(livez),
                 "TEST_POSITIONS": json.dumps(positions),
                 "TEST_ORDERS": json.dumps(orders),
                 "BOT_RELEASE_KITE_API_KEY": "fake",
@@ -530,6 +592,7 @@ exec(compile(os.environ["TEST_GUARD"], "<flat-guard>", "exec"))
             timeout=8,
         )
         assert (result.returncode == 0) is expected, (
+            livez,
             health,
             positions,
             orders,
@@ -544,15 +607,15 @@ def test_auto_market_gate_preserves_health_recovery_and_research_poll() -> None:
     assert release.index("exec 9>") < release.index('cd "$APP_DIR"') < gate
     assert release.index("git fetch --quiet origin main") < gate
     assert "service_healthy_confirmed" in protected
-    assert 'sudo -n systemctl restart "$SERVICE"' in protected
-    assert "runtime_recovery_failed" in protected
+    assert 'sudo -n systemctl restart "$SERVICE"' not in protected
+    assert "deferred_unsafe_recovery" in protected
     assert "runtime_checkout_mismatch" in protected
     assert 'current_runtime_sha" != "$BEFORE"' in protected
     assert '"http://127.0.0.1:${PORT}/releasez"' in protected
     assert protected.index("runtime_checkout_mismatch") < protected.index(
-        'sudo -n systemctl restart "$SERVICE"'
+        "deferred_unsafe_recovery"
     )
-    assert "unvalidated revision" in protected
+    assert "pending main" in protected
     assert "poll_research_request" in protected
     assert 'if [ "$BEFORE" != "$AFTER" ]; then' in protected
     assert "write_status deferred_market_window" in protected

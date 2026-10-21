@@ -326,16 +326,17 @@ poll_research_request() {
 }
 
 
-# The trading window is not a blanket auto-deployment ban. During it,
-# demand broker-confirmed flatness and reconciled engine state at every mutation
-# boundary. No proof = defer; never terminate an active protective-order manager.
+# Never automatically restart while the engine may enter a new position or
+# manage intraday exits. A flat broker snapshot is not an atomic entry lock.
+# Pre-open and post-close releases require two independent broker-flat samples
+# AND a reconciled, disarmed engine (see intraday_flat_broker_confirmed).
 market_session_protected() {
   local weekday="$1" hhmm="$2"
   # An unreadable clock fails closed for automatic releases.
   if ! [[ "$weekday" =~ ^[1-7]$ && "$hhmm" =~ ^([01][0-9]|2[0-3])[0-5][0-9]$ ]]; then
     return 0
   fi
-  [[ "$weekday" =~ ^[1-5]$ && "$hhmm" > "0759" && "$hhmm" < "1546" ]]
+  [[ "$weekday" =~ ^[1-5]$ && "$hhmm" > "0914" && "$hhmm" < "1546" ]]
 }
 
 intraday_flat_broker_confirmed() {
@@ -362,17 +363,29 @@ kite = KiteConnect(api_key=os.environ["BOT_RELEASE_KITE_API_KEY"], timeout=5)
 kite.set_access_token(os.environ["BOT_RELEASE_KITE_ACCESS_TOKEN"])
 
 def is_safe() -> bool:
-    with urllib.request.urlopen(f"http://127.0.0.1:{port}/health/trading", timeout=3) as response:
-        health = json.load(response)
-    reconciliation = health.get("reconciliation") or {}
-    if (
-        health.get("live_orders_armed") is not True
-        or reconciliation.get("completed") is not True
-        or reconciliation.get("failed") is True
-        or reconciliation.get("unprotected_positions")
-        or (health.get("broker") or {}).get("authenticated") is not True
-    ):
+    with urllib.request.urlopen(f"http://127.0.0.1:{port}/livez", timeout=3) as response:
+        live = json.load(response)
+    if live.get("engine_http_responsive") is not True:
         return False
+    if live.get("quiet") is True:
+        # The canonical off-hours control plane has no trading stack and no
+        # live entry worker. Broker positions/orders remain authoritative.
+        if live.get("bot_loaded") is not False:
+            return False
+    else:
+        if live.get("bot_loaded") is not True:
+            return False
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/health/trading", timeout=3) as response:
+            health = json.load(response)
+        reconciliation = health.get("reconciliation") or {}
+        if (
+            health.get("live_orders_armed") is not False
+            or reconciliation.get("completed") is not True
+            or reconciliation.get("failed") is True
+            or reconciliation.get("unprotected_positions")
+            or (health.get("broker") or {}).get("authenticated") is not True
+        ):
+            return False
     positions = kite.positions()
     orders = kite.orders()
     if (
@@ -393,7 +406,7 @@ def is_safe() -> bool:
     return True
 
 try:
-    # Two independent authoritative snapshots reduce the restart/entry race.
+    # Both samples must prove no orders/positions and no armed entry path.
     if not is_safe():
         sys.exit(1)
     time.sleep(1)
@@ -414,10 +427,20 @@ auto_release_should_defer() {
   if ! [[ "$weekday" =~ ^[1-7]$ && "$hhmm" =~ ^([01][0-9]|2[0-3])[0-5][0-9]$ ]]; then
     return 0
   fi
-  if ! market_session_protected "$weekday" "$hhmm"; then
-    return 1
+  # Already-current, healthy builds require no broker requests. Route through
+  # the no-change branch, which still confirms the deployed SHA and reports
+  # status; do not poll Kite positions/orders every two minutes unnecessarily.
+  if [ -n "${BEFORE:-}" ] && [ "$BEFORE" = "${AFTER:-}" ] \
+    && [ "${FORCE_RESTART:-false}" = false ] \
+    && [ ! -f "${RESTART_PENDING_FILE:-}" ] \
+    && service_healthy_confirmed "$BEFORE"; then
+    return 0
   fi
-  # A validated, flat broker account can update even during market hours.
+  # No restart across live entry/exit hours. A closed session alone also
+  # cannot prove that a position or pending order has been resolved.
+  if market_session_protected "$weekday" "$hhmm"; then
+    return 0
+  fi
   intraday_flat_broker_confirmed && return 1
   return 0
 }
@@ -470,20 +493,16 @@ if [ "$AUTO_MODE" = true ]; then
       exit 1
     fi
     if ! service_healthy_confirmed "$BEFORE"; then
-      write_status recovering_runtime "restarting unhealthy current revision ${BEFORE:0:7}; candidate release still deferred"
-      log "Existing engine failed health probes; recovering current revision, not deploying candidate"
-      sudo -n systemctl restart "$SERVICE" || {
-        write_status runtime_recovery_failed "current revision restart failed"; exit 1;
-      }
-      if ! service_healthy_confirmed "$BEFORE"; then
-        write_status runtime_recovery_failed "current revision unhealthy after recovery restart"
-        exit 1
-      fi
+      # Unknown broker exposure also forbids an automatic recovery restart:
+      # the current process may still own a protective exit.
+      write_status deferred_unsafe_recovery "engine unhealthy; restart deferred pending broker-flat proof"
+      log "Automatic recovery deferred: broker exposure/order state not proven safe"
+      exit 0
     fi
     poll_research_request
     if [ "$BEFORE" != "$AFTER" ]; then
-      write_status deferred_market_window "unvalidated revision ${AFTER:0:7} waiting for broker-flat safe restart; current ${BEFORE:0:7} retained"
-      log "Automatic release deferred: open exposure, pending broker order, or unavailable safety proof"
+      write_status deferred_market_window "pending main ${AFTER:0:7}; deployed ${BEFORE:0:7}; retry when session inactive and broker-flat"
+      log "Automatic release deferred: live session, broker exposure/order, or unavailable safety proof"
     else
       write_status current "running ${BEFORE:0:7}; no pending revision"
     fi
