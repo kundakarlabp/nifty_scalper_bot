@@ -1246,14 +1246,11 @@ def tighten_adaptive_profit_lock(manager: Any, bracket: Any, ltp: float) -> bool
     # The shared assessment cache is retained for rate control. Two quality
     # confirmations need distinct assessments, not just distinct option ticks.
     decision = _cached_assessment(manager, bracket, float(ltp))
-    assessment_at = _as_float(
-        getattr(bracket, "_profit_extension_assessed_mono", None)
-    )
+    assessment_at = _as_float(getattr(bracket, "_profit_extension_assessed_mono", None))
     wanted = _adaptive_continuation_state(decision, bracket)
     state = str(config.get("_adaptive_profit_state") or "NORMAL")
-    if (
-        assessment_at is not None
-        and assessment_at != config.get("_adaptive_profit_last_assessment_mono")
+    if assessment_at is not None and assessment_at != config.get(
+        "_adaptive_profit_last_assessment_mono"
     ):
         config["_adaptive_profit_last_assessment_mono"] = assessment_at
         pending = str(config.get("_adaptive_profit_pending") or "")
@@ -1312,9 +1309,7 @@ def tighten_adaptive_profit_lock(manager: Any, bracket: Any, ltp: float) -> bool
     if stalled:
         fraction = min(0.75, fraction + 0.10)
 
-    slippage = _adaptive_positive_env(
-        "ADAPTIVE_PROFIT_SLIPPAGE_POINTS", 0.50, 3.0
-    )
+    slippage = _adaptive_positive_env("ADAPTIVE_PROFIT_SLIPPAGE_POINTS", 0.50, 3.0)
     fixed = _adaptive_positive_env("ADAPTIVE_PROFIT_MIN_POINTS", 1.0, 3.0)
     floor = entry + cost + slippage + max(fixed, risk * 0.10)
 
