@@ -172,7 +172,7 @@ def test_release_runner_validates_and_rolls_back() -> None:
     assert "dashboard/operations_console.py" not in release
     assert '[ ! -f "$CANDIDATE/dashboard/superlite_console.py" ]' in release
     assert '"$VENV/bin/python" -m compileall -q "$CANDIDATE/dashboard"' in release
-    assert 'required dashboard entrypoint missing' in release
+    assert "required dashboard entrypoint missing" in release
     assert '"$VENV/bin/python" -m py_compile' not in release
     assert '"$CANDIDATE/dashboard/event_buffer.py"' not in release
     assert "tests/dashboard/test_superlite_event_details.py" in release
@@ -199,11 +199,11 @@ def test_dashboard_candidate_compilation_survives_retired_helper_removal(
     dashboard = tmp_path / "dashboard"
     dashboard.mkdir()
     (dashboard / "superlite_console.py").write_text(
-        'from superlite_events import parse_event\n',
+        "from superlite_events import parse_event\n",
         encoding="utf-8",
     )
     (dashboard / "superlite_events.py").write_text(
-        'def parse_event(value): return value\n',
+        "def parse_event(value): return value\n",
         encoding="utf-8",
     )
     assert not (dashboard / "event_buffer.py").exists()
