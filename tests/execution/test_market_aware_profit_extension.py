@@ -762,12 +762,12 @@ def test_adaptive_enabled_skips_competing_legacy_market_stop(monkeypatch):
     manager = object.__new__(BoundBracketManager)
     manager._trail_sync_context = threading.local()
     bracket = SimpleNamespace(
-        symbol=SYMBOL, last_ltp=115.0, sl_trigger_price=101.0,
+        symbol=SYMBOL,
+        last_ltp=115.0,
+        sl_trigger_price=101.0,
     )
     calls = []
-    monkeypatch.setattr(
-        RuntimeBracketManager, "_apply_trailing_math", lambda *_: False
-    )
+    monkeypatch.setattr(RuntimeBracketManager, "_apply_trailing_math", lambda *_: False)
     monkeypatch.setattr(
         profit_extension,
         "tighten_market_aware_floor",
