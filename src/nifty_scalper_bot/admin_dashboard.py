@@ -480,8 +480,11 @@ def restart(request: Request) -> RedirectResponse | JSONResponse:
     result = queue_validated_restart()
     if "application/json" in request.headers.get("accept", ""):
         return JSONResponse(
-            {"ok": result.ok, "state": "queued" if result.ok else "failed",
-             "message": result.message},
+            {
+                "ok": result.ok,
+                "state": "queued" if result.ok else "failed",
+                "message": result.message,
+            },
             status_code=202 if result.ok else 503,
         )
     if result.ok:
@@ -498,9 +501,15 @@ def update_from_github(request: Request) -> RedirectResponse | JSONResponse:
     ok, message = _git_update()
     if "application/json" in request.headers.get("accept", ""):
         return JSONResponse(
-            {"ok": ok, "state": "queued" if ok else "failed",
-             "message": ("Deployment check queued; completion is not yet verified"
-                         if ok else message)},
+            {
+                "ok": ok,
+                "state": "queued" if ok else "failed",
+                "message": (
+                    "Deployment check queued; completion is not yet verified"
+                    if ok
+                    else message
+                ),
+            },
             status_code=202 if ok else 503,
         )
     if ok:
