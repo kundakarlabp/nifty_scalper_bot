@@ -309,7 +309,9 @@ def status_snapshot() -> dict[str, Any]:
     runtime_sha = str(trading.get("build_sha") or mode.get("build_sha") or "").strip()
     running = runtime_sha[:7] if runtime_sha else checkout
     runtime_checkout_mismatch = bool(
-        runtime_sha and checkout not in {"", "—"} and not runtime_sha.startswith(checkout)
+        runtime_sha
+        and checkout not in {"", "—"}
+        and not runtime_sha.startswith(checkout)
     )
     data = {
         "service_process_known": _service_process_known(),
