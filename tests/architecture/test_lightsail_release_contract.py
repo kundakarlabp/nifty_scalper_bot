@@ -597,7 +597,7 @@ def test_auto_market_gate_preserves_health_recovery_and_research_poll() -> None:
     assert protected.index("runtime_checkout_mismatch") < protected.index(
         "deferred_unsafe_recovery"
     )
-    assert "unvalidated revision" in protected
+    assert "pending main" in protected
     assert "poll_research_request" in protected
     assert 'if [ "$BEFORE" != "$AFTER" ]; then' in protected
     assert "write_status deferred_market_window" in protected
