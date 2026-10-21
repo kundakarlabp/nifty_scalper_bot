@@ -1186,6 +1186,11 @@ def tighten_adaptive_profit_lock(manager: Any, bracket: Any, ltp: float) -> bool
         or getattr(bracket, "exchange_stop_degraded_reason", None)
     ):
         return False
+    live_mode = getattr(manager, "_is_live_execution", None)
+    if callable(live_mode) and live_mode() and not getattr(
+        bracket, "exchange_stop_order_id", None
+    ):
+        return False
 
     risk = _initial_risk(bracket)
     entry = _positive(getattr(bracket, "entry_price", None))
@@ -1275,7 +1280,7 @@ def tighten_adaptive_profit_lock(manager: Any, bracket: Any, ltp: float) -> bool
             "highest_executable_bid": round(high, 2),
             "bid": round(bid, 2),
             "mfe_r": round(mfe / risk, 4),
-            "stop": round(candidate, 2),
+            "virtual_stop": round(candidate, 2),
             "positive_families": list(decision.positive),
             "negative_families": list(decision.negative),
         }
