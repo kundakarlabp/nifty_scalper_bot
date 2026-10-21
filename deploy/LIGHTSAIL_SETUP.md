@@ -106,8 +106,20 @@ The runner:
 
 The automatic update timer fetches `origin/main` every two minutes. PR commits
 are not deployed until merged into `main` (unreviewed PR heads must never
-replace production). When a new main SHA is available, the updater validates
-the candidate in a detached worktree before attempting a release.
+replace production). After a merge, the updater additionally requires a
+**completed successful push-triggered GitHub CI run for the exact main SHA**
+before candidate validation or checkout mutation. It uses the public GitHub
+Actions API without storing a token. Pending CI produces `deferred_ci`; failed
+CI produces `ci_failed`; an unreachable/rate-limited/invalid CI API response
+produces `ci_unavailable`. All three leave the current runtime untouched and
+retry on the next timer invocation. An already deployed revision does not need
+a new CI request to remain healthy or restart under the existing safety policy.
+
+When a new CI-approved main SHA is available, the updater validates the
+candidate in a detached worktree before attempting a release. The two-minute
+interval is the polling interval, **not a guaranteed deployment deadline**:
+CI duration, broker exposure/arming, and transient network failures can defer
+a release without compromising live position protection.
 
 There is **no market-hours restart blackout**: automatic updates may run
 during an NSE session as soon as the safety check passes. Before changing the
