@@ -541,6 +541,32 @@ git fetch --quiet origin main || { write_status fetch_failed "git fetch failed";
 AFTER="$(git rev-parse origin/main)"
 current_runtime_sha="$(first_nonempty_env GIT_COMMIT_SHA 2>/dev/null || true)"
 
+# Do not deploy a just-merged main commit until the *push* CI run for that
+# exact SHA has completed successfully. PR-head checks do not authorize a
+# production release. Unavailable/pending/failed checks retain the running
+# revision and are automatically retried on the next timer tick.
+if [ "$BEFORE" != "$AFTER" ]; then
+  ci_verdict="$("$VENV/bin/python" "$APP_DIR/deploy/scripts/verify_release_ci.py" "$AFTER" 2>/dev/null)" || true
+  case "$ci_verdict" in
+    passed) log "GitHub main push CI passed for ${AFTER:0:7}" ;;
+    pending)
+      write_status deferred_ci "main ${AFTER:0:7} awaiting post-merge CI; deployed ${BEFORE:0:7}"
+      poll_research_request
+      exit 0
+      ;;
+    failed)
+      write_status ci_failed "main ${AFTER:0:7} CI failed; retaining deployed ${BEFORE:0:7}"
+      poll_research_request
+      exit 1
+      ;;
+    *)
+      write_status ci_unavailable "could not verify main ${AFTER:0:7} CI; retaining deployed ${BEFORE:0:7}"
+      poll_research_request
+      exit 1
+      ;;
+  esac
+fi
+
 if [ "$BEFORE" = "$AFTER" ] && [ "$FORCE_RESTART" = false ]; then
   if service_healthy_confirmed "$BEFORE"; then
     if [ "$current_runtime_sha" = "$BEFORE" ]; then
@@ -582,6 +608,7 @@ TARGETED_TESTS=(
   tests/architecture/test_file_header_standard.py
   tests/architecture/test_canonical_bo_ownership.py
   tests/architecture/test_lightsail_release_contract.py
+  tests/architecture/test_release_ci_gate.py
   tests/ops/test_research_jobs.py
   tests/scripts/test_archive_kite_history.py
   tests/backtests/test_strategy_bar_research.py
