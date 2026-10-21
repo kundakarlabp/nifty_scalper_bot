@@ -133,3 +133,21 @@ async def test_indicator_refresh_does_not_double_ingest_transition(monkeypatch) 
     diagnostics = manager.build_diagnostics()
     assert diagnostics["transition"]["pending_regime"] == "RANGE"
     assert diagnostics["transition"]["pending_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_refresh_ignores_price_only_inputs_instead_of_fabricating_range() -> None:
+    class PriceOnlyIndicators:
+        def get_indicators(self, symbol: str, names=None) -> dict[str, float]:
+            del symbol, names
+            return {"price": 22750.0, "close": 22750.0}
+
+    manager = MarketRegimeManager(
+        MarketRegimeDetector(),
+        indicators=PriceOnlyIndicators(),
+    )
+
+    await manager.refresh_from_indicators()
+
+    assert manager.get_latest_snapshot() is None
+    assert manager.get_raw_snapshot() is None
