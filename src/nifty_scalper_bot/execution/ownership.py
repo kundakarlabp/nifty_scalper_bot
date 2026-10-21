@@ -263,17 +263,20 @@ class BoundBracketManager(RuntimeBracketManager):
             ltp = _profit_extension._positive(getattr(bracket, "last_ltp", None))
             if ltp is None:
                 return canonical_changed
-            try:
-                market_changed = _profit_extension.tighten_market_aware_floor(
-                    self, bracket, ltp
-                )
-            except Exception as exc:  # noqa: BLE001 - preserve canonical SL
-                _profit_extension.LOGGER.warning(
-                    "PROFIT_TIGHTEN_EVALUATION_FAILED symbol=%s error_type=%s",
-                    getattr(bracket, "symbol", ""),
-                    type(exc).__name__,
-                )
-                market_changed = False
+            market_changed = False
+            if not _profit_extension._env_bool(
+                "ADAPTIVE_PROFIT_LOCK_ENABLED", False
+            ):
+                try:
+                    market_changed = _profit_extension.tighten_market_aware_floor(
+                        self, bracket, ltp
+                    )
+                except Exception as exc:  # noqa: BLE001 - preserve canonical SL
+                    _profit_extension.LOGGER.warning(
+                        "PROFIT_TIGHTEN_EVALUATION_FAILED symbol=%s error_type=%s",
+                        getattr(bracket, "symbol", ""),
+                        type(exc).__name__,
+                    )
             try:
                 adaptive_changed = _profit_extension.tighten_adaptive_profit_lock(
                     self, bracket, ltp
