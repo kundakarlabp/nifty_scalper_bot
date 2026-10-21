@@ -1,12 +1,14 @@
 import json
+from importlib import import_module
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-import nifty_scalper_bot.storage.replay_archive as archive
-import scripts.run_runtime_replay as worker
 from nifty_scalper_bot.backtesting.runtime_research import validate_snapshot
+from nifty_scalper_bot.storage import replay_archive as archive
+
+worker = import_module("scripts.run_runtime_replay")
 
 
 def test_full_runtime_rejects_missing_identity_and_live_positions():
