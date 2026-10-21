@@ -256,14 +256,15 @@ def render() -> None:
         + card("Visible events", len(rows))
         + card("Trade events", sum(row.get("type") == "TRADE" for row in rows))
         + card("Signal events", sum(row.get("type") == "SIGNAL" for row in rows))
-        + card("Running", status.get("running") or "—")
-        + card("Remote", status.get("remote") or "—", "warn" if status.get("stale") else "")
+        + card("Engine SHA", status.get("running") or "—")
+        + card("Cached main", status.get("remote") or "—", "warn" if status.get("stale") else "")
         + '</div><div class="cards">'
         + card("ATM", selected.get("atm") or "—")
         + card("Selected CE", selected.get("ce") or "—")
         + card("Selected PE", selected.get("pe") or "—")
         + card("Mode", status.get("mode") or status.get("execution_mode") or "—")
         + card("Selected source", status.get("selected_source") or "—")
+        + card("Updater", (status.get("updater") or {}).get("state") or "unknown", "warn" if status.get("stale") else "")
         + "</div>" + feed_html(rows),
         unsafe_allow_html=True,
     )
