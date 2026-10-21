@@ -25,3 +25,20 @@ def test_installer_preserves_external_environment() -> None:
     assert "enable --quiet --now niftybot-autodeploy.timer" in installer
     assert "niftybot-admin.service niftybot-streamlit.service" in installer
     assert "rm -rf -- {}" in installer
+
+
+def test_streamlit_control_links_follow_current_host_and_do_not_mask_failures() -> None:
+    console = (ROOT / "dashboard/superlite_console.py").read_text(encoding="utf-8")
+    review = (ROOT / "deploy/systemd/niftybot-streamlit.service").read_text(
+        encoding="utf-8"
+    )
+    installer = (
+        ROOT / "deploy/scripts/install_streamlit_console.sh"
+    ).read_text(encoding="utf-8")
+
+    assert '"Accept": "application/json"' in console
+    assert 'Check GitHub update' in console
+    assert "http://65.0.255.84:8081/admin" in installer
+    assert "Environment=BOT_ADMIN_PUBLIC_URL=" not in review
+    assert "15.206.3.6" not in review
+    assert 'status.get("runtime_sha")' not in console or "Engine SHA" in console
