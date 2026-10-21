@@ -124,3 +124,35 @@ def test_single_missing_tail_bar_is_backfilled_without_full_reseed(monkeypatch) 
 
     assert result.success is True
     assert calls == [(SYMBOL, True, canonical[-1]["timestamp"])]
+
+
+def test_sync_reseeds_duplicate_runner_minutes_from_canonical_history() -> None:
+    """A runner overlap can have a correct latest stamp but duplicated bars."""
+    canonical = _bars(40)
+    projected = canonical[:35] + [canonical[35], canonical[35]] + canonical[36:]
+    runner = _runner(canonical, projected)
+    calls: list[str] = []
+
+    def _reseed(symbol, bars, *, source="", min_bars=1):
+        calls.append(source)
+        rows = list(bars)
+        runner._symbol_history[symbol] = list(rows)
+        runner._indicator_engine.replace_history(
+            symbol, rows, source=source, min_bars=min_bars
+        )
+        return len(rows)
+
+    runner.reseed_history_from_bars = _reseed
+    result = runner.sync_history_from_mdm(
+        SYMBOL,
+        required_bars=30,
+        reason="duplicate_projection",
+        role="futures_context",
+        request_if_short=False,
+    )
+
+    assert result.success is True
+    assert calls == ["duplicate_projection"]
+    assert result.runner_bars == result.mdm_bars == 40
+    timestamps = [row["timestamp"] for row in runner._symbol_history[SYMBOL]]
+    assert len(timestamps) == len(set(timestamps))
