@@ -82,17 +82,20 @@ def test_legacy_installer_never_executes_full_setup_as_sudoers_repair(
     helpers = release[start:end]
     legacy = tmp_path / "legacy-setup.sh"
     legacy.write_text(
-        "#!/usr/bin/env bash\\nprintf 'UNSAFE_FULL_SETUP\\\\n' > \\"$SENTINEL\\"\\n",
+        """#!/usr/bin/env bash
+printf BAD > "$SENTINEL"
+""",
         encoding="utf-8",
     )
     safe = tmp_path / "current-setup.sh"
     safe.write_text(
-        '#!/usr/bin/env bash\\n'
-        'if [ "${1:-}" = "--repair-control-sudoers" ]; then\\n'
-        '  printf "REPAIR_ONLY\\\\n" > "$SENTINEL"\\n'
-        "  exit 0\\n"
-        "fi\\n"
-        "exit 5\\n",
+        """#!/usr/bin/env bash
+if [ "${1:-}" = "--repair-control-sudoers" ]; then
+  printf REPAIR_ONLY > "$SENTINEL"
+  exit 0
+fi
+exit 5
+""",
         encoding="utf-8",
     )
     import os
@@ -118,7 +121,7 @@ repair_control_sudoers_from "$1"
         )
         assert (result.returncode == 0) is expected
         if expected:
-            assert sentinel.read_text() == "REPAIR_ONLY\\n"
+            assert sentinel.read_text() == "REPAIR_ONLY"
             assert (tmp_path / "control_sudoers_v2_installed").exists()
         else:
             assert not sentinel.exists()
