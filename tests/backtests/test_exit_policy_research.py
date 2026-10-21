@@ -56,7 +56,7 @@ def test_target_overlays_use_causal_visible_bid_and_costs() -> None:
     assert report["outcomes"]["target_0.6r"]["net"] == 287.5
     assert report["outcomes"]["target_0.8r"]["net"] == 417.5
     assert report["outcomes"]["target_1.0r"]["net"] == 547.5
-    assert report["promotion_eligible"] is False if "promotion_eligible" in report else True
+    assert report["evidence"].startswith("RESEARCH_CANDIDATE")
 
 
 def test_lock_fractions_act_after_peak_and_bounded_by_real_exit() -> None:
