@@ -72,7 +72,7 @@ def test_reassert_disconnected_token_replays_only_on_connect() -> None:
     assert ticker.unsubscribed == []
 
 
-def test_stale_required_option_reasserts_ws_and_keeps_rest_recovery(monkeypatch) -> None:
+def test_stale_required_option_reasserts_ws_and_rest(monkeypatch) -> None:
     from nifty_scalper_bot.utils import market_hours
 
     mdm = MarketDataManager(kite=None)
