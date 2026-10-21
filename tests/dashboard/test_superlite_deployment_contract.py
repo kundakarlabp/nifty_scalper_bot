@@ -37,7 +37,7 @@ def test_streamlit_control_links_follow_current_host_and_do_not_mask_failures() 
     )
 
     assert '"Accept": "application/json"' in console
-    assert 'Check GitHub update' in console
+    assert "Check GitHub update" in console
     assert "http://65.0.255.84:8081/admin" in installer
     assert "Environment=BOT_ADMIN_PUBLIC_URL=" not in review
     assert "15.206.3.6" not in review
