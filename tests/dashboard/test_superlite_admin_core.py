@@ -270,3 +270,37 @@ def test_status_selected_falls_back_to_dynamic_basket_log(monkeypatch) -> None:
     status = core.status_snapshot()
     assert status["selected"] == {"ce": "NFO:NEWCE", "pe": "NFO:NEWPE", "atm": "24050"}
     assert status["selected_source"] == "journal:active_dynamic_basket"
+
+
+def test_dashboard_distinguishes_running_engine_build_from_checkout(monkeypatch) -> None:
+    import nifty_scalper_bot.superlite_admin_core as core
+
+    def payload(path: str):
+        if path == "/livez":
+            return {"bot_loaded": True}
+        if path == "/health/trading":
+            return {
+                "build_sha": "eee8cf5246034259a41e27d25571796d09ad2648",
+                "blockers": [],
+            }
+        return {"execution_mode": "LIVE"}
+
+    monkeypatch.setattr(core, "_http_json", payload)
+    monkeypatch.setattr(
+        core,
+        "_git_ref",
+        lambda ref: "1234abc" if ref == "HEAD" else "a4d9a58",
+    )
+    monkeypatch.setattr(core, "_update_state", lambda: {"state": "deferred_market_window"})
+    monkeypatch.setattr(core, "bounded_logs", lambda *_args, **_kwargs: "")
+    core.STATUS_CACHE.update({"at": 0.0, "data": {}})
+
+    status = core.status_snapshot()
+
+    assert status["running"] == "eee8cf5"
+    assert status["runtime_sha"].startswith("eee8cf52")
+    assert status["checkout_sha"] == "1234abc"
+    assert status["runtime_checkout_mismatch"] is True
+    assert status["stale"] is True
+    assert status["remote_source"] == "cached_local_origin/main"
+    assert status["updater"]["state"] == "deferred_market_window"
