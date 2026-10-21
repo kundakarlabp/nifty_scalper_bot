@@ -2401,9 +2401,18 @@ class StrategyRunner:
             failure_reason = f"mdm_history_read_failed:{type(exc).__name__}"
         source_count = len(rows)
         required_count = target
-        runner_before = len(
-            getattr(self, "_symbol_history", {}).get(normalized, []) or []
-        )
+        runner_rows = getattr(self, "_symbol_history", {}).get(normalized, []) or []
+        runner_before = len(runner_rows)
+        # The canonical MDM/Indicator histories have one row per minute.
+        # A historical refresh may race a live runner candle and append the
+        # same completed minute twice. Detect recent contamination even when
+        # readiness counts and latest timestamps otherwise look sufficient.
+        recent_minutes = [
+            stamp
+            for row in runner_rows[-12:]
+            if (stamp := self._history_row_timestamp(row)) is not None
+        ]
+        runner_tail_duplicated = len(recent_minutes) != len(set(recent_minutes))
         indicator_count = indicator_before
         source_ready = source_count >= required_count
         indicator_ready = indicator_count >= required_count
@@ -2456,6 +2465,7 @@ class StrategyRunner:
                 or indicator_depth_short
                 or not indicator_current
                 or not runner_current
+                or runner_tail_duplicated
             )
         )
         if can_incremental:
@@ -2494,6 +2504,17 @@ class StrategyRunner:
                     },
                 )
         if needs_seed:
+            if runner_tail_duplicated:
+                self._logger.warning(
+                    "RUNNER_HISTORY_DUPLICATE_REPAIR symbol=%s source=%s",
+                    normalized,
+                    reason,
+                    extra={
+                        "event": "RUNNER_HISTORY_DUPLICATE_REPAIR",
+                        "symbol": normalized,
+                        "source": reason,
+                    },
+                )
             try:
                 self.reseed_history_from_bars(
                     normalized, rows, source=reason, min_bars=required_count
@@ -7030,7 +7051,10 @@ class StrategyRunner:
         last_ts = self._last_bar_ts.get(symbol)
 
         # Use the public .timestamp property (wraps .start)
-        if not is_backfill and last_ts and bar.timestamp <= last_ts:
+        # Backfill is subject to the same monotonic minute identity as live
+        # candles. A delayed REST/history callback must never append an
+        # already-ingested minute or rewind the indicator projection.
+        if last_ts and bar.timestamp <= last_ts:
             duplicate = bar.timestamp == last_ts
             if self._should_log_throttled(f"bar_ooo:{symbol}", 60.0):
                 self._logger.log(
