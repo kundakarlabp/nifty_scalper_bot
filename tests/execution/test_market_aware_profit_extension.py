@@ -477,6 +477,7 @@ def test_adaptive_lock_uses_independent_continuation_families(monkeypatch):
 
     assert profit_extension.tighten_adaptive_profit_lock(strong, strong_bracket, 115)
     profit_extension.tighten_adaptive_profit_lock(weak, weak_bracket, 115)
+    weak_bracket._profit_extension_assessed_mono = 0.0
     weak_quote["received_at"] += 0.1
     profit_extension.tighten_adaptive_profit_lock(weak, weak_bracket, 115)
     assert weak_bracket.sl_trigger_price > strong_bracket.sl_trigger_price
@@ -538,6 +539,7 @@ def test_adaptive_lock_respects_regime_and_original_entry_context(monkeypatch):
     _adaptive_market(manager)
     profit_extension.tighten_adaptive_profit_lock(manager, baseline, 115)
     profit_extension.tighten_adaptive_profit_lock(manager, degraded, 115)
+    degraded._profit_extension_assessed_mono = 0.0
     quote = manager._market_data.quotes[SYMBOL]
     quote["received_at"] += 0.1
     profit_extension.tighten_adaptive_profit_lock(manager, degraded, 115)
@@ -599,6 +601,7 @@ def test_adaptive_atr_does_not_silently_override_strong_giveback(monkeypatch):
     monkeypatch.setenv("ADAPTIVE_PROFIT_LOCK_ENABLED", "true")
     manager = FakeManager(strong=True)
     bracket = _bracket(protected=False)
+    bracket.trailing_config["_adaptive_profit_state"] = "STRONG"
     _adaptive_market(manager, bid=115)
     strong = ContinuationDecision(
         extend=True,
@@ -647,6 +650,10 @@ def test_adaptive_does_not_confirm_state_from_cached_market_assessment(
     assert bracket.trailing_config["_adaptive_profit_pending_count"] == 1
     assert not profit_extension.tighten_adaptive_profit_lock(manager, bracket, 115)
     assert len(evaluations) == 1
+    quote["received_at"] += 0.1
+    profit_extension.tighten_adaptive_profit_lock(manager, bracket, 115)
+    assert len(evaluations) == 1
+    bracket._profit_extension_assessed_mono = 0.0
     quote["received_at"] += 0.1
     profit_extension.tighten_adaptive_profit_lock(manager, bracket, 115)
     assert len(evaluations) == 2
