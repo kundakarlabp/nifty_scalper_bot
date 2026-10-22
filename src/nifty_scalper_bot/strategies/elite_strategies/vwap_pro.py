@@ -145,7 +145,17 @@ class VWAPProStrategy(EliteStrategy):
         self._trend_momentum_enabled = str(
             os.getenv("VWAP_TREND_MOMENTUM_ENABLED", "false")
         ).strip().lower() in {"1", "true", "yes", "on"}
-        # Additional isolated research arm; never modifies LIVE admission.
+        # LIVE near-neutral-slope candidate (independent opt-out switch).
+        # Default-on is limited to the strict trend/premium/volume evidence
+        # path, not a global relaxation of the ordinary VWAP setup.
+        self._live_neutral_slope_enabled = bool(
+            os.getenv("EXECUTION_MODE", "SHADOW").strip().upper() == "LIVE"
+            and str(os.getenv("VWAP_LIVE_NEUTRAL_SLOPE_ENABLED", "true"))
+            .strip()
+            .lower()
+            in {"1", "true", "yes", "on"}
+        )
+        # Existing SHADOW research arm and comparisons remain isolated.
         self._neutral_slope_research_enabled = bool(
             os.getenv("EXECUTION_MODE", "SHADOW").strip().upper() == "SHADOW"
             and str(os.getenv("VWAP_RESEARCH_NEUTRAL_FUTURES_SLOPE", "false"))
@@ -764,12 +774,32 @@ class VWAPProStrategy(EliteStrategy):
             trend_momentum_regime = normalize_regime(
                 indicators.get("regime") or indicators.get("market_regime")
             )
+            live_neutral_slope_candidate = bool(
+                is_live
+                and self._live_neutral_slope_enabled
+                and not slope_support
+                and futures_slope_bps is not None
+                and abs(futures_slope_bps) < self._futures_slope_min_bps
+                and (
+                    (contract_side == "CE" and futures_slope_bps >= 0)
+                    or (contract_side == "PE" and futures_slope_bps <= 0)
+                )
+            )
+            premium_momentum_required = bool(
+                self._trend_momentum_enabled or live_neutral_slope_candidate
+            )
+            if live_neutral_slope_candidate and vwap_source not in {
+                "exchange_vwap",
+                "session_vwap",
+            }:
+                self._no_vote("trend_momentum_session_vwap_unavailable")
+                return None
             trend_momentum_close_location: float | None = None
             completed_option_rvol: float | None = None
             trend_momentum_volume_baseline_bars: int | None = None
             trend_momentum_retest_confirmed: bool | None = None
             trend_momentum_prior_session_vwap: float | None = None
-            if self._trend_momentum_enabled:
+            if premium_momentum_required:
                 if trend_momentum_regime != MarketRegime.TREND:
                     self._no_vote("trend_momentum_regime_not_trend")
                     return None
@@ -782,7 +812,7 @@ class VWAPProStrategy(EliteStrategy):
 
             confirmed_bar = None
             last_bars = []
-            if self._trend_momentum_enabled or self._require_finalized_signal_bar:
+            if premium_momentum_required or self._require_finalized_signal_bar:
                 # Confirm exactly the completed premium candle used by this vote.
                 # One proof owner serves both research profiles without a second
                 # signal path or an unconditional LIVE admission change.
@@ -808,7 +838,7 @@ class VWAPProStrategy(EliteStrategy):
                 if not bar_confirmed:
                     self._no_vote(
                         "trend_momentum_bar_unconfirmed"
-                        if self._trend_momentum_enabled
+                        if premium_momentum_required
                         else "vwap_signal_bar_unconfirmed"
                     )
                     return None
@@ -819,7 +849,7 @@ class VWAPProStrategy(EliteStrategy):
                 except (TypeError, ValueError, KeyError):
                     self._no_vote(
                         "trend_momentum_bar_unconfirmed"
-                        if self._trend_momentum_enabled
+                        if premium_momentum_required
                         else "vwap_signal_bar_unconfirmed"
                     )
                     return None
@@ -835,12 +865,12 @@ class VWAPProStrategy(EliteStrategy):
                 ):
                     self._no_vote(
                         "trend_momentum_bar_unconfirmed"
-                        if self._trend_momentum_enabled
+                        if premium_momentum_required
                         else "vwap_signal_bar_unconfirmed"
                     )
                     return None
 
-            if self._trend_momentum_enabled:
+            if premium_momentum_required:
                 if not momentum_continuation_confirmed:
                     self._no_vote("trend_momentum_premium_not_confirmed")
                     return None
@@ -979,14 +1009,18 @@ class VWAPProStrategy(EliteStrategy):
                 self._no_vote("vwap_event_unconfirmed")
                 return None
 
-            # SHADOW-only ablation: a fresh, completed, liquid TREND premium
-            # momentum bar may compensate for weak *same-side* futures slope.
-            # Missing, stale, adverse or strongly opposing slopes never qualify.
-            # Existing trend-momentum mode already enforces completed-bar proof,
-            # prior-candle RVOL and strong underlying direction independently.
-            research_neutral_slope_admitted = bool(
-                self._neutral_slope_research_enabled
-                and self._trend_momentum_enabled
+            # A weak same-direction slope may be replaced only by completed
+            # momentum, causal option RVOL, fresh underlying trend and volume.
+            # SHADOW research remains separate from explicit LIVE admission.
+            neutral_slope_admitted = bool(
+                (
+                    live_neutral_slope_candidate
+                    or (
+                        self._neutral_slope_research_enabled
+                        and self._trend_momentum_enabled
+                    )
+                )
+                and premium_momentum_required
                 and not slope_support
                 and futures_slope_bps is not None
                 and abs(futures_slope_bps) < self._futures_slope_min_bps
@@ -1003,13 +1037,18 @@ class VWAPProStrategy(EliteStrategy):
                 and vol_support
                 and fut_vol_support
             )
-            if research_neutral_slope_admitted:
+            neutral_slope_reason = (
+                "live_neutral_futures_slope"
+                if live_neutral_slope_candidate
+                else "research_neutral_futures_slope"
+            )
+            if neutral_slope_admitted:
                 reasons = [
                     reason
                     for reason in reasons
                     if reason != "futures_slope_below_floor"
                 ]
-                reasons.append("research_neutral_futures_slope")
+                reasons.append(neutral_slope_reason)
 
             # Structural contract: a VWAP continuation/pullback entry must have
             # a premium event, fresh underlying alignment, futures slope support
@@ -1022,7 +1061,7 @@ class VWAPProStrategy(EliteStrategy):
                 structural_failures.append("underlying_direction_conflict")
             if not context_fresh:
                 structural_failures.append("underlying_context_stale")
-            if not (slope_support or research_neutral_slope_admitted):
+            if not (slope_support or neutral_slope_admitted):
                 structural_failures.append("futures_slope_not_aligned")
             if not (vol_support or fut_vol_support):
                 structural_failures.append("volume_confirmation_missing")
@@ -1074,7 +1113,7 @@ class VWAPProStrategy(EliteStrategy):
                     "premium_above_vwap",
                     "underlying_direction_alignment",
                     "futures_slope_alignment"
-                    if slope_support else "research_neutral_futures_slope",
+                    if slope_support else neutral_slope_reason,
                     "volume_confirmation",
                 ]
             )
@@ -1104,7 +1143,14 @@ class VWAPProStrategy(EliteStrategy):
                 "context_fresh": context_fresh,
                 "futures_slope_alignment": slope_support,
                 "research_neutral_slope_enabled": self._neutral_slope_research_enabled,
-                "research_neutral_slope_admitted": research_neutral_slope_admitted,
+                "research_neutral_slope_admitted": bool(
+                    neutral_slope_admitted and not is_live
+                ),
+                "live_neutral_slope_enabled": self._live_neutral_slope_enabled,
+                "live_neutral_slope_admitted": bool(
+                    neutral_slope_admitted and is_live
+                ),
+                "neutral_slope_admitted": neutral_slope_admitted,
                 "volume_confirmation": bool(vol_support or fut_vol_support),
                 "context_direction_used": bias if bias in {"CE", "PE"} else None,
                 "requires_runner_execution_validation": True,
@@ -1177,8 +1223,9 @@ class VWAPProStrategy(EliteStrategy):
                 "vwap_penetration_atr": round(penetration_atr, 4),
                 "vwap_event_confirmed": event_confirmed,
                 "trend_momentum_enabled": self._trend_momentum_enabled,
+                "vwap_neutral_slope_premium_proof_required": premium_momentum_required,
                 "vwap_finalized_bar_required": (
-                    self._require_finalized_signal_bar or self._trend_momentum_enabled
+                    self._require_finalized_signal_bar or premium_momentum_required
                 ),
                 "vwap_finalized_bar_confirmed": confirmed_bar is not None,
                 "trend_momentum_regime": trend_momentum_regime.value,
