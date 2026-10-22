@@ -188,11 +188,12 @@ EOF_DEPLOY_SERVICE
 
 sudo tee /etc/systemd/system/niftybot-autodeploy.timer >/dev/null <<EOF_TIMER
 [Unit]
-Description=Check Nifty Bot releases every two minutes
+Description=Check Nifty Bot releases shortly after each completed check
 
 [Timer]
-OnBootSec=2min
-OnUnitActiveSec=2min
+OnBootSec=30s
+OnUnitInactiveSec=30s
+AccuracySec=5s
 Persistent=true
 
 [Install]
