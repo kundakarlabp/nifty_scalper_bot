@@ -3,12 +3,12 @@ from __future__ import annotations
 import importlib.util
 import json
 import sqlite3
+from pathlib import Path
 
 from nifty_scalper_bot.journal.trade_ledger import (
     ensure_trade_ledger_schema,
     materialize_trade_events,
 )
-from pathlib import Path
 
 SCRIPT = (
     Path(__file__).resolve().parents[2]
