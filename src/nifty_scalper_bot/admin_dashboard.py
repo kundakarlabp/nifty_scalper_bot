@@ -33,8 +33,7 @@ from nifty_scalper_bot.ops.service_control import (
     restart_deployer,
 )
 from nifty_scalper_bot.superlite_admin_core import bounded_logs, quick_overview
-from nifty_scalper_bot.superlite_admin_style import SCRIPT as _SCRIPT
-from nifty_scalper_bot.superlite_admin_style import STYLE as _CSS
+from nifty_scalper_bot.superlite_admin_style import SCRIPT as _SCRIPT, STYLE as _CSS
 
 router = APIRouter()
 
