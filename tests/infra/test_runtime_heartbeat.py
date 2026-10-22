@@ -1,4 +1,5 @@
 """No broker or AppDeploy dependencies in private Supabase heartbeat."""
+
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -14,9 +15,11 @@ from nifty_scalper_bot.infra.runtime_heartbeat import (
 
 def _make_sender(status=200, health=None):
     sent = []
+
     def transport(url, payload, timeout):
         sent.append((url, dict(payload), timeout))
         return {"ok": True}
+
     sender = RuntimeHeartbeat(
         endpoint_url="https://supabase.example/internal",
         transport=transport,
@@ -80,8 +83,10 @@ def test_local_connection_error_is_reported(monkeypatch):
     import requests
 
     sender, calls = _make_sender()
+
     def fail():
         raise requests.ConnectionError("secret data")
+
     sender.health_reader = fail
     assert sender.report_once()["engine_healthy"] is False
     assert calls[0][1]["failure_reason"] == "local_health_unavailable"
@@ -90,7 +95,10 @@ def test_local_connection_error_is_reported(monkeypatch):
 
 def test_disallowed_blocker_values_removed():
     sender, calls = _make_sender(
-        health={"status": "blocked", "blockers": ["market_closed", "private/token:value"]}
+        health={
+            "status": "blocked",
+            "blockers": ["market_closed", "private/token:value"],
+        }
     )
     sender.report_once()
     assert calls[0][1]["blockers"] == ["market_closed"]
