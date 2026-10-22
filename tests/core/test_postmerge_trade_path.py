@@ -483,3 +483,59 @@ def test_unknown_normal_queue_remains_fail_closed() -> None:
         mdm._pending_heap_push_locked(tick, unknown)
         mdm._update_pipeline_overload_locked()
     assert mdm.pipeline_overloaded is True
+
+
+def test_opt_in_smc_is_disabled_by_default(monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.delenv("SMC_SUSTAINED_FLOW_CONFIRMATION_ENABLED", raising=False)
+    manager = _manager()
+    manager._smc_sustained_flow_tracker = SimpleNamespace(observe=lambda **kw: True)
+    smc = _signal_evidence("SMC")
+    smc[0].metadata["setup_id"] = "smcv2:underlying:CE:2026-10-22T12:39"
+    flow = _signal_evidence("OrderFlow", role="context")
+    assert (
+        manager._combine_strategy_votes(
+            symbol=_CE, signals=[smc, flow], indicators=_live_indicators("CE")
+        )
+        is None
+    )
+
+
+def test_opt_in_smc_sustained_evidence_preserves_order_execution_checks(monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("SMC_SUSTAINED_FLOW_CONFIRMATION_ENABLED", "true")
+    manager = _manager()
+    manager._smc_sustained_flow_tracker = SimpleNamespace(observe=lambda **kw: True)
+    smc = _signal_evidence("SMC")
+    smc[0].metadata["setup_id"] = "smcv2:underlying:CE:2026-10-22T12:39"
+    flow = _signal_evidence("OrderFlow", role="context")
+    result = manager._combine_strategy_votes(
+        symbol=_CE, signals=[smc, flow], indicators=_live_indicators("CE")
+    )
+    assert result is not None
+    assert result.metadata["approval_path"] == "smc_sustained_orderflow_confirmed"
+    assert result.metadata["requires_runner_execution_validation"] is True
+    assert result.metadata["confirmation_contract"]["smc_sustained_flow_confirmed"] is True
+
+
+def test_smc_capacity_rejection_still_requires_independent_trigger(monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("SMC_SUSTAINED_FLOW_CONFIRMATION_ENABLED", "true")
+    manager = _manager()
+    manager._smc_sustained_flow_tracker = SimpleNamespace(observe=lambda **kw: True)
+    smc = _signal_evidence("SMC")
+    smc[0].metadata["setup_id"] = "smcv2:underlying:CE:2026-10-22T12:49"
+    smc[0].metadata["capacity_rejection_retry"] = True
+    flow = _signal_evidence("OrderFlow", role="context")
+    result = manager._combine_strategy_votes(
+        symbol=_CE, signals=[smc, flow], indicators=_live_indicators("CE")
+    )
+    assert result is None
+    decision = manager._last_no_signal_decision_by_symbol[_CE]
+    assert decision.reason == "capacity_retry_independent_confirmation_missing"
