@@ -99,8 +99,13 @@ def test_research_worker_runs_each_epoch_without_live_credentials(
         assert kwargs["env"]["ENABLE_LIVE"] == "false"
         assert kwargs["env"]["ALLOW_REAL_BROKER"] == "false"
         assert "KITE_API_KEY" not in kwargs["env"]
-        (Path(output) / "report.json").write_text(
-            '{"scope":"offline_replay","live_equivalent":false}', encoding="utf-8"
+        assert "--compare-adaptive" in command
+        assert command[command.index("--stress-bps") + 1 :] == [
+            "10", "25", "50"
+        ]
+        (Path(output) / "paired-comparison.json").write_text(
+            '{"state":"MODELED_COMPARISON_ONLY","stress":[]}',
+            encoding="utf-8",
         )
         return SimpleNamespace(returncode=0)
 
