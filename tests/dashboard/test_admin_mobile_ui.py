@@ -69,8 +69,14 @@ def test_overview_uses_live_engine_evidence_and_caches_it(monkeypatch) -> None:
 
     monkeypatch.setattr(core, "_http_json", engine)
     monkeypatch.setattr(core, "_update_state", lambda: {"state": "deployed"})
-    monkeypatch.setattr(core, "_git_ref", lambda *_: (_ for _ in ()).throw(AssertionError("no git")))
-    monkeypatch.setattr(core, "bounded_logs", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("no journal")))
+    def no_git(*_args):
+        raise AssertionError("no git in heartbeat")
+
+    monkeypatch.setattr(core, "_git_ref", no_git)
+    def no_journal(*_args, **_kwargs):
+        raise AssertionError("no journal in heartbeat")
+
+    monkeypatch.setattr(core, "bounded_logs", no_journal)
     core.OVERVIEW_CACHE.update({"at": 0.0, "data": {}})
     result = core.quick_overview()
     assert result["engine_ok"] is True
@@ -91,7 +97,8 @@ def test_timeout_never_looks_like_ready(monkeypatch) -> None:
         core,
         "_http_json",
         lambda path: {"_error": "ENGINE HTTP TIMEOUT"}
-        if path == "/livez" else {"broker_authentication": "authenticated", "execution_mode": "LIVE"},
+        if path == "/livez"
+        else {"broker_authentication": "authenticated", "execution_mode": "LIVE"},
     )
     monkeypatch.setattr(core, "_update_state", lambda: {"state": "current"})
     core.OVERVIEW_CACHE.update({"at": 0.0, "data": {}})
