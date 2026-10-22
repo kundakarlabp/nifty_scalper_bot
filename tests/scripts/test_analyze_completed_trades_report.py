@@ -170,3 +170,28 @@ def test_cli_reports_all_historical_states_without_claiming_open_broker_orders(
     assert integrity["live_open_positions_inferred"] is False
     assert integrity["broker_reconciled"] is False
     assert result["overall_post_cost"]["trade_count"] == 0
+
+
+def test_cli_broker_tradebook_audit_requires_explicit_csv(tmp_path, capsys) -> None:
+    database = tmp_path / "journal.db"
+    with sqlite3.connect(database) as conn:
+        ensure_trade_ledger_schema(conn)
+    assert module.main(["--trades-db", str(database)]) == 0
+    absent = json.loads(capsys.readouterr().out)
+    assert absent["broker_tradebook_reconciliation"]["ready"] is False
+
+    csv_path = tmp_path / "broker_trades.csv"
+    csv_path.write_text(
+        "trade_id,order_id,tradingsymbol,transaction_type,quantity,average_price\n"
+        "k1,broker-entry,NIFTYCE,BUY,65,100\n",
+        encoding="utf-8",
+    )
+    assert module.main(
+        ["--trades-db", str(database), "--broker-trades-csv", str(csv_path)]
+    ) == 0
+    present = json.loads(capsys.readouterr().out)
+    evidence = present["broker_tradebook_reconciliation"]
+    assert evidence["broker_tradebook_fill_rows"] == 1
+    assert evidence["completed_ledger_rows"] == 0
+    assert evidence["unreferenced_broker_order_count"] == 1
+    assert evidence["final_net_pnl_broker_reconciled"] is False
