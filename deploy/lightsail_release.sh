@@ -353,124 +353,6 @@ poll_research_request() {
 }
 
 
-# No market-hours ban: a validated release may restart at any clock time.
-# The exposure guard still requires two independent broker-flat samples
-# AND a reconciled, disarmed engine. Merely seeing a flat account while the
-# strategy runner is armed is not an atomic lock against a new entry.
-intraday_flat_broker_confirmed() {
-  local api_key access_token
-  api_key="$(first_nonempty_env BROKER_API_KEY ZERODHA_API_KEY KITE_API_KEY 2>/dev/null || true)"
-  access_token="$(first_nonempty_env BROKER_ACCESS_TOKEN ZERODHA_ACCESS_TOKEN KITE_ACCESS_TOKEN 2>/dev/null || true)"
-  if [ -z "$api_key" ] || [ -z "$access_token" ] || [ ! -x "$VENV/bin/python" ]; then
-    log "intraday_release_guard_blocked: broker credentials or Python unavailable"
-    return 1
-  fi
-  BOT_RELEASE_KITE_API_KEY="$api_key" BOT_RELEASE_KITE_ACCESS_TOKEN="$access_token" \
-    BOT_RELEASE_LOCAL_PORT="$PORT" BOT_RELEASE_RESTART_PENDING="$RESTART_PENDING_FILE" \
-    "$VENV/bin/python" - <<'PY_FLAT_GUARD'
-import json
-import os
-import sys
-import time
-import urllib.request
-
-from kiteconnect import KiteConnect
-
-TERMINAL = {"COMPLETE", "CANCELLED", "REJECTED", "LAPSED"}
-port = int(os.environ["BOT_RELEASE_LOCAL_PORT"])
-kite = KiteConnect(api_key=os.environ["BOT_RELEASE_KITE_API_KEY"], timeout=5)
-kite.set_access_token(os.environ["BOT_RELEASE_KITE_ACCESS_TOKEN"])
-# A newly verified token exists on disk before the old process can load it.
-# This recovery exception is available ONLY for a previously queued restart;
-# broker positions and orders still have to be proved flat twice.
-restart_marker = os.environ.get("BOT_RELEASE_RESTART_PENDING") or ""
-token_rotation_requested = bool(restart_marker and os.path.isfile(restart_marker))
-
-def is_safe() -> bool:
-    with urllib.request.urlopen(f"http://127.0.0.1:{port}/livez", timeout=3) as response:
-        live = json.load(response)
-    if live.get("engine_http_responsive") is not True:
-        return False
-    if live.get("quiet") is True:
-        # The canonical off-hours control plane has no trading stack and no
-        # live entry worker. Broker positions/orders remain authoritative.
-        if live.get("bot_loaded") is not False:
-            return False
-    else:
-        if live.get("bot_loaded") is not True:
-            return False
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/health/trading", timeout=3) as response:
-            health = json.load(response)
-        reconciliation = health.get("reconciliation") or {}
-        broker = health.get("broker") or {}
-        # A fail-closed, unrestarted engine reports its previous token invalid.
-        # Accept only a queued token rotation with explicit invalid-auth proof;
-        # never treat an unknown auth state as permission to restart.
-        token_rotation_recovery = (
-            token_rotation_requested
-            and broker.get("authenticated") is False
-            and broker.get("auth_invalid") is True
-            and health.get("broker_authentication") == "invalid"
-            and health.get("broker_session_state") == "invalid"
-            and health.get("authentication_known") is True
-        )
-        if (
-            health.get("live_orders_armed") is not False
-            or reconciliation.get("completed") is not True
-            or reconciliation.get("failed") is True
-            or reconciliation.get("unprotected_positions")
-            or (broker.get("authenticated") is not True and not token_rotation_recovery)
-        ):
-            return False
-    positions = kite.positions()
-    orders = kite.orders()
-    if (
-        not isinstance(positions, dict)
-        or not isinstance(positions.get("net"), list)
-        or not isinstance(positions.get("day"), list)
-        or not isinstance(orders, list)
-    ):
-        return False
-    for row in positions["net"] + positions["day"]:
-        if not isinstance(row, dict) or "quantity" not in row:
-            return False
-        if float(row["quantity"]) != 0:
-            return False
-    for row in orders:
-        if not isinstance(row, dict) or str(row.get("status") or "").upper() not in TERMINAL:
-            return False
-    return True
-
-try:
-    # Both samples must prove no orders/positions and no armed entry path.
-    if not is_safe():
-        sys.exit(1)
-    time.sleep(1)
-    if not is_safe():
-        sys.exit(1)
-except Exception as exc:
-    print(f"intraday_release_guard_blocked: {type(exc).__name__}", file=sys.stderr)
-    sys.exit(1)
-PY_FLAT_GUARD
-}
-
-auto_release_should_defer() {
-  [ "$AUTO_MODE" = true ] || return 1
-  # Already-current, healthy builds require no broker requests. Route through
-  # the no-change branch, which still confirms the deployed SHA and reports
-  # status; do not poll Kite positions/orders every two minutes unnecessarily.
-  if [ -n "${BEFORE:-}" ] && [ "$BEFORE" = "${AFTER:-}" ] \
-    && [ "${FORCE_RESTART:-false}" = false ] \
-    && [ ! -f "${RESTART_PENDING_FILE:-}" ] \
-    && service_healthy_confirmed "$BEFORE"; then
-    return 0
-  fi
-  # An automatic release is independent of market hours, but it must never
-  # interrupt open broker exposure or a runtime capable of entering a trade.
-  intraday_flat_broker_confirmed && return 1
-  return 0
-}
-
 exec 9>"$LOCK_FILE"
 if ! flock -n 9; then log "Another deployment is already running"; exit 0; fi
 
@@ -480,7 +362,7 @@ if [ ! -d .git ]; then
 fi
 
 # Independently heal token-entry controls on every scheduled release check,
-# including when broker exposure or a pending GitHub CI run forbids deployment.
+# including while waiting for the exact main SHA CI result.
 # Never change engine state merely because the admin page is unavailable.
 if [ "$AUTO_MODE" = true ]; then
   recover_admin_control || true
@@ -516,54 +398,9 @@ if [ ! -f "$CONFIG_DIR/control_sudoers_v2_installed" ]; then
   fi
 fi
 
-# Auto mode checks remote revisions without mutating the local runtime.
-# Preserve health recovery and independent research polling when a release waits.
-if [ "$AUTO_MODE" = true ]; then
-  BEFORE="$(git rev-parse HEAD)"
-  write_status fetching "checking origin/main from ${BEFORE:0:7}"
-  git fetch --quiet origin main || {
-    write_status fetch_failed "git fetch failed"; exit 1;
-  }
-  AFTER="$(git rev-parse origin/main)"
-  if auto_release_should_defer; then
-    # Never start a different/partially installed revision to recover a live process.
-    # A missing or differing runtime provenance requires operator reconciliation.
-    current_runtime_sha="$(first_nonempty_env GIT_COMMIT_SHA 2>/dev/null || true)"
-    if [[ ! "$current_runtime_sha" =~ ^[0-9a-fA-F]{40}$ ]] || [ "$current_runtime_sha" != "$BEFORE" ]; then
-      poll_research_request
-      write_status runtime_checkout_mismatch "recovery blocked: checkout ${BEFORE:0:7} differs from confirmed runtime build; manual reconciliation required"
-      log "Recovery blocked: do not restart an unverified checkout"
-      exit 1
-    fi
-    live_release_json="$(curl -fsS --max-time 3 "http://127.0.0.1:${PORT}/releasez" 2>/dev/null || true)"
-    if [ -n "$live_release_json" ] && ! grep -Eq "\"effective_sha\"[[:space:]]*:[[:space:]]*\"${BEFORE:0:12}\"" <<<"$live_release_json"; then
-      poll_research_request
-      write_status runtime_checkout_mismatch "recovery blocked: running process does not match checkout ${BEFORE:0:7}"
-      log "Recovery blocked: running process and checkout provenance disagree"
-      exit 1
-    fi
-    if ! service_healthy_confirmed "$BEFORE"; then
-      # Unknown broker exposure also forbids an automatic recovery restart:
-      # the current process may still own a protective exit.
-      write_status deferred_unsafe_recovery "engine unhealthy; restart deferred pending broker-flat proof"
-      log "Automatic recovery deferred: broker exposure/order state not proven safe"
-      exit 0
-    fi
-    poll_research_request
-    if [ "$BEFORE" != "$AFTER" ]; then
-      write_status deferred_broker_exposure "pending main ${AFTER:0:7}; deployed ${BEFORE:0:7}; retry when broker-flat and engine disarmed"
-      log "Automatic release deferred: broker exposure, armed engine, or unavailable safety proof"
-    else
-      if admin_healthy; then
-        write_status current "running ${BEFORE:0:7}; no pending revision"
-      else
-        write_status current_admin_degraded "running ${BEFORE:0:7}; admin service unavailable after recovery attempt"
-      fi
-    fi
-    exit 0
-  fi
-fi
-
+# Auto and manual modes now share one immediate validated release path.
+# Live arming and broker exposure do not postpone GitHub releases.
+# Preserve exact-main CI, isolated candidate checks, atomic lock and rollback.
 chmod +x "$APP_DIR/deploy/lightsail_release.sh" 2>/dev/null || true
 mkdir -p "$CONFIG_DIR" "$(dirname "$STATUS_FILE")"
 chmod 700 "$CONFIG_DIR" 2>/dev/null || true
@@ -582,8 +419,8 @@ set_env_value SUPABASE_LOG_ARCHIVE_ENABLED true
 ensure_env_default SUPABASE_LOG_ARCHIVE_URL "https://dehdptgkqbrkyzyodicd.supabase.co/functions/v1/nifty-log-archive-ingest"
 ensure_env_default SUPABASE_LOG_ARCHIVE_INTERVAL_SECONDS 300
 if [ "$RUNTIME_ENV_CHANGED" = true ]; then FORCE_RESTART=true; fi
-# A prior pre-open operation may have persisted environment or unit changes but
-# deferred its restart for unsafe broker state; retry as soon as safe.
+# A prior request may have persisted new credentials or unit changes;
+# apply the restart marker on the next validated release pass.
 if [ -f "$RESTART_PENDING_FILE" ]; then FORCE_RESTART=true; fi
 migrate_systemd_entrypoint
 migrate_autodeploy_entrypoint
@@ -712,18 +549,6 @@ if [ "${#EXISTING_TESTS[@]}" -gt 0 ]; then
   }
 fi
 
-# Recheck broker exposure and entry arming after candidate validation,
-# immediately before checkout mutation (at any hour).
-if auto_release_should_defer; then
-  if [ "$FORCE_RESTART" = true ]; then
-    mkdir -p "$CONFIG_DIR"
-    : > "$RESTART_PENDING_FILE"
-  fi
-  poll_research_request
-  write_status deferred_broker_exposure "candidate ${AFTER:0:7} validated; checkout untouched until broker-flat and disarmed"
-  exit 0
-fi
-
 # Permission repair is required before checkout changes or any service
 # restart. Use only the *validated candidate* installer; never run the legacy
 # full-setup script with a flag it does not understand.
@@ -760,31 +585,6 @@ if ! set_runtime_build_sha "$AFTER"; then
   fi
   write_status env_update_failed "could not publish runtime build SHA ${AFTER:0:7}"
   exit 1
-fi
-# Final broker/arming boundary check before automatic restart, regardless of
-# market hours. Restore the prior checkout if the proof no longer holds.
-if auto_release_should_defer; then
-  if [ "$FORCE_RESTART" = true ]; then
-    mkdir -p "$CONFIG_DIR"
-    : > "$RESTART_PENDING_FILE"
-  fi
-  if [ "$BEFORE" != "$AFTER" ]; then
-    if ! git reset --hard --quiet "$BEFORE"; then
-      write_status runtime_restore_failed "checkout restoration failed; candidate may be partially installed"
-      exit 1
-    fi
-    if ! "$VENV/bin/python" -m pip install --quiet -e .; then
-      write_status runtime_restore_failed "retained revision dependency restoration failed; manual recovery required"
-      exit 1
-    fi
-  fi
-  if ! set_runtime_build_sha "$BEFORE"; then
-    write_status runtime_restore_failed "retained revision build provenance restoration failed; manual recovery required"
-    exit 1
-  fi
-  write_status deferred_broker_exposure "broker/arming state changed before engine restart; current revision ${BEFORE:0:7} restored"
-  poll_research_request
-  exit 0
 fi
 sudo systemctl restart "$SERVICE"
 if wait_for_service "$AFTER"; then
