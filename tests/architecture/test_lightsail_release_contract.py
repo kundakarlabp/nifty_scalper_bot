@@ -360,7 +360,7 @@ def test_changed_release_restarts_current_revision_admin_before_research_poll() 
     assert 'systemctl restart "$ADMIN_SERVICE"' in helper
     assert 'http://127.0.0.1:${ADMIN_PORT}/healthz"' in helper
     assert 'http://127.0.0.1:${ADMIN_PORT}/admin"' in helper
-    assert 'http://127.0.0.1:${ADMIN_PORT}/admin/api/status' not in helper
+    assert "http://127.0.0.1:${ADMIN_PORT}/admin/api/status" not in helper
     assert "--max-time 2" in helper
     assert "--max-time 3" in helper
 
