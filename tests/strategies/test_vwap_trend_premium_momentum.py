@@ -12,8 +12,10 @@ from nifty_scalper_bot.strategies.elite_strategies.config_models import (
 from nifty_scalper_bot.strategies.elite_strategies.vwap_pro import VWAPProStrategy
 
 
-def _evaluate(monkeypatch, *, side="CE", enabled=True, retest=False, **updates):
-    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+def _evaluate(
+    monkeypatch, *, side="CE", enabled=True, retest=False, execution_mode="LIVE", **updates
+):
+    monkeypatch.setenv("EXECUTION_MODE", execution_mode)
     monkeypatch.setenv("VWAP_TREND_MOMENTUM_ENABLED", "true" if enabled else "false")
     monkeypatch.setenv("VWAP_TREND_MOMENTUM_OPTION_RVOL_MIN", "1.5")
     monkeypatch.setenv("VWAP_TREND_REQUIRE_RETEST", "true" if retest else "false")
@@ -401,3 +403,67 @@ def test_retest_preserves_genuine_prior_reclaim_when_prior_vwap_available(
     assert signal is not None
     assert signal.metadata["trend_momentum_retest_confirmed"] is True
     assert signal.metadata["trend_momentum_prior_session_vwap"] == 100.0
+
+
+@pytest.mark.parametrize("side", ["CE", "PE"])
+def test_research_neutral_futures_slope_requires_explicit_shadow_opt_in(monkeypatch, side):
+    near_neutral_same_side = 0.0001 if side == "CE" else -0.0001
+    _, baseline = _evaluate(
+        monkeypatch, side=side, execution_mode="SHADOW",
+        futures_vwap_slope=near_neutral_same_side,
+    )
+    assert baseline is None
+
+    monkeypatch.setenv("VWAP_RESEARCH_NEUTRAL_FUTURES_SLOPE", "true")
+    strategy, admitted = _evaluate(
+        monkeypatch, side=side, execution_mode="SHADOW",
+        futures_vwap_slope=near_neutral_same_side,
+    )
+    assert admitted is not None
+    assert admitted.metadata["research_neutral_slope_admitted"] is True
+    assert admitted.metadata["futures_slope_alignment"] is False
+    assert admitted.metadata["trend_momentum_completed_option_rvol"] >= 1.5
+    assert admitted.metadata["setup_pass"] is True
+
+    live_strategy, live = _evaluate(
+        monkeypatch, side=side, execution_mode="LIVE",
+        futures_vwap_slope=near_neutral_same_side,
+    )
+    assert live is None
+    assert live_strategy.last_no_vote_reason == "futures_slope_not_aligned"
+
+
+@pytest.mark.parametrize(
+    "side, updates, expected_reason",
+    [
+        ("CE", {"futures_vwap_slope": -0.0001}, "futures_slope_not_aligned"),
+        ("PE", {"futures_vwap_slope": 0.0001}, "futures_slope_not_aligned"),
+        ("CE", {"futures_vwap_slope": None}, "futures_slope_not_aligned"),
+        ("CE", {"futures_vwap_slope": float("inf")}, "futures_slope_not_aligned"),
+        ("CE", {"futures_vwap_slope": 0.0001, "futures_volume_ratio": 0.4}, "futures_slope_not_aligned"),
+        ("CE", {"futures_vwap_slope": 0.0001, "underlying_direction_confidence": 0.4}, "trend_momentum_underlying_quality_unconfirmed"),
+        ("CE", {"futures_vwap_slope": 0.0001, "context_age_seconds": 10.0}, "trend_momentum_underlying_quality_unconfirmed"),
+        ("CE", {"futures_vwap_slope": 0.0001, "regime": "RANGE"}, "trend_momentum_regime_not_trend"),
+        ("CE", {"futures_vwap_slope": 0.0001, "volume": 0.0}, "option_candle_no_trades"),
+        ("CE", {"futures_vwap_slope": 0.0001, "history_timestamp": "2026-09-10T09:59:00+05:30"}, "trend_momentum_bar_unconfirmed"),
+    ],
+)
+def test_research_neutral_slope_does_not_override_quality_guards(
+    monkeypatch, side, updates, expected_reason
+):
+    monkeypatch.setenv("VWAP_RESEARCH_NEUTRAL_FUTURES_SLOPE", "true")
+    strategy, admitted = _evaluate(
+        monkeypatch, side=side, execution_mode="SHADOW", **updates
+    )
+    assert admitted is None
+    assert strategy.last_no_vote_reason == expected_reason
+
+
+def test_research_neutral_slope_needs_completed_option_momentum(monkeypatch):
+    monkeypatch.setenv("VWAP_RESEARCH_NEUTRAL_FUTURES_SLOPE", "true")
+    strategy, signal = _evaluate(
+        monkeypatch, execution_mode="SHADOW", enabled=False,
+        futures_vwap_slope=0.0001,
+    )
+    assert signal is None
+    assert strategy.last_no_vote_reason == "futures_slope_not_aligned"
