@@ -87,9 +87,7 @@ def summarize_ledger_integrity(
         "state_counts": dict(sorted(states.items())),
         "completed_closed_rows": complete_count,
         "closed_incomplete_rows": closed_incomplete,
-        "nonclosed_historical_rows": len(rows)
-        - complete_count
-        - closed_incomplete,
+        "nonclosed_historical_rows": len(rows) - complete_count - closed_incomplete,
         "completed_missing": dict(sorted(missing.items())),
         "completed_cost_source_counts": dict(sorted(sources.items())),
         "completed_cost_arithmetic_mismatch": arithmetic_mismatch,
