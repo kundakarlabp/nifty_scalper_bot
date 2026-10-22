@@ -16,9 +16,7 @@ log = get_logger(__name__)
 
 
 def _release_control_path(name: str) -> Path:
-    return Path(
-        os.getenv("NIFTYBOT_CONFIG_DIR", "/home/ubuntu/.config/niftybot")
-    ) / name
+    return Path(os.getenv("NIFTYBOT_CONFIG_DIR", "/home/ubuntu/.config/niftybot")) / name
 
 
 def release_entry_hold_active() -> bool:
