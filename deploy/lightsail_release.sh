@@ -19,6 +19,9 @@ VENV="${BOT_VENV:-$APP_DIR/.venv}"
 STREAMLIT_VENV="${BOT_STREAMLIT_VENV:-$APP_DIR/.streamlit-venv}"
 LOCK_FILE="${BOT_DEPLOY_LOCK_FILE:-/tmp/niftybot-deploy.lock}"
 RESTART_PENDING_FILE="${CONFIG_DIR}/auto_release_restart_pending"
+RELEASE_HOLD_FILE="${CONFIG_DIR}/auto_release_entry_hold"
+RELEASE_ENTRY_LOCK_FILE="${CONFIG_DIR}/auto_release_entry_lock"
+RELEASE_HOLD_ACTIVE=false
 FORCE_RESTART=false
 AUTO_MODE=false
 SYSTEMD_ENTRYPOINT_MIGRATED=false
@@ -391,9 +394,10 @@ poll_research_request() {
 }
 
 
-# No market-hours ban. For immediate post-CI deployment the exposure
-# deferral is OFF by default. The legacy broker-flat guard remains available
-# for an explicit emergency policy override only.
+# No market-clock blackout: validate and deploy as soon as the account is
+# broker-flat, all orders are terminal, and the engine acknowledges an entry
+# hold. The release lock and entry-submit lock close the entry race; exits are
+# never blocked. No forced deployment on missing broker/engine authority.
 intraday_flat_broker_confirmed() {
   local api_key access_token
   api_key="$(first_nonempty_env BROKER_API_KEY ZERODHA_API_KEY KITE_API_KEY 2>/dev/null || true)"
@@ -404,6 +408,7 @@ intraday_flat_broker_confirmed() {
   fi
   BOT_RELEASE_KITE_API_KEY="$api_key" BOT_RELEASE_KITE_ACCESS_TOKEN="$access_token" \
     BOT_RELEASE_LOCAL_PORT="$PORT" BOT_RELEASE_RESTART_PENDING="$RESTART_PENDING_FILE" \
+    BOT_RELEASE_ENTRY_HOLD_REQUIRED="$RELEASE_HOLD_ACTIVE" \
     "$VENV/bin/python" - <<'PY_FLAT_GUARD'
 import json
 import os
@@ -422,6 +427,7 @@ kite.set_access_token(os.environ["BOT_RELEASE_KITE_ACCESS_TOKEN"])
 # broker positions and orders still have to be proved flat twice.
 restart_marker = os.environ.get("BOT_RELEASE_RESTART_PENDING") or ""
 token_rotation_requested = bool(restart_marker and os.path.isfile(restart_marker))
+hold_required = os.environ.get("BOT_RELEASE_ENTRY_HOLD_REQUIRED") == "true"
 
 def is_safe() -> bool:
     with urllib.request.urlopen(f"http://127.0.0.1:{port}/livez", timeout=3) as response:
@@ -440,6 +446,8 @@ def is_safe() -> bool:
             health = json.load(response)
         reconciliation = health.get("reconciliation") or {}
         broker = health.get("broker") or {}
+        if hold_required and health.get("release_entry_hold_active") is not True:
+            return False
         # A fail-closed, unrestarted engine reports its previous token invalid.
         # Accept only a queued token rotation with explicit invalid-auth proof;
         # never treat an unknown auth state as permission to restart.
@@ -491,26 +499,40 @@ except Exception as exc:
 PY_FLAT_GUARD
 }
 
-auto_release_should_defer() {
-  [ "$AUTO_MODE" = true ] || return 1
-  # Owner-selected deployment policy: do not hold code updates because the
-  # trading engine is armed, positions are open, or Kite exposure cannot be
-  # queried. This is intentionally disabled by default, not a hidden market
-  # hours condition. Emergency opt-in is available without a code change:
-  # BOT_AUTO_DEPLOY_EXPOSURE_GUARD_ENABLED=true.
-  if [ "${BOT_AUTO_DEPLOY_EXPOSURE_GUARD_ENABLED:-false}" != "true" ]; then
+
+acquire_release_entry_hold() {
+  mkdir -p "$CONFIG_DIR"
+  if [ -L "$RELEASE_HOLD_FILE" ] || [ -L "$RELEASE_ENTRY_LOCK_FILE" ]; then
+    log "release entry hold/lock path is a symlink"
     return 1
   fi
-  # Already-current, healthy builds require no broker requests. Route through
-  # the no-change branch, which still confirms the deployed SHA and reports
-  # status; do not poll Kite positions/orders every two minutes unnecessarily.
-  if [ -n "${BEFORE:-}" ] && [ "$BEFORE" = "${AFTER:-}" ] \
+  exec 8>"$RELEASE_ENTRY_LOCK_FILE"
+  chmod 600 "$RELEASE_ENTRY_LOCK_FILE"
+  # An in-flight LIVE BUY holds a shared lock until the broker call completes.
+  # Taking the exclusive lock therefore drains active order submissions.
+  if ! flock -w 10 8; then
+    log "release entry submission still in flight; retry automatically"
+    return 1
+  fi
+  printf '%s\n' "$" > "$RELEASE_HOLD_FILE"
+  chmod 600 "$RELEASE_HOLD_FILE"
+  RELEASE_HOLD_ACTIVE=true
+}
+
+auto_release_should_defer() {
+  # An unchanged, healthy, non-restart build needs no broker API calls.
+  if [ "$AUTO_MODE" = true ] \
+    && [ -n "${BEFORE:-}" ] && [ "$BEFORE" = "${AFTER:-}" ] \
     && [ "${FORCE_RESTART:-false}" = false ] \
     && [ ! -f "${RESTART_PENDING_FILE:-}" ] \
     && service_healthy_confirmed "$BEFORE"; then
     return 0
   fi
-  # Optional legacy exposure policy, disabled in the default automatic flow.
+  # Pre-CI and pre-validation perform no checkout change or restart. The
+  # mandatory broker-flat proof occurs only after the entry hold is acquired.
+  if [ "$RELEASE_HOLD_ACTIVE" != true ]; then
+    return 1
+  fi
   intraday_flat_broker_confirmed && return 1
   return 0
 }
@@ -595,7 +617,7 @@ if [ "$AUTO_MODE" = true ]; then
     fi
     poll_research_request
     if [ "$BEFORE" != "$AFTER" ]; then
-      write_status deferred_broker_exposure "pending main ${AFTER:0:7}; deployed ${BEFORE:0:7}; retry when broker-flat and engine disarmed"
+      write_status deferred_broker_exposure "pending main ${AFTER:0:7}; deployed ${BEFORE:0:7}; retry when broker-flat with no active orders"
       log "Automatic release deferred: broker exposure, armed engine, or unavailable safety proof"
     else
       if admin_healthy; then
@@ -687,7 +709,16 @@ if [ "$BEFORE" = "$AFTER" ] && [ "$FORCE_RESTART" = false ]; then
 fi
 
 CANDIDATE="/tmp/niftybot-candidate-${AFTER:0:12}"
-cleanup() { git worktree remove --force "$CANDIDATE" >/dev/null 2>&1 || true; }
+cleanup() {
+  # A successfully restarted engine must be able to re-arm normally; a
+  # deferred or failed release must also release the temporary entry hold.
+  if [ "$RELEASE_HOLD_ACTIVE" = true ]; then
+    rm -f "$RELEASE_HOLD_FILE"
+    flock -u 8 || true
+    RELEASE_HOLD_ACTIVE=false
+  fi
+  git worktree remove --force "$CANDIDATE" >/dev/null 2>&1 || true
+}
 trap cleanup EXIT
 git worktree prune
 rm -rf "$CANDIDATE"
@@ -715,6 +746,7 @@ TARGETED_TESTS=(
   tests/architecture/test_lightsail_release_contract.py
   tests/architecture/test_release_ci_gate.py
   tests/architecture/test_token_rotation_release_guard.py
+  tests/core/test_release_entry_handoff.py
   tests/ops/test_research_jobs.py
   tests/scripts/test_archive_kite_history.py
   tests/backtests/test_strategy_bar_research.py
@@ -757,15 +789,20 @@ if [ "${#EXISTING_TESTS[@]}" -gt 0 ]; then
   }
 fi
 
-# Recheck broker exposure and entry arming after candidate validation,
-# immediately before checkout mutation (at any hour).
+# Acquire the exclusive entry-submit barrier only after validation. Block
+# new BUY submissions while allowing protective SELL exits; then confirm two
+# independently fresh broker position/order snapshots at any market hour.
+if ! acquire_release_entry_hold; then
+  write_status deferred_entry_handoff "candidate ${AFTER:0:7} validated; entry submission busy; retry automatically"
+  exit 0
+fi
 if auto_release_should_defer; then
   if [ "$FORCE_RESTART" = true ]; then
     mkdir -p "$CONFIG_DIR"
     : > "$RESTART_PENDING_FILE"
   fi
   poll_research_request
-  write_status deferred_broker_exposure "candidate ${AFTER:0:7} validated; checkout untouched until broker-flat and disarmed"
+  write_status deferred_broker_exposure "candidate ${AFTER:0:7} validated; checkout untouched until broker-flat, terminal orders and engine hold acknowledgement"
   exit 0
 fi
 
@@ -827,7 +864,7 @@ if auto_release_should_defer; then
     write_status runtime_restore_failed "retained revision build provenance restoration failed; manual recovery required"
     exit 1
   fi
-  write_status deferred_broker_exposure "broker/arming state changed before engine restart; current revision ${BEFORE:0:7} restored"
+  write_status deferred_broker_exposure "broker/holding state changed before engine restart; current revision ${BEFORE:0:7} restored"
   poll_research_request
   exit 0
 fi

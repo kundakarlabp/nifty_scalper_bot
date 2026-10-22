@@ -46,7 +46,7 @@ The setup script:
 - installs the `niftybot` engine service;
 - installs the isolated `.streamlit-venv` and `niftybot-streamlit` console service;
 - points the engine to the external environment file;
-- installs the validated release runner and two-minute update timer;
+- installs the validated release runner and 30-second non-overlapping update timer;
 - keeps `nifty_scalper_bot.main:app` as the canonical engine entrypoint;
 - restarts both engine and console after validated GitHub updates.
 
@@ -104,7 +104,7 @@ The runner:
 9. rolls code back if the trading engine fails health validation;
 10. reports console failure separately so a healthy trading engine is not disrupted.
 
-The automatic update timer fetches `origin/main` every two minutes. PR commits
+The automatic release timer checks `origin/main` 30 seconds after its previous run finishes. PR commits
 are not deployed until merged into `main` (unreviewed PR heads must never
 replace production). After a merge, the updater additionally requires a
 **completed successful push-triggered GitHub CI run for the exact main SHA**
@@ -116,25 +116,30 @@ retry on the next timer invocation. An already deployed revision does not need
 a new CI request to remain healthy or restart under the existing safety policy.
 
 When a new CI-approved main SHA is available, the updater validates the
-candidate in a detached worktree before attempting a release. The two-minute
+candidate in a detached worktree before attempting a release. The 30-second
 interval is the polling interval, **not a guaranteed deployment deadline**:
 CI duration, broker exposure/arming, and transient network failures can defer
 a release without compromising live position protection.
 
-There is **no market-hours restart blackout**: automatic updates may run
-during an NSE session as soon as the safety check passes. Before changing the
-checkout or restarting the engine, the updater still requires a reconciled,
-**disarmed** engine and two broker-confirmed snapshots with **no** positions
-or outstanding orders. A flat account alone is insufficient while live entries
-are armed, because a new entry could be submitted between checks. The updater
-does not automatically disarm the engine or interrupt a protective exit.
-When in canonical off-hours **QUIET** mode (trading stack unloaded), the
-updater verifies that mode via `/livez` and still requires the same broker
-proof. If any safety proof fails, session credentials expire, validation fails,
-or exposure is active, the pending SHA remains queued and is retried by the
-timer irrespective of market time. Candidate checkout and engine restart
-each have a fresh exposure check. Never reset a risk limit or cancel
-protective orders to accelerate deployment.
+There is **no market-hours restart blackout**. After full candidate
+validation the updater exclusively locks the live BUY order-submission path
+and publishes an entry hold acknowledged by the running engine. Protective
+SELL exits remain available. Two independently fresh Kite snapshots must
+show zero net/day positions and **only terminal orders**, with fresh reconciled
+engine health and no entry arming. A pending/unknown order, open position,
+unavailable API, failed reconciliation or missing hold acknowledgement
+defers the deployment **automatically** until the next timer check. No
+risk budget, stop order, or live position is modified to facilitate release.
+The lock and hold cover checkout mutation, reinstall and engine restart;
+on normal completion the hold is released, allowing the new engine to arm
+from its own readiness policy.
+
+For the initial upgrade from an older engine without entry-hold support,
+the existing engine must be independently QUIET/disarmed and broker-flat.
+Do not bypass this one-time bootstrap guard while LIVE-armed. An engine
+that cannot acknowledge the hold is **not** automatically treated as safe
+to restart. CI and deploy health checks remain separate; neither PR merge
+nor a green GitHub workflow proves that production is running the new SHA.
 
 See `data/auto_update_status.json` or the Admin status page for
 `deferred_broker_exposure`, `deferred_unsafe_recovery`, validation failures,

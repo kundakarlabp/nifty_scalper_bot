@@ -509,7 +509,7 @@ def _auto_release_helpers() -> str:
     assert "TZ=Asia/Kolkata date +%u" not in release
     assert release.count("auto_release_should_defer() {") == 1
     return (
-        "BOT_AUTO_DEPLOY_EXPOSURE_GUARD_ENABLED=true\n"
+        "RELEASE_HOLD_ACTIVE=true\n"
         + "intraday_flat_broker_confirmed() {"
         + release.split("intraday_flat_broker_confirmed() {", 1)[1].split(
             "\nexec 9>", 1
@@ -517,17 +517,16 @@ def _auto_release_helpers() -> str:
     )
 
 
-def test_default_auto_release_does_not_defer_on_live_or_unknown_exposure() -> None:
-    """CI-approved releases must not be blocked by the optional broker guard."""
+def test_default_auto_release_defers_when_broker_exposure_is_unverified() -> None:
+    """A validated release cannot bypass unknown broker positions or orders."""
     helpers = _auto_release_helpers()
     shell = helpers + """
-unset BOT_AUTO_DEPLOY_EXPOSURE_GUARD_ENABLED
 AUTO_MODE=true
 BEFORE=oldrevision
 AFTER=newrevision
 FORCE_RESTART=false
 intraday_flat_broker_confirmed() {
-  printf 'UNEXPECTED_BROKER_PROBE\\n' >&2
+  printf 'BROKER_PROBED\\n' >&2
   return 1
 }
 if auto_release_should_defer; then
@@ -537,18 +536,33 @@ fi
     result = subprocess.run(
         ["bash", "-c", shell], capture_output=True, text=True, check=False
     )
-    assert result.returncode == 0, result.stderr
-    assert "UNEXPECTED_BROKER_PROBE" not in result.stderr
+    assert result.returncode == 77, result.stderr
+    assert "BROKER_PROBED" in result.stderr
 
     release = _text("deploy/lightsail_release.sh")
-    # All three historical blocking boundaries call the same policy helper;
-    # the default policy is now disabled at their shared entrypoint.
     assert release.count("if auto_release_should_defer; then") == 3
-    assert "BOT_AUTO_DEPLOY_EXPOSURE_GUARD_ENABLED:-false" in release
+    assert "BOT_AUTO_DEPLOY_EXPOSURE_GUARD_ENABLED:-false" not in release
+    assert "acquire_release_entry_hold" in release
+    assert 'BOT_RELEASE_ENTRY_HOLD_REQUIRED="$RELEASE_HOLD_ACTIVE"' in release
     assert "git worktree add" in release
     assert "verify_release_ci.py" in release
     assert "wait_for_service" in release
     assert "rolled_back" in release
+
+
+def test_release_hold_precedes_checkout_and_engine_restart() -> None:
+    release = _text("deploy/lightsail_release.sh")
+    acquired = release.index("if ! acquire_release_entry_hold; then")
+    checked = release.index("if auto_release_should_defer; then", acquired)
+    checkout = release.index('git reset --hard --quiet "$AFTER"', checked)
+    restarted = release.index('sudo systemctl restart "$SERVICE"', checkout)
+    assert acquired < checked < checkout < restarted
+    assert "flock -w 10 8" in release
+    assert 'rm -f "$RELEASE_HOLD_FILE"' in release
+    assert "release_entry_hold_active" in _text("src/nifty_scalper_bot/main.py")
+    assert "live_entry_submission_slot" in _text(
+        "src/nifty_scalper_bot/execution/order_manager_core.py"
+    )
 
 
 def test_auto_release_has_no_market_hours_blackout() -> None:
@@ -572,7 +586,7 @@ auto_release_should_defer
         assert (result.returncode == 0) is defer, (safe, result.stderr)
 
 
-def test_auto_release_and_manual_restart_have_independent_exposure_policy() -> None:
+def test_auto_release_and_manual_restart_both_require_broker_flat() -> None:
     helpers = _auto_release_helpers()
     shell = helpers + """
 AUTO_MODE="$1"
@@ -585,7 +599,7 @@ auto_release_should_defer
     for mode, safe, defer in (
         ("true", "true", False),
         ("true", "false", True),
-        ("false", "false", False),
+        ("false", "false", True),
     ):
         result = subprocess.run(
             ["bash", "-c", shell, "fixture", mode, safe],
