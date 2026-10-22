@@ -47,6 +47,7 @@ from nifty_scalper_bot.core.strategy_vote_policy import (
     independent_same_side_confirmation,
     partition_votes,
 )
+from nifty_scalper_bot.core.smc_flow_confirmation import SustainedSMCFlow
 from nifty_scalper_bot.core.underlying_direction import (
     UnderlyingDirectionObservation,
     UnderlyingDirectionState,
@@ -4367,10 +4368,48 @@ class StrategyManager(_BaseStrategyManager):
             str(evidence.strategy or "").strip().upper() == "SMC"
             for _signal, evidence in trigger_votes
         )
+        # Research opt-in: independently timed sustained option-book evidence
+        # can corroborate a fully qualified underlying SMC structural trigger.
+        # OrderFlow remains context-only. Broker/risk gates remain mandatory.
+        smc_sustained_flow_confirmed = False
+        smc_flow_enabled = (
+            str(os.getenv("SMC_SUSTAINED_FLOW_CONFIRMATION_ENABLED", "false"))
+            .strip()
+            .lower()
+            in {"1", "true", "yes", "on"}
+        )
+        if (
+            smc_flow_enabled
+            and smc_trigger_present
+            and not independent_trigger_confirmation
+            and not capacity_retry_requires_consensus
+        ):
+            smc_setup_ids = {
+                str(
+                    (signal.metadata or {}).get("setup_id")
+                    or (evidence.metadata or {}).get("setup_id")
+                    or ""
+                )
+                for signal, evidence in trigger_votes
+                if str(evidence.strategy or "").strip().upper() == "SMC"
+            }
+            if len(smc_setup_ids) == 1 and next(iter(smc_setup_ids)):
+                tracker = getattr(self, "_smc_sustained_flow_tracker", None)
+                if tracker is None:
+                    tracker = SustainedSMCFlow()
+                    self._smc_sustained_flow_tracker = tracker
+                smc_sustained_flow_confirmed = tracker.observe(
+                    setup_id=next(iter(smc_setup_ids)),
+                    symbol=symbol_norm,
+                    side=side,
+                    votes=context_votes,
+                    monotonic_now=time.monotonic(),
+                )
         if (
             smc_trigger_present
             and not independent_trigger_confirmation
             and same_side_context
+            and not smc_sustained_flow_confirmed
             and all(
                 str(evidence.strategy or "").strip().upper() == "ORDERFLOW"
                 for evidence in same_side_context
@@ -4385,7 +4424,11 @@ class StrategyManager(_BaseStrategyManager):
             )
             _observe_smc_confirmation_wait("smc_independent_confirmation_missing")
             return None
-        if not independent_trigger_confirmation and not same_side_context:
+        if (
+            not independent_trigger_confirmation
+            and not same_side_context
+            and not smc_sustained_flow_confirmed
+        ):
             context_diagnostics = [
                 {
                     "strategy": evidence.strategy,
@@ -4462,7 +4505,11 @@ class StrategyManager(_BaseStrategyManager):
         approval_path = (
             "aligned_trigger_consensus"
             if independent_trigger_confirmation
-            else "single_trigger_context_confirmed"
+            else (
+                "smc_sustained_orderflow_confirmed"
+                if smc_sustained_flow_confirmed
+                else "single_trigger_context_confirmed"
+            )
         )
         context_strategies = sorted(
             {str(evidence.strategy) for evidence in same_side_context}
@@ -4494,6 +4541,7 @@ class StrategyManager(_BaseStrategyManager):
                 "confirmation_contract": {
                     "passed": True,
                     "trigger_consensus": independent_trigger_confirmation,
+                    "smc_sustained_flow_confirmed": smc_sustained_flow_confirmed,
                     "confirming_trigger_strategies": confirming_trigger_strategies,
                     "context_strategies": context_strategies,
                 },
