@@ -186,9 +186,12 @@ def test_cli_broker_tradebook_audit_requires_explicit_csv(tmp_path, capsys) -> N
         "k1,broker-entry,NIFTYCE,BUY,65,100\n",
         encoding="utf-8",
     )
-    assert module.main(
-        ["--trades-db", str(database), "--broker-trades-csv", str(csv_path)]
-    ) == 0
+    assert (
+        module.main(
+            ["--trades-db", str(database), "--broker-trades-csv", str(csv_path)]
+        )
+        == 0
+    )
     present = json.loads(capsys.readouterr().out)
     evidence = present["broker_tradebook_reconciliation"]
     assert evidence["broker_tradebook_fill_rows"] == 1
