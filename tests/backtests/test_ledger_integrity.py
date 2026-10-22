@@ -174,6 +174,9 @@ def test_missing_initial_build_is_backfilled_from_first_known_revision() -> None
                 },
             ],
         )
-        assert conn.execute(
-            "SELECT build_sha FROM trade_ledger WHERE trade_id='t2'"
-        ).fetchone()[0] == "c" * 40
+        assert (
+            conn.execute(
+                "SELECT build_sha FROM trade_ledger WHERE trade_id='t2'"
+            ).fetchone()[0]
+            == "c" * 40
+        )
