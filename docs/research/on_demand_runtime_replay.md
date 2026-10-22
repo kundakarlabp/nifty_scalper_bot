@@ -118,3 +118,38 @@ broker-fill parity. It cannot be promoted automatically, even if all its
 scenarios show a positive modeled delta. Require chronological non-overlapping
 holdout days, validated costs, stop-limit gaps/partial-fill stress, and
 independent live-market observation before considering live activation.
+
+
+## Process restarts in a daily capture (October 2026)
+
+A daily recorder file can contain more than one **process run_id** after an
+engine restart. The runtime simulator must never connect those epochs as if
+positions, risk counters, or indicators were continuous. The research worker
+now does the following on demand:
+
+1. Validate the source archive's ordered events, monotonic receive times,
+   contiguous per-process sequences, and original writer integrity sidecars.
+2. **Only when the full-day validator identifies multiple process runs,**
+   extract each contiguous recorded run into a separate temporary replay file.
+   Do not invent warmup, orders, missing quote depth, or restart state.
+3. Carry the original run identity and full-day archive SHA in explicitly
+   labeled **derived** integrity sidecars. Validate each extracted recording
+   again; remove temporary copies after the research request.
+4. For each independently replayable epoch, compare baseline and adaptive
+   using the existing isolated offline production-composition worker at
+   10, 25 and 50 bps adverse-slippage assumptions.
+5. Report outcomes and blockers separately by date and epoch in the existing
+   `runtime_replay.json` artifact. A restart carrying an open position,
+   missing history, corrupt integrity, inadequate depth, or diverging
+   simulated entries is **not** counted as a successful comparison.
+
+This does not reconstruct account continuity between process restarts or
+convert epoch-level simulated performance into a whole-day/live profit claim.
+Failures remain visible; completing one valid epoch does not certify the
+others. The 25-minute total research budget remains unchanged, so excess
+epochs are deferred rather than silently assumed completed.
+
+The original October 19 and 21 archives were previously rejected with
+`replay_multiple_runs_unrestored_state`. They are only suitable for this
+workflow if each extracted epoch independently satisfies all replay and
+bid-depth checks. There is **no automatic adaptive live-mode activation**.
