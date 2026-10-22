@@ -398,6 +398,108 @@ poll_research_request() {
 # broker-flat, all orders are terminal, and the engine acknowledges an entry
 # hold. The release lock and entry-submit lock close the entry race; exits are
 # never blocked. No forced deployment on missing broker/engine authority.
+intraday_flat_broker_confirmed() {
+  local api_key access_token
+  api_key="$(first_nonempty_env BROKER_API_KEY ZERODHA_API_KEY KITE_API_KEY 2>/dev/null || true)"
+  access_token="$(first_nonempty_env BROKER_ACCESS_TOKEN ZERODHA_ACCESS_TOKEN KITE_ACCESS_TOKEN 2>/dev/null || true)"
+  if [ -z "$api_key" ] || [ -z "$access_token" ] || [ ! -x "$VENV/bin/python" ]; then
+    log "intraday_release_guard_blocked: broker credentials or Python unavailable"
+    return 1
+  fi
+  BOT_RELEASE_KITE_API_KEY="$api_key" BOT_RELEASE_KITE_ACCESS_TOKEN="$access_token" \
+    BOT_RELEASE_LOCAL_PORT="$PORT" BOT_RELEASE_RESTART_PENDING="$RESTART_PENDING_FILE" \
+    BOT_RELEASE_ENTRY_HOLD_REQUIRED="$RELEASE_HOLD_ACTIVE" \
+    "$VENV/bin/python" - <<'PY_FLAT_GUARD'
+import json
+import os
+import sys
+import time
+import urllib.request
+
+from kiteconnect import KiteConnect
+
+TERMINAL = {"COMPLETE", "CANCELLED", "REJECTED", "LAPSED"}
+port = int(os.environ["BOT_RELEASE_LOCAL_PORT"])
+kite = KiteConnect(api_key=os.environ["BOT_RELEASE_KITE_API_KEY"], timeout=5)
+kite.set_access_token(os.environ["BOT_RELEASE_KITE_ACCESS_TOKEN"])
+# A newly verified token exists on disk before the old process can load it.
+# This recovery exception is available ONLY for a previously queued restart;
+# broker positions and orders still have to be proved flat twice.
+restart_marker = os.environ.get("BOT_RELEASE_RESTART_PENDING") or ""
+token_rotation_requested = bool(restart_marker and os.path.isfile(restart_marker))
+hold_required = os.environ.get("BOT_RELEASE_ENTRY_HOLD_REQUIRED") == "true"
+
+def is_safe() -> bool:
+    with urllib.request.urlopen(f"http://127.0.0.1:{port}/livez", timeout=3) as response:
+        live = json.load(response)
+    if live.get("engine_http_responsive") is not True:
+        return False
+    if live.get("quiet") is True:
+        # The canonical off-hours control plane has no trading stack and no
+        # live entry worker. Broker positions/orders remain authoritative.
+        if live.get("bot_loaded") is not False:
+            return False
+    else:
+        if live.get("bot_loaded") is not True:
+            return False
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/health/trading", timeout=3) as response:
+            health = json.load(response)
+        reconciliation = health.get("reconciliation") or {}
+        broker = health.get("broker") or {}
+        if hold_required and health.get("release_entry_hold_active") is not True:
+            return False
+        # A fail-closed, unrestarted engine reports its previous token invalid.
+        # Accept only a queued token rotation with explicit invalid-auth proof;
+        # never treat an unknown auth state as permission to restart.
+        token_rotation_recovery = (
+            token_rotation_requested
+            and broker.get("authenticated") is False
+            and broker.get("auth_invalid") is True
+            and health.get("broker_authentication") == "invalid"
+            and health.get("broker_session_state") == "invalid"
+            and health.get("authentication_known") is True
+        )
+        if (
+            health.get("live_orders_armed") is not False
+            or reconciliation.get("completed") is not True
+            or reconciliation.get("failed") is True
+            or reconciliation.get("unprotected_positions")
+            or (broker.get("authenticated") is not True and not token_rotation_recovery)
+        ):
+            return False
+    positions = kite.positions()
+    orders = kite.orders()
+    if (
+        not isinstance(positions, dict)
+        or not isinstance(positions.get("net"), list)
+        or not isinstance(positions.get("day"), list)
+        or not isinstance(orders, list)
+    ):
+        return False
+    for row in positions["net"] + positions["day"]:
+        if not isinstance(row, dict) or "quantity" not in row:
+            return False
+        if float(row["quantity"]) != 0:
+            return False
+    for row in orders:
+        if not isinstance(row, dict) or str(row.get("status") or "").upper() not in TERMINAL:
+            return False
+    return True
+
+try:
+    # Both samples must prove no orders/positions and no armed entry path.
+    if not is_safe():
+        sys.exit(1)
+    time.sleep(1)
+    if not is_safe():
+        sys.exit(1)
+except Exception as exc:
+    print(f"intraday_release_guard_blocked: {type(exc).__name__}", file=sys.stderr)
+    sys.exit(1)
+PY_FLAT_GUARD
+}
+
+
 acquire_release_entry_hold() {
   mkdir -p "$CONFIG_DIR"
   if [ -L "$RELEASE_HOLD_FILE" ] || [ -L "$RELEASE_ENTRY_LOCK_FILE" ]; then
@@ -412,7 +514,7 @@ acquire_release_entry_hold() {
     log "release entry submission still in flight; retry automatically"
     return 1
   fi
-  printf '%s\\n' "$$" > "$RELEASE_HOLD_FILE"
+  printf '%s\n' "$" > "$RELEASE_HOLD_FILE"
   chmod 600 "$RELEASE_HOLD_FILE"
   RELEASE_HOLD_ACTIVE=true
 }
