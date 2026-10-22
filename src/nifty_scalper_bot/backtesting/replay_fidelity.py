@@ -94,6 +94,11 @@ def audit_session(path: Path, *, gap_seconds: float = 120) -> dict[str, Any]:
     previous: dict[str, datetime] = {}
     max_gap: dict[str, float] = defaultdict(float)
     basket_versions: set[tuple[str, str, str]] = set()
+    # A snapshot can replace the selected CE/PE while preserving replay
+    # configuration. Validate each recorded segment rather than treating all
+    # quote coverage as if one basket were active for the entire process run.
+    basket_segments: list[dict[str, Counter[str]]] = []
+    current_segment: dict[str, Counter[str]] | None = None
     unmatched = 0
     missing_symbol = 0
     for event in iter_session(path):
@@ -105,6 +110,8 @@ def audit_session(path: Path, *, gap_seconds: float = 120) -> dict[str, Any]:
             if not active:
                 raise ValueError("replay_audit_snapshot_basket_unidentified")
             basket_versions.add((active["CE"], active["PE"], active["FUT"]))
+            current_segment = defaultdict(Counter)
+            basket_segments.append(current_segment)
             previous.clear()
             continue
         tick = event["payload"]
@@ -120,16 +127,22 @@ def audit_session(path: Path, *, gap_seconds: float = 120) -> dict[str, Any]:
             continue
         c = counts[role]
         c["ticks"] += 1
+        if current_segment is not None:
+            current_segment[role]["ticks"] += 1
         if 9 * 60 + 15 <= t.hour * 60 + t.minute < 15 * 60 + 30:
             c["market_session_ticks"] += 1
             minutes[role].add(t.strftime("%H:%M"))
         if str(tick.get("source") or "").lower() in ("ws", "websocket"):
             c["websocket_ticks"] += 1
+            if current_segment is not None:
+                current_segment[role]["websocket_ticks"] += 1
         if _number(tick.get("ltp")):
             c["positive_ltp_ticks"] += 1
         top, full = _depth(tick)
         if top:
             c["uncrossed_two_sided_depth_ticks"] += 1
+            if current_segment is not None:
+                current_segment[role]["uncrossed_two_sided_depth_ticks"] += 1
         if full:
             c["five_level_depth_ticks"] += 1
         if type(tick.get("instrument_token")) is int and tick["instrument_token"] > 0:
@@ -160,13 +173,30 @@ def audit_session(path: Path, *, gap_seconds: float = 120) -> dict[str, Any]:
                 c["five_level_depth_ticks"] / n if n else None
             ),
         }
-    # Sufficient *observed* context is still not evidence that all quote
-    # events were delivered to the bot or that any modeled order was filled.
-    usable_context = (
-        len(basket_versions) == 1
-        and all(roles[r]["observed_ticks"] > 0 for r in roles)
-        and all(roles[r]["websocket_ticks"] > 0 for r in ("CE", "PE", "FUT"))
-        and all(roles[r]["uncrossed_two_sided_depth_ticks"] > 0 for r in ("CE", "PE"))
+    # Rotation itself is not a data-quality defect. A snapshot creates a
+    # fresh coverage obligation for the new selected contracts, even if the
+    # same basket was seen previously. Incomplete segments remain blocked.
+    missing_requirements: Counter[str] = Counter()
+    verified_segments = 0
+    for segment in basket_segments:
+        segment_missing = []
+        for role in ("CE", "PE", "FUT", "SPOT"):
+            if segment[role]["ticks"] == 0:
+                segment_missing.append(f"{role}_no_ticks")
+        for role in ("CE", "PE", "FUT"):
+            if segment[role]["websocket_ticks"] == 0:
+                segment_missing.append(f"{role}_no_websocket_ticks")
+        for role in ("CE", "PE"):
+            if segment[role]["uncrossed_two_sided_depth_ticks"] == 0:
+                segment_missing.append(f"{role}_no_two_sided_depth")
+        if segment_missing:
+            missing_requirements.update(segment_missing)
+        else:
+            verified_segments += 1
+    # Verified *observations* do not establish complete exchange message
+    # delivery, simulated broker fill feasibility or executable alpha.
+    usable_context = bool(basket_segments) and (
+        verified_segments == len(basket_segments)
     )
     return {
         "profile": "replay_capture_fidelity_v1",
@@ -176,6 +206,12 @@ def audit_session(path: Path, *, gap_seconds: float = 120) -> dict[str, Any]:
         "event_count": events,
         "snapshot_count": snapshots,
         "basket_versions": len(basket_versions),
+        "basket_segments": len(basket_segments),
+        "basket_segments_with_quote_context": verified_segments,
+        "basket_segments_missing_quote_context": (
+            len(basket_segments) - verified_segments
+        ),
+        "basket_segments_missing_by_requirement": dict(missing_requirements),
         "unselected_ticks": unmatched,
         "missing_symbol_ticks": missing_symbol,
         "gap_threshold_seconds": gap_seconds,
