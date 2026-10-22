@@ -133,7 +133,7 @@ def start_runtime_heartbeat_task() -> asyncio.Task[Any] | None:
     sender = build_runtime_heartbeat()
     if sender is None:
         return None
-    return safe_task(
+    task: asyncio.Task[Any] = safe_task(
         run_periodic_task(
             task_fn=lambda: asyncio.to_thread(sender.report_once),
             interval_sec=heartbeat_interval_seconds(),
@@ -141,6 +141,7 @@ def start_runtime_heartbeat_task() -> asyncio.Task[Any] | None:
             run_immediately=True,
         )
     )
+    return task
 
 
 def start_trade_replication_task(
