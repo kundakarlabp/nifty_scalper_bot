@@ -293,8 +293,14 @@ restart_admin() {
     return 1
   fi
   sudo -n systemctl restart "$ADMIN_SERVICE" 2>/dev/null || return 1
+  # The full status API calls engine HTTP, journalctl and git. Its normal
+  # latency can exceed two seconds even when the admin control plane is healthy.
+  # Probe the independent process and the actual rendered control page instead.
   for _ in $(seq 1 20); do
-    curl -fsS --max-time 2 "http://127.0.0.1:${ADMIN_PORT}/admin/api/status" >/dev/null 2>&1 && return 0
+    if curl -fsS --max-time 2 "http://127.0.0.1:${ADMIN_PORT}/healthz" >/dev/null 2>&1 &&
+       curl -fsS --max-time 3 "http://127.0.0.1:${ADMIN_PORT}/admin" >/dev/null 2>&1; then
+      return 0
+    fi
     sleep 1
   done
   return 1
