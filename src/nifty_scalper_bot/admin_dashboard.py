@@ -9,6 +9,7 @@ The daily Zerodha session flow is deliberately small and canonical:
 A paste fallback accepts either the raw request token or the complete redirect URL.
 The dashboard never collects or stores the Zerodha login password or TOTP secret.
 """
+
 # Embedded HTML/CSS/JS assets have intentional long literal lines.
 # ruff: noqa: E501
 from __future__ import annotations
@@ -25,7 +26,12 @@ import urllib.request
 from pathlib import Path
 
 from fastapi import APIRouter, Form, Request, Response
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
+from fastapi.responses import (
+    HTMLResponse,
+    JSONResponse,
+    PlainTextResponse,
+    RedirectResponse,
+)
 
 from nifty_scalper_bot.ops.service_control import (
     ControlResult,
@@ -259,6 +265,7 @@ def _git_update() -> tuple[bool, str]:
 
 # ---------------- UI ----------------
 
+# fmt: off  # The following block owns literal HTML markup.
 _PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><meta name="theme-color" content="#0b1522"><title>Nifty Scalper · Admin</title><style>{css}</style></head><body>{body}<script>{script}</script></body></html>"""
 
 
@@ -496,6 +503,9 @@ def dashboard(request: Request) -> HTMLResponse:
     return HTMLResponse(_page(body), headers={"Cache-Control": "no-store"})
 
 
+# fmt: on
+
+
 @router.get("/admin/kite/callback")
 def kite_callback(request: Request, request_token: str = "", status: str = "", action: str = "") -> RedirectResponse:
     """Registered Kite redirect target; no request/access token is rendered back to the browser."""
@@ -652,6 +662,7 @@ def update_from_github(request: Request) -> Response:
     )
 
 
+# fmt: off  # Short, stable JSON UI endpoints.
 @router.get("/admin/api/overview")
 def overview_api(request: Request) -> JSONResponse:
     """Lightweight independent heartbeat for mobile auto-refresh."""
@@ -671,6 +682,9 @@ def logs_api(request: Request, lines: int = 250, contains: str = "") -> JSONResp
         {"text": text[-100_000:] if text else "No matching log lines."},
         headers={"Cache-Control": "no-store"},
     )
+
+
+# fmt: on
 
 
 _STATUS_CACHE: dict[str, object] = {"at": 0.0, "label": "running", "color": "#3fb950"}
