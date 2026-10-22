@@ -58,3 +58,13 @@ def test_app_has_no_duplicate_datahub_bracket_feed_subscription() -> None:
     root = Path(__file__).resolve().parents[2]
     source = (root / "src/nifty_scalper_bot/core/app.py").read_text(encoding="utf-8")
     assert 'subscribe("bracket_feed"' not in source
+
+
+def test_app_initializes_bracket_manager_with_supported_keyword() -> None:
+    source = (
+        Path(__file__).resolve().parents[2] / "src/nifty_scalper_bot/core/app.py"
+    ).read_text(encoding="utf-8")
+    assert "market_data=" in source
+    start = source.find("BracketManager(")
+    assert start >= 0
+    assert "market_data_manager=" not in source[start : start + 400]
