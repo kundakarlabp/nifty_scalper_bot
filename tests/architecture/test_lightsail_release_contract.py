@@ -544,7 +544,7 @@ fi
     # All three historical blocking boundaries call the same policy helper;
     # the default policy is now disabled at their shared entrypoint.
     assert release.count("if auto_release_should_defer; then") == 3
-    assert 'BOT_AUTO_DEPLOY_EXPOSURE_GUARD_ENABLED:-false' in release
+    assert "BOT_AUTO_DEPLOY_EXPOSURE_GUARD_ENABLED:-false" in release
     assert "git worktree add" in release
     assert "verify_release_ci.py" in release
     assert "wait_for_service" in release
