@@ -24,16 +24,17 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from nifty_scalper_bot.superlite_admin_core import bounded_logs, quick_overview
+from fastapi import APIRouter, Form, Request, Response
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 
 from nifty_scalper_bot.ops.service_control import (
     ControlResult,
     queue_validated_restart,
     restart_deployer,
 )
-
-from fastapi import APIRouter, Form, Request, Response
-from fastapi.responses import HTMLResponse, RedirectResponse, PlainTextResponse, JSONResponse
+from nifty_scalper_bot.superlite_admin_core import bounded_logs, quick_overview
+from nifty_scalper_bot.superlite_admin_style import SCRIPT as _SCRIPT
+from nifty_scalper_bot.superlite_admin_style import STYLE as _CSS
 
 router = APIRouter()
 
@@ -258,8 +259,6 @@ def _git_update() -> tuple[bool, str]:
 
 
 # ---------------- UI ----------------
-
-from nifty_scalper_bot.superlite_admin_style import STYLE as _CSS, SCRIPT as _SCRIPT
 
 _PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><meta name="theme-color" content="#0b1522"><title>Nifty Scalper · Admin</title><style>{css}</style></head><body>{body}<script>{script}</script></body></html>"""
 
