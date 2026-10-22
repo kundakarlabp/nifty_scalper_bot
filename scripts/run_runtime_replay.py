@@ -256,6 +256,24 @@ def run_paired_replays(
             path = destination / "report.json"
             if process.returncode != 0 or not path.is_file():
                 result["blocker"] = "paired_replay_worker_failed"
+                result["failed_scenario"] = {"policy": name, "slippage_bps": bps}
+                # The isolated worker writes a bounded failure code. Preserve
+                # it instead of discarding the only actionable diagnostic.
+                # Never return arbitrary exception text or broker payloads.
+                try:
+                    failure = json.loads(
+                        (destination / "failure.json").read_text(encoding="utf-8")
+                    )
+                except (OSError, ValueError):
+                    failure = {}
+                error_code = failure.get("error_code") if isinstance(failure, dict) else None
+                if (
+                    isinstance(error_code, str)
+                    and error_code.startswith("replay_")
+                    and len(error_code) <= 100
+                    and error_code.replace("_", "").isalnum()
+                ):
+                    result["worker_error_code"] = error_code
                 break
             try:
                 report = json.loads(path.read_text(encoding="utf-8"))
