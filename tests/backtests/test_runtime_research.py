@@ -588,6 +588,4 @@ def test_epoch_partition_refuses_missing_original_integrity(tmp_path):
     (tmp_path / f"{second.run_id}.integrity.json").unlink()
 
     with pytest.raises(ValueError, match="replay_capture_integrity_missing"):
-        materialize_replay_epochs(
-            tmp_path / "2026-10-21.jsonl", tmp_path / "segments"
-        )
+        materialize_replay_epochs(tmp_path / "2026-10-21.jsonl", tmp_path / "segments")
