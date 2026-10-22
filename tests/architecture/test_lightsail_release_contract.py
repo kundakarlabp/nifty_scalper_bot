@@ -300,7 +300,7 @@ def test_admin_recovery_is_independent_of_broker_and_ci_gates() -> None:
     broker_gate = release.index("if auto_release_should_defer; then", entry)
     ci_gate = release.index('if [ "$BEFORE" != "$AFTER" ]; then', broker_gate)
     assert entry < recovery_call < broker_gate < ci_gate
-    assert 'http://127.0.0.1:${ADMIN_PORT}/healthz' in release
+    assert "http://127.0.0.1:${ADMIN_PORT}/healthz" in release
     assert 'http://127.0.0.1:${ADMIN_PORT}/admin"' in release
     recovery = release.split("recover_admin_control() {", 1)[1].split(
         "\nrestart_streamlit()", 1
@@ -312,9 +312,12 @@ def test_admin_recovery_is_independent_of_broker_and_ci_gates() -> None:
 
 def test_isolated_admin_recovery_success_and_failure(tmp_path: Path) -> None:
     release = _text("deploy/lightsail_release.sh")
-    recovery = "recover_admin_control() {" + release.split(
-        "recover_admin_control() {", 1
-    )[1].split("\nrestart_streamlit()", 1)[0]
+    recovery = (
+        "recover_admin_control() {"
+        + release.split("recover_admin_control() {", 1)[1].split(
+            "\nrestart_streamlit()", 1
+        )[0]
+    )
     shell = recovery + """
 log() { printf "%s\\n" "$*" >> "$LOGFILE"; }
 admin_healthy() { [ "$ADMIN_STATE" = "healthy" ]; }
