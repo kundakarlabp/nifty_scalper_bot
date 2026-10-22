@@ -292,6 +292,7 @@ def _extract_selected_from_logs(recent_logs: str) -> dict[str, Any]:
     return {}
 
 
+# fmt: off  # Keep the compact status contract legible and stable.
 def quick_overview() -> dict[str, Any]:
     """Bounded, cached UI heartbeat; no git, journal, or systemctl calls.
 
@@ -331,6 +332,9 @@ def quick_overview() -> dict[str, Any]:
     }
     OVERVIEW_CACHE.update({"at": now, "data": dict(data)})
     return data
+
+
+# fmt: on
 
 
 def status_snapshot() -> dict[str, Any]:
