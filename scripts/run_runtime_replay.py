@@ -266,7 +266,11 @@ def run_paired_replays(
                     )
                 except (OSError, ValueError):
                     failure = {}
-                error_code = failure.get("error_code") if isinstance(failure, dict) else None
+                error_code = (
+                    failure.get("error_code")
+                    if isinstance(failure, dict)
+                    else None
+                )
                 if (
                     isinstance(error_code, str)
                     and error_code.startswith("replay_")
