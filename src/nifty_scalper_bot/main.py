@@ -691,6 +691,27 @@ def _no_trade_diagnostics(
     }
 
 
+def _trade_pipeline_state(
+    live_orders_armed: bool, diagnostics: dict[str, Any]
+) -> dict[str, str]:
+    """Report the earliest observed trading stage, not a promise to trade.
+
+    Candidate counts in diagnostics are cumulative since the current runner
+    started. An approved candidate in the past is not a pending order now.
+    """
+    if not live_orders_armed:
+        return {"stage": "NOT_ARMED", "reason": "live_order_readiness_blocked"}
+
+    reason = str(diagnostics.get("reason") or "strategy_telemetry_unavailable")
+    stages = {
+        "awaiting_strategy_evaluations": "EVALUATION_PENDING",
+        "no_valid_strategy_trigger_since_start": "SIGNAL_WAITING",
+        "candidates_not_approved_since_start": "CANDIDATE_NOT_APPROVED",
+        "approved_candidate_seen_since_start": "CANDIDATE_SEEN_HISTORICALLY",
+    }
+    return {"stage": stages.get(reason, "UNKNOWN"), "reason": reason}
+
+
 def _bar_minute_identity(row):  # noqa: ANN001
     """Canonical UTC minute key for observational candle comparison."""
     from datetime import datetime, timezone
@@ -1085,6 +1106,9 @@ def health_trading():
     no_trade_diagnostics = _no_trade_diagnostics(
         signal_observability, structured_status.get("minimum_lot_affordability")
     )
+    trade_pipeline_state = _trade_pipeline_state(
+        live_orders_armed and not blockers, no_trade_diagnostics
+    )
     return JSONResponse(
         status_code=200,
         content={
@@ -1128,6 +1152,7 @@ def health_trading():
             },
             "signal_observability": signal_observability,
             "no_trade_diagnostics": no_trade_diagnostics,
+            "trade_pipeline_state": trade_pipeline_state,
             "live_order_readiness": live_order_readiness,
             "reconciliation": {
                 "started": bool(getattr(ctx, "position_reconciliation_started", False)),
@@ -1224,6 +1249,13 @@ def trading_status():
         and isinstance(runtime_state, dict)
         and runtime_state.get("live_orders_armed")
     )
+    signal_observability = _signal_observability(ctx) if ctx is not None else {}
+    no_trade_diagnostics = _no_trade_diagnostics(
+        signal_observability, structured.get("minimum_lot_affordability")
+    )
+    trade_pipeline_state = _trade_pipeline_state(
+        can_place_live_order_now, no_trade_diagnostics
+    )
     return {
         "enable_live": enable_live,
         "research_job": read_status(
@@ -1242,9 +1274,11 @@ def trading_status():
         "execution_mode": exec_mode,
         "configured_for_live": configured_for_live,
         "can_place_live_order_now": can_place_live_order_now,
-        # Compatibility key: now reflects current executable readiness rather
-        # than configuration intent.
+        # Historical compatibility key: permission to execute only, never a
+        # prediction of a signal, an order attempt or a successful fill.
         "will_trade": can_place_live_order_now,
+        "will_trade_semantics": "execution_permission_only_not_signal_or_order",
+        "trade_pipeline_state": trade_pipeline_state,
         "engine_http_responsive": True,
         "bot_loaded": app.state.bot is not None,
         "event_loop_lag_ms": round(float(_EVENT_LOOP_LAG_MS), 3),
