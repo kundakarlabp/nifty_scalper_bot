@@ -4,13 +4,12 @@ from __future__ import annotations
 
 import sqlite3
 
+from nifty_scalper_bot.backtesting.ledger_integrity import (
+    summarize_ledger_integrity,
+)
 from nifty_scalper_bot.journal.trade_ledger import (
     ensure_trade_ledger_schema,
     materialize_trade_events,
-)
-
-from nifty_scalper_bot.backtesting.ledger_integrity import (
-    summarize_ledger_integrity,
 )
 
 
