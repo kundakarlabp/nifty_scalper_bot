@@ -501,326 +501,52 @@ def test_release_health_separates_candidate_integrity_from_broker_auth() -> None
     assert "deployed_dependency_degraded" in release
 
 
-def _auto_release_helpers() -> str:
-    """Execute only the broker-exposure gate, never the deployment body."""
+def test_auto_release_never_defers_on_engine_arming_or_broker_exposure() -> None:
+    """Code releases must not be gated on a possibly always-armed runner."""
     release = _text("deploy/lightsail_release.sh")
-    assert "market_session_protected" not in release
-    assert "TZ=Asia/Kolkata date +%H%M" not in release
-    assert "TZ=Asia/Kolkata date +%u" not in release
-    assert release.count("auto_release_should_defer() {") == 1
-    return (
-        "intraday_flat_broker_confirmed() {"
-        + release.split("intraday_flat_broker_confirmed() {", 1)[1].split(
-            "\nexec 9>", 1
-        )[0]
-    )
+    assert "auto_release_should_defer" not in release
+    assert "intraday_flat_broker_confirmed" not in release
+    assert "deferred_broker_exposure" not in release
+    assert "deferred_unsafe_recovery" not in release
+    assert "PY_FLAT_GUARD" not in release
+    assert "BOT_RELEASE_KITE_ACCESS_TOKEN" not in release
 
 
-def test_auto_release_has_no_market_hours_blackout() -> None:
-    helpers = _auto_release_helpers()
-    shell = helpers + """
-AUTO_MODE=true
-BEFORE=oldrevision
-AFTER=newrevision
-SAFE="$1"
-date() { return 1; }
-intraday_flat_broker_confirmed() { [ "$SAFE" = "true" ]; }
-auto_release_should_defer
-"""
-    for safe, defer in (("true", False), ("false", True)):
-        result = subprocess.run(
-            ["bash", "-c", shell, "fixture", safe],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        assert (result.returncode == 0) is defer, (safe, result.stderr)
-
-
-def test_auto_release_and_manual_restart_have_independent_exposure_policy() -> None:
-    helpers = _auto_release_helpers()
-    shell = helpers + """
-AUTO_MODE="$1"
-SAFE="$2"
-BEFORE=oldrevision
-AFTER=newrevision
-intraday_flat_broker_confirmed() { [ "$SAFE" = "true" ]; }
-auto_release_should_defer
-"""
-    for mode, safe, defer in (
-        ("true", "true", False),
-        ("true", "false", True),
-        ("false", "false", False),
-    ):
-        result = subprocess.run(
-            ["bash", "-c", shell, "fixture", mode, safe],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        assert (result.returncode == 0) is defer, (mode, safe, result.stderr)
-
-
-def test_auto_release_probes_broker_regardless_of_market_clock() -> None:
-    helpers = _auto_release_helpers()
-    shell = helpers + """
-AUTO_MODE=true
-BEFORE=oldrevision
-AFTER=newrevision
-SAFE="$3"
-DATE_CALLED=false
-date() {
-  printf 'CLOCK_ACCESSED\\n' >&2
-  return 1
-}
-intraday_flat_broker_confirmed() {
-  printf 'BROKER_PROBED\\n' >&2
-  [ "$SAFE" = "true" ]
-}
-auto_release_should_defer
-"""
-    for weekday, hhmm, safe, defer in (
-        ("1", "0914", "true", False),
-        ("1", "0915", "true", False),
-        ("5", "1230", "true", False),
-        ("5", "1545", "true", False),
-        ("5", "1546", "true", False),
-        ("7", "1230", "true", False),
-        ("", "", "true", False),
-        ("5", "2580", "true", False),
-        ("1", "0930", "false", True),
-        ("6", "1100", "false", True),
-    ):
-        result = subprocess.run(
-            ["bash", "-c", shell, "fixture", weekday, hhmm, safe],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        assert (result.returncode == 0) is defer, (
-            weekday,
-            hhmm,
-            safe,
-            result.stderr,
-        )
-        assert "BROKER_PROBED" in result.stderr
-        assert "CLOCK_ACCESSED" not in result.stderr
-
-
-def test_already_current_healthy_release_skips_broker_exposure_poll() -> None:
-    helpers = _auto_release_helpers()
-    shell = helpers + """
-AUTO_MODE=true
-BEFORE="$1"
-AFTER="$2"
-HEALTHY="$3"
-FORCE_RESTART=false
-RESTART_PENDING_FILE=/tmp/nonexistent-nifty-release-pending-test
-date() {
-  case "$1" in
-    +%u) printf '1';;
-    +%H%M) printf '0830';;
-    *) return 1;;
-  esac
-}
-service_healthy_confirmed() { [ "$HEALTHY" = "true" ]; }
-intraday_flat_broker_confirmed() {
-  printf 'BROKER_PROBED\\n' >&2
-  return 1
-}
-auto_release_should_defer
-"""
-    for before, after, healthy, probed in (
-        ("abc123", "abc123", "true", False),
-        ("abc123", "def456", "true", True),
-        ("abc123", "abc123", "false", True),
-    ):
-        result = subprocess.run(
-            ["bash", "-c", shell, "fixture", before, after, healthy],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        assert result.returncode == 0
-        assert ("BROKER_PROBED" in result.stderr) is probed
-
-
-def test_intraday_guard_requires_authoritative_flat_broker_and_engine() -> None:
-    """Run only the read-only Python guard, with injected offline Kite replies."""
-    import json
-
+def test_release_uses_single_fetch_and_same_auto_manual_validation() -> None:
     release = _text("deploy/lightsail_release.sh")
-    guard = release.split("<<'PY_FLAT_GUARD'\n", 1)[1].split("\nPY_FLAT_GUARD", 1)[0]
-    harness = """
-import io
-import json
-import os
-import sys
-import time
-import types
-import urllib.request
-
-class FakeKite:
-    def __init__(self, **kwargs):
-        pass
-
-    def set_access_token(self, token):
-        pass
-
-    def positions(self):
-        return json.loads(os.environ["TEST_POSITIONS"])
-
-    def orders(self):
-        return json.loads(os.environ["TEST_ORDERS"])
-
-def fake_urlopen(url, timeout=3):
-    if url.endswith("/livez"):
-        return io.BytesIO(os.environ["TEST_LIVEZ"].encode())
-    return io.BytesIO(os.environ["TEST_HEALTH"].encode())
-
-sys.modules["kiteconnect"] = types.SimpleNamespace(KiteConnect=FakeKite)
-urllib.request.urlopen = fake_urlopen
-time.sleep = lambda seconds: None
-exec(compile(os.environ["TEST_GUARD"], "<flat-guard>", "exec"))
-"""
-    healthy = {
-        "live_orders_armed": False,
-        "broker": {"authenticated": True},
-        "reconciliation": {
-            "completed": True,
-            "failed": False,
-            "unprotected_positions": [],
-        },
-    }
-    flat = {"net": [{"quantity": 0}], "day": [{"quantity": 0}]}
-    active = {"engine_http_responsive": True, "bot_loaded": True}
-    quiet = {"engine_http_responsive": True, "bot_loaded": False, "quiet": True}
-    cases = (
-        (active, healthy, flat, [], True),
-        (active, healthy, {"net": [{"quantity": 65}], "day": []}, [], False),
-        (active, healthy, flat, [{"status": "TRIGGER PENDING"}], False),
-        (active, healthy, flat, [{"status": "COMPLETE"}], True),
-        (active, healthy, {"net": [{}], "day": []}, [], False),
-        (active, {**healthy, "reconciliation": {"completed": False}}, flat, [], False),
-        (active, {**healthy, "broker": {"authenticated": False}}, flat, [], False),
-        (active, {**healthy, "live_orders_armed": True}, flat, [], False),
-        (active, {**healthy, "live_orders_armed": None}, flat, [], False),
-        (active, healthy, {"net": []}, [], False),
-        (quiet, {}, flat, [], True),
-        (quiet, {}, flat, [{"status": "TRIGGER PENDING"}], False),
-        (quiet, {}, {"net": [{"quantity": 65}], "day": []}, [], False),
-        ({**quiet, "bot_loaded": True}, {}, flat, [], False),
-        (
-            {"engine_http_responsive": False, "bot_loaded": True},
-            healthy,
-            flat,
-            [],
-            False,
-        ),
-        ({"engine_http_responsive": True, "bot_loaded": False}, {}, flat, [], False),
+    assert release.count("git fetch --quiet origin main") == 1
+    assert release.index("git fetch --quiet origin main") < release.index(
+        'write_status validating "validating'
     )
-    for livez, health, positions, orders, expected in cases:
-        result = subprocess.run(
-            [sys.executable, "-c", harness],
-            env={
-                **os.environ,
-                "TEST_GUARD": guard,
-                "TEST_HEALTH": json.dumps(health),
-                "TEST_LIVEZ": json.dumps(livez),
-                "TEST_POSITIONS": json.dumps(positions),
-                "TEST_ORDERS": json.dumps(orders),
-                "BOT_RELEASE_KITE_API_KEY": "fake",
-                "BOT_RELEASE_KITE_ACCESS_TOKEN": "fake",
-                "BOT_RELEASE_LOCAL_PORT": "8080",
-            },
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=8,
-        )
-        assert (result.returncode == 0) is expected, (
-            livez,
-            health,
-            positions,
-            orders,
-            result.stderr,
-        )
+    assert release.index('write_status validating "validating') < release.index(
+        'git reset --hard --quiet "$AFTER"'
+    )
+    assert release.index('set_runtime_build_sha "$AFTER"') < release.index(
+        'sudo systemctl restart "$SERVICE"'
+    )
+    assert 'write_status deferred_ci' in release
+    assert 'write_status validation_failed' in release
+    assert 'write_status rolled_back' in release
 
 
-def test_auto_exposure_gate_preserves_health_recovery_and_research_poll() -> None:
+def test_pending_restart_marker_consumed_after_successful_release() -> None:
     release = _text("deploy/lightsail_release.sh")
-    gate = release.index("if auto_release_should_defer; then")
-    protected = release[gate : release.index("\nchmod +x", gate)]
-    assert release.index("exec 9>") < release.index('cd "$APP_DIR"') < gate
-    assert release.index("git fetch --quiet origin main") < gate
-    assert "service_healthy_confirmed" in protected
-    assert 'sudo -n systemctl restart "$SERVICE"' not in protected
-    assert "deferred_unsafe_recovery" in protected
-    assert "runtime_checkout_mismatch" in protected
-    assert 'current_runtime_sha" != "$BEFORE"' in protected
-    assert '"http://127.0.0.1:${PORT}/releasez"' in protected
-    assert protected.index("runtime_checkout_mismatch") < protected.index(
-        "deferred_unsafe_recovery"
-    )
-    assert "pending main" in protected
-    assert "poll_research_request" in protected
-    assert 'if [ "$BEFORE" != "$AFTER" ]; then' in protected
-    assert "write_status deferred_broker_exposure" in protected
-    assert "write_status current" in protected
-    assert gate < release.index("\nvalidate_environment\n", gate)
-    assert "market_session_protected()" not in release
-    assert "TZ=Asia/Kolkata date +%u" not in release
-    assert "TZ=Asia/Kolkata date +%H%M" not in release
-
-
-def test_auto_exposure_guard_rechecks_before_checkout_and_restart() -> None:
-    release = _text("deploy/lightsail_release.sh")
-    validated = release.index('write_status validating "validating')
-    after_candidate = release.index("if auto_release_should_defer; then", validated)
-    checkout = release.index('git reset --hard --quiet "$AFTER"', after_candidate)
-    restart_gate = release.index("if auto_release_should_defer; then", checkout)
-    engine_restart = release.index('sudo systemctl restart "$SERVICE"', restart_gate)
-    assert validated < after_candidate < checkout < restart_gate < engine_restart
-    assert "checkout untouched" in release[after_candidate:checkout]
-    assert 'set_runtime_build_sha "$BEFORE"' in release[restart_gate:engine_restart]
-    assert 'git reset --hard --quiet "$BEFORE"' in release[restart_gate:engine_restart]
-    assert (
-        subprocess.run(
-            ["bash", "-n", str(ROOT / "deploy/lightsail_release.sh")],
-            capture_output=True,
-            text=True,
-            check=False,
-        ).returncode
-        == 0
-    )
-
-
-def test_forced_restart_survives_broker_exposure_deferral() -> None:
-    release = _text("deploy/lightsail_release.sh")
-    assert (
-        'RESTART_PENDING_FILE="${CONFIG_DIR}/auto_release_restart_pending"' in release
-    )
+    assert "auto_release_restart_pending" in release
     assert 'if [ -f "$RESTART_PENDING_FILE" ]; then FORCE_RESTART=true; fi' in release
-    assert release.count(': > "$RESTART_PENDING_FILE"') == 2
     assert 'rm -f "$RESTART_PENDING_FILE"' in release
     assert release.index('rm -f "$RESTART_PENDING_FILE"') > release.index(
         'if wait_for_service "$AFTER"; then'
     )
 
 
-def test_auto_release_fails_closed_if_exposure_restore_fails() -> None:
-    release = _text("deploy/lightsail_release.sh")
-    boundary = release.split("# Final broker/arming boundary check", 1)[1].split(
-        'sudo systemctl restart "$SERVICE"', 1
-    )[0]
-    assert 'if ! git reset --hard --quiet "$BEFORE"; then' in boundary
-    assert 'if ! "$VENV/bin/python" -m pip install --quiet -e .; then' in boundary
-    assert 'if ! set_runtime_build_sha "$BEFORE"; then' in boundary
-    assert boundary.count("write_status runtime_restore_failed") == 3
-    assert "write_status deferred_broker_exposure" in boundary
-    assert boundary.index("write_status runtime_restore_failed") < boundary.index(
-        "write_status deferred_broker_exposure"
+def test_immediate_release_script_passes_shell_syntax() -> None:
+    result = subprocess.run(
+        ["bash", "-n", str(ROOT / "deploy/lightsail_release.sh")],
+        capture_output=True,
+        text=True,
+        check=False,
     )
+    assert result.returncode == 0, result.stderr
 
 
 def test_successful_engine_release_never_hides_failed_admin(tmp_path: Path) -> None:
