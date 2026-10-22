@@ -291,7 +291,13 @@ async def lifespan(app: FastAPI):
     yield
 
     try:
-        for running_task in (replication_task, log_archive_task, heartbeat_task, task, lag_task):
+        for running_task in (
+            replication_task,
+            log_archive_task,
+            heartbeat_task,
+            task,
+            lag_task,
+        ):
             if running_task is not None and not running_task.done():
                 running_task.cancel()
                 with suppress(asyncio.CancelledError):
