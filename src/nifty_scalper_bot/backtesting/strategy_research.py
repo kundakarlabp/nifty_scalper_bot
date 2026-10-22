@@ -2067,6 +2067,22 @@ def run_vwap_comparison(directory: Path) -> dict[str, Any]:
             },
         ),
     ]
+    # Explicitly requested SHADOW-only arm; do not change the canonical
+    # nine-arm comparison or incur added replays in ordinary research jobs.
+    include_neutral_slope = str(
+        os.getenv("VWAP_RESEARCH_COMPARE_NEUTRAL_SLOPE", "false")
+    ).lower() in {"1", "true", "yes", "on"}
+    if include_neutral_slope:
+        variants.append(
+            (
+                "trend_premium_rvol_1_5_neutral_slope",
+                {
+                    "VWAP_TREND_MOMENTUM_ENABLED": "true",
+                    "VWAP_TREND_MOMENTUM_OPTION_RVOL_MIN": "1.5",
+                    "VWAP_RESEARCH_NEUTRAL_FUTURES_SLOPE": "true",
+                },
+            )
+        )
     environment_keys = (
         "VWAP_TREND_QUALITY_MAX_DISTANCE_ATR",
         "VWAP_FUTURES_SLOPE_MIN_BPS",
@@ -2076,6 +2092,7 @@ def run_vwap_comparison(directory: Path) -> dict[str, Any]:
         "VWAP_TREND_MOMENTUM_OPTION_RVOL_MIN",
         "VWAP_TREND_REQUIRE_RETEST",
         "VWAP_REQUIRE_FINALIZED_SIGNAL_BAR",
+        "VWAP_RESEARCH_NEUTRAL_FUTURES_SLOPE",
     )
     baseline_environment = {key: os.environ.get(key) for key in environment_keys}
     candidates: list[dict[str, Any]] = []
@@ -2197,86 +2214,104 @@ def run_vwap_comparison(directory: Path) -> dict[str, Any]:
         reverse=True,
     )
 
-    # Only the two trend+option-RVOL research variants form a controlled
-    # immediate-versus-retest contrast. The unrestricted baseline is NOT a
-    # matched comparator because it lacks other premium confirmation gates.
+    # Same archive, entry/cost model, and premium RVOL in each paired ablation.
+    # The only changed rule for each pair is recorded explicitly.
     candidates_by_name = {candidate["name"]: candidate for candidate in candidates}
-    immediate = candidates_by_name["trend_premium_rvol_1_5"]
-    retest = candidates_by_name["trend_premium_vwap_retest"]
-    paired_scenarios = []
-    for control, treatment in zip(
-        immediate["scenarios"], retest["scenarios"], strict=True
-    ):
-        slip = control["slippage_bps_per_side"]
-        if slip != treatment["slippage_bps_per_side"]:
-            raise ValueError("vwap_retest_paired_slippage_mismatch")
-        base_dev = control["development_metrics"]
-        test_dev = treatment["development_metrics"]
-        base_hold = control.get("holdout_metrics") or {}
-        test_hold = treatment.get("holdout_metrics") or {}
-        base_quality = control["data_quality"]
-        test_quality = treatment["data_quality"]
-        adequate_dev = (
-            session_sample_ok
-            and base_dev["trade_count"] >= 30
-            and test_dev["trade_count"] >= 30
-            and base_quality["development_unresolved_exit_count"] == 0
-            and test_quality["development_unresolved_exit_count"] == 0
-            and base_dev["expectancy"] is not None
-            and test_dev["expectancy"] is not None
+    comparison_pairs = [
+        (
+            "trend_premium_immediate_vs_prior_retest",
+            "trend_premium_rvol_1_5",
+            "trend_premium_vwap_retest",
+            "VWAP_TREND_REQUIRE_RETEST",
         )
-        # A single lucky out-of-sample fill cannot be treated as a
-        # measurable retest effect; counts remain visible even when
-        # an expectancy difference is withheld.
-        minimum_holdout_trades = 10
-        usable_holdout = (
-            session_sample_ok
-            and base_hold.get("trade_count", 0) >= minimum_holdout_trades
-            and test_hold.get("trade_count", 0) >= minimum_holdout_trades
-            and base_quality.get("holdout_unresolved_exit_count", 0) == 0
-            and test_quality.get("holdout_unresolved_exit_count", 0) == 0
-            and base_hold.get("expectancy") is not None
-            and test_hold.get("expectancy") is not None
+    ]
+    if include_neutral_slope:
+        comparison_pairs.append(
+            (
+                "trend_premium_strict_vs_neutral_futures_slope",
+                "trend_premium_rvol_1_5",
+                "trend_premium_rvol_1_5_neutral_slope",
+                "VWAP_RESEARCH_NEUTRAL_FUTURES_SLOPE",
+            )
         )
-        paired_scenarios.append(
+    paired_comparisons = []
+    for name, control_name, treatment_name, only_changed_rule in comparison_pairs:
+        baseline_arm = candidates_by_name[control_name]
+        treatment_arm = candidates_by_name[treatment_name]
+        paired_scenarios = []
+        for control, treatment in zip(
+            baseline_arm["scenarios"], treatment_arm["scenarios"], strict=True
+        ):
+            slip = control["slippage_bps_per_side"]
+            if slip != treatment["slippage_bps_per_side"]:
+                raise ValueError("vwap_retest_paired_slippage_mismatch")
+            base_dev = control["development_metrics"]
+            test_dev = treatment["development_metrics"]
+            base_hold = control.get("holdout_metrics") or {}
+            test_hold = treatment.get("holdout_metrics") or {}
+            base_quality = control["data_quality"]
+            test_quality = treatment["data_quality"]
+            adequate_dev = (
+                session_sample_ok
+                and base_dev["trade_count"] >= 30
+                and test_dev["trade_count"] >= 30
+                and base_quality["development_unresolved_exit_count"] == 0
+                and test_quality["development_unresolved_exit_count"] == 0
+                and base_dev["expectancy"] is not None
+                and test_dev["expectancy"] is not None
+            )
+            # A single lucky out-of-sample fill cannot be treated as a
+            # measurable retest effect; counts remain visible even when
+            # an expectancy difference is withheld.
+            minimum_holdout_trades = 10
+            usable_holdout = (
+                session_sample_ok
+                and base_hold.get("trade_count", 0) >= minimum_holdout_trades
+                and test_hold.get("trade_count", 0) >= minimum_holdout_trades
+                and base_quality.get("holdout_unresolved_exit_count", 0) == 0
+                and test_quality.get("holdout_unresolved_exit_count", 0) == 0
+                and base_hold.get("expectancy") is not None
+                and test_hold.get("expectancy") is not None
+            )
+            paired_scenarios.append(
+                {
+                    "slippage_bps_per_side": slip,
+                    "development_trade_count_control": base_dev["trade_count"],
+                    "development_trade_count_treatment": test_dev["trade_count"],
+                    "development_sample_eligible": adequate_dev,
+                    "development_expectancy_delta": (
+                        test_dev["expectancy"] - base_dev["expectancy"]
+                        if adequate_dev
+                        else None
+                    ),
+                    "holdout_trade_count_control": base_hold.get("trade_count", 0),
+                    "holdout_trade_count_treatment": test_hold.get("trade_count", 0),
+                    "holdout_sample_eligible": usable_holdout,
+                    "holdout_expectancy_delta": (
+                        test_hold["expectancy"] - base_hold["expectancy"]
+                        if usable_holdout
+                        else None
+                    ),
+                }
+            )
+        paired_comparisons.append(
             {
-                "slippage_bps_per_side": slip,
-                "development_trade_count_control": base_dev["trade_count"],
-                "development_trade_count_treatment": test_dev["trade_count"],
-                "development_sample_eligible": adequate_dev,
-                "development_expectancy_delta": (
-                    test_dev["expectancy"] - base_dev["expectancy"]
-                    if adequate_dev
-                    else None
-                ),
-                "holdout_trade_count_control": base_hold.get("trade_count", 0),
-                "holdout_trade_count_treatment": test_hold.get("trade_count", 0),
-                "holdout_sample_eligible": usable_holdout,
-                "holdout_expectancy_delta": (
-                    test_hold["expectancy"] - base_hold["expectancy"]
-                    if usable_holdout
-                    else None
+                "name": name,
+                "control": control_name,
+                "treatment": treatment_name,
+                "only_changed_rule": only_changed_rule,
+                "minimum_holdout_trades_per_arm": 10,
+                "scenarios": paired_scenarios,
+                "selected_for_live": None,
+                "promotion_eligible": False,
+                "retrospective_check_is_untouched": False,
+                "evidence_note": (
+                    "Same archived basket, trend/RVOL constraints and modeled costs. "
+                    "Separate component-replay fills are not a trade-matched "
+                    "counterfactual or a live-execution validation."
                 ),
             }
         )
-    paired_comparisons = [
-        {
-            "name": "trend_premium_immediate_vs_prior_retest",
-            "control": immediate["name"],
-            "treatment": retest["name"],
-            "only_changed_rule": "VWAP_TREND_REQUIRE_RETEST",
-            "minimum_holdout_trades_per_arm": 10,
-            "scenarios": paired_scenarios,
-            "selected_for_live": None,
-            "promotion_eligible": False,
-            "retrospective_check_is_untouched": False,
-            "evidence_note": (
-                "Same archived basket, trend/RVOL constraints and modeled costs. "
-                "Separate component-replay fills are not a trade-matched "
-                "counterfactual or a live-execution validation."
-            ),
-        }
-    ]
     return {
         "scope": "bounded_vwap_active_contract_component_comparison",
         "sample_sufficiency": sample_sufficiency,

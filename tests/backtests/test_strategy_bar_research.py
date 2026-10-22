@@ -2837,3 +2837,74 @@ def test_smc_structural_exit_global_minute_gap_cannot_credit_later_target(
     )
     assert structural["smc_exit_diagnostics"]["structural_unpriced_exit_gaps"] == 1
     assert structural["worst_case_stress_trades"][0]["net_pnl"] < 0
+
+
+def test_neutral_slope_ablation_is_opt_in_cost_matched_and_environment_isolated(
+    tmp_path, monkeypatch
+):
+    """Compare one rule only, on identical archive/costs; never select for LIVE."""
+    import os
+
+    from nifty_scalper_bot.backtesting.strategy_research import run_vwap_comparison
+
+    archive(tmp_path)
+    monkeypatch.setenv("VWAP_RESEARCH_COMPARE_NEUTRAL_SLOPE", "true")
+    # Even an inherited research flag cannot contaminate ordinary arms.
+    monkeypatch.setenv("VWAP_RESEARCH_NEUTRAL_FUTURES_SLOPE", "true")
+    observed = []
+
+    def replay(*args, **kwargs):
+        observed.append(
+            {
+                "neutral": os.environ.get("VWAP_RESEARCH_NEUTRAL_FUTURES_SLOPE"),
+                "momentum": os.environ.get("VWAP_TREND_MOMENTUM_ENABLED"),
+                "rvol": os.environ.get("VWAP_TREND_MOMENTUM_OPTION_RVOL_MIN"),
+                "retest": os.environ.get("VWAP_TREND_REQUIRE_RETEST"),
+                "slippage": args[3],
+                "components": kwargs.get("components"),
+                "weekly_atm": kwargs.get("require_archived_weekly_atm"),
+            }
+        )
+        return {
+            "strategies": {
+                "VWAPPro": {
+                    "metrics": {"trade_count": 0, "expectancy": None},
+                    "development_metrics": {"trade_count": 0, "expectancy": None},
+                    "holdout_metrics": {"trade_count": 0, "expectancy": None},
+                    "data_quality": {
+                        "development_unresolved_exit_count": 0,
+                        "holdout_unresolved_exit_count": 0,
+                    },
+                    "trades": [],
+                    "setup_metrics": {},
+                }
+            }
+        }
+
+    monkeypatch.setattr(
+        "nifty_scalper_bot.backtesting.strategy_research._scenario", replay
+    )
+    before = dict(os.environ)
+    report = run_vwap_comparison(tmp_path)
+    assert dict(os.environ) == before
+    assert report["candidate_count"] == 10
+    assert len(observed) == 30
+    assert [row["slippage"] for row in observed[-3:]] == [10.0, 25.0, 50.0]
+    assert sum(row["neutral"] == "true" for row in observed) == 3
+    assert all(row["components"] == {"VWAPPro"} for row in observed)
+    assert all(row["weekly_atm"] is True for row in observed)
+
+    neutral_rows = [row for row in observed if row["neutral"] == "true"]
+    assert all(row["momentum"] == "true" for row in neutral_rows)
+    assert all(row["rvol"] == "1.5" for row in neutral_rows)
+    assert all(row["retest"] == "false" for row in neutral_rows)
+    comparison = report["paired_comparisons"][1]
+    assert comparison["control"] == "trend_premium_rvol_1_5"
+    assert comparison["treatment"] == "trend_premium_rvol_1_5_neutral_slope"
+    assert comparison["only_changed_rule"] == "VWAP_RESEARCH_NEUTRAL_FUTURES_SLOPE"
+    assert all(
+        row["development_expectancy_delta"] is None for row in comparison["scenarios"]
+    )
+    assert comparison["selected_for_live"] is None
+    assert comparison["promotion_eligible"] is False
+    assert report["selection"]["promotion_eligible"] is False
