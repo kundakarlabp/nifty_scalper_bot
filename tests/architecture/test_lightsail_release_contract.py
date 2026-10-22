@@ -571,10 +571,7 @@ def test_release_hold_marker_records_owner_pid_and_releases_lock(tmp_path) -> No
     function_body = release.split("acquire_release_entry_hold() {", 1)[1].split(
         "\nauto_release_should_defer() {", 1
     )[0]
-    shell = (
-        "acquire_release_entry_hold() {"
-        + function_body
-        + """
+    shell = "acquire_release_entry_hold() {" + function_body + """
 CONFIG_DIR="$1"
 RELEASE_HOLD_FILE="$CONFIG_DIR/auto_release_entry_hold"
 RELEASE_ENTRY_LOCK_FILE="$CONFIG_DIR/auto_release_entry_lock"
@@ -582,11 +579,10 @@ RELEASE_HOLD_ACTIVE=false
 log() { :; }
 acquire_release_entry_hold
 test "$RELEASE_HOLD_ACTIVE" = true
-test "$(cat "$RELEASE_HOLD_FILE")" = "$"
+test "$(cat "$RELEASE_HOLD_FILE")" = "$BASHPID"
 test "$(stat -c '%a' "$RELEASE_HOLD_FILE")" = 600
 flock -u 8
 """
-    )
     result = subprocess.run(
         ["bash", "-euo", "pipefail", "-c", shell, "release-test", str(tmp_path)],
         check=False,
