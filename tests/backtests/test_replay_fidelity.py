@@ -63,9 +63,7 @@ def _record(tmp_path, *, quote=True, changed=False, rotated_quotes=False):
                 tick = _tick(symbol, full=True)
                 if symbol == new_ce and not quote:
                     tick.pop("depth")
-                recorder.record(
-                    "tick", tick, t + timedelta(minutes=1, seconds=1)
-                )
+                recorder.record("tick", tick, t + timedelta(minutes=1, seconds=1))
     recorder.close()
     return tmp_path / "2026-10-21.jsonl"
 
