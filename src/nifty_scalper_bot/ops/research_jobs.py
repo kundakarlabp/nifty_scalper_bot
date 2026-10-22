@@ -465,21 +465,24 @@ def new_request(days: int = 30, mode: str = "all") -> dict[str, Any]:
 
 def partition_replay_runs(path: Path, destination: Path) -> list[tuple[str, Path]]:
     """Validate a daily archive and isolate process epochs without restoring state."""
-    from nifty_scalper_bot.backtesting.runtime_research import validate_replay_epochs
     from nifty_scalper_bot.storage.replay_archive import (
         archive_fingerprint,
         iter_session,
     )
 
     run_ids: list[str] = []
+    prior_run: str | None = None
     for event in iter_session(path):
         run_id = event["run_id"]
         if not isinstance(run_id, str) or not re.fullmatch(r"[0-9a-f]{32}", run_id):
             raise ValueError("replay_run_id_invalid")
-        if run_id not in run_ids:
+        if run_id != prior_run:
+            if run_id in run_ids:
+                raise ValueError("replay_epoch_noncontiguous")
             run_ids.append(run_id)
             if len(run_ids) > 16:
                 raise ValueError("replay_epoch_count_exceeded")
+            prior_run = run_id
     if len(run_ids) == 1:
         return [(run_ids[0], path)]
 
@@ -502,7 +505,10 @@ def partition_replay_runs(path: Path, destination: Path) -> list[tuple[str, Path
                 path.parent / f"{run_id}.integrity.json",
                 shard.parent / f"{run_id}.integrity.json",
             )
-            validate_replay_epochs(shard)
+            # Strict capture integrity is checked here; broker positions,
+            # warm-up and starting state are validated independently by each
+            # child replay. An unusable restart cannot mask other valid runs.
+            sum(1 for _ in iter_session(shard))
         if archive_fingerprint(path) != source_sha:
             raise ValueError("replay_archive_changed_during_partition")
     except Exception:
@@ -609,6 +615,11 @@ def run_recorded_replays(root: Path, request: dict[str, Any]) -> dict[str, Any]:
                                 str(epoch_path.resolve()),
                                 "--output",
                                 str(run_directory.resolve()),
+                                "--compare-adaptive",
+                                "--stress-bps",
+                                "10",
+                                "25",
+                                "50",
                             ],
                             cwd=run_directory,
                             env=env,
@@ -626,25 +637,26 @@ def run_recorded_replays(root: Path, request: dict[str, Any]) -> dict[str, Any]:
                             }
                         )
                     else:
-                        evidence = run_directory / (
-                            "report.json" if result.returncode == 0 else "failure.json"
-                        )
+                        evidence = run_directory / "paired-comparison.json"
                         if evidence.is_file():
-                            payload = json.loads(evidence.read_text())
+                            try:
+                                payload = json.loads(evidence.read_text())
+                            except (OSError, ValueError):
+                                payload = {}
+                            success = (
+                                result.returncode == 0
+                                and payload.get("state") == "MODELED_COMPARISON_ONLY"
+                            )
                             report["sessions"].append(
                                 {
                                     "date": day,
                                     "run_id": run_id,
-                                    "state": (
-                                        "completed"
-                                        if result.returncode == 0
-                                        else "failed"
-                                    ),
-                                    **{
-                                        key: value
-                                        for key, value in payload.items()
-                                        if key not in {"orders", "runner_status"}
-                                    },
+                                    "state": "completed" if success else "failed",
+                                    "comparison_state": payload.get("state"),
+                                    "error_code": payload.get("blocker")
+                                    or payload.get("error_code"),
+                                    "stress": payload.get("stress", []),
+                                    "promotion_eligible": False,
                                 }
                             )
                         else:
