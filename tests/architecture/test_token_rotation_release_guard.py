@@ -129,10 +129,10 @@ def test_rotation_exception_is_scoped_and_double_sampled() -> None:
     guard = _guard_source()
     assert 'BOT_RELEASE_RESTART_PENDING="$RESTART_PENDING_FILE"' in release
     assert "os.path.isfile(restart_marker)" in guard
-    assert "health.get(\"live_orders_armed\") is not False" in guard
-    assert "reconciliation.get(\"completed\") is not True" in guard
-    assert "reconciliation.get(\"unprotected_positions\")" in guard
-    assert "broker.get(\"auth_invalid\") is True" in guard
+    assert 'health.get("live_orders_armed") is not False' in guard
+    assert 'reconciliation.get("completed") is not True' in guard
+    assert 'reconciliation.get("unprotected_positions")' in guard
+    assert 'broker.get("auth_invalid") is True' in guard
     assert "positions = kite.positions()" in guard
     assert "orders = kite.orders()" in guard
     assert guard.count("if not is_safe():") == 2
