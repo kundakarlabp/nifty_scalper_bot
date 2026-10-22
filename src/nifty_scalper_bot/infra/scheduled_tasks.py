@@ -12,6 +12,10 @@ from nifty_scalper_bot.infra.daily_log_archive import (
     archive_interval_seconds,
     build_daily_log_archiver,
 )
+from nifty_scalper_bot.infra.runtime_heartbeat import (
+    build_runtime_heartbeat,
+    heartbeat_interval_seconds,
+)
 from nifty_scalper_bot.infra.log_rotation import rotate_order_history_archive
 from nifty_scalper_bot.infra.supabase_trade_replication import (
     build_supabase_trade_replicator,
@@ -120,6 +124,21 @@ def start_daily_log_archive_task() -> asyncio.Task[Any] | None:
             task_fn=lambda: asyncio.to_thread(archiver.archive_once),
             interval_sec=archive_interval_seconds(),
             task_name="archive_daily_market_logs",
+        )
+    )
+
+
+def start_runtime_heartbeat_task() -> asyncio.Task[Any] | None:
+    """Independently mirror local health; never interrupt the trading engine."""
+    sender = build_runtime_heartbeat()
+    if sender is None:
+        return None
+    return safe_task(
+        run_periodic_task(
+            task_fn=lambda: asyncio.to_thread(sender.report_once),
+            interval_sec=heartbeat_interval_seconds(),
+            task_name="mirror_runtime_heartbeat",
+            run_immediately=True,
         )
     )
 
