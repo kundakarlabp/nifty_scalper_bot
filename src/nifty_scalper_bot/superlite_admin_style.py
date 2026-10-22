@@ -1,4 +1,6 @@
 """Single source of truth for the mobile-first admin CSS and progressive enhancement."""
+# Embedded HTML/CSS/JS assets have intentional long literal lines.
+# ruff: noqa: E501
 
 STYLE = r"""
 :root{color-scheme:dark;--bg:#080d15;--panel:#111c2a;--panel2:#142335;--line:#293b51;--text:#edf4fb;--mut:#a9b9cb;--green:#38d6a0;--amber:#f5bb5a;--red:#ff7586;--blue:#70b4ff;--focus:#a8d8ff}
