@@ -558,7 +558,7 @@ def test_release_hold_precedes_checkout_and_engine_restart() -> None:
     restarted = release.index('sudo systemctl restart "$SERVICE"', checkout)
     assert acquired < checked < checkout < restarted
     assert "flock -w 10 8" in release
-    assert "rm -f \"$RELEASE_HOLD_FILE\"" in release
+    assert 'rm -f "$RELEASE_HOLD_FILE"' in release
     assert "release_entry_hold_active" in _text("src/nifty_scalper_bot/main.py")
     assert "live_entry_submission_slot" in _text(
         "src/nifty_scalper_bot/execution/order_manager_core.py"
