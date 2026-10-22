@@ -282,6 +282,44 @@ PY_MIGRATE
   log "migrated $AUTODEPLOY_SERVICE ExecStart to bash wrapper"
 }
 
+configure_autodeploy_timer() {
+  # Upgrade the existing host timer in place, without running the full installer
+  # or stopping the engine. Run at most once per host (idempotent).
+  local timer="/etc/systemd/system/${AUTODEPLOY_SERVICE}.timer"
+  [ -f "$timer" ] || return 0
+  if grep -Fqx "OnUnitInactiveSec=30s" "$timer" 2>/dev/null; then
+    return 0
+  fi
+  if sudo -n python3 - "$timer" <<'PY_TIMER'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+lines = path.read_text(encoding="utf-8").splitlines()
+out = []
+for line in lines:
+    if line.startswith("OnBootSec="):
+        out.append("OnBootSec=30s")
+    elif line.startswith("OnUnitActiveSec=") or line.startswith("OnUnitInactiveSec="):
+        continue
+    elif line.startswith("AccuracySec="):
+        continue
+    else:
+        out.append(line)
+idx = out.index("[Timer]") + 1
+out[idx:idx] = ["OnUnitInactiveSec=30s", "AccuracySec=5s"]
+path.write_text("\n".join(out).rstrip() + "\n", encoding="utf-8")
+PY_TIMER
+  then
+    sudo -n systemctl daemon-reload &&
+      sudo -n systemctl restart "${AUTODEPLOY_SERVICE}.timer" &&
+      log "auto-deploy timer upgraded to 30 seconds after each completed run" ||
+      log "WARNING: timer reload failed; existing timer continues"
+  else
+    log "WARNING: timer upgrade needs host permissions; existing timer continues"
+  fi
+}
+
 admin_healthy() {
   # Verify the independent control plane, not just the trading engine.
   curl -fsS --max-time 3 "http://127.0.0.1:${ADMIN_PORT}/healthz" >/dev/null 2>&1 &&
@@ -593,6 +631,7 @@ if [ "$RUNTIME_ENV_CHANGED" = true ]; then FORCE_RESTART=true; fi
 if [ -f "$RESTART_PENDING_FILE" ]; then FORCE_RESTART=true; fi
 migrate_systemd_entrypoint
 migrate_autodeploy_entrypoint
+configure_autodeploy_timer
 if [ "$SYSTEMD_ENTRYPOINT_MIGRATED" = true ]; then
   FORCE_RESTART=true
 fi
