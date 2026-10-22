@@ -145,6 +145,14 @@ class VWAPProStrategy(EliteStrategy):
         self._trend_momentum_enabled = str(
             os.getenv("VWAP_TREND_MOMENTUM_ENABLED", "false")
         ).strip().lower() in {"1", "true", "yes", "on"}
+        # Additional isolated research arm; never modifies LIVE admission.
+        self._neutral_slope_research_enabled = bool(
+            os.getenv("EXECUTION_MODE", "SHADOW").strip().upper() == "SHADOW"
+            and str(os.getenv("VWAP_RESEARCH_NEUTRAL_FUTURES_SLOPE", "false"))
+            .strip()
+            .lower()
+            in {"1", "true", "yes", "on"}
+        )
         self._trend_momentum_option_rvol_min = max(
             0.0,
             float(os.getenv("VWAP_TREND_MOMENTUM_OPTION_RVOL_MIN", "1.5")),
@@ -971,6 +979,38 @@ class VWAPProStrategy(EliteStrategy):
                 self._no_vote("vwap_event_unconfirmed")
                 return None
 
+            # SHADOW-only ablation: a fresh, completed, liquid TREND premium
+            # momentum bar may compensate for weak *same-side* futures slope.
+            # Missing, stale, adverse or strongly opposing slopes never qualify.
+            # Existing trend-momentum mode already enforces completed-bar proof,
+            # prior-candle RVOL and strong underlying direction independently.
+            research_neutral_slope_admitted = bool(
+                self._neutral_slope_research_enabled
+                and self._trend_momentum_enabled
+                and not slope_support
+                and futures_slope_bps is not None
+                and abs(futures_slope_bps) < self._futures_slope_min_bps
+                and (
+                    (contract_side == "CE" and futures_slope_bps >= 0.0)
+                    or (contract_side == "PE" and futures_slope_bps <= 0.0)
+                )
+                and strong_fresh_trend_context
+                and trend_momentum_regime == MarketRegime.TREND
+                and momentum_continuation_confirmed
+                and confirmed_bar is not None
+                and completed_option_rvol is not None
+                and completed_option_rvol >= self._trend_momentum_option_rvol_min
+                and vol_support
+                and fut_vol_support
+            )
+            if research_neutral_slope_admitted:
+                reasons = [
+                    reason
+                    for reason in reasons
+                    if reason != "futures_slope_below_floor"
+                ]
+                reasons.append("research_neutral_futures_slope")
+
             # Structural contract: a VWAP continuation/pullback entry must have
             # a premium event, fresh underlying alignment, futures slope support
             # and observed activity.  No downstream component may compensate for a
@@ -982,7 +1022,7 @@ class VWAPProStrategy(EliteStrategy):
                 structural_failures.append("underlying_direction_conflict")
             if not context_fresh:
                 structural_failures.append("underlying_context_stale")
-            if not slope_support:
+            if not (slope_support or research_neutral_slope_admitted):
                 structural_failures.append("futures_slope_not_aligned")
             if not (vol_support or fut_vol_support):
                 structural_failures.append("volume_confirmation_missing")
@@ -1033,7 +1073,8 @@ class VWAPProStrategy(EliteStrategy):
                 [
                     "premium_above_vwap",
                     "underlying_direction_alignment",
-                    "futures_slope_alignment",
+                    "futures_slope_alignment"
+                    if slope_support else "research_neutral_futures_slope",
                     "volume_confirmation",
                 ]
             )
@@ -1062,6 +1103,8 @@ class VWAPProStrategy(EliteStrategy):
                 "context_age_seconds": context_age_seconds,
                 "context_fresh": context_fresh,
                 "futures_slope_alignment": slope_support,
+                "research_neutral_slope_enabled": self._neutral_slope_research_enabled,
+                "research_neutral_slope_admitted": research_neutral_slope_admitted,
                 "volume_confirmation": bool(vol_support or fut_vol_support),
                 "context_direction_used": bias if bias in {"CE", "PE"} else None,
                 "requires_runner_execution_validation": True,
