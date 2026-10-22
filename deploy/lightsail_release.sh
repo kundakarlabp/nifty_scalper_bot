@@ -353,10 +353,9 @@ poll_research_request() {
 }
 
 
-# No market-hours ban: a validated release may restart at any clock time.
-# The exposure guard still requires two independent broker-flat samples
-# AND a reconciled, disarmed engine. Merely seeing a flat account while the
-# strategy runner is armed is not an atomic lock against a new entry.
+# No market-hours ban. For immediate post-CI deployment the exposure
+# deferral is OFF by default. The legacy broker-flat guard remains available
+# for an explicit emergency policy override only.
 intraday_flat_broker_confirmed() {
   local api_key access_token
   api_key="$(first_nonempty_env BROKER_API_KEY ZERODHA_API_KEY KITE_API_KEY 2>/dev/null || true)"
@@ -456,6 +455,14 @@ PY_FLAT_GUARD
 
 auto_release_should_defer() {
   [ "$AUTO_MODE" = true ] || return 1
+  # Owner-selected deployment policy: do not hold code updates because the
+  # trading engine is armed, positions are open, or Kite exposure cannot be
+  # queried. This is intentionally disabled by default, not a hidden market
+  # hours condition. Emergency opt-in is available without a code change:
+  # BOT_AUTO_DEPLOY_EXPOSURE_GUARD_ENABLED=true.
+  if [ "${BOT_AUTO_DEPLOY_EXPOSURE_GUARD_ENABLED:-false}" != "true" ]; then
+    return 1
+  fi
   # Already-current, healthy builds require no broker requests. Route through
   # the no-change branch, which still confirms the deployed SHA and reports
   # status; do not poll Kite positions/orders every two minutes unnecessarily.
@@ -465,8 +472,7 @@ auto_release_should_defer() {
     && service_healthy_confirmed "$BEFORE"; then
     return 0
   fi
-  # An automatic release is independent of market hours, but it must never
-  # interrupt open broker exposure or a runtime capable of entering a trade.
+  # Optional legacy exposure policy, disabled in the default automatic flow.
   intraday_flat_broker_confirmed && return 1
   return 0
 }
@@ -582,8 +588,8 @@ set_env_value SUPABASE_LOG_ARCHIVE_ENABLED true
 ensure_env_default SUPABASE_LOG_ARCHIVE_URL "https://dehdptgkqbrkyzyodicd.supabase.co/functions/v1/nifty-log-archive-ingest"
 ensure_env_default SUPABASE_LOG_ARCHIVE_INTERVAL_SECONDS 300
 if [ "$RUNTIME_ENV_CHANGED" = true ]; then FORCE_RESTART=true; fi
-# A prior pre-open operation may have persisted environment or unit changes but
-# deferred its restart for unsafe broker state; retry as soon as safe.
+# Preserve explicit restart requests across failed validation/deployment.
+# Exposure no longer defers the default automatic release.
 if [ -f "$RESTART_PENDING_FILE" ]; then FORCE_RESTART=true; fi
 migrate_systemd_entrypoint
 migrate_autodeploy_entrypoint
