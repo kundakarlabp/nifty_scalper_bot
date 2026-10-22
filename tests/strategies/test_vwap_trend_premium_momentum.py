@@ -426,7 +426,9 @@ def test_research_neutral_futures_slope_requires_explicit_shadow_opt_in(
 
     monkeypatch.setenv("VWAP_RESEARCH_NEUTRAL_FUTURES_SLOPE", "true")
     strategy, admitted = _evaluate(
-        monkeypatch, side=side, execution_mode="SHADOW",
+        monkeypatch,
+        side=side,
+        execution_mode="SHADOW",
         futures_vwap_slope=near_neutral_same_side,
     )
     assert admitted is not None
