@@ -220,8 +220,9 @@ if ops[1].button("Check GitHub update", type="primary", width="stretch"):
 ops[2].link_button("Hard admin", ADMIN_PUBLIC, width="stretch")
 ops[3].caption(
     "Controls request the validated deployment service. "
-    "Updates and restarts pass release validation but no longer wait for broker-flat status. "
-    "An active trade may temporarily lose bot-side exit monitoring. Queued is not deployed."
+    "Updates and restarts pass release validation without broker-flat delays. "
+    "An active trade may temporarily lose bot-side exit monitoring. "
+    "Queued does not mean deployed."
 )
 
 
