@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -99,8 +100,11 @@ def test_research_worker_runs_each_epoch_without_live_credentials(
         assert kwargs["env"]["ENABLE_LIVE"] == "false"
         assert kwargs["env"]["ALLOW_REAL_BROKER"] == "false"
         assert "KITE_API_KEY" not in kwargs["env"]
-        (Path(output) / "report.json").write_text(
-            '{"scope":"offline_replay","live_equivalent":false}', encoding="utf-8"
+        assert "--compare-adaptive" in command
+        assert command[command.index("--stress-bps") + 1 :] == ["10", "25", "50"]
+        (Path(output) / "paired-comparison.json").write_text(
+            '{"state":"MODELED_COMPARISON_ONLY","stress":[]}',
+            encoding="utf-8",
         )
         return SimpleNamespace(returncode=0)
 
@@ -121,3 +125,42 @@ def test_research_worker_runs_each_epoch_without_live_credentials(
     scratch = tmp_path / "data/research/epoch-fixture/runtime/2026-10-21/_epochs"
     assert not scratch.exists()
     assert archive_fingerprint(path) == before
+
+
+def test_partition_rejects_reentry_of_a_previous_process_run(tmp_path):
+    path = _record_two_runs(tmp_path)
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    repeated = dict(rows[1])
+    repeated["sequence"] += 1
+    repeated["available_at"] = "2026-10-21T10:04:00+05:30"
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(repeated) + "\n")
+    identity = rows[0]["run_id"]
+    sidecar = path.parent / f"{identity}.integrity.json"
+    counters = json.loads(sidecar.read_text())
+    counters["written_by_day"]["2026-10-21"] += 1
+    sidecar.write_text(json.dumps(counters))
+    destination = tmp_path / "epochs"
+    with pytest.raises(ValueError, match="replay_epoch_noncontiguous"):
+        partition_replay_runs(path, destination)
+    assert not destination.exists()
+
+
+def test_partition_preserves_unrestored_open_position_as_independent_blocker(
+    tmp_path,
+):
+    path = _record_two_runs(tmp_path)
+    events = [json.loads(line) for line in path.read_text().splitlines()]
+    second_run = events[-1]["run_id"]
+    for event in events:
+        if event["run_id"] == second_run and event["kind"] == "snapshot":
+            event["payload"]["initial_positions"] = [{"quantity": 65}]
+    path.write_text(
+        "\n".join(json.dumps(event) for event in events) + "\n",
+        encoding="utf-8",
+    )
+    epochs = partition_replay_runs(path, tmp_path / "epochs")
+    assert len(epochs) == 2
+    assert validate_replay_epochs(epochs[0][1])[0] == 2
+    with pytest.raises(ValueError, match="replay_initial_positions_unsupported"):
+        validate_replay_epochs(epochs[1][1])
