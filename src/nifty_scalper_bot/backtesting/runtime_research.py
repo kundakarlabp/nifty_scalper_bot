@@ -83,6 +83,77 @@ def validate_replay_epochs(path: Path) -> tuple[int, dict[str, Any], int]:
     return count, first_snapshot, snapshots
 
 
+def materialize_replay_epochs(source: Path, destination: Path) -> list[Path]:
+    """Partition a verified multirun archive without inventing restart state.
+
+    Each derived file retains the original recorded events and first snapshot.
+    The derived integrity manifest records its source SHA and run identity.
+    A caller must treat every epoch as a *separate* process with its own
+    startup snapshot; no state or positions are carried between epochs.
+    """
+    import re
+
+    original_sha = archive_fingerprint(source)
+    epochs: list[tuple[str, Path, int]] = []
+    seen: set[str] = set()
+    writer: Any = None
+    active_run: str | None = None
+    try:
+        for event in iter_session(source):
+            run = event["run_id"]
+            if not isinstance(run, str) or not re.fullmatch(r"[0-9a-fA-F]{32}", run):
+                raise ValueError("replay_epoch_run_identity_invalid")
+            if run != active_run:
+                if run in seen:
+                    raise ValueError("replay_epoch_noncontiguous")
+                if len(seen) >= 40:
+                    raise ValueError("replay_epoch_count_exceeds_limit")
+                if writer is not None:
+                    writer.close()
+                seen.add(run)
+                active_run = run
+                target = destination / f"epoch-{len(seen):03d}" / source.name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                writer = target.open("x", encoding="utf-8")
+                epochs.append((run, target, 0))
+            writer.write(json.dumps(event, separators=(",", ":"), allow_nan=False) + "\n")
+            run_id, path, total = epochs[-1]
+            epochs[-1] = (run_id, path, total + 1)
+    finally:
+        if writer is not None:
+            writer.close()
+    if archive_fingerprint(source) != original_sha:
+        raise ValueError("replay_epoch_source_changed")
+    if len(epochs) < 2:
+        raise ValueError("replay_epoch_partition_not_required")
+
+    # Original archive's iter_session has already checked every true writer
+    # sidecar and sequence to EOF. The derived sidecar is explicitly labeled
+    # with source provenance; it is not presented as a new market capture.
+    for run, path, total in epochs:
+        original = json.loads((source.parent / f"{run}.integrity.json").read_text())
+        if (
+            original.get("dropped")
+            or original.get("failed")
+            or original.get("written_by_day", {}).get(source.stem) != total
+        ):
+            raise ValueError("replay_epoch_original_integrity_mismatch")
+        marker = {
+            "run_id": run,
+            "written_by_day": {source.stem: total},
+            "dropped": 0,
+            "failed": 0,
+            "derived_epoch": True,
+            "original_capture_sha256": original_sha,
+        }
+        (path.parent / f"{run}.integrity.json").write_text(
+            json.dumps(marker), encoding="utf-8"
+        )
+        # Validate the derived sequence and its own sidecar again.
+        sum(1 for _ in iter_session(path))
+    return [path for _, path, _ in epochs]
+
+
 def _restore_settings(current: Any, captured: Any) -> Any:
     if (
         is_dataclass(current)
