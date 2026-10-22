@@ -997,15 +997,26 @@ class VWAPProStrategy(EliteStrategy):
                     reason=structural_failures[0],
                 )
                 LOGGER.info(
-                    "VWAP_STRUCTURAL_SETUP_REJECTED symbol=%s side=%s failures=%s",
+                    "VWAP_STRUCTURAL_SETUP_REJECTED symbol=%s side=%s failures=%s "
+                    "slope_bps=%s min_slope_bps=%.3f underlying_direction=%s",
                     symbol,
                     contract_side,
                     structural_failures,
+                    futures_slope_bps,
+                    self._futures_slope_min_bps,
+                    underlying_direction,
                     extra={
                         "event": "VWAP_STRUCTURAL_SETUP_REJECTED",
                         "symbol": symbol,
                         "side": contract_side,
                         "failures": structural_failures,
+                        "setup_id": setup_lifecycle_id,
+                        "futures_slope_bps": futures_slope_bps,
+                        "required_futures_slope_bps": self._futures_slope_min_bps,
+                        "underlying_direction": underlying_direction,
+                        "option_volume_ratio": option_volume_ratio,
+                        "futures_volume_ratio": futures_volume_ratio,
+                        "bar_timestamp": str(indicators.get("latest_bar_ts") or ""),
                     },
                 )
                 return None
