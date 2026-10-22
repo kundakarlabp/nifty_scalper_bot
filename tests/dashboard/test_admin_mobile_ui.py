@@ -1,4 +1,5 @@
 """Regression tests for the mobile-first independent admin control plane."""
+
 from __future__ import annotations
 
 from fastapi import FastAPI
@@ -16,7 +17,8 @@ def client() -> TestClient:
 
 def test_mobile_dashboard_loads_without_expensive_live_probes(monkeypatch) -> None:
     monkeypatch.setattr(
-        dashboard, "_read_env",
+        dashboard,
+        "_read_env",
         lambda: {
             "KITE_API_KEY": "my-key",
             "KITE_API_SECRET": "not-for-html",
@@ -26,7 +28,8 @@ def test_mobile_dashboard_loads_without_expensive_live_probes(monkeypatch) -> No
         },
     )
     monkeypatch.setattr(
-        dashboard, "quick_overview",
+        dashboard,
+        "quick_overview",
         lambda: (_ for _ in ()).throw(AssertionError("blocked page render")),
     )
     body = client().get("/admin")
@@ -69,10 +72,12 @@ def test_overview_uses_live_engine_evidence_and_caches_it(monkeypatch) -> None:
 
     monkeypatch.setattr(core, "_http_json", engine)
     monkeypatch.setattr(core, "_update_state", lambda: {"state": "deployed"})
+
     def no_git(*_args):
         raise AssertionError("no git in heartbeat")
 
     monkeypatch.setattr(core, "_git_ref", no_git)
+
     def no_journal(*_args, **_kwargs):
         raise AssertionError("no journal in heartbeat")
 
@@ -114,7 +119,8 @@ def test_overview_and_log_api_are_explicit_no_store(monkeypatch) -> None:
     monkeypatch.setattr(dashboard, "quick_overview", lambda: {"engine_ok": True})
     read = []
     monkeypatch.setattr(
-        dashboard, "bounded_logs",
+        dashboard,
+        "bounded_logs",
         lambda lines, needle: read.append((lines, needle)) or "redacted log",
     )
     app = client()
