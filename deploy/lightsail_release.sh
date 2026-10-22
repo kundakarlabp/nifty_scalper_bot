@@ -282,6 +282,12 @@ PY_MIGRATE
   log "migrated $AUTODEPLOY_SERVICE ExecStart to bash wrapper"
 }
 
+admin_healthy() {
+  # Verify the independent control plane, not just the trading engine.
+  curl -fsS --max-time 3 "http://127.0.0.1:${ADMIN_PORT}/healthz" >/dev/null 2>&1 &&
+    curl -fsS --max-time 4 "http://127.0.0.1:${ADMIN_PORT}/admin" >/dev/null 2>&1
+}
+
 restart_admin() {
   if ! systemctl is-enabled --quiet "$ADMIN_SERVICE" 2>/dev/null; then
     return 1
@@ -291,6 +297,21 @@ restart_admin() {
     curl -fsS --max-time 2 "http://127.0.0.1:${ADMIN_PORT}/admin/api/status" >/dev/null 2>&1 && return 0
     sleep 1
   done
+  return 1
+}
+
+recover_admin_control() {
+  # The bot may be trading or broker authentication may have expired. Admin
+  # recovery does not restart the engine or require broker-flat proof.
+  if admin_healthy; then
+    return 0
+  fi
+  log "WARNING: admin page unavailable; restarting only $ADMIN_SERVICE"
+  if restart_admin && admin_healthy; then
+    log "Admin control plane recovered; trading engine unchanged"
+    return 0
+  fi
+  log "WARNING: admin recovery failed; trading engine unchanged"
   return 1
 }
 
@@ -432,6 +453,13 @@ if ! flock -n 9; then log "Another deployment is already running"; exit 0; fi
 cd "$APP_DIR"
 if [ ! -d .git ]; then
   write_status repository_missing "Git repository missing at $APP_DIR"; exit 1
+fi
+
+# Independently heal token-entry controls on every scheduled release check,
+# including when broker exposure or a pending GitHub CI run forbids deployment.
+# Never change engine state merely because the admin page is unavailable.
+if [ "$AUTO_MODE" = true ]; then
+  recover_admin_control || true
 fi
 
 # A newly fetched release script can run while the checkout still contains a
