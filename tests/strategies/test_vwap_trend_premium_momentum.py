@@ -13,7 +13,13 @@ from nifty_scalper_bot.strategies.elite_strategies.vwap_pro import VWAPProStrate
 
 
 def _evaluate(
-    monkeypatch, *, side="CE", enabled=True, retest=False, execution_mode="LIVE", **updates
+    monkeypatch,
+    *,
+    side="CE",
+    enabled=True,
+    retest=False,
+    execution_mode="LIVE",
+    **updates,
 ):
     monkeypatch.setenv("EXECUTION_MODE", execution_mode)
     monkeypatch.setenv("VWAP_TREND_MOMENTUM_ENABLED", "true" if enabled else "false")
@@ -406,7 +412,9 @@ def test_retest_preserves_genuine_prior_reclaim_when_prior_vwap_available(
 
 
 @pytest.mark.parametrize("side", ["CE", "PE"])
-def test_research_neutral_futures_slope_requires_explicit_shadow_opt_in(monkeypatch, side):
+def test_research_neutral_futures_slope_requires_explicit_shadow_opt_in(
+    monkeypatch, side
+):
     near_neutral_same_side = 0.0001 if side == "CE" else -0.0001
     _, baseline = _evaluate(
         monkeypatch, side=side, execution_mode="SHADOW",
@@ -440,12 +448,36 @@ def test_research_neutral_futures_slope_requires_explicit_shadow_opt_in(monkeypa
         ("PE", {"futures_vwap_slope": 0.0001}, "futures_slope_not_aligned"),
         ("CE", {"futures_vwap_slope": None}, "futures_slope_not_aligned"),
         ("CE", {"futures_vwap_slope": float("inf")}, "futures_slope_not_aligned"),
-        ("CE", {"futures_vwap_slope": 0.0001, "futures_volume_ratio": 0.4}, "futures_slope_not_aligned"),
-        ("CE", {"futures_vwap_slope": 0.0001, "underlying_direction_confidence": 0.4}, "trend_momentum_underlying_quality_unconfirmed"),
-        ("CE", {"futures_vwap_slope": 0.0001, "context_age_seconds": 10.0}, "trend_momentum_underlying_quality_unconfirmed"),
-        ("CE", {"futures_vwap_slope": 0.0001, "regime": "RANGE"}, "trend_momentum_regime_not_trend"),
-        ("CE", {"futures_vwap_slope": 0.0001, "volume": 0.0}, "option_candle_no_trades"),
-        ("CE", {"futures_vwap_slope": 0.0001, "history_timestamp": "2026-09-10T09:59:00+05:30"}, "trend_momentum_bar_unconfirmed"),
+        (
+            "CE",
+            {"futures_vwap_slope": 0.0001, "futures_volume_ratio": 0.4},
+            "futures_slope_not_aligned",
+        ),
+        (
+            "CE",
+            {"futures_vwap_slope": 0.0001, "underlying_direction_confidence": 0.4},
+            "trend_momentum_underlying_quality_unconfirmed",
+        ),
+        (
+            "CE",
+            {"futures_vwap_slope": 0.0001, "context_age_seconds": 10.0},
+            "trend_momentum_underlying_quality_unconfirmed",
+        ),
+        (
+            "CE",
+            {"futures_vwap_slope": 0.0001, "regime": "RANGE"},
+            "trend_momentum_regime_not_trend",
+        ),
+        (
+            "CE",
+            {"futures_vwap_slope": 0.0001, "volume": 0.0},
+            "option_candle_no_trades",
+        ),
+        (
+            "CE",
+            {"futures_vwap_slope": 0.0001, "history_timestamp": "2026-09-10T09:59:00+05:30"},
+            "trend_momentum_bar_unconfirmed",
+        ),
     ],
 )
 def test_research_neutral_slope_does_not_override_quality_guards(
