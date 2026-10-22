@@ -828,8 +828,8 @@ def test_recorded_replay_budget_exhaustion_is_partial_not_completed(
 
     def replay(command, **kwargs):
         output = Path(command[command.index("--output") + 1])
-        (output / "report.json").write_text(
-            json.dumps({"events_processed": 10}),
+        (output / "paired-comparison.json").write_text(
+            json.dumps({"state": "MODELED_COMPARISON_ONLY", "stress": []}),
             encoding="utf-8",
         )
         return SimpleNamespace(returncode=0)
