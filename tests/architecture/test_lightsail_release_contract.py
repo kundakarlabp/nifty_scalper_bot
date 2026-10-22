@@ -293,6 +293,61 @@ def test_unchanged_release_confirms_health_failure_before_restart() -> None:
     assert 'service_healthy "$BEFORE"' not in unchanged
 
 
+def test_admin_recovery_is_independent_of_broker_and_ci_gates() -> None:
+    release = _text("deploy/lightsail_release.sh")
+    entry = release.index("exec 9>")
+    recovery_call = release.index("recover_admin_control || true", entry)
+    broker_gate = release.index("if auto_release_should_defer; then", entry)
+    ci_gate = release.index('if [ "$BEFORE" != "$AFTER" ]; then', broker_gate)
+    assert entry < recovery_call < broker_gate < ci_gate
+    assert 'http://127.0.0.1:${ADMIN_PORT}/healthz' in release
+    assert 'http://127.0.0.1:${ADMIN_PORT}/admin"' in release
+    recovery = release.split("recover_admin_control() {", 1)[1].split(
+        "\nrestart_streamlit()", 1
+    )[0]
+    assert "restart_admin && admin_healthy" in recovery
+    assert 'systemctl restart "$SERVICE"' not in recovery
+    assert "intraday_flat_broker_confirmed" not in recovery
+
+
+def test_isolated_admin_recovery_success_and_failure(tmp_path: Path) -> None:
+    release = _text("deploy/lightsail_release.sh")
+    recovery = "recover_admin_control() {" + release.split(
+        "recover_admin_control() {", 1
+    )[1].split("\nrestart_streamlit()", 1)[0]
+    shell = recovery + """
+log() { printf "%s\\n" "$*" >> "$LOGFILE"; }
+admin_healthy() { [ "$ADMIN_STATE" = "healthy" ]; }
+restart_admin() {
+  printf "restart-admin\\n" >> "$LOGFILE"
+  if [ "$RESTART_SUCCEEDS" = "true" ]; then ADMIN_STATE=healthy; return 0; fi
+  return 1
+}
+recover_admin_control
+"""
+    for initial, restarted, expected in (
+        ("healthy", "false", 0),
+        ("unhealthy", "true", 0),
+        ("unhealthy", "false", 1),
+    ):
+        logfile = tmp_path / "admin.log"
+        logfile.unlink(missing_ok=True)
+        env = dict(
+            os.environ,
+            LOGFILE=str(logfile),
+            ADMIN_STATE=initial,
+            RESTART_SUCCEEDS=restarted,
+            ADMIN_SERVICE="niftybot-admin",
+        )
+        result = subprocess.run(
+            ["bash", "-c", shell], capture_output=True, text=True, env=env, check=False
+        )
+        assert result.returncode == expected, result.stderr
+        logged = logfile.read_text() if logfile.exists() else ""
+        assert logged.count("restart-admin") == (0 if initial == "healthy" else 1)
+        assert "trading engine unchanged" in logged or initial == "healthy"
+
+
 def test_changed_release_restarts_current_revision_admin_before_research_poll() -> None:
     release = _text("deploy/lightsail_release.sh")
 
