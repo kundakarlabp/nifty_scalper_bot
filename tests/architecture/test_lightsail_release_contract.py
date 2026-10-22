@@ -823,21 +823,18 @@ def test_successful_engine_release_never_hides_failed_admin(tmp_path: Path) -> N
     """A healthy engine must not mask a broken independent admin service."""
     release = _text("deploy/lightsail_release.sh")
     start = release.index('if wait_for_service "$AFTER"; then')
-    end = release.index(
-        '\nif [ "$BEFORE" != "$AFTER" ]; then\n  git reset', start
-    )
+    end = release.index('\nif [ "$BEFORE" != "$AFTER" ]; then\n  git reset', start)
     success_block = release[start:end]
 
     script = (
-        'wait_for_service() { return 0; }\n'
+        "wait_for_service() { return 0; }\n"
         'restart_admin() { [ "$ADMIN_OK" = "yes" ]; }\n'
         'restart_streamlit() { [ "$CONSOLE_OK" = "yes" ]; }\n'
         'broker_auth_dependency_degraded() { [ "$BROKER_DEGRADED" = "yes" ]; }\n'
         'write_status() { printf "%s\\n" "$1" > "$STATUS_OUTPUT"; }\n'
-        'logger() { :; }\n'
-        'log() { :; }\n'
-        'poll_research_request() { :; }\n'
-        + success_block
+        "logger() { :; }\n"
+        "log() { :; }\n"
+        "poll_research_request() { :; }\n" + success_block
     )
     cases = (
         ("yes", "yes", "no", "deployed"),
