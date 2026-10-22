@@ -22,6 +22,8 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+from nifty_scalper_bot.superlite_admin_core import bounded_logs, quick_overview
+
 from nifty_scalper_bot.ops.service_control import (
     ControlResult,
     queue_validated_restart,
@@ -464,7 +466,7 @@ def dashboard(request: Request) -> HTMLResponse:
             <form method="post" action="/admin/risk/reset-day">
               <input type="hidden" name="confirm" value="RESET">
               <button type="submit" class="amb full"
-              onclick="return confirm('Reset today&#39;s risk allowance? Ledger and realised P&L remain unchanged.')">
+              onclick="return confirm('Reset the daily risk allowance? Ledger and realised P&L remain unchanged.')">
               Reset today’s risk allowance</button></form>
           </div></details>
           <details><summary>Credentials &amp; integration settings</summary><div class="detail-body">
@@ -647,6 +649,27 @@ def update_from_github(request: Request) -> Response:
     return RedirectResponse(
         "/admin?upd=err&msg=" + urllib.parse.quote(message[:120]),
         status_code=303,
+    )
+
+
+@router.get("/admin/api/overview")
+def overview_api(request: Request) -> JSONResponse:
+    """Lightweight independent heartbeat for mobile auto-refresh."""
+    _check_auth(request)
+    return JSONResponse(quick_overview(), headers={"Cache-Control": "no-store"})
+
+
+@router.get("/admin/api/logs")
+def logs_api(request: Request, lines: int = 250, contains: str = "") -> JSONResponse:
+    """Bounded, redacted, explicitly requested journal sample."""
+    _check_auth(request)
+    limit = max(50, min(lines, 500))
+    needle = contains[:80]
+    text = bounded_logs(limit, needle)
+    # Do not send megabytes of journal text to a constrained mobile browser.
+    return JSONResponse(
+        {"text": text[-100_000:] if text else "No matching log lines."},
+        headers={"Cache-Control": "no-store"},
     )
 
 
