@@ -437,6 +437,8 @@ def test_research_neutral_futures_slope_requires_explicit_shadow_opt_in(
     assert admitted.metadata["trend_momentum_completed_option_rvol"] >= 1.5
     assert admitted.metadata["setup_pass"] is True
 
+    # The original SHADOW flag must never override an explicit LIVE kill switch.
+    monkeypatch.setenv("VWAP_LIVE_NEUTRAL_SLOPE_ENABLED", "false")
     live_strategy, live = _evaluate(
         monkeypatch,
         side=side,
@@ -510,3 +512,98 @@ def test_research_neutral_slope_needs_completed_option_momentum(monkeypatch):
     )
     assert signal is None
     assert strategy.last_no_vote_reason == "futures_slope_not_aligned"
+
+
+
+@pytest.mark.parametrize("side", ["CE", "PE"])
+def test_live_neutral_slope_enables_quality_proven_entry_by_default(
+    monkeypatch, side
+):
+    monkeypatch.delenv("VWAP_LIVE_NEUTRAL_SLOPE_ENABLED", raising=False)
+    near_neutral = 0.0001 if side == "CE" else -0.0001
+    _, signal = _evaluate(
+        monkeypatch,
+        side=side,
+        enabled=False,
+        execution_mode="LIVE",
+        futures_vwap_slope=near_neutral,
+    )
+    assert signal is not None
+    assert signal.metadata["live_neutral_slope_enabled"] is True
+    assert signal.metadata["live_neutral_slope_admitted"] is True
+    assert signal.metadata["research_neutral_slope_admitted"] is False
+    assert signal.metadata["vwap_finalized_bar_confirmed"] is True
+    assert signal.metadata["vwap_neutral_slope_premium_proof_required"] is True
+    assert signal.metadata["trend_momentum_completed_option_rvol"] >= 1.5
+    assert signal.metadata["futures_slope_alignment"] is False
+    assert "live_neutral_futures_slope" in signal.metadata["setup_reasons"]
+
+
+@pytest.mark.parametrize("side", ["CE", "PE"])
+def test_live_neutral_slope_rolls_back_with_one_switch(monkeypatch, side):
+    monkeypatch.setenv("VWAP_LIVE_NEUTRAL_SLOPE_ENABLED", "false")
+    near_neutral = 0.0001 if side == "CE" else -0.0001
+    strategy, signal = _evaluate(
+        monkeypatch,
+        side=side,
+        enabled=False,
+        execution_mode="LIVE",
+        futures_vwap_slope=near_neutral,
+    )
+    assert signal is None
+    assert strategy.last_no_vote_reason == "futures_slope_not_aligned"
+
+
+@pytest.mark.parametrize(
+    "side, updates, reason",
+    [
+        ("CE", {"futures_vwap_slope": -0.0001}, "futures_slope_not_aligned"),
+        ("PE", {"futures_vwap_slope": 0.0001}, "futures_slope_not_aligned"),
+        ("CE", {"futures_vwap_slope": None}, "futures_slope_not_aligned"),
+        ("CE", {"futures_vwap_slope": float("nan")}, "futures_slope_not_aligned"),
+        ("CE", {"futures_vwap_slope": 0.0001, "regime": "RANGE"},
+         "trend_momentum_regime_not_trend"),
+        ("CE", {"futures_vwap_slope": 0.0001, "underlying_direction_bias": "PE"},
+         "underlying_direction_conflict"),
+        ("CE", {"futures_vwap_slope": 0.0001, "underlying_direction_confidence": 0.5},
+         "trend_momentum_underlying_quality_unconfirmed"),
+        ("CE", {"futures_vwap_slope": 0.0001, "context_age_seconds": 8.0},
+         "trend_momentum_underlying_quality_unconfirmed"),
+        ("CE", {"futures_vwap_slope": 0.0001, "history_volume": 300.0},
+         "trend_momentum_option_volume_not_confirmed"),
+        ("CE", {"futures_vwap_slope": 0.0001, "futures_volume_ratio": 0.5},
+         "futures_slope_not_aligned"),
+        ("CE", {"futures_vwap_slope": 0.0001, "history_high": 101.0},
+         "trend_momentum_bar_unconfirmed"),
+        ("CE", {"futures_vwap_slope": 0.0001, "is_complete": False},
+         "trend_momentum_bar_unconfirmed"),
+        ("CE", {"futures_vwap_slope": 0.0001, "open": 102.8},
+         "trend_momentum_premium_not_confirmed"),
+        ("CE", {"futures_vwap_slope": 0.0001, "session_vwap": None},
+         "trend_momentum_session_vwap_unavailable"),
+    ],
+)
+def test_live_neutral_slope_preserves_structural_guards(
+    monkeypatch, side, updates, reason
+):
+    monkeypatch.delenv("VWAP_LIVE_NEUTRAL_SLOPE_ENABLED", raising=False)
+    strategy, signal = _evaluate(
+        monkeypatch, side=side, enabled=False, execution_mode="LIVE", **updates
+    )
+    assert signal is None
+    assert strategy.last_no_vote_reason == reason
+
+
+def test_live_strong_slope_baseline_is_not_tightened(monkeypatch):
+    monkeypatch.delenv("VWAP_LIVE_NEUTRAL_SLOPE_ENABLED", raising=False)
+    _, signal = _evaluate(
+        monkeypatch,
+        enabled=False,
+        execution_mode="LIVE",
+        futures_vwap_slope=0.01,
+        is_complete=False,
+        regime="RANGE",
+    )
+    assert signal is not None
+    assert signal.metadata["live_neutral_slope_admitted"] is False
+    assert signal.metadata["vwap_neutral_slope_premium_proof_required"] is False
