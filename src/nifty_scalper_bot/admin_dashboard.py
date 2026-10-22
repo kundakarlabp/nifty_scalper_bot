@@ -315,8 +315,9 @@ def _flash(request: Request) -> str:
     if q.get("restart") == "queued":
         return (
             '<div class="flash ok">Validated bot restart queued. '
-            "Restart requires broker-flat and disarmed-engine confirmation; "
-            "queued does not mean completed.</div>"
+            "Deployment no longer waits for a flat broker account; "
+            "open-position management may be interrupted. "
+            "Queued does not mean completed.</div>"
         )
     if q.get("restart") == "err":
         return (
@@ -451,15 +452,15 @@ def dashboard(request: Request) -> HTMLResponse:
         <section class="card" id="controls">
           <h2>Deployment &amp; service</h2>
           <p>Automatic release checks run independently. Manual actions only <b>queue</b>
-          the validated operation, subject to broker-flat and disarmed-engine checks.</p>
+          validated operations. Restarting may interrupt live order management.</p>
           <div class="flow">
             <form method="post" action="/admin/update"><button type="submit" class="full">
               Check GitHub for updates</button></form>
             <form method="post" action="/admin/restart"><button type="submit" class="full amb"
-              onclick="return confirm('Queue a validated safe restart? This will not bypass trade exposure checks.')">
-              Queue safe restart</button></form>
+              onclick="return confirm('Restart the LIVE engine as soon as validated? Open-position and stop management may be interrupted.')">
+              Queue engine restart</button></form>
           </div>
-          <div class="hint">If a request is deferred, review release status.
+          <div class="hint">Review release status for CI, validation or service failures.
           Requests are not confirmation that code deployed or the engine restarted.</div>
         </section>
         <section class="card"><h2>Advanced settings</h2>
