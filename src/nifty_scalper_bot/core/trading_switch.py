@@ -6,6 +6,7 @@ import fcntl
 import os
 import threading
 import time
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,7 +17,8 @@ log = get_logger(__name__)
 
 
 def _release_control_path(name: str) -> Path:
-    return Path(os.getenv("NIFTYBOT_CONFIG_DIR", "/home/ubuntu/.config/niftybot")) / name
+    root = os.getenv("NIFTYBOT_CONFIG_DIR", "/home/ubuntu/.config/niftybot")
+    return Path(root) / name
 
 
 def release_entry_hold_active() -> bool:
@@ -25,7 +27,7 @@ def release_entry_hold_active() -> bool:
 
 
 @contextmanager
-def live_entry_submission_slot(payload):
+def live_entry_submission_slot(payload: Mapping[str, object]) -> Iterator[None]:
     """Serialize LIVE entry submission with a deployment's broker-flat handoff.
 
     Every live opening order takes a shared advisory lock across its entire
