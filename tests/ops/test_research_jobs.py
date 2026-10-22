@@ -877,3 +877,63 @@ def test_runtime_mode_is_bounded_and_requires_no_operator_login(tmp_path, monkey
     ]
     with pytest.raises(ValueError):
         validate_request({"id": "bad", "mode": "shell"})
+
+
+def test_recorded_replay_exposes_sanitized_child_failure_in_status(
+    tmp_path, monkeypatch
+):
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from nifty_scalper_bot.ops.research_jobs import run_recorded_replays
+
+    archive = tmp_path / "data/replay_archive"
+    archive.mkdir(parents=True)
+    session = archive / "2026-09-30.jsonl"
+    session.write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "nifty_scalper_bot.config.paths.get_data_dir", lambda: tmp_path / "data"
+    )
+    monkeypatch.setattr(
+        "nifty_scalper_bot.ops.research_jobs.partition_replay_runs",
+        lambda path, destination: [("0123456789abcdef0123456789abcdef", path)],
+    )
+
+    def failed_replay(command, **kwargs):
+        del kwargs
+        output = Path(command[command.index("--output") + 1])
+        (output / "paired-comparison.json").write_text(
+            json.dumps(
+                {
+                    "state": "BLOCKED",
+                    "blocker": "paired_replay_worker_failed",
+                    "worker_error_code": "replay_session_incomplete",
+                    "failed_scenario": {
+                        "policy": "baseline",
+                        "slippage_bps": 10,
+                    },
+                    "stress": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return SimpleNamespace(returncode=1)
+
+    monkeypatch.setattr(
+        "nifty_scalper_bot.ops.research_jobs.subprocess.run", failed_replay
+    )
+    request = validate_request(
+        {"id": "worker-diagnosis", "mode": "runtime", "days": 1},
+        today=date(2026, 10, 1),
+    )
+    report = run_recorded_replays(tmp_path, request)
+    assert report["state"] == "blocked"
+    assert report["completed_sessions"] == 0
+    assert report["failed_sessions"] == 1
+    failure = report["sessions"][0]
+    assert failure["error_code"] == "paired_replay_worker_failed"
+    assert failure["worker_error_code"] == "replay_session_incomplete"
+    assert failure["failed_scenario"] == {
+        "policy": "baseline",
+        "slippage_bps": 10,
+    }
