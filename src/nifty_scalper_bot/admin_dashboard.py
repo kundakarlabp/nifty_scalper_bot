@@ -9,6 +9,8 @@ The daily Zerodha session flow is deliberately small and canonical:
 A paste fallback accepts either the raw request token or the complete redirect URL.
 The dashboard never collects or stores the Zerodha login password or TOTP secret.
 """
+# Embedded HTML/CSS/JS assets have intentional long literal lines.
+# ruff: noqa: E501
 from __future__ import annotations
 
 import hashlib
