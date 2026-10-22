@@ -46,7 +46,9 @@ def _tick(symbol, *, full=True, source="ws"):
     }
 
 
-def _record(tmp_path, *, quote=True, changed=False, rotated_quotes=False):
+def _record(
+    tmp_path, *, quote=True, changed=False, rotated_quotes=False, rotated_ce_depth=True
+):
     recorder = ReplayArchive(tmp_path)
     t = datetime(2026, 10, 21, 10, 0, tzinfo=IST)
     recorder.record("snapshot", _snapshot(), t)
@@ -61,7 +63,7 @@ def _record(tmp_path, *, quote=True, changed=False, rotated_quotes=False):
         if rotated_quotes:
             for symbol in (new_ce, PE, FUT, "NSE:NIFTY 50"):
                 tick = _tick(symbol, full=True)
-                if symbol == new_ce and not quote:
+                if symbol == new_ce and not rotated_ce_depth:
                     tick.pop("depth")
                 recorder.record("tick", tick, t + timedelta(minutes=1, seconds=1))
     recorder.close()
@@ -90,7 +92,7 @@ def test_no_depth_is_reported_not_reshaped_into_executable_fill(tmp_path):
     assert report["account_pnl"] is None
 
 
-def test_dynamic_basket_is_recorded_and_rejects_single_basket_parity(tmp_path):
+def test_dynamic_basket_without_new_quote_context_is_blocked(tmp_path):
     report = audit_session(_record(tmp_path, changed=True))
     assert report["basket_versions"] == 2
     assert not report["observed_selected_context_available"]
@@ -114,6 +116,20 @@ def test_rotated_basket_without_new_quotes_remains_blocked(tmp_path):
 
     assert report["basket_versions"] == 2
     assert report["basket_segments_missing_quote_context"] == 1
+    assert not report["observed_selected_context_available"]
+
+
+def test_second_basket_missing_depth_is_not_rescued_by_first_basket(tmp_path):
+    report = audit_session(
+        _record(
+            tmp_path, changed=True, rotated_quotes=True, rotated_ce_depth=False
+        )
+    )
+    assert report["basket_segments_with_quote_context"] == 1
+    assert report["basket_segments_missing_quote_context"] == 1
+    assert report["basket_segments_missing_by_requirement"] == {
+        "CE_no_two_sided_depth": 1
+    }
     assert not report["observed_selected_context_available"]
 
 
