@@ -663,14 +663,14 @@ def update_from_github(request: Request) -> Response:
 
 
 # fmt: off  # Short, stable JSON UI endpoints.
-@router.get("/admin/api/overview")
+@router.get("/admin/api/overview")  # type: ignore[untyped-decorator]
 def overview_api(request: Request) -> JSONResponse:
     """Lightweight independent heartbeat for mobile auto-refresh."""
     _check_auth(request)
     return JSONResponse(quick_overview(), headers={"Cache-Control": "no-store"})
 
 
-@router.get("/admin/api/logs")
+@router.get("/admin/api/logs")  # type: ignore[untyped-decorator]
 def logs_api(request: Request, lines: int = 250, contains: str = "") -> JSONResponse:
     """Bounded, redacted, explicitly requested journal sample."""
     _check_auth(request)
