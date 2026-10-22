@@ -417,7 +417,9 @@ def test_research_neutral_futures_slope_requires_explicit_shadow_opt_in(
 ):
     near_neutral_same_side = 0.0001 if side == "CE" else -0.0001
     _, baseline = _evaluate(
-        monkeypatch, side=side, execution_mode="SHADOW",
+        monkeypatch,
+        side=side,
+        execution_mode="SHADOW",
         futures_vwap_slope=near_neutral_same_side,
     )
     assert baseline is None
@@ -434,7 +436,9 @@ def test_research_neutral_futures_slope_requires_explicit_shadow_opt_in(
     assert admitted.metadata["setup_pass"] is True
 
     live_strategy, live = _evaluate(
-        monkeypatch, side=side, execution_mode="LIVE",
+        monkeypatch,
+        side=side,
+        execution_mode="LIVE",
         futures_vwap_slope=near_neutral_same_side,
     )
     assert live is None
@@ -497,7 +501,9 @@ def test_research_neutral_slope_does_not_override_quality_guards(
 def test_research_neutral_slope_needs_completed_option_momentum(monkeypatch):
     monkeypatch.setenv("VWAP_RESEARCH_NEUTRAL_FUTURES_SLOPE", "true")
     strategy, signal = _evaluate(
-        monkeypatch, execution_mode="SHADOW", enabled=False,
+        monkeypatch,
+        execution_mode="SHADOW",
+        enabled=False,
         futures_vwap_slope=0.0001,
     )
     assert signal is None
