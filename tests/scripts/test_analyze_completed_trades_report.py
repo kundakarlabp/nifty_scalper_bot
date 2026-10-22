@@ -1,6 +1,13 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import sqlite3
+
+from nifty_scalper_bot.journal.trade_ledger import (
+    ensure_trade_ledger_schema,
+    materialize_trade_events,
+)
 from pathlib import Path
 
 SCRIPT = (
@@ -127,3 +134,39 @@ def test_build_analysis_emits_repeatable_realized_post_cost_evidence() -> None:
     )
     exit_reason = report["realized_post_cost_evidence"]["by_exit_reason"][0]
     assert exit_reason["value"] == "TARGET"
+
+
+def test_cli_reports_all_historical_states_without_claiming_open_broker_orders(
+    tmp_path, capsys
+) -> None:
+    database = tmp_path / "journal.db"
+    with sqlite3.connect(database) as conn:
+        ensure_trade_ledger_schema(conn)
+        materialize_trade_events(
+            conn,
+            [
+                {
+                    "trade_id": "old-submission",
+                    "event_name": "order.acknowledged",
+                    "timestamp": 1.0,
+                    "build_sha": "a" * 40,
+                },
+                {
+                    "trade_id": "old-fill",
+                    "event_name": "entry.filled",
+                    "timestamp": 2.0,
+                    "build_sha": "a" * 40,
+                },
+            ],
+        )
+
+    assert module.main(["--trades-db", str(database)]) == 0
+    result = json.loads(capsys.readouterr().out)
+    integrity = result["ledger_integrity"]
+    assert integrity["total_ledger_rows"] == 2
+    assert integrity["completed_closed_rows"] == 0
+    assert integrity["nonclosed_historical_rows"] == 2
+    assert integrity["state_counts"] == {"ENTRY_FILLED": 1, "ENTRY_SUBMITTED": 1}
+    assert integrity["live_open_positions_inferred"] is False
+    assert integrity["broker_reconciled"] is False
+    assert result["overall_post_cost"]["trade_count"] == 0
