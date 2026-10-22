@@ -510,7 +510,9 @@ def run_recorded_replays(root: Path, request: dict[str, Any]) -> dict[str, Any]:
             validate_replay_epochs(path)
         except ValueError as exc:
             split_required = str(exc) == "replay_multiple_runs_unrestored_state"
-        with tempfile.TemporaryDirectory(prefix="validated-epochs-", dir=directory) as staging:
+        with tempfile.TemporaryDirectory(
+            prefix="validated-epochs-", dir=directory
+        ) as staging:
             if split_required:
                 try:
                     epoch_paths = materialize_replay_epochs(path, Path(staging))
