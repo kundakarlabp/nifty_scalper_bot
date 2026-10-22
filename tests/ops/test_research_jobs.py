@@ -815,7 +815,12 @@ def test_recorded_replay_budget_exhaustion_is_partial_not_completed(
     monkeypatch.setattr(
         "nifty_scalper_bot.config.paths.get_data_dir", lambda: tmp_path / "data"
     )
-    clock = iter([0.0, 1.0, 1501.0])
+    # This test targets deadline bookkeeping, not archive parsing.
+    monkeypatch.setattr(
+        "nifty_scalper_bot.ops.research_jobs.partition_replay_runs",
+        lambda path, destination: [("0123456789abcdef0123456789abcdef", path)],
+    )
+    clock = iter([0.0, 1.0, 2.0, 1501.0])
     monkeypatch.setattr(
         "nifty_scalper_bot.ops.research_jobs.time.monotonic",
         lambda: next(clock),

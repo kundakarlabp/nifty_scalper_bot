@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -462,6 +463,54 @@ def new_request(days: int = 30, mode: str = "all") -> dict[str, Any]:
     return {"id": f"dashboard-{uuid.uuid4().hex}", "days": days, "mode": mode}
 
 
+def partition_replay_runs(path: Path, destination: Path) -> list[tuple[str, Path]]:
+    """Validate a daily archive and isolate process epochs without restoring state."""
+    from nifty_scalper_bot.backtesting.runtime_research import validate_replay_epochs
+    from nifty_scalper_bot.storage.replay_archive import (
+        archive_fingerprint,
+        iter_session,
+    )
+
+    run_ids: list[str] = []
+    for event in iter_session(path):
+        run_id = event["run_id"]
+        if not isinstance(run_id, str) or not re.fullmatch(r"[0-9a-f]{32}", run_id):
+            raise ValueError("replay_run_id_invalid")
+        if run_id not in run_ids:
+            run_ids.append(run_id)
+            if len(run_ids) > 16:
+                raise ValueError("replay_epoch_count_exceeded")
+    if len(run_ids) == 1:
+        return [(run_ids[0], path)]
+
+    source_sha = archive_fingerprint(path)
+    shards = {
+        run_id: destination / f"epoch-{index:02d}" / path.name
+        for index, run_id in enumerate(run_ids, 1)
+    }
+    try:
+        for event in iter_session(path):
+            shard = shards[event["run_id"]]
+            shard.parent.mkdir(parents=True, exist_ok=True)
+            with shard.open("a", encoding="utf-8") as handle:
+                handle.write(
+                    json.dumps(event, separators=(",", ":"), allow_nan=False) + "\n"
+                )
+
+        for run_id, shard in shards.items():
+            shutil.copyfile(
+                path.parent / f"{run_id}.integrity.json",
+                shard.parent / f"{run_id}.integrity.json",
+            )
+            validate_replay_epochs(shard)
+        if archive_fingerprint(path) != source_sha:
+            raise ValueError("replay_archive_changed_during_partition")
+    except Exception:
+        shutil.rmtree(destination, ignore_errors=True)
+        raise
+    return list(shards.items())
+
+
 def run_recorded_replays(root: Path, request: dict[str, Any]) -> dict[str, Any]:
     """Replay each complete captured session in its own credential-free process."""
     from nifty_scalper_bot.config.paths import get_data_dir
@@ -496,76 +545,122 @@ def run_recorded_replays(root: Path, request: dict[str, Any]) -> dict[str, Any]:
             continue
         directory = output / day
         directory.mkdir(parents=True, exist_ok=True)
-        # No operator env file or inherited credential/path settings cross here.
-        env = {
-            key: value
-            for key, value in os.environ.items()
-            if key in {"PATH", "LANG", "LC_ALL", "TZ", "VIRTUAL_ENV"}
-        }
-        env.update(
-            REPLAY_ISOLATED_PROCESS="true",
-            EXECUTION_MODE="LIVE_SIMULATION",
-            ENABLE_LIVE="false",
-            ENABLE_LIVE_TRADING="false",
-            BROKER_API_KEY="offline_replay",
-            BROKER_API_SECRET="offline_replay",
-            BROKER_ACCESS_TOKEN="offline_replay",
-            ALLOW_NETWORK="false",
-            ALLOW_REAL_BROKER="false",
-            DATA_DIR=str(directory.resolve()),
-            PYTHONPATH=str(root / "src"),
-        )
-        interpreter = root / ".venv/bin/python"
-        if not interpreter.is_file():
-            interpreter = Path(sys.executable)
-        with (directory / "worker.log").open("w") as log:
-            try:
-                result = subprocess.run(
-                    [
-                        str(interpreter),
-                        str(root / "scripts/run_runtime_replay.py"),
-                        "--session",
-                        str(path.resolve()),
-                        "--output",
-                        str(directory.resolve()),
-                    ],
-                    cwd=directory,
-                    env=env,
-                    stdout=log,
-                    stderr=log,
-                    timeout=min(600, remaining),
+        scratch = directory / "_epochs"
+        try:
+            epochs = partition_replay_runs(path, scratch)
+        except (OSError, ValueError) as exc:
+            code = str(exc)
+            report["sessions"].append(
+                {
+                    "date": day,
+                    "state": "failed",
+                    "error_code": (
+                        code
+                        if code.startswith("replay_") and len(code) <= 100
+                        else "replay_archive_unusable"
+                    ),
+                }
+            )
+            cursor += timedelta(days=1)
+            continue
+        try:
+            for epoch_index, (run_id, epoch_path) in enumerate(epochs, 1):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    report["budget_exhausted"] = True
+                    report["deferred_from"] = day
+                    report["deferred_epoch"] = epoch_index
+                    break
+                run_directory = (
+                    directory
+                    if len(epochs) == 1
+                    else directory / f"result-epoch-{epoch_index:02d}"
                 )
-            except subprocess.TimeoutExpired:
-                report["sessions"].append(
-                    {"date": day, "state": "failed", "error_code": "replay_timeout"}
+                run_directory.mkdir(parents=True, exist_ok=True)
+                # No operator credentials or live broker access cross this boundary.
+                env = {
+                    key: value
+                    for key, value in os.environ.items()
+                    if key in {"PATH", "LANG", "LC_ALL", "TZ", "VIRTUAL_ENV"}
+                }
+                env.update(
+                    REPLAY_ISOLATED_PROCESS="true",
+                    EXECUTION_MODE="LIVE_SIMULATION",
+                    ENABLE_LIVE="false",
+                    ENABLE_LIVE_TRADING="false",
+                    BROKER_API_KEY="offline_replay",
+                    BROKER_API_SECRET="offline_replay",
+                    BROKER_ACCESS_TOKEN="offline_replay",
+                    ALLOW_NETWORK="false",
+                    ALLOW_REAL_BROKER="false",
+                    DATA_DIR=str(run_directory.resolve()),
+                    PYTHONPATH=str(root / "src"),
                 )
-            else:
-                evidence = directory / (
-                    "report.json" if result.returncode == 0 else "failure.json"
-                )
-                if evidence.is_file():
-                    payload = json.loads(evidence.read_text())
-                    report["sessions"].append(
-                        {
-                            "date": day,
-                            "state": (
-                                "completed" if result.returncode == 0 else "failed"
-                            ),
-                            **{
-                                key: value
-                                for key, value in payload.items()
-                                if key not in {"orders", "runner_status"}
-                            },
-                        }
-                    )
-                else:
-                    report["sessions"].append(
-                        {
-                            "date": day,
-                            "state": "failed",
-                            "error_code": "replay_worker_exited_without_report",
-                        }
-                    )
+                interpreter = root / ".venv/bin/python"
+                if not interpreter.is_file():
+                    interpreter = Path(sys.executable)
+                with (run_directory / "worker.log").open("w") as log:
+                    try:
+                        result = subprocess.run(
+                            [
+                                str(interpreter),
+                                str(root / "scripts/run_runtime_replay.py"),
+                                "--session",
+                                str(epoch_path.resolve()),
+                                "--output",
+                                str(run_directory.resolve()),
+                            ],
+                            cwd=run_directory,
+                            env=env,
+                            stdout=log,
+                            stderr=log,
+                            timeout=min(600, remaining),
+                        )
+                    except subprocess.TimeoutExpired:
+                        report["sessions"].append(
+                            {
+                                "date": day,
+                                "run_id": run_id,
+                                "state": "failed",
+                                "error_code": "replay_timeout",
+                            }
+                        )
+                    else:
+                        evidence = run_directory / (
+                            "report.json" if result.returncode == 0 else "failure.json"
+                        )
+                        if evidence.is_file():
+                            payload = json.loads(evidence.read_text())
+                            report["sessions"].append(
+                                {
+                                    "date": day,
+                                    "run_id": run_id,
+                                    "state": (
+                                        "completed"
+                                        if result.returncode == 0
+                                        else "failed"
+                                    ),
+                                    **{
+                                        key: value
+                                        for key, value in payload.items()
+                                        if key not in {"orders", "runner_status"}
+                                    },
+                                }
+                            )
+                        else:
+                            report["sessions"].append(
+                                {
+                                    "date": day,
+                                    "run_id": run_id,
+                                    "state": "failed",
+                                    "error_code": "replay_worker_exited_without_report",
+                                }
+                            )
+        finally:
+            if scratch.exists():
+                shutil.rmtree(scratch, ignore_errors=True)
+        if report["budget_exhausted"]:
+            break
         cursor += timedelta(days=1)
     completed = sum(row["state"] == "completed" for row in report["sessions"])
     failed = sum(row["state"] == "failed" for row in report["sessions"])
