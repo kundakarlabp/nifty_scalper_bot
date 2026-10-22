@@ -2,6 +2,7 @@
 
 Research opt-in; OrderFlow remains context-only, never an entry trigger.
 """
+
 from __future__ import annotations
 
 import math
