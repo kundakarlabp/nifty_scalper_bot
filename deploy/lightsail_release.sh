@@ -655,6 +655,7 @@ TARGETED_TESTS=(
   tests/architecture/test_canonical_bo_ownership.py
   tests/architecture/test_lightsail_release_contract.py
   tests/architecture/test_release_ci_gate.py
+  tests/architecture/test_token_rotation_release_guard.py
   tests/ops/test_research_jobs.py
   tests/scripts/test_archive_kite_history.py
   tests/backtests/test_strategy_bar_research.py
