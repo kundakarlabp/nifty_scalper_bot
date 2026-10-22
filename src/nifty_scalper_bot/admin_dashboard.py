@@ -315,7 +315,7 @@ def _flash(request: Request) -> str:
     if q.get("restart") == "queued":
         return (
             '<div class="flash ok">Validated bot restart queued. '
-            "Restart requires broker-flat and disarmed-engine confirmation; "
+            "Validated release checks and rollback remain in place; "
             "queued does not mean completed.</div>"
         )
     if q.get("restart") == "err":
@@ -451,12 +451,12 @@ def dashboard(request: Request) -> HTMLResponse:
         <section class="card" id="controls">
           <h2>Deployment &amp; service</h2>
           <p>Automatic release checks run independently. Manual actions only <b>queue</b>
-          the validated operation, subject to broker-flat and disarmed-engine checks.</p>
+          the validated operation, with candidate checks and rollback.</p>
           <div class="flow">
             <form method="post" action="/admin/update"><button type="submit" class="full">
               Check GitHub for updates</button></form>
             <form method="post" action="/admin/restart"><button type="submit" class="full amb"
-              onclick="return confirm('Queue a validated safe restart? This will not bypass trade exposure checks.')">
+              onclick="return confirm('Restart the live engine as soon as release validation passes? Active positions may temporarily lose bot-side monitoring.')">
               Queue safe restart</button></form>
           </div>
           <div class="hint">If a request is deferred, review release status.
