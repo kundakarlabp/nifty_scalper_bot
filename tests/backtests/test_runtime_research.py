@@ -483,3 +483,111 @@ def test_paired_run_missing_capture_refuses_subprocess(monkeypatch, tmp_path):
     report = worker.run_paired_replays(tmp_path / "missing.jsonl", tmp_path / "output")
     assert report["state"] == "BLOCKED"
     assert report["blocker"] == "no_usable_archived_depth_session"
+
+
+def test_verified_replay_process_epochs_are_independently_replayable(tmp_path):
+    from datetime import datetime, timedelta
+
+    from nifty_scalper_bot.backtesting.runtime_research import (
+        materialize_replay_epochs,
+        validate_replay_epochs,
+    )
+    from nifty_scalper_bot.storage.replay_archive import ReplayArchive, iter_session
+
+    base = datetime.fromisoformat("2026-10-21T09:30:00+05:30")
+    snapshot = {
+        "instruments": [{"instrument_token": 123}],
+        "effective_settings": {"risk": {"enabled": True}},
+        "runner_config": {"mode": "test"},
+        "basket": {"selected_ce": "NFO:NIFTY_CE"},
+        "initial_balance": 100000,
+        "initial_positions": [],
+    }
+    first = ReplayArchive(tmp_path)
+    first.record("snapshot", snapshot, base)
+    first.record("tick", {"symbol": "NFO:NIFTY_CE"}, base + timedelta(seconds=1))
+    first.close()
+    second = ReplayArchive(tmp_path)
+    second.record("snapshot", snapshot, base + timedelta(seconds=2))
+    second.record("tick", {"symbol": "NFO:NIFTY_CE"}, base + timedelta(seconds=3))
+    second.close()
+
+    original = tmp_path / "2026-10-21.jsonl"
+    with pytest.raises(ValueError, match="replay_multiple_runs_unrestored_state"):
+        validate_replay_epochs(original)
+    parts = materialize_replay_epochs(original, tmp_path / "segments")
+
+    assert len(parts) == 2
+    assert [validate_replay_epochs(part)[0] for part in parts] == [2, 2]
+    assert [len(list(iter_session(part))) for part in parts] == [2, 2]
+    assert original.read_text() != parts[0].read_text()
+    import json
+
+    sidecar = next(parts[0].parent.glob("*.integrity.json"))
+    assert json.loads(sidecar.read_text())["derived_epoch"] is True
+
+
+def test_epoch_partition_does_not_invent_state_after_restart(tmp_path):
+    from datetime import datetime, timedelta
+
+    from nifty_scalper_bot.backtesting.runtime_research import (
+        materialize_replay_epochs,
+        validate_replay_epochs,
+    )
+    from nifty_scalper_bot.storage.replay_archive import ReplayArchive
+
+    base = datetime.fromisoformat("2026-10-21T10:00:00+05:30")
+    snapshot = {
+        "instruments": [{"instrument_token": 123}],
+        "effective_settings": {"risk": {"enabled": True}},
+        "runner_config": {"mode": "test"},
+        "basket": {"selected_ce": "NFO:NIFTY_CE"},
+        "initial_balance": 100000,
+        "initial_positions": [],
+    }
+    first = ReplayArchive(tmp_path)
+    first.record("snapshot", snapshot, base)
+    first.close()
+    second = ReplayArchive(tmp_path)
+    second.record(
+        "snapshot",
+        {**snapshot, "initial_positions": [{"quantity": 65}]},
+        base + timedelta(seconds=2),
+    )
+    second.close()
+
+    parts = materialize_replay_epochs(
+        tmp_path / "2026-10-21.jsonl", tmp_path / "segments"
+    )
+    assert validate_replay_epochs(parts[0])[0] == 1
+    with pytest.raises(ValueError, match="replay_initial_positions_unsupported"):
+        validate_replay_epochs(parts[1])
+
+
+def test_epoch_partition_refuses_missing_original_integrity(tmp_path):
+    from datetime import datetime, timedelta
+
+    from nifty_scalper_bot.backtesting.runtime_research import materialize_replay_epochs
+    from nifty_scalper_bot.storage.replay_archive import ReplayArchive
+
+    base = datetime.fromisoformat("2026-10-21T10:00:00+05:30")
+    snapshot = {
+        "instruments": [{"instrument_token": 123}],
+        "effective_settings": {"risk": {"enabled": True}},
+        "runner_config": {"mode": "test"},
+        "basket": {"selected_ce": "NFO:NIFTY_CE"},
+        "initial_balance": 100000,
+        "initial_positions": [],
+    }
+    first = ReplayArchive(tmp_path)
+    first.record("snapshot", snapshot, base)
+    first.close()
+    second = ReplayArchive(tmp_path)
+    second.record("snapshot", snapshot, base + timedelta(seconds=1))
+    second.close()
+    (tmp_path / f"{second.run_id}.integrity.json").unlink()
+
+    with pytest.raises(ValueError, match="replay_capture_integrity_missing"):
+        materialize_replay_epochs(
+            tmp_path / "2026-10-21.jsonl", tmp_path / "segments"
+        )
