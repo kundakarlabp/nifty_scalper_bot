@@ -101,9 +101,7 @@ def test_research_worker_runs_each_epoch_without_live_credentials(
         assert kwargs["env"]["ALLOW_REAL_BROKER"] == "false"
         assert "KITE_API_KEY" not in kwargs["env"]
         assert "--compare-adaptive" in command
-        assert command[command.index("--stress-bps") + 1 :] == [
-            "10", "25", "50"
-        ]
+        assert command[command.index("--stress-bps") + 1 :] == ["10", "25", "50"]
         (Path(output) / "paired-comparison.json").write_text(
             '{"state":"MODELED_COMPARISON_ONLY","stress":[]}',
             encoding="utf-8",
