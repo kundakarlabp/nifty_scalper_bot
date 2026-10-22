@@ -442,6 +442,41 @@ def _adaptive_market(manager, *, bid=115.0, quantity=65, spread=0.2, age=0.0):
     return quote
 
 
+def test_adaptive_profit_defaults_to_live_broker_only(monkeypatch):
+    monkeypatch.delenv("ADAPTIVE_PROFIT_LOCK_ENABLED", raising=False)
+    manager = FakeManager(strong=True)
+
+    assert not profit_extension.adaptive_profit_lock_enabled(manager)
+    manager._is_live_execution = lambda: False
+    assert not profit_extension.adaptive_profit_lock_enabled(manager)
+    manager._is_live_execution = lambda: True
+    assert profit_extension.adaptive_profit_lock_enabled(manager)
+
+
+def test_live_adaptive_operator_kill_switch_preserves_legacy_path(monkeypatch):
+    manager = FakeManager(strong=True)
+    manager._is_live_execution = lambda: True
+
+    monkeypatch.setenv("ADAPTIVE_PROFIT_LOCK_ENABLED", "false")
+    assert not profit_extension.adaptive_profit_lock_enabled(manager)
+    monkeypatch.setenv("ADAPTIVE_PROFIT_LOCK_ENABLED", "true")
+    assert profit_extension.adaptive_profit_lock_enabled(manager)
+
+
+def test_live_adaptive_default_requires_real_exchange_protection(monkeypatch):
+    monkeypatch.delenv("ADAPTIVE_PROFIT_LOCK_ENABLED", raising=False)
+    manager = FakeManager(strong=True)
+    manager._is_live_execution = lambda: True
+    bracket = _bracket(protected=False)
+    _adaptive_market(manager, bid=115)
+
+    assert not profit_extension.tighten_adaptive_profit_lock(manager, bracket, 115)
+    assert bracket.sl_trigger_price == 94.0
+    bracket.exchange_stop_order_id = "broker-stop-1"
+    assert profit_extension.tighten_adaptive_profit_lock(manager, bracket, 115)
+    assert bracket.sl_trigger_price > 94.0
+
+
 def test_adaptive_lock_opt_in_preserves_existing_trailing(monkeypatch):
     monkeypatch.delenv("ADAPTIVE_PROFIT_LOCK_ENABLED", raising=False)
     manager = FakeManager(strong=False)
