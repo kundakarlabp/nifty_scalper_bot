@@ -12,11 +12,11 @@ from nifty_scalper_bot.infra.daily_log_archive import (
     archive_interval_seconds,
     build_daily_log_archiver,
 )
+from nifty_scalper_bot.infra.log_rotation import rotate_order_history_archive
 from nifty_scalper_bot.infra.runtime_heartbeat import (
     build_runtime_heartbeat,
     heartbeat_interval_seconds,
 )
-from nifty_scalper_bot.infra.log_rotation import rotate_order_history_archive
 from nifty_scalper_bot.infra.supabase_trade_replication import (
     build_supabase_trade_replicator,
     replication_interval_seconds,
