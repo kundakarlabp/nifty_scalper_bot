@@ -1,4 +1,5 @@
 """Fail-closed counterfactual labels: not live trade execution tests."""
+
 from nifty_scalper_bot.backtesting.executable_counterfactual import (
     evaluate_executable_counterfactual,
 )
@@ -9,9 +10,12 @@ CE = "NFO:NIFTY26OCT22650CE"
 def quotes(points, *, symbol=CE, size=65):
     return [
         {
-            "symbol": symbol, "timestamp": float(ts),
-            "bid": float(bid), "ask": float(bid) + 1,
-            "bid_size": size, "ask_size": size,
+            "symbol": symbol,
+            "timestamp": float(ts),
+            "bid": float(bid),
+            "ask": float(bid) + 1,
+            "bid_size": size,
+            "ask_size": size,
             "captured_full_depth": True,
         }
         for ts, bid in points
@@ -20,9 +24,15 @@ def quotes(points, *, symbol=CE, size=65):
 
 def evaluate(points, **kw):
     return evaluate_executable_counterfactual(
-        quotes(points), symbol=CE, decision_ts=100.0,
-        stop_price=90.0, target_price=112.0, quantity=65,
-        horizon_seconds=20.0, max_quote_gap_seconds=10.0, **kw
+        quotes(points),
+        symbol=CE,
+        decision_ts=100.0,
+        stop_price=90.0,
+        target_price=112.0,
+        quantity=65,
+        horizon_seconds=20.0,
+        max_quote_gap_seconds=10.0,
+        **kw,
     )
 
 
@@ -44,8 +54,7 @@ def test_provenance_unverified_is_unresolved():
     rows = quotes([(100, 99), (105, 114)])
     rows[0]["captured_full_depth"] = False
     result = evaluate_executable_counterfactual(
-        rows, symbol=CE, decision_ts=100, stop_price=90,
-        target_price=112, quantity=65
+        rows, symbol=CE, decision_ts=100, stop_price=90, target_price=112, quantity=65
     )
     assert result.status == "UNRESOLVED" and result.net_pnl is None
     assert result.reason == "quote_provenance_or_freshness_unverified"
@@ -72,8 +81,11 @@ def test_incomplete_forward_horizon_is_unresolved():
 def test_contract_rotation_is_never_cross_joined():
     result = evaluate_executable_counterfactual(
         quotes([(100, 99), (105, 113)], symbol="NFO:NIFTY26OCT22700CE"),
-        symbol=CE, decision_ts=100, stop_price=90,
-        target_price=112, quantity=65
+        symbol=CE,
+        decision_ts=100,
+        stop_price=90,
+        target_price=112,
+        quantity=65,
     )
     assert result.status == "UNRESOLVED"
     assert result.reason == "no_captured_contract_quotes"
@@ -82,8 +94,7 @@ def test_contract_rotation_is_never_cross_joined():
 def test_lack_of_top_of_book_size_is_not_a_fill():
     rows = quotes([(100, 99), (105, 113)], size=25)
     result = evaluate_executable_counterfactual(
-        rows, symbol=CE, decision_ts=100, stop_price=90,
-        target_price=112, quantity=65
+        rows, symbol=CE, decision_ts=100, stop_price=90, target_price=112, quantity=65
     )
     assert result.status == "UNRESOLVED"
     assert result.reason == "invalid_quote_or_insufficient_top_size"

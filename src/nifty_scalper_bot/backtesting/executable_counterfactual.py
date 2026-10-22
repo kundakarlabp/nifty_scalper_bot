@@ -3,6 +3,7 @@
 Only accepts provenance-verified, exact-contract, two-sided full-depth quotes.
 No live strategy, risk, order, or broker code imports this module.
 """
+
 from __future__ import annotations
 
 import math
@@ -83,9 +84,7 @@ def evaluate_executable_counterfactual(
             ts = _timestamp(row.get("timestamp"), field="quote timestamp")
             if ts < decision_ts or ts > decision_ts + horizon_seconds:
                 continue
-            if row.get("captured_full_depth") is not True or row.get(
-                "stale_data_used"
-            ):
+            if row.get("captured_full_depth") is not True or row.get("stale_data_used"):
                 return unresolved("quote_provenance_or_freshness_unverified")
             bid, ask = float(row["bid"]), float(row["ask"])
             bid_size, ask_size = float(row["bid_size"]), float(row["ask_size"])
@@ -137,17 +136,24 @@ def evaluate_executable_counterfactual(
         return unresolved("slippage_exceeds_executable_exit")
     # Canonical charges; observed bid/ask crossing is already priced in.
     fees = estimate_round_trip_cost(
-        entry_price=entry, exit_price=exit_price,
-        quantity=quantity, half_spread=0.0,
+        entry_price=entry,
+        exit_price=exit_price,
+        quantity=quantity,
+        half_spread=0.0,
     ).total
     gross = (exit_price - entry) * quantity
     risk_rupees = (entry - stop_price) * quantity + fees
     if risk_rupees <= 0:
         return unresolved("invalid_cost_inclusive_risk")
     return ExecutableCounterfactual(
-        status="MODELED", reason=reason, entry_ts=entry_ts, exit_ts=exit_ts,
-        entry_price=round(entry, 6), exit_price=round(exit_price, 6),
-        gross_pnl=round(gross, 4), estimated_fees=round(fees, 4),
+        status="MODELED",
+        reason=reason,
+        entry_ts=entry_ts,
+        exit_ts=exit_ts,
+        entry_price=round(entry, 6),
+        exit_price=round(exit_price, 6),
+        gross_pnl=round(gross, 4),
+        estimated_fees=round(fees, 4),
         net_pnl=round(gross - fees, 4),
         net_r=round((gross - fees) / risk_rupees, 6),
     )
