@@ -848,10 +848,8 @@ def test_trading_status_distinguishes_live_configuration_from_current_arming(
     assert armed["configured_for_live"] is True
     assert armed["can_place_live_order_now"] is True
     assert armed["will_trade"] is True
-    assert (
-        armed["will_trade_semantics"]
-        == "execution_permission_only_not_signal_or_order"
-    )
+    semantics = armed["will_trade_semantics"]
+    assert semantics == "execution_permission_only_not_signal_or_order"
     assert armed["trade_pipeline_state"]["stage"] == "UNKNOWN"
 
 
