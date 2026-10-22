@@ -116,7 +116,9 @@ def materialize_replay_epochs(source: Path, destination: Path) -> list[Path]:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 writer = target.open("x", encoding="utf-8")
                 epochs.append((run, target, 0))
-            writer.write(json.dumps(event, separators=(",", ":"), allow_nan=False) + "\n")
+            writer.write(
+                json.dumps(event, separators=(",", ":"), allow_nan=False) + "\n"
+            )
             run_id, path, total = epochs[-1]
             epochs[-1] = (run_id, path, total + 1)
     finally:
