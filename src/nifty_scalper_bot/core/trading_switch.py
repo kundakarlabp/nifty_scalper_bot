@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import fcntl
 import os
-from pathlib import Path
 import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
+from pathlib import Path
 
 from nifty_scalper_bot.utils.logging import get_logger
 
@@ -36,7 +36,8 @@ def live_entry_submission_slot(payload):
     do not take this lock and remain available for protective execution.
     """
     side = str(payload.get("side") or payload.get("transaction_type") or "").upper()
-    if os.getenv("EXECUTION_MODE", "SHADOW").strip().upper() != "LIVE" or side == "SELL":
+    live_mode = os.getenv("EXECUTION_MODE", "SHADOW").strip().upper() == "LIVE"
+    if not live_mode or side == "SELL":
         yield
         return
     lock_path = _release_control_path("auto_release_entry_lock")
