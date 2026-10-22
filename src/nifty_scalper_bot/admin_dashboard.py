@@ -9,6 +9,9 @@ The daily Zerodha session flow is deliberately small and canonical:
 A paste fallback accepts either the raw request token or the complete redirect URL.
 The dashboard never collects or stores the Zerodha login password or TOTP secret.
 """
+
+# Embedded HTML/CSS/JS assets have intentional long literal lines.
+# ruff: noqa: E501
 from __future__ import annotations
 
 import hashlib
@@ -22,14 +25,21 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+from fastapi import APIRouter, Form, Request, Response
+from fastapi.responses import (
+    HTMLResponse,
+    JSONResponse,
+    PlainTextResponse,
+    RedirectResponse,
+)
+
 from nifty_scalper_bot.ops.service_control import (
     ControlResult,
     queue_validated_restart,
     restart_deployer,
 )
-
-from fastapi import APIRouter, Form, Request, Response
-from fastapi.responses import HTMLResponse, RedirectResponse, PlainTextResponse, JSONResponse
+from nifty_scalper_bot.superlite_admin_core import bounded_logs, quick_overview
+from nifty_scalper_bot.superlite_admin_style import SCRIPT as _SCRIPT, STYLE as _CSS
 
 router = APIRouter()
 
@@ -255,22 +265,24 @@ def _git_update() -> tuple[bool, str]:
 
 # ---------------- UI ----------------
 
-_CSS = """
-:root{--bg:#0a0e14;--card:#141b24;--bd:#222d3a;--fg:#e6edf3;--mut:#8b97a6;--grn:#2ea043;--red:#da3633;--amb:#bb8009;--blu:#1f6feb}
-*{box-sizing:border-box}body{font-family:system-ui,-apple-system,Segoe UI,Arial;background:var(--bg);color:var(--fg);margin:0}.top{position:sticky;top:0;background:#0d1420ee;border-bottom:1px solid var(--bd);padding:12px 18px;display:flex;align-items:center;gap:14px;z-index:5}.top h1{font-size:16px;margin:0}.top .sp{flex:1}.pill{padding:4px 10px;border-radius:999px;font-size:12px;font-weight:700}.pill.on{background:#0c2a16;color:#3fb950;border:1px solid #1c5c30}.pill.off{background:#2a210c;color:#d29922;border:1px solid #5c4a1c}.wrap{max-width:900px;margin:18px auto;padding:0 16px}.card{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:18px;margin-bottom:16px}.card h2{margin:0 0 4px;font-size:15px}.card p{margin:4px 0 14px;font-size:13px;color:var(--mut)}label{display:block;font-size:12px;color:var(--mut);margin:12px 0 5px}input{width:100%;padding:11px 12px;border-radius:9px;border:1px solid var(--bd);background:#0a1019;color:var(--fg);font-size:15px}.badge{display:inline-block;padding:1px 7px;border-radius:10px;font-size:11px;background:#0a1019;color:var(--mut);border:1px solid var(--bd)}button,.btn{margin-top:14px;padding:11px 16px;border:0;border-radius:9px;background:var(--grn);color:#fff;font-size:14px;font-weight:600;cursor:pointer;text-decoration:none;display:inline-block}button.blu,.btn.blu{background:var(--blu)}button.amb,.btn.amb{background:var(--amb)}button.gray,.btn.gray{background:#30363d}.row{display:flex;gap:10px;flex-wrap:wrap}.muted{font-size:12px;color:var(--mut)}.flash{padding:10px 12px;border-radius:9px;margin-bottom:14px;font-size:13px}.flash.ok{background:#0c2a16;color:#3fb950}.flash.err{background:#2a0c0c;color:#f85149}.session{border-color:#315d92;background:#101b2a}.session .btn{font-size:15px;padding:12px 18px}
-"""
-_PAGE = """<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>Nifty Bot</title><style>{css}</style></head><body>{body}</body></html>"""
+# fmt: off  # The following block owns literal HTML markup.
+_PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><meta name="theme-color" content="#0b1522"><title>Nifty Scalper · Admin</title><style>{css}</style></head><body>{body}<script>{script}</script></body></html>"""
 
 
 def _page(body: str) -> str:
-    return _PAGE.format(css=_CSS, body=body)
+    return _PAGE.format(css=_CSS, script=_SCRIPT, body=body)
 
 
 def _topbar(live_on: bool) -> str:
-    pill = '<span class="pill on">● LIVE</span>' if live_on else '<span class="pill off">● SHADOW</span>'
-    return (f'<div class=top><h1>⚡ Nifty Scalper Bot</h1>{pill}<span class=sp></span>'
-            f'<a class="btn gray" href="/admin">Dashboard</a>'
-            f'<a class="btn blu" href="/admin/logs/download">Download Logs</a></div>')
+    pill = ('<span class="pill on">Configured LIVE</span>' if live_on
+            else '<span class="pill off">Configured SHADOW</span>')
+    return (
+        '<header class="top"><a href="/admin" class="brand"><span class="logo">N</span>'
+        '<span>Nifty Scalper</span></a>' + pill
+        + '<span class="sp"></span><nav class="nav" aria-label="Admin sections">'
+        '<a href="#overview">Overview</a><a href="#session">Daily login</a>'
+        '<a href="#logs">Logs</a><a href="#controls">Controls</a></nav></header>'
+    )
 
 
 def _flash(request: Request) -> str:
@@ -331,77 +343,167 @@ def _flash(request: Request) -> str:
 
 @router.get("/admin", response_class=HTMLResponse)
 def dashboard(request: Request) -> HTMLResponse:
+    """Serve the UI immediately; live metrics are fetched independently on demand."""
     _check_auth(request)
     env = _read_env()
-    live_on = (env.get("ENABLE_LIVE", "false").strip().lower() in {"1", "true", "yes", "on"}
-               and env.get("EXECUTION_MODE", "SHADOW").strip().upper() == "LIVE")
+    live_on = (
+        env.get("ENABLE_LIVE", "false").strip().lower() in {"1", "true", "yes", "on"}
+        and env.get("EXECUTION_MODE", "SHADOW").strip().upper() == "LIVE"
+    )
     api_key = env.get("KITE_API_KEY", "").strip()
     login_url = _kite_login_url(api_key) if api_key else ""
-    login_button = (f'<a class="btn blu" href="{html.escape(login_url, quote=True)}">Authenticate Zerodha</a>'
-                    if login_url else '<span class="muted">Save the Zerodha API key and secret below first.</span>')
+    login_button = (
+        f'<a class="btn primary full" href="{html.escape(login_url, quote=True)}" rel="noopener">'
+        'Open official Zerodha login ↗</a>'
+        if login_url
+        else '<p class="warning">First save your Zerodha API key and secret under Advanced settings.</p>'
+    )
     toggle = (
-        f'<form method=post action="/admin/mode"><input type=hidden name=mode value="{"shadow" if live_on else "live"}">'
-        + ('<button class=amb type=submit>Switch to SHADOW (stop real trading)</button>' if live_on
-           else '<button type=submit onclick="return confirm(\'Turn ON live trading with REAL money?\')">Turn ON Live Trading</button>')
-        + '</form>')
+        '<form method="post" action="/admin/mode">'
+        f'<input type="hidden" name="mode" value="{"shadow" if live_on else "live"}">'
+        + (
+            '<button type="submit" class="amb full">'
+            'Switch to SHADOW (disable live orders)</button>'
+            if live_on
+            else '<button type="submit" class="danger full" '
+                 'onclick="return confirm(\'Enable LIVE trading with real capital?\')">'
+                 'Enable LIVE trading</button>'
+        )
+        + '</form>'
+    )
     rows = ""
     for label, key, sec in FIELDS:
-        v = env.get(key, "")
-        shown = ("••••••••" if v else "") if sec else v
-        rows += f'<label>{label} <span class=badge>{key}</span></label><input name="{key}" value="{html.escape(shown, quote=True)}" placeholder="(unchanged)">'
-    body = f"""{_topbar(live_on)}<div class=wrap>{_flash(request)}
-    <div class="card session"><h2>Daily Zerodha Session</h2>
-    <p><b>Recommended:</b> click Authenticate Zerodha, complete the official
-    Zerodha login/TOTP screen, and return. The server verifies and saves the
-    token, then queues a validated restart. Confirm the running engine status
-    before assuming that the new token is active.</p>
-    {login_button}
-    <p class=muted style="margin-top:12px">For automatic return, set the Kite app redirect URL to this server's <b>/admin/kite/callback</b> endpoint.</p>
-    <form method=post action="/admin/token">
-    <label>Fallback — paste the complete redirect URL or request token</label>
-    <input name="request_token" autocomplete="off" placeholder="paste callback URL or request_token">
-    <button type=submit>Generate access token &amp; restart</button></form></div>
+        value = env.get(key, "")
+        shown = "••••••••" if (sec and value) else value
+        safe_key = html.escape(key, quote=True)
+        rows += (
+            f'<label for="cfg-{safe_key}">{html.escape(label)} '
+            f'<span class="badge">{safe_key}</span></label>'
+            f'<input id="cfg-{safe_key}" name="{safe_key}" '
+            f'type="{"password" if sec else "text"}" '
+            f'value="{html.escape(shown, quote=True)}" '
+            'autocomplete="off" placeholder="Leave blank to keep existing value">'
+        )
+    body = f"""{_topbar(live_on)}<main class="wrap">
+    <div class="intro"><div><div class="eyebrow">Operations center</div>
+    <h1>Bot administration</h1>
+    <p>Daily access, deployment status and safe controls in one place.</p></div>
+    <div class="statusline"><span class="dot" aria-hidden="true"></span>
+    <span id="status-note" role="status" aria-live="polite">Checking live status…</span>
+    <button id="refresh-status" type="button" class="gray">Refresh</button></div></div>
+    {_flash(request)}
+    <section id="overview" aria-label="Live status" class="grid">
+      <div class="metric"><div class="k">Engine</div><div class="v" id="engine-value">Checking…</div>
+      <small>Actual HTTP health</small></div>
+      <div class="metric"><div class="k">Zerodha</div><div class="v" id="broker-value">Checking…</div>
+      <small>Broker authentication</small></div>
+      <div class="metric"><div class="k">Running mode</div><div class="v" id="mode-value">Checking…</div>
+      <small>Engine state, not requested mode</small></div>
+      <div class="metric"><div class="k">Blocker</div><div class="v" id="blocker-value">Checking…</div>
+      <small>Trading readiness</small></div>
+    </section>
+    <div class="cta-strip"><div class="statusline">
+      <span>Release: <b id="release-value">Checking…</b></span>
+      <span>Engine SHA: <b id="revision-value">—</b></span>
+    </div><div class="actions"><a href="/admin/status.json">Service status</a><a href="/admin/api/status" class="muted">Detailed diagnostics ↗</a></div></div>
+    <div class="layout">
+      <div class="stack">
+        <section class="card session" id="session">
+          <div class="eyebrow">Every trading day</div>
+          <h2>Zerodha access token</h2>
+          <p>Use the official login and TOTP. Your login password and TOTP are never entered into this dashboard.</p>
+          {login_button}
+          <ol class="steps">
+            <li>Authenticate at Zerodha, then return using the configured callback.</li>
+            <li>The token is verified and saved. A validated restart is queued.</li>
+            <li>Check <b>Zerodha</b> and the running engine above; queued is not completed.</li>
+          </ol>
+          <details><summary>Paste callback URL / request token instead</summary><div class="detail-body">
+            <form method="post" action="/admin/token">
+            <label for="request-token">Zerodha redirect URL or request token</label>
+            <input id="request-token" name="request_token" autocomplete="off" spellcheck="false"
+              placeholder="Paste the callback URL or request token" required>
+            <button type="submit" class="full green">Verify token and queue restart</button></form>
+          </div></details>
+          <div class="hint">Automatic callback needs the Kite app redirect URL set to this admin host’s
+          <code>/admin/kite/callback</code> path.</div>
+        </section>
+        <section class="card" id="logs">
+          <h2>Live service logs</h2>
+          <p>Read-only, bounded journal snapshot. Refresh on demand; no continuous heavy polling.</p>
+          <div class="split"><div><label for="log-filter">Filter</label>
+          <select id="log-filter"><option value="">Recent activity</option><option value="ERROR">Errors</option>
+          <option value="RUNNER">Runner</option><option value="ORDER">Orders</option>
+          <option value="WARN">Warnings</option><option value="custom">Custom search</option></select>
+          <input id="log-query" type="text" placeholder="Search log text" hidden
+          aria-label="Custom log filter"></div>
+          <div><label for="log-lines">Journal window</label>
+          <select id="log-lines"><option value="100">Last 100 lines</option>
+          <option value="250" selected>Last 250 lines</option>
+          <option value="500">Last 500 lines</option></select></div></div>
+          <div class="actions" style="margin-top:12px">
+          <button id="load-logs" type="button">Load logs</button>
+          <a class="btn gray" href="/admin/logs/download">Download Logs</a></div>
+          <pre id="log-output" class="console" role="log" aria-live="off">Select a filter and tap Load logs.</pre>
+        </section>
+      </div>
+      <div class="stack">
+        <section class="card" id="controls">
+          <h2>Deployment &amp; service</h2>
+          <p>Automatic release checks run independently. Manual actions only <b>queue</b>
+          the validated operation, subject to broker-flat and disarmed-engine checks.</p>
+          <div class="flow">
+            <form method="post" action="/admin/update"><button type="submit" class="full">
+              Check GitHub for updates</button></form>
+            <form method="post" action="/admin/restart"><button type="submit" class="full amb"
+              onclick="return confirm('Queue a validated safe restart? This will not bypass trade exposure checks.')">
+              Queue safe restart</button></form>
+          </div>
+          <div class="hint">If a request is deferred, review release status.
+          Requests are not confirmation that code deployed or the engine restarted.</div>
+        </section>
+        <section class="card"><h2>Advanced settings</h2>
+          <p>Occasional changes. Hidden by default to keep daily operation simple.</p>
+          <details><summary>Trading mode &amp; risk controls</summary><div class="detail-body">
+            <div class="subheading">Configured mode</div>
+            <p>{'LIVE requested — real orders possible when engine permits.' if live_on
+                else 'SHADOW requested — simulation only.'}</p>{toggle}
+            <div class="subheading">Daily risk allowance</div>
+            <p>Rebase the allowance only. This does not erase trades, realised P&amp;L or history.</p>
+            <form method="post" action="/admin/risk/reset-day">
+              <input type="hidden" name="confirm" value="RESET">
+              <button type="submit" class="amb full"
+              onclick="return confirm('Reset the daily risk allowance? Ledger and realised P&L remain unchanged.')">
+              Reset today’s risk allowance</button></form>
+          </div></details>
+          <details><summary>Credentials &amp; integration settings</summary><div class="detail-body">
+            <p>Existing secrets remain unchanged when their placeholders are left as-is.
+            Never share an access token in screenshots.</p>
+            <form method="post" action="/admin/save">{rows}
+              <button type="submit" class="full">Save settings</button></form>
+          </div></details>
+          <details><summary>Research &amp; backtesting</summary><div class="detail-body">
+            <p>On-demand replay and component analysis, separate from live order execution.</p>
+            <div class="flow">
+              <form method="post" action="/admin/research/start">
+              <button type="submit" class="full gray">Run research backtest</button></form>
+              <form method="post" action="/admin/research/start?mode=runtime">
+              <button type="submit" class="full gray">Replay recorded bot sessions</button></form>
+            </div><p><a href="/admin/research/status">Research job</a> ·
+            <a href="/admin/research/report">Latest research report</a></p>
+            <p>Missing sessions, slippage assumptions and coverage limitations are shown in the report.</p>
+          </div></details>
+        </section>
+        <div class="sidehelp">If this page loads but metrics do not, the admin process may be healthy while
+        the engine API is unreachable. Refresh and consult detailed diagnostics before taking action.</div>
+      </div>
+    </div>
+    <div class="footer">Nifty Scalper · Independent admin control plane · All times reflect your device’s clock.</div>
+    </main>"""
+    return HTMLResponse(_page(body), headers={"Cache-Control": "no-store"})
 
-    <div class=card><h2>Live Trading</h2><p>{'Placing REAL orders with REAL money.' if live_on else 'Analysing only — no real orders.'}</p>{toggle}</div>
 
-    <div class="card"><h2>Daily Risk Allowance</h2>
-    <p>Explicit operator override: start a fresh daily-loss allowance from the
-    current realised P&amp;L. This does <b>not</b> erase trades, P&amp;L,
-    costs, loss streak, cooldown history, or the trade ledger.</p>
-    <form method=post action="/admin/risk/reset-day">
-    <input type=hidden name=confirm value="RESET">
-    <button class=amb type=submit
-    onclick="return confirm('Reset risk allowance? Ledger is preserved.')">
-    Reset today&#39;s risk allowance</button>
-    </form></div>
-
-    <div class=card><h2>Credentials &amp; Settings</h2><p>Secrets show dots; leave them unchanged unless replacing them.</p>
-    <form method=post action="/admin/save">{rows}<button type=submit>Save settings</button></form></div>
-
-    <div class=card><h2>On-demand Research</h2>
-    <p>Collect real Kite minute history for the active NIFTY basket and analyse
-    completed trades, then backtest strategy components with modeled costs.
-    Runs separately without changing live trading settings.</p>
-    <form method=post action="/admin/research/start">
-    <button class=blu type=submit>Run research backtest</button></form>
-    <form method=post action="/admin/research/start?mode=runtime">
-    <button class=blu type=submit>Replay recorded bot sessions</button></form>
-    <p>Recorded-feed replay uses the production pipeline with simulated fills.
-    Missing sessions and replay limitations are shown in the report.</p>
-    <p><a href="/admin/research/status">Job status</a> &middot;
-    <a href="/admin/research/report">Latest evidence report</a></p>
-    <p class=muted>Uses available active contracts, next-minute fills and assumed
-    slippage. This component backtest does not establish full live-bot parity
-    or profitability. Report includes coverage and limitations.</p></div>
-
-    <div class=card><h2>Controls</h2><div class=row>
-    <form method=post action="/admin/update">
-    <button class=blu type=submit>Check GitHub update</button></form>
-    <form method=post action="/admin/restart">
-    <button class=amb type=submit>Queue safe restart</button></form>
-    <a class="btn gray" href="/admin/status.json">Service status</a>
-    </div></div></div>"""
-    return HTMLResponse(_page(body))
+# fmt: on
 
 
 @router.get("/admin/kite/callback")
@@ -558,6 +660,31 @@ def update_from_github(request: Request) -> Response:
         "/admin?upd=err&msg=" + urllib.parse.quote(message[:120]),
         status_code=303,
     )
+
+
+# fmt: off  # Short, stable JSON UI endpoints.
+@router.get("/admin/api/overview")  # type: ignore[untyped-decorator]
+def overview_api(request: Request) -> JSONResponse:
+    """Lightweight independent heartbeat for mobile auto-refresh."""
+    _check_auth(request)
+    return JSONResponse(quick_overview(), headers={"Cache-Control": "no-store"})
+
+
+@router.get("/admin/api/logs")  # type: ignore[untyped-decorator]
+def logs_api(request: Request, lines: int = 250, contains: str = "") -> JSONResponse:
+    """Bounded, redacted, explicitly requested journal sample."""
+    _check_auth(request)
+    limit = max(50, min(lines, 500))
+    needle = contains[:80]
+    text = bounded_logs(limit, needle)
+    # Do not send megabytes of journal text to a constrained mobile browser.
+    return JSONResponse(
+        {"text": text[-100_000:] if text else "No matching log lines."},
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+# fmt: on
 
 
 _STATUS_CACHE: dict[str, object] = {"at": 0.0, "label": "running", "color": "#3fb950"}

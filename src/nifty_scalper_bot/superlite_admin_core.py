@@ -38,6 +38,7 @@ SELECTED_PAIR_LOG_PATTERNS = (
 )
 ENV_CACHE: dict[str, Any] = {"at": 0.0, "data": {}}
 STATUS_CACHE: dict[str, Any] = {"at": 0.0, "data": {}}
+OVERVIEW_CACHE: dict[str, Any] = {"at": 0.0, "data": {}}
 
 
 def read_env() -> dict[str, str]:
@@ -289,6 +290,51 @@ def _extract_selected_from_logs(recent_logs: str) -> dict[str, Any]:
                     "_source": "journal:active_dynamic_basket" if "ACTIVE_DYNAMIC_BASKET_COMMITTED" in line else "journal:contract_ssot",
                 }
     return {}
+
+
+# fmt: off  # Keep the compact status contract legible and stable.
+def quick_overview() -> dict[str, Any]:
+    """Bounded, cached UI heartbeat; no git, journal, or systemctl calls.
+
+    The expensive full diagnostic snapshot is available separately and never
+    used for background browser polling. An engine timeout is not reported as
+    healthy, and the operator-requested mode is never substituted for runtime.
+    """
+    now = time.monotonic()
+    if now - float(OVERVIEW_CACHE["at"]) < 12 and OVERVIEW_CACHE["data"]:
+        return dict(OVERVIEW_CACHE["data"])
+    livez = _http_json("/livez")
+    trading = _http_json("/health/trading")
+    mode = _http_json("/trading/status")
+    engine_ok = bool(livez) and not livez.get("_error")
+    trading_ok = bool(trading) and not trading.get("_error")
+    mode_ok = bool(mode) and not mode.get("_error")
+    broker = trading.get("broker") if trading_ok else None
+    broker = broker if isinstance(broker, dict) else {}
+    update = _update_state()
+    data = {
+        "engine_ok": engine_ok,
+        "bot_loaded": bool(livez.get("bot_loaded")) if engine_ok else False,
+        "broker_authenticated": (
+            trading.get("broker_authentication")
+            or broker.get("authentication")
+            or "unknown"
+        ) if trading_ok and engine_ok else "unknown",
+        "mode": str(mode.get("execution_mode") or mode.get("mode") or "UNKNOWN").upper()
+        if engine_ok and mode_ok else "UNKNOWN",
+        "primary_blocker": (
+            str(trading.get("primary_blocker") or "")
+            if trading_ok else "Trading status unavailable"
+        ) if engine_ok else "Engine unreachable",
+        "runtime_sha": str(trading.get("build_sha") or "") if trading_ok else "",
+        "updater_state": str(update.get("state") or "unknown"),
+        "checked_at": int(time.time()),
+    }
+    OVERVIEW_CACHE.update({"at": now, "data": dict(data)})
+    return data
+
+
+# fmt: on
 
 
 def status_snapshot() -> dict[str, Any]:
