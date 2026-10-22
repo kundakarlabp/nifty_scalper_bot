@@ -398,7 +398,7 @@ def dashboard(request: Request) -> HTMLResponse:
     <div class="cta-strip"><div class="statusline">
       <span>Release: <b id="release-value">Checking…</b></span>
       <span>Engine SHA: <b id="revision-value">—</b></span>
-    </div><a href="/admin/api/status" class="muted">Detailed diagnostics ↗</a></div>
+    </div><div class="actions"><a href="/admin/status.json">Service status</a><a href="/admin/api/status" class="muted">Detailed diagnostics ↗</a></div></div>
     <div class="layout">
       <div class="stack">
         <section class="card session" id="session">
