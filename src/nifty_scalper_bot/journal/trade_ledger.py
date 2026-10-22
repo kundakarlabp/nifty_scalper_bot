@@ -207,15 +207,10 @@ ON CONFLICT(trade_id) DO UPDATE SET
         THEN excluded.last_event_name
         ELSE trade_ledger.last_event_name
     END,
-    build_sha = CASE
-        WHEN excluded.build_sha IS NOT NULL
-          AND (
-              trade_ledger.build_sha IS NULL
-              OR excluded.updated_at >= trade_ledger.updated_at
-          )
-        THEN excluded.build_sha
-        ELSE trade_ledger.build_sha
-    END,
+    -- Freeze the earliest known strategy/runtime revision for attribution.
+    -- A later close, delayed exit or replay event must never rewrite the
+    -- entry-side lineage to a different deployment.
+    build_sha = COALESCE(trade_ledger.build_sha, excluded.build_sha),
     costs_json = {_monotonic_merge_sql("costs_json")},
     execution_quality_json = {_monotonic_merge_sql("execution_quality_json")},
     outcome_json = {_monotonic_merge_sql("outcome_json")},

@@ -35,6 +35,9 @@ from nifty_scalper_bot.backtesting.research_validation import (  # noqa: E402
     combinatorial_purged_pbo,
     deflated_sharpe_ratio,
 )
+from nifty_scalper_bot.backtesting.ledger_integrity import (  # noqa: E402
+    summarize_ledger_integrity,
+)
 from nifty_scalper_bot.journal.trade_ledger import (  # noqa: E402
     load_candidate_decision_rows,
     load_trade_ledger_rows as load_canonical_trade_ledger_rows,
@@ -310,6 +313,13 @@ def main(argv: list[str] | None = None) -> int:
     components = tuple(args.components or ("ORBPro", "SMC", "VWAPPro"))
     try:
         rows = load_trade_ledger_rows(args.trades_db)
+        # Closed-trade performance and historical lifecycle completeness are
+        # different populations. Read both from the same canonical database.
+        all_ledger_rows = load_canonical_trade_ledger_rows(
+            args.trades_db,
+            limit=None,
+            closed_only=False,
+        )
         report = build_analysis(
             rows,
             block_size=args.block_size,
@@ -320,6 +330,7 @@ def main(argv: list[str] | None = None) -> int:
             walk_forward_test_trades=args.walk_forward_test_trades,
             walk_forward_min_folds=args.walk_forward_min_folds,
         )
+        report["ledger_integrity"] = summarize_ledger_integrity(all_ledger_rows)
         candidate_decisions = load_candidate_decision_rows(args.trades_db)
         decision_funnel = summarize_candidate_decisions(candidate_decisions)
         report["candidate_decision_funnel"] = asdict(decision_funnel)
