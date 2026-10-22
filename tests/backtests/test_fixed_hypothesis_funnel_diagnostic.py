@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "diagnose_fixed_hypothesis_funnel.py"
+SCRIPT = (\n    Path(__file__).resolve().parents[2]\n    / "scripts"\n    / "diagnose_fixed_hypothesis_funnel.py"\n)
 spec = importlib.util.spec_from_file_location("funnel_diagnostic", SCRIPT)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
@@ -23,7 +23,7 @@ def fixture_report():
                                      "geometry_valid": 10, "next_bar_intents": 10,
                                      "accepted_fills": 2},
                     "no_vote_reasons": {"cost_net_rr_rejected": 7},
-                    "data_quality": {"resolved_exit_count": 1, "unresolved_exit_count": 1},
+                    "data_quality": {\n                        "resolved_exit_count": 1,\n                        "unresolved_exit_count": 1,\n                    },
                 })
     return {"results": results}
 
