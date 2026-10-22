@@ -304,8 +304,10 @@ def quick_overview() -> dict[str, Any]:
         return dict(OVERVIEW_CACHE["data"])
     livez = _http_json("/livez")
     trading = _http_json("/health/trading")
+    mode = _http_json("/trading/status")
     engine_ok = bool(livez) and not livez.get("_error")
     trading_ok = bool(trading) and not trading.get("_error")
+    mode_ok = bool(mode) and not mode.get("_error")
     broker = trading.get("broker") if trading_ok else None
     broker = broker if isinstance(broker, dict) else {}
     update = _update_state()
@@ -317,8 +319,8 @@ def quick_overview() -> dict[str, Any]:
             or broker.get("authentication")
             or "unknown"
         ) if trading_ok and engine_ok else "unknown",
-        "mode": str(trading.get("execution_mode") or trading.get("mode") or "UNKNOWN").upper()
-        if engine_ok and trading_ok else "UNKNOWN",
+        "mode": str(mode.get("execution_mode") or mode.get("mode") or "UNKNOWN").upper()
+        if engine_ok and mode_ok else "UNKNOWN",
         "primary_blocker": (
             str(trading.get("primary_blocker") or "")
             if trading_ok else "Trading status unavailable"
