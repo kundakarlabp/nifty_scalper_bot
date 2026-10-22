@@ -21,5 +21,5 @@ def test_token_rotation_remains_validated_and_never_claims_early_success() -> No
     assert 'write_status validating "validating' in release
     assert 'if wait_for_service "$AFTER"; then' in release
     assert 'rm -f "$RESTART_PENDING_FILE"' in release
-    assert 'write_status rolled_back' in release
-    assert 'write_status deferred_ci' in release
+    assert "write_status rolled_back" in release
+    assert "write_status deferred_ci" in release
