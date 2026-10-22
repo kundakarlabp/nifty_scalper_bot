@@ -93,13 +93,12 @@ def test_overview_uses_live_engine_evidence_and_caches_it(monkeypatch) -> None:
 
 
 def test_timeout_never_looks_like_ready(monkeypatch) -> None:
-    monkeypatch.setattr(
-        core,
-        "_http_json",
-        lambda path: {"_error": "ENGINE HTTP TIMEOUT"}
-        if path == "/livez"
-        else {"broker_authentication": "authenticated", "execution_mode": "LIVE"},
-    )
+    def engine(path):
+        if path == "/livez":
+            return {"_error": "ENGINE HTTP TIMEOUT"}
+        return {"broker_authentication": "authenticated", "execution_mode": "LIVE"}
+
+    monkeypatch.setattr(core, "_http_json", engine)
     monkeypatch.setattr(core, "_update_state", lambda: {"state": "current"})
     core.OVERVIEW_CACHE.update({"at": 0.0, "data": {}})
     result = core.quick_overview()
