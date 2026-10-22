@@ -259,7 +259,7 @@ def _git_update() -> tuple[bool, str]:
 
 from nifty_scalper_bot.superlite_admin_style import STYLE as _CSS, SCRIPT as _SCRIPT
 
-_PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><meta name="theme-color" content="#0b1522"><title>Nifty Scalper · Admin</title><style>{css}</style><script defer>{script}</script></head><body>{body}</body></html>"""
+_PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><meta name="theme-color" content="#0b1522"><title>Nifty Scalper · Admin</title><style>{css}</style></head><body>{body}<script>{script}</script></body></html>"""
 
 
 def _page(body: str) -> str:
