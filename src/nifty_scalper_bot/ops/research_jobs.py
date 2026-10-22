@@ -12,6 +12,7 @@ import re
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from datetime import date, datetime, timedelta
@@ -496,76 +497,136 @@ def run_recorded_replays(root: Path, request: dict[str, Any]) -> dict[str, Any]:
             continue
         directory = output / day
         directory.mkdir(parents=True, exist_ok=True)
-        # No operator env file or inherited credential/path settings cross here.
-        env = {
-            key: value
-            for key, value in os.environ.items()
-            if key in {"PATH", "LANG", "LC_ALL", "TZ", "VIRTUAL_ENV"}
-        }
-        env.update(
-            REPLAY_ISOLATED_PROCESS="true",
-            EXECUTION_MODE="LIVE_SIMULATION",
-            ENABLE_LIVE="false",
-            ENABLE_LIVE_TRADING="false",
-            BROKER_API_KEY="offline_replay",
-            BROKER_API_SECRET="offline_replay",
-            BROKER_ACCESS_TOKEN="offline_replay",
-            ALLOW_NETWORK="false",
-            ALLOW_REAL_BROKER="false",
-            DATA_DIR=str(directory.resolve()),
-            PYTHONPATH=str(root / "src"),
+        from nifty_scalper_bot.backtesting.runtime_research import (
+            materialize_replay_epochs,
+            validate_replay_epochs,
         )
-        interpreter = root / ".venv/bin/python"
-        if not interpreter.is_file():
-            interpreter = Path(sys.executable)
-        with (directory / "worker.log").open("w") as log:
-            try:
-                result = subprocess.run(
-                    [
-                        str(interpreter),
-                        str(root / "scripts/run_runtime_replay.py"),
-                        "--session",
-                        str(path.resolve()),
-                        "--output",
-                        str(directory.resolve()),
-                    ],
-                    cwd=directory,
-                    env=env,
-                    stdout=log,
-                    stderr=log,
-                    timeout=min(600, remaining),
-                )
-            except subprocess.TimeoutExpired:
-                report["sessions"].append(
-                    {"date": day, "state": "failed", "error_code": "replay_timeout"}
-                )
-            else:
-                evidence = directory / (
-                    "report.json" if result.returncode == 0 else "failure.json"
-                )
-                if evidence.is_file():
-                    payload = json.loads(evidence.read_text())
+
+        # Preserve the old single-process validation exactly. Only a
+        # *specific* multirun error authorizes partitioning into genuine
+        # process epochs; no missing state or option quotes are synthesized.
+        split_required = False
+        try:
+            validate_replay_epochs(path)
+        except ValueError as exc:
+            split_required = str(exc) == "replay_multiple_runs_unrestored_state"
+        with tempfile.TemporaryDirectory(prefix="validated-epochs-", dir=directory) as staging:
+            if split_required:
+                try:
+                    epoch_paths = materialize_replay_epochs(path, Path(staging))
+                except (ValueError, OSError, TypeError) as exc:
+                    code = str(exc)
+                    if not code.startswith("replay_"):
+                        code = "replay_epoch_partition_failed"
                     report["sessions"].append(
-                        {
-                            "date": day,
-                            "state": (
-                                "completed" if result.returncode == 0 else "failed"
-                            ),
-                            **{
-                                key: value
-                                for key, value in payload.items()
-                                if key not in {"orders", "runner_status"}
-                            },
-                        }
+                        {"date": day, "state": "failed", "error_code": code}
                     )
-                else:
+                    cursor += timedelta(days=1)
+                    continue
+            else:
+                epoch_paths = [path]
+
+            for index, epoch_path in enumerate(epoch_paths, 1):
+                if len(epoch_paths) > 1:
+                    remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    report["budget_exhausted"] = True
+                    report["deferred_from"] = day
+                    break
+                destination = (
+                    directory / f"epoch-{index:03d}"
+                    if len(epoch_paths) > 1
+                    else directory
+                )
+                destination.mkdir(parents=True, exist_ok=True)
+                # No operator env file, brokerage credentials, or inherited
+                # live-mode settings cross the isolated offline boundary.
+                env = {
+                    key: value
+                    for key, value in os.environ.items()
+                    if key in {"PATH", "LANG", "LC_ALL", "TZ", "VIRTUAL_ENV"}
+                }
+                env.update(
+                    REPLAY_ISOLATED_PROCESS="true",
+                    EXECUTION_MODE="LIVE_SIMULATION",
+                    ENABLE_LIVE="false",
+                    ENABLE_LIVE_TRADING="false",
+                    BROKER_API_KEY="offline_replay",
+                    BROKER_API_SECRET="offline_replay",
+                    BROKER_ACCESS_TOKEN="offline_replay",
+                    ALLOW_NETWORK="false",
+                    ALLOW_REAL_BROKER="false",
+                    DATA_DIR=str(destination.resolve()),
+                    PYTHONPATH=str(root / "src"),
+                )
+                interpreter = root / ".venv/bin/python"
+                if not interpreter.is_file():
+                    interpreter = Path(sys.executable)
+                with (destination / "worker.log").open("w") as log:
+                    try:
+                        result = subprocess.run(
+                            [
+                                str(interpreter),
+                                str(root / "scripts/run_runtime_replay.py"),
+                                "--session",
+                                str(epoch_path.resolve()),
+                                "--output",
+                                str(destination.resolve()),
+                                "--compare-adaptive",
+                                "--stress-bps",
+                                "10",
+                                "25",
+                                "50",
+                            ],
+                            cwd=destination,
+                            env=env,
+                            stdout=log,
+                            stderr=log,
+                            timeout=min(600, remaining),
+                        )
+                    except subprocess.TimeoutExpired:
+                        report["sessions"].append(
+                            {
+                                "date": day,
+                                "epoch": index,
+                                "state": "failed",
+                                "error_code": "replay_timeout",
+                            }
+                        )
+                        continue
+                evidence = destination / "paired-comparison.json"
+                if not evidence.is_file():
                     report["sessions"].append(
                         {
                             "date": day,
+                            "epoch": index,
                             "state": "failed",
                             "error_code": "replay_worker_exited_without_report",
                         }
                     )
+                    continue
+                try:
+                    payload = json.loads(evidence.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    payload = {}
+                successful = (
+                    result.returncode == 0
+                    and payload.get("state") == "MODELED_COMPARISON_ONLY"
+                )
+                report["sessions"].append(
+                    {
+                        "date": day,
+                        "epoch": index,
+                        "state": "completed" if successful else "failed",
+                        "comparison_state": payload.get("state", "BLOCKED"),
+                        "error_code": payload.get("blocker")
+                        or payload.get("error_code"),
+                        "stress": payload.get("stress", []),
+                        "promotion_eligible": False,
+                    }
+                )
+            if report["budget_exhausted"]:
+                break
         cursor += timedelta(days=1)
     completed = sum(row["state"] == "completed" for row in report["sessions"])
     failed = sum(row["state"] == "failed" for row in report["sessions"])
