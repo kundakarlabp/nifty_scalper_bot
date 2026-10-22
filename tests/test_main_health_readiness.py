@@ -1046,3 +1046,22 @@ def test_signal_health_includes_canonical_regime_evidence() -> None:
     assert evidence["raw_reason"] == "adx_trending"
     assert evidence["stable_updated_at"] == 1780000100.0
     assert signals["runner_tick_count"] == 10
+
+
+def test_health_reports_selected_option_execution_without_changing_gates() -> None:
+    ctx = _ctx(
+        selected_ce="NFO:NIFTY26OCT22600CE",
+        selected_pe="NFO:NIFTY26OCT22600PE",
+        selected_ce_exec_ready=True,
+        selected_pe_exec_ready=False,
+        live_orders_armed=False,
+    )
+    main.app.state.bot = SimpleNamespace(_ctx=ctx)
+
+    body = _json(main.health_trading())
+
+    assert body["selected_execution_ready"] == {
+        "NFO:NIFTY26OCT22600CE": True,
+        "NFO:NIFTY26OCT22600PE": False,
+    }
+    assert body["live_orders_armed"] is False

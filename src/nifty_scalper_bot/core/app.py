@@ -15172,6 +15172,7 @@ async def startup_sequence(ctx: BotContext) -> None:
                     try:
                         if is_market_open():
                             await _reconcile_state(ctx, source="periodic_health")
+                            await _refresh_live_readiness_after_reconcile(ctx)
                         else:
                             _inner = getattr(
                                 ctx.broker_client,
@@ -15557,6 +15558,28 @@ def _should_reconcile_now(ctx: BotContext) -> bool:
         return False
     except Exception:  # noqa: BLE001 - never let the guard break the loop
         return True
+
+
+async def _refresh_live_readiness_after_reconcile(ctx: BotContext) -> None:
+    """Recheck a disarmed entry gate immediately after broker truth is refreshed."""
+    if (
+        bool(getattr(ctx, "live_orders_armed", False))
+        or bool(getattr(ctx, "position_reconciliation_failed", False))
+        or not _reconciliation_is_fresh(ctx)
+    ):
+        return
+    try:
+        await _recompute_and_push_runtime_readiness(
+            ctx, reason="post_position_reconcile"
+        )
+    except Exception:
+        # A failed recheck must not kill the broker-reconciliation worker.
+        ctx.live_orders_armed = False
+        ctx.execution_armed = False
+        LOGGER.exception(
+            "POST_RECONCILE_READINESS_RECHECK_FAILED",
+            extra={"event": "POST_RECONCILE_READINESS_RECHECK_FAILED"},
+        )
 
 
 def _reconciliation_sleep_seconds(ctx: BotContext, *, market_open: bool) -> float:

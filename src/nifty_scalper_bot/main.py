@@ -947,6 +947,11 @@ def _structured_runtime_status(ctx):  # noqa: ANN001
         "history_diagnostics": _history_count_diagnostics(
             history, ctx=ctx, selected=selected
         ),
+        "selected_execution_ready": {
+            symbol: bool(getattr(ctx, f"selected_{side}_exec_ready", False))
+            for side, symbol in (("ce", selected_ce), ("pe", selected_pe))
+            if symbol
+        },
         "state": {
             "startup_ready": bool(
                 getattr(ctx, "startup_ready", getattr(ctx, "data_hard_ready", False))
