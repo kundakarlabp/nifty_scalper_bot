@@ -514,11 +514,8 @@ def test_research_neutral_slope_needs_completed_option_momentum(monkeypatch):
     assert strategy.last_no_vote_reason == "futures_slope_not_aligned"
 
 
-
 @pytest.mark.parametrize("side", ["CE", "PE"])
-def test_live_neutral_slope_enables_quality_proven_entry_by_default(
-    monkeypatch, side
-):
+def test_live_neutral_slope_enables_quality_proven_entry_by_default(monkeypatch, side):
     monkeypatch.delenv("VWAP_LIVE_NEUTRAL_SLOPE_ENABLED", raising=False)
     near_neutral = 0.0001 if side == "CE" else -0.0001
     _, signal = _evaluate(
@@ -561,26 +558,56 @@ def test_live_neutral_slope_rolls_back_with_one_switch(monkeypatch, side):
         ("PE", {"futures_vwap_slope": 0.0001}, "futures_slope_not_aligned"),
         ("CE", {"futures_vwap_slope": None}, "futures_slope_not_aligned"),
         ("CE", {"futures_vwap_slope": float("nan")}, "futures_slope_not_aligned"),
-        ("CE", {"futures_vwap_slope": 0.0001, "regime": "RANGE"},
-         "trend_momentum_regime_not_trend"),
-        ("CE", {"futures_vwap_slope": 0.0001, "underlying_direction_bias": "PE"},
-         "underlying_direction_conflict"),
-        ("CE", {"futures_vwap_slope": 0.0001, "underlying_direction_confidence": 0.5},
-         "trend_momentum_underlying_quality_unconfirmed"),
-        ("CE", {"futures_vwap_slope": 0.0001, "context_age_seconds": 8.0},
-         "trend_momentum_underlying_quality_unconfirmed"),
-        ("CE", {"futures_vwap_slope": 0.0001, "history_volume": 300.0},
-         "trend_momentum_option_volume_not_confirmed"),
-        ("CE", {"futures_vwap_slope": 0.0001, "futures_volume_ratio": 0.5},
-         "futures_slope_not_aligned"),
-        ("CE", {"futures_vwap_slope": 0.0001, "history_high": 101.0},
-         "trend_momentum_bar_unconfirmed"),
-        ("CE", {"futures_vwap_slope": 0.0001, "is_complete": False},
-         "trend_momentum_bar_unconfirmed"),
-        ("CE", {"futures_vwap_slope": 0.0001, "open": 102.8},
-         "trend_momentum_premium_not_confirmed"),
-        ("CE", {"futures_vwap_slope": 0.0001, "session_vwap": None},
-         "trend_momentum_session_vwap_unavailable"),
+        (
+            "CE",
+            {"futures_vwap_slope": 0.0001, "regime": "RANGE"},
+            "trend_momentum_regime_not_trend",
+        ),
+        (
+            "CE",
+            {"futures_vwap_slope": 0.0001, "underlying_direction_bias": "PE"},
+            "underlying_direction_conflict",
+        ),
+        (
+            "CE",
+            {"futures_vwap_slope": 0.0001, "underlying_direction_confidence": 0.5},
+            "trend_momentum_underlying_quality_unconfirmed",
+        ),
+        (
+            "CE",
+            {"futures_vwap_slope": 0.0001, "context_age_seconds": 8.0},
+            "trend_momentum_underlying_quality_unconfirmed",
+        ),
+        (
+            "CE",
+            {"futures_vwap_slope": 0.0001, "history_volume": 300.0},
+            "trend_momentum_option_volume_not_confirmed",
+        ),
+        (
+            "CE",
+            {"futures_vwap_slope": 0.0001, "futures_volume_ratio": 0.5},
+            "futures_slope_not_aligned",
+        ),
+        (
+            "CE",
+            {"futures_vwap_slope": 0.0001, "history_high": 101.0},
+            "trend_momentum_bar_unconfirmed",
+        ),
+        (
+            "CE",
+            {"futures_vwap_slope": 0.0001, "is_complete": False},
+            "trend_momentum_bar_unconfirmed",
+        ),
+        (
+            "CE",
+            {"futures_vwap_slope": 0.0001, "open": 102.8},
+            "trend_momentum_premium_not_confirmed",
+        ),
+        (
+            "CE",
+            {"futures_vwap_slope": 0.0001, "session_vwap": None},
+            "trend_momentum_session_vwap_unavailable",
+        ),
     ],
 )
 def test_live_neutral_slope_preserves_structural_guards(
