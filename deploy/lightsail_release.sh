@@ -19,6 +19,9 @@ VENV="${BOT_VENV:-$APP_DIR/.venv}"
 STREAMLIT_VENV="${BOT_STREAMLIT_VENV:-$APP_DIR/.streamlit-venv}"
 LOCK_FILE="${BOT_DEPLOY_LOCK_FILE:-/tmp/niftybot-deploy.lock}"
 RESTART_PENDING_FILE="${CONFIG_DIR}/auto_release_restart_pending"
+RELEASE_HOLD_FILE="${CONFIG_DIR}/auto_release_entry_hold"
+RELEASE_ENTRY_LOCK_FILE="${CONFIG_DIR}/auto_release_entry_lock"
+RELEASE_HOLD_ACTIVE=false
 FORCE_RESTART=false
 AUTO_MODE=false
 SYSTEMD_ENTRYPOINT_MIGRATED=false
@@ -391,126 +394,43 @@ poll_research_request() {
 }
 
 
-# No market-hours ban. For immediate post-CI deployment the exposure
-# deferral is OFF by default. The legacy broker-flat guard remains available
-# for an explicit emergency policy override only.
-intraday_flat_broker_confirmed() {
-  local api_key access_token
-  api_key="$(first_nonempty_env BROKER_API_KEY ZERODHA_API_KEY KITE_API_KEY 2>/dev/null || true)"
-  access_token="$(first_nonempty_env BROKER_ACCESS_TOKEN ZERODHA_ACCESS_TOKEN KITE_ACCESS_TOKEN 2>/dev/null || true)"
-  if [ -z "$api_key" ] || [ -z "$access_token" ] || [ ! -x "$VENV/bin/python" ]; then
-    log "intraday_release_guard_blocked: broker credentials or Python unavailable"
+# No market-clock blackout: validate and deploy as soon as the account is
+# broker-flat, all orders are terminal, and the engine acknowledges an entry
+# hold. The release lock and entry-submit lock close the entry race; exits are
+# never blocked. No forced deployment on missing broker/engine authority.
+acquire_release_entry_hold() {
+  mkdir -p "$CONFIG_DIR"
+  if [ -L "$RELEASE_HOLD_FILE" ] || [ -L "$RELEASE_ENTRY_LOCK_FILE" ]; then
+    log "release entry hold/lock path is a symlink"
     return 1
   fi
-  BOT_RELEASE_KITE_API_KEY="$api_key" BOT_RELEASE_KITE_ACCESS_TOKEN="$access_token" \
-    BOT_RELEASE_LOCAL_PORT="$PORT" BOT_RELEASE_RESTART_PENDING="$RESTART_PENDING_FILE" \
-    "$VENV/bin/python" - <<'PY_FLAT_GUARD'
-import json
-import os
-import sys
-import time
-import urllib.request
-
-from kiteconnect import KiteConnect
-
-TERMINAL = {"COMPLETE", "CANCELLED", "REJECTED", "LAPSED"}
-port = int(os.environ["BOT_RELEASE_LOCAL_PORT"])
-kite = KiteConnect(api_key=os.environ["BOT_RELEASE_KITE_API_KEY"], timeout=5)
-kite.set_access_token(os.environ["BOT_RELEASE_KITE_ACCESS_TOKEN"])
-# A newly verified token exists on disk before the old process can load it.
-# This recovery exception is available ONLY for a previously queued restart;
-# broker positions and orders still have to be proved flat twice.
-restart_marker = os.environ.get("BOT_RELEASE_RESTART_PENDING") or ""
-token_rotation_requested = bool(restart_marker and os.path.isfile(restart_marker))
-
-def is_safe() -> bool:
-    with urllib.request.urlopen(f"http://127.0.0.1:{port}/livez", timeout=3) as response:
-        live = json.load(response)
-    if live.get("engine_http_responsive") is not True:
-        return False
-    if live.get("quiet") is True:
-        # The canonical off-hours control plane has no trading stack and no
-        # live entry worker. Broker positions/orders remain authoritative.
-        if live.get("bot_loaded") is not False:
-            return False
-    else:
-        if live.get("bot_loaded") is not True:
-            return False
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/health/trading", timeout=3) as response:
-            health = json.load(response)
-        reconciliation = health.get("reconciliation") or {}
-        broker = health.get("broker") or {}
-        # A fail-closed, unrestarted engine reports its previous token invalid.
-        # Accept only a queued token rotation with explicit invalid-auth proof;
-        # never treat an unknown auth state as permission to restart.
-        token_rotation_recovery = (
-            token_rotation_requested
-            and broker.get("authenticated") is False
-            and broker.get("auth_invalid") is True
-            and health.get("broker_authentication") == "invalid"
-            and health.get("broker_session_state") == "invalid"
-            and health.get("authentication_known") is True
-        )
-        if (
-            health.get("live_orders_armed") is not False
-            or reconciliation.get("completed") is not True
-            or reconciliation.get("failed") is True
-            or reconciliation.get("unprotected_positions")
-            or (broker.get("authenticated") is not True and not token_rotation_recovery)
-        ):
-            return False
-    positions = kite.positions()
-    orders = kite.orders()
-    if (
-        not isinstance(positions, dict)
-        or not isinstance(positions.get("net"), list)
-        or not isinstance(positions.get("day"), list)
-        or not isinstance(orders, list)
-    ):
-        return False
-    for row in positions["net"] + positions["day"]:
-        if not isinstance(row, dict) or "quantity" not in row:
-            return False
-        if float(row["quantity"]) != 0:
-            return False
-    for row in orders:
-        if not isinstance(row, dict) or str(row.get("status") or "").upper() not in TERMINAL:
-            return False
-    return True
-
-try:
-    # Both samples must prove no orders/positions and no armed entry path.
-    if not is_safe():
-        sys.exit(1)
-    time.sleep(1)
-    if not is_safe():
-        sys.exit(1)
-except Exception as exc:
-    print(f"intraday_release_guard_blocked: {type(exc).__name__}", file=sys.stderr)
-    sys.exit(1)
-PY_FLAT_GUARD
+  exec 8>"$RELEASE_ENTRY_LOCK_FILE"
+  chmod 600 "$RELEASE_ENTRY_LOCK_FILE"
+  # An in-flight LIVE BUY holds a shared lock until the broker call completes.
+  # Taking the exclusive lock therefore drains active order submissions.
+  if ! flock -w 10 8; then
+    log "release entry submission still in flight; retry automatically"
+    return 1
+  fi
+  printf '%s\\n' "$$" > "$RELEASE_HOLD_FILE"
+  chmod 600 "$RELEASE_HOLD_FILE"
+  RELEASE_HOLD_ACTIVE=true
 }
 
 auto_release_should_defer() {
-  [ "$AUTO_MODE" = true ] || return 1
-  # Owner-selected deployment policy: do not hold code updates because the
-  # trading engine is armed, positions are open, or Kite exposure cannot be
-  # queried. This is intentionally disabled by default, not a hidden market
-  # hours condition. Emergency opt-in is available without a code change:
-  # BOT_AUTO_DEPLOY_EXPOSURE_GUARD_ENABLED=true.
-  if [ "${BOT_AUTO_DEPLOY_EXPOSURE_GUARD_ENABLED:-false}" != "true" ]; then
-    return 1
-  fi
-  # Already-current, healthy builds require no broker requests. Route through
-  # the no-change branch, which still confirms the deployed SHA and reports
-  # status; do not poll Kite positions/orders every two minutes unnecessarily.
-  if [ -n "${BEFORE:-}" ] && [ "$BEFORE" = "${AFTER:-}" ] \
+  # An unchanged, healthy, non-restart build needs no broker API calls.
+  if [ "$AUTO_MODE" = true ] \
+    && [ -n "${BEFORE:-}" ] && [ "$BEFORE" = "${AFTER:-}" ] \
     && [ "${FORCE_RESTART:-false}" = false ] \
     && [ ! -f "${RESTART_PENDING_FILE:-}" ] \
     && service_healthy_confirmed "$BEFORE"; then
     return 0
   fi
-  # Optional legacy exposure policy, disabled in the default automatic flow.
+  # Pre-CI and pre-validation perform no checkout change or restart. The
+  # mandatory broker-flat proof occurs only after the entry hold is acquired.
+  if [ "$RELEASE_HOLD_ACTIVE" != true ]; then
+    return 1
+  fi
   intraday_flat_broker_confirmed && return 1
   return 0
 }
@@ -595,7 +515,7 @@ if [ "$AUTO_MODE" = true ]; then
     fi
     poll_research_request
     if [ "$BEFORE" != "$AFTER" ]; then
-      write_status deferred_broker_exposure "pending main ${AFTER:0:7}; deployed ${BEFORE:0:7}; retry when broker-flat and engine disarmed"
+      write_status deferred_broker_exposure "pending main ${AFTER:0:7}; deployed ${BEFORE:0:7}; retry when broker-flat with no active orders"
       log "Automatic release deferred: broker exposure, armed engine, or unavailable safety proof"
     else
       if admin_healthy; then
@@ -687,7 +607,16 @@ if [ "$BEFORE" = "$AFTER" ] && [ "$FORCE_RESTART" = false ]; then
 fi
 
 CANDIDATE="/tmp/niftybot-candidate-${AFTER:0:12}"
-cleanup() { git worktree remove --force "$CANDIDATE" >/dev/null 2>&1 || true; }
+cleanup() {
+  # A successfully restarted engine must be able to re-arm normally; a
+  # deferred or failed release must also release the temporary entry hold.
+  if [ "$RELEASE_HOLD_ACTIVE" = true ]; then
+    rm -f "$RELEASE_HOLD_FILE"
+    flock -u 8 || true
+    RELEASE_HOLD_ACTIVE=false
+  fi
+  git worktree remove --force "$CANDIDATE" >/dev/null 2>&1 || true
+}
 trap cleanup EXIT
 git worktree prune
 rm -rf "$CANDIDATE"
@@ -757,15 +686,20 @@ if [ "${#EXISTING_TESTS[@]}" -gt 0 ]; then
   }
 fi
 
-# Recheck broker exposure and entry arming after candidate validation,
-# immediately before checkout mutation (at any hour).
+# Acquire the exclusive entry-submit barrier only after validation. Block
+# new BUY submissions while allowing protective SELL exits; then confirm two
+# independently fresh broker position/order snapshots at any market hour.
+if ! acquire_release_entry_hold; then
+  write_status deferred_entry_handoff "candidate ${AFTER:0:7} validated; entry submission busy; retry automatically"
+  exit 0
+fi
 if auto_release_should_defer; then
   if [ "$FORCE_RESTART" = true ]; then
     mkdir -p "$CONFIG_DIR"
     : > "$RESTART_PENDING_FILE"
   fi
   poll_research_request
-  write_status deferred_broker_exposure "candidate ${AFTER:0:7} validated; checkout untouched until broker-flat and disarmed"
+  write_status deferred_broker_exposure "candidate ${AFTER:0:7} validated; checkout untouched until broker-flat, terminal orders and engine hold acknowledgement"
   exit 0
 fi
 
@@ -827,7 +761,7 @@ if auto_release_should_defer; then
     write_status runtime_restore_failed "retained revision build provenance restoration failed; manual recovery required"
     exit 1
   fi
-  write_status deferred_broker_exposure "broker/arming state changed before engine restart; current revision ${BEFORE:0:7} restored"
+  write_status deferred_broker_exposure "broker/holding state changed before engine restart; current revision ${BEFORE:0:7} restored"
   poll_research_request
   exit 0
 fi
