@@ -99,6 +99,7 @@ def audit_session(path: Path, *, gap_seconds: float = 120) -> dict[str, Any]:
     # quote coverage as if one basket were active for the entire process run.
     basket_segments: list[dict[str, Counter[str]]] = []
     current_segment: dict[str, Counter[str]] | None = None
+    current_selection: tuple[str, str, str] | None = None
     unmatched = 0
     missing_symbol = 0
     for event in iter_session(path):
@@ -109,10 +110,15 @@ def audit_session(path: Path, *, gap_seconds: float = 120) -> dict[str, Any]:
             active = _selected(event["payload"])
             if not active:
                 raise ValueError("replay_audit_snapshot_basket_unidentified")
-            basket_versions.add((active["CE"], active["PE"], active["FUT"]))
-            current_segment = defaultdict(Counter)
-            basket_segments.append(current_segment)
-            previous.clear()
+            selection = (active["CE"], active["PE"], active["FUT"])
+            basket_versions.add(selection)
+            # A repeated snapshot of the SAME selected basket is not a new
+            # selection epoch and cannot create a synthetic zero-tick segment.
+            if current_segment is None or selection != current_selection:
+                current_segment = defaultdict(Counter)
+                basket_segments.append(current_segment)
+                previous.clear()
+            current_selection = selection
             continue
         tick = event["payload"]
         symbol = tick.get("symbol")
