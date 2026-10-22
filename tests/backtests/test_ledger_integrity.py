@@ -2,6 +2,13 @@
 
 from __future__ import annotations
 
+import sqlite3
+
+from nifty_scalper_bot.journal.trade_ledger import (
+    ensure_trade_ledger_schema,
+    materialize_trade_events,
+)
+
 from nifty_scalper_bot.backtesting.ledger_integrity import (
     summarize_ledger_integrity,
 )
@@ -111,3 +118,63 @@ def test_empty_historical_ledger_is_an_explicit_unverified_result() -> None:
     assert report["completed_closed_rows"] == 0
     assert report["completed_cost_source_counts"] == {}
     assert report["broker_reconciled"] is False
+
+
+def test_late_exit_revision_cannot_relabel_entry_strategy_build() -> None:
+    with sqlite3.connect(":memory:") as conn:
+        ensure_trade_ledger_schema(conn)
+        materialize_trade_events(
+            conn,
+            [
+                {
+                    "trade_id": "t1",
+                    "event_name": "entry.filled",
+                    "timestamp": 100.0,
+                    "build_sha": "a" * 40,
+                    "price": 100.0,
+                    "qty": 65,
+                },
+                {
+                    "trade_id": "t1",
+                    "event_name": "trade.closed",
+                    "timestamp": 110.0,
+                    "build_sha": "b" * 40,
+                    "meta": {
+                        "completed_trade": {
+                            "ledger_complete": True,
+                            "gross_pnl": 100.0,
+                            "net_pnl": 70.0,
+                        }
+                    },
+                },
+            ],
+        )
+        result = conn.execute(
+            "SELECT state, build_sha FROM trade_ledger WHERE trade_id = 't1'"
+        ).fetchone()
+        assert result == ("CLOSED", "a" * 40)
+
+
+def test_missing_initial_build_is_backfilled_from_first_known_revision() -> None:
+    with sqlite3.connect(":memory:") as conn:
+        ensure_trade_ledger_schema(conn)
+        materialize_trade_events(
+            conn,
+            [
+                {
+                    "trade_id": "t2",
+                    "event_name": "entry.filled",
+                    "timestamp": 10.0,
+                    "price": 90.0,
+                },
+                {
+                    "trade_id": "t2",
+                    "event_name": "bracket.armed",
+                    "timestamp": 11.0,
+                    "build_sha": "c" * 40,
+                },
+            ],
+        )
+        assert conn.execute(
+            "SELECT build_sha FROM trade_ledger WHERE trade_id='t2'"
+        ).fetchone()[0] == "c" * 40
