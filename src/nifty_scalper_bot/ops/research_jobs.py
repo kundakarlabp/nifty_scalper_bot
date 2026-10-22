@@ -655,6 +655,10 @@ def run_recorded_replays(root: Path, request: dict[str, Any]) -> dict[str, Any]:
                                     "comparison_state": payload.get("state"),
                                     "error_code": payload.get("blocker")
                                     or payload.get("error_code"),
+                                    "worker_error_code": payload.get(
+                                        "worker_error_code"
+                                    ),
+                                    "failed_scenario": payload.get("failed_scenario"),
                                     "stress": payload.get("stress", []),
                                     "promotion_eligible": False,
                                 }

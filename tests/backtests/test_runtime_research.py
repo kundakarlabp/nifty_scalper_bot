@@ -483,3 +483,56 @@ def test_paired_run_missing_capture_refuses_subprocess(monkeypatch, tmp_path):
     report = worker.run_paired_replays(tmp_path / "missing.jsonl", tmp_path / "output")
     assert report["state"] == "BLOCKED"
     assert report["blocker"] == "no_usable_archived_depth_session"
+
+
+def test_paired_run_reports_sanitized_child_failure_without_false_success(
+    monkeypatch, tmp_path
+):
+    session = tmp_path / "2026-10-21.jsonl"
+    session.write_text("immutable archive")
+    monkeypatch.setattr(archive, "archive_fingerprint", lambda _path: "verified_sha")
+    monkeypatch.setattr(
+        worker, "write_capture_preflight", lambda *_: _paired_fidelity()
+    )
+
+    def failed_child(command, *, cwd, env, stdout, stderr, timeout, check):
+        del cwd, stdout, stderr, timeout, check
+        assert env["ALLOW_NETWORK"] == "false"
+        destination = Path(command[command.index("--output") + 1])
+        (destination / "failure.json").write_text(
+            json.dumps({"state": "failed", "error_code": "replay_session_incomplete"})
+        )
+        return SimpleNamespace(returncode=1)
+
+    monkeypatch.setattr(worker.subprocess, "run", failed_child)
+    report = worker.run_paired_replays(session, tmp_path / "out", stress_bps=(10,))
+    assert report["state"] == "BLOCKED"
+    assert report["promotion_eligible"] is False
+    assert report["blocker"] == "paired_replay_worker_failed"
+    assert report["worker_error_code"] == "replay_session_incomplete"
+    assert report["failed_scenario"] == {"policy": "baseline", "slippage_bps": 10}
+
+
+def test_paired_run_does_not_expose_untrusted_worker_failure_text(
+    monkeypatch, tmp_path
+):
+    session = tmp_path / "2026-10-21.jsonl"
+    session.write_text("immutable archive")
+    monkeypatch.setattr(archive, "archive_fingerprint", lambda _path: "verified_sha")
+    monkeypatch.setattr(
+        worker, "write_capture_preflight", lambda *_: _paired_fidelity()
+    )
+
+    def failed_child(command, *, cwd, env, stdout, stderr, timeout, check):
+        del cwd, env, stdout, stderr, timeout, check
+        destination = Path(command[command.index("--output") + 1])
+        (destination / "failure.json").write_text(
+            json.dumps({"error_code": "replay_secret=private-session-value"})
+        )
+        return SimpleNamespace(returncode=1)
+
+    monkeypatch.setattr(worker.subprocess, "run", failed_child)
+    report = worker.run_paired_replays(session, tmp_path / "out", stress_bps=(10,))
+    assert report["state"] == "BLOCKED"
+    assert report["blocker"] == "paired_replay_worker_failed"
+    assert "worker_error_code" not in report
