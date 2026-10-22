@@ -70,7 +70,7 @@ def _flash(request: Request) -> str:
     if request.query_params.get("upd") == "ok":
         return (
             '<div class="flash ok">Update check accepted by systemd. '
-            "Releases require broker-flat and disarmed-engine confirmation. "
+            "Candidate validation and rollback remain enforced. "
             "This is not deployment completion; check release status.</div>"
         )
     return _ORIGINAL_FLASH(request)
