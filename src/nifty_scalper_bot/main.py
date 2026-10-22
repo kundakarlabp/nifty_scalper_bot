@@ -1048,6 +1048,9 @@ def readyz():
 
 @app.get("/health/trading")
 def health_trading():
+    from nifty_scalper_bot.core.trading_switch import release_entry_hold_active
+
+    release_hold = release_entry_hold_active()
     ctx = _latest_context()
     if ctx is None:
         return JSONResponse(
@@ -1063,9 +1066,12 @@ def health_trading():
         )
     decision = getattr(ctx, "readiness_decision", None)
     blockers = _context_blockers(ctx)
+    if release_hold and "release_entry_hold" not in blockers:
+        blockers = [*blockers, "release_entry_hold"]
     live_orders_armed = bool(
         getattr(decision, "live_orders_armed", getattr(ctx, "live_orders_armed", False))
     )
+    live_orders_armed = live_orders_armed and not release_hold
     execution_ready = bool(
         getattr(decision, "execution_ready", getattr(ctx, "execution_armed", False))
     )
@@ -1091,6 +1097,7 @@ def health_trading():
             "status": "armed" if live_orders_armed else "blocked",
             "ready": execution_ready and not blockers,
             "live_orders_armed": live_orders_armed and not blockers,
+            "release_entry_hold_active": release_hold,
             "primary_blocker": primary,
             "blockers": [b for b in blockers if b],
             "trade_replication": get_trade_replication_status(),
