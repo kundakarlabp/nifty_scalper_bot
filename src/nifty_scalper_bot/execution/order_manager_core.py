@@ -57,7 +57,11 @@ import nifty_scalper_bot.config.settings as app_settings
 from nifty_scalper_bot.config.paths import get_data_dir
 from nifty_scalper_bot.core.active_basket import active_contract_selection_from_basket
 from nifty_scalper_bot.core.signal_arbitrator import SignalArbitrator
-from nifty_scalper_bot.core.trading_switch import TradingSwitchState, trading_switch
+from nifty_scalper_bot.core.trading_switch import (
+    TradingSwitchState,
+    live_entry_submission_slot,
+    trading_switch,
+)
 from nifty_scalper_bot.data.bracket_store import BracketStore
 from nifty_scalper_bot.data.data_hub import DataHub
 from nifty_scalper_bot.data.persistent_state import (
@@ -12112,7 +12116,8 @@ class OrderManager:
                 self._logger.debug("broker_order_attempt_metric_failed", exc_info=True)
             try:
                 # [FIX] Unpack payload so Broker Client receives named arguments
-                response = self._call_broker(self._broker.place_order, **payload)
+                with live_entry_submission_slot(payload):
+                    response = self._call_broker(self._broker.place_order, **payload)
             except RateLimitError as exc:
                 last_error = exc
                 break
