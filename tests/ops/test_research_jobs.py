@@ -943,9 +943,11 @@ def test_research_worker_processes_verified_restart_epochs_separately(
     assert [row["epoch"] for row in report["sessions"]] == [1, 2]
     assert len(invoked) == 2
     assert (replay_dir / "2026-10-21.jsonl").exists()
-    assert not list((tmp_path / "data/research/epochs/runtime/2026-10-21").glob(
-        "validated-epochs-*"
-    ))
+    assert not list(
+        (tmp_path / "data/research/epochs/runtime/2026-10-21").glob(
+            "validated-epochs-*"
+        )
+    )
 
 
 def test_research_worker_rejects_unverified_multirun_integrity_without_replay(
