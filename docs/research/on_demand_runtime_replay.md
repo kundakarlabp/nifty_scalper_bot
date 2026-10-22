@@ -118,3 +118,22 @@ broker-fill parity. It cannot be promoted automatically, even if all its
 scenarios show a positive modeled delta. Require chronological non-overlapping
 holdout days, validated costs, stop-limit gaps/partial-fill stress, and
 independent live-market observation before considering live activation.
+
+
+## Automated paired comparison of independently recorded process epochs
+
+The existing `partition_replay_runs` owner first validates the complete
+archive and its original writer-integrity sidecars. A single file may then
+contain several **contiguous genuine recording process runs** after restarts.
+Each epoch is replayed separately, never with inferred position or risk
+continuity. Noncontiguous reentry of an earlier run_id is rejected.
+Epochs with open positions at startup still fail their own validation.
+
+The existing five-day `mode=runtime` research request now runs the merged
+`--compare-adaptive --stress-bps 10 25 50` tool against every eligible
+epoch, in isolated subprocesses with no network or live broker credentials.
+The report stores the modeled comparison per `date` and `run_id`; a
+missing quote tape, corrupt capture, differing entries, partial fills, or
+unresolved broker simulation remains a failure, not a positive P&L delta.
+The research budget and trading-session deployment guards are unchanged.
+Reports are not a live-policy activation or proof of broker-executable alpha.
