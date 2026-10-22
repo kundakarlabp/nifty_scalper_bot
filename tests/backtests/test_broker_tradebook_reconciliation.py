@@ -167,7 +167,9 @@ def test_csv_aliases_and_duplicate_broker_trade_ids_are_checked(tmp_path):
         read_broker_tradebook_csv(path)
 
 
-@pytest.mark.parametrize("quantity,price", [("0", "100"), ("65", "nan"), ("65.5", "100")])
+@pytest.mark.parametrize(
+    "quantity,price", [("0", "100"), ("65", "nan"), ("65.5", "100")]
+)
 def test_csv_invalid_numeric_inputs_fail_closed(tmp_path, quantity, price):
     path = tmp_path / "broken.csv"
     path.write_text(
