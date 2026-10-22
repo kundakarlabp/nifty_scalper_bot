@@ -514,7 +514,7 @@ acquire_release_entry_hold() {
     log "release entry submission still in flight; retry automatically"
     return 1
   fi
-  printf '%s\n' "$" > "$RELEASE_HOLD_FILE"
+  printf '%s\n' "$BASHPID" > "$RELEASE_HOLD_FILE"
   # Trap cleanup must own the marker even if chmod fails under set -e.
   RELEASE_HOLD_ACTIVE=true
   chmod 600 "$RELEASE_HOLD_FILE"
