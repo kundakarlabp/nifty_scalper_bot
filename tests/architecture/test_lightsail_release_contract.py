@@ -833,7 +833,7 @@ def test_successful_engine_release_never_hides_failed_admin(tmp_path: Path) -> N
         'restart_admin() { [ "$ADMIN_OK" = "yes" ]; }\n'
         'restart_streamlit() { [ "$CONSOLE_OK" = "yes" ]; }\n'
         'broker_auth_dependency_degraded() { [ "$BROKER_DEGRADED" = "yes" ]; }\n'
-        'write_status() { printf "%s\\\n" "$1" > "$STATUS_OUTPUT"; }\n'
+        'write_status() { printf "%s\\n" "$1" > "$STATUS_OUTPUT"; }\n'
         'logger() { :; }\n'
         'log() { :; }\n'
         'poll_research_request() { :; }\n'
