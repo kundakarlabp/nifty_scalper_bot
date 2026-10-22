@@ -119,6 +119,9 @@ ensure_env_default SUPABASE_TRADE_REPLICATION_TIMEOUT_SECONDS 5
 ensure_env_default SUPABASE_LOG_ARCHIVE_ENABLED true
 ensure_env_default SUPABASE_LOG_ARCHIVE_URL "https://dehdptgkqbrkyzyodicd.supabase.co/functions/v1/nifty-log-archive-ingest"
 ensure_env_default SUPABASE_LOG_ARCHIVE_INTERVAL_SECONDS 300
+ensure_env_default SUPABASE_RUNTIME_HEARTBEAT_ENABLED true
+ensure_env_default SUPABASE_RUNTIME_HEARTBEAT_URL "https://dehdptgkqbrkyzyodicd.supabase.co/functions/v1/nifty-runtime-heartbeat-ingest"
+ensure_env_default SUPABASE_RUNTIME_HEARTBEAT_INTERVAL_SECONDS 120
 
 if [ -e "$LEGACY_ENV" ] && [ ! -L "$LEGACY_ENV" ]; then
   mv "$LEGACY_ENV" "$CONFIG_DIR/legacy.env.$(date +%Y%m%d_%H%M%S)"
