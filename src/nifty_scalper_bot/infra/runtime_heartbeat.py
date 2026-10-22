@@ -27,7 +27,9 @@ HealthReader = Callable[[], tuple[int, Mapping[str, Any]]]
 
 def heartbeat_interval_seconds() -> float:
     try:
-        return max(60.0, float(os.getenv("SUPABASE_RUNTIME_HEARTBEAT_INTERVAL_SECONDS", "120")))
+        return max(
+            60.0, float(os.getenv("SUPABASE_RUNTIME_HEARTBEAT_INTERVAL_SECONDS", "120"))
+        )
     except (TypeError, ValueError):
         return 120.0
 
@@ -73,7 +75,9 @@ class RuntimeHeartbeat:
             engine_healthy = http_status == 200
             if engine_healthy:
                 candidate = raw.get("status")
-                if isinstance(candidate, str) and re.fullmatch(r"[a-zA-Z0-9_:-]{1,90}", candidate):
+                if isinstance(candidate, str) and re.fullmatch(
+                    r"[a-zA-Z0-9_:-]{1,90}", candidate
+                ):
                     status = candidate
                 block_list = raw.get("blockers")
                 if isinstance(block_list, list):
