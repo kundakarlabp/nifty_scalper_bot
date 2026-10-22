@@ -519,7 +519,8 @@ def test_opt_in_smc_sustained_evidence_preserves_order_execution_checks(monkeypa
     assert result is not None
     assert result.metadata["approval_path"] == "smc_sustained_orderflow_confirmed"
     assert result.metadata["requires_runner_execution_validation"] is True
-    assert result.metadata["confirmation_contract"]["smc_sustained_flow_confirmed"] is True
+    contract = result.metadata["confirmation_contract"]
+    assert contract["smc_sustained_flow_confirmed"] is True
 
 
 def test_smc_capacity_rejection_still_requires_independent_trigger(monkeypatch):
