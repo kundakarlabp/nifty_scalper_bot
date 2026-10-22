@@ -515,8 +515,9 @@ acquire_release_entry_hold() {
     return 1
   fi
   printf '%s\n' "$" > "$RELEASE_HOLD_FILE"
-  chmod 600 "$RELEASE_HOLD_FILE"
+  # Trap cleanup must own the marker even if chmod fails under set -e.
   RELEASE_HOLD_ACTIVE=true
+  chmod 600 "$RELEASE_HOLD_FILE"
 }
 
 auto_release_should_defer() {
