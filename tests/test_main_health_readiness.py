@@ -1114,6 +1114,7 @@ def test_armed_trading_status_does_not_misreport_no_signal_as_order(
             }
 
     ctx = _ctx(live_orders_armed=True, strategy_runner=Runner())
+    ctx.live_orders_armed = True
     main.app.state.bot = SimpleNamespace(_ctx=ctx)
     status = main.trading_status()
     assert status["can_place_live_order_now"] is True
