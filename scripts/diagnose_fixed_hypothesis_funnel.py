@@ -32,7 +32,11 @@ def diagnose(report: dict) -> list[dict]:
         if key in observed:
             raise ValueError(f"duplicate result: {key}")
         observed.add(key)
-        if (\n            phase not in EXPECTED_PHASES\n            or strategy not in EXPECTED_STRATEGIES\n            or slip not in EXPECTED_SLIPPAGE\n        ):
+        if (
+            phase not in EXPECTED_PHASES
+            or strategy not in EXPECTED_STRATEGIES
+            or slip not in EXPECTED_SLIPPAGE
+        ):
             raise ValueError(f"unexpected cell: {key}")
         if row["session_count"] != EXPECTED_PHASES[phase]:
             raise ValueError(f"session count mismatch: {key}")
@@ -57,14 +61,28 @@ def diagnose(report: dict) -> list[dict]:
             "signals": signals, "geometry_valid": int(funnel.get("geometry_valid", 0)),
             "next_bar_intents": intents, "cost_net_rr_rejected": rr_rejected,
             "accepted_fills": fills, "resolved": resolved, "unresolved": unresolved,
-            "cost_rejection_share_of_intents": (\n                round(rr_rejected / intents, 6) if intents else None\n            ),
+            "cost_rejection_share_of_intents": (
+                round(rr_rejected / intents, 6) if intents else None
+            ),
             "other_nonfilled_intents": intents - fills - rr_rejected,
             "no_vote_reasons_json": json.dumps(reasons, sort_keys=True),
         })
-    expected = {\n        (p, s, b)\n        for p in EXPECTED_PHASES\n        for s in EXPECTED_STRATEGIES\n        for b in EXPECTED_SLIPPAGE\n    }
+    expected = {
+        (p, s, b)
+        for p in EXPECTED_PHASES
+        for s in EXPECTED_STRATEGIES
+        for b in EXPECTED_SLIPPAGE
+    }
     if observed != expected:
         raise ValueError(f"missing result cells: {expected - observed}")
-    return sorted(\n        output,\n        key=lambda r: (\n            list(EXPECTED_PHASES).index(r["phase"]),\n            r["strategy"],\n            r["slippage_bps_per_side"],\n        ),\n    )
+    return sorted(
+        output,
+        key=lambda r: (
+            list(EXPECTED_PHASES).index(r["phase"]),
+            r["strategy"],
+            r["slippage_bps_per_side"],
+        ),
+    )
 
 
 def main() -> None:
