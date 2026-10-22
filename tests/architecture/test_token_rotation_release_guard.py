@@ -34,7 +34,9 @@ health = {
     "authentication_known": os.environ["TEST_KNOWN"] == "1",
     "live_orders_armed": os.environ["TEST_ARMED"] == "1",
     "broker": {
-        "authenticated": True if mode == "valid" else (False if mode == "invalid" else None),
+        "authenticated": (
+            True if mode == "valid" else (False if mode == "invalid" else None)
+        ),
         "auth_invalid": mode == "invalid",
     },
     "reconciliation": {
