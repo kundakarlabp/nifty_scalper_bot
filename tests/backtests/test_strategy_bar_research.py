@@ -2903,7 +2903,10 @@ def test_neutral_slope_ablation_is_opt_in_cost_matched_and_environment_isolated(
     assert comparison["control"] == "trend_premium_rvol_1_5"
     assert comparison["treatment"] == "trend_premium_rvol_1_5_neutral_slope"
     assert comparison["only_changed_rule"] == "VWAP_RESEARCH_NEUTRAL_FUTURES_SLOPE"
-    assert all(row["development_expectancy_delta"] is None for row in comparison["scenarios"])
+    assert all(
+        row["development_expectancy_delta"] is None
+        for row in comparison["scenarios"]
+    )
     assert comparison["selected_for_live"] is None
     assert comparison["promotion_eligible"] is False
     assert report["selection"]["promotion_eligible"] is False
