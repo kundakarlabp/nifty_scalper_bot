@@ -77,10 +77,10 @@ def restart_deployer() -> ControlResult:
 
 
 def queue_validated_restart() -> ControlResult:
-    """Request a safe deferred engine restart through the only release owner.
+    """Queue the next validated release pass without broker-exposure postponement.
 
-    Never restart the trading engine from an HTTP request. The release runner
-    requires broker-flat and disarmed-engine proof before consuming the marker.
+    HTTP never directly restarts the engine; the release owner performs
+    candidate checks, systemd restart and rollback if readiness fails.
     """
     action = "restart_bot"
     config = Path(os.getenv("NIFTYBOT_CONFIG_DIR", "/home/ubuntu/.config/niftybot"))
@@ -110,8 +110,8 @@ def queue_validated_restart() -> ControlResult:
     return ControlResult(
         True,
         action,
-        "Validated restart queued; release runner requires broker-flat "
-        "and disarmed-engine verification regardless of market hours",
+        "Validated restart queued; auto-deployer will apply it after "
+        "release checks, with rollback if readiness fails",
         triggered.command,
     )
 
