@@ -121,9 +121,7 @@ def test_rotated_basket_without_new_quotes_remains_blocked(tmp_path):
 
 def test_second_basket_missing_depth_is_not_rescued_by_first_basket(tmp_path):
     report = audit_session(
-        _record(
-            tmp_path, changed=True, rotated_quotes=True, rotated_ce_depth=False
-        )
+        _record(tmp_path, changed=True, rotated_quotes=True, rotated_ce_depth=False)
     )
     assert report["basket_segments_with_quote_context"] == 1
     assert report["basket_segments_missing_quote_context"] == 1
