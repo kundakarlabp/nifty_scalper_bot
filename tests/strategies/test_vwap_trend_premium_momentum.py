@@ -475,7 +475,10 @@ def test_research_neutral_futures_slope_requires_explicit_shadow_opt_in(
         ),
         (
             "CE",
-            {"futures_vwap_slope": 0.0001, "history_timestamp": "2026-09-10T09:59:00+05:30"},
+            {
+                "futures_vwap_slope": 0.0001,
+                "history_timestamp": "2026-09-10T09:59:00+05:30",
+            },
             "trend_momentum_bar_unconfirmed",
         ),
     ],
