@@ -817,3 +817,64 @@ def test_auto_release_fails_closed_if_exposure_restore_fails() -> None:
     assert boundary.index("write_status runtime_restore_failed") < boundary.index(
         "write_status deferred_broker_exposure"
     )
+
+
+def test_successful_engine_release_never_hides_failed_admin(tmp_path: Path) -> None:
+    """A healthy engine must not mask a broken independent admin service."""
+    release = _text("deploy/lightsail_release.sh")
+    start = release.index('if wait_for_service "$AFTER"; then')
+    end = release.index('\nif [ "$BEFORE" != "$AFTER" ]; then\n  git reset', start)
+    success_block = release[start:end]
+
+    script = (
+        "wait_for_service() { return 0; }\n"
+        'restart_admin() { [ "$ADMIN_OK" = "yes" ]; }\n'
+        'restart_streamlit() { [ "$CONSOLE_OK" = "yes" ]; }\n'
+        'broker_auth_dependency_degraded() { [ "$BROKER_DEGRADED" = "yes" ]; }\n'
+        'write_status() { printf "%s\\n" "$1" > "$STATUS_OUTPUT"; }\n'
+        "logger() { :; }\n"
+        "log() { :; }\n"
+        "poll_research_request() { :; }\n" + success_block
+    )
+    cases = (
+        ("yes", "yes", "no", "deployed"),
+        ("no", "yes", "no", "deployed_admin_degraded"),
+        ("no", "no", "no", "deployed_controls_degraded"),
+        ("yes", "yes", "yes", "deployed_dependency_degraded"),
+        ("no", "yes", "yes", "deployed_admin_and_broker_degraded"),
+    )
+    for admin_ok, console_ok, broker_degraded, expected in cases:
+        state_file = tmp_path / "state.txt"
+        result = subprocess.run(
+            ["bash", "-c", script],
+            env={
+                **os.environ,
+                "ADMIN_OK": admin_ok,
+                "CONSOLE_OK": console_ok,
+                "BROKER_DEGRADED": broker_degraded,
+                "STATUS_OUTPUT": str(state_file),
+                "RESTART_PENDING_FILE": str(tmp_path / "pending"),
+                "AFTER": "f" * 40,
+                "BEFORE": "e" * 40,
+            },
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        assert state_file.read_text(encoding="utf-8").strip() == expected
+
+
+def test_current_release_status_surfaces_failed_admin_recovery() -> None:
+    release = _text("deploy/lightsail_release.sh")
+    assert release.count("write_status current_admin_degraded") == 2
+    assert release.count("if admin_healthy; then") >= 2
+    assert "admin service unavailable after recovery attempt" in release
+
+
+def test_admin_status_link_is_valid_on_engine_and_isolated_admin() -> None:
+    page = _text("src/nifty_scalper_bot/admin_dashboard.py")
+    assert 'href="/admin/status.json">Service status</a>' in page
+    assert 'href="/health">Health</a>' not in page
+    assert '@router.get("/admin/status.json")' in page

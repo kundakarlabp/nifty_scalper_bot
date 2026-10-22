@@ -399,7 +399,8 @@ def dashboard(request: Request) -> HTMLResponse:
     <button class=blu type=submit>Check GitHub update</button></form>
     <form method=post action="/admin/restart">
     <button class=amb type=submit>Queue safe restart</button></form>
-    <a class="btn gray" href="/health">Health</a></div></div></div>"""
+    <a class="btn gray" href="/admin/status.json">Service status</a>
+    </div></div></div>"""
     return HTMLResponse(_page(body))
 
 

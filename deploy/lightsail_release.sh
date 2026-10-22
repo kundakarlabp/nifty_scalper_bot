@@ -548,7 +548,11 @@ if [ "$AUTO_MODE" = true ]; then
       write_status deferred_broker_exposure "pending main ${AFTER:0:7}; deployed ${BEFORE:0:7}; retry when broker-flat and engine disarmed"
       log "Automatic release deferred: broker exposure, armed engine, or unavailable safety proof"
     else
-      write_status current "running ${BEFORE:0:7}; no pending revision"
+      if admin_healthy; then
+        write_status current "running ${BEFORE:0:7}; no pending revision"
+      else
+        write_status current_admin_degraded "running ${BEFORE:0:7}; admin service unavailable after recovery attempt"
+      fi
     fi
     exit 0
   fi
@@ -616,7 +620,11 @@ fi
 if [ "$BEFORE" = "$AFTER" ] && [ "$FORCE_RESTART" = false ]; then
   if service_healthy_confirmed "$BEFORE"; then
     if [ "$current_runtime_sha" = "$BEFORE" ]; then
-      write_status current "running ${BEFORE:0:7}"
+      if admin_healthy; then
+        write_status current "running ${BEFORE:0:7}"
+      else
+        write_status current_admin_degraded "running ${BEFORE:0:7}; admin service unavailable after recovery attempt"
+      fi
       poll_research_request
       exit 0
     fi
@@ -783,12 +791,24 @@ if wait_for_service "$AFTER"; then
   fi
   if broker_auth_dependency_degraded; then
     restart_streamlit || log "WARNING: dashboard restart failed while broker auth is degraded"
-    write_status deployed_dependency_degraded "deployed ${AFTER:0:7}; engine healthy, broker authentication unavailable; trading blocked"
+    if [ "$admin_ready" = true ]; then
+      write_status deployed_dependency_degraded "deployed ${AFTER:0:7}; engine healthy, broker authentication unavailable; trading blocked"
+    else
+      write_status deployed_admin_and_broker_degraded "deployed ${AFTER:0:7}; engine healthy, admin service unavailable, broker authentication unavailable"
+    fi
     logger -t niftybot-deploy "candidate deployed; broker authentication unavailable, trading remains blocked"
   elif restart_streamlit; then
-    write_status deployed "deployed ${AFTER:0:7}; bot and console healthy"
+    if [ "$admin_ready" = true ]; then
+      write_status deployed "deployed ${AFTER:0:7}; bot, admin and console healthy"
+    else
+      write_status deployed_admin_degraded "deployed ${AFTER:0:7}; bot and console healthy, admin service unavailable"
+    fi
   else
-    write_status deployed_console_degraded "deployed ${AFTER:0:7}; bot healthy, console restart failed"
+    if [ "$admin_ready" = true ]; then
+      write_status deployed_console_degraded "deployed ${AFTER:0:7}; bot and admin healthy, console restart failed"
+    else
+      write_status deployed_controls_degraded "deployed ${AFTER:0:7}; engine healthy, admin and console unavailable"
+    fi
     logger -t niftybot-deploy "bot deployed; Streamlit health check failed"
   fi
   logger -t niftybot-deploy "validated and deployed ${BEFORE:0:7} -> ${AFTER:0:7}"
