@@ -522,9 +522,9 @@ def test_release_uses_single_fetch_and_same_auto_manual_validation() -> None:
     assert release.index('set_runtime_build_sha "$AFTER"') < release.index(
         'sudo systemctl restart "$SERVICE"'
     )
-    assert 'write_status deferred_ci' in release
-    assert 'write_status validation_failed' in release
-    assert 'write_status rolled_back' in release
+    assert "write_status deferred_ci" in release
+    assert "write_status validation_failed" in release
+    assert "write_status rolled_back" in release
 
 
 def test_pending_restart_marker_consumed_after_successful_release() -> None:
