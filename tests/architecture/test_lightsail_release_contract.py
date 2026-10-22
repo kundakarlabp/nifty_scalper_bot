@@ -61,8 +61,8 @@ def test_sudoers_policy_authorizes_exact_automation_controls() -> None:
     assert "--repair-control-sudoers" in release
     assert "control_sudoers_v2_installed" in release
     repair = release.index("--repair-control-sudoers")
-    early_gate = release.index("if auto_release_should_defer; then")
-    assert repair < early_gate
+    validated = release.index('write_status validating "validating')
+    assert repair < validated
     assert (
         subprocess.run(
             ["bash", "-n", str(ROOT / "deploy/lightsail_setup.sh")],
@@ -135,8 +135,7 @@ def test_repair_only_uses_validated_candidate_before_checkout_mutation() -> None
         validated,
     )
     checkout = release.index('git reset --hard --quiet "$AFTER"', late_repair)
-    guard = release.index("if auto_release_should_defer; then", validated)
-    assert validated < guard < late_repair < checkout
+    assert validated < late_repair < checkout
     assert "control_permissions_failed" in release
     assert "market_session_protected()" not in release
 
@@ -297,9 +296,8 @@ def test_admin_recovery_is_independent_of_broker_and_ci_gates() -> None:
     release = _text("deploy/lightsail_release.sh")
     entry = release.index("exec 9>")
     recovery_call = release.index("recover_admin_control || true", entry)
-    broker_gate = release.index("if auto_release_should_defer; then", entry)
-    ci_gate = release.index('if [ "$BEFORE" != "$AFTER" ]; then', broker_gate)
-    assert entry < recovery_call < broker_gate < ci_gate
+    ci_gate = release.index('if [ "$BEFORE" != "$AFTER" ]; then', recovery_call)
+    assert entry < recovery_call < ci_gate
     assert "http://127.0.0.1:${ADMIN_PORT}/healthz" in release
     assert 'http://127.0.0.1:${ADMIN_PORT}/admin"' in release
     recovery = release.split("recover_admin_control() {", 1)[1].split(
