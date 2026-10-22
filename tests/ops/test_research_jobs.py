@@ -823,8 +823,8 @@ def test_recorded_replay_budget_exhaustion_is_partial_not_completed(
 
     def replay(command, **kwargs):
         output = Path(command[command.index("--output") + 1])
-        (output / "report.json").write_text(
-            json.dumps({"events_processed": 10}),
+        (output / "paired-comparison.json").write_text(
+            json.dumps({"state": "MODELED_COMPARISON_ONLY", "stress": []}),
             encoding="utf-8",
         )
         return SimpleNamespace(returncode=0)
@@ -872,3 +872,124 @@ def test_runtime_mode_is_bounded_and_requires_no_operator_login(tmp_path, monkey
     ]
     with pytest.raises(ValueError):
         validate_request({"id": "bad", "mode": "shell"})
+
+
+def test_research_worker_processes_verified_restart_epochs_separately(
+    tmp_path, monkeypatch
+):
+    from datetime import datetime, timedelta
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from nifty_scalper_bot.ops.research_jobs import run_recorded_replays
+    from nifty_scalper_bot.storage.replay_archive import ReplayArchive
+
+    replay_dir = tmp_path / "data/replay_archive"
+    replay_dir.mkdir(parents=True)
+    base = datetime.fromisoformat("2026-10-21T09:30:00+05:30")
+    snapshot = {
+        "instruments": [{"instrument_token": 100}],
+        "basket": {"selected_ce": "NFO:NIFTY_CE"},
+        "effective_settings": {"risk": {"enabled": True}},
+        "runner_config": {"mode": "test"},
+        "initial_balance": 100000,
+        "initial_positions": [],
+    }
+    first = ReplayArchive(replay_dir)
+    first.record("snapshot", snapshot, base)
+    first.record("tick", {"symbol": "NFO:NIFTY_CE"}, base + timedelta(seconds=1))
+    first.close()
+    second = ReplayArchive(replay_dir)
+    second.record("snapshot", snapshot, base + timedelta(seconds=2))
+    second.record("tick", {"symbol": "NFO:NIFTY_CE"}, base + timedelta(seconds=3))
+    second.close()
+    monkeypatch.setattr(
+        "nifty_scalper_bot.config.paths.get_data_dir", lambda: tmp_path / "data"
+    )
+    invoked = []
+
+    def offline_worker(command, **kwargs):
+        path = Path(command[command.index("--session") + 1])
+        folder = Path(command[command.index("--output") + 1])
+        invoked.append((path, command, kwargs["env"]))
+        assert "--compare-adaptive" in command
+        assert path.name == "2026-10-21.jsonl"
+        assert path != replay_dir / path.name
+        assert kwargs["env"]["ALLOW_NETWORK"] == "false"
+        assert "BROKER_API_SECRET" in kwargs["env"]
+        (folder / "paired-comparison.json").write_text(
+            json.dumps(
+                {
+                    "state": "MODELED_COMPARISON_ONLY",
+                    "stress": [{"net_delta": 20.0, "promotion_eligible": False}],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(
+        "nifty_scalper_bot.ops.research_jobs.subprocess.run", offline_worker
+    )
+    request = validate_request(
+        {"id": "epochs", "mode": "runtime", "days": 1},
+        today=date(2026, 10, 22),
+    )
+    report = run_recorded_replays(tmp_path, request)
+
+    assert report["completed_sessions"] == 2
+    assert report["failed_sessions"] == 0
+    assert report["state"] == "completed"
+    assert [row["epoch"] for row in report["sessions"]] == [1, 2]
+    assert len(invoked) == 2
+    assert (replay_dir / "2026-10-21.jsonl").exists()
+    assert not list((tmp_path / "data/research/epochs/runtime/2026-10-21").glob(
+        "validated-epochs-*"
+    ))
+
+
+def test_research_worker_rejects_unverified_multirun_integrity_without_replay(
+    tmp_path, monkeypatch
+):
+    from datetime import datetime, timedelta
+
+    from nifty_scalper_bot.ops.research_jobs import run_recorded_replays
+    from nifty_scalper_bot.storage.replay_archive import ReplayArchive
+
+    directory = tmp_path / "data/replay_archive"
+    directory.mkdir(parents=True)
+    base = datetime.fromisoformat("2026-10-21T09:30:00+05:30")
+    snapshot = {
+        "instruments": [{"instrument_token": 100}],
+        "basket": {"selected_ce": "NFO:NIFTY_CE"},
+        "effective_settings": {"risk": {"enabled": True}},
+        "runner_config": {"mode": "test"},
+        "initial_balance": 100000,
+        "initial_positions": [],
+    }
+    first = ReplayArchive(directory)
+    first.record("snapshot", snapshot, base)
+    first.close()
+    second = ReplayArchive(directory)
+    second.record("snapshot", snapshot, base + timedelta(seconds=1))
+    second.close()
+    (directory / f"{second.run_id}.integrity.json").unlink()
+    monkeypatch.setattr(
+        "nifty_scalper_bot.config.paths.get_data_dir", lambda: tmp_path / "data"
+    )
+    monkeypatch.setattr(
+        "nifty_scalper_bot.ops.research_jobs.subprocess.run",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            AssertionError("unverified archive cannot run any replay")
+        ),
+    )
+
+    request = validate_request(
+        {"id": "corrupt-epochs", "mode": "runtime", "days": 1},
+        today=date(2026, 10, 22),
+    )
+    report = run_recorded_replays(tmp_path, request)
+
+    assert report["completed_sessions"] == 0
+    assert report["state"] == "blocked"
+    assert report["sessions"][0]["error_code"].startswith("replay_")
