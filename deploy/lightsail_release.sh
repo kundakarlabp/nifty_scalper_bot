@@ -647,6 +647,9 @@ ensure_env_default SUPABASE_TRADE_REPLICATION_TIMEOUT_SECONDS 5
 set_env_value SUPABASE_LOG_ARCHIVE_ENABLED true
 ensure_env_default SUPABASE_LOG_ARCHIVE_URL "https://dehdptgkqbrkyzyodicd.supabase.co/functions/v1/nifty-log-archive-ingest"
 ensure_env_default SUPABASE_LOG_ARCHIVE_INTERVAL_SECONDS 300
+set_env_value SUPABASE_RUNTIME_HEARTBEAT_ENABLED true
+ensure_env_default SUPABASE_RUNTIME_HEARTBEAT_URL "https://dehdptgkqbrkyzyodicd.supabase.co/functions/v1/nifty-runtime-heartbeat-ingest"
+ensure_env_default SUPABASE_RUNTIME_HEARTBEAT_INTERVAL_SECONDS 120
 if [ "$RUNTIME_ENV_CHANGED" = true ]; then FORCE_RESTART=true; fi
 # Preserve explicit restart requests across failed validation/deployment.
 # Exposure no longer defers the default automatic release.
