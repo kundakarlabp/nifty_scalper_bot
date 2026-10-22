@@ -509,11 +509,46 @@ def _auto_release_helpers() -> str:
     assert "TZ=Asia/Kolkata date +%u" not in release
     assert release.count("auto_release_should_defer() {") == 1
     return (
-        "intraday_flat_broker_confirmed() {"
+        "BOT_AUTO_DEPLOY_EXPOSURE_GUARD_ENABLED=true\n"
+        + "intraday_flat_broker_confirmed() {"
         + release.split("intraday_flat_broker_confirmed() {", 1)[1].split(
             "\nexec 9>", 1
         )[0]
     )
+
+
+def test_default_auto_release_does_not_defer_on_live_or_unknown_exposure() -> None:
+    """CI-approved releases must not be blocked by the optional broker guard."""
+    helpers = _auto_release_helpers()
+    shell = helpers + """
+unset BOT_AUTO_DEPLOY_EXPOSURE_GUARD_ENABLED
+AUTO_MODE=true
+BEFORE=oldrevision
+AFTER=newrevision
+FORCE_RESTART=false
+intraday_flat_broker_confirmed() {
+  printf 'UNEXPECTED_BROKER_PROBE\\n' >&2
+  return 1
+}
+if auto_release_should_defer; then
+  exit 77
+fi
+"""
+    result = subprocess.run(
+        ["bash", "-c", shell], capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 0, result.stderr
+    assert "UNEXPECTED_BROKER_PROBE" not in result.stderr
+
+    release = _text("deploy/lightsail_release.sh")
+    # All three historical blocking boundaries call the same policy helper;
+    # the default policy is now disabled at their shared entrypoint.
+    assert release.count("if auto_release_should_defer; then") == 3
+    assert "BOT_AUTO_DEPLOY_EXPOSURE_GUARD_ENABLED:-false" in release
+    assert "git worktree add" in release
+    assert "verify_release_ci.py" in release
+    assert "wait_for_service" in release
+    assert "rolled_back" in release
 
 
 def test_auto_release_has_no_market_hours_blackout() -> None:

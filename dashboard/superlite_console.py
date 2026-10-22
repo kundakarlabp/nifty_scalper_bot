@@ -209,7 +209,7 @@ trade_only = controls[5].toggle("Trade events", value=False)
 controls[6].link_button("Open admin", ADMIN_PUBLIC, width="stretch")
 
 ops = st.columns([1.1, 1.2, 1.1, 2.3], gap="small")
-if ops[0].button("Queue safe restart", type="secondary", width="stretch"):
+if ops[0].button("Queue engine restart", type="secondary", width="stretch"):
     st.cache_data.clear()
     accepted, message = _post("/admin/restart")
     (st.info if accepted else st.error)(message)
@@ -220,7 +220,7 @@ if ops[1].button("Check GitHub update", type="primary", width="stretch"):
 ops[2].link_button("Hard admin", ADMIN_PUBLIC, width="stretch")
 ops[3].caption(
     "Controls request the validated deployment service. "
-    "Updates and restarts wait for broker-flat and disarmed-engine safety checks. "
+    "Updates and restarts can interrupt LIVE position and stop management. "
     "A queued request is not a completed deployment."
 )
 
