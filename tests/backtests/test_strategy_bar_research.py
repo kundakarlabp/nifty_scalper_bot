@@ -2839,7 +2839,6 @@ def test_smc_structural_exit_global_minute_gap_cannot_credit_later_target(
     assert structural["worst_case_stress_trades"][0]["net_pnl"] < 0
 
 
-
 def test_neutral_slope_ablation_is_opt_in_cost_matched_and_environment_isolated(
     tmp_path, monkeypatch
 ):
@@ -2904,8 +2903,7 @@ def test_neutral_slope_ablation_is_opt_in_cost_matched_and_environment_isolated(
     assert comparison["treatment"] == "trend_premium_rvol_1_5_neutral_slope"
     assert comparison["only_changed_rule"] == "VWAP_RESEARCH_NEUTRAL_FUTURES_SLOPE"
     assert all(
-        row["development_expectancy_delta"] is None
-        for row in comparison["scenarios"]
+        row["development_expectancy_delta"] is None for row in comparison["scenarios"]
     )
     assert comparison["selected_for_live"] is None
     assert comparison["promotion_eligible"] is False
