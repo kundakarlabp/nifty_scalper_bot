@@ -10,7 +10,7 @@ deduplicated. A post-trade profitable counterfactual has **not** been proved.
 
 | Question | Canonical owner | Opt-in flag (default false) | Unchanged safety gates |
 | --- | --- | --- | --- |
-| Qualified SMC with two separately timed supportive books | `SustainedSMCFlow` called by `StrategyManager` | `SMC_SUSTAINED_FLOW_CONFIRMATION_ENABLED` | SMC structural setup ID, direction, opposing-context veto, capacity-retry consensus, broker/runner/risk |
+| Qualified SMC with two separately timed supportive books | `SustainedSMCFlow` called by `StrategyManager` | `SMC_SUSTAINED_FLOW_CONFIRMATION_ENABLED` (Lightsail LIVE default true, explicit false opts out; disabled by default elsewhere) | SMC structural setup ID, direction, opposing-context veto, capacity-retry consensus, broker/runner/risk |
 | OFI reversal persistence versus latency | `OrderFlowStrategy` | `ORDERFLOW_OFI_ADAPTIVE_HOLDOFF_ENABLED` | Base holdoff 15s; minimum 10s when opted in and 3s sustained OFI and strong same-side book support; adverse veto |
 | Mid-trend premium pullback and rebreak beyond ordinary ATR VWAP band | `VWAPProStrategy` | `VWAP_TREND_RETEST_EXTENSION_ENABLED` | Session VWAP, strong fresh underlying direction, TREND regime, finalized current and previous adjacent bars, bearish prior retracement, rebreak, option RVOL, futures slope and risk |
 
@@ -49,3 +49,21 @@ option-contract-specific thesis and setup ID, preserving stop rearm semantics.
 
 Deployment during the live session must not interrupt a broker order or
 position. A merge alone is not proof production has deployed that SHA.
+
+## October 23 operator-directed SMC live rollout
+
+- Only the existing SMC two-book admission default is enabled in the normal
+  `aws_lightsail` LIVE startup environment. VWAP retest and adaptive OFI remain
+  default-disabled experiments; no new trade authority or risk change exists.
+- An explicit `SMC_SUSTAINED_FLOW_CONFIRMATION_ENABLED=false` remains a
+  production rollback switch after a broker-flat controlled restart.
+- Startup logs `SMC_SUSTAINED_FLOW_ADMISSION_CONFIG enabled=True/False` as
+  observed runtime proof of the flag; deployment SHA by itself is insufficient.
+- A qualified SMC setup still requires two fresh aligned, complete three-second
+  OFI observations 4–12 seconds apart with independent quote versions. An
+  adverse context, capacity retry, missing setup ID, or short-lived flow
+  cannot be promoted by this flag. Sizing, exchange SL and broker safeguards
+  remain mandatory.
+- This is an operator-requested live-small experiment, not a verified improvement
+  in out-of-sample trading expectancy. Measure actual setups, admission,
+  affordability, net after-cost P&L and adverse outcomes before further tuning.
