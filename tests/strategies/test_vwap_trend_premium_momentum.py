@@ -58,10 +58,10 @@ def _evaluate(
                 {
                     "timestamp": current_ts
                     - timedelta(minutes=max(i, indicators.get("prior_gap_minutes", 1))),
-                    "open": 100.0,
-                    "high": 103.0,
-                    "low": 98.0,
-                    "close": 101.0,
+                    "open": indicators.get("prior_open", 100.0),
+                    "high": indicators.get("prior_high", 103.0),
+                    "low": indicators.get("prior_low", 98.0),
+                    "close": indicators.get("prior_close", 101.0),
                     "volume": v,
                     "is_complete": True,
                     "is_provisional": False,
@@ -93,7 +93,11 @@ def _evaluate(
             return indicators.get("prior_session_vwap", 100.0)
 
     strategy = VWAPProStrategy(VWAPProStrategyConfig(), _CompletedBarEngine())
-    signal = strategy._evaluate_signal(f"NFO:NIFTY2691523400{side}", indicators, 103.0)
+    signal = strategy._evaluate_signal(
+        f"NFO:NIFTY2691523400{side}",
+        indicators,
+        indicators.get("current_price", 103.0),
+    )
     return strategy, signal
 
 
@@ -634,3 +638,70 @@ def test_live_strong_slope_baseline_is_not_tightened(monkeypatch):
     assert signal is not None
     assert signal.metadata["live_neutral_slope_admitted"] is False
     assert signal.metadata["vwap_neutral_slope_premium_proof_required"] is False
+
+
+
+@pytest.mark.parametrize("side", ["CE", "PE"])
+def test_opt_in_trend_retest_extension_requires_completed_pullback_rebreak(
+    monkeypatch, side
+):
+    inputs = dict(
+        enabled=False,
+        side=side,
+        atr=1.2,
+        open=102.0,
+        high=105.0,
+        low=101.0,
+        close=104.0,
+        current_price=104.0,
+        prior_open=102.0,
+        prior_close=101.0,
+    )
+    monkeypatch.setenv("VWAP_TREND_RETEST_EXTENSION_ENABLED", "false")
+    baseline_strategy, baseline = _evaluate(monkeypatch, **inputs)
+    assert baseline is None
+    assert baseline_strategy.last_no_vote_reason == "distance_outside_band"
+
+    monkeypatch.setenv("VWAP_TREND_RETEST_EXTENSION_ENABLED", "true")
+    extension_strategy, extension = _evaluate(monkeypatch, **inputs)
+    assert extension is not None
+    assert extension.metadata["setup_type"] == "vwap_trend_pullback_retest"
+    assert extension.metadata["vwap_trend_retest_extension_admitted"] is True
+    assert extension.metadata["vwap_distance_atr"] > 3.0
+    assert extension.metadata["requires_runner_execution_validation"] is True
+    assert extension.metadata["trend_alignment"] is True
+
+
+@pytest.mark.parametrize(
+    "updates, expected",
+    [
+        ({"prior_open": 100.0, "prior_close": 101.0}, "trend_retest_structure_unconfirmed"),
+        ({"prior_gap_minutes": 2}, "trend_retest_structure_unconfirmed"),
+        ({"prior_volumes": [900.0] * 9 + [0.0]}, "trend_retest_structure_unconfirmed"),
+        ({"low": 102.0}, "trend_retest_structure_unconfirmed"),
+        ({"history_high": 101.0}, "trend_momentum_bar_unconfirmed"),
+        ({"underlying_direction_bias": "PE"}, "distance_outside_band"),
+        ({"context_age_seconds": 10.0}, "distance_outside_band"),
+        ({"regime": "RANGE"}, "trend_momentum_regime_not_trend"),
+        ({"futures_vwap_slope": -0.01}, "futures_slope_not_aligned"),
+    ],
+)
+def test_trend_retest_extension_fails_closed_on_missing_structural_quality(
+    monkeypatch, updates, expected
+):
+    monkeypatch.setenv("VWAP_TREND_RETEST_EXTENSION_ENABLED", "true")
+    inputs = dict(
+        enabled=False,
+        atr=1.2,
+        open=102.0,
+        high=105.0,
+        low=101.0,
+        close=104.0,
+        current_price=104.0,
+        prior_open=102.0,
+        prior_close=101.0,
+    )
+    inputs.update(updates)
+    strategy, signal = _evaluate(monkeypatch, **inputs)
+    assert signal is None
+    assert strategy.last_no_vote_reason == expected
