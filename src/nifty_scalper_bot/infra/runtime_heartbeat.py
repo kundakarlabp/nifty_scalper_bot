@@ -21,12 +21,13 @@ from typing import Any
 
 import requests
 
-from nifty_scalper_bot.config.env_utils import resolve_build_sha
-
-DEFAULT_HEARTBEAT_URL = (
-    "https://dehdptgkqbrkyzyodicd.supabase.co/functions/v1/"
-    "nifty-runtime-heartbeat-ingest"
+from nifty_scalper_bot.config.defaults import DEFAULT_SUPABASE_HEARTBEAT_URL
+from nifty_scalper_bot.config.env_utils import (
+    resolve_build_sha,
+    supabase_telemetry_enabled,
 )
+
+DEFAULT_HEARTBEAT_URL = DEFAULT_SUPABASE_HEARTBEAT_URL
 _HEX_SHA = re.compile(r"^[0-9a-f]{7,40}$")
 HeartbeatTransport = Callable[[str, Mapping[str, Any], float], Mapping[str, Any]]
 HealthReader = Callable[[], tuple[int, Mapping[str, Any]]]
@@ -42,12 +43,7 @@ def heartbeat_interval_seconds() -> float:
 
 
 def build_runtime_heartbeat() -> "RuntimeHeartbeat | None":
-    if os.getenv("SUPABASE_RUNTIME_HEARTBEAT_ENABLED", "false").strip().lower() not in {
-        "true",
-        "1",
-        "yes",
-        "on",
-    }:
+    if not supabase_telemetry_enabled("SUPABASE_RUNTIME_HEARTBEAT_ENABLED"):
         return None
     return RuntimeHeartbeat(
         endpoint_url=os.getenv("SUPABASE_RUNTIME_HEARTBEAT_URL", DEFAULT_HEARTBEAT_URL)

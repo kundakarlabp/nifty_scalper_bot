@@ -1,4 +1,13 @@
-"""Default configuration values for the Nifty scalper bot."""
+"""Purpose: Define version-controlled broker, risk and monitoring defaults.
+
+Responsibilities:
+- Provide the existing LIVE risk limits without host-side parameter copies.
+- Define canonical, nonsecret Supabase Edge monitoring endpoints.
+- Expose quote, order and service constants to their owning subsystems.
+
+Boundaries: Constants only; no environment mutation, network or broker actions.
+Safety: Never store credentials here; trading limits are unchanged by telemetry.
+"""
 
 from __future__ import annotations
 
@@ -20,6 +29,15 @@ DEFAULT_RISK_MAX_TOTAL_EXPOSURE_PCT = 80.0
 DEFAULT_RISK_MAX_CONCURRENT_POSITIONS = 1
 DEFAULT_RISK_MAX_POSITIONS_PER_SYMBOL = 1
 DEFAULT_RISK_MIN_RISK_REWARD_RATIO = 1.5
+
+# Canonical read-only off-hot-path telemetry destinations. The Supabase Edge
+# receiver is source/IP allowlisted; these URLs contain no credentials.
+SUPABASE_FUNCTIONS_BASE_URL = "https://dehdptgkqbrkyzyodicd.supabase.co/functions/v1"
+DEFAULT_SUPABASE_TRADE_URL = SUPABASE_FUNCTIONS_BASE_URL + "/nifty-trade-ingest"
+DEFAULT_SUPABASE_ARCHIVE_URL = SUPABASE_FUNCTIONS_BASE_URL + "/nifty-log-archive-ingest"
+DEFAULT_SUPABASE_HEARTBEAT_URL = (
+    SUPABASE_FUNCTIONS_BASE_URL + "/nifty-runtime-heartbeat-ingest"
+)
 
 DEFAULT_LOG_LEVEL = "INFO"
 
