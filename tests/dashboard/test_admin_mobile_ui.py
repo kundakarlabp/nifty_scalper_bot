@@ -204,8 +204,7 @@ def test_zerodha_login_and_callback_use_same_canonical_key(monkeypatch) -> None:
     monkeypatch.setattr(
         dashboard,
         "_verify_access_token",
-        lambda key, token: calls.append((key, token))
-        or (True, "verified"),
+        lambda key, token: calls.append((key, token)) or (True, "verified"),
     )
     monkeypatch.setattr(
         dashboard,
