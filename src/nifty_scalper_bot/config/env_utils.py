@@ -225,6 +225,19 @@ def normalise_live_env_defaults() -> None:
             truthy(os.getenv("SMC_SUSTAINED_FLOW_CONFIRMATION_ENABLED")),
             os.getenv("EXECUTION_MODE"),
         )
+        # Operator-approved October 23 LIVE defaults. These flags only select
+        # already-tested, bounded alternatives inside their existing strategy
+        # owners; risk, market-data quality and broker gates remain unchanged.
+        # Explicit external 'false' independently disables either alternative.
+        setdefault_env("VWAP_TREND_RETEST_EXTENSION_ENABLED", "true")
+        setdefault_env("ORDERFLOW_OFI_ADAPTIVE_HOLDOFF_ENABLED", "true")
+        LOGGER.warning(
+            "LIVE_ENTRY_QUALITY_CONFIG vwap_retest=%s adaptive_ofi=%s "
+            "mode=%s platform=aws_lightsail",
+            truthy(os.getenv("VWAP_TREND_RETEST_EXTENSION_ENABLED")),
+            truthy(os.getenv("ORDERFLOW_OFI_ADAPTIVE_HOLDOFF_ENABLED")),
+            os.getenv("EXECUTION_MODE"),
+        )
 
     if live_requested:
         # Canonical live risk envelope. Accepted aliases are synchronized here
