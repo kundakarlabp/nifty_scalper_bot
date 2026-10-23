@@ -130,8 +130,10 @@ def normalise_live_env_defaults() -> None:
     else:
         # Conflicting ENABLE_LIVE / EXECUTION_MODE settings always disable
         # live orders; retain an explicit paper or shadow request where valid.
-        nonlive = mode if mode in {"SHADOW", "PAPER"} else (
-            "SHADOW" if mode or enable_live else "PAPER"
+        nonlive = (
+            mode
+            if mode in {"SHADOW", "PAPER"}
+            else ("SHADOW" if mode or enable_live else "PAPER")
         )
         values = {
             "ENABLE_LIVE": "false",
