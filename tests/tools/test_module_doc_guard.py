@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-
 from scripts import module_doc_guard as guard
 
 
@@ -35,7 +34,8 @@ def test_short_bare_module_header_is_rejected() -> None:
 
 def test_header_with_purpose_and_boundary_is_accepted() -> None:
     source = (
-        '"""Purpose: Normalize already selected option quotes for downstream consumers.\n'
+        '"""Purpose: Normalize already selected option quotes for downstream '
+        'consumers.\n'
         "\nResponsibilities: Preserve price and source quality markers.\n"
         "Boundaries: Contract discovery and order submission belong elsewhere.\n"
         '"""\n'
@@ -44,7 +44,12 @@ def test_header_with_purpose_and_boundary_is_accepted() -> None:
 
 
 def test_method_or_signature_change_is_detectable() -> None:
-    before = '"""Purpose: Example.\nSafety: none.\n"""\nclass Owner:\n    def go(self, price):\n        return price\n'
+    before = (
+        '"""Purpose: Example.\nSafety: none.\n"""\n'
+        "class Owner:\n"
+        "    def go(self, price):\n"
+        "        return price\n"
+    )
     after = before.replace("def go(self, price)", "def go(self, price, quantity=1)")
     assert guard.api_inventory(before) != guard.api_inventory(after)
 
