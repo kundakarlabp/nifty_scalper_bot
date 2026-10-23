@@ -83,7 +83,10 @@ def test_update_failure_propagates_operator_error(monkeypatch) -> None:
     }
 
 
-def test_token_activation_queues_safe_restart_not_direct_systemctl(monkeypatch) -> None:
+def test_token_activation_queues_safe_restart_not_direct_systemctl(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("NIFTYBOT_CONFIG_DIR", str(tmp_path))
     writes = []
     queued = []
     monkeypatch.setattr(admin, "_write_env", lambda values: writes.append(values))
@@ -103,6 +106,13 @@ def test_token_activation_queues_safe_restart_not_direct_systemctl(monkeypatch) 
             "BROKER_ACCESS_TOKEN": "verified-token",
         }
     ]
+    import hashlib
+    import json
+
+    marker = tmp_path / "auto_release_verified_token_rotation"
+    proof = json.loads(marker.read_text(encoding="utf-8"))
+    assert proof["token_sha256"] == hashlib.sha256(b"verified-token").hexdigest()
+    assert marker.stat().st_mode & 0o777 == 0o600
 
 
 def test_verified_token_reports_restart_dispatch_failure(monkeypatch) -> None:
@@ -197,3 +207,51 @@ def test_live_admin_removes_unverified_restart_and_market_time_claims() -> None:
     assert "outside the protected market window" not in service
     assert '"sudo", "systemctl", "restart"' not in dashboard
     assert "os._exit(0)" not in dashboard
+
+
+def test_callback_supports_broker_key_aliases(monkeypatch) -> None:
+    monkeypatch.setattr(
+        admin,
+        "_read_env",
+        lambda: {"BROKER_API_KEY": "key", "BROKER_API_SECRET": "secret"},
+    )
+    calls = []
+    monkeypatch.setattr(
+        admin,
+        "_exchange_request_token",
+        lambda api_key, api_secret, _token: calls.append((api_key, api_secret))
+        or (True, "issued-token"),
+    )
+    monkeypatch.setattr(admin, "_verify_access_token", lambda *_args: (True, "user"))
+    monkeypatch.setattr(
+        admin,
+        "_activate_access_token",
+        lambda _token: ControlResult(True, "restart_bot", "queued"),
+    )
+    response = _client().get(
+        "/admin/kite/callback?request_token=valid&status=success",
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert response.headers["location"] == "/admin?token=ok"
+    assert calls == [("key", "secret")]
+
+
+def test_direct_access_token_supports_zerodha_alias(monkeypatch) -> None:
+    monkeypatch.setattr(admin, "_read_env", lambda: {"ZERODHA_API_KEY": "key"})
+    called = []
+    monkeypatch.setattr(
+        admin,
+        "_verify_access_token",
+        lambda key, _token: called.append(key) or (True, "verified"),
+    )
+    monkeypatch.setattr(
+        admin,
+        "_activate_access_token",
+        lambda _token: ControlResult(True, "restart_bot", "queued"),
+    )
+    response = _client().post(
+        "/admin/token", data={"access_token": "token"}, follow_redirects=False
+    )
+    assert response.status_code == 303
+    assert called == ["key"]
