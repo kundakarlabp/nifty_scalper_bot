@@ -35,18 +35,29 @@ def test_minimal_railway_live_env_derives_flags(monkeypatch) -> None:
     assert os.getenv('SHADOW_MODE') == 'false'
 
 
-def test_execution_mode_live_alone_derives_enable_live(monkeypatch) -> None:
+def test_execution_mode_live_alone_must_not_enable_real_trading(monkeypatch) -> None:
     _clear_derived(monkeypatch)
-    monkeypatch.setenv('EXECUTION_MODE', 'LIVE')
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
 
     normalise_live_env_defaults()
 
-    assert os.getenv('ENABLE_LIVE') == 'true'
-    assert os.getenv('ENABLE_LIVE_TRADING') == 'true'
-    assert os.getenv('ORDERS__ENABLE_LIVE') == 'true'
-    assert os.getenv('PAPER__ENABLED') == 'false'
-    assert os.getenv('PAPER_MODE') == 'false'
-    assert os.getenv('SHADOW_MODE') == 'false'
+    assert os.getenv("ENABLE_LIVE") == "false"
+    assert os.getenv("ENABLE_LIVE_TRADING") == "false"
+    assert os.getenv("ORDERS__ENABLE_LIVE") == "false"
+    assert os.getenv("EXECUTION_MODE") == "SHADOW"
+    assert os.getenv("PAPER_MODE") == "true"
+
+
+def test_enable_live_without_matching_mode_is_inert(monkeypatch) -> None:
+    _clear_derived(monkeypatch)
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+
+    normalise_live_env_defaults()
+
+    assert os.getenv("ENABLE_LIVE") == "false"
+    assert os.getenv("EXECUTION_MODE") == "SHADOW"
+    assert os.getenv("ENABLE_LIVE_TRADING") == "false"
+
 
 
 def test_paper_defaults_when_no_live_requested(monkeypatch) -> None:
@@ -71,49 +82,32 @@ def test_explicit_railway_override_preserved(monkeypatch) -> None:
 
     normalise_live_env_defaults()
 
-    assert os.getenv('PAPER_MODE') == 'true'
+    assert os.getenv('PAPER_MODE') == 'false'
 
 
-def test_lightsail_defaults_live_even_with_legacy_shadow_flags(monkeypatch, tmp_path) -> None:
+def test_first_lightsail_boot_never_promotes_legacy_shadow_to_live(
+    monkeypatch, tmp_path
+) -> None:
     _clear_derived(monkeypatch)
-    monkeypatch.delenv('PRODUCTION_DEFAULT_LIVE', raising=False)
-    monkeypatch.delenv('PRODUCTION_LIVE_DEFAULT_INITIALIZED', raising=False)
-    monkeypatch.setenv('DEPLOYMENT_PLATFORM', 'aws_lightsail')
-    monkeypatch.setenv('ENABLE_LIVE', 'false')
-    monkeypatch.setenv('ENABLE_LIVE_TRADING', 'false')
-    monkeypatch.setenv('EXECUTION_MODE', 'SHADOW')
-    monkeypatch.setenv('ORDERS__ENABLE_LIVE', 'false')
-    monkeypatch.setenv('PAPER__ENABLED', 'true')
-    monkeypatch.setenv('PAPER_MODE', 'true')
-    monkeypatch.setenv('SHADOW_MODE', 'true')
-    env_file = tmp_path / 'niftybot.env'
-    env_file.write_text(
-        'ENABLE_LIVE=false\nEXECUTION_MODE=SHADOW\nKITE_API_SECRET=keep-me\n',
-        encoding='utf-8',
-    )
-    monkeypatch.setenv('BOT_ENV_FILE', str(env_file))
+    monkeypatch.delenv("PRODUCTION_DEFAULT_LIVE", raising=False)
+    monkeypatch.delenv("PRODUCTION_LIVE_DEFAULT_INITIALIZED", raising=False)
+    monkeypatch.setenv("DEPLOYMENT_PLATFORM", "aws_lightsail")
+    monkeypatch.setenv("ENABLE_LIVE", "false")
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    env_file = tmp_path / "niftybot.env"
+    original = "ENABLE_LIVE=false\\nEXECUTION_MODE=SHADOW\\nKITE_API_SECRET=keep-me\\n"
+    env_file.write_text(original, encoding="utf-8")
+    monkeypatch.setenv("BOT_ENV_FILE", str(env_file))
 
     normalise_live_env_defaults()
 
-    assert os.getenv('ENABLE_LIVE') == 'true'
-    assert os.getenv('ENABLE_LIVE_TRADING') == 'true'
-    assert os.getenv('EXECUTION_MODE') == 'LIVE'
-    assert os.getenv('ORDERS__ENABLE_LIVE') == 'true'
-    assert os.getenv('PAPER__ENABLED') == 'false'
-    assert os.getenv('PAPER_MODE') == 'false'
-    assert os.getenv('SHADOW_MODE') == 'false'
-    assert os.getenv('PRODUCTION_LIVE_DEFAULT_INITIALIZED') == 'true'
+    assert os.getenv("ENABLE_LIVE") == "false"
+    assert os.getenv("EXECUTION_MODE") == "SHADOW"
+    assert os.getenv("ENABLE_LIVE_TRADING") == "false"
+    assert os.getenv("ORDERS__ENABLE_LIVE") == "false"
+    assert os.getenv("PRODUCTION_LIVE_DEFAULT_INITIALIZED") is None
+    assert env_file.read_text(encoding="utf-8") == original
 
-    persisted = env_file.read_text(encoding='utf-8')
-    assert 'ENABLE_LIVE=true' in persisted
-    assert 'ENABLE_LIVE_TRADING=true' in persisted
-    assert 'EXECUTION_MODE=LIVE' in persisted
-    assert 'ORDERS__ENABLE_LIVE=true' in persisted
-    assert 'PAPER__ENABLED=false' in persisted
-    assert 'PAPER_MODE=false' in persisted
-    assert 'SHADOW_MODE=false' in persisted
-    assert 'PRODUCTION_LIVE_DEFAULT_INITIALIZED=true' in persisted
-    assert 'KITE_API_SECRET=keep-me' in persisted
 
 
 def test_lightsail_explicit_default_live_opt_out_preserves_shadow(monkeypatch) -> None:
