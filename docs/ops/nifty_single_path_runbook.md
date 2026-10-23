@@ -42,6 +42,20 @@ Release source of truth on Lightsail:
 **the running process matching the intended main SHA and passing health**.
 Do not infer it from a button, commit, or queued deploy marker.
 
+## One protected production environment source
+
+The runtime settings loader reads only `BOT_ENV_FILE` when that explicit
+file is provided. In the Lightsail production profile, an absent or invalid
+`BOT_ENV_FILE` fails closed to SHADOW; it never tries a project, working
+directory or fallback `.env` that could accidentally authorize LIVE.
+
+Values already supplied by the systemd `EnvironmentFile` retain precedence
+(`override=False`). The protected file contains broker credentials and
+explicit operator mode/override settings; GitHub continues to own strategy
+defaults. Local development without a production profile still supports its
+historic `.env` discovery. This is not a credential migration and never
+deletes or rewrites existing host settings.
+
 ## GitHub-owned telemetry defaults
 
 Supabase monitoring policy and nonsecret Edge ingestion URLs now live in
