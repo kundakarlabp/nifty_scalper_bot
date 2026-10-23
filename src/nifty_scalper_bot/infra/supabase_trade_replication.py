@@ -1,7 +1,7 @@
 """Purpose: Replicate committed trade observations to optional Supabase storage.
 
 Responsibilities:
-- build_supabase_trade_replicator configures the bounded optional remote sink.
+- build_supabase_trade_replicator uses canonical telemetry enablement and URL.
 - SupabaseTradeReplicator.replicate_once ships journal and ledger batches.
 - Persist checkpoints only after acknowledged replication.
 
