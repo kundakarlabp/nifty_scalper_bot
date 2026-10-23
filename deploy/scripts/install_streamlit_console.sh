@@ -83,5 +83,6 @@ if [[ "$admin_ok" != true || "$review_ok" != true ]]; then
   exit 1
 fi
 
-echo "Admin controls ready: http://15.206.3.6:8081/admin"
-echo "Read-only review ready: http://15.206.3.6:8501"
+echo "Admin controls ready locally: http://127.0.0.1:8081/admin"
+echo "Read-only review ready locally: http://127.0.0.1:8501"
+echo "External access depends on your configured public address and firewall."

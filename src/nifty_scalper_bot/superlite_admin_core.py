@@ -1,4 +1,13 @@
-"""Filesystem, service and status helpers for the superlite admin process."""
+"""Purpose: Provide bounded status and filesystem access for isolated admin UI.
+
+Responsibilities:
+- Read release state, engine health and operator-visible diagnostics.
+- Verify host-local engine/admin/Streamlit HTTP liveness independently.
+- Keep admin settings and journal operations outside the trading engine.
+
+Boundaries: This control plane never owns strategy, broker or release activation.
+Safety: Publish only fixed liveness fields; never expose secrets or internal URLs.
+"""
 from __future__ import annotations
 
 import hashlib
@@ -39,6 +48,7 @@ SELECTED_PAIR_LOG_PATTERNS = (
 ENV_CACHE: dict[str, Any] = {"at": 0.0, "data": {}}
 STATUS_CACHE: dict[str, Any] = {"at": 0.0, "data": {}}
 OVERVIEW_CACHE: dict[str, Any] = {"at": 0.0, "data": {}}
+SERVICE_HEALTH_CACHE: dict[str, Any] = {"at": 0.0, "data": {}}
 
 
 def read_env() -> dict[str, str]:
@@ -128,6 +138,51 @@ def _http_json(path: str) -> dict[str, Any]:
     except (OSError, ValueError):
         return {"_error": "ENGINE HTTP UNRESPONSIVE"}
 
+
+
+def _streamlit_reachable() -> bool:
+    """Check only the local Streamlit liveness endpoint; never follow redirects."""
+    request = urllib.request.Request(
+        "http://127.0.0.1:8501/_stcore/health",
+        headers={"Accept": "text/plain"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=1.0) as response:
+            return response.status == 200 and response.read(16).strip() == b"ok"
+    except (OSError, TimeoutError, ValueError):
+        return False
+
+
+def service_health_snapshot() -> dict[str, Any]:
+    """Expose a cached allowlisted probe of three independent local services.
+
+    This tests HTTP liveness from the admin host, not external firewall reachability
+    or permission to place an option trade. No broker, user or environment values
+    are forwarded to API callers.
+    """
+    now = time.monotonic()
+    if now - float(SERVICE_HEALTH_CACHE["at"]) < 10 and SERVICE_HEALTH_CACHE["data"]:
+        return dict(SERVICE_HEALTH_CACHE["data"])
+    live = _http_json("/livez")
+    engine_ok = bool(live) and not bool(live.get("_error"))
+    release = _update_state()
+    raw_state = release.get("state")
+    release_state = (
+        raw_state
+        if isinstance(raw_state, str) and re.fullmatch(r"[a-z_]{1,60}", raw_state)
+        else "unknown"
+    )
+    result = {
+        "scope": "host_local_only",
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+        "engine_http_responsive": engine_ok,
+        "engine_quiet": bool(live.get("quiet")) if engine_ok else None,
+        "admin_http_responsive": True,
+        "streamlit_http_responsive": _streamlit_reachable(),
+        "release_state": release_state,
+    }
+    SERVICE_HEALTH_CACHE.update({"at": now, "data": dict(result)})
+    return result
 
 def _git_ref(ref: str) -> str:
     try:
