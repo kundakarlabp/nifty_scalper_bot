@@ -847,7 +847,7 @@ write_status deploying "deploying ${AFTER:0:7}"
 # editable install points at APP_DIR/src and needs no pip operation unless
 # packaging/dependencies change or the installed package is missing. Avoid
 # mutating the running interpreter's site-packages for ordinary commits.
-if "$VENV/bin/python" -c 'from importlib.util import find_spec; assert find_spec("nifty_scalper_bot") is not None' >/dev/null 2>&1 \
+if BOT_DEPLOY_APP_DIR="$APP_DIR" "$VENV/bin/python" -c 'from importlib.util import find_spec; from pathlib import Path; import os; spec = find_spec("nifty_scalper_bot"); assert spec is not None and spec.origin and Path(spec.origin).resolve().is_relative_to(Path(os.environ["BOT_DEPLOY_APP_DIR"]).resolve() / "src")' >/dev/null 2>&1 \
   && git diff --quiet "$BEFORE" "$AFTER" -- \
     pyproject.toml setup.cfg setup.py requirements.txt 'requirements*.txt' \
     requirements/ uv.lock poetry.lock Pipfile Pipfile.lock; then
