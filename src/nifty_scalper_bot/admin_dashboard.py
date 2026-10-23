@@ -398,7 +398,14 @@ def dashboard(request: Request) -> HTMLResponse:
         env.get("ENABLE_LIVE", "false").strip().lower() in {"1", "true", "yes", "on"}
         and env.get("EXECUTION_MODE", "SHADOW").strip().upper() == "LIVE"
     )
-    api_key = env.get("KITE_API_KEY", "").strip()
+    api_key = next(
+        (
+            env.get(key, "").strip()
+            for key in ("BROKER_API_KEY", "ZERODHA_API_KEY", "KITE_API_KEY")
+            if env.get(key, "").strip()
+        ),
+        "",
+    )
     login_url = _kite_login_url(api_key) if api_key else ""
     login_button = (
         f'<a class="btn primary full" href="{html.escape(login_url, quote=True)}" rel="noopener">'
@@ -751,7 +758,10 @@ def status_json(request: Request) -> JSONResponse:
     now = time.time()
     ttl = float(os.getenv("ADMIN_STATUS_CACHE_SECONDS", "10") or "10")
     if now - float(_STATUS_CACHE["at"]) < ttl:
-        return JSONResponse({"label": _STATUS_CACHE["label"], "color": _STATUS_CACHE["color"]})
+        return JSONResponse(
+            {"label": _STATUS_CACHE["label"], "color": _STATUS_CACHE["color"]},
+            headers={"Cache-Control": "no-store"},
+        )
     # Do not infer engine health from old log lines: use the same canonical
     # fast status snapshot as the visible dashboard, with no journal scan.
     try:
