@@ -70,6 +70,8 @@ def _track_admission_test_environment(monkeypatch) -> None:
     """Restore env mutated directly by normalisation after each new test."""
     for key in (
         "SMC_SUSTAINED_FLOW_CONFIRMATION_ENABLED",
+        "VWAP_TREND_RETEST_EXTENSION_ENABLED",
+        "ORDERFLOW_OFI_ADAPTIVE_HOLDOFF_ENABLED",
         "ENABLE_LIVE_TRADING",
         "ORDERS__ENABLE_LIVE",
         "PAPER__ENABLED",
@@ -123,3 +125,55 @@ def test_nonproduction_and_nonlive_do_not_enable_smc_live_admission(
     monkeypatch.setenv("EXECUTION_MODE", "PAPER")
     normalise_live_env_defaults()
     assert os.getenv("SMC_SUSTAINED_FLOW_CONFIRMATION_ENABLED") is None
+
+
+def test_lightsail_live_vwap_and_ofi_default_on_with_independent_rollback(
+    monkeypatch, caplog
+) -> None:
+    """The two existing bounded paths activate only in actual Lightsail LIVE."""
+    _track_admission_test_environment(monkeypatch)
+    monkeypatch.setenv("DEPLOYMENT_PLATFORM", "aws_lightsail")
+    monkeypatch.setenv("PRODUCTION_LIVE_DEFAULT_INITIALIZED", "true")
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.delenv("VWAP_TREND_RETEST_EXTENSION_ENABLED", raising=False)
+    monkeypatch.delenv("ORDERFLOW_OFI_ADAPTIVE_HOLDOFF_ENABLED", raising=False)
+
+    normalise_live_env_defaults()
+    assert os.environ["VWAP_TREND_RETEST_EXTENSION_ENABLED"] == "true"
+    assert os.environ["ORDERFLOW_OFI_ADAPTIVE_HOLDOFF_ENABLED"] == "true"
+    assert "LIVE_ENTRY_QUALITY_CONFIG vwap_retest=True adaptive_ofi=True" in caplog.text
+
+    monkeypatch.setenv("VWAP_TREND_RETEST_EXTENSION_ENABLED", "false")
+    normalise_live_env_defaults()
+    assert os.environ["VWAP_TREND_RETEST_EXTENSION_ENABLED"] == "false"
+    assert os.environ["ORDERFLOW_OFI_ADAPTIVE_HOLDOFF_ENABLED"] == "true"
+    assert "LIVE_ENTRY_QUALITY_CONFIG vwap_retest=False adaptive_ofi=True" in caplog.text
+
+    monkeypatch.setenv("ORDERFLOW_OFI_ADAPTIVE_HOLDOFF_ENABLED", "false")
+    normalise_live_env_defaults()
+    assert os.environ["VWAP_TREND_RETEST_EXTENSION_ENABLED"] == "false"
+    assert os.environ["ORDERFLOW_OFI_ADAPTIVE_HOLDOFF_ENABLED"] == "false"
+    assert "LIVE_ENTRY_QUALITY_CONFIG vwap_retest=False adaptive_ofi=False" in caplog.text
+
+
+def test_lightsail_paper_and_nonproduction_live_do_not_implicitly_activate_both(
+    monkeypatch,
+) -> None:
+    _track_admission_test_environment(monkeypatch)
+    monkeypatch.delenv("VWAP_TREND_RETEST_EXTENSION_ENABLED", raising=False)
+    monkeypatch.delenv("ORDERFLOW_OFI_ADAPTIVE_HOLDOFF_ENABLED", raising=False)
+    monkeypatch.setenv("DEPLOYMENT_PLATFORM", "railway")
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    normalise_live_env_defaults()
+    assert os.getenv("VWAP_TREND_RETEST_EXTENSION_ENABLED") is None
+    assert os.getenv("ORDERFLOW_OFI_ADAPTIVE_HOLDOFF_ENABLED") is None
+
+    monkeypatch.setenv("DEPLOYMENT_PLATFORM", "aws_lightsail")
+    monkeypatch.setenv("PRODUCTION_LIVE_DEFAULT_INITIALIZED", "true")
+    monkeypatch.setenv("ENABLE_LIVE", "false")
+    monkeypatch.setenv("EXECUTION_MODE", "PAPER")
+    normalise_live_env_defaults()
+    assert os.getenv("VWAP_TREND_RETEST_EXTENSION_ENABLED") is None
+    assert os.getenv("ORDERFLOW_OFI_ADAPTIVE_HOLDOFF_ENABLED") is None
