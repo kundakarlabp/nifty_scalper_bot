@@ -464,7 +464,16 @@ def is_safe() -> bool:
             return False
     else:
         if live.get("bot_loaded") is not True:
-            return False
+            # An expired prior token can prevent engine startup entirely.
+            # Only fresh, token-bound verification plus an exclusive entry hold
+            # permits recovery; two new-token broker-flat samples still follow.
+            if not (
+                token_rotation_verified
+                and hold_required
+                and live.get("bot_loaded") is False
+            ):
+                return False
+            return True
         with urllib.request.urlopen(f"http://127.0.0.1:{port}/health/trading", timeout=3) as response:
             health = json.load(response)
         reconciliation = health.get("reconciliation") or {}
