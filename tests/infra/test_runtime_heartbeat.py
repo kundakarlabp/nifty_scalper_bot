@@ -113,9 +113,7 @@ def test_failed_ingest_does_not_claim_success():
         sender.report_once()
 
 
-def test_heartbeat_sends_only_allowlisted_release_metadata(
-    tmp_path, monkeypatch
-):
+def test_heartbeat_sends_only_allowlisted_release_metadata(tmp_path, monkeypatch):
     import json
 
     from nifty_scalper_bot.infra import runtime_heartbeat as mod
@@ -133,9 +131,7 @@ def test_heartbeat_sends_only_allowlisted_release_metadata(
         encoding="utf-8",
     )
     monkeypatch.setenv("BOT_UPDATE_STATUS_FILE", str(path))
-    sender, calls = _make_sender(
-        health={"status": "armed", "blockers": []}
-    )
+    sender, calls = _make_sender(health={"status": "armed", "blockers": []})
     assert sender.report_once()["published"] is True
     payload = calls[0][1]
     assert payload["release_state"] == "deferred_broker_exposure"
