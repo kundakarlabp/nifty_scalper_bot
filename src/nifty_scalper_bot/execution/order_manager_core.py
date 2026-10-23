@@ -7,7 +7,7 @@ Runtime role:
   guardrails around each order.
 
 Position in the pipeline:
-    strategies/runner.py -> THIS FILE (order_manager.py)
+    strategies/runner.py -> THIS FILE (order_manager_core.py)
     -> execution/bracket_manager.py / execution/position_manager.py
 
 Owns / does NOT own:
