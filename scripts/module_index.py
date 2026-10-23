@@ -29,7 +29,7 @@ def module_group(path: str) -> str:
     """Group a covered file by its existing source directory."""
     prefix = "src/nifty_scalper_bot/"
     if path.startswith(prefix):
-        remainder = path[len(prefix):]
+        remainder = path[len(prefix) :]
         if "/" not in remainder:
             return prefix
         return prefix + remainder.split("/", 1)[0] + "/"
@@ -47,7 +47,7 @@ def summary(source: str) -> str:
             continue
         for prefix in ("File purpose:", "Purpose:"):
             if candidate.lower().startswith(prefix.lower()):
-                candidate = candidate[len(prefix):].strip()
+                candidate = candidate[len(prefix) :].strip()
         if candidate:
             return candidate.replace("|", r"\|").replace(BT, "\\" + BT)
     raise ValueError("Opening module docstring contains no purpose statement")

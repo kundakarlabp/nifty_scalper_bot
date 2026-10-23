@@ -133,9 +133,7 @@ def _validate(
     if doc_guard.returncode != 0:
         return doc_guard.returncode
 
-    index = _run(
-        root, [sys.executable, "-m", "scripts.module_index", "--check"]
-    )
+    index = _run(root, [sys.executable, "-m", "scripts.module_index", "--check"])
     if index.returncode != 0:
         return index.returncode
 
