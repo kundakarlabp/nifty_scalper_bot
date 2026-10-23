@@ -1,6 +1,10 @@
 # Deployment & Monitoring Guide
 
-This document summarises how to deploy the Nifty Scalper bot, run the new backtesting engine, and operate the accompanying monitoring stack.
+This document covers **optional local research/backtesting infrastructure**.
+The **LIVE bot runs only on AWS Lightsail**. Its daily operations, automatic
+GitHub-to-Lightsail deployment, and Supabase-only remote monitoring use the
+single-path runbook: [Production operations](../ops/nifty_single_path_runbook.md).
+Do not launch the Docker/Prometheus/Grafana compose stack as a second live bot.
 
 ## Backtesting
 

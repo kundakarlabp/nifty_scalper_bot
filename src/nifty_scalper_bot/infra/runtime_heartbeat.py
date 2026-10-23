@@ -6,10 +6,12 @@ off the trading hot path. It never sends orders, tokens, balances or prices.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import requests
@@ -93,6 +95,7 @@ class RuntimeHeartbeat:
         except (requests.RequestException, TimeoutError, OSError, ValueError):
             failure_reason = "local_health_unavailable"
         sha = str(resolve_build_sha() or "").strip().lower()
+        release_state, release_updated_at = _local_release_state()
         payload = {
             "observed_at": current.isoformat(),
             "build_sha": sha if _HEX_SHA.fullmatch(sha) else None,
@@ -101,11 +104,39 @@ class RuntimeHeartbeat:
             "trading_status": status,
             "blockers": blockers,
             "failure_reason": failure_reason,
+            "release_state": release_state,
+            "release_updated_at": release_updated_at,
         }
         reply = self.transport(self.endpoint_url, payload, self.timeout_seconds)
         if reply.get("ok") is not True:
             raise RuntimeError("runtime_heartbeat_ingest_failed")
         return {"published": True, "engine_healthy": engine_healthy}
+
+
+def _local_release_state() -> tuple[str | None, str | None]:
+    """Read only two allowlisted fields from the canonical host release state."""
+    root = Path(os.getenv("BOT_APP_DIR", "/home/ubuntu/nifty_scalper_bot"))
+    status_path = Path(
+        os.getenv(
+            "BOT_UPDATE_STATUS_FILE",
+            str(root / "data" / "auto_update_status.json"),
+        )
+    )
+    try:
+        record = json.loads(status_path.read_text(encoding="utf-8"))
+        if not isinstance(record, dict):
+            return None, None
+        state = record.get("state")
+        if not isinstance(state, str) or not re.fullmatch(r"[a-z_]{1,60}", state):
+            state = None
+        when = record.get("updated_at")
+        if isinstance(when, str):
+            stamped = datetime.fromisoformat(when.replace("Z", "+00:00"))
+            if stamped.tzinfo is not None:
+                return state, stamped.astimezone(timezone.utc).isoformat()
+        return state, None
+    except (OSError, TypeError, ValueError):
+        return None, None
 
 
 def _read_local_health() -> tuple[int, Mapping[str, Any]]:

@@ -1,0 +1,91 @@
+# NIFTY production — one-path operator runbook
+
+**Single source of truth:** GitHub `main` contains code; AWS Lightsail is
+the sole LIVE trading runtime; Supabase is the private read-only remote
+telemetry store. **AppDeploy is not in the dependency chain.** Do not spend
+hosting credits redeploying the optional historic AppDeploy relay, and do not
+route trading orders or daily broker-token activation through it.
+
+## Daily operation
+
+- Open the existing Lightsail admin page (independent `niftybot-admin` on
+  port 8081 behind the approved private/IP-restricted access path).
+- If Zerodha is already authenticated and `/health/trading` shows no auth
+  blocker, **do nothing**. Repeated token exchanges and restarts add risk.
+- Otherwise use the official Zerodha login link once. The admin verifies,
+  atomically saves the broker access-token aliases outside Git, and requests
+  a **validated safe restart**. `queued` is not `completed`.
+- Open positions, pending orders, unavailable broker verification, an active
+  order-submit call, or an unacknowledged entry hold block restarting the
+  LIVE trading engine. Protective exits are never blocked.
+- Never paste the request-token URL, access tokens, or TOTP into chat,
+  screenshots, GitHub Actions, or Supabase telemetry.
+
+## Releases — ONE production deploy authority
+
+GitHub CI pass on the exact merged `main` SHA → existing
+`niftybot-autodeploy.timer` on Lightsail (~30 seconds after completed
+prior validation) → `deploy/lightsail_release.sh --auto` → broker-flat
+handoff → install + restart + readiness verification (or rollback).
+
+**Do not add GitHub-hosted trading services, GitHub deployment Actions,
+AppDeploy deploy triggers, extra daily restarts, webhook listeners, or
+alternate restart logic.** The admin's GitHub Update button only requests
+an immediate check of the SAME Lightsail deployer; the timer is already
+automatic. CI green is necessary, not sufficient, to prove a live release.
+
+Release source of truth on Lightsail:
+`data/auto_update_status.json` (state and updated_at), supplemented by
+`/releasez` and the running engine's build SHA. A valid release is
+**the running process matching the intended main SHA and passing health**.
+Do not infer it from a button, commit, or queued deploy marker.
+
+## Monitoring — ONE private remote source
+
+The pre-existing Supabase project `dehdptgkqbrkyzyodicd` contains:
+- `public.nifty_runtime_heartbeat`: newest engine status, SHA, and
+  allowlisted release state + timestamp; refreshed about every 120 seconds
+- `public.nifty_trade_events`: replicated broker-trade events
+- `public.nifty_daily_market_logs`: incremental and finalized day logs
+
+A heartbeat older than **5 minutes** is **STALE/UNKNOWN**, not necessarily a
+stopped engine. A fresh `trading_status=quiet` during AUTO off-hours is
+a planned idle, not an outage. A fresh `armed` heartbeat does not replace
+the authenticated broker checks for placing any trade. The release fields
+are read from the host's canonical release status; never accept status text
+as an order or action instruction.
+
+Read-only monitoring query for the authorized Supabase SQL connector:
+
+```sql
+SELECT now() AS checked_at,
+       observed_at, received_at, build_sha, engine_healthy,
+       trading_status, blockers, release_state, release_updated_at
+FROM public.nifty_runtime_heartbeat
+WHERE source = 'lightsail';
+```
+
+The dashboard `/admin/api/overview` and `/admin/status.json` use live
+local HTTP health and the same release-state file; **not historical log
+phrases**. Heavy raw log downloads remain on demand.
+
+## When something actually fails
+
+| Symptom | Authority to check | Correct response |
+| --- | --- | --- |
+| AppDeploy 402 | Supabase heartbeat | Ignore relay billing for bot health; never restart engine just for 402 |
+| Bot not trading | Admin broker/readiness + local logs | Identify actual reason; don't automatically change access token |
+| GitHub merged but old SHA | Canonical release state, CI, 30-second timer | Distinguish deferred order exposure, failed CI, or inactive timer |
+| Dashboard unreachable | Admin :8081 `/healthz` | Recover independent admin service, not the trading engine |
+| Stale heartbeat | Supabase receiver, local engine and network | Report UNKNOWN until local health and transport verified |
+| Quiet out of hours | `/livez` | Expected; do not treat as failure |
+
+Production engine port 8080, admin 8081, optional read-only Streamlit 8501.
+Do not expose write-capable admin interfaces openly on the internet;
+the legacy admin relies on an external network allowlist rather than
+built-in user authentication. Preserve the existing allowlist.
+
+For first-time Lightsail host provisioning, see `deploy/LIGHTSAIL_SETUP.md`.
+For the separate research/backtesting environment see
+`docs/deployment/README.md`. Do not confuse Docker research deployment with
+production Lightsail deployment.

@@ -64,6 +64,11 @@ Deno.serve(async (req: Request) => {
     trading_status: clean(body.trading_status),
     blockers,
     failure_reason: clean(body.failure_reason),
+    release_state: clean(body.release_state),
+    release_updated_at: typeof body.release_updated_at === "string" &&
+      Number.isFinite(Date.parse(body.release_updated_at)) &&
+      Date.parse(body.release_updated_at) <= Date.now() + 300000
+      ? new Date(body.release_updated_at).toISOString() : null,
   };
   const headers: Record<string,string> = {
     "content-type": "application/json",

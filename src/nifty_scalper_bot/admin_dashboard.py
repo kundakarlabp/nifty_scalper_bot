@@ -398,7 +398,14 @@ def dashboard(request: Request) -> HTMLResponse:
         env.get("ENABLE_LIVE", "false").strip().lower() in {"1", "true", "yes", "on"}
         and env.get("EXECUTION_MODE", "SHADOW").strip().upper() == "LIVE"
     )
-    api_key = env.get("KITE_API_KEY", "").strip()
+    api_key = next(
+        (
+            env.get(key, "").strip()
+            for key in ("BROKER_API_KEY", "ZERODHA_API_KEY", "KITE_API_KEY")
+            if env.get(key, "").strip()
+        ),
+        "",
+    )
     login_url = _kite_login_url(api_key) if api_key else ""
     login_button = (
         f'<a class="btn primary full" href="{html.escape(login_url, quote=True)}" rel="noopener">'
@@ -604,8 +611,14 @@ def set_mode(request: Request, mode: str = Form(...)) -> RedirectResponse:
     _check_auth(request)
     if mode.strip().lower() == "live":
         env = _read_env()
-        has_key = any(env.get(k, "").strip() for k in ("KITE_API_KEY", "ZERODHA_API_KEY", "BROKER_API_KEY"))
-        has_secret = any(env.get(k, "").strip() for k in ("KITE_API_SECRET", "ZERODHA_API_SECRET", "BROKER_API_SECRET"))
+        has_key = any(
+            env.get(k, "").strip()
+            for k in ("BROKER_API_KEY", "ZERODHA_API_KEY", "KITE_API_KEY")
+        )
+        has_secret = any(
+            env.get(k, "").strip()
+            for k in ("BROKER_API_SECRET", "ZERODHA_API_SECRET", "KITE_API_SECRET")
+        )
         has_token = any(env.get(k, "").strip() for k in ("KITE_ACCESS_TOKEN", "ZERODHA_ACCESS_TOKEN", "BROKER_ACCESS_TOKEN"))
         if not (has_key and has_secret and has_token):
             return RedirectResponse("/admin?mode=err", status_code=303)
@@ -751,24 +764,44 @@ def status_json(request: Request) -> JSONResponse:
     now = time.time()
     ttl = float(os.getenv("ADMIN_STATUS_CACHE_SECONDS", "10") or "10")
     if now - float(_STATUS_CACHE["at"]) < ttl:
-        return JSONResponse({"label": _STATUS_CACHE["label"], "color": _STATUS_CACHE["color"]})
-    label, color = "running", "#3fb950"
+        return JSONResponse(
+            {"label": _STATUS_CACHE["label"], "color": _STATUS_CACHE["color"]},
+            headers={"Cache-Control": "no-store"},
+        )
+    # Do not infer engine health from old log lines: use the same canonical
+    # fast status snapshot as the visible dashboard, with no journal scan.
     try:
-        tail = _gather_logs(60, clean=True)
-        if "degraded mode" in tail or "Missing required env" in tail:
-            label, color = "degraded", "#d29922"
-        elif "fully operational" in tail:
-            label, color = "operational", "#3fb950"
+        overview = quick_overview()
+        if overview.get("engine_ok") is not True:
+            label, color = "unreachable", "#ff7586"
+        elif overview.get("quiet") is True:
+            label, color = "quiet", "#38d6a0"
+        elif overview.get("bot_loaded") is True:
+            label, color = "operational", "#38d6a0"
+        else:
+            label, color = "starting", "#f5bb5a"
     except Exception:
         label, color = "unknown", "#8b97a6"
     _STATUS_CACHE.update({"at": now, "label": label, "color": color})
-    return JSONResponse({"label": label, "color": color})
+    return JSONResponse(
+        {"label": label, "color": color},
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 _TRADE_MARKERS = (
-    "ORDER_SENT", "Sending Order", "FILLED", "average_price", "EXIT",
-    "TRADE_ATTEMPT", "ORDER_REJECTED", "ORDER_BROKER_CONFIG_ERROR", "pnl",
-    "TRADE_CLOSED", "ORDER_COMPLETE", "SIGNAL_GENERATED",
+    "ORDER_SENT",
+    "Sending Order",
+    "FILLED",
+    "average_price",
+    "EXIT",
+    "TRADE_ATTEMPT",
+    "ORDER_REJECTED",
+    "ORDER_BROKER_CONFIG_ERROR",
+    "pnl",
+    "TRADE_CLOSED",
+    "ORDER_COMPLETE",
+    "SIGNAL_GENERATED",
 )
 
 

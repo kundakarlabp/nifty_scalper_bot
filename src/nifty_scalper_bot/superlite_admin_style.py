@@ -52,15 +52,16 @@ SCRIPT = r"""
   }
   function drawOverview(data) {
     var online = data.engine_ok === true;
-    setText("engine-value", online ? (data.bot_loaded ? "Running" : "Starting") : "Unreachable");
-    highlight("engine-value", online ? (data.bot_loaded ? "good" : "warning") : "failure");
-    setText("broker-value", online ? labelBroker(data.broker_authenticated) : "Unknown");
-    highlight("broker-value", online && labelBroker(data.broker_authenticated) === "Authenticated" ? "good" : "warning");
-    setText("mode-value", online ? data.mode : "Unknown");
-    setText("blocker-value", online ? (data.primary_blocker || "None") : "Engine unavailable");
+    var quiet = online && data.quiet === true;
+    setText("engine-value", !online ? "Unreachable" : quiet ? "QUIET (planned)" : data.bot_loaded ? "Running" : "Starting");
+    highlight("engine-value", !online ? "failure" : quiet || data.bot_loaded ? "good" : "warning");
+    setText("broker-value", online && !quiet ? labelBroker(data.broker_authenticated) : "Not checked");
+    highlight("broker-value", online && !quiet && labelBroker(data.broker_authenticated) === "Authenticated" ? "good" : "warning");
+    setText("mode-value", quiet ? "AUTO · QUIET" : online ? data.mode : "Unknown");
+    setText("blocker-value", quiet ? "Scheduled idle" : online ? (data.primary_blocker || "None") : "Engine unavailable");
     setText("release-value", data.updater_state || "Unknown");
     setText("revision-value", online && data.runtime_sha ? data.runtime_sha.slice(0, 10) : "—");
-    var result = online ? "Engine reachable" : "Engine unavailable — check service";
+    var result = !online ? "Engine unavailable — check service" : quiet ? "AUTO quiet · control plane online" : "Engine reachable";
     if (data.updater_state && /deploying|restarting|validating|recovering|fetching/.test(data.updater_state))
       result += " · Deployment in progress";
     status.textContent = result + " · " + new Date().toLocaleTimeString();
