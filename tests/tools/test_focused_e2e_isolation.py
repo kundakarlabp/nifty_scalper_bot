@@ -6,7 +6,6 @@ from pathlib import Path
 
 from scripts import agent_check
 
-
 ROOT = Path(__file__).resolve().parents[2]
 
 
