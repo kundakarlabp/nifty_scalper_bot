@@ -385,18 +385,32 @@ class OrderFlowStrategy(EliteStrategy):
             # reversal. Keep the existing context authority, but avoid approving
             # a live entry on the first brief positive window after opposition.
             ofi_reversal_holdoff_active = False
+            # Experimental adaptive window, OFF by default. Never discount a
+            # recent reversal without completed sustained OFI AND strong depth.
+            # The original 15s policy remains authoritative unless opted in.
+            ofi_reversal_holdoff_seconds = max(
+                0.0, safe_float_env("ORDERFLOW_OFI_REVERSAL_HOLDOFF_SECONDS", 15.0)
+            )
+            if (
+                is_live
+                and str(os.getenv("ORDERFLOW_OFI_ADAPTIVE_HOLDOFF_ENABLED", "false"))
+                .strip().lower() in {"1", "true", "yes", "on"}
+                and ofi_sustained_confirmation
+                and strong_depth_supports_side
+                and not strong_depth_conflicts_side
+                and context_quality_eligible
+                and side_aligns
+            ):
+                ofi_reversal_holdoff_seconds = min(ofi_reversal_holdoff_seconds, 10.0)
             if is_live and context_quality_eligible and side_aligns:
                 now = time.monotonic()
                 if ofi_directional and ofi_conflicts_side:
                     self._last_live_adverse_ofi[symbol] = now
                 else:
                     last_adverse = self._last_live_adverse_ofi.get(symbol)
-                    holdoff = max(
-                        0.0,
-                        safe_float_env("ORDERFLOW_OFI_REVERSAL_HOLDOFF_SECONDS", 15.0),
-                    )
                     ofi_reversal_holdoff_active = bool(
-                        last_adverse is not None and 0.0 <= now - last_adverse < holdoff
+                        last_adverse is not None
+                        and 0.0 <= now - last_adverse < ofi_reversal_holdoff_seconds
                     )
                     if ofi_reversal_holdoff_active:
                         context_alignment_source = None
@@ -560,6 +574,7 @@ class OrderFlowStrategy(EliteStrategy):
                 "effective_context_alignment": effective_context_alignment,
                 "context_alignment_block_reason": context_alignment_block_reason,
                 "ofi_reversal_holdoff_active": ofi_reversal_holdoff_active,
+                "ofi_reversal_holdoff_seconds": ofi_reversal_holdoff_seconds,
                 "effective_context_conflict": effective_context_conflict,
                 "context_role": "confirmation",
                 "vote_timestamp": time.time(),
