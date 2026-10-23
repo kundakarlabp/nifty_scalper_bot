@@ -61,42 +61,55 @@ OPTION_HISTORY_WARM_CACHE_SIZE: int = 5
 
 
 def _ensure_env_loaded_before_settings() -> None:
-    """Load .env file before any settings are built.
+    """Load exactly the operator-selected file on production hosts.
 
-    ✅ CRITICAL FIX: This MUST run at import time!
-
-    Problem: Python imports settings.py which calls _build_order_settings()
-    at module level. If load_dotenv() hasn't run yet, os.getenv("ENABLE_LIVE")
-    returns None, and the bot starts in SHADOW mode.
-
-    Solution: Load .env here, before any settings classes are built.
+    Systemd environment values retain precedence. A missing explicit file or
+    incomplete Lightsail host configuration must not discover unrelated repo
+    dotenv values that might activate real trading. Developer installations
+    continue to support local dotenv discovery.
     """
     from dotenv import load_dotenv
+
+    canonical = os.getenv("BOT_ENV_FILE")
+    production = (
+        os.getenv("DEPLOYMENT_PLATFORM") or ""
+    ).strip().lower() == "aws_lightsail"
+    if canonical:
+        path = Path(canonical).expanduser()
+        if path.is_file():
+            load_dotenv(dotenv_path=str(path), override=False)
+            LOGGER.info("CONFIG_SOURCE selected=operator_env_file")
+        else:
+            LOGGER.error("CONFIG_SOURCE_MISSING_FAIL_CLOSED")
+            os.environ["ENABLE_LIVE"] = "false"
+            os.environ["EXECUTION_MODE"] = "SHADOW"
+        normalise_live_env_defaults()
+        return
+
+    if production:
+        # The Lightsail installer/systemd unit must provide BOT_ENV_FILE.
+        # Never use a working-directory .env to fill missing live controls.
+        LOGGER.error("CONFIG_SOURCE_UNSET_FAIL_CLOSED")
+        os.environ["ENABLE_LIVE"] = "false"
+        os.environ["EXECUTION_MODE"] = "SHADOW"
+        normalise_live_env_defaults()
+        return
 
     search_paths = [
         Path.cwd() / ".env",
         Path("/app/.env"),
-        Path(__file__).resolve().parent.parent.parent / ".env",  # src/../.env
+        Path(__file__).resolve().parent.parent.parent / ".env",
         Path(__file__).resolve().parent.parent / ".env",
     ]
-
     for env_path in search_paths:
-        try:
-            if env_path.exists() and env_path.is_file():
-                load_dotenv(dotenv_path=str(env_path), override=False)
-                normalise_live_env_defaults()
-                enable_live = os.getenv("ENABLE_LIVE", "NOT_SET")
-                print(f"[SETTINGS] Loaded .env from {env_path}", flush=True)
-                print(f"   ENABLE_LIVE={enable_live}", flush=True)
-                return
-        except Exception as e:
-            print(f"[SETTINGS] Error loading {env_path}: {e}", flush=True)
-            continue
+        if env_path.is_file():
+            load_dotenv(dotenv_path=str(env_path), override=False)
+            LOGGER.info("CONFIG_SOURCE selected=development_dotenv")
+            normalise_live_env_defaults()
+            return
 
-    # Fallback
     load_dotenv(override=False)
-    print("[SETTINGS] No .env found, using system environment", flush=True)
-
+    LOGGER.info("CONFIG_SOURCE selected=environment")
     normalise_live_env_defaults()
 
 
