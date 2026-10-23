@@ -170,18 +170,18 @@ def _verify_access_token(api_key: str, access_token: str) -> tuple[bool, str]:
 
 def _activate_access_token(access_token: str) -> ControlResult:
     """Persist verified token, then queue restart with a bounded rotation proof."""
-    _write_env({
-        "KITE_ACCESS_TOKEN": access_token,
-        "ZERODHA_ACCESS_TOKEN": access_token,
-        "BROKER_ACCESS_TOKEN": access_token,
-    })
+    _write_env(
+        {
+            "KITE_ACCESS_TOKEN": access_token,
+            "ZERODHA_ACCESS_TOKEN": access_token,
+            "BROKER_ACCESS_TOKEN": access_token,
+        }
+    )
     # Ordinary restart markers never authorize an old-authentication bypass.
     # The broker's /user/profile was verified immediately before this call.
     import tempfile
 
-    proof_dir = Path(
-        os.getenv("NIFTYBOT_CONFIG_DIR", "/home/ubuntu/.config/niftybot")
-    )
+    proof_dir = Path(os.getenv("NIFTYBOT_CONFIG_DIR", "/home/ubuntu/.config/niftybot"))
     proof_file = proof_dir / "auto_release_verified_token_rotation"
     if not proof_dir.is_dir() or proof_dir.is_symlink() or proof_file.is_symlink():
         return ControlResult(False, "restart_bot", "token proof location unavailable")
