@@ -22,6 +22,16 @@
 
 <!-- Test, replay, architecture guard, or other evidence that would fail before the fix where practical. -->
 
+## Documentation synchronization
+
+<!-- For every changed Python module: was its opening summary reviewed and
+updated when entrypoints or responsibilities changed? Identify changed header(s).
+If no header edit was necessary, briefly explain why. -->
+- Module header impact:
+- README / lifecycle / architecture manifest impact:
+- Deployment / operations runbook impact:
+- Documentation guard result:
+
 ## Validation
 
 - Local/focused preflight:
