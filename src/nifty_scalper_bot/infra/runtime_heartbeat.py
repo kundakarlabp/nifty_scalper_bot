@@ -72,8 +72,9 @@ class RuntimeHeartbeat:
         blockers: list[str] = []
         try:
             http_status, raw = self.health_reader()
-            engine_healthy = http_status == 200
-            if engine_healthy:
+            # QUIET is a planned unloaded-engine state, not a process outage.
+            engine_healthy = http_status == 200 and raw.get("status") != "quiet"
+            if http_status == 200:
                 candidate = raw.get("status")
                 if isinstance(candidate, str) and re.fullmatch(
                     r"[a-zA-Z0-9_:-]{1,90}", candidate
@@ -119,6 +120,22 @@ def _read_local_health() -> tuple[int, Mapping[str, Any]]:
         timeout=2.0,
         allow_redirects=False,
     )
+    if reply.status_code == 404:
+        # AUTO's off-hours ASGI wrapper intentionally has no trading endpoint.
+        live = requests.get(
+            f"http://127.0.0.1:{port}/livez",
+            timeout=2.0,
+            allow_redirects=False,
+        )
+        if live.status_code == 200:
+            body = live.json()
+            if (
+                isinstance(body, Mapping)
+                and body.get("quiet") is True
+                and body.get("bot_loaded") is False
+                and body.get("engine_http_responsive") is True
+            ):
+                return 200, {"status": "quiet", "blockers": ["auto_quiet"]}
     body = reply.json() if reply.status_code == 200 else {}
     return reply.status_code, body if isinstance(body, Mapping) else {}
 
