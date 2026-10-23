@@ -89,9 +89,7 @@ def test_explicit_systemd_live_settings_have_priority_over_dotenv(
     monkeypatch, tmp_path
 ) -> None:
     protected = tmp_path / "niftybot.env"
-    protected.write_text(
-        "ENABLE_LIVE=false\nEXECUTION_MODE=SHADOW\n", encoding="utf-8"
-    )
+    protected.write_text("ENABLE_LIVE=false\nEXECUTION_MODE=SHADOW\n", encoding="utf-8")
     monkeypatch.setenv("BOT_ENV_FILE", str(protected))
     monkeypatch.setenv("DEPLOYMENT_PLATFORM", "aws_lightsail")
     monkeypatch.setenv("ENABLE_LIVE", "true")
