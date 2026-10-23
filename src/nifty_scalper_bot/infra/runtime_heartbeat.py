@@ -2,7 +2,8 @@
 
 Responsibilities:
 - build_runtime_heartbeat configures remote heartbeat transport.
-- RuntimeHeartbeat reports engine, release, and local operator-service liveness off hot path.
+- RuntimeHeartbeat reports engine and release state off the trading hot path.
+- Sample independent operator-service HTTP liveness without broker operations.
 - heartbeat_interval_seconds bounds reporting frequency and overhead.
 
 Boundaries: Telemetry only; the host/broker remain authoritative for trading.
