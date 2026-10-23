@@ -67,7 +67,7 @@ def test_non_live_mode_does_not_relax_explicit_risk_limits(monkeypatch) -> None:
 
 
 def _track_admission_test_environment(monkeypatch) -> None:
-    """Restore env mutated directly by normalisation after each new test."""
+    """Restore values normalized directly into os.environ after tests."""
     for key in (
         "SMC_SUSTAINED_FLOW_CONFIRMATION_ENABLED",
         "VWAP_TREND_RETEST_EXTENSION_ENABLED",
@@ -87,93 +87,78 @@ def _track_admission_test_environment(monkeypatch) -> None:
         monkeypatch.setenv(key, os.getenv(key, ""))
 
 
-def test_lightsail_live_smc_confirmation_default_and_explicit_rollback(
-    monkeypatch, caplog
+_ENTRY_FLAGS = (
+    "SMC_SUSTAINED_FLOW_CONFIRMATION_ENABLED",
+    "VWAP_TREND_RETEST_EXTENSION_ENABLED",
+    "ORDERFLOW_OFI_ADAPTIVE_HOLDOFF_ENABLED",
+)
+
+
+@pytest.mark.parametrize("platform", ["aws_lightsail", "railway", ""])
+def test_live_entry_defaults_use_execution_mode_not_host(
+    monkeypatch, caplog, platform
 ) -> None:
-    """Only production LIVE inherits admission; explicit false survives reinit."""
     _track_admission_test_environment(monkeypatch)
-    monkeypatch.setenv("DEPLOYMENT_PLATFORM", "aws_lightsail")
+    monkeypatch.setenv("DEPLOYMENT_PLATFORM", platform)
     monkeypatch.setenv("PRODUCTION_LIVE_DEFAULT_INITIALIZED", "true")
     monkeypatch.setenv("ENABLE_LIVE", "true")
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
-    monkeypatch.delenv("SMC_SUSTAINED_FLOW_CONFIRMATION_ENABLED", raising=False)
+    for key in _ENTRY_FLAGS:
+        monkeypatch.delenv(key, raising=False)
 
     normalise_live_env_defaults()
-    assert os.environ["SMC_SUSTAINED_FLOW_CONFIRMATION_ENABLED"] == "true"
+    assert all(os.environ[key] == "true" for key in _ENTRY_FLAGS)
     assert "SMC_SUSTAINED_FLOW_ADMISSION_CONFIG enabled=True" in caplog.text
-
-    monkeypatch.setenv("SMC_SUSTAINED_FLOW_CONFIRMATION_ENABLED", "false")
-    normalise_live_env_defaults()
-    assert os.environ["SMC_SUSTAINED_FLOW_CONFIRMATION_ENABLED"] == "false"
-    assert "SMC_SUSTAINED_FLOW_ADMISSION_CONFIG enabled=False" in caplog.text
-
-
-def test_nonproduction_and_nonlive_do_not_enable_smc_live_admission(
-    monkeypatch,
-) -> None:
-    _track_admission_test_environment(monkeypatch)
-    monkeypatch.delenv("SMC_SUSTAINED_FLOW_CONFIRMATION_ENABLED", raising=False)
-    monkeypatch.setenv("DEPLOYMENT_PLATFORM", "railway")
-    monkeypatch.setenv("ENABLE_LIVE", "true")
-    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
-    normalise_live_env_defaults()
-    assert os.getenv("SMC_SUSTAINED_FLOW_CONFIRMATION_ENABLED") is None
-
-    monkeypatch.setenv("DEPLOYMENT_PLATFORM", "aws_lightsail")
-    monkeypatch.setenv("PRODUCTION_LIVE_DEFAULT_INITIALIZED", "true")
-    monkeypatch.setenv("ENABLE_LIVE", "false")
-    monkeypatch.setenv("EXECUTION_MODE", "PAPER")
-    normalise_live_env_defaults()
-    assert os.getenv("SMC_SUSTAINED_FLOW_CONFIRMATION_ENABLED") is None
-
-
-def test_lightsail_live_vwap_and_ofi_default_on_with_independent_rollback(
-    monkeypatch, caplog
-) -> None:
-    """The two existing bounded paths activate only in actual Lightsail LIVE."""
-    _track_admission_test_environment(monkeypatch)
-    monkeypatch.setenv("DEPLOYMENT_PLATFORM", "aws_lightsail")
-    monkeypatch.setenv("PRODUCTION_LIVE_DEFAULT_INITIALIZED", "true")
-    monkeypatch.setenv("ENABLE_LIVE", "true")
-    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
-    monkeypatch.delenv("VWAP_TREND_RETEST_EXTENSION_ENABLED", raising=False)
-    monkeypatch.delenv("ORDERFLOW_OFI_ADAPTIVE_HOLDOFF_ENABLED", raising=False)
-
-    normalise_live_env_defaults()
-    assert os.environ["VWAP_TREND_RETEST_EXTENSION_ENABLED"] == "true"
-    assert os.environ["ORDERFLOW_OFI_ADAPTIVE_HOLDOFF_ENABLED"] == "true"
     assert "LIVE_ENTRY_QUALITY_CONFIG vwap_retest=True adaptive_ofi=True" in caplog.text
 
-    monkeypatch.setenv("VWAP_TREND_RETEST_EXTENSION_ENABLED", "false")
-    normalise_live_env_defaults()
-    assert os.environ["VWAP_TREND_RETEST_EXTENSION_ENABLED"] == "false"
-    assert os.environ["ORDERFLOW_OFI_ADAPTIVE_HOLDOFF_ENABLED"] == "true"
-    assert "vwap_retest=False adaptive_ofi=True" in caplog.text
 
-    monkeypatch.setenv("ORDERFLOW_OFI_ADAPTIVE_HOLDOFF_ENABLED", "false")
-    normalise_live_env_defaults()
-    assert os.environ["VWAP_TREND_RETEST_EXTENSION_ENABLED"] == "false"
-    assert os.environ["ORDERFLOW_OFI_ADAPTIVE_HOLDOFF_ENABLED"] == "false"
-    assert "vwap_retest=False adaptive_ofi=False" in caplog.text
-
-
-def test_lightsail_paper_and_nonproduction_live_do_not_implicitly_activate_both(
-    monkeypatch,
+@pytest.mark.parametrize("disabled_flag", _ENTRY_FLAGS)
+def test_live_entry_flags_retain_independent_false_override(
+    monkeypatch, disabled_flag
 ) -> None:
     _track_admission_test_environment(monkeypatch)
-    monkeypatch.delenv("VWAP_TREND_RETEST_EXTENSION_ENABLED", raising=False)
-    monkeypatch.delenv("ORDERFLOW_OFI_ADAPTIVE_HOLDOFF_ENABLED", raising=False)
     monkeypatch.setenv("DEPLOYMENT_PLATFORM", "railway")
     monkeypatch.setenv("ENABLE_LIVE", "true")
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
-    normalise_live_env_defaults()
-    assert os.getenv("VWAP_TREND_RETEST_EXTENSION_ENABLED") is None
-    assert os.getenv("ORDERFLOW_OFI_ADAPTIVE_HOLDOFF_ENABLED") is None
+    for key in _ENTRY_FLAGS:
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv(disabled_flag, "false")
 
-    monkeypatch.setenv("DEPLOYMENT_PLATFORM", "aws_lightsail")
+    normalise_live_env_defaults()
+    for key in _ENTRY_FLAGS:
+        assert os.environ[key] == ("false" if key == disabled_flag else "true")
+    normalise_live_env_defaults()
+    assert os.environ[disabled_flag] == "false"
+
+
+@pytest.mark.parametrize("platform", ["aws_lightsail", "railway", ""])
+@pytest.mark.parametrize("mode", ["PAPER", "SHADOW"])
+def test_nonlive_entry_features_remain_unset(monkeypatch, platform, mode) -> None:
+    _track_admission_test_environment(monkeypatch)
+    monkeypatch.setenv("DEPLOYMENT_PLATFORM", platform)
     monkeypatch.setenv("PRODUCTION_LIVE_DEFAULT_INITIALIZED", "true")
     monkeypatch.setenv("ENABLE_LIVE", "false")
-    monkeypatch.setenv("EXECUTION_MODE", "PAPER")
+    monkeypatch.setenv("EXECUTION_MODE", mode)
+    for key in _ENTRY_FLAGS:
+        monkeypatch.delenv(key, raising=False)
+
     normalise_live_env_defaults()
-    assert os.getenv("VWAP_TREND_RETEST_EXTENSION_ENABLED") is None
-    assert os.getenv("ORDERFLOW_OFI_ADAPTIVE_HOLDOFF_ENABLED") is None
+    assert all(os.getenv(key) is None for key in _ENTRY_FLAGS)
+
+
+@pytest.mark.parametrize(
+    ("mode", "enable_live"),
+    [("LIVE", "false"), ("PAPER", "true")],
+)
+def test_inconsistent_mode_flags_do_not_admit_live_features(
+    monkeypatch, mode, enable_live
+) -> None:
+    _track_admission_test_environment(monkeypatch)
+    monkeypatch.setenv("DEPLOYMENT_PLATFORM", "railway")
+    monkeypatch.setenv("EXECUTION_MODE", mode)
+    monkeypatch.setenv("ENABLE_LIVE", enable_live)
+    for key in _ENTRY_FLAGS:
+        monkeypatch.delenv(key, raising=False)
+
+    normalise_live_env_defaults()
+    assert all(os.getenv(key) is None for key in _ENTRY_FLAGS)

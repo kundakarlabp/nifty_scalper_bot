@@ -213,30 +213,26 @@ def normalise_live_env_defaults() -> None:
     if production_default_live:
         _persist_production_live_defaults(defaults)
 
-    # Explicit operator-approved SMC admission for LIVE Lightsail only.
-    # This grants no entry by itself: the existing setup-keyed two-book
-    # validator, adverse-flow veto, cost/risk and broker checks still apply.
-    # A persisted explicit 'false' remains the rollback/opt-out control.
-    if _is_lightsail_production() and live_requested:
+    # Entry admission belongs to the GitHub-controlled LIVE profile, not to
+    # any particular hosting provider. Require both canonical live controls to
+    # agree after normalization; contradictory modes must not enable features.
+    if (
+        truthy(os.getenv("ENABLE_LIVE"))
+        and (os.getenv("EXECUTION_MODE") or "").strip().upper() == "LIVE"
+    ):
+        # An explicitly supplied false always overrides the profile default.
+        # Strategy, quote, risk and broker safeguards are unchanged.
         setdefault_env("SMC_SUSTAINED_FLOW_CONFIRMATION_ENABLED", "true")
-        LOGGER.warning(
-            "SMC_SUSTAINED_FLOW_ADMISSION_CONFIG enabled=%s mode=%s "
-            "platform=aws_lightsail",
-            truthy(os.getenv("SMC_SUSTAINED_FLOW_CONFIRMATION_ENABLED")),
-            os.getenv("EXECUTION_MODE"),
-        )
-        # Operator-approved October 23 LIVE defaults. These flags only select
-        # already-tested, bounded alternatives inside their existing strategy
-        # owners; risk, market-data quality and broker gates remain unchanged.
-        # Explicit external 'false' independently disables either alternative.
         setdefault_env("VWAP_TREND_RETEST_EXTENSION_ENABLED", "true")
         setdefault_env("ORDERFLOW_OFI_ADAPTIVE_HOLDOFF_ENABLED", "true")
         LOGGER.warning(
-            "LIVE_ENTRY_QUALITY_CONFIG vwap_retest=%s adaptive_ofi=%s "
-            "mode=%s platform=aws_lightsail",
+            "SMC_SUSTAINED_FLOW_ADMISSION_CONFIG enabled=%s mode=LIVE",
+            truthy(os.getenv("SMC_SUSTAINED_FLOW_CONFIRMATION_ENABLED")),
+        )
+        LOGGER.warning(
+            "LIVE_ENTRY_QUALITY_CONFIG vwap_retest=%s adaptive_ofi=%s mode=LIVE",
             truthy(os.getenv("VWAP_TREND_RETEST_EXTENSION_ENABLED")),
             truthy(os.getenv("ORDERFLOW_OFI_ADAPTIVE_HOLDOFF_ENABLED")),
-            os.getenv("EXECUTION_MODE"),
         )
 
     if live_requested:
