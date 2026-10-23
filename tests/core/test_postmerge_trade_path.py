@@ -208,6 +208,9 @@ def test_lightsail_live_uses_sustained_smc_proof_without_overriding_opt_out(
     monkeypatch.setenv("ENABLE_LIVE", "true")
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     monkeypatch.delenv("SMC_SUSTAINED_FLOW_CONFIRMATION_ENABLED", raising=False)
+    from nifty_scalper_bot.config.env_utils import normalise_live_env_defaults
+
+    normalise_live_env_defaults()
     smc_signal, smc_evidence = _signal_evidence("SMC")
     smc_signal.metadata["setup_id"] = "smcv2:live:sweep"
     smc_evidence.metadata["setup_id"] = smc_signal.metadata["setup_id"]
