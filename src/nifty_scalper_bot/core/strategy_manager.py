@@ -4378,9 +4378,11 @@ class StrategyManager(_BaseStrategyManager):
             .lower()
             in {"1", "true", "yes", "on"}
         )
+        # Observe the SAME setup-keyed two-book mechanism even when admission
+        # is disabled. This yields a non-trading counterfactual audit without
+        # inventing a second SMC arbiter or silently changing live eligibility.
         if (
-            smc_flow_enabled
-            and smc_trigger_present
+            smc_trigger_present
             and not independent_trigger_confirmation
             and not capacity_retry_requires_consensus
         ):
@@ -4398,12 +4400,29 @@ class StrategyManager(_BaseStrategyManager):
                 if tracker is None:
                     tracker = SustainedSMCFlow()
                     self._smc_sustained_flow_tracker = tracker
-                smc_sustained_flow_confirmed = tracker.observe(
+                smc_sustained_flow_observed = tracker.observe(
                     setup_id=next(iter(smc_setup_ids)),
                     symbol=symbol_norm,
                     side=side,
                     votes=context_votes,
                     monotonic_now=time.monotonic(),
+                )
+                if smc_sustained_flow_observed:
+                    log.info(
+                        "SMC_SUSTAINED_FLOW_PROOF symbol=%s setup_id=%s admission_enabled=%s",
+                        symbol_norm,
+                        next(iter(smc_setup_ids)),
+                        smc_flow_enabled,
+                        extra={
+                            "event": "SMC_SUSTAINED_FLOW_PROOF",
+                            "symbol": symbol_norm,
+                            "setup_id": next(iter(smc_setup_ids)),
+                            "admission_enabled": smc_flow_enabled,
+                            "is_counterfactual": not smc_flow_enabled,
+                        },
+                    )
+                smc_sustained_flow_confirmed = bool(
+                    smc_flow_enabled and smc_sustained_flow_observed
                 )
         if (
             smc_trigger_present
