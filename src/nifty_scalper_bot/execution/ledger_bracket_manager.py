@@ -1,11 +1,15 @@
 # fmt: off
 # ruff: noqa: E501,I001,F401,F841,E402
 # mypy: ignore-errors
-"""Canonical bracket lifecycle with durable confirmed-fill accounting.
+"""Purpose: Keep the protective bracket lifecycle tied to durable fill evidence.
 
-Protective execution never depends on the ledger being healthy.  A persistence
-failure therefore cannot stop SL/TP handling, but it does block the runner from
-re-arming until fill history and broker-flat state are reconciled.
+Responsibilities:
+- LedgerBracketManager coordinates canonical bracket state and fill-ledger storage.
+- Reconcile confirmed fills, exit state and broker-flat evidence before rearming.
+- Keep trading ledger persistence distinct from the live protective mechanism.
+
+Boundaries: BoundBracket/core remain authoritative for protective broker actions.
+Safety: Ledger failure cannot suppress SL/TP exits; uncertain fills block new entries.
 """
 
 from __future__ import annotations

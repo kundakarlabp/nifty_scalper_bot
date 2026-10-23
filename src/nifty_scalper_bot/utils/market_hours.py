@@ -1,4 +1,13 @@
-"""Canonical NSE market-session and safe-entry window utilities."""
+"""Purpose: Define canonical NSE market-session and entry-time windows.
+
+Responsibilities:
+- MarketState and get_market_state classify exchange-session boundaries.
+- is_safe_entry_window and is_market_hours enforce entry cutoff policy.
+- allow_offhours_testing_safe permits configured testing only outside real LIVE mode.
+
+Boundaries: Session gates are not full strategy, broker or risk authorization.
+Safety: Live trading cannot bypass exchange holidays or off-hours entry restrictions.
+"""
 
 from __future__ import annotations
 

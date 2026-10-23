@@ -1,4 +1,13 @@
-"""Asynchronous trade journaling for low-latency execution paths."""
+"""Purpose: Journal execution events asynchronously without blocking hot paths.
+
+Responsibilities:
+- TradeJournal queues canonical event records for SQLite persistence.
+- Reconcile event rows into the derived trade_ledger materialization.
+- Tag committed observations with release identity for later audit/replay.
+
+Boundaries: Journal records observed decisions/fills; broker remains exposure truth.
+Safety: Journal delays must not trigger duplicate orders or falsely close positions.
+"""
 
 from __future__ import annotations
 

@@ -1,7 +1,12 @@
-"""Private, quota-independent Supabase health mirror for the Lightsail engine.
+"""Purpose: Mirror sanitized Lightsail runtime health to optional Supabase.
 
-This reads only the local readiness endpoint, and posts sanitized diagnostics
-off the trading hot path. It never sends orders, tokens, balances or prices.
+Responsibilities:
+- build_runtime_heartbeat configures remote heartbeat transport.
+- RuntimeHeartbeat reports local status, release SHA and blockers off hot path.
+- heartbeat_interval_seconds bounds reporting frequency and overhead.
+
+Boundaries: Telemetry only; the host/broker remain authoritative for trading.
+Safety: Never send tokens, balances, orders or execution-control commands.
 """
 
 from __future__ import annotations

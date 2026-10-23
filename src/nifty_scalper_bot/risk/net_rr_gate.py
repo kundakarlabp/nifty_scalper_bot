@@ -1,4 +1,13 @@
-"""Final transaction-cost-aware reward-to-risk gate for option entries."""
+"""Purpose: Evaluate final option-entry reward/risk after transaction costs.
+
+Responsibilities:
+- NetRRResult reports net and gross reward/risk with execution friction.
+- Final gate combines selected stop, target, quantity and cost assumptions.
+- Reuse cost_model for fees instead of separate approximations.
+
+Boundaries: This pure risk check does not submit, resize or reconcile broker orders.
+Safety: Infeasible or uncertain net expectancy fails the final entry gate.
+"""
 
 from __future__ import annotations
 
