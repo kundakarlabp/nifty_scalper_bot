@@ -19,7 +19,20 @@ The repository path `/home/ubuntu/nifty_scalper_bot/.env` is only a compatibilit
 symlink to that external file. Git pulls, resets, validation worktrees, and code
 rollbacks therefore cannot overwrite broker or Telegram credentials.
 
-Never commit a populated `.env` file. `.env.example` is the repository template.
+Never commit a populated `.env` file. `.env.example` is an example
+for development, **not** the source of production strategy defaults. The
+runtime's GitHub-owned configuration modules own those defaults.
+
+Fresh Lightsail installations now create only a minimal secret/operator file
+(`ENABLE_LIVE=false`, `EXECUTION_MODE=SHADOW`); neither setup nor Python's
+config normalizer silently authorizes real orders. To enable an existing LIVE
+installation, both canonical flags must already be explicitly set and agree.
+Inconsistent settings fail closed and do not rewrite the host's protected file.
+
+Existing populated host environment files are preserved to avoid unexpected
+changes to trading behavior. A subsequent migration of legacy strategy
+overrides must compare *effective* values, not blindly delete keys while
+trading. Do not run the full setup script merely to edit credentials.
 
 ## One-time setup or migration
 
@@ -42,7 +55,8 @@ validated release runner below, not a separate ad-hoc deployment path.
 
 The setup script:
 
-- migrates the historic in-repository `.env` file;
+- preserves existing external credentials, migrating a legacy `.env` only once;
+- creates a minimal SHADOW-only host env on fresh installs, with no strategy defaults;
 - installs the `niftybot` engine service;
 - installs the isolated `.streamlit-venv` and `niftybot-streamlit` console service;
 - points the engine to the external environment file;
