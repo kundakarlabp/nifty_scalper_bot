@@ -681,7 +681,7 @@ def test_opt_in_trend_retest_extension_requires_completed_pullback_rebreak(
         ),
         ({"prior_gap_minutes": 2}, "trend_retest_structure_unconfirmed"),
         ({"prior_volumes": [900.0] * 9 + [0.0]}, "trend_retest_structure_unconfirmed"),
-        ({"low": 102.0}, "trend_retest_structure_unconfirmed"),
+        ({"low": 102.0}, "trend_momentum_weak_close"),
         ({"history_high": 101.0}, "trend_momentum_bar_unconfirmed"),
         ({"underlying_direction_bias": "PE"}, "distance_outside_band"),
         ({"context_age_seconds": 10.0}, "distance_outside_band"),
