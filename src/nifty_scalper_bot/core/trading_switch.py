@@ -1,4 +1,13 @@
-"""Centralized trading switch for operator pause and cooldown controls."""
+"""Purpose: Coordinate operator entry controls and release-safe submission.
+
+Responsibilities:
+- TradingSwitch tracks pause/cooldown and entry-admission state.
+- release_entry_hold_active reports the deployment's entry hold.
+- live_entry_submission_slot synchronizes new broker entries with release handoff.
+
+Boundaries: Entry control is not broker order placement or position truth.
+Safety: Release holds block opening exposure, not protective exit orders.
+"""
 
 from __future__ import annotations
 

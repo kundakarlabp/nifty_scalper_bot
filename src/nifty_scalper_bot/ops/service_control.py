@@ -1,8 +1,12 @@
-"""Bounded system-control helpers for low-memory Lightsail recovery.
+"""Purpose: Provide bounded Lightsail restart/update controls for operators.
 
-These helpers intentionally expose only a tiny allow-list of operations needed by
-remote operator surfaces: restart the trading engine and restart the lightweight
-console. Instance shutdown is intentionally not performed from the web process.
+Responsibilities:
+- restart_bot and restart_deployer invoke permitted system services.
+- queue_validated_restart routes requested updates to the release mechanism.
+- ControlResult exposes explicit success/failure without masking command errors.
+
+Boundaries: Operator control does not own strategy/order logic or host secrets.
+Safety: Never treat an accepted restart request as a verified new release.
 """
 from __future__ import annotations
 
