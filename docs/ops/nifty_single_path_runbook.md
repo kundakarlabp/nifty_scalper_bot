@@ -2,9 +2,11 @@
 
 **Single source of truth:** GitHub `main` contains code; AWS Lightsail is
 the sole LIVE trading runtime; Supabase is the private read-only remote
-telemetry store. **AppDeploy is not in the dependency chain.** Do not spend
-hosting credits redeploying the optional historic AppDeploy relay, and do not
-route trading orders or daily broker-token activation through it.
+telemetry store. **AppDeploy is not in the dependency chain.**
+On 23 October 2026, the five obsolete AppDeploy NIFTY network probes/relays
+were deleted and confirmed deleted. Do not recreate or redeploy them, including
+during investigation of direct HTTP access failures. No bot order, release or
+daily broker-token operation may require AppDeploy.
 
 ## Daily operation
 
@@ -84,6 +86,38 @@ Production engine port 8080, admin 8081, optional read-only Streamlit 8501.
 Do not expose write-capable admin interfaces openly on the internet;
 the legacy admin relies on an external network allowlist rather than
 built-in user authentication. Preserve the existing allowlist.
+
+## Minimal AWS process inventory
+
+Keep the **three existing, distinct processes** for fault containment, not a
+larger constellation of duplicate services:
+
+| Purpose | Service | Critical? |
+| --- | --- | --- |
+| LIVE trading and protective exits | `niftybot` :8080 | Yes |
+| Daily broker login, manual actions and independent recovery | `niftybot-admin` :8081 | Yes |
+| Read-only reports / operator console | `niftybot-streamlit` :8501 | Optional for orders; preserve current user features |
+| Verified code-release poll | `niftybot-autodeploy.timer` | Yes |
+
+Do **not** restart the trading engine merely because the optional
+Streamlit page or a monitoring provider fails. Never put an order or secret
+in the read-only console. Optional Docker/Prometheus/Grafana scripts are
+research infrastructure, not an additional deployed LIVE bot.
+
+## Removed third-party relay inventory
+
+These obsolete AppDeploy apps were permanently deleted on 23 October 2026,
+with `status=deleted` independently checked:
+`nifty-endpoint-probe-qspiq0`,
+`nifty-deploy-recovery-relay-u7c57n`,
+`nifty-cloud-probe-capture-w3mrp1`,
+`nifty-live-diagnostic-relay-09rb32` and
+`nifty-live-readonly-relay-kb0r4e`.
+
+The separate `nifty-historical-data-collector-pwtdwk` is **not** a LIVE
+dependency but still stores Dhan history in AppDeploy storage. Preserve and
+export/verify the archive before deleting that app. Three unrelated clinical
+apps also remain and must not be silently destroyed by NIFTY maintenance.
 
 For first-time Lightsail host provisioning, see `deploy/LIGHTSAIL_SETUP.md`.
 For the separate research/backtesting environment see
