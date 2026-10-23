@@ -18,25 +18,18 @@ from zoneinfo import ZoneInfo
 
 import requests
 
+from nifty_scalper_bot.config.defaults import DEFAULT_SUPABASE_TRADE_URL
+from nifty_scalper_bot.config.env_utils import supabase_telemetry_enabled
 from nifty_scalper_bot.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
 
-DEFAULT_REPLICATION_URL = (
-    "https://dehdptgkqbrkyzyodicd.supabase.co/functions/v1/nifty-trade-ingest"
-)
+DEFAULT_REPLICATION_URL = DEFAULT_SUPABASE_TRADE_URL
 _DEFAULT_SOURCE = "lightsail"
 _IST = ZoneInfo("Asia/Kolkata")
 _REPLICATION_SINK = "supabase_trade_observability"
 
 Transport = Callable[[str, Mapping[str, Any], float], Mapping[str, Any]]
-
-
-def _env_enabled(name: str, default: bool = False) -> bool:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def replication_interval_seconds() -> float:
@@ -53,7 +46,7 @@ def build_supabase_trade_replicator(
     db_path: str | Path,
 ) -> "SupabaseTradeReplicator | None":
     """Build the optional remote sink from runtime configuration."""
-    if not _env_enabled("SUPABASE_TRADE_REPLICATION_ENABLED", default=False):
+    if not supabase_telemetry_enabled("SUPABASE_TRADE_REPLICATION_ENABLED"):
         return None
     endpoint = (
         os.getenv("SUPABASE_TRADE_REPLICATION_URL", DEFAULT_REPLICATION_URL).strip()
