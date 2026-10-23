@@ -29,6 +29,7 @@ def _make_sender(status=200, health=None):
 
 
 def test_disabled_without_explicit_env(monkeypatch):
+    monkeypatch.setenv("DEPLOYMENT_PLATFORM", "development")
     monkeypatch.delenv("SUPABASE_RUNTIME_HEARTBEAT_ENABLED", raising=False)
     assert build_runtime_heartbeat() is None
 
