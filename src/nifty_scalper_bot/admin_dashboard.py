@@ -212,8 +212,22 @@ def _activate_access_token(access_token: str) -> ControlResult:
 
 def _complete_kite_session(request_token: str) -> RedirectResponse:
     env = _read_env()
-    api_key = env.get("KITE_API_KEY", "").strip()
-    api_secret = env.get("KITE_API_SECRET", "").strip()
+    api_key = next(
+        (
+            env.get(k, "").strip()
+            for k in ("KITE_API_KEY", "ZERODHA_API_KEY", "BROKER_API_KEY")
+            if env.get(k, "").strip()
+        ),
+        "",
+    )
+    api_secret = next(
+        (
+            env.get(k, "").strip()
+            for k in ("KITE_API_SECRET", "ZERODHA_API_SECRET", "BROKER_API_SECRET")
+            if env.get(k, "").strip()
+        ),
+        "",
+    )
     if not api_key or not api_secret:
         return RedirectResponse("/admin?token=err&msg=set+API+key+and+secret+first", status_code=303)
     ok, result = _exchange_request_token(api_key, api_secret, request_token)
@@ -562,7 +576,14 @@ def update_token(request: Request, request_token: str = Form(""), access_token: 
     if not acc_tok:
         return RedirectResponse("/admin?token=err&msg=no+token+provided", status_code=303)
     env = _read_env()
-    api_key = env.get("KITE_API_KEY", "").strip()
+    api_key = next(
+        (
+            env.get(k, "").strip()
+            for k in ("KITE_API_KEY", "ZERODHA_API_KEY", "BROKER_API_KEY")
+            if env.get(k, "").strip()
+        ),
+        "",
+    )
     if not api_key:
         return RedirectResponse("/admin?token=err&msg=set+API+key+first", status_code=303)
     verified, detail = _verify_access_token(api_key, acc_tok)
