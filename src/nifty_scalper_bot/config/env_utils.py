@@ -1,9 +1,10 @@
 """Purpose: Normalize execution-mode settings and runtime environment defaults.
 
 Responsibilities:
-- normalise_live_env_defaults requires explicit, consistent LIVE authorization.
-- supabase_telemetry_enabled resolves host-scoped monitoring with opt-out.
-- parse_float_env and resolve_build_sha provide safe configuration and identity.
+- normalise_live_env_defaults enforces explicit LIVE authorization and risk caps.
+- _bounded_live_risk_pct reconciles restrictive operator aliases without widening.
+- supabase_telemetry_enabled controls monitoring; parse_float_env and
+  resolve_build_sha provide safe configuration and release identity.
 
 Boundaries: GitHub configuration owns policy; protected AWS env holds secrets.
 Safety: Conflicting trading-mode settings fail closed; telemetry cannot arm LIVE.
