@@ -1,4 +1,13 @@
-"""Default configuration values for the Nifty scalper bot."""
+"""Purpose: Define version-controlled broker, risk and monitoring defaults.
+
+Responsibilities:
+- Provide the existing LIVE risk limits without host-side parameter copies.
+- Define canonical, nonsecret Supabase Edge monitoring endpoints.
+- Expose quote, order and service constants to their owning subsystems.
+
+Boundaries: Constants only; no environment mutation, network or broker actions.
+Safety: Never store credentials here; trading limits are unchanged by telemetry.
+"""
 
 from __future__ import annotations
 
