@@ -5,6 +5,11 @@ from __future__ import annotations
 DEFAULT_BROKER_BASE_URL = "https://api.example.com"
 DEFAULT_BROKER_WEBSOCKET_URL = "wss://ws.example.com/stream"
 
+# Single GitHub-owned current LIVE risk envelope. Keep observed exposure
+# unchanged in this infrastructure-only refactor; sizing review is separate.
+DEFAULT_LIVE_PER_TRADE_RISK_PCT = "5.0"
+DEFAULT_LIVE_DAILY_LOSS_PCT = "5.0"
+
 DEFAULT_RISK_MAX_DAILY_TRADES = 20
 DEFAULT_RISK_MAX_ORDER_NOTIONAL = 200_000.0
 DEFAULT_RISK_ALLOW_SHORT = False  # Options buying bot — never write/short options (requires margin)
