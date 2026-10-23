@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 import json
+from pathlib import Path
 
 from scripts import module_doc_guard as guard
 
@@ -124,15 +124,20 @@ def test_changed_deployment_asset_requires_opening_labels(
         "#!/usr/bin/env bash\n# File purpose: Start a release.\n"
         "# Key responsibilities: Validate and restart.\n"
         "# Operational constraints: Do not bypass broker-safe checks.\n"
-        "true\n", encoding="utf-8",
+        "true\n",
+        encoding="utf-8",
     )
     assert guard.check(tmp_path, base="main") == []
 
 
 def test_coverage_expands_to_dashboard_and_tools() -> None:
-    payload = {"module_documentation": [
-        "dashboard/superlite_console.py", "scripts/module_doc_guard.py"
-    ]}
+    payload = {
+        "module_documentation": [
+            "dashboard/superlite_console.py",
+            "scripts/module_doc_guard.py",
+        ]
+    }
     assert guard.covered_modules(payload) == {
-        "dashboard/superlite_console.py", "scripts/module_doc_guard.py"
+        "dashboard/superlite_console.py",
+        "scripts/module_doc_guard.py",
     }
