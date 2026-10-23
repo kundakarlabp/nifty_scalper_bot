@@ -19,6 +19,7 @@ VENV="${BOT_VENV:-$APP_DIR/.venv}"
 STREAMLIT_VENV="${BOT_STREAMLIT_VENV:-$APP_DIR/.streamlit-venv}"
 LOCK_FILE="${BOT_DEPLOY_LOCK_FILE:-/tmp/niftybot-deploy.lock}"
 RESTART_PENDING_FILE="${CONFIG_DIR}/auto_release_restart_pending"
+VERIFIED_TOKEN_ROTATION_FILE="${CONFIG_DIR}/auto_release_verified_token_rotation"
 RELEASE_HOLD_FILE="${CONFIG_DIR}/auto_release_entry_hold"
 RELEASE_ENTRY_LOCK_FILE="${CONFIG_DIR}/auto_release_entry_lock"
 RELEASE_HOLD_ACTIVE=false
@@ -408,8 +409,10 @@ intraday_flat_broker_confirmed() {
   fi
   BOT_RELEASE_KITE_API_KEY="$api_key" BOT_RELEASE_KITE_ACCESS_TOKEN="$access_token" \
     BOT_RELEASE_LOCAL_PORT="$PORT" BOT_RELEASE_RESTART_PENDING="$RESTART_PENDING_FILE" \
+    BOT_RELEASE_VERIFIED_TOKEN_ROTATION="$VERIFIED_TOKEN_ROTATION_FILE" \
     BOT_RELEASE_ENTRY_HOLD_REQUIRED="$RELEASE_HOLD_ACTIVE" \
     "$VENV/bin/python" - <<'PY_FLAT_GUARD'
+import hashlib
 import json
 import os
 import sys
@@ -428,6 +431,26 @@ kite.set_access_token(os.environ["BOT_RELEASE_KITE_ACCESS_TOKEN"])
 restart_marker = os.environ.get("BOT_RELEASE_RESTART_PENDING") or ""
 token_rotation_requested = bool(restart_marker and os.path.isfile(restart_marker))
 hold_required = os.environ.get("BOT_RELEASE_ENTRY_HOLD_REQUIRED") == "true"
+
+# Only an access token verified with Kite's profile endpoint may bypass an
+# *old process* authentication-state check. A generic restart marker is not
+# sufficient. External Kite position/order snapshots remain mandatory.
+rotation_proof = os.environ.get("BOT_RELEASE_VERIFIED_TOKEN_ROTATION") or ""
+token_rotation_verified = False
+if token_rotation_requested and rotation_proof and os.path.isfile(rotation_proof):
+    try:
+        with open(rotation_proof, encoding="utf-8") as proof_stream:
+            proof = json.load(proof_stream)
+        age = time.time() - float(proof["verified_at"])
+        expected = hashlib.sha256(
+            os.environ["BOT_RELEASE_KITE_ACCESS_TOKEN"].encode("utf-8")
+        ).hexdigest()
+        token_rotation_verified = (
+            0 <= age <= 12 * 3600
+            and str(proof.get("token_sha256") or "") == expected
+        )
+    except (OSError, ValueError, TypeError, KeyError):
+        token_rotation_verified = False
 
 def is_safe() -> bool:
     with urllib.request.urlopen(f"http://127.0.0.1:{port}/livez", timeout=3) as response:
@@ -448,17 +471,11 @@ def is_safe() -> bool:
         broker = health.get("broker") or {}
         if hold_required and health.get("release_entry_hold_active") is not True:
             return False
-        # A fail-closed, unrestarted engine reports its previous token invalid.
-        # Accept only a queued token rotation with explicit invalid-auth proof;
-        # never treat an unknown auth state as permission to restart.
-        token_rotation_recovery = (
-            token_rotation_requested
-            and broker.get("authenticated") is False
-            and broker.get("auth_invalid") is True
-            and health.get("broker_authentication") == "invalid"
-            and health.get("broker_session_state") == "invalid"
-            and health.get("authentication_known") is True
-        )
+        # A new verified token can make the *old process's* auth state stale.
+        # Only this fresh, token-bound proof permits skipping that single
+        # local auth bit. Flat broker positions and terminal orders are still
+        # verified twice using the new token, with an active entry hold.
+        token_rotation_recovery = token_rotation_verified and hold_required
         if (
             health.get("live_orders_armed") is not False
             or reconciliation.get("completed") is not True
@@ -874,7 +891,7 @@ if auto_release_should_defer; then
 fi
 sudo systemctl restart "$SERVICE"
 if wait_for_service "$AFTER"; then
-  rm -f "$RESTART_PENDING_FILE"
+  rm -f "$RESTART_PENDING_FILE" "$VERIFIED_TOKEN_ROTATION_FILE"
   admin_ready=false
   if restart_admin; then
     admin_ready=true
