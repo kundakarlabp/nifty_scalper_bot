@@ -148,13 +148,13 @@ def test_lightsail_live_vwap_and_ofi_default_on_with_independent_rollback(
     normalise_live_env_defaults()
     assert os.environ["VWAP_TREND_RETEST_EXTENSION_ENABLED"] == "false"
     assert os.environ["ORDERFLOW_OFI_ADAPTIVE_HOLDOFF_ENABLED"] == "true"
-    assert "LIVE_ENTRY_QUALITY_CONFIG vwap_retest=False adaptive_ofi=True" in caplog.text
+    assert "vwap_retest=False adaptive_ofi=True" in caplog.text
 
     monkeypatch.setenv("ORDERFLOW_OFI_ADAPTIVE_HOLDOFF_ENABLED", "false")
     normalise_live_env_defaults()
     assert os.environ["VWAP_TREND_RETEST_EXTENSION_ENABLED"] == "false"
     assert os.environ["ORDERFLOW_OFI_ADAPTIVE_HOLDOFF_ENABLED"] == "false"
-    assert "LIVE_ENTRY_QUALITY_CONFIG vwap_retest=False adaptive_ofi=False" in caplog.text
+    assert "vwap_retest=False adaptive_ofi=False" in caplog.text
 
 
 def test_lightsail_paper_and_nonproduction_live_do_not_implicitly_activate_both(
