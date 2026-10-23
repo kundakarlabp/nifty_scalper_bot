@@ -28,6 +28,17 @@ def test_dotenv_is_not_tracked() -> None:
     assert (ROOT / ".env.example").is_file()
 
 
+def test_fresh_host_never_copies_full_strategy_template_to_secret_env() -> None:
+    setup = _text("deploy/lightsail_setup.sh")
+    assert 'cp "$APP_DIR/.env.example" "$ENV_FILE"' not in setup
+    assert 'ENABLE_LIVE=false' in setup
+    assert 'EXECUTION_MODE=SHADOW' in setup
+    assert 'KITE_API_SECRET=' in setup
+    assert 'TELEGRAM_BOT_TOKEN=' in setup
+    # Existing installs must preserve credentials and operator-selected mode.
+    assert 'log "Preserving external environment and credentials"' in setup
+
+
 def test_lightsail_uses_external_environment_file() -> None:
     setup = _text("deploy/lightsail_setup.sh")
     assert 'CONFIG_DIR="/home/ubuntu/.config/niftybot"' in setup
