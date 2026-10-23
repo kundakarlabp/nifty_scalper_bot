@@ -35,7 +35,7 @@ def test_short_bare_module_header_is_rejected() -> None:
 def test_header_with_purpose_and_boundary_is_accepted() -> None:
     source = (
         '"""Purpose: Normalize already selected option quotes for downstream '
-        'consumers.\n'
+        "consumers.\n"
         "\nResponsibilities: Preserve price and source quality markers.\n"
         "Boundaries: Contract discovery and order submission belong elsewhere.\n"
         '"""\n'
