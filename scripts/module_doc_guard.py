@@ -13,7 +13,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-
 MANIFEST = Path("docs/architecture/agent_manifest.json")
 ARCHITECTURE_DOCS = {
     "ARCHITECTURE_TRADING_PATH.md",
@@ -51,7 +50,12 @@ def api_inventory(source: str) -> tuple[tuple[str, ...], ...]:
     for item in tree.body:
         if isinstance(item, function_types):
             result.append(
-                ("function", item.name, ast.dump(item.args), (ast.dump(item.returns) if item.returns is not None else ""))
+                (
+                    "function",
+                    item.name,
+                    ast.dump(item.args),
+                    ast.dump(item.returns) if item.returns is not None else "",
+                )
             )
         elif isinstance(item, ast.ClassDef):
             result.append(("class", item.name, ast.dump(ast.Tuple(elts=item.bases))))
@@ -63,7 +67,7 @@ def api_inventory(source: str) -> tuple[tuple[str, ...], ...]:
                             item.name,
                             method.name,
                             ast.dump(method.args),
-                            (ast.dump(method.returns) if method.returns is not None else ""),
+                            ast.dump(method.returns) if method.returns is not None else "",
                         )
                     )
     return tuple(sorted(result))
