@@ -499,7 +499,10 @@ def test_telemetry_urls_and_enablement_are_owned_by_github() -> None:
     assert "nifty-runtime-heartbeat-ingest" in defaults
     assert 'os.getenv("DEPLOYMENT_PLATFORM")' in env_utils
     assert "supabase_telemetry_enabled" in env_utils
-    assert 'if [ "$RUNTIME_ENV_CHANGED" = true ]; then FORCE_RESTART=true; fi' in release
+    assert (
+        'if [ "$RUNTIME_ENV_CHANGED" = true ]; then FORCE_RESTART=true; fi'
+        in release
+    )
     assert "tests/infra/test_supabase_trade_replication.py" in release
 
 
