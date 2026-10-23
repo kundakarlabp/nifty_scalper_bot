@@ -17,7 +17,18 @@ _PRODUCTION_ROOTS = (
     ROOT / ".github" / "workflows",
 )
 _DEPLOY_EXTENSIONS = frozenset(
-    {".py", ".sh", ".ts", ".js", ".json", ".yml", ".yaml", ".toml", ".service", ".timer"}
+    {
+        ".py",
+        ".sh",
+        ".ts",
+        ".js",
+        ".json",
+        ".yml",
+        ".yaml",
+        ".toml",
+        ".service",
+        ".timer",
+    }
 )
 _PROHIBITED = (
     "api-v2.appdeploy.ai",
