@@ -1,5 +1,13 @@
-"""
-World-class ATR-based trailing stop controller.
+"""Purpose: Provide ATR-aware adaptive trailing-stop calculations and updates.
+
+Responsibilities: TrailingSpec describes activation/distance/steps; the
+AdaptiveTrailingController processes option ticks, volatility context and
+broker stop-modification callbacks.
+Key interfaces: TrailingSpec, AdaptiveTrailingController.on_tick.
+Boundaries: The hardened runtime controller adds protective invariants;
+canonical bracket/order managers own exit state and broker order routing.
+Safety: A trailing update must not loosen the active protective stop, and
+stale volatility or failed modifications must not be treated as success.
 """
 
 from __future__ import annotations

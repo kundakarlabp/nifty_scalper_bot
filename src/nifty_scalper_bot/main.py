@@ -1,11 +1,13 @@
-"""
-nifty_scalper_bot.main
+"""Purpose: Host the production FastAPI process and its trading runtime lifecycle.
 
-Production Entrypoint
-- Preserves existing bot logic
-- Prevents zombie / false-alive state
-- Fails fast on core app crash
-- ✅ FIX: Data directory permission handling
+Responsibilities: Load host environment, supervise the app background task,
+expose /livez, /readyz, /releasez and structured health/status diagnostics,
+and provide explicit startup/shutdown management.
+Key interfaces: lifespan, livez, readyz and trading/status handlers.
+Boundaries: This HTTP shell does not own market direction, risk or order policy;
+core/app.py orchestrates the trading components.
+Safety: A responsive HTTP server is not proof of a trading-ready broker session;
+failed startup must remain observable and must not report false readiness.
 """
 
 import asyncio

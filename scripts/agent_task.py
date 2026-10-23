@@ -120,6 +120,10 @@ def _validate(
     if syntax != 0:
         return syntax
 
+    doc_guard = _python(root, "module_doc_guard.py", "--base-ref", base_ref)
+    if doc_guard.returncode != 0:
+        return doc_guard.returncode
+
     if style_fix:
         style = _python(
             root,

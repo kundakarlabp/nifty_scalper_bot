@@ -175,12 +175,21 @@ def build(
     architecture_lint = root / "scripts" / "architecture_lint.py"
     if _has_production_python(normalized) and architecture_lint.exists():
         commands.append("python scripts/architecture_lint.py")
+    # Live-simulation tests must run in a separate pytest process. Co-collecting
+    # them with import/reload-heavy unit tests can invalidate class identity.
+    # The dedicated E2E command below preserves the same marked coverage.
+    standard_tests = [
+        test for test in tests if not test.startswith("tests/e2e/live_sim/")
+    ]
+    e2e_selected = any(test.startswith("tests/e2e/live_sim/") for test in tests)
     commands.append(
-        "python -m pytest -q " + " ".join(tests)
-        if tests
+        "python -m pytest -q " + " ".join(standard_tests)
+        if standard_tests
         else "python -m pytest -q tests/architecture"
     )
-    if risk_level == "high" and (root / "tests" / "e2e" / "live_sim").exists():
+    if (risk_level == "high" or e2e_selected) and (
+        root / "tests" / "e2e" / "live_sim"
+    ).exists():
         commands.append(E2E_COMMAND)
     commands.append("python -m pytest -q")
     return Plan(
