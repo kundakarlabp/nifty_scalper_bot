@@ -107,6 +107,17 @@ def setdefault_env(key: str, value: str) -> None:
         os.environ[key] = value
 
 
+def supabase_telemetry_enabled(key: str) -> bool:
+    """Enable only on the receiver-authorized Lightsail host unless overridden.
+
+    Secrets, trade control, and broker execution are never read or modified.
+    """
+    explicit = os.getenv(key)
+    if explicit is not None:
+        return truthy(explicit)
+    return (os.getenv("DEPLOYMENT_PLATFORM") or "").strip().lower() == "aws_lightsail"
+
+
 def normalise_live_env_defaults() -> None:
     """Resolve a coherent trading mode from explicit operator settings.
 
