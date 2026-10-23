@@ -42,6 +42,22 @@ Release source of truth on Lightsail:
 **the running process matching the intended main SHA and passing health**.
 Do not infer it from a button, commit, or queued deploy marker.
 
+## LIVE risk ceiling and operator overrides
+
+GitHub's `config/defaults.py` retains the existing **5% per-trade** and
+**5% daily-loss** risk ceilings; this rollout does not increase or recommend
+either limit. The canonical `config/env_utils.py` normalizer now respects
+explicit *lower* operator limits instead of silently overwriting them with 5%.
+Conflicting aliases resolve to the strictest finite positive value, while
+attempted increases above GitHub's ceiling are capped. Invalid, zero, negative,
+NaN or infinite LIVE limits fail closed before broker-live authorization.
+
+The effective per-trade and daily values are logged as
+`LIVE_RISK_ENVELOPE_CONFIG`, with no account balance, token or other secrets.
+This is a safety correction, not a strategy or trading-exposure optimization.
+Any later decision to revise the default 5% profile needs a separate risk
+evaluation; do not silently alter active positions or protective orders.
+
 ## One protected production environment source
 
 The runtime settings loader reads only `BOT_ENV_FILE` when that explicit

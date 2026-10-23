@@ -1,9 +1,10 @@
 """Purpose: Normalize execution-mode settings and runtime environment defaults.
 
 Responsibilities:
-- normalise_live_env_defaults requires explicit, consistent LIVE authorization.
-- supabase_telemetry_enabled resolves host-scoped monitoring with opt-out.
-- parse_float_env and resolve_build_sha provide safe configuration and identity.
+- normalise_live_env_defaults enforces explicit LIVE authorization and risk caps.
+- _bounded_live_risk_pct reconciles restrictive operator aliases without widening.
+- supabase_telemetry_enabled controls monitoring; parse_float_env and
+  resolve_build_sha provide safe configuration and release identity.
 
 Boundaries: GitHub configuration owns policy; protected AWS env holds secrets.
 Safety: Conflicting trading-mode settings fail closed; telemetry cannot arm LIVE.
@@ -12,6 +13,7 @@ Safety: Conflicting trading-mode settings fail closed; telemetry cannot arm LIVE
 from __future__ import annotations
 
 import logging
+import math
 import os
 
 from nifty_scalper_bot.config import defaults
@@ -127,6 +129,27 @@ def supabase_telemetry_enabled(key: str) -> bool:
     return (os.getenv("DEPLOYMENT_PLATFORM") or "").strip().lower() == "aws_lightsail"
 
 
+def _bounded_live_risk_pct(keys: tuple[str, ...], ceiling: str) -> str:
+    """Use the strictest finite positive operator cap, never above GitHub policy.
+
+    All active aliases are inspected, not merely the first one: a stale
+    permissive alias must never overrule a more protective operator limit.
+    """
+    selected = float(ceiling)
+    for key in keys:
+        raw = os.getenv(key)
+        if raw is None or not raw.strip():
+            continue
+        try:
+            value = float(_strip_inline_comment(raw))
+        except ValueError as exc:
+            raise ValueError(f"invalid_live_risk_limit:{key}") from exc
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError(f"invalid_live_risk_limit:{key}")
+        selected = min(selected, value)
+    return str(selected)
+
+
 def normalise_live_env_defaults() -> None:
     """Resolve a coherent trading mode from explicit operator settings.
 
@@ -136,6 +159,28 @@ def normalise_live_env_defaults() -> None:
     enable_live = truthy(os.getenv("ENABLE_LIVE"))
     mode = (os.getenv("EXECUTION_MODE") or "").strip().upper()
     live_requested = enable_live and mode == "LIVE"
+    invalid_live_risk: ValueError | None = None
+    per_trade_limit = LIVE_PER_TRADE_RISK_PCT
+    daily_limit = LIVE_DAILY_LOSS_PCT
+    if live_requested:
+        try:
+            per_trade_limit = _bounded_live_risk_pct(
+                ("RISK__PER_TRADE_RISK_PCT", "RISK_PER_TRADE_PCT"),
+                LIVE_PER_TRADE_RISK_PCT,
+            )
+            daily_limit = _bounded_live_risk_pct(
+                (
+                    "RISK_DAILY_LOSS_PCT",
+                    "RISK_DAILY_PNL_CAP_PCT",
+                    "RISK_MAX_DAILY_LOSS_PCT",
+                    "DAILY_PNL_CAP_PCT",
+                ),
+                LIVE_DAILY_LOSS_PCT,
+            )
+        except ValueError as exc:
+            invalid_live_risk = exc
+            live_requested = False
+            LOGGER.error("LIVE_RISK_CONFIG_INVALID_FAIL_CLOSED key=%s", exc)
 
     if live_requested:
         values = {
@@ -176,6 +221,11 @@ def normalise_live_env_defaults() -> None:
     for key, value in values.items():
         os.environ[key] = value
 
+    if invalid_live_risk is not None:
+        # Leave every broker-live alias disabled; startup must not silently
+        # replace a malformed restrictive cap with the permissive default.
+        raise invalid_live_risk
+
     if live_requested:
         # Operator-approved bounded entry paths; each explicit false wins.
         setdefault_env("SMC_SUSTAINED_FLOW_CONFIRMATION_ENABLED", "true")
@@ -193,12 +243,17 @@ def normalise_live_env_defaults() -> None:
 
         # Preserve the existing LIVE risk profile. The canonical values live
         # in config/defaults.py; aliases are normalized for older consumers.
-        os.environ["RISK__PER_TRADE_RISK_PCT"] = LIVE_PER_TRADE_RISK_PCT
-        os.environ["RISK_PER_TRADE_PCT"] = LIVE_PER_TRADE_RISK_PCT
-        os.environ["RISK_DAILY_LOSS_PCT"] = LIVE_DAILY_LOSS_PCT
-        os.environ["RISK_DAILY_PNL_CAP_PCT"] = LIVE_DAILY_LOSS_PCT
-        os.environ["RISK_MAX_DAILY_LOSS_PCT"] = LIVE_DAILY_LOSS_PCT
-        os.environ["DAILY_PNL_CAP_PCT"] = LIVE_DAILY_LOSS_PCT
+        os.environ["RISK__PER_TRADE_RISK_PCT"] = per_trade_limit
+        os.environ["RISK_PER_TRADE_PCT"] = per_trade_limit
+        os.environ["RISK_DAILY_LOSS_PCT"] = daily_limit
+        os.environ["RISK_DAILY_PNL_CAP_PCT"] = daily_limit
+        os.environ["RISK_MAX_DAILY_LOSS_PCT"] = daily_limit
+        os.environ["DAILY_PNL_CAP_PCT"] = daily_limit
+        LOGGER.warning(
+            "LIVE_RISK_ENVELOPE_CONFIG per_trade_pct=%s daily_loss_pct=%s",
+            per_trade_limit,
+            daily_limit,
+        )
 
 
 def resolve_build_sha() -> str:
