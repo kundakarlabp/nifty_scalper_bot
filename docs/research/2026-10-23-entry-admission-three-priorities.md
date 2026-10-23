@@ -18,11 +18,16 @@ No alternate entry arbiter, second quote freshness authority, second stop/sizing
 system, or unbounded global VWAP distance increase is introduced.
 The SMC proof engine may observe evidence with its admission flag off:
 `SMC_SUSTAINED_FLOW_PROOF` reports `is_counterfactual=true` and
-**does not authorize a live order**.
+**does not authorize a live order**. Proof is consumed and logged only once
+per unique setup identity; subsequent quote versions or adverse transitions
+cannot manufacture additional missed opportunities.
 
 The OrderFlow knob `ORDERFLOW_OFI_REVERSAL_HOLDOFF_SECONDS` retains its
 existing default of 15 seconds. Adaptive adjustment is limited to 10 seconds
 only after **complete** and **sustained** supportive 3s OFI plus strong depth.
+The experimental path enforces a hard 10-second minimum even if the legacy
+holdoff environment setting is shorter; with the experiment off, explicit
+legacy settings remain authoritative.
 Missing, neutral, stale or adverse flow retains the original holdoff.
 
 VWAPPro's `VWAP_TREND_RETEST_EXTENSION_MAX_ATR` defaults to 3.5;
