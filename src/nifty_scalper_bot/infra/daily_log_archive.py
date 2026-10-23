@@ -1,4 +1,13 @@
-"""Off-hot-path archival of the complete trading-session service log."""
+"""Purpose: Archive finalized NIFTY trading-session logs off the hot path.
+
+Responsibilities:
+- build_daily_log_archiver uses GitHub-owned Supabase monitoring defaults.
+- DailyLogArchiver.archive_once snapshots bounded IST journald sessions.
+- archive_interval_seconds enforces a minimum reporting interval.
+
+Boundaries: Observability only; the local journal/engine remain authoritative.
+Safety: Archiving failures cannot create orders, change risk or enable LIVE.
+"""
 
 from __future__ import annotations
 
