@@ -1,4 +1,5 @@
 """The quiet control plane must remain observable without a broker."""
+
 from __future__ import annotations
 
 from nifty_scalper_bot.infra.runtime_heartbeat import RuntimeHeartbeat
