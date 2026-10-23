@@ -87,3 +87,19 @@ edited when top-level functions, class methods or signatures change.
 An unchanged public interface does **not** prove unchanged behavior; reviewers
 must still revise header descriptions whenever responsibilities, gates,
 control flow or recovery semantics materially change.
+
+## Generated module navigation index
+
+`docs/MODULE_INDEX.md` is a **generated navigation artifact, not a second
+source of truth**. It renders the existing architecture manifest's covered
+paths and the first substantive line of each file's module docstring.
+
+```bash
+python -m scripts.module_index --write
+python -m scripts.module_index --check
+```
+
+Regenerate the index whenever a covered path or opening purpose changes.
+GitHub CI and `scripts/agent_task.py check` reject stale/missing output.
+This tool reads and parses Python source only; it never imports live trading code.
+
