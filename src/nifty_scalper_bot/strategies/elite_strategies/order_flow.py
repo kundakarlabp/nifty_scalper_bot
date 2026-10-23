@@ -403,7 +403,11 @@ class OrderFlowStrategy(EliteStrategy):
                 and context_quality_eligible
                 and side_aligns
             ):
-                ofi_reversal_holdoff_seconds = min(ofi_reversal_holdoff_seconds, 10.0)
+                # Experimental branch has a hard 10s floor, including when
+                # the legacy base was explicitly configured shorter. This
+                # makes enabling the experiment never shorten reversal safety
+                # beyond its documented floor.
+                ofi_reversal_holdoff_seconds = 10.0
             if is_live and context_quality_eligible and side_aligns:
                 now = time.monotonic()
                 if ofi_directional and ofi_conflicts_side:
