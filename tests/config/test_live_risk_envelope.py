@@ -82,11 +82,10 @@ def test_invalid_live_risk_limit_fails_closed_before_authorization(
 
     with pytest.raises(ValueError, match="RISK__PER_TRADE_RISK_PCT"):
         normalise_live_env_defaults()
-    assert os.getenv("ENABLE_LIVE_TRADING") != "true" or (
-        os.getenv("ORDERS__ENABLE_LIVE") != "true"
-    )
-
-
+    assert os.getenv("ENABLE_LIVE") == "false"
+    assert os.getenv("EXECUTION_MODE") == "SHADOW"
+    assert os.getenv("ENABLE_LIVE_TRADING") == "false"
+    assert os.getenv("ORDERS__ENABLE_LIVE") == "false"
 
 
 def test_non_live_mode_does_not_relax_explicit_risk_limits(monkeypatch) -> None:
