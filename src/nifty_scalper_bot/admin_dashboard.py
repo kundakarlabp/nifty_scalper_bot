@@ -611,8 +611,8 @@ def set_mode(request: Request, mode: str = Form(...)) -> RedirectResponse:
     _check_auth(request)
     if mode.strip().lower() == "live":
         env = _read_env()
-        has_key = any(env.get(k, "").strip() for k in ("KITE_API_KEY", "ZERODHA_API_KEY", "BROKER_API_KEY"))
-        has_secret = any(env.get(k, "").strip() for k in ("KITE_API_SECRET", "ZERODHA_API_SECRET", "BROKER_API_SECRET"))
+        has_key = any(env.get(k, "").strip() for k in ("BROKER_API_KEY", "ZERODHA_API_KEY", "KITE_API_KEY"))
+        has_secret = any(env.get(k, "").strip() for k in ("BROKER_API_SECRET", "ZERODHA_API_SECRET", "KITE_API_SECRET"))
         has_token = any(env.get(k, "").strip() for k in ("KITE_ACCESS_TOKEN", "ZERODHA_ACCESS_TOKEN", "BROKER_ACCESS_TOKEN"))
         if not (has_key and has_secret and has_token):
             return RedirectResponse("/admin?mode=err", status_code=303)
