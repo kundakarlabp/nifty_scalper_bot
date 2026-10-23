@@ -177,7 +177,7 @@ def test_code_only_release_reuses_installed_editable_environment() -> None:
     assert 'find_spec("nifty_scalper_bot")' in release
     assert "Skipping pip install: installed editable package" in release
     assert "PACKAGE_INSTALL_ATTEMPTED=false" in release
-    assert "if [ \"$PACKAGE_INSTALL_ATTEMPTED\" = true ]; then" in release
+    assert 'if [ "$PACKAGE_INSTALL_ATTEMPTED" = true ]; then' in release
     assert "auto_release_should_defer" in release
     assert "intraday_flat_broker_confirmed" in release
 
