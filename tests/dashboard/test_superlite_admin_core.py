@@ -383,10 +383,8 @@ def test_streamlit_probe_requires_exact_health_response(monkeypatch) -> None:
 
 def test_service_health_route_registered_without_app_import() -> None:
     """Inspect route metadata without mutating global dashboard auth hooks."""
-    module = (
-        Path(__file__).resolve().parents[2]
-        / "src/nifty_scalper_bot/superlite_admin.py"
-    )
+    root = Path(__file__).resolve().parents[2]
+    module = root / "src/nifty_scalper_bot/superlite_admin.py"
     tree = ast.parse(module.read_text(encoding="utf-8"))
     route = next(
         node
