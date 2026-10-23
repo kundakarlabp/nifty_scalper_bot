@@ -104,3 +104,27 @@ def test_invalid_quote_version():
 def test_missing_setup_identity_fails_closed():
     tracker = SustainedSMCFlow()
     assert not observe(tracker, 10, setup="")
+
+
+def test_proven_setup_emits_exactly_one_proof_despite_more_versions() -> None:
+    tracker = SustainedSMCFlow()
+    assert not observe(tracker, 10)
+    assert observe(tracker, 20, mono=106.0)
+    assert not observe(tracker, 30, mono=111.0)
+    assert not observe(tracker, 40, mono=117.0)
+    # Adverse or incomplete evidence cannot erase a consumed setup proof.
+    assert not observe(tracker, 41, mono=120.0, effective_context_conflict=True)
+    assert not observe(tracker, 50, mono=125.0)
+    assert not observe(tracker, 60, mono=131.0)
+    # A genuinely new setup has its own independent two-book evidence.
+    assert not observe(tracker, 70, mono=135.0, setup="sweep-B")
+    assert observe(tracker, 80, mono=141.0, setup="sweep-B")
+
+
+def test_proved_setup_stays_consumed_after_invalid_book_identity() -> None:
+    tracker = SustainedSMCFlow()
+    assert not observe(tracker, 10)
+    assert observe(tracker, 20, mono=106.0)
+    assert not observe(tracker, -1, mono=111.0)
+    assert not observe(tracker, 30, mono=116.0)
+    assert not observe(tracker, 40, mono=122.0)

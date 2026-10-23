@@ -152,6 +152,47 @@ def test_single_trigger_requires_fresh_independent_context(monkeypatch) -> None:
     assert result.metadata["context_confirmation_strategies"] == ["OrderFlow"]
 
 
+def test_smc_proof_is_audited_without_admission_when_flag_disabled(monkeypatch) -> None:
+    """Research observation cannot silently authorize a real SMC order."""
+    from nifty_scalper_bot.core import strategy_manager as module
+
+    observations = []
+
+    class AlwaysProven:
+        def observe(self, **kwargs):
+            observations.append(kwargs)
+            return True
+
+    monkeypatch.setattr(module, "SustainedSMCFlow", AlwaysProven)
+    monkeypatch.setenv("SMC_SUSTAINED_FLOW_CONFIRMATION_ENABLED", "false")
+    manager = _manager()
+    smc_signal, smc_evidence = _signal_evidence("SMC")
+    smc_signal.metadata["setup_id"] = "smcv2:20261023:CE:one"
+    smc_evidence.metadata["setup_id"] = smc_signal.metadata["setup_id"]
+    context = _signal_evidence("OrderFlow", role="context")
+
+    rejected = manager._combine_strategy_votes(
+        symbol=_CE,
+        signals=[(smc_signal, smc_evidence), context],
+        indicators=_live_indicators(),
+    )
+    assert rejected is None
+    assert len(observations) == 1
+    assert observations[0]["setup_id"] == "smcv2:20261023:CE:one"
+    assert manager._last_no_signal_decision_by_symbol[_CE].reason == (
+        "smc_independent_confirmation_missing"
+    )
+
+    monkeypatch.setenv("SMC_SUSTAINED_FLOW_CONFIRMATION_ENABLED", "true")
+    approved = manager._combine_strategy_votes(
+        symbol=_CE,
+        signals=[(smc_signal, smc_evidence), context],
+        indicators=_live_indicators(),
+    )
+    assert approved is not None
+    assert approved.metadata["approval_path"] == "smc_sustained_orderflow_confirmed"
+
+
 def test_smc_is_not_confirmed_by_short_orderflow_context_alone(
     monkeypatch,
 ) -> None:

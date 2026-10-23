@@ -16,7 +16,9 @@ class SustainedSMCFlow:
     """Require two distinct fresh, non-adverse temporal OFI observations."""
 
     def __init__(self) -> None:
-        self._prior: OrderedDict[str, tuple[float, int]] = OrderedDict()
+        # Tuple: first observation time, quote version, consumed proof.
+        # Proof is once per setup identity, not once per quote update.
+        self._prior: OrderedDict[str, tuple[float, int, bool]] = OrderedDict()
 
     def observe(
         self,
@@ -66,17 +68,25 @@ class SustainedSMCFlow:
             ):
                 eligible.append(version)
 
+        prior = self._prior.get(key)
         if len(eligible) != 1 or not math.isfinite(monotonic_now):
-            self._prior.pop(key, None)
+            # Reset incomplete unproven evidence, but never rearm a setup
+            # whose independent two-book proof has already been consumed.
+            if prior is None or not prior[2]:
+                self._prior.pop(key, None)
             return False
 
+        if prior is not None and prior[2]:
+            self._prior.move_to_end(key)
+            return False
         version = eligible[0]
-        prior = self._prior.get(key)
-        self._prior[key] = (monotonic_now, version)
+        confirmed = bool(
+            prior is not None
+            and version > prior[1]
+            and 4.0 <= monotonic_now - prior[0] <= 12.0
+        )
+        self._prior[key] = (monotonic_now, version, confirmed)
         self._prior.move_to_end(key)
         while len(self._prior) > 512:
             self._prior.popitem(last=False)
-        if prior is None:
-            return False
-        elapsed = monotonic_now - prior[0]
-        return version > prior[1] and 4.0 <= elapsed <= 12.0
+        return confirmed
