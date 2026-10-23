@@ -28,6 +28,7 @@ AUTO_MODE=false
 SYSTEMD_ENTRYPOINT_MIGRATED=false
 AUTODEPLOY_ENTRYPOINT_MIGRATED=false
 RUNTIME_ENV_CHANGED=false
+PACKAGE_INSTALL_ATTEMPTED=false
 
 for arg in "$@"; do
   case "$arg" in
@@ -842,11 +843,23 @@ cp -p "$ENV_FILE" "$CONFIG_DIR/backups/niftybot.env.$(date +%Y%m%d_%H%M%S)"
 write_status deploying "deploying ${AFTER:0:7}"
 [ "$BEFORE" = "$AFTER" ] || git reset --hard --quiet "$AFTER"
 
-if ! "$VENV/bin/python" -m pip install --quiet -e .; then
-  if [ "$BEFORE" != "$AFTER" ]; then
-    git reset --hard --quiet "$BEFORE"; "$VENV/bin/python" -m pip install --quiet -e . || true
+# Most updates only change GitHub-owned Python code. The established
+# editable install points at APP_DIR/src and needs no pip operation unless
+# packaging/dependencies change or the installed package is missing. Avoid
+# mutating the running interpreter's site-packages for ordinary commits.
+if BOT_DEPLOY_APP_DIR="$APP_DIR" "$VENV/bin/python" -c 'from importlib.util import find_spec; from pathlib import Path; import os; spec = find_spec("nifty_scalper_bot"); assert spec is not None and spec.origin and Path(spec.origin).resolve().is_relative_to(Path(os.environ["BOT_DEPLOY_APP_DIR"]).resolve() / "src")' >/dev/null 2>&1 \
+  && git diff --quiet "$BEFORE" "$AFTER" -- \
+    pyproject.toml setup.cfg setup.py requirements.txt 'requirements*.txt' \
+    requirements/ uv.lock poetry.lock Pipfile Pipfile.lock; then
+  log "Skipping pip install: installed editable package and unchanged packaging"
+else
+  PACKAGE_INSTALL_ATTEMPTED=true
+  if ! "$VENV/bin/python" -m pip install --quiet -e .; then
+    if [ "$BEFORE" != "$AFTER" ]; then
+      git reset --hard --quiet "$BEFORE"; "$VENV/bin/python" -m pip install --quiet -e . || true
+    fi
+    write_status install_failed "install failed; restored ${BEFORE:0:7}"; exit 1
   fi
-  write_status install_failed "install failed; restored ${BEFORE:0:7}"; exit 1
 fi
 
 if [ -x "$STREAMLIT_VENV/bin/python" ] && [ -f dashboard/requirements.txt ]; then
@@ -859,7 +872,9 @@ fi
 if ! set_runtime_build_sha "$AFTER"; then
   if [ "$BEFORE" != "$AFTER" ]; then
     git reset --hard --quiet "$BEFORE"
-    "$VENV/bin/python" -m pip install --quiet -e . || true
+    if [ "$PACKAGE_INSTALL_ATTEMPTED" = true ]; then
+      "$VENV/bin/python" -m pip install --quiet -e . || true
+    fi
   fi
   write_status env_update_failed "could not publish runtime build SHA ${AFTER:0:7}"
   exit 1
@@ -876,9 +891,11 @@ if auto_release_should_defer; then
       write_status runtime_restore_failed "checkout restoration failed; candidate may be partially installed"
       exit 1
     fi
-    if ! "$VENV/bin/python" -m pip install --quiet -e .; then
-      write_status runtime_restore_failed "retained revision dependency restoration failed; manual recovery required"
-      exit 1
+    if [ "$PACKAGE_INSTALL_ATTEMPTED" = true ]; then
+      if ! "$VENV/bin/python" -m pip install --quiet -e .; then
+        write_status runtime_restore_failed "retained revision dependency restoration failed; manual recovery required"
+        exit 1
+      fi
     fi
   fi
   if ! set_runtime_build_sha "$BEFORE"; then
@@ -929,7 +946,9 @@ fi
 
 if [ "$BEFORE" != "$AFTER" ]; then
   git reset --hard --quiet "$BEFORE"
-  "$VENV/bin/python" -m pip install --quiet -e . || true
+  if [ "$PACKAGE_INSTALL_ATTEMPTED" = true ]; then
+    "$VENV/bin/python" -m pip install --quiet -e . || true
+  fi
   set_runtime_build_sha "$BEFORE" || true
   sudo systemctl restart "$SERVICE"
   restart_admin || true

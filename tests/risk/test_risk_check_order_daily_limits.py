@@ -4,6 +4,7 @@ from nifty_scalper_bot.risk import OrderSignal, RiskManager
 
 
 def test_check_order_enforces_max_trades_per_day_at_final_gate(monkeypatch):
+    # Keep the fixture above the binding net RR gate so it reaches daily limits.
     manager = RiskManager.__new__(RiskManager)
     manager.settings = SimpleNamespace(max_trades_per_day=3, max_open_positions=0)
     manager.position_manager = SimpleNamespace(
@@ -21,7 +22,7 @@ def test_check_order_enforces_max_trades_per_day_at_final_gate(monkeypatch):
             quantity=75,
             price=100.0,
             stop_loss=95.0,
-            take_profit=110.0,
+            take_profit=140.0,
         ),
         live_enabled=True,
     )
@@ -33,6 +34,7 @@ def test_check_order_enforces_max_trades_per_day_at_final_gate(monkeypatch):
 
 
 def test_check_order_enforces_max_open_positions_at_final_gate(monkeypatch):
+    # Independent risk controls: high net RR lets the open-position gate decide.
     manager = RiskManager.__new__(RiskManager)
     manager.settings = SimpleNamespace(max_trades_per_day=0, max_open_positions=1)
     manager.position_manager = SimpleNamespace(
@@ -50,7 +52,7 @@ def test_check_order_enforces_max_open_positions_at_final_gate(monkeypatch):
             quantity=75,
             price=100.0,
             stop_loss=95.0,
-            take_profit=110.0,
+            take_profit=140.0,
         ),
         live_enabled=True,
     )

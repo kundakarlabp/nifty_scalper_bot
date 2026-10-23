@@ -169,6 +169,21 @@ def test_retired_dashboard_and_adhoc_tooling_are_absent() -> None:
     assert (ROOT / "dashboard/log_export.py").is_file()
 
 
+def test_code_only_release_reuses_installed_editable_environment() -> None:
+    release = _text("deploy/lightsail_release.sh")
+    assert 'git diff --quiet "$BEFORE" "$AFTER" --' in release
+    assert "pyproject.toml" in release
+    assert "requirements/" in release
+    assert 'find_spec("nifty_scalper_bot")' in release
+    assert "BOT_DEPLOY_APP_DIR" in release
+    assert "is_relative_to" in release
+    assert "Skipping pip install: installed editable package" in release
+    assert "PACKAGE_INSTALL_ATTEMPTED=false" in release
+    assert 'if [ "$PACKAGE_INSTALL_ATTEMPTED" = true ]; then' in release
+    assert "auto_release_should_defer" in release
+    assert "intraday_flat_broker_confirmed" in release
+
+
 def test_release_runner_validates_and_rolls_back() -> None:
     release = _text("deploy/lightsail_release.sh")
     assert "flock -n 9" in release

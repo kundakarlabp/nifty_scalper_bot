@@ -200,6 +200,23 @@ Routine updates must continue through the single canonical
 compiles the actual candidate dashboard tree rather than pinning retired
 internal helper filenames.
 
+## Fast code-only releases
+
+The single validated Lightsail release runner now reuses an already-installed
+editable Python package when the committed packaging and dependency manifests
+are unchanged. Ordinary changes to `src/` need only the guarded checkout,
+service restart and health verification; they do not mutate installed Python
+dependencies. A missing editable install or changes to `pyproject.toml`,
+setup files, requirements or lockfiles retain the full `pip install -e .`
+path. When a dependency installation was attempted, rollback restores the
+previous dependency environment as before. All GitHub CI, broker-flat
+verification, entry hold, SHA validation and systemd rollback guards remain.
+
+This is a deployment-speed optimization, **not** a second deployment system.
+A future fully versioned/atomic virtual environment migration would require
+separate systemd and rollback regression tests before it could replace the
+existing service path.
+
 ## Log exports
 
 The console supports:
