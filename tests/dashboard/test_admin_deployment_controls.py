@@ -211,7 +211,8 @@ def test_live_admin_removes_unverified_restart_and_market_time_claims() -> None:
 
 def test_callback_supports_broker_key_aliases(monkeypatch) -> None:
     monkeypatch.setattr(
-        admin, "_read_env",
+        admin,
+        "_read_env",
         lambda: {"BROKER_API_KEY": "key", "BROKER_API_SECRET": "secret"},
     )
     calls = []
