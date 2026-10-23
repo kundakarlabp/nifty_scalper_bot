@@ -63,7 +63,6 @@ def comment_header_issue(path: str, source: str) -> str | None:
     return None
 
 
-
 def covered_modules(payload: dict[str, object]) -> set[str]:
     """Resolve source paths from the existing architecture ownership SSOT."""
     paths = set(payload.get("runtime_path", []))
