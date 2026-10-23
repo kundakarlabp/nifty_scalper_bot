@@ -11,6 +11,7 @@ Safety: Publish only fixed liveness fields; never expose secrets or internal URL
 from __future__ import annotations
 
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -141,16 +142,16 @@ def _http_json(path: str) -> dict[str, Any]:
 
 
 def _streamlit_reachable() -> bool:
-    """Check only the local Streamlit liveness endpoint; never follow redirects."""
-    request = urllib.request.Request(
-        "http://127.0.0.1:8501/_stcore/health",
-        headers={"Accept": "text/plain"},
-    )
+    """Read the localhost Streamlit health path without following redirects."""
+    connection = http.client.HTTPConnection("127.0.0.1", 8501, timeout=1.0)
     try:
-        with urllib.request.urlopen(request, timeout=1.0) as response:
-            return response.status == 200 and response.read(16).strip() == b"ok"
-    except (OSError, TimeoutError, ValueError):
+        connection.request("GET", "/_stcore/health")
+        response = connection.getresponse()
+        return response.status == 200 and response.read(16).strip() == b"ok"
+    except (OSError, TimeoutError, http.client.HTTPException):
         return False
+    finally:
+        connection.close()
 
 
 def service_health_snapshot() -> dict[str, Any]:
