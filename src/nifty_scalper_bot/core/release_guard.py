@@ -1,11 +1,13 @@
-"""Fail-closed deployment freshness checks for the trading process.
+"""Purpose: Verify the effective source revision before and during bot operation.
 
-Railway exposes the source commit as ``RAILWAY_GIT_COMMIT_SHA`` during build and
-runtime. The Docker image embeds that value. Startup refuses to arm an image
-whose embedded commit differs from the deployment commit. A low-frequency
-daemon also compares the running commit with the configured GitHub branch and
-terminates the process after a confirmed mismatch, allowing Railway to replace
-or restart a stale instance.
+Responsibilities:
+- build_release_snapshot reconciles build, runtime and expected commit identity.
+- enforce_release_freshness gates startup; release_watchdog checks later drift.
+- fetch_remote_branch_sha observes the configured GitHub branch.
+
+Boundaries: Validation does not deploy, merge, trade or change secrets.
+Safety: Contradictory identities follow the configured strict/fail-closed policy.
+Railway variables remain supported, but Lightsail is the LIVE host.
 """
 
 from __future__ import annotations

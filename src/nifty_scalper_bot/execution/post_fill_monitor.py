@@ -1,4 +1,13 @@
-"""Background reconciliation monitor for execution state alignment."""
+"""Purpose: Monitor reconciliation of broker positions with local state.
+
+Responsibilities:
+- PostFillMonitor periodically fetches broker state and checks local exposure.
+- Detect mismatches and surface operational recovery diagnostics.
+- Keep monitoring cadence and alert behavior independently configurable.
+
+Boundaries: Monitoring does not independently create entry orders.
+Safety: Unknown or mismatched exposure must not be represented as flat.
+"""
 
 from __future__ import annotations
 

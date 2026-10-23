@@ -1,4 +1,13 @@
-"""Deterministic exit routing with MIS cutoff and AMO fallbacks."""
+"""Purpose: Route broker exit attempts under session and product rules.
+
+Responsibilities:
+- plan_and_send_exit applies time cutoff and available fallback paths.
+- ExitAttempt and ExitResult capture each attempted route and result.
+- Broker rejection parsing supports explicit failure reporting.
+
+Boundaries: The caller owns position truth and reconciles filled exits.
+Safety: An exit acknowledgement alone does not prove a flat position.
+"""
 
 from __future__ import annotations
 

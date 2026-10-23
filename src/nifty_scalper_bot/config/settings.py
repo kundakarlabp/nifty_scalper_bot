@@ -1,17 +1,12 @@
-"""Runtime settings facade used by hardened infrastructure components.
+"""Purpose: Provide shared, validated trading runtime configuration.
 
-This module centralises environment driven configuration so that new
-infrastructure additions – resilient streaming, safe order routing,
-risk management gates, notifications, health endpoints and structured
-logging – can share a common source of truth.  The legacy configuration
-models under :mod:`nifty_scalper_bot.config.base` are still used for the
-core trading stack; ``Settings`` simply wraps the existing
-``AppConfig`` while exposing new knobs required by the refactor.
+Responsibilities:
+- Settings groups execution, risk, streaming and instrument options.
+- get_settings exposes the runtime facade over configured inputs.
+- Centralize effective defaults and environment parsing for consumers.
 
-The implementation intentionally avoids additional dependencies (for
-example ``pydantic-settings``) so that the production footprint remains
-unchanged.  All parsing helpers perform strict validation and provide
-clear error messages to ease troubleshooting in Railway deployments.
+Boundaries: Configuration does not itself authorize a live order.
+Safety: Final LIVE-mode and risk authorization remain with owning gates.
 """
 
 from __future__ import annotations
