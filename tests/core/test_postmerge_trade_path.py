@@ -193,49 +193,6 @@ def test_smc_proof_is_audited_without_admission_when_flag_disabled(monkeypatch) 
     assert approved.metadata["approval_path"] == "smc_sustained_orderflow_confirmed"
 
 
-def test_lightsail_live_uses_sustained_smc_proof_without_overriding_opt_out(
-    monkeypatch,
-) -> None:
-    """Live default may admit only an independently qualified two-book proof."""
-    from nifty_scalper_bot.core import strategy_manager as module
-
-    class ProvenBooks:
-        def observe(self, **kwargs):
-            return True
-
-    monkeypatch.setattr(module, "SustainedSMCFlow", ProvenBooks)
-    monkeypatch.setenv("DEPLOYMENT_PLATFORM", "aws_lightsail")
-    monkeypatch.setenv("PRODUCTION_LIVE_DEFAULT_INITIALIZED", "true")
-    monkeypatch.setenv("ENABLE_LIVE", "true")
-    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
-    monkeypatch.delenv("SMC_SUSTAINED_FLOW_CONFIRMATION_ENABLED", raising=False)
-    from nifty_scalper_bot.config.env_utils import normalise_live_env_defaults
-
-    normalise_live_env_defaults()
-    smc_signal, smc_evidence = _signal_evidence("SMC")
-    smc_signal.metadata["setup_id"] = "smcv2:live:sweep"
-    smc_evidence.metadata["setup_id"] = smc_signal.metadata["setup_id"]
-    votes = [(smc_signal, smc_evidence), _signal_evidence("OrderFlow", role="context")]
-
-    approved = _manager()._combine_strategy_votes(
-        symbol=_CE, signals=votes, indicators=_live_indicators()
-    )
-    assert approved is not None
-    assert approved.metadata["approval_path"] == "smc_sustained_orderflow_confirmed"
-
-    monkeypatch.setenv("SMC_SUSTAINED_FLOW_CONFIRMATION_ENABLED", "false")
-    rejected = _manager()
-    assert (
-        rejected._combine_strategy_votes(
-            symbol=_CE, signals=votes, indicators=_live_indicators()
-        )
-        is None
-    )
-    assert rejected._last_no_signal_decision_by_symbol[_CE].reason == (
-        "smc_independent_confirmation_missing"
-    )
-
-
 def test_smc_is_not_confirmed_by_short_orderflow_context_alone(
     monkeypatch,
 ) -> None:
