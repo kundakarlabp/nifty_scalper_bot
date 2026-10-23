@@ -8,11 +8,11 @@ deduplicated. A post-trade profitable counterfactual has **not** been proved.
 
 ## Single owners and experiment switches
 
-| Question | Canonical owner | Opt-in flag (default false) | Unchanged safety gates |
+| Question | Canonical owner | Opt-in flag (default false outside Lightsail LIVE) | Unchanged safety gates |
 | --- | --- | --- | --- |
 | Qualified SMC with two separately timed supportive books | `SustainedSMCFlow` called by `StrategyManager` | `SMC_SUSTAINED_FLOW_CONFIRMATION_ENABLED` (Lightsail LIVE default true, explicit false opts out; disabled by default elsewhere) | SMC structural setup ID, direction, opposing-context veto, capacity-retry consensus, broker/runner/risk |
-| OFI reversal persistence versus latency | `OrderFlowStrategy` | `ORDERFLOW_OFI_ADAPTIVE_HOLDOFF_ENABLED` | Base holdoff 15s; minimum 10s when opted in and 3s sustained OFI and strong same-side book support; adverse veto |
-| Mid-trend premium pullback and rebreak beyond ordinary ATR VWAP band | `VWAPProStrategy` | `VWAP_TREND_RETEST_EXTENSION_ENABLED` | Session VWAP, strong fresh underlying direction, TREND regime, finalized current and previous adjacent bars, bearish prior retracement, rebreak, option RVOL, futures slope and risk |
+| OFI reversal persistence versus latency | `OrderFlowStrategy` | `ORDERFLOW_OFI_ADAPTIVE_HOLDOFF_ENABLED` (Lightsail LIVE default true, explicit false opts out) | Base holdoff 15s; minimum 10s when opted in and 3s sustained OFI and strong same-side book support; adverse veto |
+| Mid-trend premium pullback and rebreak beyond ordinary ATR VWAP band | `VWAPProStrategy` | `VWAP_TREND_RETEST_EXTENSION_ENABLED` (Lightsail LIVE default true, explicit false opts out) | Session VWAP, strong fresh underlying direction, TREND regime, finalized current and previous adjacent bars, bearish prior retracement, rebreak, option RVOL, futures slope and risk |
 
 No alternate entry arbiter, second quote freshness authority, second stop/sizing
 system, or unbounded global VWAP distance increase is introduced.
@@ -52,9 +52,9 @@ position. A merge alone is not proof production has deployed that SHA.
 
 ## October 23 operator-directed SMC live rollout
 
-- Only the existing SMC two-book admission default is enabled in the normal
-  `aws_lightsail` LIVE startup environment. VWAP retest and adaptive OFI remain
-  default-disabled experiments; no new trade authority or risk change exists.
+- The existing SMC two-book admission was enabled first in the normal
+  `aws_lightsail` LIVE startup environment. VWAP retest and adaptive OFI were
+  still default-disabled at that stage; no new trade authority or risk change existed.
 - An explicit `SMC_SUSTAINED_FLOW_CONFIRMATION_ENABLED=false` remains a
   production rollback switch after a broker-flat controlled restart.
 - Startup logs `SMC_SUSTAINED_FLOW_ADMISSION_CONFIG enabled=True/False` as
@@ -67,3 +67,28 @@ position. A merge alone is not proof production has deployed that SHA.
 - This is an operator-requested live-small experiment, not a verified improvement
   in out-of-sample trading expectancy. Measure actual setups, admission,
   affordability, net after-cost P&L and adverse outcomes before further tuning.
+
+## October 23 subsequent operator-directed VWAP and OrderFlow LIVE rollout
+
+- On `aws_lightsail` when canonical execution mode requests LIVE, the existing
+  configuration normalizer now defaults
+  `VWAP_TREND_RETEST_EXTENSION_ENABLED=true` and
+  `ORDERFLOW_OFI_ADAPTIVE_HOLDOFF_ENABLED=true` *only if the respective
+  environment setting was absent*. Each explicitly set `false` independently
+  overrides that default; paper, shadow and non-Lightsail default unchanged.
+- The release logs
+  `LIVE_ENTRY_QUALITY_CONFIG vwap_retest=True adaptive_ofi=True` along with
+  mode and platform. A deployed Git SHA alone does not certify the effective
+  flags. The existing SMC startup event remains separate.
+- Strategy code, 3.5 ATR cap, strict two-bar finalized trend retest, sustained
+  3-second OFI, 10-second adaptive minimum, adverse microstructure veto,
+  risk/capital, exchange protective stops and broker reconciliation are
+  unchanged. This activates already-implemented guarded alternatives rather
+  than widening global entry or removing any protections.
+- Deploy through the canonical exact-post-merge-push-CI and broker-flat release
+  barrier. Recheck the exact SHA, `release_state=current`, engine readiness,
+  and both effective startup values before claiming live activation.
+- Operator approval to test small live exposure is not evidence of positive
+  economic expectancy. Analyze unique admissions, fills and actual net costs,
+  stopped positions, drawdown, and chronological out-of-sample replay before
+  further raising trade frequency.
