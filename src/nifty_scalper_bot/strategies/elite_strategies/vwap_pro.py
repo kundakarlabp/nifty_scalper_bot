@@ -170,6 +170,17 @@ class VWAPProStrategy(EliteStrategy):
         self._trend_require_retest = str(
             os.getenv("VWAP_TREND_REQUIRE_RETEST", "false")
         ).strip().lower() in {"1", "true", "yes", "on"}
+        # Alternative to chasing stretched premiums: only a completed,
+        # bullish pullback-and-rebreak event may challenge the ATR band.
+        # Existing thesis, direction, quote and risk authorities stay intact.
+        # Default OFF pending matched bid/ask replay and economic validation.
+        self._trend_retest_extension_enabled = str(
+            os.getenv("VWAP_TREND_RETEST_EXTENSION_ENABLED", "false")
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        self._trend_retest_extension_max_atr = max(
+            self._trend_quality_max_distance_atr,
+            min(4.0, float(os.getenv("VWAP_TREND_RETEST_EXTENSION_MAX_ATR", "3.5"))),
+        )
         # Research-only: demand proof that the signal OHLC is the latest
         # finalized option candle. Existing LIVE candidacy is unchanged.
         self._require_finalized_signal_bar = str(
@@ -623,7 +634,15 @@ class VWAPProStrategy(EliteStrategy):
                 distance_pct > allowed_distance
                 or distance_atr > effective_quality_max_distance_atr
             )
-            if overextended:
+            retest_extension_candidate = bool(
+                overextended
+                and self._trend_retest_extension_enabled
+                and vwap_source in {"exchange_vwap", "session_vwap"}
+                and strong_fresh_trend_context
+                and distance_atr <= self._trend_retest_extension_max_atr
+                and distance_pct <= allowed_distance * 1.25
+            )
+            if overextended and not retest_extension_candidate:
                 self._no_vote("distance_outside_band")
                 LOGGER.debug("STRATEGY_NO_VOTE strategy=VWAPPro reason=overextended")
                 return None
@@ -786,9 +805,13 @@ class VWAPProStrategy(EliteStrategy):
                 )
             )
             premium_momentum_required = bool(
-                self._trend_momentum_enabled or live_neutral_slope_candidate
+                self._trend_momentum_enabled
+                or live_neutral_slope_candidate
+                or retest_extension_candidate
             )
-            if live_neutral_slope_candidate and vwap_source not in {
+            if (
+                live_neutral_slope_candidate or retest_extension_candidate
+            ) and vwap_source not in {
                 "exchange_vwap",
                 "session_vwap",
             }:
@@ -870,6 +893,7 @@ class VWAPProStrategy(EliteStrategy):
                     )
                     return None
 
+            trend_retest_extension_confirmed = False
             if premium_momentum_required:
                 if not momentum_continuation_confirmed:
                     self._no_vote("trend_momentum_premium_not_confirmed")
@@ -917,6 +941,44 @@ class VWAPProStrategy(EliteStrategy):
                 if completed_option_rvol < self._trend_momentum_option_rvol_min:
                     self._no_vote("trend_momentum_option_volume_not_confirmed")
                     return None
+                if retest_extension_candidate:
+                    # Only finalized, adjacent option-premium candles count.
+                    # The previous candle must actually retrace, and the current
+                    # completed candle must retest its close then reclaim its high.
+                    try:
+                        previous = last_bars[-2]
+                        previous_ts = datetime.fromisoformat(
+                            _normalize_thesis_anchor(previous["timestamp"])
+                        )
+                        previous_open = float(previous["open"])
+                        previous_high = float(previous["high"])
+                        previous_low = float(previous["low"])
+                        previous_close = float(previous["close"])
+                        previous_volume = float(previous["volume"])
+                        trend_retest_extension_confirmed = bool(
+                            previous.get("is_complete") is True
+                            and previous.get("is_provisional") is not True
+                            and current_ts - previous_ts == timedelta(minutes=1)
+                            and previous_ts.date() == current_ts.date()
+                            and all(
+                                math.isfinite(value)
+                                for value in (
+                                    previous_open, previous_high, previous_low,
+                                    previous_close, previous_volume,
+                                )
+                            )
+                            and previous_volume > 0
+                            and previous_low <= previous_close < previous_open <= previous_high
+                            and confirmed_low >= vwap
+                            and confirmed_low <= previous_close
+                            and close > previous_high
+                            and close <= previous_high + 1.25 * atr_safe
+                        )
+                    except (IndexError, KeyError, TypeError, ValueError, OverflowError):
+                        trend_retest_extension_confirmed = False
+                    if not trend_retest_extension_confirmed:
+                        self._no_vote("trend_retest_structure_unconfirmed")
+                        return None
                 if self._trend_require_retest:
                     trend_momentum_retest_confirmed = False
                     if len(last_bars) >= 2:
@@ -971,7 +1033,9 @@ class VWAPProStrategy(EliteStrategy):
                         return None
 
             setup_type: str | None = None
-            if pullback_flag and continuation_confirmed:
+            if trend_retest_extension_confirmed:
+                setup_type = "vwap_trend_pullback_retest"
+            elif pullback_flag and continuation_confirmed:
                 setup_type = "vwap_reclaim_momentum"
             elif pullback_flag:
                 setup_type = "vwap_reclaim"
@@ -1100,7 +1164,9 @@ class VWAPProStrategy(EliteStrategy):
                 )
                 return None
 
-            if setup_type == "vwap_reclaim_momentum":
+            if setup_type == "vwap_trend_pullback_retest":
+                reasons.extend(["premium_trend_pullback_retest", "premium_continuation"])
+            elif setup_type == "vwap_reclaim_momentum":
                 reasons.extend(["premium_reclaim_vwap", "premium_continuation"])
             elif setup_type == "vwap_reclaim":
                 reasons.append("premium_reclaim_vwap")
@@ -1187,6 +1253,9 @@ class VWAPProStrategy(EliteStrategy):
                 "vwap_base_quality_max_distance_atr": self._quality_max_distance_atr,
                 "vwap_trend_quality_max_distance_atr": self._trend_quality_max_distance_atr,
                 "vwap_strong_fresh_trend_context": strong_fresh_trend_context,
+                "vwap_trend_retest_extension_enabled": self._trend_retest_extension_enabled,
+                "vwap_trend_retest_extension_admitted": trend_retest_extension_confirmed,
+                "vwap_trend_retest_extension_max_atr": self._trend_retest_extension_max_atr,
                 "vwap_configured_proximity_pct": configured_proximity_pct,
                 "vwap_configured_proximity_pass": near_configured_vwap,
                 "vwap_configured_proximity_role": "telemetry_only",
