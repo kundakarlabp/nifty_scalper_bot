@@ -131,7 +131,7 @@ def healthz() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.get("/admin/api/service-health")
+@app.get("/admin/api/service-health")  # type: ignore[untyped-decorator]
 def service_health() -> JSONResponse:
     """Lightweight allowlisted host-local liveness for the operator console."""
     return JSONResponse(
