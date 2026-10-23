@@ -2,7 +2,8 @@
 
 Responsibilities:
 - build_runtime_heartbeat configures remote heartbeat transport.
-- RuntimeHeartbeat reports local status, release SHA and blockers off hot path.
+- RuntimeHeartbeat reports engine and release state off the trading hot path.
+- Sample independent operator-service HTTP liveness without broker operations.
 - heartbeat_interval_seconds bounds reporting frequency and overhead.
 
 Boundaries: Telemetry only; the host/broker remain authoritative for trading.
@@ -31,6 +32,7 @@ DEFAULT_HEARTBEAT_URL = DEFAULT_SUPABASE_HEARTBEAT_URL
 _HEX_SHA = re.compile(r"^[0-9a-f]{7,40}$")
 HeartbeatTransport = Callable[[str, Mapping[str, Any], float], Mapping[str, Any]]
 HealthReader = Callable[[], tuple[int, Mapping[str, Any]]]
+ServiceHealthReader = Callable[[], Mapping[str, Any]]
 
 
 def heartbeat_interval_seconds() -> float:
@@ -58,11 +60,13 @@ class RuntimeHeartbeat:
         *,
         endpoint_url: str,
         health_reader: HealthReader | None = None,
+        service_health_reader: ServiceHealthReader | None = None,
         transport: HeartbeatTransport | None = None,
         timeout_seconds: float = 5.0,
     ) -> None:
         self.endpoint_url = endpoint_url
         self.health_reader = health_reader or _read_local_health
+        self.service_health_reader = service_health_reader or _read_local_services
         self.transport = transport or _post_json
         self.timeout_seconds = max(1.0, min(10.0, float(timeout_seconds)))
 
@@ -97,6 +101,15 @@ class RuntimeHeartbeat:
             failure_reason = "local_health_unavailable"
         sha = str(resolve_build_sha() or "").strip().lower()
         release_state, release_updated_at = _local_release_state()
+        try:
+            service_health = self.service_health_reader()
+        except Exception:
+            # Monitoring failure must never block engine/release heartbeat delivery.
+            service_health = {}
+        if not isinstance(service_health, Mapping):
+            service_health = {}
+        admin_ok = service_health.get("admin_http_responsive")
+        streamlit_ok = service_health.get("streamlit_http_responsive")
         payload = {
             "observed_at": current.isoformat(),
             "build_sha": sha if _HEX_SHA.fullmatch(sha) else None,
@@ -107,6 +120,10 @@ class RuntimeHeartbeat:
             "failure_reason": failure_reason,
             "release_state": release_state,
             "release_updated_at": release_updated_at,
+            "admin_http_responsive": admin_ok if isinstance(admin_ok, bool) else None,
+            "streamlit_http_responsive": (
+                streamlit_ok if isinstance(streamlit_ok, bool) else None
+            ),
         }
         reply = self.transport(self.endpoint_url, payload, self.timeout_seconds)
         if reply.get("ok") is not True:
@@ -170,6 +187,40 @@ def _read_local_health() -> tuple[int, Mapping[str, Any]]:
                 return 200, {"status": "quiet", "blockers": ["auto_quiet"]}
     body = reply.json() if reply.status_code == 200 else {}
     return reply.status_code, body if isinstance(body, Mapping) else {}
+
+
+def _read_local_services() -> Mapping[str, bool]:
+    """Probe fixed localhost HTTP endpoints independently of the trading engine.
+
+    These off-hot-path GETs cannot submit orders or follow an HTTP redirect.
+    A connection failure means unavailable *from the host*, not publicly down.
+    """
+    admin_ok = False
+    streamlit_ok = False
+    try:
+        response = requests.get(
+            "http://127.0.0.1:8081/healthz",
+            timeout=1.0,
+            allow_redirects=False,
+        )
+        if response.status_code == 200:
+            body = response.json()
+            admin_ok = isinstance(body, Mapping) and body.get("status") == "ok"
+    except (requests.RequestException, OSError, ValueError):
+        pass
+    try:
+        response = requests.get(
+            "http://127.0.0.1:8501/_stcore/health",
+            timeout=1.0,
+            allow_redirects=False,
+        )
+        streamlit_ok = response.status_code == 200 and response.text.strip() == "ok"
+    except (requests.RequestException, OSError, ValueError):
+        pass
+    return {
+        "admin_http_responsive": admin_ok,
+        "streamlit_http_responsive": streamlit_ok,
+    }
 
 
 def _post_json(
