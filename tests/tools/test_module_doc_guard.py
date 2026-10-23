@@ -82,7 +82,8 @@ def _temporary_manifest(root: Path) -> None:
 
 
 def test_existing_untracked_runtime_edit_requires_header(
-    tmp_path: Path, monkeypatch,
+    tmp_path: Path,
+    monkeypatch,
 ) -> None:
     _temporary_manifest(tmp_path)
     path = "src/nifty_scalper_bot/risk/new_policy.py"
@@ -94,7 +95,8 @@ def test_existing_untracked_runtime_edit_requires_header(
 
 
 def test_changed_dashboard_file_with_header_passes(
-    tmp_path: Path, monkeypatch,
+    tmp_path: Path,
+    monkeypatch,
 ) -> None:
     _temporary_manifest(tmp_path)
     path = "dashboard/example.py"
@@ -111,7 +113,8 @@ def test_changed_dashboard_file_with_header_passes(
 
 
 def test_changed_deployment_asset_requires_opening_labels(
-    tmp_path: Path, monkeypatch,
+    tmp_path: Path,
+    monkeypatch,
 ) -> None:
     _temporary_manifest(tmp_path)
     path = "deploy/scripts/run_release.sh"
