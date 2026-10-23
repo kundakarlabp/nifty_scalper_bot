@@ -61,6 +61,8 @@ def test_sanitized_healthy_payload_never_contains_account_secrets(monkeypatch):
         "trading_status": "armed",
         "blockers": [],
         "failure_reason": None,
+        "release_state": None,
+        "release_updated_at": None,
     }
 
 
@@ -109,3 +111,51 @@ def test_failed_ingest_does_not_claim_success():
     sender.transport = lambda *_: {"ok": False}
     with pytest.raises(RuntimeError, match="runtime_heartbeat_ingest_failed"):
         sender.report_once()
+
+
+def test_heartbeat_sends_only_allowlisted_release_metadata(
+    tmp_path, monkeypatch
+):
+    import json
+
+    from nifty_scalper_bot.infra import runtime_heartbeat as mod
+
+    path = tmp_path / "release.json"
+    path.write_text(
+        json.dumps(
+            {
+                "state": "deferred_broker_exposure",
+                "updated_at": "2026-10-23T09:10:00+05:30",
+                "message": "sensitive token=DO_NOT_LEAK",
+                "command": "never forward",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("BOT_UPDATE_STATUS_FILE", str(path))
+    sender, calls = _make_sender(
+        health={"status": "armed", "blockers": []}
+    )
+    assert sender.report_once()["published"] is True
+    payload = calls[0][1]
+    assert payload["release_state"] == "deferred_broker_exposure"
+    assert payload["release_updated_at"] == "2026-10-23T03:40:00+00:00"
+    assert "DO_NOT_LEAK" not in str(payload)
+    assert "command" not in str(payload)
+    assert mod._local_release_state() == (
+        "deferred_broker_exposure",
+        "2026-10-23T03:40:00+00:00",
+    )
+
+
+def test_invalid_release_metadata_is_not_published(tmp_path, monkeypatch):
+    path = tmp_path / "release.json"
+    path.write_text(
+        '{"state":"secret=not_valid","updated_at":"not-a-date"}',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("BOT_UPDATE_STATUS_FILE", str(path))
+    sender, calls = _make_sender()
+    sender.report_once()
+    assert calls[0][1]["release_state"] is None
+    assert calls[0][1]["release_updated_at"] is None
