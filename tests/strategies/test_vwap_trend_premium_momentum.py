@@ -675,7 +675,10 @@ def test_opt_in_trend_retest_extension_requires_completed_pullback_rebreak(
 @pytest.mark.parametrize(
     "updates, expected",
     [
-        ({"prior_open": 100.0, "prior_close": 101.0}, "trend_retest_structure_unconfirmed"),
+        (
+            {"prior_open": 100.0, "prior_close": 101.0},
+            "trend_retest_structure_unconfirmed",
+        ),
         ({"prior_gap_minutes": 2}, "trend_retest_structure_unconfirmed"),
         ({"prior_volumes": [900.0] * 9 + [0.0]}, "trend_retest_structure_unconfirmed"),
         ({"low": 102.0}, "trend_retest_structure_unconfirmed"),
