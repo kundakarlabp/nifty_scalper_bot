@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import logging
 import os
-from pathlib import Path
+
+from nifty_scalper_bot.config import defaults
 
 LOGGER = logging.getLogger(__name__)
-LIVE_PER_TRADE_RISK_PCT = "5.0"
+LIVE_PER_TRADE_RISK_PCT = defaults.DEFAULT_LIVE_PER_TRADE_RISK_PCT
 # Daily loss is an independent portfolio-level circuit breaker. An indivisible
 # lot that cannot fit the per-trade risk budget is skipped rather than widening
 # either limit at runtime.
-LIVE_DAILY_LOSS_PCT = "5.0"
+LIVE_DAILY_LOSS_PCT = defaults.DEFAULT_LIVE_DAILY_LOSS_PCT
 PRODUCTION_LIVE_DEFAULT_INITIALIZED = "PRODUCTION_LIVE_DEFAULT_INITIALIZED"
 
 
@@ -106,75 +107,18 @@ def setdefault_env(key: str, value: str) -> None:
         os.environ[key] = value
 
 
-def _is_lightsail_production() -> bool:
-    return (os.getenv("DEPLOYMENT_PLATFORM") or "").strip().lower() == "aws_lightsail"
-
-
-def _production_live_default_enabled() -> bool:
-    """Return whether this Lightsail host needs its one-time LIVE migration."""
-    if not _is_lightsail_production():
-        return False
-    if truthy(os.getenv(PRODUCTION_LIVE_DEFAULT_INITIALIZED)):
-        return False
-    preference = os.getenv("PRODUCTION_DEFAULT_LIVE")
-    if preference is not None and preference.strip() and not truthy(preference):
-        return False
-    return True
-
-
-def _persist_production_live_defaults(defaults: dict[str, str]) -> None:
-    """Persist the one-time Lightsail LIVE migration without touching secrets."""
-    env_path = (os.getenv("BOT_ENV_FILE") or "").strip()
-    if not env_path:
-        return
-    path = Path(env_path).expanduser()
-    if not path.exists() or not path.is_file():
-        return
-
-    updates = dict(defaults)
-    updates[PRODUCTION_LIVE_DEFAULT_INITIALIZED] = "true"
-    existing = path.read_text(encoding="utf-8").splitlines()
-    seen: set[str] = set()
-    out: list[str] = []
-    for line in existing:
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#") or "=" not in stripped:
-            out.append(line)
-            continue
-        key = stripped.split("=", 1)[0].strip()
-        if key in updates:
-            if key not in seen:
-                out.append(f"{key}={updates[key]}")
-                seen.add(key)
-            continue
-        out.append(line)
-    for key, value in updates.items():
-        if key not in seen:
-            out.append(f"{key}={value}")
-
-    tmp = path.with_name(f".{path.name}.live-default.tmp")
-    try:
-        tmp.write_text("\n".join(out).rstrip() + "\n", encoding="utf-8")
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, path)
-        os.environ[PRODUCTION_LIVE_DEFAULT_INITIALIZED] = "true"
-    except OSError as exc:
-        LOGGER.warning("Could not persist Lightsail LIVE default migration: %s", exc)
-        try:
-            tmp.unlink(missing_ok=True)
-        except OSError:
-            pass
-
-
 def normalise_live_env_defaults() -> None:
-    """Derive live/paper env defaults. Args: none. Returns: None. Raises: none."""
+    """Resolve a coherent trading mode from explicit operator settings.
+
+    LIVE requires both canonical controls. Missing/conflicting controls fail
+    closed, including on a fresh AWS instance. No environment file is written.
+    """
     enable_live = truthy(os.getenv("ENABLE_LIVE"))
-    execution_mode = (os.getenv("EXECUTION_MODE") or "").strip().upper()
-    production_default_live = _production_live_default_enabled()
-    live_requested = production_default_live or enable_live or execution_mode == "LIVE"
+    mode = (os.getenv("EXECUTION_MODE") or "").strip().upper()
+    live_requested = enable_live and mode == "LIVE"
 
     if live_requested:
-        defaults = {
+        values = {
             "ENABLE_LIVE": "true",
             "ENABLE_LIVE_TRADING": "true",
             "EXECUTION_MODE": "LIVE",
@@ -184,44 +128,36 @@ def normalise_live_env_defaults() -> None:
             "SHADOW_MODE": "false",
         }
     else:
-        non_live_mode = (
-            execution_mode if execution_mode in {"SHADOW", "PAPER"} else "PAPER"
+        # Conflicting ENABLE_LIVE / EXECUTION_MODE settings always disable
+        # live orders; retain an explicit paper or shadow request where valid.
+        nonlive = (
+            mode
+            if mode in {"SHADOW", "PAPER"}
+            else ("SHADOW" if mode or enable_live else "PAPER")
         )
-        defaults = {
+        values = {
             "ENABLE_LIVE": "false",
             "ENABLE_LIVE_TRADING": "false",
-            "EXECUTION_MODE": non_live_mode,
+            "EXECUTION_MODE": nonlive,
             "ORDERS__ENABLE_LIVE": "false",
             "PAPER__ENABLED": "true",
             "PAPER_MODE": "true",
             "SHADOW_MODE": "true",
         }
+        if enable_live or mode == "LIVE":
+            LOGGER.error(
+                "LIVE_MODE_CONFLICT_FAIL_CLOSED enable_live=%s execution_mode=%s",
+                enable_live,
+                mode,
+            )
 
-    production_initialized = _is_lightsail_production() and truthy(
-        os.getenv(PRODUCTION_LIVE_DEFAULT_INITIALIZED)
-    )
-    for key, value in defaults.items():
-        if production_default_live or production_initialized:
-            # On the first upgraded boot, migrate the legacy SHADOW env to LIVE.
-            # Thereafter ENABLE_LIVE + EXECUTION_MODE are canonical and the
-            # derived aliases are synchronized in-process, so an explicit admin
-            # switch back to SHADOW remains authoritative across restarts.
-            os.environ[key] = value
-        else:
-            setdefault_env(key, value)
+    # This is one canonical, in-process normalization owner; legacy aliases
+    # cannot re-arm a supposedly disarmed environment.
+    for key, value in values.items():
+        os.environ[key] = value
 
-    if production_default_live:
-        _persist_production_live_defaults(defaults)
-
-    # Entry admission belongs to the GitHub-controlled LIVE profile, not to
-    # any particular hosting provider. Require both canonical live controls to
-    # agree after normalization; contradictory modes must not enable features.
-    if (
-        truthy(os.getenv("ENABLE_LIVE"))
-        and (os.getenv("EXECUTION_MODE") or "").strip().upper() == "LIVE"
-    ):
-        # An explicitly supplied false always overrides the profile default.
-        # Strategy, quote, risk and broker safeguards are unchanged.
+    if live_requested:
+        # Operator-approved bounded entry paths; each explicit false wins.
         setdefault_env("SMC_SUSTAINED_FLOW_CONFIRMATION_ENABLED", "true")
         setdefault_env("VWAP_TREND_RETEST_EXTENSION_ENABLED", "true")
         setdefault_env("ORDERFLOW_OFI_ADAPTIVE_HOLDOFF_ENABLED", "true")
@@ -235,10 +171,8 @@ def normalise_live_env_defaults() -> None:
             truthy(os.getenv("ORDERFLOW_OFI_ADAPTIVE_HOLDOFF_ENABLED")),
         )
 
-    if live_requested:
-        # Canonical live risk envelope. Accepted aliases are synchronized here
-        # so stale deployment values cannot silently change per-trade risk.
-        # Existing sizing clamps and final RiskManager breakers remain unchanged.
+        # Preserve the existing LIVE risk profile. The canonical values live
+        # in config/defaults.py; aliases are normalized for older consumers.
         os.environ["RISK__PER_TRADE_RISK_PCT"] = LIVE_PER_TRADE_RISK_PCT
         os.environ["RISK_PER_TRADE_PCT"] = LIVE_PER_TRADE_RISK_PCT
         os.environ["RISK_DAILY_LOSS_PCT"] = LIVE_DAILY_LOSS_PCT

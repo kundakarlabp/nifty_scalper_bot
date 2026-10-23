@@ -74,12 +74,11 @@ if [ ! -f "$ENV_FILE" ]; then
     log "Migrated existing .env outside the Git checkout"
   else
     ADMIN_PW="$(python3 -c 'import secrets;print(secrets.token_urlsafe(18))')"
-    if [ -f "$APP_DIR/.env.example" ]; then
-      cp "$APP_DIR/.env.example" "$ENV_FILE"
-      printf '\nADMIN_PASSWORD=%s\n' "$ADMIN_PW" >> "$ENV_FILE"
-    else
-      cat > "$ENV_FILE" <<EOF_ENV
-# Managed locally on the Lightsail host. Never commit or share this file.
+    # Fresh hosts must not inherit 600+ sample strategy/risk parameters.
+    # GitHub owns defaults; the protected host file owns secrets, operator
+    # enablement and host-only service settings.
+    cat > "$ENV_FILE" <<EOF_ENV
+# Host secrets and operator-controlled mode only; GitHub owns strategy defaults.
 ADMIN_PASSWORD=$ADMIN_PW
 PORT=$PORT
 BOT_ENV_FILE=$ENV_FILE
@@ -96,7 +95,6 @@ TELEGRAM_BOT_TOKEN=
 TELEGRAM_CHAT_ID=
 TELEGRAM_ALLOWED_ID=
 EOF_ENV
-    fi
     log "Created an execution-disabled environment file from safe defaults"
   fi
 else
