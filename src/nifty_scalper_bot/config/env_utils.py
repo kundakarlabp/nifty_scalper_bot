@@ -1,4 +1,13 @@
-"""Environment normalization helpers for live/paper defaults."""
+"""Purpose: Normalize execution-mode settings and runtime environment defaults.
+
+Responsibilities:
+- normalise_live_env_defaults requires explicit, consistent LIVE authorization.
+- supabase_telemetry_enabled resolves host-scoped monitoring with opt-out.
+- parse_float_env and resolve_build_sha provide safe configuration and identity.
+
+Boundaries: GitHub configuration owns policy; protected AWS env holds secrets.
+Safety: Conflicting trading-mode settings fail closed; telemetry cannot arm LIVE.
+"""
 
 from __future__ import annotations
 
