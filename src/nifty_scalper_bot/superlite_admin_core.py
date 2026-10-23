@@ -315,19 +315,29 @@ def quick_overview() -> dict[str, Any]:
     data = {
         "engine_ok": engine_ok,
         "bot_loaded": bool(livez.get("bot_loaded")) if engine_ok else False,
+        "quiet": bool(livez.get("quiet")) if engine_ok else False,
         "broker_authenticated": (
             trading.get("broker_authentication")
             or broker.get("authentication")
             or "unknown"
         ) if trading_ok and engine_ok else "unknown",
-        "mode": str(mode.get("execution_mode") or mode.get("mode") or "UNKNOWN").upper()
-        if engine_ok and mode_ok else "UNKNOWN",
+        "mode": (
+            str(mode.get("execution_mode") or mode.get("mode") or "UNKNOWN").upper()
+            if engine_ok and mode_ok
+            else str(livez.get("operating_mode") or "UNKNOWN").upper()
+            if engine_ok and livez.get("quiet") is True
+            else "UNKNOWN"
+        ),
         "primary_blocker": (
             str(trading.get("primary_blocker") or "")
-            if trading_ok else "Trading status unavailable"
+            if trading_ok
+            else "auto_quiet"
+            if livez.get("quiet") is True
+            else "Trading status unavailable"
         ) if engine_ok else "Engine unreachable",
         "runtime_sha": str(trading.get("build_sha") or "") if trading_ok else "",
         "updater_state": str(update.get("state") or "unknown"),
+        "updater_updated_at": str(update.get("updated_at") or ""),
         "checked_at": int(time.time()),
     }
     OVERVIEW_CACHE.update({"at": now, "data": dict(data)})
