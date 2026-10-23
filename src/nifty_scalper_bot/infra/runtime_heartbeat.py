@@ -127,9 +127,7 @@ def _local_release_state() -> tuple[str | None, str | None]:
         if not isinstance(record, dict):
             return None, None
         state = record.get("state")
-        if not isinstance(state, str) or not re.fullmatch(
-            r"[a-z_]{1,60}", state
-        ):
+        if not isinstance(state, str) or not re.fullmatch(r"[a-z_]{1,60}", state):
             state = None
         when = record.get("updated_at")
         if isinstance(when, str):
