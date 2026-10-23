@@ -140,3 +140,42 @@ def test_log_payload_is_bounded_before_browser_delivery(monkeypatch) -> None:
     result = client().get("/admin/api/logs?lines=1")
     assert result.status_code == 200
     assert len(result.json()["text"]) == 100_000
+
+
+def test_quiet_mode_reports_planned_idle_not_engine_failure(monkeypatch) -> None:
+    responses = {
+        "/livez": {
+            "quiet": True,
+            "bot_loaded": False,
+            "operating_mode": "AUTO",
+        },
+        "/health/trading": {"_error": "HTTP 404"},
+        "/trading/status": {"_error": "HTTP 404"},
+    }
+    monkeypatch.setattr(core, "_http_json", lambda path: responses[path])
+    monkeypatch.setattr(core, "_update_state", lambda: {"state": "current"})
+    core.OVERVIEW_CACHE.update({"at": 0.0, "data": {}})
+    view = core.quick_overview()
+    assert view["engine_ok"] is True
+    assert view["quiet"] is True
+    assert view["bot_loaded"] is False
+    assert view["mode"] == "AUTO"
+    assert view["primary_blocker"] == "auto_quiet"
+    assert view["broker_authenticated"] == "unknown"
+    core.OVERVIEW_CACHE.update({"at": 0.0, "data": {}})
+
+
+def test_admin_login_button_accepts_canonical_broker_alias(monkeypatch) -> None:
+    monkeypatch.setattr(
+        dashboard,
+        "_read_env",
+        lambda: {
+            "BROKER_API_KEY": "broker-key",
+            "ENABLE_LIVE": "true",
+            "EXECUTION_MODE": "LIVE",
+        },
+    )
+    response = client().get("/admin")
+    assert response.status_code == 200
+    assert "Open official Zerodha login" in response.text
+    assert "api_key=broker-key" in response.text
