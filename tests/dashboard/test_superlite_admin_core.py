@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 
 from starlette.requests import Request
@@ -382,7 +383,6 @@ def test_streamlit_probe_requires_exact_health_response(monkeypatch) -> None:
 
 
 def test_service_health_endpoint_has_no_control_actions(monkeypatch) -> None:
-    import json
     import nifty_scalper_bot.superlite_admin as admin
 
     monkeypatch.setattr(
@@ -396,7 +396,8 @@ def test_service_health_endpoint_has_no_control_actions(monkeypatch) -> None:
         },
     )
     routes = [
-        route for route in admin.app.routes
+        route
+        for route in admin.app.routes
         if getattr(route, "path", None) == "/admin/api/service-health"
     ]
     assert len(routes) == 1

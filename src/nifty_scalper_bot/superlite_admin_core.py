@@ -140,7 +140,6 @@ def _http_json(path: str) -> dict[str, Any]:
         return {"_error": "ENGINE HTTP UNRESPONSIVE"}
 
 
-
 def _streamlit_reachable() -> bool:
     """Read the localhost Streamlit health path without following redirects."""
     connection = http.client.HTTPConnection("127.0.0.1", 8501, timeout=1.0)
@@ -184,6 +183,7 @@ def service_health_snapshot() -> dict[str, Any]:
     }
     SERVICE_HEALTH_CACHE.update({"at": now, "data": dict(result)})
     return result
+
 
 def _git_ref(ref: str) -> str:
     try:
