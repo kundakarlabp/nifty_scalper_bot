@@ -179,3 +179,49 @@ def test_admin_login_button_accepts_canonical_broker_alias(monkeypatch) -> None:
     assert response.status_code == 200
     assert "Open official Zerodha login" in response.text
     assert "api_key=broker-key" in response.text
+
+
+def test_zerodha_login_and_callback_use_same_canonical_key(monkeypatch) -> None:
+    from nifty_scalper_bot.ops.service_control import ControlResult
+
+    monkeypatch.setattr(
+        dashboard,
+        "_read_env",
+        lambda: {
+            "BROKER_API_KEY": "primary-key",
+            "BROKER_API_SECRET": "primary-secret",
+            "KITE_API_KEY": "older-key",
+            "KITE_API_SECRET": "older-secret",
+        },
+    )
+    calls = []
+    monkeypatch.setattr(
+        dashboard,
+        "_exchange_request_token",
+        lambda key, secret, token: calls.append((key, secret, token))
+        or (True, "verified-token"),
+    )
+    monkeypatch.setattr(
+        dashboard,
+        "_verify_access_token",
+        lambda key, token: calls.append((key, token))
+        or (True, "verified"),
+    )
+    monkeypatch.setattr(
+        dashboard,
+        "_activate_access_token",
+        lambda _token: ControlResult(True, "restart_bot", "queued"),
+    )
+    app = client()
+    page = app.get("/admin")
+    assert "api_key=primary-key" in page.text
+    callback = app.get(
+        "/admin/kite/callback?request_token=one-time&status=success",
+        follow_redirects=False,
+    )
+    assert callback.status_code == 303
+    assert callback.headers["location"] == "/admin?token=ok"
+    assert calls == [
+        ("primary-key", "primary-secret", "one-time"),
+        ("primary-key", "verified-token"),
+    ]
