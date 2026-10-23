@@ -4372,23 +4372,8 @@ class StrategyManager(_BaseStrategyManager):
         # can corroborate a fully qualified underlying SMC structural trigger.
         # OrderFlow remains context-only. Broker/risk gates remain mandatory.
         smc_sustained_flow_confirmed = False
-        # Production operator admission: retain the canonical proof engine,
-        # apply the requested change ONLY on real Lightsail LIVE, and keep an
-        # explicit flag=false as an immediate post-restart rollback switch.
-        # Every risk, opposing-context, and broker gate still runs downstream.
-        smc_live_default = (
-            "true"
-            if (
-                str(os.getenv("DEPLOYMENT_PLATFORM", "")).strip().lower()
-                == "aws_lightsail"
-                and str(os.getenv("EXECUTION_MODE", "")).strip().upper() == "LIVE"
-                and str(os.getenv("ENABLE_LIVE", "")).strip().lower()
-                in {"1", "true", "yes", "on"}
-            )
-            else "false"
-        )
         smc_flow_enabled = (
-            str(os.getenv("SMC_SUSTAINED_FLOW_CONFIRMATION_ENABLED", smc_live_default))
+            str(os.getenv("SMC_SUSTAINED_FLOW_CONFIRMATION_ENABLED", "false"))
             .strip()
             .lower()
             in {"1", "true", "yes", "on"}
