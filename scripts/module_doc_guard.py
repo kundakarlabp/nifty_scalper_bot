@@ -4,7 +4,7 @@
 Responsibilities:
 - Validate manifest-listed runtime and operator module headers.
 - Require summaries for all changed production, dashboard, scripts and ops Python.
-- Compare covered callable interfaces with the PR base to catch header drift.
+- Compare every changed Python callable interface with the PR base.
 - Check opening comments on changed deployment and CI workflow files.
 
 Boundaries: Static source inspection; no production imports or broker calls.
@@ -207,7 +207,6 @@ def check(root: Path, *, base: str | None = None) -> list[str]:
             problem = header_issue(path, after)
             if problem:
                 problems.append(problem)
-            continue
         before = git_read(root, base, path)
         if before is None:
             continue

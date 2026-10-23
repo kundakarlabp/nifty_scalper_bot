@@ -34,7 +34,7 @@ When a source file changes, inspect and update its **opening header as needed**.
 CI and `python scripts/agent_task.py check` invoke `scripts/module_doc_guard.py`. It:
 - checks short, meaningful headers on all key modules listed by the architecture manifest;
 - checks documentation on newly added production Python modules;
-- requires a header edit when a covered module's callable API inventory changes against the PR base;
+- requires a header edit when **any changed production/dashboard/scripts/ops Python module** changes its callable API inventory against the PR base;
 - requires an architecture-path document review when the manifest's runtime-path/owner contract changes.
 
 It intentionally **does not generate plausible but unverified explanations**. Semantics cannot be proven by a syntax check; developer/reviewer accountability remains necessary.
@@ -58,7 +58,7 @@ not a duplicate runtime ownership map: `runtime_path` and `owners` retain author
 The PR-base check requires a meaningful module docstring on **every modified
 production, dashboard, scripts or ops Python file**, including existing files not
 yet in the major-module manifest (except package `__init__.py`). Covered major
-modules also require a header edit when their callable interface changes.
+modules and unlisted Python modules alike require a header edit when their callable interface changes.
 
 Changed deployment Bash scripts, systemd service units, Dockerfile, Railway TOML,
 and GitHub workflows require `File purpose:`, `Key responsibilities:`, and
@@ -70,3 +70,20 @@ narrative docstrings as shown above.
 Code reviewers still need to assess behavior and responsibility changes that
 AST signatures cannot detect, including whether README, architecture, lifecycle
 and operations documentation needs updating. The guard never modifies live code.
+
+## Phase 3: trading-safety handoff coverage
+
+The documented major-module set also includes startup readiness, broker REST,
+market-data policy and persistence, release entry holds, state machine, bounded
+entry recovery, broker position identity, fill-ledger brackets, net reward/risk,
+SQLite trade journal, runtime heartbeat, service controls and NSE session gates.
+These are **documentation references only**; ownership and business logic remain
+in their original modules.
+
+Interface drift is checked for **all changed, non-package Python modules**
+in the production/dashboard/scripts/ops trees, whether or not those modules are
+explicitly named in the architecture manifest. The opening summary must be
+edited when top-level functions, class methods or signatures change.
+An unchanged public interface does **not** prove unchanged behavior; reviewers
+must still revise header descriptions whenever responsibilities, gates,
+control flow or recovery semantics materially change.

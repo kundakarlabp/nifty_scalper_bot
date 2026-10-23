@@ -144,3 +144,31 @@ def test_coverage_expands_to_dashboard_and_tools() -> None:
         "dashboard/superlite_console.py",
         "scripts/module_doc_guard.py",
     }
+
+
+def test_existing_untracked_callable_change_requires_updated_header(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Unlisted source still gets full API/header drift enforcement."""
+    _temporary_manifest(tmp_path)
+    path = "src/nifty_scalper_bot/execution/new_gate.py"
+    file = tmp_path / path
+    file.parent.mkdir(parents=True)
+    old_header = (
+        '"""Purpose: Authorize an isolated test signal with safe boundaries.\n'
+        "\nResponsibilities: Check a prepared signal and return a decision.\n"
+        'Boundaries: No direct broker action or position mutation.\n"""\n'
+    )
+    before = old_header + "def authorize(symbol):\n    return bool(symbol)\n"
+    after = old_header + "def authorize(symbol, live=False):\n    return bool(symbol)\n"
+    file.write_text(after, encoding="utf-8")
+    monkeypatch.setattr(guard, "git_changed", lambda *_: {path})
+    monkeypatch.setattr(guard, "git_read", lambda *_: before)
+    issues = guard.check(tmp_path, base="main")
+    assert any("callable interface changed" in issue for issue in issues)
+    revised_header = old_header.replace(
+        "Check a prepared signal", "Check a prepared signal and a live-mode flag"
+    )
+    file.write_text(after.replace(old_header, revised_header), encoding="utf-8")
+    assert guard.check(tmp_path, base="main") == []
