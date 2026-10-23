@@ -6,8 +6,8 @@ import hashlib
 import json
 import os
 import subprocess
-import time
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -159,7 +159,8 @@ def test_rotation_exception_is_scoped_and_double_sampled() -> None:
     assert 'reconciliation.get("completed") is not True' in guard
     assert 'reconciliation.get("unprotected_positions")' in guard
     assert "token_rotation_verified and hold_required" in guard
-    assert 'BOT_RELEASE_VERIFIED_TOKEN_ROTATION="$VERIFIED_TOKEN_ROTATION_FILE"' in release
+    marker = 'BOT_RELEASE_VERIFIED_TOKEN_ROTATION="$VERIFIED_TOKEN_ROTATION_FILE"'
+    assert marker in release
     assert 'rm -f "$RESTART_PENDING_FILE" "$VERIFIED_TOKEN_ROTATION_FILE"' in release
     assert "positions = kite.positions()" in guard
     assert "orders = kite.orders()" in guard
