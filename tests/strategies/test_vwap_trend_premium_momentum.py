@@ -640,7 +640,6 @@ def test_live_strong_slope_baseline_is_not_tightened(monkeypatch):
     assert signal.metadata["vwap_neutral_slope_premium_proof_required"] is False
 
 
-
 @pytest.mark.parametrize("side", ["CE", "PE"])
 def test_opt_in_trend_retest_extension_requires_completed_pullback_rebreak(
     monkeypatch, side
