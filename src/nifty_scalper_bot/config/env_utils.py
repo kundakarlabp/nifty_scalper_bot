@@ -1,4 +1,13 @@
-"""Environment normalization helpers for live/paper defaults."""
+"""Purpose: Normalize execution-mode settings and runtime environment defaults.
+
+Responsibilities:
+- normalise_live_env_defaults requires explicit, consistent LIVE authorization.
+- supabase_telemetry_enabled resolves host-scoped monitoring with opt-out.
+- parse_float_env and resolve_build_sha provide safe configuration and identity.
+
+Boundaries: GitHub configuration owns policy; protected AWS env holds secrets.
+Safety: Conflicting trading-mode settings fail closed; telemetry cannot arm LIVE.
+"""
 
 from __future__ import annotations
 
@@ -105,6 +114,17 @@ def setdefault_env(key: str, value: str) -> None:
     """Set env key only when missing. Args: key, value. Returns: None. Raises: none."""
     if os.getenv(key) is None:
         os.environ[key] = value
+
+
+def supabase_telemetry_enabled(key: str) -> bool:
+    """Enable only on the receiver-authorized Lightsail host unless overridden.
+
+    Secrets, trade control, and broker execution are never read or modified.
+    """
+    explicit = os.getenv(key)
+    if explicit is not None:
+        return truthy(explicit)
+    return (os.getenv("DEPLOYMENT_PLATFORM") or "").strip().lower() == "aws_lightsail"
 
 
 def normalise_live_env_defaults() -> None:

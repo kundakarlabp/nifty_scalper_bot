@@ -482,35 +482,25 @@ def test_release_runner_publishes_exact_runtime_build_sha() -> None:
     assert "FORCE_RESTART=true" in no_change_block
 
 
-def test_release_enables_existing_daily_log_archive() -> None:
+def test_telemetry_urls_and_enablement_are_owned_by_github() -> None:
     release = _text("deploy/lightsail_release.sh")
     setup = _text("deploy/lightsail_setup.sh")
-    example = _text(".env.example")
-    endpoint = (
-        "https://dehdptgkqbrkyzyodicd.supabase.co/functions/v1/nifty-log-archive-ingest"
-    )
+    defaults = _text("src/nifty_scalper_bot/config/defaults.py")
+    env_utils = _text("src/nifty_scalper_bot/config/env_utils.py")
 
-    assert "set_env_value SUPABASE_LOG_ARCHIVE_ENABLED true" in release
-    for text in (release, setup):
-        assert endpoint in text
-        assert "SUPABASE_LOG_ARCHIVE_INTERVAL_SECONDS 300" in text
-    assert "SUPABASE_LOG_ARCHIVE_ENABLED=true" in example
-
-
-def test_release_provisions_nonsecret_trade_replication_settings() -> None:
-    release = _text("deploy/lightsail_release.sh")
-    setup = _text("deploy/lightsail_setup.sh")
-    endpoint = (
-        "https://dehdptgkqbrkyzyodicd.supabase.co/functions/v1/nifty-trade-ingest"
-    )
-    for text in (release, setup):
-        assert "SUPABASE_TRADE_REPLICATION_ENABLED true" in text
-        assert endpoint in text
-        assert "SUPABASE_SERVICE_ROLE" not in text
-        assert "SUPABASE_SECRET" not in text
-    assert (
-        'if [ "$RUNTIME_ENV_CHANGED" = true ]; then FORCE_RESTART=true; fi' in release
-    )
+    for script in (setup, release):
+        assert "ensure_env_default SUPABASE_" not in script
+        assert "set_env_value SUPABASE_" not in script
+        assert "supabase.co/functions/v1" not in script
+        assert "SUPABASE_SECRET" not in script
+        assert "SUPABASE_SERVICE_ROLE" not in script
+    assert "nifty-trade-ingest" in defaults
+    assert "nifty-log-archive-ingest" in defaults
+    assert "nifty-runtime-heartbeat-ingest" in defaults
+    assert 'os.getenv("DEPLOYMENT_PLATFORM")' in env_utils
+    assert "supabase_telemetry_enabled" in env_utils
+    restart_marker = 'if [ "$RUNTIME_ENV_CHANGED" = true ]; then FORCE_RESTART=true; fi'
+    assert restart_marker in release
     assert "tests/infra/test_supabase_trade_replication.py" in release
 
 
