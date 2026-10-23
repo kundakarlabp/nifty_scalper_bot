@@ -8,11 +8,11 @@ deduplicated. A post-trade profitable counterfactual has **not** been proved.
 
 ## Single owners and experiment switches
 
-| Question | Canonical owner | Opt-in flag (default false outside Lightsail LIVE) | Unchanged safety gates |
+| Question | Canonical owner | LIVE profile default (host-neutral; explicit false opts out) | Unchanged safety gates |
 | --- | --- | --- | --- |
-| Qualified SMC with two separately timed supportive books | `SustainedSMCFlow` called by `StrategyManager` | `SMC_SUSTAINED_FLOW_CONFIRMATION_ENABLED` (Lightsail LIVE default true, explicit false opts out; disabled by default elsewhere) | SMC structural setup ID, direction, opposing-context veto, capacity-retry consensus, broker/runner/risk |
-| OFI reversal persistence versus latency | `OrderFlowStrategy` | `ORDERFLOW_OFI_ADAPTIVE_HOLDOFF_ENABLED` (Lightsail LIVE default true, explicit false opts out) | Base holdoff 15s; minimum 10s when opted in and 3s sustained OFI and strong same-side book support; adverse veto |
-| Mid-trend premium pullback and rebreak beyond ordinary ATR VWAP band | `VWAPProStrategy` | `VWAP_TREND_RETEST_EXTENSION_ENABLED` (Lightsail LIVE default true, explicit false opts out) | Session VWAP, strong fresh underlying direction, TREND regime, finalized current and previous adjacent bars, bearish prior retracement, rebreak, option RVOL, futures slope and risk |
+| Qualified SMC with two separately timed supportive books | `SustainedSMCFlow` called by `StrategyManager` | `SMC_SUSTAINED_FLOW_CONFIRMATION_ENABLED` (default true in canonical LIVE) | SMC structural setup ID, direction, opposing-context veto, capacity-retry consensus, broker/runner/risk |
+| OFI reversal persistence versus latency | `OrderFlowStrategy` | `ORDERFLOW_OFI_ADAPTIVE_HOLDOFF_ENABLED` (default true in canonical LIVE) | Base holdoff 15s; minimum 10s when opted in and 3s sustained OFI and strong same-side book support; adverse veto |
+| Mid-trend premium pullback and rebreak beyond ordinary ATR VWAP band | `VWAPProStrategy` | `VWAP_TREND_RETEST_EXTENSION_ENABLED` (default true in canonical LIVE) | Session VWAP, strong fresh underlying direction, TREND regime, finalized current and previous adjacent bars, bearish prior retracement, rebreak, option RVOL, futures slope and risk |
 
 No alternate entry arbiter, second quote freshness authority, second stop/sizing
 system, or unbounded global VWAP distance increase is introduced.
@@ -44,13 +44,14 @@ option-contract-specific thesis and setup ID, preserving stop rearm semantics.
    false-positive rate over development, separate validation and current
    weekly-options out-of-sample sessions. No profitable-miss inference from
    no-trade counters alone.
-5. Only with convincing evidence and explicit operational approval, activate
-   one independent flag; otherwise leave all three disabled.
+5. The operator explicitly requested limited LIVE activation of all three
+   existing bounded paths. This approval does not prove net profitability; retain
+   independent rollback switches and evaluate the actual outcomes.
 
 Deployment during the live session must not interrupt a broker order or
 position. A merge alone is not proof production has deployed that SHA.
 
-## October 23 operator-directed SMC live rollout
+## October 23 historical Lightsail-only SMC rollout (superseded)
 
 - The existing SMC two-book admission was enabled first in the normal
   `aws_lightsail` LIVE startup environment. VWAP retest and adaptive OFI were
@@ -68,7 +69,7 @@ position. A merge alone is not proof production has deployed that SHA.
   in out-of-sample trading expectancy. Measure actual setups, admission,
   affordability, net after-cost P&L and adverse outcomes before further tuning.
 
-## October 23 subsequent operator-directed VWAP and OrderFlow LIVE rollout
+## October 23 historical Lightsail-only VWAP and OrderFlow rollout (superseded)
 
 - On `aws_lightsail` when canonical execution mode requests LIVE, the existing
   configuration normalizer now defaults
@@ -92,3 +93,25 @@ position. A merge alone is not proof production has deployed that SHA.
   economic expectancy. Analyze unique admissions, fills and actual net costs,
   stopped positions, drawdown, and chronological out-of-sample replay before
   further raising trade frequency.
+
+## Canonical GitHub LIVE profile (current)
+
+The repository's `config/env_utils.py:normalise_live_env_defaults` now owns
+all three default-on admission flags. This policy is independent of the host:
+AWS Lightsail, any other deployment, and local LIVE mode share the same
+strategy configuration. Each `setdefault_env` respects an explicit `false`
+for independent operational rollback.
+
+The profile is applied **only** when normalized `EXECUTION_MODE=LIVE` and
+`ENABLE_LIVE=true` agree. PAPER, SHADOW, and mismatched mode/enable state
+do not acquire any new implicit flags. Logs retain the canonical events
+`SMC_SUSTAINED_FLOW_ADMISSION_CONFIG` and `LIVE_ENTRY_QUALITY_CONFIG` to
+verify actual startup values. The AWS-specific first-boot legacy LIVE migration
+and guarded deployment belong to infrastructure operations, not strategy
+selection; they remain unchanged.
+
+The strategy owners, two-book confirmation proof, max 3.5 ATR trend-retest
+extension, conditional 10s OFI holdoff, adverse context vetoes, economic
+admission, exchange protection and broker-risk checks remain intact. Neither
+GitHub merge nor deployment SHA proves that an external explicit override is
+not present; verify actual effective flags from the runtime logs.
