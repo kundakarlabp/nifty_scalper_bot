@@ -752,17 +752,25 @@ def status_json(request: Request) -> JSONResponse:
     ttl = float(os.getenv("ADMIN_STATUS_CACHE_SECONDS", "10") or "10")
     if now - float(_STATUS_CACHE["at"]) < ttl:
         return JSONResponse({"label": _STATUS_CACHE["label"], "color": _STATUS_CACHE["color"]})
-    label, color = "running", "#3fb950"
+    # Do not infer engine health from old log lines: use the same canonical
+    # fast status snapshot as the visible dashboard, with no journal scan.
     try:
-        tail = _gather_logs(60, clean=True)
-        if "degraded mode" in tail or "Missing required env" in tail:
-            label, color = "degraded", "#d29922"
-        elif "fully operational" in tail:
-            label, color = "operational", "#3fb950"
+        overview = quick_overview()
+        if overview.get("engine_ok") is not True:
+            label, color = "unreachable", "#ff7586"
+        elif overview.get("quiet") is True:
+            label, color = "quiet", "#38d6a0"
+        elif overview.get("bot_loaded") is True:
+            label, color = "operational", "#38d6a0"
+        else:
+            label, color = "starting", "#f5bb5a"
     except Exception:
         label, color = "unknown", "#8b97a6"
     _STATUS_CACHE.update({"at": now, "label": label, "color": color})
-    return JSONResponse({"label": label, "color": color})
+    return JSONResponse(
+        {"label": label, "color": color},
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 _TRADE_MARKERS = (
