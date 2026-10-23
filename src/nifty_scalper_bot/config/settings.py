@@ -72,8 +72,8 @@ def _ensure_env_loaded_before_settings() -> None:
 
     canonical = os.getenv("BOT_ENV_FILE")
     production = (
-        (os.getenv("DEPLOYMENT_PLATFORM") or "").strip().lower() == "aws_lightsail"
-    )
+        os.getenv("DEPLOYMENT_PLATFORM") or ""
+    ).strip().lower() == "aws_lightsail"
     if canonical:
         path = Path(canonical).expanduser()
         if path.is_file():
