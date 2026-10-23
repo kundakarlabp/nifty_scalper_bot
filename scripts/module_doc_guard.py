@@ -67,7 +67,11 @@ def api_inventory(source: str) -> tuple[tuple[str, ...], ...]:
                             item.name,
                             method.name,
                             ast.dump(method.args),
-                            ast.dump(method.returns) if method.returns is not None else "",
+                            (
+                                ast.dump(method.returns)
+                                if method.returns is not None
+                                else ""
+                            ),
                         )
                     )
     return tuple(sorted(result))
