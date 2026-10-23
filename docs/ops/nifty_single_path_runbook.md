@@ -42,6 +42,22 @@ Release source of truth on Lightsail:
 **the running process matching the intended main SHA and passing health**.
 Do not infer it from a button, commit, or queued deploy marker.
 
+## GitHub-owned telemetry defaults
+
+Supabase monitoring policy and nonsecret Edge ingestion URLs now live in
+`src/nifty_scalper_bot/config/defaults.py` and
+`config/env_utils.py:supabase_telemetry_enabled`. The authorized Lightsail
+runtime enables heartbeat, journald archive and trade-ledger replication
+automatically when the respective setting is absent. Development and other
+hosts default to disabled; explicit `false` overrides remain available.
+
+Neither `deploy/lightsail_setup.sh` nor `deploy/lightsail_release.sh` now
+duplicates those endpoint URLs, timing values, or writes telemetry settings
+into the protected environment file. Existing AWS overrides are deliberately
+preserved; deleting unknown historical entries requires a separate effective
+config comparison and must not silently change trading behavior. Supabase
+remains a monitor, not a release, order or risk controller.
+
 ## Monitoring — ONE private remote source
 
 The pre-existing Supabase project `dehdptgkqbrkyzyodicd` contains:

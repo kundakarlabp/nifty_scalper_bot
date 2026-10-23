@@ -75,7 +75,11 @@ def test_supabase_is_independent_and_read_only_for_operator_monitoring() -> None
     heartbeat = (
         ROOT / "src" / "nifty_scalper_bot" / "infra" / "runtime_heartbeat.py"
     ).read_text(encoding="utf-8")
-    assert "nifty-runtime-heartbeat-ingest" in heartbeat
+    defaults = (
+        ROOT / "src" / "nifty_scalper_bot" / "config" / "defaults.py"
+    ).read_text(encoding="utf-8")
+    assert "nifty-runtime-heartbeat-ingest" in defaults
+    assert "DEFAULT_SUPABASE_HEARTBEAT_URL" in heartbeat
     assert "127.0.0.1" in heartbeat
     assert "token_sha256" not in heartbeat
     assert "trade/order" not in heartbeat
