@@ -34,6 +34,17 @@ The `Agent Context Builder` workflow comments on the issue with:
 
 Use that report to fetch only the highest-ranked files. Avoid broad searches and repeated full-file reads unless the ranked context is insufficient.
 
+## Documentation in every code change
+
+Start from the file's opening summary; after edits, update that header
+when its responsibilities, interfaces or safety contract changed. Review the
+[documentation policy](MODULE_DOCUMENTATION.md) and
+[trading lifecycle](TRADING_LIFECYCLE.md) for corresponding higher-level
+documentation. Include an explicit documentation-impact decision in the PR.
+Run `python scripts/module_doc_guard.py --base-ref origin/main` locally,
+or rely on the same mandatory guard in both draft and final GitHub CI.
+Syntax/API checks cannot replace semantic review.
+
 ## Implementation sequence
 
 ```text
