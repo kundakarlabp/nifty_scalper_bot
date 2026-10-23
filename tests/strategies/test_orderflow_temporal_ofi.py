@@ -426,3 +426,32 @@ def test_adaptive_holdoff_opt_out_and_neutral_depth_preserve_fifteen_seconds(
     assert neutral is not None
     assert neutral.metadata["ofi_reversal_holdoff_seconds"] == 15.0
     assert neutral.metadata["ofi_reversal_holdoff_active"] is True
+
+
+def test_adaptive_reversal_holdoff_is_never_shorter_than_ten_seconds(
+    monkeypatch,
+) -> None:
+    """A manually short base must not make the optional experiment unsafe."""
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ORDERFLOW_OFI_REVERSAL_HOLDOFF_SECONDS", "5")
+    monkeypatch.setenv("ORDERFLOW_OFI_ADAPTIVE_HOLDOFF_ENABLED", "true")
+    clock = [100.0]
+    monkeypatch.setattr(order_flow_module.time, "monotonic", lambda: clock[0])
+    strategy = _strategy()
+    indicators = _indicators(buy=400.0, sell=100.0, ofi_value=-0.5, supports=False)
+    indicators.pop("_expected_support")
+    assert strategy._evaluate_signal(SYMBOL, indicators, 100.25) is not None
+    clock[0] = 107.0
+    indicators["ofi_1s_normalized"] = 0.5
+    indicators["ofi_3s_normalized"] = 0.5
+    indicators["quote_update_version"] = 4
+    held = strategy._evaluate_signal(SYMBOL, indicators, 100.25)
+    assert held is not None
+    assert held.metadata["ofi_reversal_holdoff_seconds"] == 10.0
+    assert held.metadata["ofi_reversal_holdoff_active"] is True
+    clock[0] = 110.5
+    indicators["quote_update_version"] = 5
+    cleared = strategy._evaluate_signal(SYMBOL, indicators, 100.25)
+    assert cleared is not None
+    assert cleared.metadata["ofi_reversal_holdoff_seconds"] == 10.0
+    assert cleared.metadata["ofi_reversal_holdoff_active"] is False
