@@ -205,6 +205,7 @@ def test_lightsail_live_uses_sustained_smc_proof_without_overriding_opt_out(
 
     monkeypatch.setattr(module, "SustainedSMCFlow", ProvenBooks)
     monkeypatch.setenv("DEPLOYMENT_PLATFORM", "aws_lightsail")
+    monkeypatch.setenv("PRODUCTION_LIVE_DEFAULT_INITIALIZED", "true")
     monkeypatch.setenv("ENABLE_LIVE", "true")
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     monkeypatch.delenv("SMC_SUSTAINED_FLOW_CONFIRMATION_ENABLED", raising=False)
