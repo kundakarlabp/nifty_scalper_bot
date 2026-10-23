@@ -158,9 +158,7 @@ def test_invalid_release_metadata_is_not_published(tmp_path, monkeypatch):
     assert calls[0][1]["release_updated_at"] is None
 
 
-def test_supabase_monitoring_defaults_belong_to_git_not_host_env(
-    monkeypatch, tmp_path
-):
+def test_supabase_monitoring_defaults_belong_to_git_not_host_env(monkeypatch, tmp_path):
     from nifty_scalper_bot.infra.daily_log_archive import build_daily_log_archiver
     from nifty_scalper_bot.infra.supabase_trade_replication import (
         build_supabase_trade_replicator,
