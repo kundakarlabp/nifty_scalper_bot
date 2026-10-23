@@ -215,7 +215,7 @@ def _complete_kite_session(request_token: str) -> RedirectResponse:
     api_key = next(
         (
             env.get(k, "").strip()
-            for k in ("KITE_API_KEY", "ZERODHA_API_KEY", "BROKER_API_KEY")
+            for k in ("BROKER_API_KEY", "ZERODHA_API_KEY", "KITE_API_KEY")
             if env.get(k, "").strip()
         ),
         "",
@@ -223,7 +223,7 @@ def _complete_kite_session(request_token: str) -> RedirectResponse:
     api_secret = next(
         (
             env.get(k, "").strip()
-            for k in ("KITE_API_SECRET", "ZERODHA_API_SECRET", "BROKER_API_SECRET")
+            for k in ("BROKER_API_SECRET", "ZERODHA_API_SECRET", "KITE_API_SECRET")
             if env.get(k, "").strip()
         ),
         "",
@@ -579,7 +579,7 @@ def update_token(request: Request, request_token: str = Form(""), access_token: 
     api_key = next(
         (
             env.get(k, "").strip()
-            for k in ("KITE_API_KEY", "ZERODHA_API_KEY", "BROKER_API_KEY")
+            for k in ("BROKER_API_KEY", "ZERODHA_API_KEY", "KITE_API_KEY")
             if env.get(k, "").strip()
         ),
         "",
@@ -604,8 +604,8 @@ def set_mode(request: Request, mode: str = Form(...)) -> RedirectResponse:
     _check_auth(request)
     if mode.strip().lower() == "live":
         env = _read_env()
-        has_key = any(env.get(k, "").strip() for k in ("KITE_API_KEY", "ZERODHA_API_KEY", "BROKER_API_KEY"))
-        has_secret = any(env.get(k, "").strip() for k in ("KITE_API_SECRET", "ZERODHA_API_SECRET", "BROKER_API_SECRET"))
+        has_key = any(env.get(k, "").strip() for k in ("BROKER_API_KEY", "ZERODHA_API_KEY", "KITE_API_KEY"))
+        has_secret = any(env.get(k, "").strip() for k in ("BROKER_API_SECRET", "ZERODHA_API_SECRET", "KITE_API_SECRET"))
         has_token = any(env.get(k, "").strip() for k in ("KITE_ACCESS_TOKEN", "ZERODHA_ACCESS_TOKEN", "BROKER_ACCESS_TOKEN"))
         if not (has_key and has_secret and has_token):
             return RedirectResponse("/admin?mode=err", status_code=303)
