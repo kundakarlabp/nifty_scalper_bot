@@ -394,7 +394,9 @@ class OrderFlowStrategy(EliteStrategy):
             if (
                 is_live
                 and str(os.getenv("ORDERFLOW_OFI_ADAPTIVE_HOLDOFF_ENABLED", "false"))
-                .strip().lower() in {"1", "true", "yes", "on"}
+                .strip()
+                .lower()
+                in {"1", "true", "yes", "on"}
                 and ofi_sustained_confirmation
                 and strong_depth_supports_side
                 and not strong_depth_conflicts_side
