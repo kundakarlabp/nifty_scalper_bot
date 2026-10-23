@@ -339,9 +339,7 @@ def test_host_local_service_health_unknown_fail_closed_and_cached(monkeypatch) -
         core, "_http_json", lambda path: observed.append(path) or {"_error": "timeout"}
     )
     monkeypatch.setattr(core, "_streamlit_reachable", lambda: False)
-    monkeypatch.setattr(
-        core, "_update_state", lambda: {"state": "api_key=DO_NOT_LEAK"}
-    )
+    monkeypatch.setattr(core, "_update_state", lambda: {"state": "api_key=DO_NOT_LEAK"})
     core.SERVICE_HEALTH_CACHE.update({"at": 0.0, "data": {}})
     probe = core.service_health_snapshot()
     assert probe["engine_http_responsive"] is False
