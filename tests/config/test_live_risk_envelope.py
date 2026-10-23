@@ -64,3 +64,62 @@ def test_non_live_mode_does_not_relax_explicit_risk_limits(monkeypatch) -> None:
     assert os.environ["RISK_PER_TRADE_PCT"] == "1.0"
     assert os.environ["RISK_DAILY_LOSS_PCT"] == "2.0"
     assert os.environ["RISK_DAILY_PNL_CAP_PCT"] == "2.0"
+
+
+def _track_admission_test_environment(monkeypatch) -> None:
+    """Restore env mutated directly by normalisation after each new test."""
+    for key in (
+        "SMC_SUSTAINED_FLOW_CONFIRMATION_ENABLED",
+        "ENABLE_LIVE_TRADING",
+        "ORDERS__ENABLE_LIVE",
+        "PAPER__ENABLED",
+        "PAPER_MODE",
+        "SHADOW_MODE",
+        "RISK__PER_TRADE_RISK_PCT",
+        "RISK_PER_TRADE_PCT",
+        "RISK_DAILY_LOSS_PCT",
+        "RISK_DAILY_PNL_CAP_PCT",
+        "RISK_MAX_DAILY_LOSS_PCT",
+        "DAILY_PNL_CAP_PCT",
+    ):
+        monkeypatch.setenv(key, os.getenv(key, ""))
+
+
+def test_lightsail_live_smc_confirmation_default_and_explicit_rollback(
+    monkeypatch, caplog
+) -> None:
+    """Only production LIVE inherits admission; explicit false survives reinit."""
+    _track_admission_test_environment(monkeypatch)
+    monkeypatch.setenv("DEPLOYMENT_PLATFORM", "aws_lightsail")
+    monkeypatch.setenv("PRODUCTION_LIVE_DEFAULT_INITIALIZED", "true")
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.delenv("SMC_SUSTAINED_FLOW_CONFIRMATION_ENABLED", raising=False)
+
+    normalise_live_env_defaults()
+    assert os.environ["SMC_SUSTAINED_FLOW_CONFIRMATION_ENABLED"] == "true"
+    assert "SMC_SUSTAINED_FLOW_ADMISSION_CONFIG enabled=True" in caplog.text
+
+    monkeypatch.setenv("SMC_SUSTAINED_FLOW_CONFIRMATION_ENABLED", "false")
+    normalise_live_env_defaults()
+    assert os.environ["SMC_SUSTAINED_FLOW_CONFIRMATION_ENABLED"] == "false"
+    assert "SMC_SUSTAINED_FLOW_ADMISSION_CONFIG enabled=False" in caplog.text
+
+
+def test_nonproduction_and_nonlive_do_not_enable_smc_live_admission(
+    monkeypatch,
+) -> None:
+    _track_admission_test_environment(monkeypatch)
+    monkeypatch.delenv("SMC_SUSTAINED_FLOW_CONFIRMATION_ENABLED", raising=False)
+    monkeypatch.setenv("DEPLOYMENT_PLATFORM", "railway")
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    normalise_live_env_defaults()
+    assert os.getenv("SMC_SUSTAINED_FLOW_CONFIRMATION_ENABLED") is None
+
+    monkeypatch.setenv("DEPLOYMENT_PLATFORM", "aws_lightsail")
+    monkeypatch.setenv("PRODUCTION_LIVE_DEFAULT_INITIALIZED", "true")
+    monkeypatch.setenv("ENABLE_LIVE", "false")
+    monkeypatch.setenv("EXECUTION_MODE", "PAPER")
+    normalise_live_env_defaults()
+    assert os.getenv("SMC_SUSTAINED_FLOW_CONFIRMATION_ENABLED") is None
