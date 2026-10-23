@@ -48,3 +48,25 @@ python scripts/agent_task.py check --files src/nifty_scalper_bot/strategies/runn
 ```
 
 Avoid timestamped copies of whole README/architecture documents, auto-rewriting production source with a formatter, and runtime-generated docs on the live AWS host. Updates are reviewed, tested and merged in GitHub; AWS only consumes validated releases.
+
+## Extended coverage (phase 2)
+
+The manifest now includes admission/risk policy, recovery, configuration, release,
+operator surfaces and replication modules. This is a **documentation coverage list**,
+not a duplicate runtime ownership map: `runtime_path` and `owners` retain authority.
+
+The PR-base check requires a meaningful module docstring on **every modified
+production, dashboard, scripts or ops Python file**, including existing files not
+yet in the major-module manifest (except package `__init__.py`). Covered major
+modules also require a header edit when their callable interface changes.
+
+Changed deployment Bash scripts, systemd service units, Dockerfile, Railway TOML,
+and GitHub workflows require `File purpose:`, `Key responsibilities:`, and
+`Operational constraints:` as opening comments. The older
+[File Header Standard](FILE_HEADER_STANDARD.md) specifies this stricter labeled
+form for an existing tested subset. Other Python files can use descriptive
+narrative docstrings as shown above.
+
+Code reviewers still need to assess behavior and responsibility changes that
+AST signatures cannot detect, including whether README, architecture, lifecycle
+and operations documentation needs updating. The guard never modifies live code.
