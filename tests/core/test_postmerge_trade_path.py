@@ -225,9 +225,12 @@ def test_lightsail_live_uses_sustained_smc_proof_without_overriding_opt_out(
 
     monkeypatch.setenv("SMC_SUSTAINED_FLOW_CONFIRMATION_ENABLED", "false")
     rejected = _manager()
-    assert rejected._combine_strategy_votes(
-        symbol=_CE, signals=votes, indicators=_live_indicators()
-    ) is None
+    assert (
+        rejected._combine_strategy_votes(
+            symbol=_CE, signals=votes, indicators=_live_indicators()
+        )
+        is None
+    )
     assert rejected._last_no_signal_decision_by_symbol[_CE].reason == (
         "smc_independent_confirmation_missing"
     )
