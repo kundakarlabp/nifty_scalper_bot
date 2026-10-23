@@ -1,7 +1,16 @@
 # fmt: off
 # ruff: noqa: E501,I001,F401,F841,E402
 # mypy: ignore-errors
-"""Risk management guardrails and telemetry helpers."""
+"""Purpose: Enforce canonical position sizing and risk-based entry admission.
+
+Responsibilities: RiskManager checks proposed orders against account/margin
+capacity, per-trade and daily loss budgets, trading switches and cooldowns.
+Key interfaces: RiskManager.check_order, RiskSnapshot, RiskState, OrderSignal.
+Boundaries: Strategy produces intent; broker order submission and fill truth live
+in execution/position management. This module must not place broker orders.
+Safety: Protective risk-reducing exits are not equivalent to new BUY entries;
+never bypass live exposure, margin or loss limits to increase trade frequency.
+"""
 
 from __future__ import annotations
 
