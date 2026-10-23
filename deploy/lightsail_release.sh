@@ -75,28 +75,6 @@ ensure_env_default() {
   fi
 }
 
-set_env_value() {
-  local key="$1" value="$2" current tmp
-  current="$(first_nonempty_env "$key" 2>/dev/null || true)"
-  if [ "$current" = "$value" ]; then return 0; fi
-  tmp="$(mktemp "${ENV_FILE}.runtime.XXXXXX")" || return 1
-  if ! awk -v key="$key" -v value="$value" '
-    BEGIN { written = 0 }
-    index($0, key "=") == 1 {
-      if (!written) { print key "=" value; written = 1 }
-      next
-    }
-    { print }
-    END { if (!written) print key "=" value }
-  ' "$ENV_FILE" > "$tmp"; then
-    rm -f "$tmp"
-    return 1
-  fi
-  chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
-  mv "$tmp" "$ENV_FILE"
-  RUNTIME_ENV_CHANGED=true
-}
-
 set_runtime_build_sha() {
   local sha="$1" tmp
   if [[ ! "$sha" =~ ^[0-9a-fA-F]{7,64}$ ]]; then
@@ -657,18 +635,8 @@ if [ ! -f "$ENV_FILE" ] && [ -f "$APP_DIR/.env" ]; then
 fi
 validate_environment
 ensure_env_default BOT_RESEARCH_LAUNCHER systemd
-ensure_env_default SUPABASE_TRADE_REPLICATION_ENABLED true
-ensure_env_default SUPABASE_TRADE_REPLICATION_URL "https://dehdptgkqbrkyzyodicd.supabase.co/functions/v1/nifty-trade-ingest"
-ensure_env_default SUPABASE_TRADE_REPLICATION_SOURCE lightsail
-ensure_env_default SUPABASE_TRADE_REPLICATION_INTERVAL_SECONDS 30
-ensure_env_default SUPABASE_TRADE_REPLICATION_BATCH_SIZE 100
-ensure_env_default SUPABASE_TRADE_REPLICATION_TIMEOUT_SECONDS 5
-set_env_value SUPABASE_LOG_ARCHIVE_ENABLED true
-ensure_env_default SUPABASE_LOG_ARCHIVE_URL "https://dehdptgkqbrkyzyodicd.supabase.co/functions/v1/nifty-log-archive-ingest"
-ensure_env_default SUPABASE_LOG_ARCHIVE_INTERVAL_SECONDS 300
-set_env_value SUPABASE_RUNTIME_HEARTBEAT_ENABLED true
-ensure_env_default SUPABASE_RUNTIME_HEARTBEAT_URL "https://dehdptgkqbrkyzyodicd.supabase.co/functions/v1/nifty-runtime-heartbeat-ingest"
-ensure_env_default SUPABASE_RUNTIME_HEARTBEAT_INTERVAL_SECONDS 120
+# Off-hot-path Supabase defaults are GitHub-owned in Python. Host file
+# contains only secrets/operational overrides, not replicated sink settings.
 if [ "$RUNTIME_ENV_CHANGED" = true ]; then FORCE_RESTART=true; fi
 # Preserve explicit restart requests across failed validation/deployment.
 # Exposure no longer defers the default automatic release.
