@@ -11,16 +11,18 @@ from zoneinfo import ZoneInfo
 
 import requests
 
-from nifty_scalper_bot.config.env_utils import resolve_build_sha
+from nifty_scalper_bot.config.defaults import DEFAULT_SUPABASE_ARCHIVE_URL
+from nifty_scalper_bot.config.env_utils import (
+    resolve_build_sha,
+    supabase_telemetry_enabled,
+)
 from nifty_scalper_bot.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
 _IST = ZoneInfo("Asia/Kolkata")
 _OPEN = time(9, 15)
 _CLOSE = time(15, 30)
-DEFAULT_ARCHIVE_URL = (
-    "https://dehdptgkqbrkyzyodicd.supabase.co/functions/v1/nifty-log-archive-ingest"
-)
+DEFAULT_ARCHIVE_URL = DEFAULT_SUPABASE_ARCHIVE_URL
 Transport = Callable[[str, Mapping[str, Any], float], Mapping[str, Any]]
 
 
@@ -33,8 +35,7 @@ def archive_interval_seconds() -> float:
 
 
 def build_daily_log_archiver() -> "DailyLogArchiver | None":
-    raw = os.getenv("SUPABASE_LOG_ARCHIVE_ENABLED", "false").strip().lower()
-    if raw not in {"1", "true", "yes", "on"}:
+    if not supabase_telemetry_enabled("SUPABASE_LOG_ARCHIVE_ENABLED"):
         return None
     return DailyLogArchiver(
         endpoint_url=os.getenv("SUPABASE_LOG_ARCHIVE_URL", DEFAULT_ARCHIVE_URL),
