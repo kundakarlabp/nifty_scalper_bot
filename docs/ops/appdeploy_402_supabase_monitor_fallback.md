@@ -1,4 +1,13 @@
-# NIFTY monitoring when AppDeploy returns HTTP 402
+# Historical incident: AppDeploy HTTP 402 (relay retired)
+
+**Archived for diagnosis, not an operating procedure.** The five obsolete
+NIFTY AppDeploy relays were deleted on 23 October 2026. Do not restore or
+recreate them. For live operations, use the single-path
+[Lightsail + Supabase runbook](nifty_single_path_runbook.md).
+The retired relay should never be treated as the primary bot health check.
+
+---
+
 
 ## Verified diagnosis on 22 October 2026
 
