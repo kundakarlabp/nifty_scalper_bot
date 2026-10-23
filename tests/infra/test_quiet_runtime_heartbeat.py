@@ -15,6 +15,10 @@ def test_quiet_mode_is_distinct_from_runtime_failure() -> None:
     heartbeat = RuntimeHeartbeat(
         endpoint_url="https://test.invalid",
         health_reader=lambda: (200, {"status": "quiet", "blockers": ["auto_quiet"]}),
+        service_health_reader=lambda: {
+            "admin_http_responsive": True,
+            "streamlit_http_responsive": True,
+        },
         transport=send,
     )
     result = heartbeat.report_once()
@@ -22,3 +26,5 @@ def test_quiet_mode_is_distinct_from_runtime_failure() -> None:
     assert messages[0]["trading_status"] == "quiet"
     assert messages[0]["blockers"] == ["auto_quiet"]
     assert messages[0]["failure_reason"] is None
+    assert messages[0]["admin_http_responsive"] is True
+    assert messages[0]["streamlit_http_responsive"] is True

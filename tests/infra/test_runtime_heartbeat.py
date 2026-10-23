@@ -24,6 +24,10 @@ def _make_sender(status=200, health=None):
         endpoint_url="https://supabase.example/internal",
         transport=transport,
         health_reader=lambda: (status, health or {}),
+        service_health_reader=lambda: {
+            "admin_http_responsive": True,
+            "streamlit_http_responsive": False,
+        },
     )
     return sender, sent
 
@@ -64,6 +68,8 @@ def test_sanitized_healthy_payload_never_contains_account_secrets(monkeypatch):
         "failure_reason": None,
         "release_state": None,
         "release_updated_at": None,
+        "admin_http_responsive": True,
+        "streamlit_http_responsive": False,
     }
 
 
@@ -187,3 +193,85 @@ def test_supabase_monitoring_defaults_belong_to_git_not_host_env(monkeypatch, tm
     assert build_runtime_heartbeat() is None
     assert build_daily_log_archiver() is None
     assert build_supabase_trade_replicator(tmp_path / "trades.db") is None
+
+
+def test_local_operator_http_probes_are_fixed_and_do_not_redirect(monkeypatch):
+    """Only two fixed loopback URLs are allowed, even if the reply redirects."""
+    import requests
+
+    from nifty_scalper_bot.infra.runtime_heartbeat import _read_local_services
+
+    calls = []
+
+    class Response:
+        def __init__(self, status, payload):
+            self.status_code = status
+            self._payload = payload
+            self.text = payload if isinstance(payload, str) else ""
+
+        def json(self):
+            return self._payload
+
+    def fake_get(url, **kwargs):
+        calls.append((url, kwargs))
+        if url.endswith("/healthz"):
+            return Response(200, {"status": "ok", "token": "DO_NOT_LEAK"})
+        return Response(302, "ok")
+
+    monkeypatch.setattr(requests, "get", fake_get)
+    assert _read_local_services() == {
+        "admin_http_responsive": True,
+        "streamlit_http_responsive": False,
+    }
+    assert [call[0] for call in calls] == [
+        "http://127.0.0.1:8081/healthz",
+        "http://127.0.0.1:8501/_stcore/health",
+    ]
+    assert all(call[1] == {"timeout": 1.0, "allow_redirects": False} for call in calls)
+
+
+def test_local_operator_probes_fail_closed_independently(monkeypatch):
+    import requests
+
+    from nifty_scalper_bot.infra.runtime_heartbeat import _read_local_services
+
+    class Reply:
+        status_code = 200
+        text = "ok"
+
+    def fake_get(url, **_kwargs):
+        if ":8081" in url:
+            raise requests.Timeout("secret token")
+        return Reply()
+
+    monkeypatch.setattr(requests, "get", fake_get)
+    result = _read_local_services()
+    assert result == {
+        "admin_http_responsive": False,
+        "streamlit_http_responsive": True,
+    }
+    assert "secret" not in str(result)
+
+
+def test_service_probe_failure_does_not_block_engine_heartbeat():
+    sender, calls = _make_sender(health={"status": "quiet"})
+    sender.service_health_reader = lambda: (_ for _ in ()).throw(
+        RuntimeError("unsafe operator secret")
+    )
+    result = sender.report_once()
+    assert result["published"] is True
+    assert calls[0][1]["admin_http_responsive"] is None
+    assert calls[0][1]["streamlit_http_responsive"] is None
+    assert "unsafe" not in str(calls[0][1])
+
+
+def test_bad_service_field_values_never_leave_heartbeat():
+    sender, calls = _make_sender(health={"status": "quiet"})
+    sender.service_health_reader = lambda: {
+        "admin_http_responsive": "secret=DO_NOT_LEAK",
+        "streamlit_http_responsive": 1,
+    }
+    sender.report_once()
+    assert calls[0][1]["admin_http_responsive"] is None
+    assert calls[0][1]["streamlit_http_responsive"] is None
+    assert "DO_NOT_LEAK" not in str(calls[0][1])
