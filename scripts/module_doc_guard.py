@@ -1,7 +1,14 @@
 #!/usr/bin/env python3
-"""Check key module summaries and prevent interface/documentation drift in CI.
+"""Purpose: Enforce major module headers and changed-file documentation quality.
 
-Reads the architecture manifest; never imports production modules or contacts a broker.
+Responsibilities:
+- Validate manifest-listed runtime and operator module headers.
+- Require summaries for all changed production, dashboard, scripts and ops Python.
+- Compare covered callable interfaces with the PR base to catch header drift.
+- Check opening comments on changed deployment and CI workflow files.
+
+Boundaries: Static source inspection; no production imports or broker calls.
+Safety: Reports documentation omissions without generating unverified text.
 """
 
 from __future__ import annotations
@@ -18,6 +25,42 @@ ARCHITECTURE_DOCS = {
     "ARCHITECTURE_TRADING_PATH.md",
     "docs/TRADING_LIFECYCLE.md",
 }
+PYTHON_ROOTS = ("src/nifty_scalper_bot/", "dashboard/", "scripts/", "ops/")
+COMMENT_LABELS = ("File purpose:", "Key responsibilities:", "Operational constraints:")
+
+
+def documented_python_path(path: str) -> bool:
+    """Identify code files needing a header; exclude empty package stubs."""
+    return (
+        path.endswith(".py")
+        and not path.endswith("/__init__.py")
+        and path.startswith(PYTHON_ROOTS)
+    )
+
+
+def deployment_header_path(path: str) -> bool:
+    """Identify deployment files that require three labeled opening comments."""
+    return (
+        path in {"Dockerfile", "railway.toml"}
+        or (path.startswith("deploy/") and path.endswith((".sh", ".service")))
+        or (path.startswith(".github/workflows/") and path.endswith((".yml", ".yaml")))
+    )
+
+
+def comment_header_issue(path: str, source: str) -> str | None:
+    """Only comments at the beginning of a deployment file count as a header."""
+    opening: list[str] = []
+    for line in source.splitlines()[:24]:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            opening.append(line)
+            continue
+        break
+    content = "\n".join(opening)
+    missing = [label for label in COMMENT_LABELS if label not in content]
+    if missing:
+        return f"{path}: missing opening comment labels: {', '.join(missing)}"
+    return None
 
 
 def covered_modules(payload: dict[str, object]) -> set[str]:
@@ -34,7 +77,7 @@ def covered_modules(payload: dict[str, object]) -> set[str]:
             if isinstance(value, str) and value.endswith(".py"):
                 paths.add(value)
     paths.update(payload.get("module_documentation", []))
-    return {path for path in paths if path.startswith("src/") and path.endswith(".py")}
+    return {path for path in paths if documented_python_path(path)}
 
 
 def module_doc(source: str) -> str:
@@ -149,19 +192,24 @@ def check(root: Path, *, base: str | None = None) -> list[str]:
 
     changed = git_changed(root, base)
     for path in sorted(changed):
-        if not (path.startswith("src/nifty_scalper_bot/") and path.endswith(".py")):
-            continue
         file = root / path
         if not file.is_file():
             continue
-        after = file.read_text(encoding="utf-8")
-        before = git_read(root, base, path)
-        if before is None:
-            problem = header_issue(path, after)
-            if problem and path not in tracked:
+        if deployment_header_path(path):
+            problem = comment_header_issue(path, file.read_text(encoding="utf-8"))
+            if problem:
                 problems.append(problem)
             continue
+        if not documented_python_path(path):
+            continue
+        after = file.read_text(encoding="utf-8")
         if path not in tracked:
+            problem = header_issue(path, after)
+            if problem:
+                problems.append(problem)
+            continue
+        before = git_read(root, base, path)
+        if before is None:
             continue
         try:
             changed_api = api_inventory(before) != api_inventory(after)

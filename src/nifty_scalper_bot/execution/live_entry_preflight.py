@@ -1,8 +1,12 @@
-"""Live-entry preflight guard for broker and market truth.
+"""Purpose: Validate broker-backed entry readiness and quote evidence.
 
-This module is deliberately side-effect free. Runtime patching lives in
-``core.live_entry_preflight_safety`` so tests and tools can evaluate the guard
-without importing the full application.
+Responsibilities:
+- SelectedOptionProof captures selected-contract quote and history readiness.
+- evaluate_live_entry_preflight reports explicit readiness blockers.
+- quote_timestamp_source_acceptable checks timestamp source quality.
+
+Boundaries: Pure evaluator; does not change runtime or place an order.
+Safety: Synthetic or unreliable timestamps cannot become fresh broker proof.
 """
 
 from __future__ import annotations

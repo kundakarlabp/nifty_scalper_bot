@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from scripts import module_doc_guard as guard
@@ -72,3 +73,74 @@ def test_all_real_critical_modules_have_informative_headers() -> None:
     root = Path(__file__).resolve().parents[2]
     issues = guard.check(root)
     assert not issues, "\n".join(issues)
+
+
+def _temporary_manifest(root: Path) -> None:
+    path = root / "docs/architecture/agent_manifest.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"runtime_path": [], "owners": []}), encoding="utf-8")
+
+
+def test_existing_untracked_runtime_edit_requires_header(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _temporary_manifest(tmp_path)
+    path = "src/nifty_scalper_bot/risk/new_policy.py"
+    file = tmp_path / path
+    file.parent.mkdir(parents=True)
+    file.write_text('"""Short."""\n\nvalue = 1\n', encoding="utf-8")
+    monkeypatch.setattr(guard, "git_changed", lambda *_: {path})
+    assert any(path in issue for issue in guard.check(tmp_path, base="main"))
+
+
+def test_changed_dashboard_file_with_header_passes(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _temporary_manifest(tmp_path)
+    path = "dashboard/example.py"
+    file = tmp_path / path
+    file.parent.mkdir(parents=True)
+    file.write_text(
+        '"""Purpose: Describe operator-only dashboard observability here.\n'
+        "\nResponsibilities: Render read-only runtime state summaries.\n"
+        'Boundaries: No broker submissions or trading decision authority.\n"""\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(guard, "git_changed", lambda *_: {path})
+    assert guard.check(tmp_path, base="main") == []
+
+
+def test_changed_deployment_asset_requires_opening_labels(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _temporary_manifest(tmp_path)
+    path = "deploy/scripts/run_release.sh"
+    file = tmp_path / path
+    file.parent.mkdir(parents=True)
+    file.write_text("#!/usr/bin/env bash\n# release script\ntrue\n", encoding="utf-8")
+    monkeypatch.setattr(guard, "git_changed", lambda *_: {path})
+    assert any("File purpose:" in issue for issue in guard.check(tmp_path, base="main"))
+    file.write_text(
+        "#!/usr/bin/env bash\n# File purpose: Start a release.\n"
+        "# Key responsibilities: Validate and restart.\n"
+        "# Operational constraints: Do not bypass broker-safe checks.\n"
+        "true\n",
+        encoding="utf-8",
+    )
+    assert guard.check(tmp_path, base="main") == []
+
+
+def test_coverage_expands_to_dashboard_and_tools() -> None:
+    payload = {
+        "module_documentation": [
+            "dashboard/superlite_console.py",
+            "scripts/module_doc_guard.py",
+        ]
+    }
+    assert guard.covered_modules(payload) == {
+        "dashboard/superlite_console.py",
+        "scripts/module_doc_guard.py",
+    }

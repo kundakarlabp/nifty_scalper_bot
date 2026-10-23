@@ -1,10 +1,12 @@
-"""Canonical arbitration for NIFTY underlying direction.
+"""Purpose: Arbitrate underlying NIFTY direction from fresh market evidence.
 
-Option-premium data may trigger a setup but must never authorize NIFTY direction.
-Only fresh spot/futures observations participate. Futures is the primary
-price-discovery source when both underlying sources agree; spot is confirmation.
-Any fresh disagreement remains fail-closed. This treats opposing underlying
-views as a transition/reversal warning instead of forcing a CE/PE decision.
+Responsibilities:
+- UnderlyingDirectionObservation binds source, age, confidence and direction.
+- arbitrate_underlying_direction resolves spot/futures observations.
+- UnderlyingDirectionResolution identifies confirmation or transition.
+
+Boundaries: Option price momentum is setup evidence, never direction authority.
+Safety: Missing, stale or conflicting fresh underlying views fail closed.
 """
 
 from __future__ import annotations

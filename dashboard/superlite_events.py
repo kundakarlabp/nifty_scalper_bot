@@ -1,4 +1,13 @@
-"""Low-overhead parsing of actionable Nifty bot journal events."""
+"""Purpose: Parse engine journal lines into a compact operator event feed.
+
+Responsibilities:
+- parse_event extracts timestamps, event types and structured detail fields.
+- deduplicate_events and filter_events prepare bounded event views.
+- csv_bytes exports selected rows with credential redaction.
+
+Boundaries: Parsed logs are observations, not canonical trade state.
+Safety: Keep secrets redacted and preserve distinctions for hard errors.
+"""
 from __future__ import annotations
 
 import csv

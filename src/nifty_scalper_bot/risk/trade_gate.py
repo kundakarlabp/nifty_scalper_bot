@@ -1,4 +1,13 @@
-"""Trade gate before sizing/execution."""
+"""Purpose: Apply the high-level admission gate for BUY decisions.
+
+Responsibilities:
+- TradeGate.evaluate checks pause, market session, arming and preflight state.
+- GateResult returns an allowed flag plus a reason and supporting detail.
+- Daily loss and other provided risk state participate in entry decisions.
+
+Boundaries: Does not size the order, query broker state or submit an order.
+Safety: Missing/failed live preflight evidence cannot count as approval.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass

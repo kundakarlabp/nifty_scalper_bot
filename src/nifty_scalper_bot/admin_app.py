@@ -1,21 +1,12 @@
-"""Standalone admin dashboard ASGI app.
+"""Purpose: Serve the isolated Lightsail admin-control ASGI process.
 
-The dashboard and the trading engine previously ran in ONE uvicorn process,
-sharing a single asyncio event loop (the engine runs as a lifespan task on the
-same loop). On the memory-tight host, engine CPU/loop load and swap pressure
-gradually starved the shared loop until the dashboard stopped responding —
-"works for a while, then hangs".
+Responsibilities:
+- Expose admin routes independently from the engine event loop.
+- Offer a minimal health endpoint for its systemd service.
+- Route operator requests to the existing admin-dashboard API handlers.
 
-This entrypoint serves ONLY the admin router, which is filesystem-only — it
-touches ``.env``, journald, git and systemctl, and imports no engine objects.
-Run it as its own service so the dashboard is fully isolated and stays
-responsive no matter how busy the engine is:
-
-    uvicorn nifty_scalper_bot.admin_app:app --host 0.0.0.0 --port 8081
-
-Token entry / mode changes are written to ``.env``; the engine (a separate
-service) reads them on its next restart, which the dashboard's Restart/Update
-buttons trigger.
+Boundaries: No strategy loop, market feed or independent broker orders.
+Safety: A working admin page is not proof of trading readiness.
 """
 
 from __future__ import annotations

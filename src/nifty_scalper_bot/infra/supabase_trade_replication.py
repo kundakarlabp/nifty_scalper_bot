@@ -1,8 +1,12 @@
-"""Off-hot-path replication of canonical trade observability to Supabase.
+"""Purpose: Replicate committed trade observations to optional Supabase storage.
 
-SQLite remains the source of truth. This module owns no execution state and no
-event queue; it periodically reads committed TradeJournal rows and advances one
-local checkpoint only after the remote batch is acknowledged.
+Responsibilities:
+- build_supabase_trade_replicator configures the bounded optional remote sink.
+- SupabaseTradeReplicator.replicate_once ships journal and ledger batches.
+- Persist checkpoints only after acknowledged replication.
+
+Boundaries: Local SQLite journal owns truth; Supabase is observability only.
+Safety: Replication failure cannot create orders or alter broker exposure.
 """
 
 from __future__ import annotations

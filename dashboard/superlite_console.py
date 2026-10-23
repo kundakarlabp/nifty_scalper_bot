@@ -1,4 +1,13 @@
-"""Read-only, bounded and low-overhead Streamlit review console."""
+"""Purpose: Render the low-memory read-only Streamlit operations console.
+
+Responsibilities:
+- status_snapshot and recent_events fetch bounded observations.
+- render shows readiness, engine health, P&L summaries and event feed.
+- Display labels distinguish missing evidence from confirmed broker state.
+
+Boundaries: Console does not run strategy, orders or release activation.
+Safety: A responsive UI is not proof that the live trading engine is ready.
+"""
 from __future__ import annotations
 
 import html

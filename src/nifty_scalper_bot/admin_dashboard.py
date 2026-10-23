@@ -1,13 +1,12 @@
-"""Browser admin dashboard for non-technical operation on the Lightsail VM.
+"""Purpose: Expose daily broker authentication and operational admin controls.
 
-The daily Zerodha session flow is deliberately small and canonical:
-- open the official Kite login from this dashboard;
-- Zerodha redirects the browser back here with request_token when the app redirect
-  URL is configured to /admin/kite/callback;
-- exchange request_token for access_token, verify it, persist aliases, restart.
+Responsibilities:
+- Provide Kite request-token callback, token entry and mode operations.
+- Serve sanitized runtime overview, logs and research-status endpoints.
+- Route GitHub-update/restart requests through service-control owners.
 
-A paste fallback accepts either the raw request token or the complete redirect URL.
-The dashboard never collects or stores the Zerodha login password or TOTP secret.
+Boundaries: The release runner and engine retain execution authority.
+Safety: Do not collect Kite passwords/TOTP or bypass broker release safeguards.
 """
 
 # Embedded HTML/CSS/JS assets have intentional long literal lines.
