@@ -360,7 +360,6 @@ def test_ofi_reversal_holdoff_does_not_modify_nonlive_confirmation(
     assert recovered.metadata["effective_context_alignment"] is True
 
 
-
 def test_adaptive_holdoff_requires_complete_flow_and_strong_same_side_depth(
     monkeypatch,
 ) -> None:
