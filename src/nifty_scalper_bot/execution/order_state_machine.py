@@ -1,4 +1,13 @@
-"""Execution state machine to prevent duplicate and invalid order flows."""
+"""Purpose: Enforce valid per-symbol order/position lifecycle transitions.
+
+Responsibilities:
+- ExecutionState enumerates idle, signal, order and position phases.
+- OrderStateMachine validates allowed transitions and pending-order tracking.
+- Reject duplicate or out-of-sequence state transitions.
+
+Boundaries: Local transition model; broker order history remains external truth.
+Safety: Timeouts/unknown states cannot be promoted to confirmed fills.
+"""
 
 from __future__ import annotations
 

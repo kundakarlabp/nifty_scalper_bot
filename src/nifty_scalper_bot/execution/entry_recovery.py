@@ -1,8 +1,12 @@
-"""Bounded recovery for the authoritative runner-facing entry path.
+"""Purpose: Recover bounded entry failures in the existing order-manager path.
 
-Wraps existing OrderManager methods without replacing the class. Recovery stays
-bounded, reconciles uncertain broker outcomes before retrying, keeps quantities
-whole-lot, and protects partial entry fills.
+Responsibilities:
+- Classify failures via broker_recovery recovery decisions and action limits.
+- Revalidate fresh quotes, available size and whole-lot quantities before retry.
+- Reconcile uncertain responses and preserve any partial-fill exposure.
+
+Boundaries: Wrap existing OrderManager operations; no new independent entry route.
+Safety: Never retry ambiguous broker outcomes before reconciliation.
 """
 
 from __future__ import annotations

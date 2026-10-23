@@ -1,9 +1,13 @@
-"""Production ready Zerodha Kite REST and websocket clients.
+"""Purpose: Adapt Zerodha Kite REST and WebSocket broker interfaces.
 
-Runtime role:
-- Low-level Zerodha REST adapter for instruments, quotes, orders, and history.
-- Provides broker data to owner modules.
-- Must not own live contract selection."""
+Responsibilities:
+- ZerodhaKiteClient owns low-level session, instrument, quote and order APIs.
+- Historical-data and market-data requests return broker-derived observations.
+- Transport normalization and retry/cache behavior are broker-boundary details.
+
+Boundaries: InstrumentManager owns contract selection; execution owners approve orders.
+Safety: Transport acknowledgments are not fills, and cached data is not fresh proof.
+"""
 
 from __future__ import annotations
 
