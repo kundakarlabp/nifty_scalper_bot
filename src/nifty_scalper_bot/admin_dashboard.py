@@ -169,11 +169,44 @@ def _verify_access_token(api_key: str, access_token: str) -> tuple[bool, str]:
 
 
 def _activate_access_token(access_token: str) -> ControlResult:
+    """Persist verified token, then queue restart with a bounded rotation proof."""
     _write_env({
         "KITE_ACCESS_TOKEN": access_token,
         "ZERODHA_ACCESS_TOKEN": access_token,
         "BROKER_ACCESS_TOKEN": access_token,
     })
+    # Ordinary restart markers never authorize an old-authentication bypass.
+    # The broker's /user/profile was verified immediately before this call.
+    import tempfile
+
+    proof_dir = Path(
+        os.getenv("NIFTYBOT_CONFIG_DIR", "/home/ubuntu/.config/niftybot")
+    )
+    proof_file = proof_dir / "auto_release_verified_token_rotation"
+    if not proof_dir.is_dir() or proof_dir.is_symlink() or proof_file.is_symlink():
+        return ControlResult(False, "restart_bot", "token proof location unavailable")
+    try:
+        fd, temporary = tempfile.mkstemp(prefix=".verified-token.", dir=proof_dir)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as target:
+                json.dump(
+                    {
+                        "token_sha256": hashlib.sha256(
+                            access_token.encode("utf-8")
+                        ).hexdigest(),
+                        "verified_at": time.time(),
+                    },
+                    target,
+                )
+                target.flush()
+                os.fsync(target.fileno())
+            os.chmod(temporary, 0o600)
+            os.replace(temporary, proof_file)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+    except OSError:
+        return ControlResult(False, "restart_bot", "token proof could not be stored")
     return _restart_service()
 
 
@@ -315,8 +348,8 @@ def _flash(request: Request) -> str:
     if q.get("restart") == "queued":
         return (
             '<div class="flash ok">Validated bot restart queued. '
-            "Deployment no longer waits for a flat broker account; "
-            "open-position management may be interrupted. "
+            "Restart waits for verified flat broker positions and terminal orders; "
+            "protective position management must not be interrupted. "
             "Queued does not mean completed.</div>"
         )
     if q.get("restart") == "err":
