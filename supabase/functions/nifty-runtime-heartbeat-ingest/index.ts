@@ -51,6 +51,17 @@ Deno.serve(async (req: Request) => {
     ? body.blockers.slice(0, 20).map(clean).filter((x): x is string => x !== null)
     : [];
 
+  // Backward-compatible: old heartbeat clients omit these two fields.
+  // Never accept strings/numbers as proof that a local service is reachable.
+  const operatorStatus = (value: unknown): boolean | null =>
+    typeof value === "boolean" ? value : null;
+  for (const field of ["admin_http_responsive", "streamlit_http_responsive"]) {
+    if (body[field] !== undefined && body[field] !== null &&
+        typeof body[field] !== "boolean") {
+      return respond({ ok: false, error: "invalid_operator_service_status" }, 400);
+    }
+  }
+
   const url = Deno.env.get("SUPABASE_URL") ?? "";
   const key = serviceKey();
   if (!url || !key) return respond({ ok: false, error: "server_configuration_missing" }, 500);
@@ -65,6 +76,8 @@ Deno.serve(async (req: Request) => {
     blockers,
     failure_reason: clean(body.failure_reason),
     release_state: clean(body.release_state),
+    admin_http_responsive: operatorStatus(body.admin_http_responsive),
+    streamlit_http_responsive: operatorStatus(body.streamlit_http_responsive),
     release_updated_at: typeof body.release_updated_at === "string" &&
       Number.isFinite(Date.parse(body.release_updated_at)) &&
       Date.parse(body.release_updated_at) <= Date.now() + 300000

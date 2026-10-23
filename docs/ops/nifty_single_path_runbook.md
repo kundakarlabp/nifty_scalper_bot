@@ -72,6 +72,43 @@ defaults. Local development without a production profile still supports its
 historic `.env` discovery. This is not a credential migration and never
 deletes or rewrites existing host settings.
 
+
+## Remote operator-service liveness (Phase 6)
+
+The existing `RuntimeHeartbeat` reporter checks two **fixed loopback
+addresses** during its off-trading-hot-path 120-second Supabase update:
+`127.0.0.1:8081/healthz` for the independent admin process and
+`127.0.0.1:8501/_stcore/health` for Streamlit. Both require the expected
+HTTP 200 response body and do not follow redirects. No new daemon, token,
+gateway, public firewall port, AppDeploy relay, or control RPC is involved.
+
+The same private `nifty-runtime-heartbeat-ingest` receiver accepts only
+booleans or null for `admin_http_responsive` and
+`streamlit_http_responsive`, and saves them alongside the existing engine
+SHA, release status and market-session state. Missing values from old
+releases remain **null / unknown**, not false. The two nullable columns
+are added by the versioned Supabase migration in this repository. The
+migration and backward-compatible Edge receiver must be present before
+deploying the new sender on Lightsail; otherwise monitoring should fail
+closed without affecting order execution.
+
+Read-only verification:
+
+```sql
+select received_at, build_sha, release_state, trading_status,
+       admin_http_responsive, streamlit_http_responsive
+from public.nifty_runtime_heartbeat
+order by received_at desc
+limit 1;
+```
+
+`false` means the specific HTTP service did not respond correctly **from
+Lightsail localhost** during the probe. It is not evidence of a public
+network outage. `true` proves only that service's local HTTP liveness,
+not broker authentication, safe LIVE entry authorization or externally
+accessible UI. `null` means missing/invalid/not-yet-upgraded evidence.
+The `received_at` timestamp must be fresh before interpreting any status.
+
 ## GitHub-owned telemetry defaults
 
 Supabase monitoring policy and nonsecret Edge ingestion URLs now live in
