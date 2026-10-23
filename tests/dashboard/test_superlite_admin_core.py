@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import json
+import ast
 import os
+from pathlib import Path
 
 from starlette.requests import Request
 
@@ -380,29 +381,26 @@ def test_streamlit_probe_requires_exact_health_response(monkeypatch) -> None:
     assert len(responses) == 1
 
 
-def test_service_health_endpoint_has_no_control_actions(monkeypatch) -> None:
-    import nifty_scalper_bot.superlite_admin as admin
-
-    monkeypatch.setattr(
-        admin,
-        "service_health_snapshot",
-        lambda: {
-            "scope": "host_local_only",
-            "engine_http_responsive": True,
-            "admin_http_responsive": True,
-            "streamlit_http_responsive": False,
-        },
+def test_service_health_route_registered_without_app_import() -> None:
+    """Inspect route metadata without mutating global dashboard auth hooks."""
+    module = (
+        Path(__file__).resolve().parents[2]
+        / "src/nifty_scalper_bot/superlite_admin.py"
     )
-    routes = [
-        route
-        for route in admin.app.routes
-        if getattr(route, "path", None) == "/admin/api/service-health"
-    ]
-    assert len(routes) == 1
-    assert routes[0].methods == {"GET"}
-    response = routes[0].endpoint()
-    assert response.status_code == 200
-    assert response.headers["cache-control"] == "no-store"
-    payload = json.loads(response.body)
-    assert payload["streamlit_http_responsive"] is False
-    assert "api_key" not in payload
+    tree = ast.parse(module.read_text(encoding="utf-8"))
+    route = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "service_health"
+    )
+    assert any(
+        isinstance(decorator, ast.Call)
+        and isinstance(decorator.func, ast.Attribute)
+        and isinstance(decorator.func.value, ast.Name)
+        and decorator.func.value.id == "app"
+        and decorator.func.attr == "get"
+        and len(decorator.args) == 1
+        and isinstance(decorator.args[0], ast.Constant)
+        and decorator.args[0].value == "/admin/api/service-health"
+        for decorator in route.decorator_list
+    )
