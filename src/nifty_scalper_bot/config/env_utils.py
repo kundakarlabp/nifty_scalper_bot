@@ -213,6 +213,19 @@ def normalise_live_env_defaults() -> None:
     if production_default_live:
         _persist_production_live_defaults(defaults)
 
+    # Explicit operator-approved SMC admission for LIVE Lightsail only.
+    # This grants no entry by itself: the existing setup-keyed two-book
+    # validator, adverse-flow veto, cost/risk and broker checks still apply.
+    # A persisted explicit 'false' remains the rollback/opt-out control.
+    if _is_lightsail_production() and live_requested:
+        setdefault_env("SMC_SUSTAINED_FLOW_CONFIRMATION_ENABLED", "true")
+        LOGGER.warning(
+            "SMC_SUSTAINED_FLOW_ADMISSION_CONFIG enabled=%s mode=%s "
+            "platform=aws_lightsail",
+            truthy(os.getenv("SMC_SUSTAINED_FLOW_CONFIRMATION_ENABLED")),
+            os.getenv("EXECUTION_MODE"),
+        )
+
     if live_requested:
         # Canonical live risk envelope. Accepted aliases are synchronized here
         # so stale deployment values cannot silently change per-trade risk.
