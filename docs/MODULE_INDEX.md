@@ -4,7 +4,7 @@
 
 This navigation index is derived from the authoritative [architecture manifest](architecture/agent_manifest.json) and each module's opening docstring. It does not define runtime ownership or replace [the trading lifecycle](TRADING_LIFECYCLE.md).
 
-**Documented critical modules:** 55
+**Documented critical modules:** 57
 
 ## `dashboard/`
 
@@ -33,6 +33,8 @@ This navigation index is derived from the authoritative [architecture manifest](
 | [`admin_app.py`](../src/nifty_scalper_bot/admin_app.py) | Serve the isolated Lightsail admin-control ASGI process. |
 | [`admin_dashboard.py`](../src/nifty_scalper_bot/admin_dashboard.py) | Expose daily broker authentication and operational admin controls. |
 | [`main.py`](../src/nifty_scalper_bot/main.py) | Host the production FastAPI process and its trading runtime lifecycle. |
+| [`superlite_admin.py`](../src/nifty_scalper_bot/superlite_admin.py) | Host the isolated operator admin API independently of trading. |
+| [`superlite_admin_core.py`](../src/nifty_scalper_bot/superlite_admin_core.py) | Provide bounded status and filesystem access for isolated admin UI. |
 
 ## `src/nifty_scalper_bot/config/`
 

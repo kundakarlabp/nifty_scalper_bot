@@ -56,6 +56,8 @@
     "src/nifty_scalper_bot/risk/net_rr_gate.py",
     "src/nifty_scalper_bot/risk/trade_gate.py",
     "src/nifty_scalper_bot/streaming/websocket_manager.py",
+    "src/nifty_scalper_bot/superlite_admin.py",
+    "src/nifty_scalper_bot/superlite_admin_core.py",
     "src/nifty_scalper_bot/utils/market_hours.py"
   ],
   "owners": [

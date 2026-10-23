@@ -1,4 +1,13 @@
-"""Independent low-overhead host for the existing Nifty admin controls."""
+"""Purpose: Host the isolated operator admin API independently of trading.
+
+Responsibilities:
+- Serve existing admin control routes and bounded diagnostic endpoints.
+- Expose cached host-local liveness for engine, admin and Streamlit services.
+- Preserve requested release validation and operator authentication handling.
+
+Boundaries: The admin process does not place broker orders or own execution.
+Safety: Liveness proof is not market readiness or external accessibility proof.
+"""
 from __future__ import annotations
 
 import os
@@ -18,6 +27,7 @@ from nifty_scalper_bot.superlite_admin_core import (
     bounded_logs,
     read_env,
     same_origin,
+    service_health_snapshot,
     status_snapshot,
     write_env,
 )
@@ -119,6 +129,14 @@ def root() -> RedirectResponse:
 @app.get("/healthz")
 def healthz() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/admin/api/service-health")  # type: ignore[untyped-decorator]
+def service_health() -> JSONResponse:
+    """Lightweight allowlisted host-local liveness for the operator console."""
+    return JSONResponse(
+        service_health_snapshot(), headers={"Cache-Control": "no-store"}
+    )
 
 
 @app.get("/admin/api/status")

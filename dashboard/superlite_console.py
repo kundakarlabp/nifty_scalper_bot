@@ -1,7 +1,7 @@
 """Purpose: Render the low-memory read-only Streamlit operations console.
 
 Responsibilities:
-- status_snapshot and recent_events fetch bounded observations.
+- status_snapshot, service_health_snapshot and recent_events fetch bounded data.
 - render shows readiness, engine health, P&L summaries and event feed.
 - Display labels distinguish missing evidence from confirmed broker state.
 
@@ -98,6 +98,12 @@ def _post(path: str) -> tuple[bool, str]:
 @st.cache_data(ttl=STATUS_TTL, show_spinner=False)
 def status_snapshot() -> dict:
     return _get_json("/admin/api/status")
+
+
+@st.cache_data(ttl=STATUS_TTL, show_spinner=False)
+def service_health_snapshot() -> dict:
+    """Read only independent host-local HTTP liveness, not trading readiness."""
+    return _get_json("/admin/api/service-health")
 
 
 @st.cache_data(ttl=EVENT_TTL, show_spinner=False)
@@ -236,6 +242,7 @@ ops[3].caption(
 
 def render() -> None:
     status = status_snapshot()
+    services = service_health_snapshot()
     rows_all = recent_events()
     rows = filter_events(rows_all, event_type, query)
     if trade_only:
@@ -297,6 +304,15 @@ def render() -> None:
     st.download_button("Download current filtered events", csv_bytes(rows), file_name=f"niftybot-events-{datetime.now(IST):%Y%m%d-%H%M}.csv", mime="text/csv", width="stretch")
     with st.expander("Hardening install proof", expanded=False):
         st.json({"display": proof_status, "install_proof": proof})
+    with st.expander("Service liveness (host-local)", expanded=False):
+        if services:
+            st.json(services)
+            st.caption(
+                "Local HTTP liveness does not verify public firewall reachability "
+                "or broker/trading readiness."
+            )
+        else:
+            st.warning("Admin service probe unavailable; liveness is unknown.")
     with st.expander("Technical status", expanded=False):
         st.json(status)
 

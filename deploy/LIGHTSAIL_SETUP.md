@@ -78,6 +78,16 @@ Admin fallback:     http://LIGHTSAIL_STATIC_IP:8080/admin
 The operations console is read-only. Historical journal scans run only after the
 **Generate download** button is pressed. Live fragments never scan historical logs.
 
+The independent admin process also exposes
+`/admin/api/service-health` on port `8081`, and Streamlit's
+**Service liveness (host-local)** section displays the result. It checks
+engine `/livez`, the responding admin process, and Streamlit
+`/_stcore/health` without invoking broker APIs. A green local probe does
+**not** prove that the public firewall, proxy or external browser can reach
+that service, and it does not mean LIVE entries are armed. Supabase's
+existing runtime heartbeat remains an independent engine/release monitor,
+not an admin/Streamlit availability assertion.
+
 ## Entering broker credentials
 
 Use the admin dashboard or edit the external environment file:
