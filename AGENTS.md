@@ -87,6 +87,22 @@ Before a non-trivial edit:
 
 Prefer existing owners/public interfaces. Do not add helpers, wrappers, compatibility layers, dependencies, or managers unless the requested behavior cannot be expressed cleanly through the existing architecture.
 
+## Source and lifecycle documentation rule
+
+Before editing a major runtime module, read its opening module docstring and
+[documentation policy](docs/MODULE_DOCUMENTATION.md). After changing its API,
+functions, responsibilities or safety semantics, revise that header in the same
+PR. Review [lifecycle guide](docs/TRADING_LIFECYCLE.md), the canonical
+`ARCHITECTURE_TRADING_PATH.md`, deployment runbooks and the manifest when
+the corresponding lifecycle/ownership/operations contract changes. For purely
+internal implementation edits where the summary remains accurate, record that
+review in the PR template rather than making a meaningless header change.
+
+The manifest-driven `scripts/module_doc_guard.py` runs in the single
+`agent_task.py` validation façade and in draft/final CI. It enforces header
+coverage and callable-interface/header changes; human reviewers must verify
+semantic accuracy. Do not auto-generate fabricated descriptions from names.
+
 ## Validation
 
 Use the single public agent façade rather than hand-building validation commands:
