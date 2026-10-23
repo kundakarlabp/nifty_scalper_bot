@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from scripts.agent_check import E2E_COMMAND, build
+from scripts.agent_check import build, E2E_COMMAND
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -12,7 +12,9 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def test_focused_validation_separates_simulated_runtime_tests() -> None:
     plan = build(ROOT, ["src/nifty_scalper_bot/risk/risk_manager.py"])
-    focus = [command for command in plan.commands if command.startswith("python -m pytest")]
+    focus = [
+        command for command in plan.commands if command.startswith("python -m pytest")
+    ]
     assert E2E_COMMAND in focus
     mixed = [command for command in focus if command != E2E_COMMAND]
     assert mixed
