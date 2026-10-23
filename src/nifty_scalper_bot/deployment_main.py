@@ -43,6 +43,7 @@ else:
     # Quiet mode still publishes a small health heartbeat to Supabase; the
     # trading engine remains unloaded and no broker endpoints are invoked.
     import asyncio
+    from collections.abc import AsyncIterator
     from contextlib import asynccontextmanager, suppress
 
     from nifty_scalper_bot.admin_dashboard import router as admin_router
@@ -51,7 +52,7 @@ else:
     )
 
     @asynccontextmanager
-    async def quiet_lifespan(_app: FastAPI):
+    async def quiet_lifespan(_app: FastAPI) -> AsyncIterator[None]:
         heartbeat_task = start_runtime_heartbeat_task()
         try:
             yield
