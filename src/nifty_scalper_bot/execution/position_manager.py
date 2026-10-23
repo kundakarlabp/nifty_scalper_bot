@@ -1,7 +1,16 @@
 # fmt: off
 # ruff: noqa: E501,I001,F841
 # mypy: ignore-errors
-"""Position and order state tracking for the scalper bot."""
+"""Purpose: Track broker orders, confirmed positions and local exposure lifecycle.
+
+Responsibilities: PositionManager maintains pending/terminal order state,
+reconciles broker snapshots with local positions and persists recovery state.
+Key interfaces: PositionManager and broker order/position reconciliation helpers.
+Boundaries: OrderManager submits orders; BracketManager chooses protective exits;
+position bookkeeping must not create independent entry or stop decisions.
+Safety: Requested/acknowledged quantity is not a fill. Unknown, partial or
+rejected exposure remains explicit until broker state is reconciled.
+"""
 
 from __future__ import annotations
 
