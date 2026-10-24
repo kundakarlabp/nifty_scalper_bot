@@ -64,6 +64,7 @@ from typing import (
 from nifty_scalper_bot.utils.log_throttle import log_throttled as log_throttled_live
 from nifty_scalper_bot.utils.logging import get_logger
 from nifty_scalper_bot.utils.symbols import normalize_symbol
+from nifty_scalper_bot.execution.exchange_stop_proof import verify_exchange_stop_order
 from nifty_scalper_bot.execution.position_snapshot import (
     PositionSnapshot,
     PositionSnapshotError,
@@ -5277,26 +5278,16 @@ class BracketManager:
             )
             evidence = {}
         status = str(evidence.get("status") or "").strip().upper()
-        try:
-            broker_qty = int(evidence["quantity"])
-        except (KeyError, TypeError, ValueError, OverflowError):
-            broker_qty = None
-        confirmed = (
-            status in {"OPEN", "TRIGGER PENDING"}
-            and broker_qty is not None
-            and broker_qty == requested_qty
-            and requested_qty > 0
-        )
-        reason = (
-            None
-            if confirmed
-            else (
-                "broker_stop_quantity_unverified"
-                if broker_qty is None and status in {"OPEN", "TRIGGER PENDING"}
-                else "broker_stop_quantity_mismatch"
-                if status in {"OPEN", "TRIGGER PENDING"}
-                else f"broker_stop_status_unverified:{status or 'UNKNOWN'}"
-            )
+        broker_qty = evidence.get("quantity")
+        confirmed, reason = verify_exchange_stop_order(
+            evidence,
+            order_id=order_id,
+            symbol=bracket.symbol,
+            entry_side=bracket.side,
+            product=bracket.product,
+            quantity=requested_qty,
+            trigger_price=bracket.exchange_stop_trigger_price,
+            limit_price=bracket.exchange_stop_limit_price,
         )
         with self._lock:
             if str(bracket.exchange_stop_order_id or "") != order_id:
@@ -5633,7 +5624,7 @@ class BracketManager:
             bracket.updated_at = time.time()
         if modified:
             LOGGER.info(
-                "EXCHANGE_PROTECTIVE_STOP_RATCHETED order_id=%s symbol=%s "
+                "EXCHANGE_PROTECTIVE_STOP_MODIFY_SUBMITTED order_id=%s symbol=%s "
                 "trigger=%s limit=%s count=%s/%s",
                 order_id,
                 bracket.symbol,
@@ -5642,7 +5633,7 @@ class BracketManager:
                 modify_count + 1,
                 max_modifications,
                 extra={
-                    "event": "EXCHANGE_PROTECTIVE_STOP_RATCHETED",
+                    "event": "EXCHANGE_PROTECTIVE_STOP_MODIFY_SUBMITTED",
                     "order_id": order_id,
                     "symbol": bracket.symbol,
                     "trigger_price": trigger,
@@ -5652,6 +5643,17 @@ class BracketManager:
                 },
             )
         confirmed = self._confirm_exchange_protective_stop(bracket) if modified else False
+        if confirmed:
+            LOGGER.info(
+                "EXCHANGE_PROTECTIVE_STOP_RATCHET_CONFIRMED order_id=%s symbol=%s",
+                order_id,
+                bracket.symbol,
+                extra={
+                    "event": "EXCHANGE_PROTECTIVE_STOP_RATCHET_CONFIRMED",
+                    "order_id": order_id,
+                    "symbol": bracket.symbol,
+                },
+            )
         with suppress(Exception):
             self.save_state()
         return confirmed

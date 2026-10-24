@@ -4,7 +4,7 @@
 
 This navigation index is derived from the authoritative [architecture manifest](architecture/agent_manifest.json) and each module's opening docstring. It does not define runtime ownership or replace [the trading lifecycle](TRADING_LIFECYCLE.md).
 
-**Documented critical modules:** 58
+**Documented critical modules:** 59
 
 ## `dashboard/`
 
@@ -77,6 +77,7 @@ This navigation index is derived from the authoritative [architecture manifest](
 | [`bracket_manager.py`](../src/nifty_scalper_bot/execution/bracket_manager.py) | Provide the stable public API for the canonical bracket and exit lifecycle. |
 | [`broker_recovery.py`](../src/nifty_scalper_bot/execution/broker_recovery.py) | Classify broker failures and recommend bounded recovery. |
 | [`entry_recovery.py`](../src/nifty_scalper_bot/execution/entry_recovery.py) | Recover bounded entry failures in the existing order-manager path. |
+| [`exchange_stop_proof.py`](../src/nifty_scalper_bot/execution/exchange_stop_proof.py) | Verify exchange-resident stop coverage against broker order truth. |
 | [`exit_router.py`](../src/nifty_scalper_bot/execution/exit_router.py) | Route broker exit attempts under session and product rules. |
 | [`hardened_adaptive_trailing.py`](../src/nifty_scalper_bot/execution/hardened_adaptive_trailing.py) | Safety-hardened adaptive trailing controller. |
 | [`ledger_bracket_manager.py`](../src/nifty_scalper_bot/execution/ledger_bracket_manager.py) | Keep the protective bracket lifecycle tied to durable fill evidence. |
