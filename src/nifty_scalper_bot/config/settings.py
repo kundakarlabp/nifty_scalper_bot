@@ -3,7 +3,7 @@
 Responsibilities:
 - Settings groups execution, risk, streaming and instrument options.
 - get_settings exposes the runtime facade over configured inputs.
-- Centralize effective defaults and environment parsing for consumers.
+- Centralize effective defaults, environment parsing and safe startup provenance.
 
 Boundaries: Configuration does not itself authorize a live order.
 Safety: Final LIVE-mode and risk authorization remain with owning gates.
@@ -61,12 +61,11 @@ OPTION_HISTORY_WARM_CACHE_SIZE: int = 5
 
 
 def _ensure_env_loaded_before_settings() -> None:
-    """Load exactly the operator-selected file on production hosts.
+    """Resolve exactly one source, normalize once, and log safe effective state.
 
-    Systemd environment values retain precedence. A missing explicit file or
-    incomplete Lightsail host configuration must not discover unrelated repo
-    dotenv values that might activate real trading. Developer installations
-    continue to support local dotenv discovery.
+    Systemd variables take precedence over the protected operator file.
+    Production never discovers a repository .env if the configured source
+    is absent. Only fixed source labels and validated mode booleans are logged.
     """
     from dotenv import load_dotenv
 
@@ -74,43 +73,47 @@ def _ensure_env_loaded_before_settings() -> None:
     production = (
         os.getenv("DEPLOYMENT_PLATFORM") or ""
     ).strip().lower() == "aws_lightsail"
+    source = "environment"
     if canonical:
         path = Path(canonical).expanduser()
         if path.is_file():
             load_dotenv(dotenv_path=str(path), override=False)
-            LOGGER.info("CONFIG_SOURCE selected=operator_env_file")
+            source = "operator_env_file"
         else:
+            source = "operator_env_missing"
             LOGGER.error("CONFIG_SOURCE_MISSING_FAIL_CLOSED")
             os.environ["ENABLE_LIVE"] = "false"
             os.environ["EXECUTION_MODE"] = "SHADOW"
-        normalise_live_env_defaults()
-        return
-
-    if production:
-        # The Lightsail installer/systemd unit must provide BOT_ENV_FILE.
-        # Never use a working-directory .env to fill missing live controls.
+    elif production:
+        # No repo/cwd fallback may authorize orders on an unconfigured host.
+        source = "production_env_missing"
         LOGGER.error("CONFIG_SOURCE_UNSET_FAIL_CLOSED")
         os.environ["ENABLE_LIVE"] = "false"
         os.environ["EXECUTION_MODE"] = "SHADOW"
-        normalise_live_env_defaults()
-        return
+    else:
+        search_paths = [
+            Path.cwd() / ".env",
+            Path("/app/.env"),
+            Path(__file__).resolve().parent.parent.parent / ".env",
+            Path(__file__).resolve().parent.parent / ".env",
+        ]
+        for env_path in search_paths:
+            if env_path.is_file():
+                load_dotenv(dotenv_path=str(env_path), override=False)
+                source = "development_dotenv"
+                break
+        else:
+            load_dotenv(override=False)
 
-    search_paths = [
-        Path.cwd() / ".env",
-        Path("/app/.env"),
-        Path(__file__).resolve().parent.parent.parent / ".env",
-        Path(__file__).resolve().parent.parent / ".env",
-    ]
-    for env_path in search_paths:
-        if env_path.is_file():
-            load_dotenv(dotenv_path=str(env_path), override=False)
-            LOGGER.info("CONFIG_SOURCE selected=development_dotenv")
-            normalise_live_env_defaults()
-            return
-
-    load_dotenv(override=False)
-    LOGGER.info("CONFIG_SOURCE selected=environment")
     normalise_live_env_defaults()
+    # Source labels are static: never emit a path, token, credential, or raw
+    # host environment value to journald or remote archived logs.
+    LOGGER.warning(
+        "CONFIG_EFFECTIVE_PROFILE source=%s mode=%s live_orders=%s",
+        source,
+        os.environ["EXECUTION_MODE"],
+        os.environ["ORDERS__ENABLE_LIVE"],
+    )
 
 
 # ✅ EXECUTE IMMEDIATELY when settings.py is imported
