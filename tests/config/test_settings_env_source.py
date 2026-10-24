@@ -121,7 +121,7 @@ def test_effective_profile_reports_only_source_and_normalized_mode(
 ) -> None:
     protected = tmp_path / "operator-settings.env"
     protected.write_text(
-        "ENABLE_LIVE=false\\nEXECUTION_MODE=SHADOW\\n", encoding="utf-8"
+        "ENABLE_LIVE=false\nEXECUTION_MODE=SHADOW\n", encoding="utf-8"
     )
     monkeypatch.setenv("DEPLOYMENT_PLATFORM", "aws_lightsail")
     monkeypatch.setenv("BOT_ENV_FILE", str(protected))
@@ -139,7 +139,7 @@ def test_missing_production_source_reports_fail_closed_profile(
     monkeypatch.setenv("DEPLOYMENT_PLATFORM", "aws_lightsail")
     monkeypatch.setenv("BOT_ENV_FILE", str(tmp_path / "absent.env"))
     (tmp_path / ".env").write_text(
-        "ENABLE_LIVE=true\\nEXECUTION_MODE=LIVE\\n", encoding="utf-8"
+        "ENABLE_LIVE=true\nEXECUTION_MODE=LIVE\n", encoding="utf-8"
     )
     monkeypatch.chdir(tmp_path)
 
