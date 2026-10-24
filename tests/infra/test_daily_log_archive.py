@@ -102,9 +102,10 @@ def test_archive_includes_bounded_startup_audit_without_protection_claim() -> No
         transport=lambda _url, payload, _timeout: calls.append(payload) or {"ok": True},
         log_reader=lambda _start, _end: journal,
     )
-    assert archiver.archive_once(
-        datetime(2026, 10, 23, 16, 0, tzinfo=IST)
-    )["archived"] is True
+    assert (
+        archiver.archive_once(datetime(2026, 10, 23, 16, 0, tzinfo=IST))["archived"]
+        is True
+    )
     audit = calls[0]["startup_audit"]
     assert audit["observed_startup_count"] == 1
     assert audit["startups_after_0930_count"] == 1
