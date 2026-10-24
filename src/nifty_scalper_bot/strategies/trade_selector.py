@@ -28,6 +28,8 @@ from nifty_scalper_bot.risk.net_rr_gate import minimum_risk_distance_for_net_rr
 from nifty_scalper_bot.utils.logging import get_logger, log_once_or_throttled
 
 LOGGER = get_logger(__name__)
+
+
 def _float_env(name: str, default: float, *, minimum: float = 0.0) -> float:
     try:
         value = float(os.getenv(name, str(default)) or default)
