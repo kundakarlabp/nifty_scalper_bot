@@ -118,9 +118,10 @@ def test_crossed_option_book_is_never_an_execution_candidate(monkeypatch):
     selector = TradeCandidateSelector()
     crossed = base(bid=125, ask=115)
 
-    assert selector.select_ranked_candidates(
+    ranked = selector.select_ranked_candidates(
         direction_bias="CE", atm_strike=22000, snapshots=[crossed]
-    ) == []
+    )
+    assert ranked == []
     quality = selector.evaluate_data_quality(crossed)
     assert quality.allowed is False
     assert "missing_bid_ask" in quality.reasons
@@ -157,9 +158,10 @@ def test_unusable_timestamp_quality_cannot_prove_candidate_bid_ask(monkeypatch):
     selector = TradeCandidateSelector()
     snapshot = base(timestamp_quality="synthetic")
 
-    assert selector.select_ranked_candidates(
+    ranked = selector.select_ranked_candidates(
         direction_bias="CE", atm_strike=22000, snapshots=[snapshot]
-    ) == []
+    )
+    assert ranked == []
     assert "missing_bid_ask" in selector.evaluate_data_quality(snapshot).reasons
 
 
@@ -170,6 +172,7 @@ def test_nonfinite_option_ltp_is_not_executable(monkeypatch):
     monkeypatch.setattr(selector_module, "midday_pause_block", lambda: (False, ""))
     selector = TradeCandidateSelector()
     for value in (float("nan"), float("inf"), float("-inf")):
-        assert selector.select_ranked_candidates(
+        ranked = selector.select_ranked_candidates(
             direction_bias="CE", atm_strike=22000, snapshots=[base(ltp=value)]
-        ) == []
+        )
+        assert ranked == []
