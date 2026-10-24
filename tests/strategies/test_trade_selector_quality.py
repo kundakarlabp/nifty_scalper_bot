@@ -108,3 +108,71 @@ def test_execution_premium_floor_cannot_be_bypassed_by_dynamic_filter(monkeypatc
         snapshots=[snapshot],
     )
     assert ranked == []
+
+
+def test_crossed_option_book_is_never_an_execution_candidate(monkeypatch):
+    import nifty_scalper_bot.strategies.trade_selector as selector_module
+
+    monkeypatch.setattr(selector_module, "expiry_theta_block", lambda: (False, ""))
+    monkeypatch.setattr(selector_module, "midday_pause_block", lambda: (False, ""))
+    selector = TradeCandidateSelector()
+    crossed = base(bid=125, ask=115)
+
+    ranked = selector.select_ranked_candidates(
+        direction_bias="CE", atm_strike=22000, snapshots=[crossed]
+    )
+    assert ranked == []
+    quality = selector.evaluate_data_quality(crossed)
+    assert quality.allowed is False
+    assert "missing_bid_ask" in quality.reasons
+
+
+def test_canonical_depth_quote_remains_eligible(monkeypatch):
+    import nifty_scalper_bot.strategies.trade_selector as selector_module
+
+    monkeypatch.setattr(selector_module, "expiry_theta_block", lambda: (False, ""))
+    monkeypatch.setattr(selector_module, "midday_pause_block", lambda: (False, ""))
+    selector = TradeCandidateSelector()
+    depth_quote = base(
+        bid=None,
+        ask=None,
+        depth={
+            "buy": [{"price": 119.0}],
+            "sell": [{"price": 121.0}],
+        },
+    )
+
+    candidates = selector.select_ranked_candidates(
+        direction_bias="CE", atm_strike=22000, snapshots=[depth_quote]
+    )
+    assert len(candidates) == 1
+    assert candidates[0].entry_price == 121.0
+    assert selector.evaluate_data_quality(depth_quote).allowed is True
+
+
+def test_unusable_timestamp_quality_cannot_prove_candidate_bid_ask(monkeypatch):
+    import nifty_scalper_bot.strategies.trade_selector as selector_module
+
+    monkeypatch.setattr(selector_module, "expiry_theta_block", lambda: (False, ""))
+    monkeypatch.setattr(selector_module, "midday_pause_block", lambda: (False, ""))
+    selector = TradeCandidateSelector()
+    snapshot = base(timestamp_quality="synthetic")
+
+    ranked = selector.select_ranked_candidates(
+        direction_bias="CE", atm_strike=22000, snapshots=[snapshot]
+    )
+    assert ranked == []
+    assert "missing_bid_ask" in selector.evaluate_data_quality(snapshot).reasons
+
+
+def test_nonfinite_option_ltp_is_not_executable(monkeypatch):
+    import nifty_scalper_bot.strategies.trade_selector as selector_module
+
+    monkeypatch.setattr(selector_module, "expiry_theta_block", lambda: (False, ""))
+    monkeypatch.setattr(selector_module, "midday_pause_block", lambda: (False, ""))
+    selector = TradeCandidateSelector()
+    for value in (float("nan"), float("inf"), float("-inf")):
+        ranked = selector.select_ranked_candidates(
+            direction_bias="CE", atm_strike=22000, snapshots=[base(ltp=value)]
+        )
+        assert ranked == []

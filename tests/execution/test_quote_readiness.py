@@ -205,3 +205,22 @@ def test_tick_age_prefers_real_quote_timestamp_over_stale_cached_age(monkeypatch
     )
 
     assert age_ms == 500.0
+
+
+def test_nonfinite_option_bid_ask_cannot_prove_executable_quote():
+    quote = {"bid": 99.9, "ask": 100.1, "ltp": 100.0, "tick_age_ms": 100}
+    for field in ("bid", "ask"):
+        for value in (float("inf"), float("-inf"), float("nan")):
+            invalid = {**quote, field: value}
+            bid, ask, _spread, _source = resolve_quote_bid_ask_spread(invalid)
+            assert bid is None and ask is None
+            assert (
+                evaluate_quote_readiness(
+                    "NFO:NIFTY26JUN24000CE",
+                    invalid,
+                    require_fresh=True,
+                    max_age_s=2.5,
+                    max_spread_pct=0.75,
+                ).tradable_quote_ready
+                is False
+            )

@@ -1,10 +1,18 @@
-"""Option trade candidate selection using explicit execution/economic gates."""
+"""Purpose: Rank NIFTY option candidates after execution and economic gates.
+
+Responsibilities: Reuse canonical bid/ask evidence, enforce premium and
+freshness limits, and rank eligible option contracts on net economics.
+Boundaries: Execution quote parsing is owned by execution.readiness;
+strategy arbitration, risk approval and broker orders remain external.
+Safety: Invalid quote proof or non-finite premium cannot authorize an entry.
+"""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import logging
 import os
+from dataclasses import dataclass
+from math import isfinite
 from typing import Any
 
 from nifty_scalper_bot.config.entry_policy import resolve_entry_policy
@@ -13,6 +21,7 @@ from nifty_scalper_bot.execution.quote_readiness import (
     resolve_real_tick_count,
     resolve_tick_age_ms,
 )
+from nifty_scalper_bot.execution.readiness import resolve_quote_bid_ask_spread
 from nifty_scalper_bot.risk.cost_model import evaluate_net_reward_risk
 from nifty_scalper_bot.risk.expiry_gate import expiry_theta_block, midday_pause_block
 from nifty_scalper_bot.risk.net_rr_gate import minimum_risk_distance_for_net_rr
@@ -246,12 +255,9 @@ class TradeCandidateSelector:
                 )
                 continue
 
-            bid, ask, ltp = (
-                self._f(s.get("bid")),
-                self._f(s.get("ask")),
-                self._f(s.get("ltp")),
-            )
-            has_bid_ask = bool((bid or 0) > 0 and (ask or 0) > 0)
+            bid, ask, _resolved_spread, _quote_source = resolve_quote_bid_ask_spread(s)
+            ltp = self._f(s.get("ltp"))
+            has_bid_ask = bid is not None and ask is not None
             if is_live and not has_bid_ask:
                 rejects["live_bid_ask_required"] += 1
                 self._log_reject(
@@ -582,8 +588,10 @@ class TradeCandidateSelector:
         if tick_age is None or tick_age > max_age:
             reasons.append("tick_stale")
 
-        bid, ask = self._f(snapshot.get("bid")), self._f(snapshot.get("ask"))
-        has_bid_ask = bool((bid or 0) > 0 and (ask or 0) > 0)
+        bid, ask, _resolved_spread, _quote_source = resolve_quote_bid_ask_spread(
+            snapshot
+        )
+        has_bid_ask = bid is not None and ask is not None
         if not has_bid_ask:
             reasons.append("missing_bid_ask")
         else:
@@ -611,9 +619,10 @@ class TradeCandidateSelector:
     @staticmethod
     def _f(v: Any) -> float | None:
         try:
-            return None if v is None else float(v)
-        except Exception:
+            number = float(v)
+        except (TypeError, ValueError):
             return None
+        return number if isfinite(number) else None
 
 
 __all__ = ["DataQualityResult", "TradeCandidate", "TradeCandidateSelector"]

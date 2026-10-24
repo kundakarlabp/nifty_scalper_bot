@@ -89,7 +89,7 @@ This navigation index is derived from the authoritative [architecture manifest](
 | [`position_manager.py`](../src/nifty_scalper_bot/execution/position_manager.py) | Track broker orders, confirmed positions and local exposure lifecycle. |
 | [`position_reconciliation_identity.py`](../src/nifty_scalper_bot/execution/position_reconciliation_identity.py) | Normalize broker-position identities for PositionManager. |
 | [`post_fill_monitor.py`](../src/nifty_scalper_bot/execution/post_fill_monitor.py) | Monitor reconciliation of broker positions with local state. |
-| [`readiness.py`](../src/nifty_scalper_bot/execution/readiness.py) | Readiness helpers used by the live arming gate. |
+| [`readiness.py`](../src/nifty_scalper_bot/execution/readiness.py) | Canonical quote parsing and deterministic live-readiness decisions. |
 | [`runtime_order_manager.py`](../src/nifty_scalper_bot/execution/runtime_order_manager.py) | Implement the single production order manager used by the trading runtime. |
 
 ## `src/nifty_scalper_bot/infra/`
