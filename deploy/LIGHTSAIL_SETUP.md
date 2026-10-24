@@ -210,6 +210,21 @@ Routine updates must continue through the single canonical
 compiles the actual candidate dashboard tree rather than pinning retired
 internal helper filenames.
 
+## Console dependency failures are explicit, not silent
+
+Code-only releases and same-commit restarts do not reinstall Streamlit
+packages. Only a change in `dashboard/requirements.txt` triggers that
+isolated-venv refresh. If pip fails, the deployer does **not** claim the
+console is healthy or restart it against an unverified dependency set:
+the release status explicitly records `deployed_console_dependencies_degraded`
+(or a combined degraded state when admin/broker authentication is impaired).
+
+A healthy trading engine continues to serve protective exits; console
+dependency failures do not bypass broker-flat checks, change strategy/risk
+settings, or turn an engine restart into a forced rollback. Investigate the
+Streamlit environment and repair only that optional service before treating
+the console as operational. This optimization introduces no extra AWS service.
+
 ## Fast code-only releases
 
 The single validated Lightsail release runner now reuses an already-installed
