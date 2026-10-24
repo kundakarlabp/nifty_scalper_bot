@@ -14,7 +14,7 @@ from __future__ import annotations
 import re
 from datetime import datetime
 
-_TS = re.compile(r"\\[(20\\d{2}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}) IST\\]")
+_TS = re.compile(r"\[(20\d{2}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) IST\]")
 _START = "STARTUP_PHASE phase=create_context"
 _WS = "STARTUP_WS_START_DONE"
 _RECONCILE = "RECONCILE_COMPLETE"
