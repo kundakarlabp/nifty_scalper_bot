@@ -221,9 +221,14 @@ the release status explicitly records `deployed_console_dependencies_degraded`
 
 A healthy trading engine continues to serve protective exits; console
 dependency failures do not bypass broker-flat checks, change strategy/risk
-settings, or turn an engine restart into a forced rollback. Investigate the
-Streamlit environment and repair only that optional service before treating
-the console as operational. This optimization introduces no extra AWS service.
+settings, or turn an engine restart into a forced rollback. A protected marker
+(`streamlit_dependency_refresh_failed` under the host configuration directory)
+retains the degraded status across same-SHA restarts and code-only releases.
+Those runs retry the required console dependencies; **only a successful pip
+refresh clears the marker**. Missing/inaccessible console environments keep
+the degraded status rather than silently claiming success. Investigate and
+repair only the optional console before treating it as operational. This
+optimization introduces no extra AWS service.
 
 ## Fast code-only releases
 
