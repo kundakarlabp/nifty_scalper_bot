@@ -619,7 +619,9 @@ if [ "$AUTO_MODE" = true ]; then
       write_status deferred_broker_exposure "pending main ${AFTER:0:7}; deployed ${BEFORE:0:7}; retry when broker-flat with no active orders"
       log "Automatic release deferred: broker exposure, armed engine, or unavailable safety proof"
     else
-      if admin_healthy; then
+      if [ -f "$STREAMLIT_DEPENDENCY_FAILURE_MARKER" ]; then
+        write_status current_console_dependencies_degraded "running ${BEFORE:0:7}; console dependencies unverified; repair awaits safe release handoff"
+      elif admin_healthy; then
         write_status current "running ${BEFORE:0:7}; no pending revision"
       else
         write_status current_admin_degraded "running ${BEFORE:0:7}; admin service unavailable after recovery attempt"
@@ -685,7 +687,9 @@ fi
 if [ "$BEFORE" = "$AFTER" ] && [ "$FORCE_RESTART" = false ]; then
   if service_healthy_confirmed "$BEFORE"; then
     if [ "$current_runtime_sha" = "$BEFORE" ]; then
-      if admin_healthy; then
+      if [ -f "$STREAMLIT_DEPENDENCY_FAILURE_MARKER" ]; then
+        write_status current_console_dependencies_degraded "running ${BEFORE:0:7}; console dependency refresh failed; retry on next validated release"
+      elif admin_healthy; then
         write_status current "running ${BEFORE:0:7}"
       else
         write_status current_admin_degraded "running ${BEFORE:0:7}; admin service unavailable after recovery attempt"
