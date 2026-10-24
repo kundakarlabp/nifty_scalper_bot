@@ -224,9 +224,12 @@ dependency failures do not bypass broker-flat checks, change strategy/risk
 settings, or turn an engine restart into a forced rollback. A protected marker
 (`streamlit_dependency_refresh_failed` under the host configuration directory)
 retains the degraded status across same-SHA restarts and code-only releases.
-Those runs retry the required console dependencies; **only a successful pip
-refresh clears the marker**. Missing/inaccessible console environments keep
-the degraded status rather than silently claiming success. Investigate and
+A subsequent validated release, including an explicitly forced same-SHA
+restart, retries installation; **only a successful pip refresh clears the
+marker**. Regular unchanged timer ticks report
+`current_console_dependencies_degraded` without restarting the trading
+engine. Missing/inaccessible console environments keep the degraded status
+rather than silently claiming success. Investigate and
 repair only the optional console before treating it as operational. This
 optimization introduces no extra AWS service.
 
