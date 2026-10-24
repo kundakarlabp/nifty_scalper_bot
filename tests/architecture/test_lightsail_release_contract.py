@@ -48,13 +48,13 @@ def test_release_never_migrates_repo_dotenv_into_protected_credentials() -> None
 
     assert 'cp -p "$APP_DIR/.env" "$ENV_FILE"' not in release
     assert 'cp -p "$LEGACY_ENV" "$ENV_FILE"' not in release
-    assert 'validate_environment\n' in release
+    assert "validate_environment\n" in release
     assert 'write_status env_missing "environment file missing:' in release
 
     # Historical one-time import remains only in explicit operator setup.
     assert 'cp -p "$LEGACY_ENV" "$ENV_FILE"' in setup
-    assert 'ENABLE_LIVE=false' in setup
-    assert 'EXECUTION_MODE=SHADOW' in setup
+    assert "ENABLE_LIVE=false" in setup
+    assert "EXECUTION_MODE=SHADOW" in setup
 
 
 def test_lightsail_uses_external_environment_file() -> None:
