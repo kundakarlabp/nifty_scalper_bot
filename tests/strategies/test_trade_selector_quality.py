@@ -111,10 +111,10 @@ def test_execution_premium_floor_cannot_be_bypassed_by_dynamic_filter(monkeypatc
 
 
 def test_crossed_option_book_is_never_an_execution_candidate(monkeypatch):
-    import nifty_scalper_bot.strategies.trade_selector as trade_selector_module
+    import nifty_scalper_bot.strategies.trade_selector as selector_module
 
-    monkeypatch.setattr(trade_selector_module, "expiry_theta_block", lambda: (False, ""))
-    monkeypatch.setattr(trade_selector_module, "midday_pause_block", lambda: (False, ""))
+    monkeypatch.setattr(selector_module, "expiry_theta_block", lambda: (False, ""))
+    monkeypatch.setattr(selector_module, "midday_pause_block", lambda: (False, ""))
     selector = TradeCandidateSelector()
     crossed = base(bid=125, ask=115)
 
@@ -127,10 +127,10 @@ def test_crossed_option_book_is_never_an_execution_candidate(monkeypatch):
 
 
 def test_canonical_depth_quote_remains_eligible(monkeypatch):
-    import nifty_scalper_bot.strategies.trade_selector as trade_selector_module
+    import nifty_scalper_bot.strategies.trade_selector as selector_module
 
-    monkeypatch.setattr(trade_selector_module, "expiry_theta_block", lambda: (False, ""))
-    monkeypatch.setattr(trade_selector_module, "midday_pause_block", lambda: (False, ""))
+    monkeypatch.setattr(selector_module, "expiry_theta_block", lambda: (False, ""))
+    monkeypatch.setattr(selector_module, "midday_pause_block", lambda: (False, ""))
     selector = TradeCandidateSelector()
     depth_quote = base(
         bid=None,
@@ -150,10 +150,10 @@ def test_canonical_depth_quote_remains_eligible(monkeypatch):
 
 
 def test_unusable_timestamp_quality_cannot_prove_candidate_bid_ask(monkeypatch):
-    import nifty_scalper_bot.strategies.trade_selector as trade_selector_module
+    import nifty_scalper_bot.strategies.trade_selector as selector_module
 
-    monkeypatch.setattr(trade_selector_module, "expiry_theta_block", lambda: (False, ""))
-    monkeypatch.setattr(trade_selector_module, "midday_pause_block", lambda: (False, ""))
+    monkeypatch.setattr(selector_module, "expiry_theta_block", lambda: (False, ""))
+    monkeypatch.setattr(selector_module, "midday_pause_block", lambda: (False, ""))
     selector = TradeCandidateSelector()
     snapshot = base(timestamp_quality="synthetic")
 
@@ -164,10 +164,10 @@ def test_unusable_timestamp_quality_cannot_prove_candidate_bid_ask(monkeypatch):
 
 
 def test_nonfinite_option_ltp_is_not_executable(monkeypatch):
-    import nifty_scalper_bot.strategies.trade_selector as trade_selector_module
+    import nifty_scalper_bot.strategies.trade_selector as selector_module
 
-    monkeypatch.setattr(trade_selector_module, "expiry_theta_block", lambda: (False, ""))
-    monkeypatch.setattr(trade_selector_module, "midday_pause_block", lambda: (False, ""))
+    monkeypatch.setattr(selector_module, "expiry_theta_block", lambda: (False, ""))
+    monkeypatch.setattr(selector_module, "midday_pause_block", lambda: (False, ""))
     selector = TradeCandidateSelector()
     for value in (float("nan"), float("inf"), float("-inf")):
         assert selector.select_ranked_candidates(
