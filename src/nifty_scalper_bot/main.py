@@ -1,6 +1,6 @@
 """Purpose: Host the production FastAPI process and its trading runtime lifecycle.
 
-Responsibilities: Load host environment, supervise the app background task,
+Responsibilities: Initialize canonical settings, supervise the app background task,
 expose /livez, /readyz, /releasez and structured health/status diagnostics,
 and provide explicit startup/shutdown management.
 Key interfaces: lifespan, livez, readyz and trading/status handlers.
@@ -16,18 +16,17 @@ import os
 import socket
 import sys
 from contextlib import asynccontextmanager, suppress
+from importlib import import_module
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from nifty_scalper_bot.config.defaults import (
     DEFAULT_OPTION_EXEC_MIN_BARS as _DEFAULT_OPT_MIN_BARS,
 )
-from nifty_scalper_bot.config.env_utils import normalise_live_env_defaults
 from nifty_scalper_bot.config.paths import get_data_dir
 from nifty_scalper_bot.core.runtime_install_proof import build_runtime_install_proof
 from nifty_scalper_bot.infra.scheduled_tasks import (
@@ -48,41 +47,12 @@ sys.stdout.reconfigure(line_buffering=True)
 
 
 def _load_env_file() -> None:
-    """Load .env defaults only. Args: none. Returns: None. Raises: none."""
-    search_paths = [
-        Path.cwd() / ".env",
-        Path("/app/.env"),
-        Path(__file__).resolve().parents[3] / ".env",
-        Path(__file__).resolve().parents[2] / ".env",
-    ]
+    """Initialize the canonical settings loader; never search dotenv here.
 
-    loaded_from: Path | None = None
-    for env_path in search_paths:
-        if env_path.exists() and env_path.is_file():
-            load_dotenv(dotenv_path=str(env_path), override=False)
-            loaded_from = env_path
-            break
-
-    normalise_live_env_defaults()
-
-    if loaded_from is not None:
-        print(f"✅ ENV FILE FOUND (defaults only): {loaded_from}", flush=True)
-    else:
-        print("⚠️ WARNING: No .env file found! Using system env vars only.", flush=True)
-
-    effective_keys = [
-        "ENABLE_LIVE",
-        "ENABLE_LIVE_TRADING",
-        "EXECUTION_MODE",
-        "ORDERS__ENABLE_LIVE",
-        "PAPER__ENABLED",
-        "PAPER_MODE",
-        "SHADOW_MODE",
-        "DATA_DIR",
-        "PORT",
-    ]
-    for key in effective_keys:
-        print(f"   🔧 {key} = {os.getenv(key, 'NOT_SET')}", flush=True)
+    Importing settings runs its validated, fail-closed bootstrap once per
+    process. Repeated imports cannot introduce another configuration path.
+    """
+    import_module("nifty_scalper_bot.config.settings")
 
 
 def _ensure_data_directory() -> None:
