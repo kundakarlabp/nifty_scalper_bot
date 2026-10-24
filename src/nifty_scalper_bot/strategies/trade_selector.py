@@ -1,9 +1,9 @@
 """Purpose: Rank NIFTY option candidates after execution and economic gates.
 
-Responsibilities: Reuse canonical bid/ask evidence, enforce premium and
-freshness limits, and rank eligible option contracts on net economics.
-Boundaries: Execution quote parsing is owned by execution.readiness;
-strategy arbitration, risk approval and broker orders remain external.
+Responsibilities: Reuse canonical quote/spread and entry-policy decisions,
+enforce premium/freshness limits, and rank by executable net economics.
+Boundaries: Quote parsing and LIVE policy belong to execution.readiness
+and config.entry_policy; risk approval and broker orders remain external.
 Safety: Invalid quote proof or non-finite premium cannot authorize an entry.
 """
 
@@ -28,24 +28,6 @@ from nifty_scalper_bot.risk.net_rr_gate import minimum_risk_distance_for_net_rr
 from nifty_scalper_bot.utils.logging import get_logger, log_once_or_throttled
 
 LOGGER = get_logger(__name__)
-_TRUE_VALUES = {"1", "true", "yes", "y", "on", "live"}
-
-
-def _env_true(name: str) -> bool:
-    return str(os.getenv(name, "") or "").strip().lower() in _TRUE_VALUES
-
-
-def _real_live_mode() -> bool:
-    mode = str(os.getenv("EXECUTION_MODE", "SHADOW") or "SHADOW").strip().upper()
-    live_enabled = _env_true("ENABLE_LIVE") or _env_true("ENABLE_LIVE_TRADING")
-    paper_or_shadow = (
-        _env_true("PAPER_MODE")
-        or _env_true("PAPER__ENABLED")
-        or _env_true("SHADOW_MODE")
-    )
-    return mode == "LIVE" and live_enabled and not paper_or_shadow
-
-
 def _float_env(name: str, default: float, *, minimum: float = 0.0) -> float:
     try:
         value = float(os.getenv(name, str(default)) or default)
@@ -159,12 +141,11 @@ class TradeCandidateSelector:
             max_age = float(self.max_tick_age_s)
         if self.require_real_ticks_last_60s is not None:
             min_ticks = int(self.require_real_ticks_last_60s)
-        is_live = _real_live_mode()
+        policy = resolve_entry_policy()
+        is_live = policy.is_live
         if is_live:
-            # EXECUTION policy: the binding spread cap.
-            max_spread = min(
-                max_spread, resolve_entry_policy().execution_max_spread_pct
-            )
+            # The policy owner also defines the binding execution spread cap.
+            max_spread = min(max_spread, policy.execution_max_spread_pct)
             max_age = min(
                 max_age, _float_env("LIVE_CANDIDATE_MAX_TICK_AGE_S", 2.5, minimum=0.1)
             )
@@ -255,7 +236,7 @@ class TradeCandidateSelector:
                 )
                 continue
 
-            bid, ask, _resolved_spread, _quote_source = resolve_quote_bid_ask_spread(s)
+            bid, ask, resolved_spread_pct, _quote_source = resolve_quote_bid_ask_spread(s)
             ltp = self._f(s.get("ltp"))
             has_bid_ask = bid is not None and ask is not None
             if is_live and not has_bid_ask:
@@ -350,11 +331,8 @@ class TradeCandidateSelector:
                 reasons.append("real_tick_count_derived_from_fresh_ms_quote")
             spread_pct: float | None = None
             if has_bid_ask:
-                mid = ((bid or 0.0) + (ask or 0.0)) / 2.0
-                spread_pct = (
-                    (((ask or 0.0) - (bid or 0.0)) / mid * 100.0) if mid > 0 else 100.0
-                )
-                if spread_pct > max_spread:
+                spread_pct = resolved_spread_pct
+                if spread_pct is None or spread_pct > max_spread:
                     rejects["spread_too_wide"] += 1
                     self._log_reject(
                         "spread_too_wide",
@@ -588,18 +566,14 @@ class TradeCandidateSelector:
         if tick_age is None or tick_age > max_age:
             reasons.append("tick_stale")
 
-        bid, ask, _resolved_spread, _quote_source = resolve_quote_bid_ask_spread(
+        bid, ask, resolved_spread_pct, _quote_source = resolve_quote_bid_ask_spread(
             snapshot
         )
         has_bid_ask = bid is not None and ask is not None
         if not has_bid_ask:
             reasons.append("missing_bid_ask")
         else:
-            mid = ((bid or 0.0) + (ask or 0.0)) / 2.0
-            spread_pct = (
-                (((ask or 0.0) - (bid or 0.0)) / mid * 100.0) if mid > 0 else 100.0
-            )
-            if spread_pct > max_spread:
+            if resolved_spread_pct is None or resolved_spread_pct > max_spread:
                 reasons.append("spread_too_wide")
 
         if real_ticks is None:
