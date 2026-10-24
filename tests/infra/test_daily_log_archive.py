@@ -83,3 +83,31 @@ def test_archive_skips_before_market_open() -> None:
     result = archiver.archive_once(datetime(2026, 9, 24, 9, 0, tzinfo=IST))
 
     assert result == {"archived": False, "reason": "outside_session"}
+
+
+
+def test_archive_includes_bounded_startup_audit_without_protection_claim() -> None:
+    calls = []
+    journal = (
+        "[2026-10-23 09:49:33 IST] STARTUP_PHASE phase=create_context\n"
+        "[2026-10-23 09:49:35 IST] STARTUP_WS_START_DONE phase=spot_first\n"
+        "[2026-10-23 09:49:36 IST] BROKER_ORDER_RECONCILE_OK seen=2\n"
+        "[2026-10-23 09:50:04 IST] RECONCILE_COMPLETE\n"
+        "[2026-10-23 09:50:04 IST] STARTUP_MODE_TRANSITION "
+        "from=DATA_WARMUP to=LIVE_READY\n"
+        "access_token=DO_NOT_REPLICATE_IN_SUMMARY"
+    )
+    archiver = DailyLogArchiver(
+        endpoint_url="https://example.test/archive",
+        transport=lambda _url, payload, _timeout: calls.append(payload) or {"ok": True},
+        log_reader=lambda _start, _end: journal,
+    )
+    assert archiver.archive_once(
+        datetime(2026, 10, 23, 16, 0, tzinfo=IST)
+    )["archived"] is True
+    audit = calls[0]["startup_audit"]
+    assert audit["observed_startup_count"] == 1
+    assert audit["startups_after_0930_count"] == 1
+    assert audit["max_startup_to_ready_seconds"] == 31
+    assert audit["protective_stop_verification"] == "not_established_from_log_markers"
+    assert "DO_NOT_REPLICATE" not in str(audit)
