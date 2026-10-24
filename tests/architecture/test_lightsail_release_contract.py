@@ -207,11 +207,14 @@ def test_dashboard_dependency_refresh_is_changed_manifest_only_and_observable(
     release = _text("deploy/lightsail_release.sh")
     start = (
         'if [ -x "$STREAMLIT_VENV/bin/python" ] '
-        '&& [ -f dashboard/requirements.txt ]; then'
+        "&& [ -f dashboard/requirements.txt ]; then"
     )
-    dependency_block = start + release.split(start, 1)[1].split(
-        '\nif ! set_runtime_build_sha "$AFTER"; then', 1
-    )[0]
+    dependency_block = (
+        start
+        + release.split(start, 1)[1].split(
+            '\nif ! set_runtime_build_sha "$AFTER"; then', 1
+        )[0]
+    )
 
     (tmp_path / "dashboard").mkdir()
     (tmp_path / "dashboard" / "requirements.txt").write_text(
@@ -225,16 +228,20 @@ def test_dashboard_dependency_refresh_is_changed_manifest_only_and_observable(
     )
     python.chmod(0o755)
     calls = tmp_path / "pip-calls.txt"
-    shell = """
+    shell = (
+        """
 set -eu
 git() {
   if [ "$MANIFEST_CHANGED" = "true" ]; then return 1; fi
   return 0
 }
 log() { :; }
-""" + dependency_block + """
+"""
+        + dependency_block
+        + """
 printf "degraded=%s\\n" "$STREAMLIT_DEPENDENCY_FAILED"
 """
+    )
     env = dict(
         os.environ,
         BEFORE="sha-a",
@@ -263,7 +270,7 @@ def test_failed_console_dependencies_are_reported_as_degraded() -> None:
     release = _text("deploy/lightsail_release.sh")
     assert "deployed_console_dependencies_degraded" in release
     assert 'if [ "$STREAMLIT_DEPENDENCY_FAILED" = true ]; then' in release
-    assert 'WARNING: dashboard dependency refresh failed' not in release
+    assert "WARNING: dashboard dependency refresh failed" not in release
 
 
 def test_release_runner_validates_and_rolls_back() -> None:
