@@ -22,11 +22,11 @@ from zoneinfo import ZoneInfo
 import requests
 
 from nifty_scalper_bot.config.defaults import DEFAULT_SUPABASE_ARCHIVE_URL
-from nifty_scalper_bot.infra.session_startup_audit import audit_session_startups
 from nifty_scalper_bot.config.env_utils import (
     resolve_build_sha,
     supabase_telemetry_enabled,
 )
+from nifty_scalper_bot.infra.session_startup_audit import audit_session_startups
 from nifty_scalper_bot.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
