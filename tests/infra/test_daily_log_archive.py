@@ -85,7 +85,6 @@ def test_archive_skips_before_market_open() -> None:
     assert result == {"archived": False, "reason": "outside_session"}
 
 
-
 def test_archive_includes_bounded_startup_audit_without_protection_claim() -> None:
     calls = []
     journal = (
