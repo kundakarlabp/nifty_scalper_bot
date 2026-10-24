@@ -34,6 +34,20 @@ changes to trading behavior. A subsequent migration of legacy strategy
 overrides must compare *effective* values, not blindly delete keys while
 trading. Do not run the full setup script merely to edit credentials.
 
+## No credential migration in routine releases
+
+The automatic `deploy/lightsail_release.sh` path **never copies**
+`$APP_DIR/.env` into the protected `BOT_ENV_FILE`. If the protected
+file is missing, release validation fails closed *before* checkout mutation
+or broker-facing service restarts. An old repository `.env` cannot silently
+re-enable trading, and the existing running revision is left untouched.
+
+For genuinely legacy installations, only a deliberate, operator-invoked
+`deploy/lightsail_setup.sh` can perform a one-time import. Review
+`ENABLE_LIVE` and `EXECUTION_MODE` together and preserve broker credentials
+before using that migration. Do not run the installer as part of normal CI,
+post-merge release, or a recovery timer.
+
 ## One-time setup or migration
 
 ```bash
