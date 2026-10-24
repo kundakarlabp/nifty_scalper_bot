@@ -73,9 +73,11 @@ def verify_exchange_stop_order(
     if broker_exchange != "NFO":
         return False, "broker_stop_exchange_unverified"
     expected_side = "SELL" if str(entry_side).upper() == "BUY" else "BUY"
-    broker_side = str(
-        evidence.get("transaction_type") or evidence.get("side") or ""
-    ).strip().upper()
+    broker_side = (
+        str(evidence.get("transaction_type") or evidence.get("side") or "")
+        .strip()
+        .upper()
+    )
     if broker_side != expected_side:
         return False, "broker_stop_side_mismatch"
     if (
