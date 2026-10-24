@@ -48,6 +48,7 @@
     "src/nifty_scalper_bot/execution/readiness.py",
     "src/nifty_scalper_bot/execution/runtime_order_manager.py",
     "src/nifty_scalper_bot/infra/runtime_heartbeat.py",
+    "src/nifty_scalper_bot/infra/session_startup_audit.py",
     "src/nifty_scalper_bot/infra/supabase_trade_replication.py",
     "src/nifty_scalper_bot/journal/trade_journal.py",
     "src/nifty_scalper_bot/main.py",

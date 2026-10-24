@@ -3,6 +3,7 @@
 Responsibilities:
 - build_daily_log_archiver uses GitHub-owned Supabase monitoring defaults.
 - DailyLogArchiver.archive_once snapshots bounded IST journald sessions.
+- Include source-only startup/recovery evidence in the existing archive summary.
 - archive_interval_seconds enforces a minimum reporting interval.
 
 Boundaries: Observability only; the local journal/engine remain authoritative.
@@ -25,6 +26,7 @@ from nifty_scalper_bot.config.env_utils import (
     resolve_build_sha,
     supabase_telemetry_enabled,
 )
+from nifty_scalper_bot.infra.session_startup_audit import audit_session_startups
 from nifty_scalper_bot.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
@@ -95,6 +97,7 @@ class DailyLogArchiver:
             "line_count": len(lines),
             "byte_count": len(text.encode("utf-8")),
             "log_text": text,
+            "startup_audit": audit_session_startups(text),
             "first_log_at": start.astimezone(timezone.utc).isoformat(),
             "last_log_at": end.astimezone(timezone.utc).isoformat(),
             "finalized": current >= close,
