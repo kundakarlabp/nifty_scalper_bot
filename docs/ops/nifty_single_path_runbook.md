@@ -73,6 +73,22 @@ historic `.env` discovery. This is not a credential migration and never
 deletes or rewrites existing host settings.
 
 
+## Safe effective startup configuration evidence
+
+The one canonical settings loader normalizes the environment **once** and emits
+`CONFIG_EFFECTIVE_PROFILE source=<category> mode=<LIVE|PAPER|SHADOW> live_orders=<true|false>`
+at startup. The source category is `operator_env_file`,
+`operator_env_missing`, `production_env_missing`,
+`development_dotenv` or `environment`; neither the operator's protected
+file path nor raw environment values are logged. Existing separate
+`LIVE_RISK_ENVELOPE_CONFIG`, `SMC_SUSTAINED_FLOW_ADMISSION_CONFIG`
+and `LIVE_ENTRY_QUALITY_CONFIG` events remain authoritative for their
+respective whitelisted effective values. Treat an absent startup event as
+**not verified**, not as enabled.
+
+These messages flow through the existing journald/daily-log archive; no
+additional AWS process, Supabase table or authentication surface is added.
+
 ## Remote operator-service liveness (Phase 6)
 
 The existing `RuntimeHeartbeat` reporter checks two **fixed loopback
