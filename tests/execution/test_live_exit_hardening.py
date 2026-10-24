@@ -93,7 +93,11 @@ class _OrderManager:
         self._next_id += 1
         self._broker.statuses[order_id] = "OPEN"
         self._broker.quantities[order_id] = int(kwargs["quantity"])
-        if kwargs.get("order_type") == "SL":
+        if (
+            kwargs.get("order_type") == "SL"
+            and "trigger_price" in kwargs
+            and "price" in kwargs
+        ):
             self._broker.protective_order_fields[order_id] = {
                 "order_id": order_id,
                 "tradingsymbol": str(kwargs["symbol"]).removeprefix("NFO:"),
