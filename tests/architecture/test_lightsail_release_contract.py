@@ -187,12 +187,21 @@ def test_code_only_release_reuses_installed_editable_environment() -> None:
 
 
 @pytest.mark.parametrize(
-    ("same_sha", "manifest_changed", "pip_exit", "expected_calls", "degraded"),
+    (
+        "same_sha",
+        "manifest_changed",
+        "pip_exit",
+        "prior_failure",
+        "expected_calls",
+        "degraded",
+    ),
     [
-        (True, True, 0, 0, False),
-        (False, False, 0, 0, False),
-        (False, True, 0, 1, False),
-        (False, True, 1, 1, True),
+        (True, True, 0, False, 0, False),
+        (False, False, 0, False, 0, False),
+        (False, True, 0, False, 1, False),
+        (False, True, 1, False, 1, True),
+        (True, False, 1, True, 1, True),
+        (True, False, 0, True, 1, False),
     ],
 )
 def test_dashboard_dependency_refresh_is_changed_manifest_only_and_observable(
@@ -200,15 +209,13 @@ def test_dashboard_dependency_refresh_is_changed_manifest_only_and_observable(
     same_sha: bool,
     manifest_changed: bool,
     pip_exit: int,
+    prior_failure: bool,
     expected_calls: int,
     degraded: bool,
 ) -> None:
     """Console pip failures must never masquerade as a healthy console release."""
     release = _text("deploy/lightsail_release.sh")
-    start = (
-        'if [ -x "$STREAMLIT_VENV/bin/python" ] '
-        "&& [ -f dashboard/requirements.txt ]; then"
-    )
+    start = 'if [ -f "$STREAMLIT_DEPENDENCY_FAILURE_MARKER" ]; then'
     dependency_block = (
         start
         + release.split(start, 1)[1].split(
@@ -228,6 +235,10 @@ def test_dashboard_dependency_refresh_is_changed_manifest_only_and_observable(
     )
     python.chmod(0o755)
     calls = tmp_path / "pip-calls.txt"
+    failure_marker = tmp_path / "protected" / "console-install-failed"
+    failure_marker.parent.mkdir()
+    if prior_failure:
+        failure_marker.touch()
     shell = (
         """
 set -eu
@@ -251,6 +262,7 @@ printf "degraded=%s\\n" "$STREAMLIT_DEPENDENCY_FAILED"
         PIP_EXIT=str(pip_exit),
         PIP_CALLS=str(calls),
         STREAMLIT_DEPENDENCY_FAILED="false",
+        STREAMLIT_DEPENDENCY_FAILURE_MARKER=str(failure_marker),
     )
     done = subprocess.run(
         ["bash", "-c", shell],
@@ -263,12 +275,15 @@ printf "degraded=%s\\n" "$STREAMLIT_DEPENDENCY_FAILED"
     assert done.returncode == 0, done.stderr
     call_count = calls.read_text().count("pip") if calls.exists() else 0
     assert call_count == expected_calls
+    assert failure_marker.exists() is degraded
     assert f"degraded={str(degraded).lower()}" in done.stdout
 
 
 def test_failed_console_dependencies_are_reported_as_degraded() -> None:
     release = _text("deploy/lightsail_release.sh")
     assert "deployed_console_dependencies_degraded" in release
+    assert "STREAMLIT_DEPENDENCY_FAILURE_MARKER" in release
+    assert 'rm -f "$STREAMLIT_DEPENDENCY_FAILURE_MARKER"' in release
     assert 'if [ "$STREAMLIT_DEPENDENCY_FAILED" = true ]; then' in release
     assert "WARNING: dashboard dependency refresh failed" not in release
 
