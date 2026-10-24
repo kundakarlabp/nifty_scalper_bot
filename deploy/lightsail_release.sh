@@ -29,6 +29,7 @@ SYSTEMD_ENTRYPOINT_MIGRATED=false
 AUTODEPLOY_ENTRYPOINT_MIGRATED=false
 RUNTIME_ENV_CHANGED=false
 PACKAGE_INSTALL_ATTEMPTED=false
+STREAMLIT_DEPENDENCY_FAILED=false
 
 for arg in "$@"; do
   case "$arg" in
@@ -831,9 +832,13 @@ else
 fi
 
 if [ -x "$STREAMLIT_VENV/bin/python" ] && [ -f dashboard/requirements.txt ]; then
-  if [ "$BEFORE" = "$AFTER" ] || ! git diff --quiet "$BEFORE" "$AFTER" -- dashboard/requirements.txt; then
-    "$STREAMLIT_VENV/bin/python" -m pip install --quiet -r dashboard/requirements.txt || \
-      log "WARNING: dashboard dependency refresh failed"
+  # Same-revision recovery and code-only changes must not mutate console
+  # packages. Only an actual requirements diff authorizes a refresh.
+  if [ "$BEFORE" != "$AFTER" ] && ! git diff --quiet "$BEFORE" "$AFTER" -- dashboard/requirements.txt; then
+    if ! "$STREAMLIT_VENV/bin/python" -m pip install --quiet -r dashboard/requirements.txt; then
+      STREAMLIT_DEPENDENCY_FAILED=true
+      log "ERROR: dashboard dependency refresh failed; trading engine release continues, console health is unverified"
+    fi
   fi
 fi
 
@@ -884,13 +889,34 @@ if wait_for_service "$AFTER"; then
     log "WARNING: admin service restart/health check failed; research manifest launch skipped"
   fi
   if broker_auth_dependency_degraded; then
-    restart_streamlit || log "WARNING: dashboard restart failed while broker auth is degraded"
-    if [ "$admin_ready" = true ]; then
-      write_status deployed_dependency_degraded "deployed ${AFTER:0:7}; engine healthy, broker authentication unavailable; trading blocked"
+    if [ "$STREAMLIT_DEPENDENCY_FAILED" = true ]; then
+      log "ERROR: Streamlit restart skipped after failed dependency refresh; broker auth also degraded"
     else
-      write_status deployed_admin_and_broker_degraded "deployed ${AFTER:0:7}; engine healthy, admin service unavailable, broker authentication unavailable"
+      restart_streamlit || log "WARNING: dashboard restart failed while broker auth is degraded"
+    fi
+    if [ "$admin_ready" = true ]; then
+      if [ "$STREAMLIT_DEPENDENCY_FAILED" = true ]; then
+        write_status deployed_broker_and_console_dependencies_degraded "deployed ${AFTER:0:7}; broker authentication unavailable; console dependency refresh failed"
+      else
+        write_status deployed_dependency_degraded "deployed ${AFTER:0:7}; engine healthy, broker authentication unavailable; trading blocked"
+      fi
+    else
+      if [ "$STREAMLIT_DEPENDENCY_FAILED" = true ]; then
+        write_status deployed_admin_broker_and_console_dependencies_degraded "deployed ${AFTER:0:7}; admin unavailable; broker auth and console dependencies degraded"
+      else
+        write_status deployed_admin_and_broker_degraded "deployed ${AFTER:0:7}; engine healthy, admin service unavailable, broker authentication unavailable"
+      fi
     fi
     logger -t niftybot-deploy "candidate deployed; broker authentication unavailable, trading remains blocked"
+  elif [ "$STREAMLIT_DEPENDENCY_FAILED" = true ]; then
+    # Console is ancillary; report degraded instead of blocking healthy
+    # protective trading paths or claiming unverified console availability.
+    if [ "$admin_ready" = true ]; then
+      write_status deployed_console_dependencies_degraded "deployed ${AFTER:0:7}; bot and admin healthy; console dependency refresh failed"
+    else
+      write_status deployed_admin_console_dependencies_degraded "deployed ${AFTER:0:7}; bot healthy; admin unavailable and console dependency refresh failed"
+    fi
+    logger -t niftybot-deploy "console dependency installation failed; engine remains available"
   elif restart_streamlit; then
     if [ "$admin_ready" = true ]; then
       write_status deployed "deployed ${AFTER:0:7}; bot, admin and console healthy"
