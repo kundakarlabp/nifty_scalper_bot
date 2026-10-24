@@ -120,9 +120,7 @@ def test_effective_profile_reports_only_source_and_normalized_mode(
     monkeypatch, tmp_path, caplog
 ) -> None:
     protected = tmp_path / "operator-settings.env"
-    protected.write_text(
-        "ENABLE_LIVE=false\nEXECUTION_MODE=SHADOW\n", encoding="utf-8"
-    )
+    protected.write_text("ENABLE_LIVE=false\nEXECUTION_MODE=SHADOW\n", encoding="utf-8")
     monkeypatch.setenv("DEPLOYMENT_PLATFORM", "aws_lightsail")
     monkeypatch.setenv("BOT_ENV_FILE", str(protected))
 
