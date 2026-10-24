@@ -10,9 +10,9 @@ from __future__ import annotations
 
 import logging
 import os
-from math import isfinite
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+from math import isfinite
 from typing import Mapping
 
 from nifty_scalper_bot.config.env_utils import parse_float_env
