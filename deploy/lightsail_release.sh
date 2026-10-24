@@ -30,6 +30,7 @@ AUTODEPLOY_ENTRYPOINT_MIGRATED=false
 RUNTIME_ENV_CHANGED=false
 PACKAGE_INSTALL_ATTEMPTED=false
 STREAMLIT_DEPENDENCY_FAILED=false
+STREAMLIT_DEPENDENCY_FAILURE_MARKER="${CONFIG_DIR}/streamlit_dependency_refresh_failed"
 
 for arg in "$@"; do
   case "$arg" in
@@ -831,13 +832,26 @@ else
   fi
 fi
 
+# Failed console dependency updates survive a restart and later code-only
+# commits. Never silently clear degradation until pip successfully retries.
+if [ -f "$STREAMLIT_DEPENDENCY_FAILURE_MARKER" ]; then
+  STREAMLIT_DEPENDENCY_FAILED=true
+fi
 if [ -x "$STREAMLIT_VENV/bin/python" ] && [ -f dashboard/requirements.txt ]; then
-  # Same-revision recovery and code-only changes must not mutate console
-  # packages. Only an actual requirements diff authorizes a refresh.
-  if [ "$BEFORE" != "$AFTER" ] && ! git diff --quiet "$BEFORE" "$AFTER" -- dashboard/requirements.txt; then
+  # Skip healthy same-revision/code-only releases. A persisted failure always
+  # attempts recovery, including when the revision or manifest is unchanged.
+  if [ "$STREAMLIT_DEPENDENCY_FAILED" = true ] || {
+    [ "$BEFORE" != "$AFTER" ] && ! git diff --quiet "$BEFORE" "$AFTER" -- dashboard/requirements.txt
+  }; then
     if ! "$STREAMLIT_VENV/bin/python" -m pip install --quiet -r dashboard/requirements.txt; then
       STREAMLIT_DEPENDENCY_FAILED=true
-      log "ERROR: dashboard dependency refresh failed; trading engine release continues, console health is unverified"
+      mkdir -p "$(dirname "$STREAMLIT_DEPENDENCY_FAILURE_MARKER")"
+      : > "$STREAMLIT_DEPENDENCY_FAILURE_MARKER.tmp"
+      mv "$STREAMLIT_DEPENDENCY_FAILURE_MARKER.tmp" "$STREAMLIT_DEPENDENCY_FAILURE_MARKER"
+      log "ERROR: dashboard dependency refresh failed; console degraded until successful verified retry"
+    else
+      rm -f "$STREAMLIT_DEPENDENCY_FAILURE_MARKER"
+      STREAMLIT_DEPENDENCY_FAILED=false
     fi
   fi
 fi
