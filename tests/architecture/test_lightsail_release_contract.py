@@ -8,6 +8,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -182,6 +184,113 @@ def test_code_only_release_reuses_installed_editable_environment() -> None:
     assert 'if [ "$PACKAGE_INSTALL_ATTEMPTED" = true ]; then' in release
     assert "auto_release_should_defer" in release
     assert "intraday_flat_broker_confirmed" in release
+
+
+@pytest.mark.parametrize(
+    (
+        "same_sha",
+        "manifest_changed",
+        "pip_exit",
+        "prior_failure",
+        "expected_calls",
+        "degraded",
+    ),
+    [
+        (True, True, 0, False, 0, False),
+        (False, False, 0, False, 0, False),
+        (False, True, 0, False, 1, False),
+        (False, True, 1, False, 1, True),
+        (True, False, 1, True, 1, True),
+        (True, False, 0, True, 1, False),
+    ],
+)
+def test_dashboard_dependency_refresh_is_changed_manifest_only_and_observable(
+    tmp_path: Path,
+    same_sha: bool,
+    manifest_changed: bool,
+    pip_exit: int,
+    prior_failure: bool,
+    expected_calls: int,
+    degraded: bool,
+) -> None:
+    """Console pip failures must never masquerade as a healthy console release."""
+    release = _text("deploy/lightsail_release.sh")
+    start = "# Failed console dependency updates survive a restart and later code-only"
+    dependency_block = (
+        start
+        + release.split(start, 1)[1].split(
+            '\nif ! set_runtime_build_sha "$AFTER"; then', 1
+        )[0]
+    )
+
+    (tmp_path / "dashboard").mkdir()
+    (tmp_path / "dashboard" / "requirements.txt").write_text(
+        "streamlit>=1,<2\n", encoding="utf-8"
+    )
+    python = tmp_path / "streamlit-venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.write_text(
+        '#!/bin/sh\nprintf "pip\\n" >> "$PIP_CALLS"\nexit "$PIP_EXIT"\n',
+        encoding="utf-8",
+    )
+    python.chmod(0o755)
+    calls = tmp_path / "pip-calls.txt"
+    failure_marker = tmp_path / "protected" / "console-install-failed"
+    failure_marker.parent.mkdir()
+    if prior_failure:
+        failure_marker.touch()
+    shell = (
+        """
+set -eu
+git() {
+  if [ "$MANIFEST_CHANGED" = "true" ]; then return 1; fi
+  return 0
+}
+log() { :; }
+"""
+        + dependency_block
+        + """
+printf "degraded=%s\\n" "$STREAMLIT_DEPENDENCY_FAILED"
+"""
+    )
+    env = dict(
+        os.environ,
+        BEFORE="sha-a",
+        AFTER="sha-a" if same_sha else "sha-b",
+        STREAMLIT_VENV=str(python.parent.parent),
+        MANIFEST_CHANGED="true" if manifest_changed else "false",
+        PIP_EXIT=str(pip_exit),
+        PIP_CALLS=str(calls),
+        STREAMLIT_DEPENDENCY_FAILED="false",
+        STREAMLIT_DEPENDENCY_FAILURE_MARKER=str(failure_marker),
+    )
+    done = subprocess.run(
+        ["bash", "-c", shell],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert done.returncode == 0, done.stderr
+    call_count = calls.read_text().count("pip") if calls.exists() else 0
+    assert call_count == expected_calls
+    assert failure_marker.exists() is degraded
+    assert f"degraded={str(degraded).lower()}" in done.stdout
+
+
+def test_failed_console_dependencies_are_reported_as_degraded() -> None:
+    release = _text("deploy/lightsail_release.sh")
+    assert "deployed_console_dependencies_degraded" in release
+    assert "STREAMLIT_DEPENDENCY_FAILURE_MARKER" in release
+    assert 'rm -f "$STREAMLIT_DEPENDENCY_FAILURE_MARKER"' in release
+    # Both no-change early exits must retain the persistent degraded signal.
+    no_change_fast_path = release.split("# Auto mode checks remote revisions", 1)[
+        1
+    ].split("CANDIDATE=", 1)[0]
+    assert no_change_fast_path.count("current_console_dependencies_degraded") == 2
+    assert 'if [ "$STREAMLIT_DEPENDENCY_FAILED" = true ]; then' in release
+    assert "WARNING: dashboard dependency refresh failed" not in release
 
 
 def test_release_runner_validates_and_rolls_back() -> None:
