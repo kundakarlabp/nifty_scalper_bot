@@ -236,7 +236,9 @@ class TradeCandidateSelector:
                 )
                 continue
 
-            bid, ask, resolved_spread_pct, _quote_source = resolve_quote_bid_ask_spread(s)
+            bid, ask, resolved_spread_pct, _quote_source = resolve_quote_bid_ask_spread(
+                s
+            )
             ltp = self._f(s.get("ltp"))
             has_bid_ask = bid is not None and ask is not None
             if is_live and not has_bid_ask:
