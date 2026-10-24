@@ -33,7 +33,7 @@ Protective exits and reconciliation continue independently of new-entry approval
 | **Canonical trading owners** | [ARCHITECTURE_TRADING_PATH.md](ARCHITECTURE_TRADING_PATH.md) | Actual runtime authorities and hand-offs |
 | **Machine-readable architecture SSOT** | [agent_manifest.json](docs/architecture/agent_manifest.json) | Runtime path, ownership and validation routing |
 | **Module navigation** | [docs/REPO_MAP.md](docs/REPO_MAP.md) | Find the relevant module, tests and owner |
-| **Generated module index** | [docs/MODULE_INDEX.md](docs/MODULE_INDEX.md) | Browse 58 critical modules and their source-derived purpose statements |
+| **Generated module index** | [docs/MODULE_INDEX.md](docs/MODULE_INDEX.md) | Browse 59 critical modules and their source-derived purpose statements |
 | **Documentation maintenance** | [docs/MODULE_DOCUMENTATION.md](docs/MODULE_DOCUMENTATION.md) | File-header convention, synchronization and CI guard |
 | **Engineering instructions** | [AGENTS.md](AGENTS.md) | Safety invariants and change discipline |
 | **Operational runbooks** | [RUNBOOK.md](RUNBOOK.md), [Lightsail setup](deploy/LIGHTSAIL_SETUP.md) | Operator/deployment procedures |

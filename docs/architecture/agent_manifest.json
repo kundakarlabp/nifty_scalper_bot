@@ -36,6 +36,7 @@
     "src/nifty_scalper_bot/execution/bracket_core.py",
     "src/nifty_scalper_bot/execution/broker_recovery.py",
     "src/nifty_scalper_bot/execution/entry_recovery.py",
+    "src/nifty_scalper_bot/execution/exchange_stop_proof.py",
     "src/nifty_scalper_bot/execution/exit_router.py",
     "src/nifty_scalper_bot/execution/hardened_adaptive_trailing.py",
     "src/nifty_scalper_bot/execution/ledger_bracket_manager.py",

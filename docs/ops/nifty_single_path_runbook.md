@@ -23,6 +23,31 @@ daily broker-token operation may require AppDeploy.
 - Never paste the request-token URL, access tokens, or TOTP into chat,
   screenshots, GitHub Actions, or Supabase telemetry.
 
+## Exchange protective-stop broker evidence (Phase 8)
+
+A broker **order ID, submitted modification, or OPEN status alone is not
+protection proof**. The canonical bracket owner confirms an exchange SL only
+after the broker orderbook agrees on exact order ID, NFO tradingsymbol, side,
+product, SL/SL-M order type, quantity, remaining quantity (if provided),
+trigger and stop-limit geometry. Unknown, partial and MODIFY PENDING records
+remain unverified; only a subsequent matching broker readback clears the
+degraded reason. This applies on entry fill and restored-bracket startup.
+
+The logging vocabulary distinguishes
+`EXCHANGE_PROTECTIVE_STOP_MODIFY_SUBMITTED` from the later
+`EXCHANGE_PROTECTIVE_STOP_RATCHET_CONFIRMED`. Neither a stale submission log
+nor a virtual trailing value should be interpreted as an acknowledged
+exchange-side stop.
+
+Read the canonical
+`src/nifty_scalper_bot/execution/exchange_stop_proof.py` validation before
+editing these invariants. A rejected/incomplete broker proof keeps the
+entry-protection blocker; it does **not** cancel, replace or submit competing
+protective orders. Existing protective exit pathways continue unimpeded.
+Never infer complete stop coverage from the daily startup summary or Supabase
+status alone. Broker state may legitimately be unavailable during a
+modification: distinguish **unverified** from **failed/cancelled**.
+
 ## Archived startup and recovery evidence (Phase 7)
 
 The existing five-minute Lightsail journald archiver attaches a compact,
