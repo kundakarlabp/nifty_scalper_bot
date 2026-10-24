@@ -215,7 +215,9 @@ def test_dashboard_dependency_refresh_is_changed_manifest_only_and_observable(
 ) -> None:
     """Console pip failures must never masquerade as a healthy console release."""
     release = _text("deploy/lightsail_release.sh")
-    start = 'if [ -f "$STREAMLIT_DEPENDENCY_FAILURE_MARKER" ]; then'
+    start = (
+        "# Failed console dependency updates survive a restart and later code-only"
+    )
     dependency_block = (
         start
         + release.split(start, 1)[1].split(
