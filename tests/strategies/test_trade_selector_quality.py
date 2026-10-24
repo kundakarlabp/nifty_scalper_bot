@@ -176,3 +176,38 @@ def test_nonfinite_option_ltp_is_not_executable(monkeypatch):
             direction_bias="CE", atm_strike=22000, snapshots=[base(ltp=value)]
         )
         assert ranked == []
+
+
+def test_candidate_live_mode_is_owned_by_entry_policy(monkeypatch):
+    from nifty_scalper_bot.config.entry_policy import resolve_entry_policy
+
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE_TRADING", "false")
+    monkeypatch.setenv("PAPER_MODE", "false")
+    monkeypatch.setenv("PAPER__ENABLED", "false")
+    monkeypatch.setenv("SHADOW_MODE", "false")
+
+    for live_flag in ("1", "false", "live"):
+        monkeypatch.setenv("ENABLE_LIVE", live_flag)
+        policy = resolve_entry_policy()
+        selector = TradeCandidateSelector()
+        max_spread, _max_age, _min_ticks, is_live = selector._effective_limits()
+        assert is_live is policy.is_live
+        if is_live:
+            assert max_spread <= policy.execution_max_spread_pct
+
+
+def test_candidate_uses_canonical_quote_spread_value(monkeypatch):
+    import nifty_scalper_bot.strategies.trade_selector as selector_module
+    from nifty_scalper_bot.execution.readiness import resolve_quote_bid_ask_spread
+
+    monkeypatch.setattr(selector_module, "expiry_theta_block", lambda: (False, ""))
+    monkeypatch.setattr(selector_module, "midday_pause_block", lambda: (False, ""))
+    snapshot = base(bid=119.9, ask=120.1)
+    expected = resolve_quote_bid_ask_spread(snapshot)[2]
+
+    ranked = TradeCandidateSelector().select_ranked_candidates(
+        direction_bias="CE", atm_strike=22000, snapshots=[snapshot]
+    )
+    assert len(ranked) == 1
+    assert ranked[0].spread_pct == expected
