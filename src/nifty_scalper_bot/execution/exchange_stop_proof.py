@@ -78,7 +78,10 @@ def verify_exchange_stop_order(
     ).strip().upper()
     if broker_side != expected_side:
         return False, "broker_stop_side_mismatch"
-    if str(evidence.get("product") or "").strip().upper() != str(product).strip().upper():
+    if (
+        str(evidence.get("product") or "").strip().upper()
+        != str(product).strip().upper()
+    ):
         return False, "broker_stop_product_mismatch"
     order_type = str(evidence.get("order_type") or "").strip().upper()
     if order_type not in {"SL", "SL-M"}:
