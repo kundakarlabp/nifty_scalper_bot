@@ -4,7 +4,7 @@
 
 This navigation index is derived from the authoritative [architecture manifest](architecture/agent_manifest.json) and each module's opening docstring. It does not define runtime ownership or replace [the trading lifecycle](TRADING_LIFECYCLE.md).
 
-**Documented critical modules:** 57
+**Documented critical modules:** 58
 
 ## `dashboard/`
 
@@ -96,6 +96,7 @@ This navigation index is derived from the authoritative [architecture manifest](
 | Module | Purpose at a glance |
 | --- | --- |
 | [`runtime_heartbeat.py`](../src/nifty_scalper_bot/infra/runtime_heartbeat.py) | Mirror sanitized Lightsail runtime health to optional Supabase. |
+| [`session_startup_audit.py`](../src/nifty_scalper_bot/infra/session_startup_audit.py) | Summarize observed market-session startup and recovery log events. |
 | [`supabase_trade_replication.py`](../src/nifty_scalper_bot/infra/supabase_trade_replication.py) | Replicate committed trade observations to optional Supabase storage. |
 
 ## `src/nifty_scalper_bot/journal/`

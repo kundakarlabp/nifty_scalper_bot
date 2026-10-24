@@ -23,6 +23,37 @@ daily broker-token operation may require AppDeploy.
 - Never paste the request-token URL, access tokens, or TOTP into chat,
   screenshots, GitHub Actions, or Supabase telemetry.
 
+## Archived startup and recovery evidence (Phase 7)
+
+The existing five-minute Lightsail journald archiver attaches a compact,
+non-secret `startup_audit` to the already-present
+`public.nifty_daily_market_logs.summary` JSONB column. Its existing Supabase
+Edge receiver accepts only allowlisted counters, HH:MM:SS clocks and a fixed
+`protective_stop_verification` caveat. Older clients without the audit
+continue to archive logs without clearing existing summaries.
+
+This is **session retrospective evidence**, not broker reconciliation authority.
+Counts of `STARTUP_PHASE phase=create_context`,
+`STARTUP_WS_START_DONE`, `RECONCILE_COMPLETE`, and
+`STARTUP_MODE_TRANSITION ... to=LIVE_READY` help investigate repeated
+intraday restarts. The markers **cannot prove exchange-side stop protection**
+or explain the root cause of a restart. Missing markers are missing evidence,
+not success. Partial intraday archives may change; use `finalized` when
+comparing complete sessions.
+
+Read-only verification:
+
+```sql
+select trading_date, finalized, line_count,
+       summary -> 'startup_audit' as startup_audit
+from public.nifty_daily_market_logs
+order by trading_date desc
+limit 5;
+```
+
+Investigate repeated intraday startups against broker reconciliation evidence.
+Do not restart services or change trade/risk settings based on this summary.
+
 ## Releases — ONE production deploy authority
 
 GitHub CI pass on the exact merged `main` SHA → existing
