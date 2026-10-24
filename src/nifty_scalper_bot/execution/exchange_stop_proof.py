@@ -57,7 +57,9 @@ def verify_exchange_stop_order(
     """Return broker-confirmed protection or a fixed fail-closed reason code."""
     state = str(evidence.get("status") or "").strip().upper()
     if state not in {"OPEN", "TRIGGER PENDING"}:
-        return False, "broker_stop_status_unverified:" + (state or "UNKNOWN")
+        known = {"MODIFY PENDING", "CANCELLED", "REJECTED", "COMPLETE", "OPEN PENDING"}
+        safe_state = state if state in known else "UNKNOWN"
+        return False, "broker_stop_status_unverified:" + safe_state
     broker_id = str(evidence.get("order_id") or evidence.get("id") or "").strip()
     if not broker_id or broker_id != str(order_id).strip():
         return False, "broker_stop_order_id_mismatch"
