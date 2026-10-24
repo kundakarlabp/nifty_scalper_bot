@@ -38,6 +38,7 @@ class _Broker:
         self.cancel_confirms = cancel_confirms
         self.statuses: dict[str, str] = {"old-exit": "OPEN PENDING"}
         self.quantities: dict[str, int] = {}
+        self.protective_order_fields: dict[str, dict[str, Any]] = {}
         self.positions: list[dict[str, Any]] = [{"symbol": SYMBOL, "quantity": 65}]
         self.cancel_calls: list[str] = []
         self.modify_calls: list[tuple[str, dict[str, Any]]] = []
@@ -46,6 +47,7 @@ class _Broker:
         result: dict[str, Any] = {"status": self.statuses.get(order_id, "")}
         if order_id in self.quantities:
             result["quantity"] = self.quantities[order_id]
+        result.update(self.protective_order_fields.get(order_id, {}))
         return result
 
     def get_positions(self) -> list[dict[str, Any]]:
@@ -91,6 +93,19 @@ class _OrderManager:
         self._next_id += 1
         self._broker.statuses[order_id] = "OPEN"
         self._broker.quantities[order_id] = int(kwargs["quantity"])
+        if kwargs.get("order_type") == "SL":
+            self._broker.protective_order_fields[order_id] = {
+                "order_id": order_id,
+                "tradingsymbol": str(kwargs["symbol"]).removeprefix("NFO:"),
+                "exchange": "NFO",
+                "transaction_type": kwargs["side"],
+                "product": kwargs.get("product", "MIS"),
+                "order_type": "SL",
+                "pending_quantity": int(kwargs["quantity"]),
+                "filled_quantity": 0,
+                "trigger_price": kwargs["trigger_price"],
+                "price": kwargs["price"],
+            }
         return order_id
 
     def cancel_order(self, order_id: str, *args: Any, **kwargs: Any) -> bool:
@@ -100,6 +115,12 @@ class _OrderManager:
         self.modify_calls.append((str(order_id), dict(kwargs)))
         if "quantity" in kwargs:
             self._broker.quantities[str(order_id)] = int(kwargs["quantity"])
+        if str(order_id) in self._broker.protective_order_fields:
+            fields = self._broker.protective_order_fields[str(order_id)]
+            for key in ("trigger_price", "price", "quantity"):
+                if key in kwargs:
+                    target = "pending_quantity" if key == "quantity" else key
+                    fields[target] = kwargs[key]
         return True
 
     def submit_trade_plan_result(self, _plan: Any) -> str:
