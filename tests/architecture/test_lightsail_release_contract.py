@@ -41,6 +41,22 @@ def test_fresh_host_never_copies_full_strategy_template_to_secret_env() -> None:
     assert 'log "Preserving external environment and credentials"' in setup
 
 
+def test_release_never_migrates_repo_dotenv_into_protected_credentials() -> None:
+    """Release is not a credentials migration or LIVE authorization authority."""
+    release = _text("deploy/lightsail_release.sh")
+    setup = _text("deploy/lightsail_setup.sh")
+
+    assert 'cp -p "$APP_DIR/.env" "$ENV_FILE"' not in release
+    assert 'cp -p "$LEGACY_ENV" "$ENV_FILE"' not in release
+    assert "validate_environment\n" in release
+    assert 'write_status env_missing "environment file missing:' in release
+
+    # Historical one-time import remains only in explicit operator setup.
+    assert 'cp -p "$LEGACY_ENV" "$ENV_FILE"' in setup
+    assert "ENABLE_LIVE=false" in setup
+    assert "EXECUTION_MODE=SHADOW" in setup
+
+
 def test_lightsail_uses_external_environment_file() -> None:
     setup = _text("deploy/lightsail_setup.sh")
     assert 'CONFIG_DIR="/home/ubuntu/.config/niftybot"' in setup

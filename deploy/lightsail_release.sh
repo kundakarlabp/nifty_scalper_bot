@@ -634,9 +634,10 @@ fi
 chmod +x "$APP_DIR/deploy/lightsail_release.sh" 2>/dev/null || true
 mkdir -p "$CONFIG_DIR" "$(dirname "$STATUS_FILE")"
 chmod 700 "$CONFIG_DIR" 2>/dev/null || true
-if [ ! -f "$ENV_FILE" ] && [ -f "$APP_DIR/.env" ]; then
-  cp -p "$APP_DIR/.env" "$ENV_FILE"; chmod 600 "$ENV_FILE"
-fi
+# The validated release path never migrates or reconstructs credentials.
+# If the protected operator file is missing, fail closed before checking out
+# main or restarting any broker-facing service. One-time migration belongs to
+# explicitly invoked lightsail_setup.sh only.
 validate_environment
 ensure_env_default BOT_RESEARCH_LAUNCHER systemd
 # Off-hot-path Supabase defaults are GitHub-owned in Python. Host file
