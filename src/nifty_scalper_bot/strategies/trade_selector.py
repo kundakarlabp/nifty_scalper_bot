@@ -9,10 +9,10 @@ Safety: Invalid quote proof or non-finite premium cannot authorize an entry.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import logging
-from math import isfinite
 import os
+from dataclasses import dataclass
+from math import isfinite
 from typing import Any
 
 from nifty_scalper_bot.config.entry_policy import resolve_entry_policy
