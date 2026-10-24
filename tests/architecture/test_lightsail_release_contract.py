@@ -284,6 +284,11 @@ def test_failed_console_dependencies_are_reported_as_degraded() -> None:
     assert "deployed_console_dependencies_degraded" in release
     assert "STREAMLIT_DEPENDENCY_FAILURE_MARKER" in release
     assert 'rm -f "$STREAMLIT_DEPENDENCY_FAILURE_MARKER"' in release
+    # Both no-change early exits must retain the persistent degraded signal.
+    no_change_fast_path = release.split("# Auto mode checks remote revisions", 1)[
+        1
+    ].split('CANDIDATE=', 1)[0]
+    assert no_change_fast_path.count("current_console_dependencies_degraded") == 2
     assert 'if [ "$STREAMLIT_DEPENDENCY_FAILED" = true ]; then' in release
     assert "WARNING: dashboard dependency refresh failed" not in release
 
