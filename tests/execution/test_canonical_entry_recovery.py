@@ -212,7 +212,6 @@ def test_duplicate_response_reconciles_existing_order_without_resubmit() -> None
     assert len(manager.plans) == 1
 
 
-
 def test_recovery_does_not_adopt_generic_same_symbol_tag() -> None:
     manager = _RecoveryManager([_reject("duplicate order request already processed")])
     manager._broker.orders_payload = [
