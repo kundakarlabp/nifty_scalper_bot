@@ -9,6 +9,7 @@ itself change the fixed Lightsail bundle price.
 from __future__ import annotations
 
 import html
+import logging
 import os
 import threading
 import time
@@ -31,6 +32,7 @@ VALID_MODES = {"AUTO", "ACTIVE", "QUIET"}
 DEFAULT_START = dt_time(8, 55)
 DEFAULT_STOP = dt_time(15, 40)
 router = APIRouter()
+_LOGGER = logging.getLogger(__name__)
 
 
 def operating_mode() -> str:
@@ -115,8 +117,17 @@ def start_transition_watchdog(
                 continue
             current = engine_should_run()
             if current != expected:
-                _restart_service()
-                return
+                # A rejected queue request must not strand AUTO in the
+                # wrong process mode for the entire market session.
+                # The existing guarded deployer still owns broker-flat
+                # restart authorization.
+                result = _restart_service()
+                if result.ok:
+                    return
+                _LOGGER.warning(
+                    "AUTO mode transition restart request rejected; "
+                    "will retry on next watchdog tick"
+                )
 
     thread = threading.Thread(
         target=watch,
