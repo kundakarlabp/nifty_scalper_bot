@@ -51,7 +51,7 @@ def _basic(password: str) -> str:
 
 
 @pytest.mark.parametrize(
-    ("request", "status"),
+    ("case_request", "status"),
     [
         (_request(scheme="http", authorization=_basic("long-test-pass")), 403),
         (_request(), 401),
@@ -67,11 +67,11 @@ def _basic(password: str) -> str:
         ),
     ],
 )
-def test_public_production_controls_fail_closed(monkeypatch, request, status) -> None:
+def test_public_production_controls_fail_closed(monkeypatch, case_request, status) -> None:
     monkeypatch.setenv("DEPLOYMENT_PLATFORM", "aws_lightsail")
     monkeypatch.setenv("ADMIN_PASSWORD", "long-test-pass")
     with pytest.raises(HTTPException) as failed:
-        admin_dashboard._check_auth(request)
+        admin_dashboard._check_auth(case_request)
     assert failed.value.status_code == status
 
 
