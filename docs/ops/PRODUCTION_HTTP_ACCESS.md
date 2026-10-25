@@ -70,3 +70,25 @@ recorded as operator-ingress degradation, not silently marked secure.
 The CI proof tag shares GitHub repository write authority; protect that ref
 namespace through GitHub rulesets if available, and restrict repository write
 access. GitHub `main` remains the only release source.
+
+
+## AUTO wake-up, Monday market session
+
+`BOT_OPERATING_MODE=AUTO` loads only the lightweight control app outside
+weekdays **08:55–15:40 IST**; the existing 30-second watchdog queues a
+broker-safe validated service restart when crossing the operating boundary.
+The first trading-entry opportunity is later than this warm-up window.
+The watchdog must **retry a rejected queue attempt** on the next tick rather
+than quitting and leaving an unloaded engine for the trading day. An
+*accepted queue* still only means the release runner accepted the request;
+it is not proof the broker session, feed, reconciliation, or protective
+orders are ready. A fresh `/health/trading` readiness decision after
+08:55 IST must confirm those requirements before any live entry.
+
+On a normal off-hours Sunday, `/livez` returning
+`{"quiet":true,"bot_loaded":false}` and Supabase
+`trading_status=quiet` are expected. Do not activate the trading
+engine manually on Sunday merely to prove Monday's broker authorization;
+Zerodha access tokens are session-bound. Monday, 2026-10-26 is scheduled
+as an NSE derivatives session. Do not infer live order permissions from
+HTTP liveness or the absence of an exchange holiday.
