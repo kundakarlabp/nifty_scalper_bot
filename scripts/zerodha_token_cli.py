@@ -57,7 +57,8 @@ def resolve_token_env_path(
     """Select one operator env file, refusing a different production path."""
     variables = os.environ if environ is None else environ
     protected = variables.get("BOT_ENV_FILE")
-    production = variables.get("DEPLOYMENT_PLATFORM", "").strip().lower() == "aws_lightsail"
+    platform = variables.get("DEPLOYMENT_PLATFORM", "")
+    production = platform.strip().lower() == "aws_lightsail"
     if production and (not protected or not Path(protected).is_absolute()):
         raise ValueError("canonical BOT_ENV_FILE is required on production")
     candidate = Path(cli_env or protected or ".env").expanduser()
