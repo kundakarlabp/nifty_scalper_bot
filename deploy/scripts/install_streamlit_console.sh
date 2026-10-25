@@ -28,7 +28,7 @@ ensure_default POST_MARKET_BASKET_REFRESH_SECONDS 1800
 ensure_default POST_MARKET_MARKET_DATA_SUMMARY_SECONDS 900
 ensure_default POST_MARKET_SUPPRESS_CANDLE_GAP_WARNINGS true
 ensure_default BOT_ADMIN_API_URL http://127.0.0.1:8081
-ensure_default BOT_ADMIN_PUBLIC_URL http://65.0.255.84:8081/admin
+ensure_default BOT_ADMIN_PUBLIC_URL https://65.0.255.84/admin
 ensure_default BOT_ADMIN_REVISION_CHECK_SECONDS 120
 
 if ! dpkg -s python3-venv >/dev/null 2>&1; then
