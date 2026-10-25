@@ -76,7 +76,12 @@ def _ensure_env_loaded_before_settings() -> None:
     source = "environment"
     if canonical:
         path = Path(canonical).expanduser()
-        if path.is_file():
+        if production and not path.is_absolute():
+            source = "operator_env_relative"
+            LOGGER.error("CONFIG_SOURCE_RELATIVE_FAIL_CLOSED")
+            os.environ["ENABLE_LIVE"] = "false"
+            os.environ["EXECUTION_MODE"] = "SHADOW"
+        elif path.is_file():
             load_dotenv(dotenv_path=str(path), override=False)
             source = "operator_env_file"
         else:
