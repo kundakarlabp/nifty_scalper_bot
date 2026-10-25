@@ -255,7 +255,7 @@ consolidation, first inspect **names only** without deleting overrides:
 
 ```bash
 cd /home/ubuntu/nifty_scalper_bot
-.venv/bin/python deploy/scripts/audit_operator_env.py \\
+.venv/bin/python deploy/scripts/audit_operator_env.py \
   --env-file /home/ubuntu/.config/niftybot/niftybot.env
 ```
 
