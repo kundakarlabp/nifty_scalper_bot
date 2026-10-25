@@ -72,6 +72,24 @@ if ! sudo -n cmp -s "$CADDY_SOURCE" "$CADDY_TARGET"; then
   fi
 fi
 
-# Certificate issuance may be asynchronous: external verified-TLS checks
-# are still required. Never claim that reload alone proves public HTTPS.
-echo "[operator-ingress] systemd admin bind and Caddy configuration synchronized"
+# A matching file is not proof the systemd unit is running or a valid IP
+# certificate was issued. Probe the host-local Caddy listener with ordinary
+# trusted CA validation and the public IP's certificate identity (no -k).
+if ! sudo -n systemctl is-active --quiet caddy; then
+  sudo -n systemctl start caddy || {
+    echo "[operator-ingress] Caddy failed to start; admin is loopback-only" >&2
+    exit 1
+  }
+fi
+for attempt in 1 2 3 4 5 6; do
+  if curl --noproxy '*' -fsS --max-time 5 \
+    --resolve 65.0.255.84:443:127.0.0.1 \
+    https://65.0.255.84/livez 2>/dev/null \
+    | grep -Eq '"status"[[:space:]]*:[[:space:]]*"alive"'; then
+    echo "[operator-ingress] admin loopback and trusted public-IP TLS verified"
+    exit 0
+  fi
+  sleep 2
+done
+echo "[operator-ingress] public-IP certificate missing/untrusted; retry next timer; admin is loopback-only" >&2
+exit 1
