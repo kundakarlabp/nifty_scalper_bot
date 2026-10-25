@@ -5,7 +5,7 @@
 
 65.0.255.84 {
     # Let's Encrypt's IP certificates require the six-day shortlived profile.
-    # Caddy >=2.10.1 is mandatory. Never use a locally issued 'tls internal'
+    # Caddy >=2.10.1 is mandatory. Never use a locally issued internal-CA
     # certificate for the public operator console.
     tls {
         issuer acme {
