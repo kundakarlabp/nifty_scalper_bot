@@ -165,7 +165,6 @@ def test_core_confirmation_latches_mismatched_broker_identity() -> None:
     assert bracket.exchange_stop_degraded_reason is None
 
 
-
 def test_sparse_history_obtains_exact_live_stop_orderbook_proof() -> None:
     """Entry and restart paths share this order-evidence lookup."""
     reads = []
