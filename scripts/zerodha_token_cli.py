@@ -79,7 +79,11 @@ def write_env_tokens(env_path: Path, token: str) -> None:
     if env_path.is_symlink() or (env_path.exists() and not env_path.is_file()):
         raise ValueError("expected a regular operator env file")
     keys = ("ZERODHA_ACCESS_TOKEN", "BROKER_ACCESS_TOKEN", "KITE_ACCESS_TOKEN")
-    lines = env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
+    lines = (
+        env_path.read_text(encoding="utf-8").splitlines()
+        if env_path.exists()
+        else []
+    )
     written: set[str] = set()
     updated: list[str] = []
     for line in lines:
@@ -210,7 +214,10 @@ def get_automated_request_token(
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--env", help="Operator env path (defaults to BOT_ENV_FILE; local .env only in development)")
+    ap.add_argument(
+        "--env",
+        help="Operator env path (BOT_ENV_FILE in production; .env in development)",
+    )
     ap.add_argument(
         "--write-env", action="store_true", default=True, help="Write access tokens to the environment file"
     )
