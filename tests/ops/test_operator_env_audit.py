@@ -44,6 +44,7 @@ def test_reports_only_known_policy_keys_and_no_values(tmp_path: Path) -> None:
                 "SMC_SUSTAINED_FLOW_CONFIRMATION_ENABLED=false",
                 "SUPABASE_RUNTIME_HEARTBEAT_URL=https://private-endpoint.example",
                 "CUSTOM_PASSPHRASE=OTHER_PRIVATE_VALUE",
+                "CUSTOM_METADATA=NONPUBLIC_OTHER_VALUE",
             ]
         ),
     )
@@ -63,6 +64,7 @@ def test_reports_only_known_policy_keys_and_no_values(tmp_path: Path) -> None:
     assert payload["unclassified_key_count"] == 1
     assert secret not in response.stdout + response.stderr
     assert "OTHER_PRIVATE_VALUE" not in response.stdout + response.stderr
+    assert "NONPUBLIC_OTHER_VALUE" not in response.stdout + response.stderr
     assert "2.0" not in response.stdout + response.stderr
     assert "https://private-endpoint" not in response.stdout + response.stderr
     assert str(path) not in response.stdout + response.stderr
