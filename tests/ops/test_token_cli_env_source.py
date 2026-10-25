@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import stat
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -103,4 +104,21 @@ def test_manage_bot_shell_cannot_source_repo_env() -> None:
     root = Path(__file__).resolve().parents[2]
     text = (root / "manage_bot.sh").read_text(encoding="utf-8")
     assert "source .env" not in text
-    assert "exec python scripts/zerodha_token_cli.py --write-env" in text
+    assert 'source .env' not in text
+    assert 'exec python scripts/zerodha_token_cli.py --env "$BOT_ENV_FILE" --write-env' in text
+    assert "absolute BOT_ENV_FILE" in text
+
+
+def test_unconfigured_manual_shell_does_not_run_token_cli(tmp_path: Path) -> None:
+    root = Path(__file__).resolve().parents[2]
+    result = subprocess.run(
+        ["bash", str(root / "manage_bot.sh"), "token"],
+        cwd=tmp_path,
+        env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(tmp_path)},
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=8,
+    )
+    assert result.returncode == 2
+    assert "absolute BOT_ENV_FILE" in result.stderr
