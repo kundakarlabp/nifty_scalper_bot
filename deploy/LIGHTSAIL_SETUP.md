@@ -78,19 +78,32 @@ The setup script:
 - keeps `nifty_scalper_bot.main:app` as the canonical engine entrypoint;
 - restarts both engine and console after validated GitHub updates.
 
-Allow TCP `443` and TCP `8501` in the Lightsail firewall. Port `8080` is needed
-only when direct admin fallback access is required.
+Keep the AWS inbound firewall restricted to required services: 443 for encrypted
+admin access, 8501 for the read-only console and optional 8080 for direct
+liveness/release diagnostics. The independent admin server (8081) must bind
+to 127.0.0.1 only; do not expose TCP 8081 publicly. For the canonical
+external probe procedure and known client timeouts, see
+[Production HTTP access](../docs/ops/PRODUCTION_HTTP_ACCESS.md).
 
 ## Console URLs
 
 ```text
 Operations console: http://LIGHTSAIL_STATIC_IP:8501
-Admin dashboard:    https://LIGHTSAIL_STATIC_IP/admin
-Admin fallback:     http://LIGHTSAIL_STATIC_IP:8080/admin
+Admin dashboard:    https://LIGHTSAIL_STATIC_IP/admin (trusted TLS + username admin + protected ADMIN_PASSWORD)
+Engine diagnostics: http://LIGHTSAIL_STATIC_IP:8080/livez
 ```
 
 The operations console is read-only. Historical journal scans run only after the
 **Generate download** button is pressed. Live fragments never scan historical logs.
+
+The validated release runner also applies `deploy/caddy/Caddyfile` and the
+loopback-only admin service unit. Caddy 2.10.1+ obtains a publicly trusted
+short-lived IP certificate with the ACME `shortlived` profile; its reload
+does not prove that issuance succeeded. After a release, verify HTTPS with
+normal certificate verification enabled. No admin password or broker token
+may be submitted over public HTTP. A failed Caddy validation/reload retains
+the previous Caddyfile, records an operator-ingress degradation marker, and
+never restarts the trading engine just to repair HTTPS.
 
 The independent admin process also exposes
 `/admin/api/service-health` on port `8081`, and Streamlit's
