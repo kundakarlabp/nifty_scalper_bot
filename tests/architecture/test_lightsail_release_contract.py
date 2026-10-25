@@ -663,16 +663,16 @@ def test_broker_guard_diagnostic_never_authorizes_release() -> None:
     import ast
 
     release = _text("deploy/lightsail_release.sh")
-    guard = release.split("<<'PY_FLAT_GUARD'\n", 1)[1].split(
-        "\nPY_FLAT_GUARD", 1
-    )[0]
+    guard = release.split("<<'PY_FLAT_GUARD'\n", 1)[1].split("\nPY_FLAT_GUARD", 1)[0]
     parsed = ast.parse(guard)
     blocked = next(
-        node for node in parsed.body
+        node
+        for node in parsed.body
         if isinstance(node, ast.FunctionDef) and node.name == "blocked"
     )
     is_safe = next(
-        node for node in parsed.body
+        node
+        for node in parsed.body
         if isinstance(node, ast.FunctionDef) and node.name == "is_safe"
     )
     blocked_returns = [
@@ -708,7 +708,7 @@ def test_broker_guard_diagnostic_never_authorizes_release() -> None:
     assert guard.count("if not is_safe():") == 2
     assert "time.sleep(1)" in guard
     assert "kite.positions()" in guard and "kite.orders()" in guard
-    assert "print(f\"intraday_release_guard_blocked: {reason}\"" in guard
+    assert 'print(f"intraday_release_guard_blocked: {reason}"' in guard
 
 
 def test_default_auto_release_defers_when_broker_exposure_is_unverified() -> None:
