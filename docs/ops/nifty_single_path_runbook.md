@@ -123,6 +123,27 @@ disaster recovery, maintain separately controlled off-host credential
 recovery procedures; these snapshots are short-lived local rollback
 history, not an external backup service.
 
+## Release guard diagnostics (25 October 2026)
+
+The existing broker-flat handoff remains fail-closed in LIVE and off-hours
+quiet mode. A `deferred_broker_exposure` release state **does not prove an
+open position**: missing/expired broker credentials, an invalid broker API
+response, nonterminal orders, or an unavailable local hold/reconciliation
+signal all prevent positive broker-flat proof.
+
+The *same* two broker position/order samples are still mandatory before
+deployment. The existing journal now reports only fixed
+`intraday_release_guard_blocked: <reason_code>` tokens such as
+`broker_position_nonflat`, `broker_order_not_terminal`,
+`broker_snapshot_shape_invalid`, `local_reconciliation_incomplete`,
+`entry_hold_not_acknowledged` and `local_broker_auth_unverified`.
+An unexpected broker exception is logged by **class name only**.
+No tokens, position snapshots or account identifiers are printed.
+These codes **explain a deferral; they never override it**. During Sunday
+quiet hours, absence of a usable fresh Zerodha token is not proof the account
+is flat. Do not force the release or infer flat positions solely from
+`trading_status=quiet`.
+
 ## Releases — ONE production deploy authority
 
 GitHub CI pass on the exact merged `main` SHA → existing

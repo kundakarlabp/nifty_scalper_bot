@@ -433,38 +433,45 @@ if token_rotation_requested and rotation_proof and os.path.isfile(rotation_proof
     except (OSError, ValueError, TypeError, KeyError):
         token_rotation_verified = False
 
+def blocked(reason: str) -> bool:
+    # Fixed diagnostic token only: never print credentials or broker payloads.
+    print(f"intraday_release_guard_blocked: {reason}", file=sys.stderr)
+    return False
+
 def is_safe() -> bool:
     with urllib.request.urlopen(f"http://127.0.0.1:{port}/livez", timeout=3) as response:
         live = json.load(response)
     if live.get("engine_http_responsive") is not True:
-        return False
+        return blocked("engine_http_unresponsive")
     if live.get("quiet") is True:
         # The canonical off-hours control plane has no trading stack and no
         # live entry worker. Broker positions/orders remain authoritative.
         if live.get("bot_loaded") is not False:
-            return False
+            return blocked("quiet_runtime_not_unloaded")
     else:
         if live.get("bot_loaded") is not True:
-            return False
+            return blocked("runtime_not_loaded")
         with urllib.request.urlopen(f"http://127.0.0.1:{port}/health/trading", timeout=3) as response:
             health = json.load(response)
         reconciliation = health.get("reconciliation") or {}
         broker = health.get("broker") or {}
         if hold_required and health.get("release_entry_hold_active") is not True:
-            return False
+            return blocked("entry_hold_not_acknowledged")
         # A new verified token can make the *old process's* auth state stale.
         # Only this fresh, token-bound proof permits skipping that single
         # local auth bit. Flat broker positions and terminal orders are still
         # verified twice using the new token, with an active entry hold.
         token_rotation_recovery = token_rotation_verified and hold_required
-        if (
-            health.get("live_orders_armed") is not False
-            or reconciliation.get("completed") is not True
-            or reconciliation.get("failed") is True
-            or reconciliation.get("unprotected_positions")
-            or (broker.get("authenticated") is not True and not token_rotation_recovery)
-        ):
-            return False
+        if health.get("live_orders_armed") is not False:
+            return blocked("entry_path_not_disarmed")
+        if reconciliation.get("completed") is not True:
+            return blocked("local_reconciliation_incomplete")
+        if reconciliation.get("failed") is True:
+            return blocked("local_reconciliation_failed")
+        if reconciliation.get("unprotected_positions"):
+            return blocked("unprotected_position_reported")
+        if broker.get("authenticated") is not True and not token_rotation_recovery:
+            return blocked("local_broker_auth_unverified")
     positions = kite.positions()
     orders = kite.orders()
     if (
@@ -473,15 +480,15 @@ def is_safe() -> bool:
         or not isinstance(positions.get("day"), list)
         or not isinstance(orders, list)
     ):
-        return False
+        return blocked("broker_snapshot_shape_invalid")
     for row in positions["net"] + positions["day"]:
         if not isinstance(row, dict) or "quantity" not in row:
-            return False
+            return blocked("broker_position_row_invalid")
         if float(row["quantity"]) != 0:
-            return False
+            return blocked("broker_position_nonflat")
     for row in orders:
         if not isinstance(row, dict) or str(row.get("status") or "").upper() not in TERMINAL:
-            return False
+            return blocked("broker_order_not_terminal")
     return True
 
 try:

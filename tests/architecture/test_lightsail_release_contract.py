@@ -658,6 +658,59 @@ def _auto_release_helpers() -> str:
     )
 
 
+def test_broker_guard_diagnostic_never_authorizes_release() -> None:
+    """Diagnostic codes must not replace either of the broker-flat samples."""
+    import ast
+
+    release = _text("deploy/lightsail_release.sh")
+    guard = release.split("<<'PY_FLAT_GUARD'\n", 1)[1].split("\nPY_FLAT_GUARD", 1)[0]
+    parsed = ast.parse(guard)
+    blocked = next(
+        node
+        for node in parsed.body
+        if isinstance(node, ast.FunctionDef) and node.name == "blocked"
+    )
+    is_safe = next(
+        node
+        for node in parsed.body
+        if isinstance(node, ast.FunctionDef) and node.name == "is_safe"
+    )
+    blocked_returns = [
+        node for node in ast.walk(blocked) if isinstance(node, ast.Return)
+    ]
+    assert len(blocked_returns) == 1
+    assert isinstance(blocked_returns[0].value, ast.Constant)
+    assert blocked_returns[0].value.value is False
+    reasons = {
+        node.args[0].value
+        for node in ast.walk(is_safe)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "blocked"
+        and len(node.args) == 1
+        and isinstance(node.args[0], ast.Constant)
+    }
+    assert reasons >= {
+        "entry_hold_not_acknowledged",
+        "local_reconciliation_incomplete",
+        "local_reconciliation_failed",
+        "broker_snapshot_shape_invalid",
+        "broker_position_nonflat",
+        "broker_order_not_terminal",
+        "local_broker_auth_unverified",
+    }
+    assert not any(
+        isinstance(node, ast.Return)
+        and isinstance(node.value, ast.Constant)
+        and node.value.value is False
+        for node in ast.walk(is_safe)
+    )
+    assert guard.count("if not is_safe():") == 2
+    assert "time.sleep(1)" in guard
+    assert "kite.positions()" in guard and "kite.orders()" in guard
+    assert 'print(f"intraday_release_guard_blocked: {reason}"' in guard
+
+
 def test_default_auto_release_defers_when_broker_exposure_is_unverified() -> None:
     """A validated release cannot bypass unknown broker positions or orders."""
     helpers = _auto_release_helpers()
