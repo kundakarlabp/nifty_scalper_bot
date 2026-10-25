@@ -11,11 +11,9 @@ else
   export PYTHONPATH="${PYTHONPATH:-$ROOT_DIR}"
 fi
 
-# Optional: load .env if present (Railway also injects envs)
-if [[ -f .env ]]; then
-  # shellcheck disable=SC1091
-  source .env
-fi
+# Never shell-source a repository .env: it may execute arbitrary commands
+# and can override the protected host policy. Python settings resolve the one
+# canonical BOT_ENV_FILE in production and local dotenv in development.
 
 cmd="${1:-run}"
 
