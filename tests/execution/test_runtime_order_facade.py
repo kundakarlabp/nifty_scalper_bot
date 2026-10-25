@@ -457,6 +457,129 @@ def test_real_broker_update_supplies_order_to_partial_fill_reconciler(
     assert reconciled == [(entry_order, payload)]
 
 
+def test_delayed_cancel_does_not_undo_confirmed_entry_fill(
+    monkeypatch,
+) -> None:
+    reconciled: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        "nifty_scalper_bot.execution.runtime_order_manager._finalize_partial_entry",
+        lambda _manager, _order, payload: reconciled.append(dict(payload)),
+    )
+    manager = _manager(None)
+    manager._lock = threading.RLock()
+    order = order_manager_core.OrderDetails(
+        order_id="ENTRY-FILLED",
+        symbol="NFO:NIFTY2681124500CE",
+        side="BUY",
+        quantity=65,
+        order_type=order_manager_core.OrderType.LIMIT,
+        status=order_manager_core.OrderStatus.FILLED,
+        filled_quantity=65,
+        applied_filled_quantity=65,
+        fill_price=101.0,
+        intent="ENTRY",
+    )
+    manager._orders = {order.order_id: order}
+    manager._bracket_manager = None
+    manager.save_orders = lambda: None
+
+    result = manager._apply_broker_order_update(
+        {"order_id": order.order_id, "status": "CANCELLED", "filled_quantity": 0}
+    )
+
+    assert result is None
+    assert order.status is order_manager_core.OrderStatus.FILLED
+    assert order.filled_quantity == 65
+    assert order.fill_price == 101.0
+    assert reconciled == []
+
+
+def test_delayed_open_does_not_reopen_cancelled_partial_entry(
+    monkeypatch,
+) -> None:
+    reconciled: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        "nifty_scalper_bot.execution.runtime_order_manager._finalize_partial_entry",
+        lambda _manager, _order, payload: reconciled.append(dict(payload)),
+    )
+    manager = _manager(None)
+    manager._lock = threading.RLock()
+    order = order_manager_core.OrderDetails(
+        order_id="ENTRY-CANCELLED",
+        symbol="NFO:NIFTY2681124500CE",
+        side="BUY",
+        quantity=130,
+        order_type=order_manager_core.OrderType.LIMIT,
+        status=order_manager_core.OrderStatus.CANCELLED,
+        filled_quantity=65,
+        applied_filled_quantity=65,
+        fill_price=101.0,
+        intent="ENTRY",
+    )
+    manager._orders = {order.order_id: order}
+    manager._bracket_manager = None
+    manager.save_orders = lambda: None
+
+    result = manager._apply_broker_order_update(
+        {"order_id": order.order_id, "status": "OPEN", "filled_quantity": 65}
+    )
+
+    assert result is None
+    assert order.status is order_manager_core.OrderStatus.CANCELLED
+    assert order.filled_quantity == 65
+    assert reconciled == []
+
+
+def test_delayed_open_does_not_regress_partial_fill() -> None:
+    manager = _manager(None)
+    manager._lock = threading.RLock()
+    order = order_manager_core.OrderDetails(
+        order_id="ENTRY-PARTIAL",
+        symbol="NFO:NIFTY2681124500CE",
+        side="BUY",
+        quantity=130,
+        order_type=order_manager_core.OrderType.LIMIT,
+        status=order_manager_core.OrderStatus.PARTIALLY_FILLED,
+        filled_quantity=65,
+        applied_filled_quantity=65,
+        intent="ENTRY",
+    )
+    manager._orders = {order.order_id: order}
+
+    result = manager._apply_broker_order_update(
+        {"order_id": order.order_id, "status": "OPEN", "filled_quantity": 0}
+    )
+
+    assert result is None
+    assert order.status is order_manager_core.OrderStatus.PARTIALLY_FILLED
+    assert order.filled_quantity == 65
+
+
+def test_delayed_poll_status_does_not_mutate_filled_entry() -> None:
+    manager = _manager(None)
+    order = order_manager_core.OrderDetails(
+        order_id="ENTRY-POLL",
+        symbol="NFO:NIFTY2681124500CE",
+        side="BUY",
+        quantity=65,
+        order_type=order_manager_core.OrderType.LIMIT,
+        status=order_manager_core.OrderStatus.FILLED,
+        filled_quantity=65,
+        fill_price=101.0,
+        intent="ENTRY",
+    )
+
+    result = manager._update_from_response(
+        order,
+        {"order_id": order.order_id, "status": "OPEN", "filled_quantity": 65},
+    )
+
+    assert result is order
+    assert order.status is order_manager_core.OrderStatus.FILLED
+    assert order.filled_quantity == 65
+    assert order.fill_price == 101.0
+
+
 def test_fast_fill_rejects_status_only_complete_payload() -> None:
     manager = _manager(None)
     updates: list[dict[str, Any]] = []

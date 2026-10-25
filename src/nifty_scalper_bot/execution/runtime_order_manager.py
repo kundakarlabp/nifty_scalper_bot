@@ -9,6 +9,8 @@ Key responsibilities:
 Operational constraints:
     - Protective exits must bypass entry blocking.
     - Recovery must remain bounded and must not create duplicate broker orders.
+    - Skip downstream partial-fill/bracket reconciliation for regressive
+      broker statuses with no new fill evidence.
 """
 
 from __future__ import annotations
@@ -980,6 +982,8 @@ class RuntimeOrderManager(_core.OrderManager):
         order: Any,
         payload: dict[str, Any],
     ) -> Any:
+        if self._is_stale_broker_order_update(order, payload):
+            return order
         updated = super()._update_from_response(order, payload)
         try:
             _finalize_partial_entry(self, updated, payload)
