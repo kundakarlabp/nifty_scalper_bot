@@ -497,7 +497,6 @@ def test_fast_fill_accepts_quantitative_broker_execution() -> None:
     ]
 
 
-
 def test_fast_fill_does_not_accept_other_order_identity() -> None:
     manager = _manager(None)
     updates: list[dict[str, Any]] = []
