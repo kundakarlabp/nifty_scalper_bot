@@ -67,7 +67,9 @@ def _basic(password: str) -> str:
         ),
     ],
 )
-def test_public_production_controls_fail_closed(monkeypatch, case_request, status) -> None:
+def test_public_production_controls_fail_closed(
+    monkeypatch, case_request, status
+) -> None:
     monkeypatch.setenv("DEPLOYMENT_PLATFORM", "aws_lightsail")
     monkeypatch.setenv("ADMIN_PASSWORD", "long-test-pass")
     with pytest.raises(HTTPException) as failed:
