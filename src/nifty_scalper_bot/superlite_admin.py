@@ -1,7 +1,8 @@
 """Purpose: Host the isolated operator admin API independently of trading.
 
 Responsibilities:
-- Serve existing admin control routes and bounded diagnostic endpoints.
+- _guard enforces canonical production authentication and same-origin on sensitive routes.
+- service_health and status expose authenticated bounded diagnostics.
 - Expose cached host-local liveness for engine, admin and Streamlit services.
 - Preserve requested release validation and operator authentication handling.
 
