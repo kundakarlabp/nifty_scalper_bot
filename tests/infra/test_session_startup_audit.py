@@ -88,7 +88,7 @@ def test_no_logs_means_unknown_evidence_not_success() -> None:
     assert summary["protective_stop_verification"] == "not_established_from_log_markers"
 
 
-def test_session_audit_counts_events_without_inferring_continuous_stop_protection() -> None:
+def test_audit_stop_markers_do_not_prove_continuous_protection() -> None:
     summary = audit_session_startups(
         "\n".join(
             (
