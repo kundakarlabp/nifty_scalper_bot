@@ -880,7 +880,6 @@ def test_conflicting_terminal_status_without_fill_is_ignored() -> None:
     assert order.filled_quantity == order.applied_filled_quantity == 65
 
 
-
 def test_open_websocket_reports_and_protects_incremental_fills(monkeypatch) -> None:
     forwarded: list[dict[str, Any]] = []
     reconciled: list[dict[str, Any]] = []
@@ -976,7 +975,6 @@ def test_open_full_cumulative_qty_is_not_terminal(monkeypatch) -> None:
     )
     assert observed is order
     assert order.status is order_manager_core.OrderStatus.FILLED
-
 
 
 def test_fast_fill_rejects_status_only_complete_payload() -> None:
