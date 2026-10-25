@@ -34,6 +34,7 @@ from nifty_scalper_bot.superlite_admin_core import (
 from nifty_scalper_bot.superlite_admin_style import STYLE
 
 _ORIGINAL_FLASH = dashboard._flash
+_CANONICAL_AUTH = dashboard._check_auth
 
 
 def _revision() -> str:
@@ -67,6 +68,7 @@ threading.Thread(target=_watch_revision, daemon=True, name="admin-revision-watch
 
 
 def _guard(request: Request) -> None:
+    _CANONICAL_AUTH(request)
     if request.method.upper() not in {"GET", "HEAD", "OPTIONS"}:
         same_origin(request)
 
@@ -132,15 +134,17 @@ def healthz() -> dict[str, str]:
 
 
 @app.get("/admin/api/service-health")  # type: ignore[untyped-decorator]
-def service_health() -> JSONResponse:
+def service_health(request: Request) -> JSONResponse:
     """Lightweight allowlisted host-local liveness for the operator console."""
+    _guard(request)
     return JSONResponse(
         service_health_snapshot(), headers={"Cache-Control": "no-store"}
     )
 
 
 @app.get("/admin/api/status")
-def status() -> JSONResponse:
+def status(request: Request) -> JSONResponse:
+    _guard(request)
     data = status_snapshot()
     proof = data.get("install_proof") if isinstance(data.get("install_proof"), dict) else _engine_install_proof()
     data["install_proof"] = proof
