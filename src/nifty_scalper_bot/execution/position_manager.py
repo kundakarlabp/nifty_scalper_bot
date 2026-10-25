@@ -10,6 +10,7 @@ Boundaries: OrderManager submits orders; BracketManager chooses protective exits
 position bookkeeping must not create independent entry or stop decisions.
 Safety: Requested/acknowledged quantity is not a fill. Unknown, partial or
 rejected exposure remains explicit until broker state is reconciled.
+Late cumulative fills on cancelled orders must be accounted for exactly once.
 """
 
 from __future__ import annotations
