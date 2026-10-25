@@ -13,7 +13,7 @@ RELEASE_SCRIPT = ROOT / "deploy" / "lightsail_release.sh"
 
 def _run_backup(tmp_path: Path, *, source_exists: bool = True) -> tuple[subprocess.CompletedProcess[str], Path]:
     config_dir = tmp_path / "config"
-    config_dir.mkdir()
+    config_dir.mkdir(exist_ok=True)
     env_file = config_dir / "niftybot.env"
     if source_exists:
         env_file.write_text("KITE_API_SECRET=private-example\n", encoding="utf-8")
