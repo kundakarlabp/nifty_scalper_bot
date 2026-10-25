@@ -7757,10 +7757,9 @@ class OrderManager:
             return False
         if previous_status in self.FINAL_STATUSES:
             return incoming_status != previous_status
-        return (
-            previous_status == OrderStatus.PARTIALLY_FILLED
-            and incoming_status in {OrderStatus.PENDING, OrderStatus.SUBMITTED}
-        )
+        if previous_status == OrderStatus.PARTIALLY_FILLED:
+            return incoming_status in {OrderStatus.PENDING, OrderStatus.SUBMITTED}
+        return False
 
     def _apply_broker_order_update(
         self, order_update: dict[str, Any]
