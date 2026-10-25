@@ -163,3 +163,59 @@ def test_core_confirmation_latches_mismatched_broker_identity() -> None:
     order["transaction_type"] = "SELL"
     assert manager._confirm_exchange_protective_stop(bracket) is True
     assert bracket.exchange_stop_degraded_reason is None
+
+
+def test_sparse_history_obtains_exact_live_stop_orderbook_proof() -> None:
+    """Entry and restart paths share this order-evidence lookup."""
+    reads = []
+    manager = object.__new__(BracketManager)
+    manager.order_manager = SimpleNamespace(
+        _broker=SimpleNamespace(
+            get_order_status=lambda _id: {"order_id": "stop-123", "status": "OPEN"},
+            get_orders=lambda: reads.append("book") or [_valid_order()],
+        )
+    )
+    assert _verify(dict(manager._get_broker_order_status("stop-123"))) == (True, None)
+    assert reads == ["book"]
+
+
+def test_sparse_history_missing_exact_order_cannot_confirm_protection() -> None:
+    other = _valid_order()
+    other["order_id"] = "another-stop"
+    manager = object.__new__(BracketManager)
+    manager.order_manager = SimpleNamespace(
+        _broker=SimpleNamespace(
+            get_order_status=lambda _id: {"order_id": "stop-123", "status": "OPEN"},
+            get_orders=lambda: [other],
+        )
+    )
+    assert _verify(dict(manager._get_broker_order_status("stop-123")))[0] is False
+
+
+def test_terminal_history_does_not_use_stale_open_orderbook() -> None:
+    def wrong_fallback():
+        raise AssertionError("terminal broker history must win")
+
+    manager = object.__new__(BracketManager)
+    manager.order_manager = SimpleNamespace(
+        _broker=SimpleNamespace(
+            get_order_status=lambda order_id: {
+                "order_id": order_id,
+                "status": "CANCELLED",
+            },
+            get_orders=wrong_fallback,
+        )
+    )
+    evidence = manager._get_broker_order_status("stop-123")
+    assert evidence["status"] == "CANCELLED"
+
+
+def test_complete_history_does_not_require_secondary_broker_read() -> None:
+    manager = object.__new__(BracketManager)
+    manager.order_manager = SimpleNamespace(
+        _broker=SimpleNamespace(
+            get_order_status=lambda _id: _valid_order(),
+            get_orders=lambda: (_ for _ in ()).throw(AssertionError("not needed")),
+        )
+    )
+    assert _verify(dict(manager._get_broker_order_status("stop-123"))) == (True, None)

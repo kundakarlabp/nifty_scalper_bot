@@ -48,6 +48,32 @@ Never infer complete stop coverage from the daily startup summary or Supabase
 status alone. Broker state may legitimately be unavailable during a
 modification: distinguish **unverified** from **failed/cancelled**.
 
+## Broker stop evidence and repeated-startup audit (Phase 9)
+
+The canonical stop-order lookup now falls back to the exact broker day-orderbook
+record when a nonterminal OPEN/TRIGGER PENDING history response lacks required
+stop-order identity or geometry. Complete stop history and terminal statuses
+remain authoritative. Neither a broker order ID nor a software trailing stop
+alone establishes exchange protection. If both broker evidence paths are
+incomplete, the existing fail-closed entry blocker remains in force. This
+same canonical lookup is used after an entry fill and when restoring brackets.
+It never submits duplicate protection to fix missing evidence.
+
+The *existing* `startup_audit` JSONB summary reports repeated startup markers
+(`observed_repeat_startup_count`), starts during 09:30–15:00 IST
+(`market_window_startup_count`), and counts of stop-arm, stop-unverified,
+stop-not-armed and stop-ratchet-confirmed events. These are **observations, not
+per-position or continuous broker stop-coverage proof**. The fixed
+`restart_cause` value remains `unknown_without_process_and_deployment_events`
+until independent release and systemd process evidence establishes a cause.
+Do not infer a crash, successful stop, or safe redeployment from log counts.
+
+A new live archive appears only during a normal weekday market session; on
+weekends the old finalized days correctly retain their prior schema. Check
+`summary -> 'startup_audit'` and `finalized` on the next trading day.
+The Supabase receiver's optional Phase 9 fields preserve compatibility with
+Phase 7 clients; no new table, scheduler or trading service is introduced.
+
 ## Archived startup and recovery evidence (Phase 7)
 
 The existing five-minute Lightsail journald archiver attaches a compact,
