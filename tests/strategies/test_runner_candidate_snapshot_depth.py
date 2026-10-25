@@ -58,3 +58,16 @@ async def test_candidate_snapshot_preserves_normalized_depth_availability() -> N
     assert refresh_pending is False
     assert len(snapshots) == 1
     assert snapshots[0]["depth_available"] is True
+    # Spread in this public snapshot contract is percent, not decimal ratio.
+    assert snapshots[0]["spread_pct"] == pytest.approx(
+        (127.15 - 127.05) / ((127.05 + 127.15) / 2) * 100.0
+    )
+
+    # Invalid/crossed prices cannot manufacture an executable spread.
+    option.ask = 126.9
+    crossed, refresh_pending = await runner.build_candidate_snapshots_async(
+        atm_strike=24250,
+        window_each_side=1,
+    )
+    assert refresh_pending is False
+    assert crossed[0]["spread_pct"] is None
