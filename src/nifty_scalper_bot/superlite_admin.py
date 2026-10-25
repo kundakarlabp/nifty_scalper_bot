@@ -1,7 +1,7 @@
 """Purpose: Host the isolated operator admin API independently of trading.
 
 Responsibilities:
-- _guard enforces canonical production authentication and same-origin on sensitive routes.
+- _guard enforces canonical authentication and same-origin on admin routes.
 - service_health and status expose authenticated bounded diagnostics.
 - Expose cached host-local liveness for engine, admin and Streamlit services.
 - Preserve requested release validation and operator authentication handling.
