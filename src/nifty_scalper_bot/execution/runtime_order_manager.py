@@ -10,7 +10,8 @@ Operational constraints:
     - Protective exits must bypass entry blocking.
     - Recovery must remain bounded and must not create duplicate broker orders.
     - Skip downstream partial-fill/bracket reconciliation for regressive
-      broker statuses with no new fill evidence.
+      broker statuses without new fills; use preserved order status for
+      late cumulative-fill reconciliation.
 """
 
 from __future__ import annotations
@@ -957,8 +958,11 @@ class RuntimeOrderManager(_core.OrderManager):
     def _apply_broker_order_update(self, order_update: dict[str, Any]) -> Any:
         updated = super()._apply_broker_order_update(order_update)
         if updated is not None:
+            effective_update = dict(order_update)
+            if self._parse_status(order_update.get("status")) != updated.status:
+                effective_update["status"] = updated.status.name
             try:
-                _finalize_partial_entry(self, updated, order_update)
+                _finalize_partial_entry(self, updated, effective_update)
             except Exception as exc:
                 logger = getattr(self, "_logger", None)
                 log = getattr(logger, "error", None)
@@ -973,8 +977,8 @@ class RuntimeOrderManager(_core.OrderManager):
                             "error_type": type(exc).__name__,
                         },
                     )
-            _maybe_reprice_open_entry(self, updated, order_update)
-        self._sync_filled_exit_bracket(updated, order_update)
+            _maybe_reprice_open_entry(self, updated, effective_update)
+            self._sync_filled_exit_bracket(updated, effective_update)
         return updated
 
     def _update_from_response(
@@ -985,8 +989,11 @@ class RuntimeOrderManager(_core.OrderManager):
         if self._is_stale_broker_order_update(order, payload):
             return order
         updated = super()._update_from_response(order, payload)
+        effective_update = dict(payload)
+        if self._parse_status(payload.get("status")) != updated.status:
+            effective_update["status"] = updated.status.name
         try:
-            _finalize_partial_entry(self, updated, payload)
+            _finalize_partial_entry(self, updated, effective_update)
         except Exception as exc:
             logger = getattr(self, "_logger", None)
             log = getattr(logger, "error", None)
@@ -1002,8 +1009,8 @@ class RuntimeOrderManager(_core.OrderManager):
                     },
                 )
         if updated is not None:
-            _maybe_reprice_open_entry(self, updated, payload)
-        self._sync_filled_exit_bracket(updated, payload)
+            _maybe_reprice_open_entry(self, updated, effective_update)
+        self._sync_filled_exit_bracket(updated, effective_update)
         return updated
 
 
