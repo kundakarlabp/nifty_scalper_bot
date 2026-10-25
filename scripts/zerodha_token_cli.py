@@ -57,9 +57,7 @@ def resolve_token_env_path(
     """Select one operator env file, refusing a different production path."""
     variables = os.environ if environ is None else environ
     protected = variables.get("BOT_ENV_FILE")
-    production = (
-        variables.get("DEPLOYMENT_PLATFORM", "").strip().lower() == "aws_lightsail"
-    )
+    production = variables.get("DEPLOYMENT_PLATFORM", "").strip().lower() == "aws_lightsail"
     if production and (not protected or not Path(protected).is_absolute()):
         raise ValueError("canonical BOT_ENV_FILE is required on production")
     candidate = Path(cli_env or protected or ".env").expanduser()
@@ -79,11 +77,9 @@ def write_env_tokens(env_path: Path, token: str) -> None:
     if env_path.is_symlink() or (env_path.exists() and not env_path.is_file()):
         raise ValueError("expected a regular operator env file")
     keys = ("ZERODHA_ACCESS_TOKEN", "BROKER_ACCESS_TOKEN", "KITE_ACCESS_TOKEN")
-    lines = (
-        env_path.read_text(encoding="utf-8").splitlines()
-        if env_path.exists()
-        else []
-    )
+    lines: list[str] = []
+    if env_path.exists():
+        lines = env_path.read_text(encoding="utf-8").splitlines()
     written: set[str] = set()
     updated: list[str] = []
     for line in lines:
@@ -219,7 +215,10 @@ def main() -> None:
         help="Operator env path (BOT_ENV_FILE in production; .env in development)",
     )
     ap.add_argument(
-        "--write-env", action="store_true", default=True, help="Write access tokens to the environment file"
+        "--write-env",
+        action="store_true",
+        default=True,
+        help="Write access tokens to the environment file",
     )
     ap.add_argument("--request-token", help="Provide request_token manually to skip login")
     args = ap.parse_args()
@@ -233,8 +232,16 @@ def main() -> None:
         load_dotenv(env_path, override=False)
 
     # Load API Credentials
-    api_key = os.getenv("ZERODHA_API_KEY") or os.getenv("KITE_API_KEY") or os.getenv("BROKER_API_KEY")
-    api_secret = os.getenv("ZERODHA_API_SECRET") or os.getenv("KITE_API_SECRET") or os.getenv("BROKER_API_SECRET")
+    api_key = (
+        os.getenv("ZERODHA_API_KEY")
+        or os.getenv("KITE_API_KEY")
+        or os.getenv("BROKER_API_KEY")
+    )
+    api_secret = (
+        os.getenv("ZERODHA_API_SECRET")
+        or os.getenv("KITE_API_SECRET")
+        or os.getenv("BROKER_API_SECRET")
+    )
     
     if not api_key or not api_secret:
         print("❌ Error: ZERODHA_API_KEY and ZERODHA_API_SECRET must be configured in environment or .env file.", file=sys.stderr)
