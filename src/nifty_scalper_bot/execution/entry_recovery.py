@@ -7,7 +7,8 @@ Responsibilities:
   contract; preserve unresolved same-symbol orders and partial-fill exposure.
 
 Boundaries: Wrap existing OrderManager operations; no new independent entry route.
-Safety: Never retry ambiguous broker outcomes before reconciliation.
+Safety: Never retry ambiguous broker outcomes before reconciliation. Terminal
+zero-fill cancellation is released only after confirmed flat broker exposure.
 """
 
 from __future__ import annotations
@@ -967,6 +968,14 @@ def _finalize_partial_entry(
     }
     if status not in handled:
         return
+    terminal = status in {
+        "COMPLETE",
+        "FILLED",
+        "CANCELLED",
+        "CANCELED",
+        "REJECTED",
+        "EXPIRED",
+    }
     order_id = str(getattr(order, "order_id", "") or "")
     if not order_id:
         return
@@ -1017,7 +1026,7 @@ def _finalize_partial_entry(
         payload,
         "pending_quantity",
         "pending",
-        default=max(requested_quantity - broker_filled, 0),
+        default=0 if terminal else max(requested_quantity - broker_filled, 0),
     )
     broker_cancelled = _payload_int(
         payload,
@@ -1080,15 +1089,43 @@ def _finalize_partial_entry(
         }
     )
 
-    terminal = status in {
-        "COMPLETE",
-        "FILLED",
-        "CANCELLED",
-        "CANCELED",
-        "REJECTED",
-        "EXPIRED",
-    }
+    if terminal and pending_lots > 0:
+        state["state"] = "ENTRY_RECONCILIATION_UNKNOWN"
+        state["last_error"] = "terminal_entry_pending_quantity_positive"
+        _latch_entry_blocker(
+            manager, order, "terminal_entry_pending_quantity_positive", state=state
+        )
+        return
+
     if filled_lots == 0:
+        if terminal:
+            # Cancelled/rejected does not prove no execution. A delayed fill
+            # may already be held at the broker despite the zero-fill payload.
+            broker_position = _broker_position_quantity(
+                manager, str(getattr(order, "symbol", ""))
+            )
+            state["broker_position_quantity"] = broker_position
+            if (
+                broker_position is None
+                or broker_position > 0
+                or int(state.get("protected_lots") or 0) > 0
+            ):
+                state["state"] = "ENTRY_RECONCILIATION_UNKNOWN"
+                state["last_error"] = "zero_fill_terminal_position_unverified"
+                _latch_entry_blocker(
+                    manager,
+                    order,
+                    "zero_fill_terminal_position_unverified",
+                    state=state,
+                )
+                return
+            if status in {"COMPLETE", "FILLED"}:
+                state["state"] = "ENTRY_RECONCILIATION_UNKNOWN"
+                state["last_error"] = "terminal_entry_fill_evidence_missing"
+                _latch_entry_blocker(
+                    manager, order, "terminal_entry_fill_evidence_missing", state=state
+                )
+                return
         if status in {"CANCELLED", "CANCELED"}:
             state["state"] = "ENTRY_CANCELLED"
             state["terminal_confirmed_at"] = now
