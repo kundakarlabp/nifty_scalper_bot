@@ -161,8 +161,10 @@ evaluation; do not silently alter active positions or protective orders.
 ## One protected production environment source
 
 The runtime settings loader reads only `BOT_ENV_FILE` when that explicit
-file is provided. In the Lightsail production profile, an absent or invalid
-`BOT_ENV_FILE` fails closed to SHADOW; it never tries a project, working
+file is provided. In the Lightsail production profile this must be an
+**absolute path** to the protected file, independent of systemd's working
+directory. An absent, relative or invalid `BOT_ENV_FILE` fails closed to
+SHADOW; the loader never tries a project, working
 directory or fallback `.env` that could accidentally authorize LIVE.
 
 Values already supplied by the systemd `EnvironmentFile` retain precedence
