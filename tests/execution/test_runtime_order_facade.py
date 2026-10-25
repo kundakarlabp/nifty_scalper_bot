@@ -736,6 +736,142 @@ def test_polled_late_cancelled_fill_preserves_terminal_and_average(
     assert payload["status"] == "OPEN"
 
 
+
+def test_websocket_overfill_quarantines_without_advancing_order_or_ledger() -> None:
+    manager = _manager(None)
+    manager._lock = threading.RLock()
+    order = order_manager_core.OrderDetails(
+        order_id="ENTRY-OVERFILL-WS",
+        symbol="NFO:NIFTY2681124500CE",
+        side="BUY",
+        quantity=130,
+        order_type=order_manager_core.OrderType.LIMIT,
+        status=order_manager_core.OrderStatus.CANCELLED,
+        filled_quantity=65,
+        applied_filled_quantity=65,
+        fill_price=100.0,
+        intent="ENTRY",
+    )
+    manager._orders = {order.order_id: order}
+    effects: list[str] = []
+    manager._positions = SimpleNamespace(
+        apply_broker_order_update=lambda *_args: effects.append("position")
+    )
+    manager._register_virtual_bracket_for_fill = (
+        lambda *_args, **_kwargs: effects.append("protection")
+    )
+    manager.save_orders = lambda: effects.append("persistence")
+
+    invalid = {
+        "order_id": order.order_id,
+        "status": "COMPLETE",
+        "filled_quantity": 195,
+        "average_price": 101.0,
+    }
+    assert manager._apply_broker_order_update(invalid) is None
+    assert order.status is order_manager_core.OrderStatus.CANCELLED
+    assert order.filled_quantity == order.applied_filled_quantity == 65
+    assert order.fill_price == 100.0
+    assert effects == []
+    blocker = manager.current_entry_blocker()
+    assert blocker is not None
+    assert blocker["block_reason"] == "broker_fill_quantity_reconciliation_required"
+    assert blocker["details"]["requested_quantity"] == 130
+    assert blocker["details"]["reported_filled_quantity"] == 195
+    assert manager._apply_broker_order_update(invalid) is None
+    assert manager.current_entry_blocker() is blocker
+
+
+def test_polling_overfill_quarantines_without_updating_positions() -> None:
+    manager = _manager(None)
+    manager._lock = threading.RLock()
+    order = order_manager_core.OrderDetails(
+        order_id="ENTRY-OVERFILL-POLL",
+        symbol="NFO:NIFTY2681124500CE",
+        side="BUY",
+        quantity=130,
+        order_type=order_manager_core.OrderType.LIMIT,
+        status=order_manager_core.OrderStatus.PARTIALLY_FILLED,
+        filled_quantity=65,
+        applied_filled_quantity=65,
+        fill_price=100.0,
+        intent="ENTRY",
+    )
+    effects: list[str] = []
+    manager._positions = SimpleNamespace(
+        update_order_status=lambda *_args: effects.append("position"),
+        apply_broker_order_update=lambda *_args: effects.append("fill"),
+    )
+    manager._register_order = lambda *_args: effects.append("register")
+    assert manager._update_from_response(
+        order,
+        {
+            "order_id": order.order_id,
+            "status": "COMPLETE",
+            "filled_quantity": 131,
+            "average_price": 101.0,
+        },
+    ) is order
+    assert order.status is order_manager_core.OrderStatus.PARTIALLY_FILLED
+    assert order.filled_quantity == order.applied_filled_quantity == 65
+    assert order.fill_price == 100.0
+    assert effects == []
+    assert manager.current_entry_blocker()["block_reason"] == (
+        "broker_fill_quantity_reconciliation_required"
+    )
+
+
+def test_invalid_cumulative_fill_is_quarantined_before_mutation() -> None:
+    manager = _manager(None)
+    manager._lock = threading.RLock()
+    order = order_manager_core.OrderDetails(
+        order_id="ENTRY-INVALID-QTY",
+        symbol="NFO:NIFTY2681124500CE",
+        side="BUY",
+        quantity=130,
+        order_type=order_manager_core.OrderType.LIMIT,
+        status=order_manager_core.OrderStatus.SUBMITTED,
+        filled_quantity=0,
+        applied_filled_quantity=0,
+        intent="ENTRY",
+    )
+    manager._orders = {order.order_id: order}
+    for impossible in ("nan", "inf", -1, 65.5):
+        assert manager._apply_broker_order_update(
+            {
+                "order_id": order.order_id,
+                "status": "PARTIALLY FILLED",
+                "filled_quantity": impossible,
+                "average_price": 101.0,
+            }
+        ) is None
+        assert order.status is order_manager_core.OrderStatus.SUBMITTED
+        assert order.filled_quantity == order.applied_filled_quantity == 0
+    assert manager.current_entry_blocker() is not None
+
+
+def test_conflicting_terminal_status_without_fill_is_ignored() -> None:
+    manager = _manager(None)
+    manager._lock = threading.RLock()
+    order = order_manager_core.OrderDetails(
+        order_id="ENTRY-CONFLICT",
+        symbol="NFO:NIFTY2681124500CE",
+        side="BUY",
+        quantity=130,
+        order_type=order_manager_core.OrderType.LIMIT,
+        status=order_manager_core.OrderStatus.CANCELLED,
+        filled_quantity=65,
+        applied_filled_quantity=65,
+        intent="ENTRY",
+    )
+    manager._orders = {order.order_id: order}
+    assert manager._apply_broker_order_update(
+        {"order_id": order.order_id, "status": "REJECTED", "filled_quantity": 65}
+    ) is None
+    assert order.status is order_manager_core.OrderStatus.CANCELLED
+    assert order.filled_quantity == order.applied_filled_quantity == 65
+
+
 def test_fast_fill_rejects_status_only_complete_payload() -> None:
     manager = _manager(None)
     updates: list[dict[str, Any]] = []
