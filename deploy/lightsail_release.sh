@@ -813,8 +813,38 @@ if [ ! -f "$CONFIG_DIR/control_sudoers_v2_installed" ]; then
   fi
 fi
 
-mkdir -p "$CONFIG_DIR/backups"
-cp -p "$ENV_FILE" "$CONFIG_DIR/backups/niftybot.env.$(date +%Y%m%d_%H%M%S)"
+# Limit automatically generated copies of protected broker credentials.
+# Human-named backups, symlinks, and unrecognized files are never deleted.
+# Failure to preserve the current environment blocks the checkout/restart.
+save_protected_env_backup() {
+  local MAX_MANAGED_ENV_BACKUPS=5
+  local backup_dir="$CONFIG_DIR/backups" new_backup item name seen=0
+  (
+    umask 077
+    [[ ! -L "$backup_dir" ]] || exit 1
+    mkdir -p -- "$backup_dir" || exit 1
+    chmod 700 -- "$backup_dir" || exit 1
+    new_backup="$(mktemp "$backup_dir/niftybot.env.$(date +%Y%m%d_%H%M%S).XXXXXX")" || exit 1
+    if ! cp -p -- "$ENV_FILE" "$new_backup"; then
+      rm -f -- "$new_backup"
+      exit 1
+    fi
+    chmod 600 -- "$new_backup" || { rm -f -- "$new_backup"; exit 1; }
+    while IFS= read -r item; do
+      name="${item##*/}"
+      [[ "$name" =~ ^niftybot[.]env[.][0-9]{8}_[0-9]{6}([.][[:alnum:]]{6})?$ ]] || continue
+      [[ -f "$item" && ! -L "$item" ]] || continue
+      seen=$((seen + 1))
+      if (( seen > MAX_MANAGED_ENV_BACKUPS )); then
+        rm -f -- "$item" || exit 1
+      fi
+    done < <(printf '%s\n' "$backup_dir"/niftybot.env.* | LC_ALL=C sort -r)
+  )
+}
+if ! save_protected_env_backup; then
+  write_status backup_failed "protected environment backup failed; retaining ${BEFORE:0:7}"
+  exit 1
+fi
 write_status deploying "deploying ${AFTER:0:7}"
 [ "$BEFORE" = "$AFTER" ] || git reset --hard --quiet "$AFTER"
 

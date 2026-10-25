@@ -79,6 +79,24 @@ limit 5;
 Investigate repeated intraday startups against broker reconciliation evidence.
 Do not restart services or change trade/risk settings based on this summary.
 
+## Protected host environment backup retention
+
+The existing release script takes a local copy of the protected broker
+environment **before any candidate checkout or restart**. To avoid
+unbounded copies of trading credentials, it retains at most **five**
+recognizable release-created `niftybot.env.YYYYMMDD_HHMMSS[.suffix]`
+backups in the private host backup directory. A unique private filename
+prevents accidental overwrite, with directory mode 0700 and snapshot mode
+0600. Manually named files, symlinks, the active environment file, and
+unrecognized historical files are not modified.
+
+If creating a protected snapshot fails, the release aborts **before
+deployment**. This does not export secrets to Supabase or GitHub and does
+not affect protective exits or broker-flat deployment checks. For
+disaster recovery, maintain separately controlled off-host credential
+recovery procedures; these snapshots are short-lived local rollback
+history, not an external backup service.
+
 ## Releases — ONE production deploy authority
 
 GitHub CI pass on the exact merged `main` SHA → existing
