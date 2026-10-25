@@ -3391,11 +3391,9 @@ class StrategyRunner:
                             "symbol": sym,
                         },
                     )
-                spread_pct = None
-                if snap.bid and snap.ask and snap.bid > 0 and snap.ask > 0:
-                    mid = (snap.bid + snap.ask) / 2.0
-                    if mid > 0:
-                        spread_pct = (snap.ask - snap.bid) / mid
+                # Use the single quote authority: spread_pct means percent,
+                # and crossed/invalid books cannot carry synthetic spread proof.
+                _, _, spread_pct, _ = resolve_quote_bid_ask_spread(snap)
                 candidates.append(
                     {
                         "symbol": snap.canonical_symbol,
