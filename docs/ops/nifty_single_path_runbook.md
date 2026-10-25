@@ -27,8 +27,9 @@ daily broker-token operation may require AppDeploy.
 
 The authenticated admin token workflow remains the operational default. The
 legacy `bash manage_bot.sh token` helper is retained for operator recovery,
-but it no longer shell-sources `.env`. On Lightsail it requires an explicit,
-absolute `BOT_ENV_FILE` pointing to the same protected environment used by
+but it no longer shell-sources `.env`. The shell launcher requires an
+explicit absolute `BOT_ENV_FILE` even without systemd's platform variables.
+On Lightsail this must point to the same protected environment used by
 systemd; it will not read or write a repository `.env` or a competing
 `--env` file. Development without the production profile may still use
 a local `.env`.
