@@ -134,9 +134,9 @@ def test_operator_proxy_is_secure_and_admin_is_loopback_only() -> None:
     assert "--host 127.0.0.1 --port 8081" in service
     assert "--host 0.0.0.0 --port 8081" not in service
     assert 'caddy validate --config "$CADDY_SOURCE"' in script
-    assert 'systemctl reload caddy' in script
+    assert "systemctl reload caddy" in script
     assert 'systemctl restart "$SERVICE"' not in script
-    assert 'deploy/scripts/apply_operator_ingress.sh' in release
+    assert "deploy/scripts/apply_operator_ingress.sh" in release
     assert "operator_ingress_degraded" in release
     assert (
         subprocess.run(
