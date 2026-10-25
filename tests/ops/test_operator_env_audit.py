@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -134,8 +135,6 @@ def test_whitespace_around_equal_matches_dotenv(tmp_path: Path) -> None:
 
 def test_fifo_returns_unsafe_result_without_hanging(tmp_path: Path) -> None:
     fifo = tmp_path / "stream.env"
-    import os
-
     os.mkfifo(fifo, mode=0o600)
     response, payload = _run(fifo)
     assert response.returncode != 0
@@ -163,6 +162,19 @@ def test_symlink_and_world_readable_file_are_rejected(tmp_path: Path) -> None:
     response, payload = _run(target)
     assert response.returncode != 0
     assert payload == {"status": "missing_or_unsafe_file"}
+
+
+def test_documented_shell_command_uses_one_continuation() -> None:
+    runbook = (ROOT / "docs" / "ops" / "nifty_single_path_runbook.md").read_text(
+        encoding="utf-8"
+    )
+    line = next(
+        x
+        for x in runbook.splitlines()
+        if ".venv/bin/python deploy/scripts/audit_operator_env.py" in x
+    )
+    assert line.endswith(chr(92))
+    assert not line.endswith(chr(92) * 2)
 
 
 def test_malformed_or_oversize_payload_never_echoes_sensitive_data(
