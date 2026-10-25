@@ -106,6 +106,15 @@ def test_mode_classification(tmp_path: Path, content: str, expected: str) -> Non
     assert payload["mode_alignment"] == expected
 
 
+def test_export_prefixed_settings_remain_visible_as_names(tmp_path: Path) -> None:
+    path = tmp_path / "niftybot.env"
+    _private_file(path, "export RISK_PER_TRADE_PCT=3.0\\n")
+    response, payload = _run(path)
+    assert response.returncode == 0
+    assert payload["strategy_risk_overrides"] == ["RISK_PER_TRADE_PCT"]
+    assert payload["malformed_line_count"] == 0
+
+
 def test_missing_file_fails_closed_without_leaking_path(tmp_path: Path) -> None:
     path = tmp_path / "secret-user-name.env"
     response, payload = _run(path)
