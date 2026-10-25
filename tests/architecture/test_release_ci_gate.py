@@ -158,9 +158,9 @@ def test_git_proof_cannot_authorize_missing_or_wrong_ref(monkeypatch) -> None:
 def test_workflow_publishes_proof_only_after_complete_main_push_ci() -> None:
     from pathlib import Path
 
-    yml = (
-        Path(__file__).resolve().parents[2] / ".github/workflows/ci.yml"
-    ).read_text(encoding="utf-8")
+    yml = (Path(__file__).resolve().parents[2] / ".github/workflows/ci.yml").read_text(
+        encoding="utf-8"
+    )
     assert "publish-main-ci-proof:" in yml
     section = yml.split("  publish-main-ci-proof:", 1)[1].split(
         "  final-validation:", 1
