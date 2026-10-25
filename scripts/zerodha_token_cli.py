@@ -74,7 +74,7 @@ def resolve_token_env_path(
 
 def write_env_tokens(env_path: Path, token: str) -> None:
     """Atomically replace token aliases in one private regular env file."""
-    if not token or any(c in token for c in "\\r\\n"):
+    if not token or any(c in token for c in "\r\n"):
         raise ValueError("invalid access token")
     if env_path.is_symlink() or (env_path.exists() and not env_path.is_file()):
         raise ValueError("expected a regular operator env file")
@@ -99,7 +99,7 @@ def write_env_tokens(env_path: Path, token: str) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             os.fchmod(handle.fileno(), 0o600)
-            handle.write("\\n".join(updated) + "\\n")
+            handle.write("\n".join(updated) + "\n")
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temp_path, env_path)
