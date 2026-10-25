@@ -25,6 +25,8 @@ Safe-edit notes:
   evidence; malformed depth quantities cannot bypass entry preflight.
 - Fast fill confirmation accepts only matching broker order identity (when
   present), positive filled quantity and finite positive execution price.
+- Out-of-order broker status events without additional filled quantity cannot
+  regress an already partial or terminal order state.
 """
 
 from __future__ import annotations
@@ -7743,6 +7745,23 @@ class OrderManager:
             return
         self.apply_broker_order_update(str(order_id), order_update)
 
+    def _is_stale_broker_order_update(
+        self, order: OrderDetails, payload: Mapping[str, Any]
+    ) -> bool:
+        """Reject backward status movement without new broker fill evidence."""
+        previous_status = order.status
+        incoming_status = self._parse_status(payload.get("status"))
+        incoming_quantity = self._coerce_int(payload.get("filled_quantity")) or 0
+        previous_quantity = int(getattr(order, "filled_quantity", 0) or 0)
+        if incoming_quantity > previous_quantity:
+            return False
+        if previous_status in self.FINAL_STATUSES:
+            return incoming_status != previous_status
+        return (
+            previous_status == OrderStatus.PARTIALLY_FILLED
+            and incoming_status in {OrderStatus.PENDING, OrderStatus.SUBMITTED}
+        )
+
     def _apply_broker_order_update(
         self, order_update: dict[str, Any]
     ) -> OrderDetails | None:
@@ -7858,6 +7877,13 @@ class OrderManager:
             # -----------------------------------------------------
             # 🔄 STATE SYNCHRONIZATION
             # -----------------------------------------------------
+            if self._is_stale_broker_order_update(order, order_update):
+                self._logger.debug(
+                    "BROKER_STALE_ORDER_UPDATE_IGNORED order_id=%s status=%s",
+                    order_id,
+                    status_raw,
+                )
+                return None
             old_status = order.status
             new_status = self._parse_status(status_raw)
 
@@ -12618,6 +12644,8 @@ class OrderManager:
         self, order: OrderDetails, payload: dict[str, Any]
     ) -> OrderDetails:
         with self._lock:
+            if self._is_stale_broker_order_update(order, payload):
+                return order
             previous_status = order.status
             status = self._parse_status(payload.get("status"))
             filled_qty = (
