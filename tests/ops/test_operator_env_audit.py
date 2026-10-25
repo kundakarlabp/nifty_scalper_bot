@@ -117,6 +117,31 @@ def test_export_prefixed_settings_remain_visible_as_names(tmp_path: Path) -> Non
     assert payload["malformed_line_count"] == 0
 
 
+def test_whitespace_around_equal_matches_dotenv(tmp_path: Path) -> None:
+    path = tmp_path / "niftybot.env"
+    _private_file(
+        path,
+        "ENABLE_LIVE = true\\nEXECUTION_MODE = LIVE\\n"
+        "RISK_PER_TRADE_PCT = 0.5\\n",
+    )
+    response, payload = _run(path)
+    assert response.returncode == 0
+    assert payload["mode_alignment"] == "explicit_live"
+    assert payload["strategy_risk_overrides"] == ["RISK_PER_TRADE_PCT"]
+    assert payload["malformed_line_count"] == 0
+    assert "0.5" not in response.stdout + response.stderr
+
+
+def test_fifo_returns_unsafe_result_without_hanging(tmp_path: Path) -> None:
+    fifo = tmp_path / "stream.env"
+    import os
+
+    os.mkfifo(fifo, mode=0o600)
+    response, payload = _run(fifo)
+    assert response.returncode != 0
+    assert payload == {"status": "missing_or_unsafe_file"}
+
+
 def test_missing_file_fails_closed_without_leaking_path(tmp_path: Path) -> None:
     path = tmp_path / "secret-user-name.env"
     response, payload = _run(path)
