@@ -27,11 +27,17 @@ def test_job_environment_does_not_reference_unavailable_runner_context() -> None
                 assert "runner." not in str(value), path.name
 
 
-def test_ci_is_read_only_and_deduplicates_e2e_markers() -> None:
+def test_ci_limits_write_permission_to_successful_release_proof() -> None:
     text = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
+    config = yaml.safe_load(text)
 
-    assert "contents: read" in text
-    assert "contents: write" not in text
+    assert config["permissions"] == {"contents": "read"}
+    assert config["jobs"]["publish-main-ci-proof"]["permissions"] == {
+        "contents": "write"
+    }
+    for name, job in config["jobs"].items():
+        if name != "publish-main-ci-proof":
+            assert job.get("permissions", {}).get("contents") != "write"
     assert "branches: [main]" in text
     assert "changed-code-quality:" in text
     assert "normal-test-shard:" in text

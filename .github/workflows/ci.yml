@@ -189,6 +189,29 @@ jobs:
           if-no-files-found: ignore
           retention-days: 3
 
+  # Free, GitHub-native exact-SHA proof; no unauthenticated API polling.
+  publish-main-ci-proof:
+    name: publish-main-ci-proof
+    if: ${{ github.event_name == 'push' }}
+    needs: [final-validation]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+      - name: Publish exact-commit successful CI ref
+        env:
+          VALIDATION: ${{ needs.final-validation.result }}
+        shell: bash
+        run: |
+          test "$VALIDATION" = "success"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          proof_ref="refs/tags/nifty-ci-passed/$GITHUB_SHA"
+          git push origin "$GITHUB_SHA:$proof_ref"
+
   final-validation:
     name: final-validation
     if: ${{ always() && (github.event_name == 'push' || github.event.pull_request.draft == false) }}

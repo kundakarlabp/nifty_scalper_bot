@@ -552,10 +552,32 @@ if [ ! -d .git ]; then
   write_status repository_missing "Git repository missing at $APP_DIR"; exit 1
 fi
 
-# Independently heal token-entry controls on every scheduled release check,
-# including when broker exposure or a pending GitHub CI run forbids deployment.
-# Never change engine state merely because the admin page is unavailable.
+# The first release of an ingress helper may run under the OLD release
+# script, so reconcile Caddy/admin independently on the next timer tick.
+# No trading restart, broker calls, credential writes, or entry hold is needed.
+repair_operator_ingress_if_needed() {
+  [ "$AUTO_MODE" = true ] || return 0
+  local helper="$APP_DIR/deploy/scripts/apply_operator_ingress.sh"
+  [ -f "$helper" ] || return 0
+  if [ ! -f "$OPERATOR_INGRESS_DEGRADED_MARKER" ] \
+    && sudo -n cmp -s "$APP_DIR/deploy/caddy/Caddyfile" /etc/caddy/Caddyfile \
+    && sudo -n cmp -s "$APP_DIR/deploy/systemd/niftybot-admin.service" /etc/systemd/system/niftybot-admin.service; then
+    return 0
+  fi
+  if bash "$helper" && restart_admin; then
+    rm -f "$OPERATOR_INGRESS_DEGRADED_MARKER"
+    log "Operator ingress reconciled without changing trading engine"
+  else
+    mkdir -p "$CONFIG_DIR"
+    : > "$OPERATOR_INGRESS_DEGRADED_MARKER"
+    log "WARNING: operator HTTPS/admin ingress repair incomplete; engine unchanged"
+  fi
+}
+
+# Recover control-plane access even if CI is pending or broker exposure keeps
+# the release deferred. These checks never restart the trading engine.
 if [ "$AUTO_MODE" = true ]; then
+  repair_operator_ingress_if_needed
   recover_admin_control || true
 fi
 
