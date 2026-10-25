@@ -895,7 +895,7 @@ def test_open_websocket_reports_and_protects_incremental_fills(monkeypatch) -> N
         order_id="ENTRY-OPEN-PARTIAL",
         symbol="NFO:NIFTY2681124500CE",
         side="BUY",
-        quantity=130,
+        quantity=195,
         order_type=order_manager_core.OrderType.LIMIT,
         status=order_manager_core.OrderStatus.SUBMITTED,
         intent="ENTRY",
@@ -911,7 +911,7 @@ def test_open_websocket_reports_and_protects_incremental_fills(monkeypatch) -> N
     manager._notify_failed_entry_terminal = lambda *_args: None
     manager.save_orders = lambda: None
 
-    for cumulative in (65, 100):
+    for cumulative in (65, 130):
         update = {
             "order_id": order.order_id,
             "status": "OPEN",
