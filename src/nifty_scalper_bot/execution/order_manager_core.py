@@ -21,6 +21,8 @@ Safe-edit notes:
   guard/idempotency boundaries and do not introduce a second placement route.
 - order_executor.py is NOT the live path (it is a separate, non-live executor);
   do not confuse the two.
+- Reference midpoints and live entry depth require finite, uncrossed bid/ask
+  evidence; malformed depth quantities cannot bypass entry preflight.
 """
 
 from __future__ import annotations
@@ -251,7 +253,14 @@ def _mid(bid: float | None, ask: float | None) -> float | None:
         None.
     """
 
-    if bid is None or ask is None or bid <= 0 or ask <= 0:
+    if (
+        bid is None
+        or ask is None
+        or not math.isfinite(bid)
+        or not math.isfinite(ask)
+        or bid <= 0
+        or ask <= bid
+    ):
         return None
     return (bid + ask) / 2.0
 
@@ -4459,7 +4468,7 @@ class OrderManager:
         def _safe_int(value: object, default: int = 0) -> int:
             try:
                 return int(float(value))
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 return default
 
         bid = _safe_float(
@@ -4693,7 +4702,7 @@ class OrderManager:
         LTP-only quote with bid=0/ask=0 and no depth passed straight through to
         the broker. Returns None when the quote is fully proven.
         """
-        if qd["bid"] <= 0 or qd["ask"] < qd["bid"]:
+        if qd["bid"] <= 0 or qd["ask"] <= qd["bid"]:
             return OrderPreflightResult(
                 False,
                 "entry_bid_ask_missing",
