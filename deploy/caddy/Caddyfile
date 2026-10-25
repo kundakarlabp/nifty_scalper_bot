@@ -1,0 +1,23 @@
+{
+    # Browsers connecting to an IPv4 URL may omit TLS SNI.
+    default_sni 65.0.255.84
+}
+
+65.0.255.84 {
+    # Let's Encrypt's IP certificates require the six-day shortlived profile.
+    # Caddy >=2.10.1 is mandatory. Never use a locally issued 'tls internal'
+    # certificate for the public operator console.
+    tls {
+        issuer acme {
+            profile shortlived
+        }
+    }
+
+    @admin path /admin /admin/*
+    handle @admin {
+        reverse_proxy 127.0.0.1:8081
+    }
+    handle {
+        reverse_proxy 127.0.0.1:8080
+    }
+}
