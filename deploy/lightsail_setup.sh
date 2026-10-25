@@ -207,23 +207,18 @@ if ! command -v caddy >/dev/null 2>&1; then
   sudo apt-get install -y -qq caddy
 fi
 
-sudo tee /etc/caddy/Caddyfile >/dev/null <<EOF_CADDY
-{
-  auto_https disable_redirects
-}
-:443 {
-  tls internal
-  reverse_proxy 127.0.0.1:${PORT}
-}
-EOF_CADDY
-sudo systemctl restart caddy || log "Caddy restart failed; HTTP remains available on port ${PORT}"
+# Apply exactly the same reviewed ingress policy as guarded GitHub updates.
+# Failure is explicitly reported, not mistaken for successful HTTPS.
+if ! bash "$APP_DIR/deploy/scripts/apply_operator_ingress.sh"; then
+  log "WARNING: operator HTTPS hardening incomplete; inspect Caddy version and ACME issuance"
+fi
 
 IP="$(curl -fsSL https://checkip.amazonaws.com 2>/dev/null || echo 'YOUR_STATIC_IP')"
 printf '\n============================================================\n'
 printf 'Setup complete.\n'
 printf 'Operations console: http://%s:%s\n' "$IP" "$STREAMLIT_PORT"
 printf 'Admin dashboard:    https://%s/admin\n' "$IP"
-printf 'Admin fallback:     http://%s:%s/admin\n' "$IP" "$PORT"
+printf 'Diagnostics:        http://%s:%s/livez\n' "$IP" "$PORT"
 printf 'Environment:        %s\n' "$ENV_FILE"
 printf 'Password:           %s\n' "${ADMIN_PW:-already configured}"
 printf 'Allow TCP 443 and TCP %s in Lightsail Networking.\n' "$STREAMLIT_PORT"
