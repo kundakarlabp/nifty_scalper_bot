@@ -1,9 +1,13 @@
-"""Low-resource operating-mode control for the production ASGI wrapper.
+"""Purpose: Bound production AUTO/QUIET/ACTIVE operating modes and transitions.
 
-AUTO keeps the full trading engine loaded only around the NSE cash session on
-weekdays. QUIET keeps only HTTP/admin controls alive. ACTIVE keeps the engine
-loaded continuously. This reduces off-hours CPU/network work; it does not by
-itself change the fixed Lightsail bundle price.
+Responsibilities:
+- Compute the weekday engine warm-up/quiet window in IST.
+- Queue an AUTO boundary restart through the canonical validated release runner.
+- Retry rejected queue requests so a transient control failure cannot strand
+  the engine unloaded for a trading session.
+
+Safety: Never restart trading directly or bypass broker-flat release gates.
+Off-hours unloading reduces CPU work, not the fixed Lightsail bundle price.
 """
 
 from __future__ import annotations
