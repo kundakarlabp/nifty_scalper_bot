@@ -305,7 +305,6 @@ def test_partial_fills_apply_only_cumulative_delta(tmp_path) -> None:
     assert position.quantity == 65
 
 
-
 def test_cancelled_entry_applies_late_incremental_fill_only_once(tmp_path) -> None:
     manager = PositionManager(state_file=str(tmp_path / "positions.json"))
     manager.add_pending_order(
@@ -331,7 +330,6 @@ def test_cancelled_entry_applies_late_incremental_fill_only_once(tmp_path) -> No
         {"status": "CANCELLED", "filled_quantity": 100, "average_price": 101.0},
     )
     assert manager.get_position(SYMBOL).quantity == 100
-
 
 
 def test_partial_exit_fill_reduces_only_cumulative_delta(tmp_path) -> None:
