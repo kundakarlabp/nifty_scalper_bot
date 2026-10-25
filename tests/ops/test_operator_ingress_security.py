@@ -165,7 +165,6 @@ def test_timer_repairs_ingress_without_restarting_trading_engine() -> None:
     assert end < invocation < first_checkout
 
 
-
 def test_operator_repair_secures_admin_before_caddy_preflight() -> None:
     script = (ROOT / "deploy/scripts/apply_operator_ingress.sh").read_text()
     loopback_install = script.index('install -m 0644 "$ADMIN_SOURCE" "$ADMIN_TARGET"')
@@ -180,7 +179,7 @@ def test_operator_repair_secures_admin_before_caddy_preflight() -> None:
 def test_free_upgrade_is_quiet_only_and_bounded() -> None:
     script = (ROOT / "deploy/scripts/apply_operator_ingress.sh").read_text()
     assert "caddy_upgrade_attempted" in script
-    assert "find \"$marker\" -mmin +360" in script
+    assert 'find "$marker" -mmin +360' in script
     assert "/livez" in script and "quiet" in script
     assert "--only-upgrade -y -qq caddy" in script
     assert "DEBIAN_FRONTEND=noninteractive" in script
