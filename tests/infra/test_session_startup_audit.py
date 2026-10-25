@@ -38,6 +38,9 @@ def test_four_realistic_live_restarts_are_counted_without_claiming_safety() -> N
     assert summary["live_ready_count"] == 4
     assert summary["startups_after_0930_count"] == 4
     assert summary["startups_without_live_ready_count"] == 0
+    assert summary["observed_repeat_startup_count"] == 3
+    assert summary["market_window_startup_count"] == 3
+    assert summary["restart_cause"] == "unknown_without_process_and_deployment_events"
     assert summary["first_startup_at_ist"] == "09:49:33"
     assert summary["last_startup_at_ist"] == "15:12:33"
     assert summary["last_live_ready_at_ist"] == "15:13:04"
@@ -83,3 +86,29 @@ def test_no_logs_means_unknown_evidence_not_success() -> None:
     assert summary["reconcile_complete_count"] == 0
     assert summary["max_startup_to_ready_seconds"] is None
     assert summary["protective_stop_verification"] == "not_established_from_log_markers"
+
+
+def test_session_audit_counts_events_without_inferring_continuous_stop_protection() -> None:
+    summary = audit_session_startups(
+        "\n".join(
+            (
+                line("09:35:00", "STARTUP_PHASE phase=create_context"),
+                line("09:35:31", "EXCHANGE_PROTECTIVE_STOP_ARMED order_id=stop-a"),
+                line("09:36:00", "EXCHANGE_PROTECTIVE_STOP_UNVERIFIED order_id=stop-a"),
+                line("09:37:00", "EXCHANGE_PROTECTIVE_STOP_NOT_ARMED"),
+                line("10:00:00", "EXCHANGE_PROTECTIVE_STOP_RATCHET_CONFIRMED"),
+                line("14:59:00", "STARTUP_PHASE phase=create_context"),
+                line("15:12:33", "STARTUP_PHASE phase=create_context"),
+                "access_token=SECRET_MUST_NOT_LEAK",
+            )
+        )
+    )
+    assert summary["stop_armed_event_count"] == 1
+    assert summary["stop_unverified_event_count"] == 1
+    assert summary["stop_not_armed_event_count"] == 1
+    assert summary["stop_ratchet_confirmed_event_count"] == 1
+    assert summary["observed_repeat_startup_count"] == 2
+    assert summary["market_window_startup_count"] == 2
+    assert summary["protective_stop_verification"] == "not_established_from_log_markers"
+    assert summary["restart_cause"] == "unknown_without_process_and_deployment_events"
+    assert "SECRET_MUST_NOT_LEAK" not in str(summary)
