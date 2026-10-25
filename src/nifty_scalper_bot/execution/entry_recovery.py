@@ -547,9 +547,7 @@ def _reconcile_intent(
             unresolved_same_symbol = True
 
     if unresolved_same_symbol:
-        return "unknown", None, {
-            "reason": "same_symbol_order_without_verified_identity"
-        }
+        return "unknown", None, {"reason": "same_symbol_order_without_verified_identity"}
 
     positions = _broker_positions(manager)
     if positions is None:
