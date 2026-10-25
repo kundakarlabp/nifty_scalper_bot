@@ -29,6 +29,18 @@ os.environ.setdefault("BROKER_API_SECRET", "mock_api_secret")
 
 
 @pytest.fixture(autouse=True)
+def _isolate_production_platform(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Host candidate tests must not inherit live AWS access policy.
+
+    The guarded Lightsail release invokes pytest with protected production
+    environment loaded. FastAPI TestClient peers are "testclient", not the
+    real 127.0.0.1 host. Reset only the platform marker for tests; individual
+    production-auth regressions explicitly set it again themselves.
+    """
+    monkeypatch.delenv("DEPLOYMENT_PLATFORM", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_data_dir(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
     """Point DATA_DIR at a per-test directory.
 
