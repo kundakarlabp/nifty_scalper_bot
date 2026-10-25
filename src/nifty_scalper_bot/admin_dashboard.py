@@ -110,7 +110,9 @@ def _check_auth(request: Request) -> None:
     if os.getenv("DEPLOYMENT_PLATFORM") != "aws_lightsail":
         return
     peer = request.client.host if request.client else ""
-    if peer in {"127.0.0.1", "::1"}:
+    # Caddy itself connects from loopback, but forwarded public clients
+    # must never inherit the host-local bypass when proxy headers are absent.
+    if peer in {"127.0.0.1", "::1"} and not request.headers.get("x-forwarded-for"):
         return
     if request.url.scheme != "https":
         raise HTTPException(status_code=403, detail="admin_https_required")
