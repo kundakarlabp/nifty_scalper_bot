@@ -7,7 +7,6 @@ import stat
 from pathlib import Path
 
 import pytest
-
 from scripts.zerodha_token_cli import resolve_token_env_path, write_env_tokens
 
 
