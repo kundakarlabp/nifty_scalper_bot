@@ -1128,3 +1128,28 @@ def test_live_entry_accepts_complete_quote_evidence() -> None:
             "received_at": time.time(),
         }
     ) is None
+
+
+def test_live_entry_rejects_locked_and_crossed_books_with_depth() -> None:
+    for bid, ask in ((100.0, 100.0), (101.0, 100.0)):
+        quote = {
+            "ltp": 100.0,
+            "bid": bid,
+            "ask": ask,
+            "bid_quantity": 500,
+            "ask_quantity": 500,
+            "received_at": time.time(),
+        }
+        assert _reject_reason(quote) == "entry_bid_ask_missing"
+
+
+def test_live_entry_nonfinite_depth_quantity_fails_closed() -> None:
+    quote = {
+        "ltp": 100.0,
+        "bid": 99.5,
+        "ask": 100.5,
+        "bid_quantity": 500,
+        "ask_quantity": float("inf"),
+        "received_at": time.time(),
+    }
+    assert _reject_reason(quote) == "entry_executable_depth_missing"
