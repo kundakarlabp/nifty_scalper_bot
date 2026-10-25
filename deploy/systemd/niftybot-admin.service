@@ -1,3 +1,6 @@
+# File purpose: Run the independent Lightsail admin control server.
+# Key responsibilities: Serve authenticated operator pages only through localhost/Caddy.
+# Operational constraints: Never bind port 8081 publicly or restart trading.
 [Unit]
 Description=Nifty Bot Lightweight Admin Controls
 After=network-online.target niftybot.service
