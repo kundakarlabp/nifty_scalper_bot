@@ -200,7 +200,8 @@ def test_terminal_history_does_not_use_stale_open_orderbook() -> None:
     manager.order_manager = SimpleNamespace(
         _broker=SimpleNamespace(
             get_order_status=lambda order_id: {
-                "order_id": order_id, "status": "CANCELLED"
+                "order_id": order_id,
+                "status": "CANCELLED",
             },
             get_orders=wrong_fallback,
         )
