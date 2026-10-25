@@ -147,3 +147,19 @@ def test_operator_proxy_is_secure_and_admin_is_loopback_only() -> None:
         ).returncode
         == 0
     )
+
+
+def test_timer_repairs_ingress_without_restarting_trading_engine() -> None:
+    release = (ROOT / "deploy/lightsail_release.sh").read_text()
+    start = release.index("repair_operator_ingress_if_needed() {")
+    end = release.index("\n}\n", start) + 2
+    repair = release[start:end]
+    assert 'bash "$helper" && restart_admin' in repair
+    assert 'systemctl restart "$SERVICE"' not in repair
+    assert "intraday_flat_broker_confirmed" not in repair
+    assert 'sudo -n cmp -s "$APP_DIR/deploy/caddy/Caddyfile"' in repair
+    assert "OPERATOR_INGRESS_DEGRADED_MARKER" in repair
+    # A same-revision timer tick runs this before the unchanged-SHA early exit.
+    invocation = release.index("\n  repair_operator_ingress_if_needed\n")
+    first_checkout = release.index('BEFORE="$(git rev-parse HEAD)"')
+    assert end < invocation < first_checkout
