@@ -497,6 +497,82 @@ def test_fast_fill_accepts_quantitative_broker_execution() -> None:
     ]
 
 
+def test_fast_fill_does_not_accept_other_order_identity() -> None:
+    manager = _manager(None)
+    updates: list[dict[str, Any]] = []
+
+    class _Broker:
+        def get_order_status(self, _order_id: str) -> dict[str, Any]:
+            return {
+                "order_id": "ANOTHER-ENTRY",
+                "status": "COMPLETE",
+                "average_price": 101.5,
+                "filled_quantity": 65,
+            }
+
+    manager._broker = _Broker()
+    manager.on_order_update = lambda payload: updates.append(dict(payload))
+
+    assert manager._confirm_fill_fast("ENTRY-1", timeout_ms=1) is False
+    assert updates == []
+
+
+def test_fast_fill_does_not_apply_other_order_terminal_status() -> None:
+    manager = _manager(None)
+    updates: list[dict[str, Any]] = []
+
+    class _Broker:
+        def get_order_status(self, _order_id: str) -> dict[str, Any]:
+            return {"order_id": "ANOTHER-ENTRY", "status": "REJECTED"}
+
+    manager._broker = _Broker()
+    manager.on_order_update = lambda payload: updates.append(dict(payload))
+
+    assert manager._confirm_fill_fast("ENTRY-1", timeout_ms=1) is False
+    assert updates == []
+
+
+def test_fast_fill_rejects_nonfinite_price_proof() -> None:
+    manager = _manager(None)
+    updates: list[dict[str, Any]] = []
+
+    class _Broker:
+        def get_order_status(self, _order_id: str) -> dict[str, Any]:
+            return {
+                "order_id": "ENTRY-1",
+                "status": "COMPLETE",
+                "average_price": float("inf"),
+                "filled_quantity": 65,
+            }
+
+    manager._broker = _Broker()
+    manager.on_order_update = lambda payload: updates.append(dict(payload))
+
+    assert manager._confirm_fill_fast("ENTRY-1", timeout_ms=1) is False
+    assert updates == []
+
+
+def test_fast_fill_accepts_matching_explicit_broker_identity() -> None:
+    manager = _manager(None)
+    updates: list[dict[str, Any]] = []
+
+    class _Broker:
+        def get_order_status(self, _order_id: str) -> dict[str, Any]:
+            return {
+                "order_id": "ENTRY-1",
+                "status": "COMPLETE",
+                "average_price": 101.5,
+                "filled_quantity": 65,
+            }
+
+    manager._broker = _Broker()
+    manager.on_order_update = lambda payload: updates.append(dict(payload))
+
+    assert manager._confirm_fill_fast("ENTRY-1", timeout_ms=50) is True
+    assert len(updates) == 1
+    assert updates[0]["order_id"] == "ENTRY-1"
+
+
 def test_entry_fill_journal_uses_actual_broker_fill_values() -> None:
     manager = _manager(None)
     events: list[dict[str, Any]] = []

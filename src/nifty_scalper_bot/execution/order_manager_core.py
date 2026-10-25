@@ -23,6 +23,8 @@ Safe-edit notes:
   do not confuse the two.
 - Reference midpoints and live entry depth require finite, uncrossed bid/ask
   evidence; malformed depth quantities cannot bypass entry preflight.
+- Fast fill confirmation accepts only matching broker order identity (when
+  present), positive filled quantity and finite positive execution price.
 """
 
 from __future__ import annotations
@@ -8571,6 +8573,19 @@ class OrderManager:
                     backoff_ms = min(backoff_ms * 1.5, max_backoff_ms)
                     continue
 
+                # A broker response for another order must never confirm or
+                # transition the order currently being checked.
+                response_order_id = str(status.get("order_id") or "").strip()
+                if response_order_id and response_order_id != str(order_id):
+                    self._logger.warning(
+                        "BROKER_FILL_IDENTITY_MISMATCH requested=%s returned=%s",
+                        order_id,
+                        response_order_id,
+                    )
+                    time.sleep(backoff_ms / 1000.0)
+                    backoff_ms = min(backoff_ms * 1.5, max_backoff_ms)
+                    continue
+
                 status_text = str(status.get("status") or "").strip().upper()
                 if status_text in {"COMPLETE", "FILLED"}:
                     try:
@@ -8581,7 +8596,7 @@ class OrderManager:
                                 or 0
                             )
                         )
-                    except (TypeError, ValueError):
+                    except (TypeError, ValueError, OverflowError):
                         filled_qty = 0
                     try:
                         fill_price = float(
@@ -8592,7 +8607,7 @@ class OrderManager:
                         )
                     except (TypeError, ValueError):
                         fill_price = 0.0
-                    if filled_qty > 0 and fill_price > 0:
+                    if filled_qty > 0 and math.isfinite(fill_price) and fill_price > 0:
                         payload = dict(status)
                         payload["filled_quantity"] = filled_qty
                         payload["average_price"] = fill_price
