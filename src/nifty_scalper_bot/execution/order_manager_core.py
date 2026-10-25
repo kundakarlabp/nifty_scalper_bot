@@ -7781,7 +7781,7 @@ class OrderManager:
                             "symbol": order.symbol,
                             "requested_quantity": requested_quantity,
                             "reported_filled_quantity": (
-                                incoming_quantity
+                                numeric_quantity
                                 if math.isfinite(numeric_quantity)
                                 else None
                             ),
