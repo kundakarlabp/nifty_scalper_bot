@@ -34,7 +34,7 @@ def _run_backup(
             "-o",
             "pipefail",
             "-c",
-            function + "\n"+"save_protected_env_backup",
+            function + "\nsave_protected_env_backup",
         ],
         check=False,
         text=True,
@@ -72,8 +72,11 @@ def test_automatic_env_backup_retention_is_bounded_and_redacted(tmp_path: Path) 
     assert symlink.is_symlink()
     assert outside.read_text(encoding="utf-8") == "do-not-touch"
     managed = [
-        p for p in backups.iterdir()
-        if p.is_file() and not p.is_symlink() and p.name.startswith("niftybot.env.")
+        p
+        for p in backups.iterdir()
+        if p.is_file()
+        and not p.is_symlink()
+        and p.name.startswith("niftybot.env.")
         and p.name != "niftybot.env.not-a-release"
     ]
     assert len(managed) == 5
