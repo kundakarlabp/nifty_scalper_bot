@@ -658,7 +658,7 @@ def _auto_release_helpers() -> str:
     )
 
 
-def test_broker_flat_guard_diagnostics_are_bounded_and_never_authorize_release() -> None:
+def test_broker_guard_diagnostic_never_authorizes_release() -> None:
     """Diagnostic codes must not replace either of the broker-flat samples."""
     import ast
 
