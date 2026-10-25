@@ -1,22 +1,14 @@
 #!/usr/bin/env python3
 # scripts/zerodha_token_cli.py
-"""
-Automated Zerodha Kite Connect access token helper.
+"""Purpose: Maintain a legacy operator-only Zerodha session token helper.
 
-This script automates the retrieval and update of the Zerodha access token.
-If the credentials:
-  - ZERODHA_USER_ID
-  - ZERODHA_PASSWORD
-  - ZERODHA_TOTP_SECRET
-are set in .env or the system environment, the script will login programmatically
-via HTTP requests, generate the TOTP in real-time, retrieve the request_token,
-and exchange it for the daily access_token.
+Responsibilities:
+- resolve_token_env_path selects the single protected operator credential file.
+- write_env_tokens updates the three access-token aliases atomically and privately.
+- main exchanges a request token using Zerodha and stores the resulting token.
 
-If these credentials are not provided, it falls back to manual interactive mode
-where it prints the login URL and prompts the user to paste the request_token.
-
-Usage:
-  python scripts/zerodha_token_cli.py --write-env
+Boundaries: Not a broker trading, deployment, or service-restart owner.
+Safety: Never write an incidental production .env, log token fragments, or arm LIVE.
 """
 
 from __future__ import annotations
@@ -24,6 +16,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import tempfile
 from pathlib import Path
 from urllib.parse import parse_qs, urljoin, urlparse
 
@@ -56,43 +49,63 @@ except ImportError:
     requests = None
 
 
-def write_env_tokens(env_path: Path, token: str) -> None:
-    """Safely updates or adds the access tokens in the .env file."""
-    keys_to_update = ["ZERODHA_ACCESS_TOKEN", "BROKER_ACCESS_TOKEN", "KITE_ACCESS_TOKEN"]
-    
-    if not env_path.exists():
-        lines = [f"{key}={token}" for key in keys_to_update]
-        env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        return
+def resolve_token_env_path(
+    cli_env: str | None = None,
+    *,
+    environ: dict[str, str] | None = None,
+) -> Path:
+    """Select one operator env file, refusing a different production path."""
+    variables = os.environ if environ is None else environ
+    protected = variables.get("BOT_ENV_FILE")
+    production = (
+        variables.get("DEPLOYMENT_PLATFORM", "").strip().lower() == "aws_lightsail"
+    )
+    if production and (not protected or not Path(protected).is_absolute()):
+        raise ValueError("canonical BOT_ENV_FILE is required on production")
+    candidate = Path(cli_env or protected or ".env").expanduser()
+    if production and candidate.resolve() != Path(protected).resolve():
+        raise ValueError("only the canonical protected env file is allowed")
+    if candidate.is_symlink():
+        raise ValueError("symlinked operator env files are not accepted")
+    if production and not candidate.is_file():
+        raise ValueError("canonical protected env file is missing")
+    return candidate
 
-    content = env_path.read_text(encoding="utf-8")
-    lines = content.splitlines()
-    new_lines = []
-    
-    # Track which keys we've already written so we don't duplicate
-    written = set()
-    
+
+def write_env_tokens(env_path: Path, token: str) -> None:
+    """Atomically replace token aliases in one private regular env file."""
+    if not token or any(c in token for c in "\\r\\n"):
+        raise ValueError("invalid access token")
+    if env_path.is_symlink() or (env_path.exists() and not env_path.is_file()):
+        raise ValueError("expected a regular operator env file")
+    keys = ("ZERODHA_ACCESS_TOKEN", "BROKER_ACCESS_TOKEN", "KITE_ACCESS_TOKEN")
+    lines = env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
+    written: set[str] = set()
+    updated: list[str] = []
     for line in lines:
-        stripped = line.strip()
-        matched_key = None
-        for key in keys_to_update:
-            if stripped.startswith(f"{key}=") or stripped.startswith(f"export {key}="):
-                matched_key = key
-                break
-        
-        if matched_key:
-            # Overwrite the existing line with the new value
-            new_lines.append(f"{matched_key}={token}")
-            written.add(matched_key)
+        raw = line.strip().removeprefix("export ").strip()
+        name = raw.partition("=")[0].strip()
+        if name in keys and "=" in raw:
+            if name not in written:
+                updated.append(f"{name}={token}")
+                written.add(name)
         else:
-            new_lines.append(line)
-            
-    # Append any keys that weren't already in the file
-    for key in keys_to_update:
-        if key not in written:
-            new_lines.append(f"{key}={token}")
-            
-    env_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+            updated.append(line)
+    updated.extend(f"{name}={token}" for name in keys if name not in written)
+
+    # Preserve valid env lines; never truncate the protected file in-place.
+    # New inode is private (0600) before it holds any token bytes.
+    fd, temp_path = tempfile.mkstemp(prefix=".nifty-token-", dir=env_path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            os.fchmod(handle.fileno(), 0o600)
+            handle.write("\\n".join(updated) + "\\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, env_path)
+    finally:
+        if os.path.exists(temp_path):
+            os.unlink(temp_path)
 
 
 def get_automated_request_token(
@@ -197,16 +210,20 @@ def get_automated_request_token(
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--env", default=".env", help="Path to .env file (default: ./.env)")
+    ap.add_argument("--env", help="Operator env path (defaults to BOT_ENV_FILE; local .env only in development)")
     ap.add_argument(
         "--write-env", action="store_true", default=True, help="Write access tokens to the environment file"
     )
     ap.add_argument("--request-token", help="Provide request_token manually to skip login")
     args = ap.parse_args()
 
-    env_path = Path(args.env)
-    if env_path.exists():
-        load_dotenv(env_path)
+    try:
+        env_path = resolve_token_env_path(args.env)
+    except ValueError as exc:
+        print(f"Token helper configuration refused: {exc}", file=sys.stderr)
+        sys.exit(2)
+    if env_path.is_file():
+        load_dotenv(env_path, override=False)
 
     # Load API Credentials
     api_key = os.getenv("ZERODHA_API_KEY") or os.getenv("KITE_API_KEY") or os.getenv("BROKER_API_KEY")
@@ -264,14 +281,14 @@ def main() -> None:
         print("❌ Error: Zerodha session generation did not return an access token.", file=sys.stderr)
         sys.exit(1)
 
-    print(f"✅ Successfully authenticated! Access Token: {access_token[:6]}...{access_token[-6:]}")
+    print("Zerodha authenticated successfully; access token value not displayed.")
 
     if args.write_env:
         try:
             write_env_tokens(env_path, access_token)
-            print(f"✅ Successfully wrote access tokens to {env_path.resolve()}")
-        except Exception as exc:
-            print(f"❌ Failed to write token to {env_path}: {exc}", file=sys.stderr)
+            print("Access token aliases stored in the selected operator env file.")
+        except Exception:
+            print("Failed to update the selected operator env file.", file=sys.stderr)
             sys.exit(1)
 
 
