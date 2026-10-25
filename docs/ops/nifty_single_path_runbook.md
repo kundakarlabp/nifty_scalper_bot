@@ -23,6 +23,24 @@ daily broker-token operation may require AppDeploy.
 - Never paste the request-token URL, access tokens, or TOTP into chat,
   screenshots, GitHub Actions, or Supabase telemetry.
 
+## Legacy command-line token helper — protected-file only
+
+The authenticated admin token workflow remains the operational default. The
+legacy `bash manage_bot.sh token` helper is retained for operator recovery,
+but it no longer shell-sources `.env`. The shell launcher requires an
+explicit absolute `BOT_ENV_FILE` even without systemd's platform variables.
+On Lightsail this must point to the same protected environment used by
+systemd; it will not read or write a repository `.env` or a competing
+`--env` file. Development without the production profile may still use
+a local `.env`.
+
+A successful request-token exchange updates the three token aliases through
+an atomic private (0600) file replacement, preserving unrelated mode/strategy
+settings. The CLI never prints the access-token value or a token fragment.
+This is **not** a service restart or evidence that the bot re-authenticated:
+after an operator recovery, continue to use the existing broker-authenticated
+readiness check and safe restart guard, without touching open positions.
+
 ## Exchange protective-stop broker evidence (Phase 8)
 
 A broker **order ID, submitted modification, or OPEN status alone is not

@@ -11,11 +11,9 @@ else
   export PYTHONPATH="${PYTHONPATH:-$ROOT_DIR}"
 fi
 
-# Optional: load .env if present (Railway also injects envs)
-if [[ -f .env ]]; then
-  # shellcheck disable=SC1091
-  source .env
-fi
+# Never shell-source a repository .env: it may execute arbitrary commands
+# and can override the protected host policy. Python settings resolve the one
+# canonical BOT_ENV_FILE in production and local dotenv in development.
 
 cmd="${1:-run}"
 
@@ -42,8 +40,14 @@ run_backtest() {
 }
 
 token_helper() {
+  # A manual SSH shell does not necessarily inherit systemd's environment.
+  # Never fall back to a repository .env, even when the platform flag is absent.
+  if [[ -z "${BOT_ENV_FILE:-}" || "${BOT_ENV_FILE:-}" != /* ]]; then
+    echo "Token helper requires an absolute BOT_ENV_FILE; use the authenticated admin page otherwise." >&2
+    exit 2
+  fi
   log "Launching Zerodha token helper"
-  exec python scripts/zerodha_token_cli.py --write-env
+  exec python scripts/zerodha_token_cli.py --env "$BOT_ENV_FILE" --write-env
 }
 
 case "$cmd" in
