@@ -661,9 +661,7 @@ def test_late_cancelled_fill_delta_reconciles_before_replay(
         intent="ENTRY",
     )
     manager._orders = {order.order_id: order}
-    manager._positions = SimpleNamespace(
-        apply_broker_order_update=lambda *_args: None
-    )
+    manager._positions = SimpleNamespace(apply_broker_order_update=lambda *_args: None)
     manager._register_virtual_bracket_for_fill = (
         lambda updated, **_kwargs: fills.append(updated.filled_quantity)
     )
