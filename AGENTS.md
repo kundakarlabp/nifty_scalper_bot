@@ -146,3 +146,15 @@ Production diagnosis is read-only by default. Do not restart, redeploy, enable l
 Never commit or print secrets, tokens, broker session material, private account data, or operator-only credentials.
 
 Cross-repository edits are required only when the requested behavior changes a real shared interface, schema, protocol, deployment contract, or user workflow.
+
+## Production HTTP/HTTPS reachability (2026-10-25 incident)
+
+For subsequent ChatGPT investigations **read `docs/ops/PRODUCTION_HTTP_ACCESS.md` first**.
+A direct fresh external HTTP client independently verified public Lightsail
+`:8080/livez`, `:8080/releasez` and `:8501/_stcore/health` despite
+connection timeouts from Supabase SQL HTTP and restricted tool environments.
+Never label the bot down from those timeouts alone. Supabase heartbeat is
+host-local monitoring, not proof of public ingress. Control-plane access is
+separate: HTTPS requires a publicly trusted certificate and authentication;
+independent port 8081 must bind to localhost. Do not use AppDeploy/SSH,
+change trading risk, or bypass broker-safe deployment to troubleshoot HTTP.

@@ -13,7 +13,9 @@ Safety: Do not collect Kite passwords/TOTP or bypass broker release safeguards.
 # ruff: noqa: E501
 from __future__ import annotations
 
+import base64
 import hashlib
+import hmac
 import html
 import json
 import os
@@ -24,7 +26,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from fastapi import APIRouter, Form, Request, Response
+from fastapi import APIRouter, Form, HTTPException, Request, Response
 from fastapi.responses import (
     HTMLResponse,
     JSONResponse,
@@ -100,9 +102,49 @@ def _write_env(updates: dict[str, str]) -> None:
 
 
 def _check_auth(request: Request) -> None:
-    # Host security-group/IP allowlist remains the access boundary for this legacy
-    # console. Do not add broker login passwords or TOTP seeds to this application.
-    return None
+    """Keep host-local controls usable; require authenticated HTTPS on Lightsail.
+
+    The engine's public HTTP port also mounts these routes, so changing only
+    the independent admin service bind address cannot protect them.
+    """
+    if os.getenv("DEPLOYMENT_PLATFORM") != "aws_lightsail":
+        return
+    peer = request.client.host if request.client else ""
+    # Caddy itself connects from loopback, but forwarded public clients
+    # must never inherit the host-local bypass when proxy headers are absent.
+    if peer in {"127.0.0.1", "::1"} and not request.headers.get("x-forwarded-for"):
+        return
+    if request.url.scheme != "https":
+        raise HTTPException(status_code=403, detail="admin_https_required")
+
+    password = os.getenv("ADMIN_PASSWORD") or _read_env().get("ADMIN_PASSWORD", "")
+    if not password:
+        raise HTTPException(status_code=503, detail="admin_password_not_configured")
+    challenge = {"WWW-Authenticate": 'Basic realm="Nifty Bot Admin"'}
+    raw = request.headers.get("authorization", "")
+    if not raw.lower().startswith("basic "):
+        raise HTTPException(
+            status_code=401, detail="admin_auth_required", headers=challenge
+        )
+    try:
+        decoded = base64.b64decode(raw[6:].strip(), validate=True).decode("utf-8")
+        username, supplied = decoded.split(":", 1)
+    except (ValueError, UnicodeDecodeError):
+        raise HTTPException(
+            status_code=401, detail="admin_auth_required", headers=challenge
+        ) from None
+    if not (
+        hmac.compare_digest(username, "admin")
+        and hmac.compare_digest(supplied, password)
+    ):
+        raise HTTPException(
+            status_code=401, detail="admin_auth_required", headers=challenge
+        )
+    if request.method.upper() not in {"GET", "HEAD", "OPTIONS"}:
+        source = request.headers.get("origin") or request.headers.get("referer", "")
+        parsed = urllib.parse.urlsplit(source)
+        if parsed.scheme != "https" or parsed.netloc != request.headers.get("host"):
+            raise HTTPException(status_code=403, detail="admin_same_origin_required")
 
 
 def _admin_password() -> str:

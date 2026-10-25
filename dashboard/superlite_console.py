@@ -31,11 +31,17 @@ ADMIN_API = os.getenv("BOT_ADMIN_API_URL", "http://127.0.0.1:8081").rstrip("/")
 _configured_admin = os.getenv("BOT_ADMIN_PUBLIC_URL", "").strip()
 # Older systemd units override the environment file with a retired static IP.
 # Recover that exact legacy default without changing an operator-set custom URL.
+_parsed_admin = urllib.parse.urlsplit(_configured_admin)
 if (
     not _configured_admin
-    or urllib.parse.urlsplit(_configured_admin).hostname == "15.206.3.6"
+    or _parsed_admin.hostname == "15.206.3.6"
+    or (
+        _parsed_admin.hostname == "65.0.255.84"
+        and _parsed_admin.scheme == "http"
+        and _parsed_admin.netloc == "65.0.255.84:8081"
+    )
 ):
-    ADMIN_PUBLIC = "http://" + os.getenv("BOT_PUBLIC_IP", "65.0.255.84") + ":8081/admin"
+    ADMIN_PUBLIC = "https://" + os.getenv("BOT_PUBLIC_IP", "65.0.255.84") + "/admin"
 else:
     ADMIN_PUBLIC = _configured_admin
 SERVICE = os.getenv("BOT_SERVICE_NAME", "niftybot")
