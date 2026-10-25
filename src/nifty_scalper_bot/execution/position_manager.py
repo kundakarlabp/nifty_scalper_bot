@@ -3261,8 +3261,14 @@ class PositionManager:
 
         fill_result = FillApplicationResult()
         if (
-            order.status in ("PARTIALLY_FILLED", "FILLED")
-            and order.fill_price is not None
+            order.fill_price is not None
+            and (
+                order.status in ("PARTIALLY_FILLED", "FILLED")
+                or (
+                    order.status in ("CANCELLED", "REJECTED", "EXPIRED")
+                    and order.filled_quantity > order.applied_filled_quantity
+                )
+            )
         ):
             if order.filled_quantity <= 0:
                 order.filled_quantity = order.quantity
@@ -3355,7 +3361,9 @@ class PositionManager:
                 ) or broker_payload.get("filled")
                 if order is not None and filled_qty is not None:
                     with suppress(Exception):
-                        order.filled_quantity = int(float(filled_qty))
+                        order.filled_quantity = max(
+                            order.filled_quantity, int(float(filled_qty))
+                        )
                 fill_price: float | None = None
                 if fill_price_raw is not None:
                     with suppress(Exception):
