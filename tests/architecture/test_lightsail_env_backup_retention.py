@@ -103,8 +103,8 @@ def test_backup_failure_does_not_prune_existing_recoverable_files(
 def test_release_calls_backup_before_applying_candidate() -> None:
     script = RELEASE_SCRIPT.read_text(encoding="utf-8")
     assert "MAX_MANAGED_ENV_BACKUPS=5" in script
-    assert 'if ! save_protected_env_backup; then' in script
+    assert "if ! save_protected_env_backup; then" in script
     assert script.index("if ! save_protected_env_backup; then") < script.index(
         'write_status deploying "deploying'
     )
-    assert 'write_status backup_failed' in script
+    assert "write_status backup_failed" in script
