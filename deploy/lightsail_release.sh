@@ -31,6 +31,7 @@ RUNTIME_ENV_CHANGED=false
 PACKAGE_INSTALL_ATTEMPTED=false
 STREAMLIT_DEPENDENCY_FAILED=false
 STREAMLIT_DEPENDENCY_FAILURE_MARKER="${CONFIG_DIR}/streamlit_dependency_refresh_failed"
+OPERATOR_INGRESS_DEGRADED_MARKER="${CONFIG_DIR}/operator_ingress_degraded"
 
 for arg in "$@"; do
   case "$arg" in
@@ -628,6 +629,8 @@ if [ "$AUTO_MODE" = true ]; then
     else
       if [ -f "$STREAMLIT_DEPENDENCY_FAILURE_MARKER" ]; then
         write_status current_console_dependencies_degraded "running ${BEFORE:0:7}; console dependencies unverified; repair awaits safe release handoff"
+      elif [ -f "$OPERATOR_INGRESS_DEGRADED_MARKER" ]; then
+        write_status current_operator_ingress_degraded "running ${BEFORE:0:7}; public TLS/admin bind repair required"
       elif admin_healthy; then
         write_status current "running ${BEFORE:0:7}; no pending revision"
       else
@@ -938,6 +941,14 @@ fi
 sudo systemctl restart "$SERVICE"
 if wait_for_service "$AFTER"; then
   rm -f "$RESTART_PENDING_FILE" "$VERIFIED_TOKEN_ROTATION_FILE"
+  # Auxiliary networking hardening happens only after the guarded engine
+  # restart passed release checks. It never restarts or reconfigures trading.
+  if bash "$APP_DIR/deploy/scripts/apply_operator_ingress.sh"; then
+    rm -f "$OPERATOR_INGRESS_DEGRADED_MARKER"
+  else
+    : > "$OPERATOR_INGRESS_DEGRADED_MARKER"
+    log "WARNING: Caddy/admin ingress hardening incomplete; engine unchanged"
+  fi
   admin_ready=false
   if restart_admin; then
     admin_ready=true
@@ -986,6 +997,10 @@ if wait_for_service "$AFTER"; then
       write_status deployed_controls_degraded "deployed ${AFTER:0:7}; engine healthy, admin and console unavailable"
     fi
     logger -t niftybot-deploy "bot deployed; Streamlit health check failed"
+  fi
+  if [ -f "$OPERATOR_INGRESS_DEGRADED_MARKER" ] && [ "$admin_ready" = true ] \
+    && [ "$STREAMLIT_DEPENDENCY_FAILED" = false ]; then
+    write_status deployed_operator_ingress_degraded "deployed ${AFTER:0:7}; engine healthy; operator TLS/admin ingress needs repair"
   fi
   logger -t niftybot-deploy "validated and deployed ${BEFORE:0:7} -> ${AFTER:0:7}"
   if [ "$admin_ready" = true ]; then
