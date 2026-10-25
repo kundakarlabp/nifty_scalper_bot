@@ -20,7 +20,7 @@ from collections import Counter
 from pathlib import Path
 
 _MAX_SIZE = 256 * 1024
-_KEY_LINE = re.compile(r"^(?:export\s+)?([A-Z][A-Z0-9_]*)=(.*)$")
+_KEY_LINE = re.compile(r"^(?:export\s+)?([A-Z][A-Z0-9_]*)\s*=\s*(.*)$")
 _STRATEGY_RISK_KEYS = frozenset(
     {
         "RISK__PER_TRADE_RISK_PCT",
@@ -86,7 +86,7 @@ def _read_protected(path: Path) -> str | None:
         return None
     descriptor = -1
     try:
-        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         info = os.fstat(descriptor)
         if (
             not stat.S_ISREG(info.st_mode)
