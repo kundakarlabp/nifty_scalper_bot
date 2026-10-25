@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # File purpose: Synchronize Lightsail admin bind and public TLS configuration.
-# Key responsibilities: Validate Caddy, install loopback admin unit, reload and restore on failure.
+# Key responsibilities: Bind admin locally first, validate/repair Caddy and verify trusted public-IP HTTPS.
 # Operational constraints: Do not restart trading or change credentials; never claim certificate issuance from reload.
 set -euo pipefail
 
@@ -10,25 +10,45 @@ ADMIN_TARGET="/etc/systemd/system/niftybot-admin.service"
 CADDY_SOURCE="$APP_DIR/deploy/caddy/Caddyfile"
 CADDY_TARGET="/etc/caddy/Caddyfile"
 
-if ! command -v caddy >/dev/null 2>&1; then
-  echo "[operator-ingress] Caddy is missing; HTTPS configuration not applied" >&2
-  exit 1
-fi
-caddy_version="$(caddy version | sed -nE 's/^v([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' | head -1)"
-if [ -z "$caddy_version" ] || ! dpkg --compare-versions "$caddy_version" ge "2.10.1"; then
-  echo "[operator-ingress] Caddy >=2.10.1 needed for ACME IP certificate" >&2
-  exit 1
-fi
-if ! sudo -n caddy validate --config "$CADDY_SOURCE" --adapter caddyfile >/dev/null; then
-  echo "[operator-ingress] Candidate Caddyfile validation failed" >&2
-  exit 1
-fi
-
-# Independent admin API is reachable from the host and Caddy only.
-# This change does not stop or restart the trading engine.
+# The independent operator API must bind to loopback even if HTTPS
+# configuration cannot be validated. Never restart the trading engine.
 if ! cmp -s "$ADMIN_SOURCE" "$ADMIN_TARGET"; then
   sudo -n install -m 0644 "$ADMIN_SOURCE" "$ADMIN_TARGET"
   sudo -n systemctl daemon-reload
+  sudo -n systemctl restart niftybot-admin.service
+fi
+
+caddy_supported() {
+  command -v caddy >/dev/null 2>&1 || return 1
+  local version
+  version="$(caddy version | awk '{print $1}' | sed 's/^v//')"
+  [ -n "$version" ] && dpkg --compare-versions "$version" ge "2.10.1"
+}
+
+# Use only the already configured free stable APT package, and never install
+# or upgrade it during active trading. Limit attempts to once per six hours.
+if ! caddy_supported; then
+  marker="${NIFTYBOT_CONFIG_DIR:-/home/ubuntu/.config/niftybot}/caddy_upgrade_attempted"
+  if [ ! -f "$marker" ] || [ -n "$(find "$marker" -mmin +360 -print 2>/dev/null)" ]; then
+    if curl -fsS --max-time 3 http://127.0.0.1:8080/livez \
+      | grep -Eq '"quiet"[[:space:]]*:[[:space:]]*true'; then
+      mkdir -p "$(dirname "$marker")"
+      : > "$marker"
+      if command -v caddy >/dev/null 2>&1; then
+        sudo -n env DEBIAN_FRONTEND=noninteractive apt-get update -qq \
+          && sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install \
+            --only-upgrade -y -qq caddy || true
+      fi
+    fi
+  fi
+fi
+if ! caddy_supported; then
+  echo "[operator-ingress] Caddy >=2.10.1 required for IP TLS; admin is loopback-only" >&2
+  exit 1
+fi
+if ! sudo -n caddy validate --config "$CADDY_SOURCE" --adapter caddyfile >/dev/null; then
+  echo "[operator-ingress] Caddy config invalid; admin remains loopback-only" >&2
+  exit 1
 fi
 
 if ! sudo -n cmp -s "$CADDY_SOURCE" "$CADDY_TARGET"; then
@@ -52,6 +72,24 @@ if ! sudo -n cmp -s "$CADDY_SOURCE" "$CADDY_TARGET"; then
   fi
 fi
 
-# Certificate issuance may be asynchronous: external verified-TLS checks
-# are still required. Never claim that reload alone proves public HTTPS.
-echo "[operator-ingress] systemd admin bind and Caddy configuration synchronized"
+# A matching file is not proof the systemd unit is running or a valid IP
+# certificate was issued. Probe the host-local Caddy listener with ordinary
+# trusted CA validation and the public IP's certificate identity (no -k).
+if ! sudo -n systemctl is-active --quiet caddy; then
+  sudo -n systemctl start caddy || {
+    echo "[operator-ingress] Caddy failed to start; admin is loopback-only" >&2
+    exit 1
+  }
+fi
+for attempt in 1 2 3 4 5 6; do
+  if curl --noproxy '*' -fsS --max-time 5 \
+    --resolve 65.0.255.84:443:127.0.0.1 \
+    https://65.0.255.84/livez 2>/dev/null \
+    | grep -Eq '"status"[[:space:]]*:[[:space:]]*"alive"'; then
+    echo "[operator-ingress] admin loopback and trusted public-IP TLS verified"
+    exit 0
+  fi
+  sleep 2
+done
+echo "[operator-ingress] public-IP certificate missing/untrusted; retry next timer; admin is loopback-only" >&2
+exit 1

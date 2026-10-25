@@ -722,6 +722,8 @@ if [ "$BEFORE" = "$AFTER" ] && [ "$FORCE_RESTART" = false ]; then
     if [ "$current_runtime_sha" = "$BEFORE" ]; then
       if [ -f "$STREAMLIT_DEPENDENCY_FAILURE_MARKER" ]; then
         write_status current_console_dependencies_degraded "running ${BEFORE:0:7}; console dependency refresh failed; retry on next validated release"
+      elif [ -f "$OPERATOR_INGRESS_DEGRADED_MARKER" ]; then
+        write_status current_operator_ingress_degraded "running ${BEFORE:0:7}; HTTPS/admin loopback repair required"
       elif admin_healthy; then
         write_status current "running ${BEFORE:0:7}"
       else

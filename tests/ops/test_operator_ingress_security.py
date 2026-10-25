@@ -163,3 +163,33 @@ def test_timer_repairs_ingress_without_restarting_trading_engine() -> None:
     invocation = release.index("\n  repair_operator_ingress_if_needed\n")
     first_checkout = release.index('BEFORE="$(git rev-parse HEAD)"')
     assert end < invocation < first_checkout
+
+
+def test_operator_repair_secures_admin_before_caddy_preflight() -> None:
+    script = (ROOT / "deploy/scripts/apply_operator_ingress.sh").read_text()
+    loopback_install = script.index('install -m 0644 "$ADMIN_SOURCE" "$ADMIN_TARGET"')
+    admin_restart = script.index("systemctl restart niftybot-admin.service")
+    caddy_version = script.index("if ! caddy_supported;")
+    assert loopback_install < admin_restart < caddy_version
+    assert "systemctl restart niftybot" not in script.replace(
+        "systemctl restart niftybot-admin.service", ""
+    )
+
+
+def test_free_upgrade_is_quiet_only_and_bounded() -> None:
+    script = (ROOT / "deploy/scripts/apply_operator_ingress.sh").read_text()
+    assert "caddy_upgrade_attempted" in script
+    assert 'find "$marker" -mmin +360' in script
+    assert "/livez" in script and "quiet" in script
+    assert "--only-upgrade -y -qq caddy" in script
+    assert "DEBIAN_FRONTEND=noninteractive" in script
+
+
+def test_ingress_success_requires_verified_public_certificate() -> None:
+    script = (ROOT / "deploy/scripts/apply_operator_ingress.sh").read_text()
+    assert "--resolve 65.0.255.84:443:127.0.0.1" in script
+    assert "https://65.0.255.84/livez" in script
+    assert "--noproxy '*'" in script
+    assert " -k " not in script
+    release = (ROOT / "deploy/lightsail_release.sh").read_text()
+    assert release.count("current_operator_ingress_degraded") >= 2
