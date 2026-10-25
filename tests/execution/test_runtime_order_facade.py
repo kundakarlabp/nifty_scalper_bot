@@ -686,6 +686,58 @@ def test_late_cancelled_fill_delta_reconciles_before_replay(
     assert len(reconciled) == 2
 
 
+def test_polled_late_cancelled_fill_preserves_terminal_and_average(
+    monkeypatch,
+) -> None:
+    reconciled: list[dict[str, Any]] = []
+    forwarded: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        "nifty_scalper_bot.execution.runtime_order_manager._finalize_partial_entry",
+        lambda _manager, _order, payload: reconciled.append(dict(payload)),
+    )
+    manager = _manager(None)
+    manager._lock = threading.RLock()
+    manager._bracket_manager = None
+    order = order_manager_core.OrderDetails(
+        order_id="ENTRY-POLL-LATE",
+        symbol="NFO:NIFTY2681124500CE",
+        side="BUY",
+        quantity=130,
+        order_type=order_manager_core.OrderType.LIMIT,
+        status=order_manager_core.OrderStatus.CANCELLED,
+        filled_quantity=65,
+        applied_filled_quantity=65,
+        fill_price=100.0,
+        intent="ENTRY",
+    )
+    manager._positions = SimpleNamespace(
+        apply_broker_order_update=lambda _oid, payload: forwarded.append(dict(payload)),
+        update_order_status=lambda *_args: None,
+    )
+    manager._register_order = lambda *_args: None
+    manager._publish_order_to_hub = lambda *_args: None
+    manager._sync_positions_to_hub = lambda: None
+    manager._handle_bracket_update = lambda *_args: None
+    manager._handle_guard_order_update = lambda *_args: None
+    manager._notify_failed_entry_terminal = lambda *_args: None
+
+    payload = {
+        "order_id": order.order_id,
+        "status": "OPEN",
+        "filled_quantity": 100,
+        "average_price": 101.0,
+    }
+    assert manager._update_from_response(order, payload) is order
+    assert order.status is order_manager_core.OrderStatus.CANCELLED
+    assert order.fill_price == 101.0
+    assert order.applied_filled_quantity == 100
+    assert len(forwarded) == 1
+    assert forwarded[0]["status"] == "CANCELLED"
+    assert forwarded[0]["filled_quantity"] == 100
+    assert reconciled[0]["status"] == "CANCELLED"
+    assert payload["status"] == "OPEN"
+
+
 def test_fast_fill_rejects_status_only_complete_payload() -> None:
     manager = _manager(None)
     updates: list[dict[str, Any]] = []
