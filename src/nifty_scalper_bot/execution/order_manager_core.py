@@ -7944,7 +7944,6 @@ class OrderManager:
             elif old_status == OrderStatus.PARTIALLY_FILLED:
                 if new_status in {OrderStatus.PENDING, OrderStatus.SUBMITTED}:
                     new_status = old_status
-            order.status = new_status
             incoming_filled_quantity = max(
                 0, int(float(order_update.get("filled_quantity", 0) or 0))
             )
@@ -7957,6 +7956,15 @@ class OrderManager:
             broker_filled_quantity = max(
                 previous_broker_filled, incoming_filled_quantity
             )
+            # OPEN may carry an executed partial fill before the broker emits
+            # PARTIALLY_FILLED. Protect the exposure without inventing COMPLETE.
+            if (
+                old_status not in self.FINAL_STATUSES
+                and new_status in {OrderStatus.PENDING, OrderStatus.SUBMITTED}
+                and broker_filled_quantity > 0
+            ):
+                new_status = OrderStatus.PARTIALLY_FILLED
+            order.status = new_status
             order.filled_quantity = broker_filled_quantity
 
             # Update Price: Prefer actual fill price ('average_price')

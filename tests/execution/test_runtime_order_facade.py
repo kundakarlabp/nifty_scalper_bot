@@ -880,6 +880,103 @@ def test_conflicting_terminal_status_without_fill_is_ignored() -> None:
     assert order.filled_quantity == order.applied_filled_quantity == 65
 
 
+def test_open_websocket_reports_and_protects_incremental_fills(monkeypatch) -> None:
+    forwarded: list[dict[str, Any]] = []
+    reconciled: list[dict[str, Any]] = []
+    protected: list[int] = []
+    monkeypatch.setattr(
+        "nifty_scalper_bot.execution.runtime_order_manager._finalize_partial_entry",
+        lambda _manager, _order, payload: reconciled.append(dict(payload)),
+    )
+    manager = _manager(None)
+    manager._lock = threading.RLock()
+    manager._bracket_manager = None
+    order = order_manager_core.OrderDetails(
+        order_id="ENTRY-OPEN-PARTIAL",
+        symbol="NFO:NIFTY2681124500CE",
+        side="BUY",
+        quantity=195,
+        order_type=order_manager_core.OrderType.LIMIT,
+        status=order_manager_core.OrderStatus.SUBMITTED,
+        intent="ENTRY",
+    )
+    manager._orders = {order.order_id: order}
+    manager._positions = SimpleNamespace(
+        apply_broker_order_update=lambda _oid, payload: forwarded.append(dict(payload))
+    )
+    manager._register_virtual_bracket_for_fill = (
+        lambda current, **_kwargs: protected.append(current.filled_quantity)
+    )
+    manager._confirm_position_protection_for_fill = lambda _order: None
+    manager._notify_failed_entry_terminal = lambda *_args: None
+    manager.save_orders = lambda: None
+
+    for cumulative in (65, 130):
+        update = {
+            "order_id": order.order_id,
+            "status": "OPEN",
+            "filled_quantity": cumulative,
+            "average_price": 101.0,
+        }
+        assert manager._apply_broker_order_update(update) is order
+        assert order.status is order_manager_core.OrderStatus.PARTIALLY_FILLED
+        assert order.filled_quantity == order.applied_filled_quantity == cumulative
+        assert forwarded[-1]["status"] == "PARTIALLY_FILLED"
+        assert reconciled[-1]["status"] == "PARTIALLY_FILLED"
+        assert update["status"] == "OPEN"
+
+    assert protected == [65, 130]
+    assert len(forwarded) == len(reconciled) == 2
+    assert manager._apply_broker_order_update(update) is None
+    assert protected == [65, 130]
+    assert len(forwarded) == len(reconciled) == 2
+
+
+def test_open_full_cumulative_qty_is_not_terminal(monkeypatch) -> None:
+    reconciled: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        "nifty_scalper_bot.execution.runtime_order_manager._finalize_partial_entry",
+        lambda _manager, _order, payload: reconciled.append(dict(payload)),
+    )
+    manager = _manager(None)
+    manager._lock = threading.RLock()
+    manager._bracket_manager = None
+    order = order_manager_core.OrderDetails(
+        order_id="ENTRY-OPEN-FULL-QTY",
+        symbol="NFO:NIFTY2681124500CE",
+        side="BUY",
+        quantity=130,
+        order_type=order_manager_core.OrderType.LIMIT,
+        status=order_manager_core.OrderStatus.SUBMITTED,
+        intent="ENTRY",
+    )
+    manager._orders = {order.order_id: order}
+    manager._positions = SimpleNamespace(apply_broker_order_update=lambda *_args: None)
+    manager._register_virtual_bracket_for_fill = lambda *_args, **_kwargs: None
+    manager._confirm_position_protection_for_fill = lambda _order: None
+    manager._notify_failed_entry_terminal = lambda *_args: None
+    manager.save_orders = lambda: None
+
+    observed = manager._apply_broker_order_update(
+        {
+            "order_id": order.order_id,
+            "status": "OPEN",
+            "filled_quantity": 130,
+            "average_price": 101.0,
+        }
+    )
+    assert observed is order
+    assert order.status is order_manager_core.OrderStatus.PARTIALLY_FILLED
+    assert order.applied_filled_quantity == 130
+    assert reconciled[-1]["status"] == "PARTIALLY_FILLED"
+
+    observed = manager._apply_broker_order_update(
+        {"order_id": order.order_id, "status": "COMPLETE", "filled_quantity": 130}
+    )
+    assert observed is order
+    assert order.status is order_manager_core.OrderStatus.FILLED
+
+
 def test_fast_fill_rejects_status_only_complete_payload() -> None:
     manager = _manager(None)
     updates: list[dict[str, Any]] = []
