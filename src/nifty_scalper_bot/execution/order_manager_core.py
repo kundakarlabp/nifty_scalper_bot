@@ -27,6 +27,8 @@ Safe-edit notes:
   present), positive filled quantity and finite positive execution price.
 - Out-of-order broker statuses cannot reopen terminal orders. Genuine
   additional cumulative fills still reach position and protection owners.
+- Impossible cumulative quantities are quarantined before lifecycle mutations;
+  the existing entry gate stays blocked pending broker reconciliation.
 """
 
 from __future__ import annotations
@@ -7748,10 +7750,58 @@ class OrderManager:
     def _is_stale_broker_order_update(
         self, order: OrderDetails, payload: Mapping[str, Any]
     ) -> bool:
-        """Reject backward status movement without new broker fill evidence."""
+        """Ignore regressive or impossible broker updates before any lifecycle mutation.
+
+        Invalid cumulative fills must not advance order/protection accounting.
+        Preserve the existing entry-reconciliation blocker for operator review.
+        """
         previous_status = order.status
         incoming_status = self._parse_status(payload.get("status"))
-        incoming_quantity = self._coerce_int(payload.get("filled_quantity")) or 0
+        raw_quantity = payload.get("filled_quantity")
+        incoming_quantity = self._coerce_int(raw_quantity) or 0
+        if raw_quantity is not None and raw_quantity != "":
+            try:
+                numeric_quantity = float(raw_quantity)
+            except (TypeError, ValueError, OverflowError):
+                numeric_quantity = math.nan
+            requested_quantity = int(getattr(order, "quantity", 0) or 0)
+            if (
+                not math.isfinite(numeric_quantity)
+                or numeric_quantity < 0
+                or not numeric_quantity.is_integer()
+                or incoming_quantity > requested_quantity
+            ):
+                blocker = getattr(self, "_entry_lifecycle_blocker", None)
+                if not isinstance(blocker, Mapping):
+                    blocker = {
+                        "block_reason": "broker_fill_quantity_reconciliation_required",
+                        "broker_attempted": True,
+                        "details": {
+                            "order_id": order.order_id,
+                            "symbol": order.symbol,
+                            "requested_quantity": requested_quantity,
+                            "reported_filled_quantity": (
+                                incoming_quantity
+                                if math.isfinite(numeric_quantity)
+                                else None
+                            ),
+                        },
+                    }
+                    self._entry_lifecycle_blocker = blocker
+                    self._last_order_decision = blocker
+                    self._logger.critical(
+                        "BROKER_FILL_QUANTITY_RECONCILIATION_REQUIRED "
+                        "order_id=%s requested=%s reported=%s",
+                        order.order_id,
+                        requested_quantity,
+                        blocker["details"]["reported_filled_quantity"],
+                        extra={
+                            "event": "BROKER_FILL_QUANTITY_RECONCILIATION_REQUIRED",
+                            "order_id": order.order_id,
+                            "symbol": order.symbol,
+                        },
+                    )
+                return True
         previous_quantity = int(getattr(order, "filled_quantity", 0) or 0)
         if incoming_quantity > previous_quantity:
             return False
