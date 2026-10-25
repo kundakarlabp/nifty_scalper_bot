@@ -96,8 +96,7 @@ def audit_session_startups(log_text: str) -> dict[str, int | str | None]:
         "startups_without_live_ready_count": len(starts) - len(used),
         "observed_repeat_startup_count": max(0, len(starts) - 1),
         "market_window_startup_count": sum(
-            "09:30:00" <= start.strftime("%H:%M:%S") <= "15:00:00"
-            for start in starts
+            "09:30:00" <= start.strftime("%H:%M:%S") <= "15:00:00" for start in starts
         ),
         **stop_counts,
         "first_startup_at_ist": starts[0].strftime("%H:%M:%S") if starts else None,
