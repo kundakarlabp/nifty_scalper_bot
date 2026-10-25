@@ -419,7 +419,6 @@ def test_partial_entry_cancels_remainder_and_arms_completed_whole_lot() -> None:
     )
 
 
-
 def test_zero_fill_cancel_reconciles_flat_position_before_release() -> None:
     manager = _PartialManager()
     manager._entry_lifecycle_blocker = {"block_reason": "entry_reconciliation_pending"}
