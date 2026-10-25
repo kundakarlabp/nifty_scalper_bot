@@ -7758,7 +7758,7 @@ class OrderManager:
         previous_status = order.status
         incoming_status = self._parse_status(payload.get("status"))
         raw_quantity = payload.get("filled_quantity")
-        incoming_quantity = self._coerce_int(raw_quantity) or 0
+        incoming_quantity = 0
         if raw_quantity is not None and raw_quantity != "":
             try:
                 numeric_quantity = float(raw_quantity)
@@ -7769,7 +7769,7 @@ class OrderManager:
                 not math.isfinite(numeric_quantity)
                 or numeric_quantity < 0
                 or not numeric_quantity.is_integer()
-                or incoming_quantity > requested_quantity
+                or numeric_quantity > requested_quantity
             ):
                 blocker = getattr(self, "_entry_lifecycle_blocker", None)
                 if not isinstance(blocker, Mapping):
@@ -7802,6 +7802,7 @@ class OrderManager:
                         },
                     )
                 return True
+            incoming_quantity = int(numeric_quantity)
         previous_quantity = int(getattr(order, "filled_quantity", 0) or 0)
         if incoming_quantity > previous_quantity:
             return False
