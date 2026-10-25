@@ -123,14 +123,23 @@ def _check_auth(request: Request) -> None:
     challenge = {"WWW-Authenticate": 'Basic realm="Nifty Bot Admin"'}
     raw = request.headers.get("authorization", "")
     if not raw.lower().startswith("basic "):
-        raise HTTPException(status_code=401, detail="admin_auth_required", headers=challenge)
+        raise HTTPException(
+            status_code=401, detail="admin_auth_required", headers=challenge
+        )
     try:
         decoded = base64.b64decode(raw[6:].strip(), validate=True).decode("utf-8")
         username, supplied = decoded.split(":", 1)
     except (ValueError, UnicodeDecodeError):
-        raise HTTPException(status_code=401, detail="admin_auth_required", headers=challenge) from None
-    if not (hmac.compare_digest(username, "admin") and hmac.compare_digest(supplied, password)):
-        raise HTTPException(status_code=401, detail="admin_auth_required", headers=challenge)
+        raise HTTPException(
+            status_code=401, detail="admin_auth_required", headers=challenge
+        ) from None
+    if not (
+        hmac.compare_digest(username, "admin")
+        and hmac.compare_digest(supplied, password)
+    ):
+        raise HTTPException(
+            status_code=401, detail="admin_auth_required", headers=challenge
+        )
     if request.method.upper() not in {"GET", "HEAD", "OPTIONS"}:
         source = request.headers.get("origin") or request.headers.get("referer", "")
         parsed = urllib.parse.urlsplit(source)
