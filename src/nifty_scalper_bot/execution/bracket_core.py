@@ -4431,10 +4431,30 @@ class BracketManager:
             history = getter(order_id)
             if isinstance(history, Mapping):
                 result = history
-                if str(history.get("status") or "").strip().upper() not in {
-                    "", "UNKNOWN"
-                }:
-                    return history
+                state = str(history.get("status") or "").strip().upper()
+                if state not in {"", "UNKNOWN"}:
+                    # Nonterminal history can omit stop identity and geometry.
+                    # Only a complete broker record counts as protective proof.
+                    # Terminal states remain authoritative: never override a
+                    # cancellation or fill with an earlier OPEN orderbook row.
+                    required = (
+                        "order_id",
+                        "exchange",
+                        "tradingsymbol",
+                        "transaction_type",
+                        "product",
+                        "order_type",
+                        "quantity",
+                        "trigger_price",
+                    )
+                    complete = all(
+                        history.get(name) not in (None, "") for name in required
+                    ) and (
+                        str(history.get("order_type") or "").upper() != "SL"
+                        or history.get("price") not in (None, "")
+                    )
+                    if state not in {"OPEN", "TRIGGER PENDING"} or complete:
+                        return history
         getter = getattr(broker, "get_orders", None) if broker is not None else None
         if callable(getter):
             orders = getter()
