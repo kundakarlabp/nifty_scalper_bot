@@ -3,7 +3,8 @@
 Responsibilities:
 - Classify failures via broker_recovery recovery decisions and action limits.
 - Revalidate fresh quotes, available size and whole-lot quantities before retry.
-- Reconcile uncertain responses and preserve any partial-fill exposure.
+- Reconcile uncertain responses against exact broker orderbook identity and
+  contract; preserve unresolved same-symbol orders and partial-fill exposure.
 
 Boundaries: Wrap existing OrderManager operations; no new independent entry route.
 Safety: Never retry ambiguous broker outcomes before reconciliation.
@@ -498,52 +499,56 @@ def _broker_positions(manager: Any) -> list[Mapping[str, Any]] | None:
 def _reconcile_intent(
     manager: Any, plan: Any
 ) -> tuple[str, str | None, dict[str, Any]]:
-    keys = [
-        str(getattr(plan, name, "") or "") for name in ("signal_id", "trace_id", "tag")
-    ]
-    finder = getattr(manager, "_find_open_order", None)
-    if callable(finder):
-        for key in keys:
-            if not key:
-                continue
-            try:
-                order = finder(key)
-            except Exception:
-                order = None
-            if isinstance(order, Mapping):
-                oid = str(order.get("order_id") or order.get("id") or "")
-                if oid:
-                    return "order_found", oid, {"order": dict(order)}
-
+    # The broker orderbook is the sole reconciliation evidence: the generic
+    # open-order finder permits substring matches without contract checking.
+    # Neither generic strategy tags nor truncated/suffix IDs prove identity.
+    wanted = {
+        str(getattr(plan, name, "") or "").strip().upper()
+        for name in (
+            "client_order_id",
+            "signal_id",
+            "trace_id",
+            "trade_lifecycle_id",
+        )
+    }
+    wanted.discard("")
     orders = _broker_orders(manager)
     if orders is None:
         return "unknown", None, {"reason": "orders_unavailable"}
     wanted_symbol = _symbol_key(plan.symbol)
-    wanted = {key.upper() for key in keys if key}
+    unresolved_same_symbol = False
     for order in orders:
         if (
             _symbol_key(order.get("tradingsymbol") or order.get("symbol"))
             != wanted_symbol
         ):
             continue
-        candidates = {
-            str(order.get(key) or "").upper()
-            for key in ("tag", "client_order_id", "guid")
-        }
-        if wanted and not any(
-            key == candidate or (key and candidate and key[-8:] in candidate)
-            for key in wanted
-            for candidate in candidates
-        ):
+        status = str(order.get("status") or "").strip().upper()
+        if status in {"REJECTED", "CANCELLED", "CANCELED", "EXPIRED"}:
             continue
-        if str(order.get("status") or "").upper() not in {
-            "REJECTED",
-            "CANCELLED",
-            "CANCELED",
-            "EXPIRED",
-        }:
+        candidates = {
+            str(order.get(key) or "").strip().upper()
+            for key in (
+                "tag",
+                "client_order_id",
+                "guid",
+                "signal_id",
+                "trace_id",
+                "trade_lifecycle_id",
+            )
+        }
+        candidates.discard("")
+        if wanted & candidates:
             oid = str(order.get("order_id") or order.get("id") or "")
-            return "order_found", oid or None, {"order": dict(order)}
+            if oid:
+                return "order_found", oid, {"order": dict(order)}
+            return "unknown", None, {"reason": "matching_order_id_missing"}
+        if status not in {"COMPLETE", "COMPLETED", "FILLED"}:
+            unresolved_same_symbol = True
+
+    if unresolved_same_symbol:
+        reason = "same_symbol_order_without_verified_identity"
+        return "unknown", None, {"reason": reason}
 
     positions = _broker_positions(manager)
     if positions is None:

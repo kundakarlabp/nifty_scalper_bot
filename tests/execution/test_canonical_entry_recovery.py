@@ -199,7 +199,7 @@ def test_duplicate_response_reconciles_existing_order_without_resubmit() -> None
         {
             "order_id": "existing-123",
             "symbol": "NIFTY2662324050PE",
-            "tag": "runner-entry",
+            "tag": "trace-1",
             "status": "OPEN",
         }
     ]
@@ -210,6 +210,104 @@ def test_duplicate_response_reconciles_existing_order_without_resubmit() -> None
     assert result.order_id == "existing-123"
     assert result.reason == "broker_order_reconciled"
     assert len(manager.plans) == 1
+
+
+def test_recovery_does_not_adopt_generic_same_symbol_tag() -> None:
+    manager = _RecoveryManager([_reject("duplicate order request already processed")])
+    manager._broker.orders_payload = [
+        {
+            "order_id": "other-order",
+            "symbol": "NIFTY2662324050PE",
+            "tag": "runner-entry",
+            "status": "OPEN",
+        }
+    ]
+
+    result = manager.submit_trade_plan_result(_plan())
+
+    assert result.accepted is False
+    assert result.reason == "entry_order_state_ambiguous"
+    assert result.details["entry_recovery"]["reason"] == (
+        "same_symbol_order_without_verified_identity"
+    )
+    assert len(manager.plans) == 1
+
+
+def test_recovery_does_not_match_partial_signal_suffix() -> None:
+    manager = _RecoveryManager([_reject("gateway timeout HTTP 504")])
+    manager._broker.orders_payload = [
+        {
+            "order_id": "other-order",
+            "symbol": "NIFTY2662324050PE",
+            "tag": "different-setup-signal-1",
+            "status": "OPEN",
+        }
+    ]
+
+    result = manager.submit_trade_plan_result(_plan())
+
+    assert result.accepted is False
+    assert result.reason == "entry_order_state_ambiguous"
+    assert len(manager.plans) == 1
+
+
+def test_recovery_ignores_wrong_contract_even_for_exact_trace() -> None:
+    from nifty_scalper_bot.execution.entry_recovery import _reconcile_intent
+
+    manager = _RecoveryManager([])
+    manager._broker.orders_payload = [
+        {
+            "order_id": "different-contract-order",
+            "symbol": "NIFTY2662324050CE",
+            "tag": "trace-1",
+            "status": "OPEN",
+        }
+    ]
+    state, order_id, _evidence = _reconcile_intent(manager, _plan())
+
+    assert state == "absent"
+    assert order_id is None
+
+
+def test_recovery_accepts_exact_client_order_id_not_shared_tag() -> None:
+    from nifty_scalper_bot.execution.entry_recovery import _reconcile_intent
+
+    manager = _RecoveryManager([])
+    manager._broker.orders_payload = [
+        {
+            "order_id": "existing-exact",
+            "symbol": "NIFTY2662324050PE",
+            "tag": "runner-entry",
+            "client_order_id": "client-order-unique-42",
+            "status": "OPEN",
+        }
+    ]
+    plan = _plan()
+    plan.client_order_id = "client-order-unique-42"
+    state, order_id, evidence = _reconcile_intent(manager, plan)
+
+    assert state == "order_found"
+    assert order_id == "existing-exact"
+    assert evidence["order"]["client_order_id"] == "client-order-unique-42"
+
+
+def test_recovery_does_not_adopt_terminal_order_with_matching_identity() -> None:
+    from nifty_scalper_bot.execution.entry_recovery import _reconcile_intent
+
+    manager = _RecoveryManager([])
+    manager._broker.orders_payload = [
+        {
+            "order_id": "rejected-order",
+            "symbol": "NIFTY2662324050PE",
+            "tag": "trace-1",
+            "status": "REJECTED",
+        }
+    ]
+
+    state, order_id, _evidence = _reconcile_intent(manager, _plan())
+
+    assert state == "absent"
+    assert order_id is None
 
 
 def test_ambiguous_timeout_with_broker_exposure_never_retries() -> None:
