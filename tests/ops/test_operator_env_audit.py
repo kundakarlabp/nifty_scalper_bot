@@ -122,8 +122,7 @@ def test_whitespace_around_equal_matches_dotenv(tmp_path: Path) -> None:
     path = tmp_path / "niftybot.env"
     _private_file(
         path,
-        "ENABLE_LIVE = true\\nEXECUTION_MODE = LIVE\\n"
-        "RISK_PER_TRADE_PCT = 0.5\\n",
+        "ENABLE_LIVE = true\\nEXECUTION_MODE = LIVE\\nRISK_PER_TRADE_PCT = 0.5\\n",
     )
     response, payload = _run(path)
     assert response.returncode == 0
