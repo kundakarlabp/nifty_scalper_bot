@@ -419,6 +419,116 @@ def test_partial_entry_cancels_remainder_and_arms_completed_whole_lot() -> None:
     )
 
 
+def test_zero_fill_cancel_reconciles_flat_position_before_release() -> None:
+    manager = _PartialManager()
+    manager._entry_lifecycle_blocker = {"block_reason": "entry_reconciliation_pending"}
+    manager._broker.positions_payload = []
+    order = _Order(filled_quantity=0)
+    manager._update_from_response(
+        order,
+        {"status": "CANCELLED", "filled_quantity": 0, "pending_quantity": 0},
+    )
+
+    assert order.entry_lifecycle_state["state"] == "ENTRY_CANCELLED"
+    assert order.entry_lifecycle_state["broker_position_quantity"] == 0
+    assert manager._entry_lifecycle_blocker is None
+    assert manager.confirmed == []
+
+
+def test_zero_fill_cancel_does_not_release_when_broker_has_exposure() -> None:
+    manager = _PartialManager()
+    order = _Order(filled_quantity=0)
+    manager._update_from_response(
+        order,
+        {"status": "CANCELLED", "filled_quantity": 0, "pending_quantity": 0},
+    )
+
+    assert order.entry_lifecycle_state["state"] == "ENTRY_RECONCILIATION_UNKNOWN"
+    assert order.entry_lifecycle_state["broker_position_quantity"] == 50
+    assert manager._entry_lifecycle_blocker["block_reason"] == (
+        "zero_fill_terminal_position_unverified"
+    )
+    assert manager.confirmed == []
+
+
+def test_zero_fill_cancel_does_not_release_when_position_unavailable() -> None:
+    manager = _PartialManager()
+    manager._broker = SimpleNamespace()
+    order = _Order(filled_quantity=0)
+    manager._update_from_response(
+        order,
+        {"status": "CANCELLED", "filled_quantity": 0, "pending_quantity": 0},
+    )
+
+    assert order.entry_lifecycle_state["state"] == "ENTRY_RECONCILIATION_UNKNOWN"
+    assert manager._entry_lifecycle_blocker["block_reason"] == (
+        "zero_fill_terminal_position_unverified"
+    )
+
+
+def test_terminal_entry_with_positive_pending_qty_stays_blocked() -> None:
+    manager = _PartialManager()
+    manager._broker.positions_payload = []
+    order = _Order(filled_quantity=0)
+    manager._update_from_response(
+        order,
+        {"status": "CANCELLED", "filled_quantity": 0, "pending_quantity": 50},
+    )
+
+    assert order.entry_lifecycle_state["state"] == "ENTRY_RECONCILIATION_UNKNOWN"
+    assert manager._entry_lifecycle_blocker["block_reason"] == (
+        "terminal_entry_pending_quantity_positive"
+    )
+
+
+def test_zero_fill_complete_status_requires_fill_reconciliation() -> None:
+    manager = _PartialManager()
+    manager._broker.positions_payload = []
+    order = _Order(filled_quantity=0)
+    manager._update_from_response(
+        order,
+        {"status": "COMPLETE", "filled_quantity": 0, "pending_quantity": 0},
+    )
+
+    assert order.entry_lifecycle_state["state"] == "ENTRY_RECONCILIATION_UNKNOWN"
+    assert manager._entry_lifecycle_blocker["block_reason"] == (
+        "terminal_entry_fill_evidence_missing"
+    )
+
+
+def test_cancelled_partial_remainder_preserves_confirmed_protected_fill() -> None:
+    manager = _PartialManager()
+    order = _Order()
+    manager._update_from_response(
+        order,
+        {
+            "status": "PARTIALLY FILLED",
+            "filled_quantity": 50,
+            "pending_quantity": 50,
+            "average_price": 101.5,
+        },
+    )
+    manager._update_from_response(
+        order,
+        {
+            "status": "CANCELLED",
+            "filled_quantity": 50,
+            "cancelled_quantity": 50,
+            "average_price": 101.5,
+        },
+    )
+
+    state = order.entry_lifecycle_state
+    assert state["broker_filled_quantity"] == 50
+    assert state["broker_pending_quantity"] == 0
+    assert state["broker_cancelled_quantity"] == 50
+    assert state["protected_quantity"] == 50
+    assert state["state"] == "ENTRY_PROTECTION_PENDING"
+    assert manager._entry_lifecycle_blocker is None
+    assert manager.confirmed == [("entry-partial", 50, 101.5)]
+    assert manager._broker.cancel_calls == ["entry-partial"]
+
+
 def test_one_lot_complete_fill_activates_full_lot_protection_without_cancel() -> None:
     manager = _PartialManager()
     order = _Order(requested_lots=1, quantity=50, filled_quantity=50)
