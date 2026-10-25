@@ -132,7 +132,7 @@ def test_git_success_proof_matches_exact_sha_and_skips_rate_limited_api(
         calls.append(command)
         assert command == ["git", "ls-remote", "--refs", "origin", ref]
         assert kwargs["timeout"] <= 10
-        return SimpleNamespace(returncode=0, stdout=f"{SHA}\\t{ref}\\n")
+        return SimpleNamespace(returncode=0, stdout=f"{SHA}\t{ref}\n")
 
     monkeypatch.setattr(gate.subprocess, "run", fake_run)
     monkeypatch.setattr(
@@ -145,7 +145,7 @@ def test_git_success_proof_matches_exact_sha_and_skips_rate_limited_api(
 
 
 def test_git_proof_cannot_authorize_missing_or_wrong_ref(monkeypatch) -> None:
-    outputs = [OTHER_SHA + "\\t" + gate.PROOF_TAG_PREFIX + SHA + "\\n", ""]
+    outputs = [OTHER_SHA + "\t" + gate.PROOF_TAG_PREFIX + SHA + "\n", ""]
     monkeypatch.setattr(
         gate.subprocess,
         "run",
