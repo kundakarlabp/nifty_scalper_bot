@@ -3380,6 +3380,20 @@ class StrategyRunner:
                                 },
                             )
                 snap = self._market_data.get_symbol_snapshot(sym)
+                if snap is None:
+                    # A missing candidate is pending, not a reason to discard
+                    # valid snapshots for other contracts in the same basket.
+                    any_refresh_pending = True
+                    self._logger.warning(
+                        "CANDIDATE_SNAPSHOT_PENDING_REFRESH symbol=%s reason=snapshot_missing",
+                        sym,
+                        extra={
+                            "event": "CANDIDATE_SNAPSHOT_PENDING_REFRESH",
+                            "symbol": sym,
+                            "reason": "snapshot_missing",
+                        },
+                    )
+                    continue
                 if symbol_refresh_pending and (
                     snap.ltp is None or not snap.tradable_quote
                 ):
