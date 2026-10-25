@@ -73,7 +73,7 @@ def verified_ci_proof_tag(sha: str) -> bool:
         )
     except (OSError, subprocess.TimeoutExpired):
         return False
-    return result.returncode == 0 and result.stdout.strip() == f"{sha}\\t{ref}"
+    return result.returncode == 0 and result.stdout.strip() == f"{sha}\t{ref}"
 
 
 def verify_ci(sha: str) -> str:
