@@ -103,4 +103,4 @@ def test_manage_bot_shell_cannot_source_repo_env() -> None:
     root = Path(__file__).resolve().parents[2]
     text = (root / "manage_bot.sh").read_text(encoding="utf-8")
     assert "source .env" not in text
-    assert 'exec python scripts/zerodha_token_cli.py --write-env' in text
+    assert "exec python scripts/zerodha_token_cli.py --write-env" in text
