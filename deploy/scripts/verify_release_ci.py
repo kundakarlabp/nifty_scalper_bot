@@ -1,13 +1,15 @@
 """Verify that the exact main SHA passed post-merge GitHub CI before release.
 
-This check is read-only, uses no GitHub token, and fails closed if GitHub
-cannot establish the state of the authoritative push workflow.
+This read-only check first verifies a Git ref published after complete main-push
+CI, avoiding rate-limited unauthenticated REST polling. The exact-SHA API
+check remains a fallback, and missing evidence still fails closed.
 """
 
 from __future__ import annotations
 
 import json
 import re
+import subprocess
 import sys
 from collections.abc import Mapping
 from urllib.error import HTTPError, URLError
@@ -20,6 +22,8 @@ CI_RUNS_URL = (
 )
 CI_WORKFLOW_PATH = ".github/workflows/ci.yml"
 SHA_PATTERN = re.compile(r"[0-9a-fA-F]{40}\Z")
+
+PROOF_TAG_PREFIX = "refs/tags/nifty-ci-passed/"
 
 
 def classify_ci(payload: object, sha: str) -> str:
@@ -54,10 +58,30 @@ def classify_ci(payload: object, sha: str) -> str:
     return "failed"
 
 
+def verified_ci_proof_tag(sha: str) -> bool:
+    """Match a CI-published Git ref to the exact deployed commit SHA."""
+    if SHA_PATTERN.fullmatch(sha) is None:
+        return False
+    ref = PROOF_TAG_PREFIX + sha
+    try:
+        result = subprocess.run(
+            ["git", "ls-remote", "--refs", "origin", ref],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=8,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0 and result.stdout.strip() == f"{sha}\\t{ref}"
+
+
 def verify_ci(sha: str) -> str:
-    """Check public GitHub Actions metadata, never invoke a release."""
+    """Check proof from complete main push CI; API remains a fallback."""
     if SHA_PATTERN.fullmatch(sha) is None:
         return "unavailable"
+    if verified_ci_proof_tag(sha):
+        return "passed"
     url = CI_RUNS_URL + "?" + urlencode(
         {"head_sha": sha, "event": "push", "per_page": 10}
     )
