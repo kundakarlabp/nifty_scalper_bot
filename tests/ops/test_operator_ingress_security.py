@@ -22,12 +22,15 @@ def _request(
     peer: str = "203.0.113.5",
     authorization: str = "",
     origin: str = "",
+    forwarded_for: str = "",
 ) -> Request:
     headers = [(b"host", b"65.0.255.84")]
     if authorization:
         headers.append((b"authorization", authorization.encode()))
     if origin:
         headers.append((b"origin", origin.encode()))
+    if forwarded_for:
+        headers.append((b"x-forwarded-for", forwarded_for.encode()))
     return Request(
         {
             "type": "http",
@@ -98,6 +101,20 @@ def test_host_local_process_probes_need_no_browser_credentials(monkeypatch) -> N
     monkeypatch.setenv("DEPLOYMENT_PLATFORM", "aws_lightsail")
     monkeypatch.delenv("ADMIN_PASSWORD", raising=False)
     admin_dashboard._check_auth(_request(scheme="http", peer="127.0.0.1"))
+
+
+def test_forwarded_public_client_cannot_skip_auth_as_loopback(monkeypatch) -> None:
+    monkeypatch.setenv("DEPLOYMENT_PLATFORM", "aws_lightsail")
+    monkeypatch.setenv("ADMIN_PASSWORD", "long-test-pass")
+    with pytest.raises(HTTPException) as failed:
+        admin_dashboard._check_auth(
+            _request(
+                scheme="https",
+                peer="127.0.0.1",
+                forwarded_for="203.0.113.5",
+            )
+        )
+    assert failed.value.status_code == 401
 
 
 def test_other_platforms_keep_existing_dev_route_behavior(monkeypatch) -> None:
