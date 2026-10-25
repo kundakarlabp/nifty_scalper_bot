@@ -457,8 +457,6 @@ def test_real_broker_update_supplies_order_to_partial_fill_reconciler(
     assert reconciled == [(entry_order, payload)]
 
 
-
-
 def test_delayed_cancel_does_not_undo_confirmed_entry_fill(
     monkeypatch,
 ) -> None:
