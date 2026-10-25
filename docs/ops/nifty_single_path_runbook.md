@@ -248,6 +248,31 @@ not broker authentication, safe LIVE entry authorization or externally
 accessible UI. `null` means missing/invalid/not-yet-upgraded evidence.
 The `received_at` timestamp must be fresh before interpreting any status.
 
+## Read-only legacy host override audit
+
+For a protected Lightsail environment that predates GitHub configuration
+consolidation, first inspect **names only** without deleting overrides:
+
+```bash
+cd /home/ubuntu/nifty_scalper_bot
+.venv/bin/python deploy/scripts/audit_operator_env.py \
+  --env-file /home/ubuntu/.config/niftybot/niftybot.env
+```
+
+This CLI reads only the explicit regular, private (mode 0600) file, without
+following symlinks. The JSON contains allowlisted policy/monitoring key
+**names**, mode-alignment classifications and duplicate counts; it never
+prints values, passwords, tokens, file paths or unknown field names.
+`missing_or_unsafe_file` is a diagnostic error, not permission to loosen
+filesystem protections. The report is **static host-file evidence**, not
+proof of effective process settings or broker-flat state.
+
+Do not automatically delete any reported risk overrides: tighter operator
+limits may be intentional, and the GitHub LIVE risk envelope already
+reconciles them conservatively. Compare actual effective startup evidence
+and broker state before a separate, reviewed operator migration. The CLI
+does not write, restart, release, send network requests or authorize LIVE.
+
 ## GitHub-owned telemetry defaults
 
 Supabase monitoring policy and nonsecret Edge ingestion URLs now live in
