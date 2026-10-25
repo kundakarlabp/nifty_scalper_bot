@@ -7890,11 +7890,9 @@ class OrderManager:
             # processing the extra execution through the existing owners.
             if old_status in self.FINAL_STATUSES:
                 new_status = old_status
-            elif (
-                old_status == OrderStatus.PARTIALLY_FILLED
-                and new_status in {OrderStatus.PENDING, OrderStatus.SUBMITTED}
-            ):
-                new_status = old_status
+            elif old_status == OrderStatus.PARTIALLY_FILLED:
+                if new_status in {OrderStatus.PENDING, OrderStatus.SUBMITTED}:
+                    new_status = old_status
             order.status = new_status
             incoming_filled_quantity = max(
                 0, int(float(order_update.get("filled_quantity", 0) or 0))
@@ -12662,11 +12660,9 @@ class OrderManager:
             filled_qty = max(filled_qty, previous_filled)
             if previous_status in self.FINAL_STATUSES:
                 status = previous_status
-            elif (
-                previous_status == OrderStatus.PARTIALLY_FILLED
-                and status in {OrderStatus.PENDING, OrderStatus.SUBMITTED}
-            ):
-                status = previous_status
+            elif previous_status == OrderStatus.PARTIALLY_FILLED:
+                if status in {OrderStatus.PENDING, OrderStatus.SUBMITTED}:
+                    status = previous_status
 
             average_price = payload.get("average_price") or payload.get("averagePrice")
             message = payload.get("status_message") or payload.get("message")
