@@ -25,8 +25,8 @@ Safe-edit notes:
   evidence; malformed depth quantities cannot bypass entry preflight.
 - Fast fill confirmation accepts only matching broker order identity (when
   present), positive filled quantity and finite positive execution price.
-- Out-of-order broker status events without additional filled quantity cannot
-  regress an already partial or terminal order state.
+- Out-of-order broker statuses cannot reopen terminal orders. Genuine
+  additional cumulative fills still reach position and protection owners.
 """
 
 from __future__ import annotations
@@ -7885,7 +7885,14 @@ class OrderManager:
                 return None
             old_status = order.status
             new_status = self._parse_status(status_raw)
-
+            # A later cumulative fill does not make a cancelled/rejected
+            # order open again. Preserve the terminal order status while
+            # processing the extra execution through the existing owners.
+            if old_status in self.FINAL_STATUSES:
+                new_status = old_status
+            elif old_status == OrderStatus.PARTIALLY_FILLED:
+                if new_status in {OrderStatus.PENDING, OrderStatus.SUBMITTED}:
+                    new_status = old_status
             order.status = new_status
             incoming_filled_quantity = max(
                 0, int(float(order_update.get("filled_quantity", 0) or 0))
@@ -7912,12 +7919,10 @@ class OrderManager:
             # ✅ FILL PROCESSING (Trigger Stop Loss / Target)
             # -----------------------------------------------------
             fill_delta = max(0, broker_filled_quantity - applied_filled_quantity)
-            is_fill_update = status_raw in [
-                "PARTIALLY FILLED",
-                "PARTIAL",
-                "COMPLETE",
-                "FILLED",
-            ] and fill_delta > 0
+            is_fill_update = fill_delta > 0 and (
+                new_status in self.FINAL_STATUSES
+                or new_status == OrderStatus.PARTIALLY_FILLED
+            )
 
             if is_fill_update or (adopted and order.filled_quantity > 0):
                 self._logger.info(
@@ -7936,7 +7941,7 @@ class OrderManager:
                             order.order_id,
                             {
                                 **order_update,
-                                "status": status_raw,
+                                "status": order.status.name,
                                 "average_price": order.fill_price,
                                 "filled_quantity": order.filled_quantity,
                             },
@@ -12646,18 +12651,33 @@ class OrderManager:
             if self._is_stale_broker_order_update(order, payload):
                 return order
             previous_status = order.status
+            previous_filled = int(order.filled_quantity or 0)
             status = self._parse_status(payload.get("status"))
             filled_qty = (
                 self._coerce_int(payload.get("filled_quantity"))
                 or order.filled_quantity
             )
+            filled_qty = max(filled_qty, previous_filled)
+            if previous_status in self.FINAL_STATUSES:
+                status = previous_status
+            elif previous_status == OrderStatus.PARTIALLY_FILLED:
+                if status in {OrderStatus.PENDING, OrderStatus.SUBMITTED}:
+                    status = previous_status
 
             average_price = payload.get("average_price") or payload.get("averagePrice")
             message = payload.get("status_message") or payload.get("message")
 
             order.status = status
             order.filled_quantity = filled_qty
-            if filled_qty >= order.quantity and status != OrderStatus.CANCELLED:
+            if filled_qty > previous_filled and average_price is not None:
+                latest_average = self._coerce_float(average_price)
+                if latest_average and math.isfinite(latest_average):
+                    order.fill_price = latest_average
+            if filled_qty >= order.quantity and status not in {
+                OrderStatus.CANCELLED,
+                OrderStatus.REJECTED,
+                OrderStatus.EXPIRED,
+            }:
                 order.status = OrderStatus.FILLED
             elif 0 < filled_qty < order.quantity and status not in self.FINAL_STATUSES:
                 order.status = OrderStatus.PARTIALLY_FILLED
@@ -12670,9 +12690,25 @@ class OrderManager:
                 order.rejection_reason = message
 
             self._register_order(order)
-            self._positions.update_order_status(
-                order.order_id, order.status.name, order.fill_price
-            )
+            if (
+                filled_qty > int(getattr(order, "applied_filled_quantity", 0) or 0)
+                and previous_status in self.FINAL_STATUSES
+                and hasattr(self._positions, "apply_broker_order_update")
+            ):
+                self._positions.apply_broker_order_update(
+                    order.order_id,
+                    {
+                        **payload,
+                        "status": order.status.name,
+                        "filled_quantity": filled_qty,
+                        "average_price": order.fill_price or average_price,
+                    },
+                )
+                order.applied_filled_quantity = filled_qty
+            else:
+                self._positions.update_order_status(
+                    order.order_id, order.status.name, order.fill_price
+                )
 
         self._publish_order_to_hub(order, payload)
         self._sync_positions_to_hub()
