@@ -149,7 +149,6 @@ def test_missing_production_source_reports_fail_closed_profile(
     assert str(tmp_path) not in caplog.text
 
 
-
 def test_production_relative_explicit_env_path_fails_closed(
     monkeypatch, tmp_path, caplog
 ) -> None:
