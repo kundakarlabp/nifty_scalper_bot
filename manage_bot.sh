@@ -42,7 +42,7 @@ run_backtest() {
 token_helper() {
   # A manual SSH shell does not necessarily inherit systemd's environment.
   # Never fall back to a repository .env, even when the platform flag is absent.
-  if [[ -z "${BOT_ENV_FILE:-}" || "${BOT_ENV_FILE}" != /* ]]; then
+  if [[ -z "${BOT_ENV_FILE:-}" || "${BOT_ENV_FILE:-}" != /* ]]; then
     echo "Token helper requires an absolute BOT_ENV_FILE; use the authenticated admin page otherwise." >&2
     exit 2
   fi
