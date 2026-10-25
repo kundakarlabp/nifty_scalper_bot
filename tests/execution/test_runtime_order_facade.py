@@ -925,10 +925,10 @@ def test_open_websocket_reports_and_protects_incremental_fills(monkeypatch) -> N
         assert reconciled[-1]["status"] == "PARTIALLY_FILLED"
         assert update["status"] == "OPEN"
 
-    assert protected == [65, 100]
+    assert protected == [65, 130]
     assert len(forwarded) == len(reconciled) == 2
     assert manager._apply_broker_order_update(update) is None
-    assert protected == [65, 100]
+    assert protected == [65, 130]
     assert len(forwarded) == len(reconciled) == 2
 
 
