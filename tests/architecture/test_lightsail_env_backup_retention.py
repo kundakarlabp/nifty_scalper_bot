@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 import stat
 import subprocess
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 RELEASE_SCRIPT = ROOT / "deploy" / "lightsail_release.sh"
 
 
-def _run_backup(tmp_path: Path, *, source_exists: bool = True) -> tuple[subprocess.CompletedProcess[str], Path]:
+def _run_backup(
+    tmp_path: Path, *, source_exists: bool = True
+) -> tuple[subprocess.CompletedProcess[str], Path]:
     config_dir = tmp_path / "config"
     config_dir.mkdir(exist_ok=True)
     env_file = config_dir / "niftybot.env"
@@ -25,7 +27,15 @@ def _run_backup(tmp_path: Path, *, source_exists: bool = True) -> tuple[subproce
     function = script[begin:end]
 
     result = subprocess.run(
-        ["bash", "-e", "-u", "-o", "pipefail", "-c", function + "\nsave_protected_env_backup"],
+        [
+            "bash",
+            "-e",
+            "-u",
+            "-o",
+            "pipefail",
+            "-c",
+            function + "\n"+"save_protected_env_backup",
+        ],
         check=False,
         text=True,
         capture_output=True,
@@ -59,7 +69,8 @@ def test_automatic_env_backup_retention_is_bounded_and_redacted(tmp_path: Path) 
         "KITE_API_SECRET=private-example\n"
     )
     assert manual.exists() and anomalous.exists()
-    assert symlink.is_symlink() and outside.read_text(encoding="utf-8") == "do-not-touch"
+    assert symlink.is_symlink()
+    assert outside.read_text(encoding="utf-8") == "do-not-touch"
     managed = [
         p for p in backups.iterdir()
         if p.is_file() and not p.is_symlink() and p.name.startswith("niftybot.env.")
@@ -71,7 +82,9 @@ def test_automatic_env_backup_retention_is_bounded_and_redacted(tmp_path: Path) 
     assert stat.S_IMODE(backups.stat().st_mode) == 0o700
 
 
-def test_backup_failure_does_not_prune_existing_recoverable_files(tmp_path: Path) -> None:
+def test_backup_failure_does_not_prune_existing_recoverable_files(
+    tmp_path: Path,
+) -> None:
     backups = tmp_path / "config" / "backups"
     backups.mkdir(parents=True)
     previous = backups / "niftybot.env.20261024_100000"
