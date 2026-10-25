@@ -36,7 +36,6 @@ def test_manual_modes_override_schedule(monkeypatch):
     assert control.engine_should_run(datetime(2026, 9, 16, 10, 0, tzinfo=IST)) is False
 
 
-
 def test_auto_watchdog_retries_rejected_restart_then_exits_on_accepted_queue(
     monkeypatch,
 ) -> None:
@@ -78,6 +77,7 @@ def test_auto_watchdog_retries_rejected_restart_then_exits_on_accepted_queue(
 
 def test_auto_watchdog_never_queues_when_mode_does_not_transition(monkeypatch):
     """Heartbeat ticks with unchanged mode must not cause restart requests."""
+
     class StopWatch(Exception):
         pass
 
