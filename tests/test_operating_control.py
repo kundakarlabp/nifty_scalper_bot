@@ -1,8 +1,8 @@
 from datetime import datetime
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import pytest
-from zoneinfo import ZoneInfo
 
 import nifty_scalper_bot.operating_control as control
 
