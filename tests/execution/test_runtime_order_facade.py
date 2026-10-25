@@ -736,7 +736,6 @@ def test_polled_late_cancelled_fill_preserves_terminal_and_average(
     assert payload["status"] == "OPEN"
 
 
-
 def test_websocket_overfill_quarantines_without_advancing_order_or_ledger() -> None:
     manager = _manager(None)
     manager._lock = threading.RLock()
@@ -803,15 +802,18 @@ def test_polling_overfill_quarantines_without_updating_positions() -> None:
         apply_broker_order_update=lambda *_args: effects.append("fill"),
     )
     manager._register_order = lambda *_args: effects.append("register")
-    assert manager._update_from_response(
-        order,
-        {
-            "order_id": order.order_id,
-            "status": "COMPLETE",
-            "filled_quantity": 131,
-            "average_price": 101.0,
-        },
-    ) is order
+    assert (
+        manager._update_from_response(
+            order,
+            {
+                "order_id": order.order_id,
+                "status": "COMPLETE",
+                "filled_quantity": 131,
+                "average_price": 101.0,
+            },
+        )
+        is order
+    )
     assert order.status is order_manager_core.OrderStatus.PARTIALLY_FILLED
     assert order.filled_quantity == order.applied_filled_quantity == 65
     assert order.fill_price == 100.0
@@ -837,14 +839,17 @@ def test_invalid_cumulative_fill_is_quarantined_before_mutation() -> None:
     )
     manager._orders = {order.order_id: order}
     for impossible in ("nan", "inf", -1, 65.5):
-        assert manager._apply_broker_order_update(
-            {
-                "order_id": order.order_id,
-                "status": "PARTIALLY FILLED",
-                "filled_quantity": impossible,
-                "average_price": 101.0,
-            }
-        ) is None
+        assert (
+            manager._apply_broker_order_update(
+                {
+                    "order_id": order.order_id,
+                    "status": "PARTIALLY FILLED",
+                    "filled_quantity": impossible,
+                    "average_price": 101.0,
+                }
+            )
+            is None
+        )
         assert order.status is order_manager_core.OrderStatus.SUBMITTED
         assert order.filled_quantity == order.applied_filled_quantity == 0
     assert manager.current_entry_blocker() is not None
@@ -865,9 +870,12 @@ def test_conflicting_terminal_status_without_fill_is_ignored() -> None:
         intent="ENTRY",
     )
     manager._orders = {order.order_id: order}
-    assert manager._apply_broker_order_update(
-        {"order_id": order.order_id, "status": "REJECTED", "filled_quantity": 65}
-    ) is None
+    assert (
+        manager._apply_broker_order_update(
+            {"order_id": order.order_id, "status": "REJECTED", "filled_quantity": 65}
+        )
+        is None
+    )
     assert order.status is order_manager_core.OrderStatus.CANCELLED
     assert order.filled_quantity == order.applied_filled_quantity == 65
 
