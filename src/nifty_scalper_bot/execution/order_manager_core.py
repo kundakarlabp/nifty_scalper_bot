@@ -12653,12 +12653,13 @@ class OrderManager:
             if self._is_stale_broker_order_update(order, payload):
                 return order
             previous_status = order.status
+            previous_filled = int(order.filled_quantity or 0)
             status = self._parse_status(payload.get("status"))
             filled_qty = (
                 self._coerce_int(payload.get("filled_quantity"))
                 or order.filled_quantity
             )
-            filled_qty = max(filled_qty, order.filled_quantity)
+            filled_qty = max(filled_qty, previous_filled)
             if previous_status in self.FINAL_STATUSES:
                 status = previous_status
             elif (
@@ -12672,7 +12673,15 @@ class OrderManager:
 
             order.status = status
             order.filled_quantity = filled_qty
-            if filled_qty >= order.quantity and status != OrderStatus.CANCELLED:
+            if filled_qty > previous_filled and average_price is not None:
+                latest_average = self._coerce_float(average_price)
+                if latest_average and math.isfinite(latest_average):
+                    order.fill_price = latest_average
+            if filled_qty >= order.quantity and status not in {
+                OrderStatus.CANCELLED,
+                OrderStatus.REJECTED,
+                OrderStatus.EXPIRED,
+            }:
                 order.status = OrderStatus.FILLED
             elif 0 < filled_qty < order.quantity and status not in self.FINAL_STATUSES:
                 order.status = OrderStatus.PARTIALLY_FILLED
