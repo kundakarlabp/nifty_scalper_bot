@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # File purpose: Synchronize Lightsail admin bind and public TLS configuration.
-# Key responsibilities: Validate Caddy, install loopback admin unit, reload and restore on failure.
+# Key responsibilities: Bind admin locally first, validate/repair Caddy and verify trusted public-IP HTTPS.
 # Operational constraints: Do not restart trading or change credentials; never claim certificate issuance from reload.
 set -euo pipefail
 
