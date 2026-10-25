@@ -98,9 +98,7 @@ def test_conflicting_mode_and_duplicate_policy_are_diagnostic_only(
         ("ENABLE_LIVE=true\nEXECUTION_MODE=LIVE\nENABLE_LIVE=false\n", "ambiguous"),
     ],
 )
-def test_mode_classification(
-    tmp_path: Path, content: str, expected: str
-) -> None:
+def test_mode_classification(tmp_path: Path, content: str, expected: str) -> None:
     path = tmp_path / "niftybot.env"
     _private_file(path, content)
     response, payload = _run(path)
