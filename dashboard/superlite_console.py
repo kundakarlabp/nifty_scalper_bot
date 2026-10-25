@@ -38,7 +38,7 @@ if (
     or (
         _parsed_admin.hostname == "65.0.255.84"
         and _parsed_admin.scheme == "http"
-        and _parsed_admin.port == 8081
+        and _parsed_admin.netloc == "65.0.255.84:8081"
     )
 ):
     ADMIN_PUBLIC = "https://" + os.getenv("BOT_PUBLIC_IP", "65.0.255.84") + "/admin"
