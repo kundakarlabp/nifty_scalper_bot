@@ -38,3 +38,35 @@ The independent HTTPS client could not negotiate trusted TLS on `:443` under the
 6. Mark deployment complete **only** after Supabase SHA equals merged main and `release_state=current`. CI and HTTP liveness do not prove LIVE entry readiness. Never restart a LIVE-exposed engine merely to fix dashboard ingress.
 
 This file is the SSOT for subsequent ChatGPT discussions of HTTP reachability; keep test claims dated and distinguish **verified**, **proposed**, and **not verified**.
+
+## CI gate reliability and no-cost recovery
+
+The 2026-10-25 incident also uncovered `release_state=ci_unavailable` despite
+a completed, successful GitHub main-push CI run for the pending SHA. The
+historical `verify_release_ci.py` used the unauthenticated GitHub Actions REST
+API on a frequent release timer. An HTTP 403/429, rate limit, or host egress
+failure yields `ci_unavailable`; **do not override the gate, restart trading,
+or interpret this as failed tests**.
+
+From the next merged revision onward, the full **push** CI workflow publishes
+`refs/tags/nifty-ci-passed/<full-40-character-sha>` via the existing free
+`GITHUB_TOKEN` only after `final-validation` succeeds. The host verifier
+reads that exact non-forced ref using `git ls-remote` (the same transport used
+by `git fetch origin main`), and requires the ref's target OID to match the
+complete main SHA; the original GitHub API check remains as fallback. Missing
+or inconsistent evidence fails closed. No Supabase write credentials, extra
+service, GitHub PAT, or paid API is required.
+
+The installed **old** release verifier cannot recognize newly added refs
+before it successfully updates itself. If the old host remains
+`ci_unavailable`, wait for its existing rate limit/network access to recover
+or use an authorized AWS control-plane repair. **Never relax the old CI gate
+through an unauthenticated external HTTP endpoint.** The guarded release
+script preserves broker-flat and terminal-order confirmation. After the new
+runner is installed, its regular timer can reconcile the Caddy/admin unit
+from the GitHub checkout without restarting the engine; a failed repair is
+recorded as operator-ingress degradation, not silently marked secure.
+
+The CI proof tag shares GitHub repository write authority; protect that ref
+namespace through GitHub rulesets if available, and restrict repository write
+access. GitHub `main` remains the only release source.
