@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+from types import SimpleNamespace
 from urllib.error import URLError
 
 from deploy.scripts import verify_release_ci as gate
@@ -72,6 +73,7 @@ def test_gh_api_unavailable_and_invalid_sha_fail_closed(monkeypatch) -> None:
         raise URLError("offline")
 
     monkeypatch.setattr(gate, "urlopen", fail)
+    monkeypatch.setattr(gate, "verified_ci_proof_tag", lambda _sha: False)
     assert gate.verify_ci(SHA) == "unavailable"
     assert gate.verify_ci("not-a-commit") == "unavailable"
     assert gate.main([SHA]) == 1
@@ -92,6 +94,7 @@ def test_ci_verifier_queries_exact_main_sha_and_push_run(monkeypatch) -> None:
         return Response(json.dumps({"workflow_runs": [_run()]}).encode())
 
     monkeypatch.setattr(gate, "urlopen", fake_open)
+    monkeypatch.setattr(gate, "verified_ci_proof_tag", lambda _sha: False)
     assert gate.verify_ci(SHA) == "passed"
     assert gate.main([SHA]) == 0
     url, timeout = called[0]
@@ -117,3 +120,55 @@ def test_release_ci_gate_precedes_checkout_and_keeps_exposure_guard() -> None:
     assert "intraday_flat_broker_confirmed" in release
     assert "auto_release_should_defer" in release
     assert "tests/architecture/test_release_ci_gate.py" in release
+
+
+def test_git_success_proof_matches_exact_sha_and_skips_rate_limited_api(
+    monkeypatch,
+) -> None:
+    ref = gate.PROOF_TAG_PREFIX + SHA
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        assert command == ["git", "ls-remote", "--refs", "origin", ref]
+        assert kwargs["timeout"] <= 10
+        return SimpleNamespace(returncode=0, stdout=f"{SHA}\\t{ref}\\n")
+
+    monkeypatch.setattr(gate.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        gate,
+        "urlopen",
+        lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("REST rate")),
+    )
+    assert gate.verify_ci(SHA) == "passed"
+    assert len(calls) == 1
+
+
+def test_git_proof_cannot_authorize_missing_or_wrong_ref(monkeypatch) -> None:
+    outputs = [OTHER_SHA + "\\t" + gate.PROOF_TAG_PREFIX + SHA + "\\n", ""]
+    monkeypatch.setattr(
+        gate.subprocess,
+        "run",
+        lambda *_a, **_kw: SimpleNamespace(returncode=0, stdout=outputs.pop(0)),
+    )
+    assert gate.verified_ci_proof_tag(SHA) is False
+    assert gate.verified_ci_proof_tag(SHA) is False
+
+
+def test_workflow_publishes_proof_only_after_complete_main_push_ci() -> None:
+    from pathlib import Path
+
+    yml = (
+        Path(__file__).resolve().parents[2] / ".github/workflows/ci.yml"
+    ).read_text(encoding="utf-8")
+    assert "publish-main-ci-proof:" in yml
+    section = yml.split("  publish-main-ci-proof:", 1)[1].split(
+        "  final-validation:", 1
+    )[0]
+    assert "needs: [final-validation]" in section
+    assert "github.event_name == 'push'" in section
+    assert "contents: write" in section
+    assert 'test "$VALIDATION" = "success"' in section
+    assert "refs/tags/nifty-ci-passed/$GITHUB_SHA" in section
+    assert "git push origin" in section
+    assert "--force" not in section
