@@ -47,6 +47,24 @@ function cleanStartupAudit(raw: unknown): Record<string, unknown> | null {
         value < 0 || value > 1000000) return null
     safe[name] = value
   }
+  // Phase 9 fields are optional so Phase 7 senders remain supported.
+  for (const name of [
+    'observed_repeat_startup_count', 'market_window_startup_count',
+    'stop_armed_event_count', 'stop_unverified_event_count',
+    'stop_not_armed_event_count', 'stop_ratchet_confirmed_event_count',
+  ]) {
+    if (input[name] === undefined) continue
+    const count = input[name]
+    if (typeof count !== 'number' || !Number.isSafeInteger(count) ||
+        count < 0 || count > 1000000) return null
+    safe[name] = count
+  }
+  if (input.restart_cause !== undefined) {
+    if (input.restart_cause !== 'unknown_without_process_and_deployment_events') {
+      return null
+    }
+    safe.restart_cause = input.restart_cause
+  }
   for (const name of [
     'first_startup_at_ist', 'last_startup_at_ist', 'last_live_ready_at_ist',
   ]) {
