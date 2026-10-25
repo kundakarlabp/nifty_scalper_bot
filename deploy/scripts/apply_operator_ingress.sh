@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Purpose: One guarded, idempotent Lightsail operator-ingress hardening step.
-# Boundaries: Never restart the trading engine or alter private broker settings.
-# Safety: Preserve the previous Caddyfile when validation/reload fails.
+# File purpose: Synchronize Lightsail admin bind and public TLS configuration.
+# Key responsibilities: Validate Caddy, install loopback admin unit, reload and restore on failure.
+# Operational constraints: Do not restart trading or change credentials; never claim certificate issuance from reload.
 set -euo pipefail
 
 APP_DIR="${BOT_APP_DIR:-/home/ubuntu/nifty_scalper_bot}"
