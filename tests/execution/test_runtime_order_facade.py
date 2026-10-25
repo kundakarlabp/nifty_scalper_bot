@@ -580,6 +580,112 @@ def test_delayed_poll_status_does_not_mutate_filled_entry() -> None:
     assert order.fill_price == 101.0
 
 
+def test_late_terminal_entry_fill_delta_keeps_terminal_and_reconciles(
+    monkeypatch,
+) -> None:
+    reconciled: list[dict[str, Any]] = []
+    fills: list[int] = []
+    positions: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        "nifty_scalper_bot.execution.runtime_order_manager._finalize_partial_entry",
+        lambda _manager, _order, payload: reconciled.append(dict(payload)),
+    )
+    manager = _manager(None)
+    manager._lock = threading.RLock()
+    manager._bracket_manager = None
+    order = order_manager_core.OrderDetails(
+        order_id="ENTRY-LATE-DELTA",
+        symbol="NFO:NIFTY2681124500CE",
+        side="BUY",
+        quantity=130,
+        order_type=order_manager_core.OrderType.LIMIT,
+        status=order_manager_core.OrderStatus.CANCELLED,
+        filled_quantity=65,
+        applied_filled_quantity=65,
+        fill_price=100.0,
+        intent="ENTRY",
+    )
+    manager._orders = {order.order_id: order}
+    manager._positions = SimpleNamespace(
+        apply_broker_order_update=lambda _oid, payload: positions.append(dict(payload))
+    )
+    manager._register_virtual_bracket_for_fill = (
+        lambda updated, **_kwargs: fills.append(updated.filled_quantity)
+    )
+    manager._confirm_position_protection_for_fill = lambda _order: None
+    manager._notify_failed_entry_terminal = lambda *_args: None
+    manager.save_orders = lambda: None
+    late = {
+        "order_id": order.order_id,
+        "status": "OPEN",
+        "filled_quantity": 100,
+        "average_price": 101.0,
+    }
+
+    assert manager._apply_broker_order_update(late) is order
+    assert order.status is order_manager_core.OrderStatus.CANCELLED
+    assert order.filled_quantity == order.applied_filled_quantity == 100
+    assert fills == [100]
+    assert positions[0]["status"] == "CANCELLED"
+    assert positions[0]["filled_quantity"] == 100
+    assert reconciled[0]["status"] == "CANCELLED"
+    assert late["status"] == "OPEN"
+
+    assert manager._apply_broker_order_update(late) is None
+    assert fills == [100]
+    assert len(positions) == len(reconciled) == 1
+
+
+def test_late_cancelled_fill_delta_reconciles_before_replay(
+    monkeypatch,
+) -> None:
+    reconciled: list[dict[str, Any]] = []
+    fills: list[int] = []
+    monkeypatch.setattr(
+        "nifty_scalper_bot.execution.runtime_order_manager._finalize_partial_entry",
+        lambda _manager, _order, payload: reconciled.append(dict(payload)),
+    )
+    manager = _manager(None)
+    manager._lock = threading.RLock()
+    manager._bracket_manager = None
+    order = order_manager_core.OrderDetails(
+        order_id="ENTRY-LATE-CANCELLED",
+        symbol="NFO:NIFTY2681124500CE",
+        side="BUY",
+        quantity=130,
+        order_type=order_manager_core.OrderType.LIMIT,
+        status=order_manager_core.OrderStatus.CANCELLED,
+        filled_quantity=65,
+        applied_filled_quantity=65,
+        fill_price=100.0,
+        intent="ENTRY",
+    )
+    manager._orders = {order.order_id: order}
+    manager._positions = SimpleNamespace(
+        apply_broker_order_update=lambda *_args: None
+    )
+    manager._register_virtual_bracket_for_fill = (
+        lambda updated, **_kwargs: fills.append(updated.filled_quantity)
+    )
+    manager._confirm_position_protection_for_fill = lambda _order: None
+    manager._notify_failed_entry_terminal = lambda *_args: None
+    manager.save_orders = lambda: None
+
+    payload = {
+        "order_id": order.order_id,
+        "status": "CANCELLED",
+        "filled_quantity": 100,
+        "average_price": 101.0,
+    }
+    manager._apply_broker_order_update(payload)
+    manager._apply_broker_order_update(payload)
+
+    assert order.status is order_manager_core.OrderStatus.CANCELLED
+    assert order.applied_filled_quantity == 100
+    assert fills == [100]
+    assert len(reconciled) == 2
+
+
 def test_fast_fill_rejects_status_only_complete_payload() -> None:
     manager = _manager(None)
     updates: list[dict[str, Any]] = []
