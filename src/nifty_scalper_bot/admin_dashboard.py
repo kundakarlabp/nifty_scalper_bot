@@ -140,9 +140,7 @@ def _check_auth(request: Request) -> None:
             parsed = urllib.parse.urlsplit(source)
             expected_host = request.headers.get("host")
             if parsed.scheme != "https" or parsed.netloc != expected_host:
-                raise HTTPException(
-                    status_code=403, detail="admin_same_origin_required"
-                )
+                raise HTTPException(status_code=403, detail="admin_same_origin_required")
         return
     if owner and not request.headers.get("authorization"):
         raise HTTPException(status_code=401, detail="owner_login_required")
