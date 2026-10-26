@@ -127,11 +127,13 @@ def verify_challenge(request: Request, submitted: str) -> bool:
     if not cookie or not hmac.compare_digest(cookie, submitted):
         return False
     payload = _unpack(cookie)
+    issued_at = payload.get("iat") if payload else None
     return bool(
         payload
+        and isinstance(issued_at, int)
         and payload.get("kind") == "login"
         and isinstance(payload.get("nonce"), str)
-        and time.time() - int(payload["iat"]) <= LOGIN_TTL_SECONDS
+        and time.time() - issued_at <= LOGIN_TTL_SECONDS
     )
 
 
@@ -158,10 +160,12 @@ def valid_owner_session(request: Request, expected_user_id: str) -> bool:
     if not expected_user_id or request.url.scheme != "https":
         return False
     payload = _unpack(request.cookies.get(SESSION_COOKIE, ""))
+    issued_at = payload.get("iat") if payload else None
     return bool(
         payload
+        and isinstance(issued_at, int)
         and payload.get("kind") == "session"
         and isinstance(payload.get("uid"), str)
         and hmac.compare_digest(str(payload["uid"]), expected_user_id)
-        and time.time() - int(payload["iat"]) <= SESSION_TTL_SECONDS
+        and time.time() - issued_at <= SESSION_TTL_SECONDS
     )
