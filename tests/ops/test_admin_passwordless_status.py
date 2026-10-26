@@ -53,7 +53,7 @@ def test_https_admin_opens_dashboard_without_extra_login_page(monkeypatch) -> No
         assert "Bot administration" in response.text
         assert 'action="/admin/token"' in response.text
         assert 'name="owner_state"' in response.text
-        assert '<details open><summary>Paste callback URL' in response.text
+        assert "<details open><summary>Paste callback URL" in response.text
         assert 'action="/admin/mode" inert' in response.text
         assert "www-authenticate" not in response.headers
     for path in ("/admin/api/logs", "/admin/trades.json"):
