@@ -972,7 +972,12 @@ _STATUS_CACHE: dict[str, object] = {"at": 0.0, "label": "running", "color": "#3f
 
 @router.get("/admin/status.json")
 def status_json(request: Request) -> JSONResponse:
-    _check_auth(request)
+    """Expose only the process-status label; no private controls or logs."""
+    if (
+        os.getenv("DEPLOYMENT_PLATFORM") == "aws_lightsail"
+        and request.url.scheme != "https"
+    ):
+        raise HTTPException(status_code=403, detail="admin_https_required")
     now = time.time()
     ttl = float(os.getenv("ADMIN_STATUS_CACHE_SECONDS", "10") or "10")
     if now - float(_STATUS_CACHE["at"]) < ttl:
