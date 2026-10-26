@@ -114,9 +114,7 @@ def build_execution_evidence(
         ask = float(cast(Any, payload.get("ask") or 0.0))
     except (TypeError, ValueError, OverflowError):
         bid = ask = 0.0
-    bid_ask_valid = (
-        isfinite(bid) and isfinite(ask) and bid > 0.0 and ask >= bid
-    )
+    bid_ask_valid = isfinite(bid) and isfinite(ask) and bid > 0.0 and ask >= bid
 
     spread_observed = payload.get("spread_pct") is not None
     try:
