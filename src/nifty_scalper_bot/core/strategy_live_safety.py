@@ -8,6 +8,7 @@ approved signals are idempotent without depending on every strategy to stamp it.
 
 from __future__ import annotations
 
+import math
 import os
 import time
 from contextlib import suppress
@@ -586,6 +587,52 @@ def _add_identity(signal: Signal) -> Signal:
     return signal.with_metadata(**metadata)
 
 
+
+def _approved_smc_freshness_block(
+    signal: Signal, *, now_epoch: float
+) -> dict[str, Any] | None:
+    """Reject live SMC entries whose original sweep is no longer actionable.
+
+    A recently computed signal/quote is not proof that its underlying setup is
+    recent. Always compare the *original* sweep event against wall-clock time,
+    not the last completed candle or the latest refreshed signal timestamp.
+    """
+    if str(getattr(signal, "action", "")).upper() not in {"BUY", "SELL"}:
+        return None
+    metadata = dict(getattr(signal, "metadata", {}) or {})
+    strategy = str(
+        metadata.get("strategy_name") or metadata.get("strategy") or ""
+    ).strip().upper()
+    if strategy != "SMC":
+        return None
+    sweep_epoch = _coerce_epoch_seconds(metadata.get("sweep_timestamp"))
+    if sweep_epoch is None or not math.isfinite(sweep_epoch):
+        return {"reason": "live_smc_sweep_timestamp_missing"}
+    if not math.isfinite(now_epoch):
+        return {"reason": "live_smc_clock_unavailable"}
+
+    # The strategy's existing confirmation window is at most five minutes in
+    # live execution. Larger operator overrides cannot silently revive an old
+    # setup. A shorter configured window is respected.
+    try:
+        configured = float(os.getenv("SMC_CONFIRMATION_MAX_MINUTES", "5"))
+    except (TypeError, ValueError, OverflowError):
+        configured = 5.0
+    if not math.isfinite(configured):
+        configured = 5.0
+    max_age_seconds = min(max(configured, 1.0), 5.0) * 60.0
+    age_seconds = now_epoch - sweep_epoch
+    proof = {
+        "sweep_age_seconds": round(age_seconds, 3),
+        "max_sweep_age_seconds": max_age_seconds,
+    }
+    if age_seconds < -_clock_skew_tolerance_seconds():
+        return {"reason": "live_smc_sweep_future_timestamp", **proof}
+    if age_seconds > max_age_seconds:
+        return {"reason": "live_smc_sweep_expired", **proof}
+    return None
+
+
 def _orderflow_selected_option_block(signal: Signal) -> dict[str, Any] | None:
     metadata = dict(getattr(signal, "metadata", {}) or {})
     strategy_name = str(metadata.get("strategy_name") or metadata.get("strategy") or "")
@@ -724,6 +771,22 @@ def apply_patches() -> None:
             signal = _add_identity(signal)
             metadata = dict(getattr(signal, "metadata", {}) or {})
         candidate_symbol = normalize_symbol(getattr(signal, "symbol", ""))
+        freshness_block = _approved_smc_freshness_block(signal, now_epoch=time.time())
+        if freshness_block is not None:
+            _record(
+                self,
+                candidate_symbol,
+                str(freshness_block["reason"]),
+                trace_id,
+                freshness_block,
+            )
+            LOG.warning(
+                "LIVE_SMC_FRESHNESS_BLOCK symbol=%s reason=%s details=%s",
+                candidate_symbol,
+                freshness_block["reason"],
+                freshness_block,
+            )
+            return None
         block = _candidate_execution_block(self, candidate_symbol)
         if block is not None:
             _record(
