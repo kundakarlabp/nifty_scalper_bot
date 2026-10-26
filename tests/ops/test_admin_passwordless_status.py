@@ -13,7 +13,9 @@ from nifty_scalper_bot import admin_dashboard as dashboard
 def _client(*, https: bool = True) -> TestClient:
     app = FastAPI()
     app.include_router(dashboard.router)
-    return TestClient(app, base_url="https://65.0.255.84" if https else "http://65.0.255.84")
+    return TestClient(
+        app, base_url="https://65.0.255.84" if https else "http://65.0.255.84"
+    )
 
 
 def _basic(password: str) -> dict[str, str]:
