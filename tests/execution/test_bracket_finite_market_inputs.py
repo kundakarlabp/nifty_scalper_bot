@@ -4,21 +4,17 @@ from __future__ import annotations
 
 from unittest.mock import Mock
 
-import pytest
-
 from nifty_scalper_bot.execution.bracket_manager import BracketManager
-
 
 SYMBOL = "NFO:NIFTY26OCT22700CE"
 
 
-@pytest.fixture
-def manager(monkeypatch, tmp_path):
-    monkeypatch.setenv("BRACKET_FILL_LEDGER_PATH", str(tmp_path / "fill-ledger.db"))
-    owner = BracketManager(order_manager=Mock())
-    owner._running = False
-    owner._watchdog_thread.join(timeout=1.0)
-    owner.register_virtual_bracket(
+def _manager(monkeypatch, tmp_path) -> BracketManager:
+    monkeypatch.setenv("BRACKET_FILL_LEDGER_PATH", str(tmp_path / "fills.db"))
+    manager = BracketManager(order_manager=Mock())
+    manager._running = False
+    manager._watchdog_thread.join(timeout=1.0)
+    manager.register_virtual_bracket(
         "entry-finite",
         SYMBOL,
         "BUY",
@@ -28,12 +24,11 @@ def manager(monkeypatch, tmp_path):
         120.0,
         activate_immediately=True,
     )
-    yield owner
-    owner._running = False
+    return manager
 
 
-@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
-def test_nonfinite_tick_never_contaminates_bracket_or_exits(manager, bad):
+def test_nonfinite_tick_never_contaminates_bracket_or_exits(monkeypatch, tmp_path):
+    manager = _manager(monkeypatch, tmp_path)
     bracket = manager.get_bracket("entry-finite")
     assert bracket is not None
     original = (
@@ -42,37 +37,37 @@ def test_nonfinite_tick_never_contaminates_bracket_or_exits(manager, bad):
         bracket.sl_trigger_price,
         bracket.trail_revision,
     )
-    manager.on_tick(SYMBOL, bad)
-    manager.on_tick_event({"symbol": SYMBOL, "ltp": bad, "bid": 1.0, "ask": 2.0})
-    assert (
-        bracket.last_ltp,
-        bracket.highest_ltp,
-        bracket.sl_trigger_price,
-        bracket.trail_revision,
-    ) == original
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        manager.on_tick(SYMBOL, bad)
+        manager.on_tick_event({"symbol": SYMBOL, "ltp": bad, "bid": 1.0, "ask": 2.0})
+        assert (
+            bracket.last_ltp,
+            bracket.highest_ltp,
+            bracket.sl_trigger_price,
+            bracket.trail_revision,
+        ) == original
     assert SYMBOL not in manager._exit_quotes
     assert not bracket.exit_pending
 
 
-@pytest.mark.parametrize(
-    ("bid", "ask"),
-    [
+def test_nonfinite_quote_cannot_be_cached_as_executable_depth(
+    monkeypatch, tmp_path
+):
+    manager = _manager(monkeypatch, tmp_path)
+    for bid, ask in (
         (float("nan"), 102.0),
         (99.0, float("nan")),
         (float("inf"), 102.0),
         (99.0, float("inf")),
-    ],
-)
-def test_nonfinite_quote_is_not_considered_fresh_executable_depth(
-    manager, bid, ask
-):
-    assert not manager._capture_exit_quote(
-        SYMBOL, {"bid": bid, "ask": ask, "ltp": 100.0}
-    )
-    assert SYMBOL not in manager._exit_quotes
+    ):
+        assert not manager._capture_exit_quote(
+            SYMBOL, {"bid": bid, "ask": ask, "ltp": 100.0}
+        )
+        assert SYMBOL not in manager._exit_quotes
 
 
-def test_corrupt_cached_depth_falls_back_to_ltp(manager):
+def test_corrupt_cached_depth_falls_back_to_ltp(monkeypatch, tmp_path):
+    manager = _manager(monkeypatch, tmp_path)
     bracket = manager.get_bracket("entry-finite")
     assert bracket is not None
     manager._exit_quotes[SYMBOL] = (float("nan"), float("inf"), 1.0)
@@ -82,20 +77,24 @@ def test_corrupt_cached_depth_falls_back_to_ltp(manager):
     )
 
 
-@pytest.mark.parametrize("bad", [float("inf"), float("nan"), float("-inf")])
-def test_nonfinite_atr_provider_and_external_updates_fail_closed(manager, bad):
+def test_nonfinite_atr_is_rejected_from_provider_and_manual_feed(
+    monkeypatch, tmp_path
+):
+    manager = _manager(monkeypatch, tmp_path)
     manager._atr_provider = Mock()
-    manager._atr_provider.get_current_atr.return_value = bad
     manager._current_atr[SYMBOL] = 2.5
-    assert manager._get_current_atr(SYMBOL) == 2.5
-    manager.update_market_stats(SYMBOL, atr=bad)
-    assert manager._current_atr[SYMBOL] == 2.5
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        manager._atr_provider.get_current_atr.return_value = bad
+        assert manager._get_current_atr(SYMBOL) == 2.5
+        manager.update_market_stats(SYMBOL, atr=bad)
+        assert manager._current_atr[SYMBOL] == 2.5
     manager._atr_provider.feed_manual.assert_not_called()
 
 
-@pytest.mark.parametrize("value", ["nan", "inf", "-inf", "0", "-1"])
-def test_invalid_activation_r_uses_safe_default(manager, value):
+def test_invalid_activation_r_uses_existing_default(monkeypatch, tmp_path):
+    manager = _manager(monkeypatch, tmp_path)
     bracket = manager.get_bracket("entry-finite")
     assert bracket is not None
-    bracket.trailing_config["breakeven_activation_r"] = value
-    assert manager._trail_activation_r(bracket) == pytest.approx(0.60)
+    for value in ("nan", "inf", "-inf", "0", "-1"):
+        bracket.trailing_config["breakeven_activation_r"] = value
+        assert manager._trail_activation_r(bracket) == 0.60
