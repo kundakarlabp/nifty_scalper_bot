@@ -419,60 +419,6 @@ def _flash(request: Request) -> str:
     return ""
 
 
-def _passwordless_status_page() -> HTMLResponse:
-    """Render public process-only status; never leak credentials or controls."""
-    body = """<!doctype html><html lang="en"><head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Nifty Scalper · Status</title>
-<style>
-body{font:16px system-ui,sans-serif;background:#0b1522;color:#edf3fa;
-max-width:650px;margin:8vh auto;padding:20px}
-section{background:#162434;border:1px solid #304055;border-radius:14px;padding:22px}
-h1{font-size:1.5rem}dl{display:grid;grid-template-columns:1fr 1fr;gap:14px}
-dt{color:#afc0cf}dd{margin:5px 0;font-weight:600;overflow-wrap:anywhere}
-a{color:#83bcff}small{color:#afc0cf}
-</style></head><body><section><h1>Nifty Scalper · Status</h1>
-<p>Read-only process diagnostics. No admin login required.</p>
-<dl><div><dt>Engine</dt><dd id="engine">Checking…</dd></div>
-<div><dt>Operating mode</dt><dd id="mode">Checking…</dd></div>
-<div><dt>Release</dt><dd id="release">Checking…</dd></div>
-<div><dt>Revision</dt><dd id="revision">Checking…</dd></div></dl>
-<p><small>Trading readiness and broker authentication are not established
-by process liveness.</small></p>
-<p><a href="https://65.0.255.84/admin/kite/start">Sign in with Zerodha (HTTPS)</a> · <a href="/admin/manage">Protected trading controls</a></p></section>
-<script>
-async function refresh(){
-  try{
-    const responses=await Promise.all([
-      fetch("/livez",{cache:"no-store",credentials:"omit"}),
-      fetch("/releasez",{cache:"no-store",credentials:"omit"})
-    ]);
-    if(!responses.every(r=>r.ok))throw Error("unavailable");
-    const [live,release]=await Promise.all(responses.map(r=>r.json()));
-    document.getElementById("engine").textContent =
-      live.quiet===true?"QUIET":live.bot_loaded===true?"Loaded":"Not loaded";
-    document.getElementById("mode").textContent =
-      String(live.operating_mode||release.operating_mode||"Unknown");
-    document.getElementById("release").textContent =
-      String(release.status||"Unknown");
-    document.getElementById("revision").textContent =
-      String(release.effective_sha||release.runtime_sha||"Unknown").slice(0,12);
-  }catch{
-    document.getElementById("engine").textContent="Unavailable";
-  }
-}
-refresh();setInterval(refresh,15000);
-</script></body></html>"""
-    return HTMLResponse(
-        body,
-        headers={
-            "Cache-Control": "no-store",
-            "X-Content-Type-Options": "nosniff",
-            "Referrer-Policy": "no-referrer",
-        },
-    )
-
-
 @router.get("/admin", response_class=HTMLResponse)
 def dashboard(request: Request) -> Response:
     """Use the familiar /admin URL for complete owner controls over HTTPS."""
