@@ -186,6 +186,12 @@ def run_worker(request: dict[str, Any], env_file: Path) -> dict[str, Any]:
         status["retained_cache_coverage"] = {
             "scope": "verified_retained_pairs_not_full_historical_universe",
             "staged_session_dates": retained["staged_session_dates"],
+            "orb_opening_range_ready_staged_session_dates": retained.get(
+                "orb_opening_range_ready_staged_session_dates", []
+            ),
+            "orb_opening_range_incomplete_staged_session_dates": retained.get(
+                "orb_opening_range_incomplete_staged_session_dates", []
+            ),
             "staging_rejections": retained["staging_rejections"],
             "valid_cached_files": retained["valid_cached_files"],
             "corrupt_or_untrusted_files": retained["corrupt_or_untrusted_files"],
