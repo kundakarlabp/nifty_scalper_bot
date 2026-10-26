@@ -498,7 +498,7 @@ def dashboard(request: Request) -> HTMLResponse:
     return _full_dashboard(request)
 
 
-@router.get("/admin/manage", response_class=HTMLResponse)
+@router.get("/admin/manage", response_class=HTMLResponse)  # type: ignore[untyped-decorator]
 def admin_manage(request: Request) -> HTMLResponse:
     """Provide broker credentials and mutable controls only after auth."""
     return _full_dashboard(request)
