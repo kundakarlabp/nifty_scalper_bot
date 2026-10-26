@@ -284,6 +284,9 @@ def test_nonfinite_live_age_env_cannot_relax_bound(monkeypatch):
 
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     monkeypatch.setenv("ENABLE_LIVE", "true")
+    monkeypatch.setenv("PAPER_MODE", "false")
+    monkeypatch.setenv("PAPER__ENABLED", "false")
+    monkeypatch.setenv("SHADOW_MODE", "false")
     monkeypatch.setenv("LIVE_CANDIDATE_MAX_TICK_AGE_S", "nan")
     selector = TradeCandidateSelector()
     _spread, age, _ticks, is_live = selector._effective_limits()
