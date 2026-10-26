@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from unittest.mock import Mock
+import unittest.mock
 
 import pytest
 
@@ -16,7 +16,7 @@ SYMBOL = "NFO:NIFTY26OCT22700CE"
 @pytest.fixture
 def manager(monkeypatch, tmp_path):
     monkeypatch.setenv("BRACKET_FILL_LEDGER_PATH", str(tmp_path / "fill-ledger.db"))
-    owner = BracketManager(order_manager=Mock())
+    owner = BracketManager(order_manager=unittest.mock.Mock())
     owner._running = False
     owner._watchdog_thread.join(timeout=1.0)
     owner.register_virtual_bracket(
