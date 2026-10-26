@@ -31,9 +31,7 @@ def _owner(monkeypatch, *, authenticated: bool) -> None:
             "EXECUTION_MODE": "SHADOW",
         },
     )
-    monkeypatch.setattr(
-        dashboard, "valid_owner_session", lambda *_: authenticated
-    )
+    monkeypatch.setattr(dashboard, "valid_owner_session", lambda *_: authenticated)
 
 
 def test_http_bookmark_redirects_to_secure_admin_without_basic(monkeypatch) -> None:
@@ -80,7 +78,8 @@ def test_existing_password_cannot_bypass_zerodha_ownership(monkeypatch) -> None:
     _owner(monkeypatch, authenticated=False)
     monkeypatch.setenv("ADMIN_PASSWORD", "obsolete")
     response = _client().get(
-        "/admin/manage", headers={"authorization": "Basic YWRtaW46b2Jzb2xldGU="},
+        "/admin/manage",
+        headers={"authorization": "Basic YWRtaW46b2Jzb2xldGU="},
         follow_redirects=False,
     )
     assert response.status_code == 303
