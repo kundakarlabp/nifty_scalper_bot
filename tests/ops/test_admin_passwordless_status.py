@@ -20,8 +20,10 @@ def _client(*, https: bool = True) -> TestClient:
     )
 
 
-def _owner(monkeypatch, *, authenticated: bool) -> None:
+def _owner(monkeypatch, *, authenticated: bool, tmp_path=None) -> None:
     monkeypatch.setenv("DEPLOYMENT_PLATFORM", "aws_lightsail")
+    if tmp_path is not None:
+        monkeypatch.setenv("NIFTYBOT_CONFIG_DIR", str(tmp_path))
     monkeypatch.setattr(
         dashboard,
         "_read_env",
@@ -44,13 +46,19 @@ def test_http_bookmark_redirects_to_secure_admin_without_basic(monkeypatch) -> N
     assert _client(https=False).get("/admin/manage").status_code == 403
 
 
-def test_https_admin_entry_routes_directly_to_owner_login(monkeypatch) -> None:
-    _owner(monkeypatch, authenticated=False)
+def test_https_admin_opens_dashboard_without_extra_login_page(
+    monkeypatch, tmp_path
+) -> None:
+    _owner(monkeypatch, authenticated=False, tmp_path=tmp_path)
     client = _client()
     for path in ("/admin", "/admin/manage"):
         response = client.get(path, follow_redirects=False)
-        assert response.status_code == 303
-        assert response.headers["location"] == "/admin/kite/start"
+        assert response.status_code == 200
+        assert "Bot administration" in response.text
+        assert 'action="/admin/token"' in response.text
+        assert 'name="owner_state"' in response.text
+        assert "<details open><summary>Paste callback URL" in response.text
+        assert 'action="/admin/mode" inert' in response.text
         assert "www-authenticate" not in response.headers
     for path in ("/admin/api/logs", "/admin/trades.json"):
         response = client.get(path)
@@ -74,14 +82,16 @@ def test_signed_owner_gets_existing_full_dashboard_without_admin_password(
     assert "www-authenticate" not in response.headers
 
 
-def test_existing_password_cannot_bypass_zerodha_ownership(monkeypatch) -> None:
-    _owner(monkeypatch, authenticated=False)
+def test_existing_password_cannot_bypass_zerodha_ownership(
+    monkeypatch, tmp_path
+) -> None:
+    _owner(monkeypatch, authenticated=False, tmp_path=tmp_path)
     monkeypatch.setenv("ADMIN_PASSWORD", "obsolete")
     response = _client().get(
         "/admin/manage",
         headers={"authorization": "Basic YWRtaW46b2Jzb2xldGU="},
         follow_redirects=False,
     )
-    assert response.status_code == 303
-    assert response.headers["location"] == "/admin/kite/start"
+    assert response.status_code == 200
+    assert "Bot administration" in response.text
     assert "www-authenticate" not in response.headers

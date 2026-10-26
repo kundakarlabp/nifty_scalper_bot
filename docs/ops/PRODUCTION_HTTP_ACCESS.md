@@ -17,7 +17,7 @@
 | `http://65.0.255.84:8080/releasez` | Public deployed GitHub SHA and release provenance | HTTP 200; compare `effective_sha` with GitHub main |
 | `http://65.0.255.84:8501/_stcore/health` | Public Streamlit process liveness | HTTP 200, `ok` |
 | `http://65.0.255.84:8080/health/trading` | Operational trading readiness | May be 404 while off-hours `AUTO` deliberately unloads the engine |
-| `http://65.0.255.84:8080/admin` | Legacy admin bookmark | HTTP 307 redirect to `https://65.0.255.84/admin`; never expose control actions in cleartext |\n| `https://65.0.255.84/admin` | Full operator dashboard | Existing settings, daily Zerodha token form and trading controls after owner session |
+| `http://65.0.255.84:8080/admin` | Legacy admin bookmark | HTTP 307 redirect to `https://65.0.255.84/admin`; never expose control actions in cleartext |\n| `https://65.0.255.84/admin` | Full operator dashboard | Opens without intermediate login; normal daily Zerodha token form unlocks write controls |
 | `https://65.0.255.84/admin/manage` | Compatibility alias | Same full owner-verified dashboard; no separate admin username/password |
 | `http://127.0.0.1:8081/healthz` | Host-local independent admin process liveness | HTTP 200, `status=ok`; never require public TCP 8081 |
 
@@ -104,10 +104,12 @@ full dashboard (`/admin`, also accessible as `/admin/manage`) includes
 daily Kite login/request-token submission, access-token rotation, settings,
 operating mode, logs, risk operations, and validated GitHub update/restart.
 
-On the first access each day, the browser is directed to
-`/admin/kite/start`: authenticate on Zerodha's official website, paste
-the request token or redirect URL into that one form, and the server exchanges
-the token and verifies the account against the **preconfigured**
+On first access, **the original dashboard opens immediately** at
+`/admin` with its daily request-token field expanded. There is no extra
+owner-verification page and no separate admin password. Authenticate on
+Zerodha's official website, paste the request token or redirect URL into
+the existing form; the server exchanges the token and verifies the account
+against the **preconfigured**
 `ADMIN_ZERODHA_USER_ID`. After that, the protected browser session opens the
 full admin page directly without another username/password. Only the
 existing authorized Kite account can open real-money operations. The
@@ -130,8 +132,8 @@ logins, and there is no clock-based ban on intraday safe releases.
 
 Verification after release:
 - HTTP `:8080/admin` returns a 307 redirect to HTTPS; no Basic challenge.
-- HTTPS `/admin` redirects an unknown browser to Zerodha login (303).
-- HTTPS `/admin` opens the **full** editable dashboard for the signed owner.
+- HTTPS `/admin` opens the **full** dashboard before daily login, with a visible token form and unprivileged controls inactive.
+- Entering the verified owner's daily Zerodha request token unlocks the other editable controls in the same browser.
 - HTTP `/admin/manage` and unauthenticated mutations remain forbidden.
 - Check actual AWS build SHA against merged GitHub main and complete release
   state before claiming the deployment is active.

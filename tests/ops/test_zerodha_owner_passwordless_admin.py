@@ -31,23 +31,25 @@ def _setup(monkeypatch, tmp_path, *, owner: str = "AB1234") -> TestClient:
 
 
 def _start(client: TestClient) -> str:
-    response = client.get("/admin/kite/start")
+    response = client.get("/admin")
     assert response.status_code == 200
     assert response.cookies.get("nifty_owner_login")
     assert "secure" in response.headers["set-cookie"].lower()
     assert "httponly" in response.headers["set-cookie"].lower()
-    challenge = re.search(r"name='owner_state' value='([^']+)'", response.text)
+    challenge = re.search(r'name="owner_state" value="([^"]+)"', response.text)
     assert challenge is not None
+    assert 'action="/admin/token"' in response.text
     return challenge.group(1)
 
 
-def test_zerodha_owner_session_replaces_separate_admin_prompt(
+def test_original_dashboard_token_rotates_and_unlocks_controls(
     monkeypatch, tmp_path
 ) -> None:
     client = _setup(monkeypatch, tmp_path)
     login = client.get("/admin/manage", follow_redirects=False)
-    assert login.status_code == 303
-    assert login.headers["location"] == "/admin/kite/start"
+    assert login.status_code == 200
+    assert 'action="/admin/token"' in login.text
+    assert 'action="/admin/mode" inert' in login.text
     state = _start(client)
     monkeypatch.setattr(
         dashboard, "_exchange_request_token", lambda *_: (True, "access-secret")
@@ -62,18 +64,19 @@ def test_zerodha_owner_session_replaces_separate_admin_prompt(
         ),
     )
     result = client.post(
-        "/admin/kite/complete",
+        "/admin/token",
         data={"owner_state": state, "request_token": "one-time-request"},
         headers={"origin": "https://65.0.255.84"},
         follow_redirects=False,
     )
     assert result.status_code == 303
-    assert result.headers["location"].startswith("/admin/manage")
+    assert result.headers["location"].startswith("/admin?token=ok")
     assert actions == ["access-secret"]
     assert result.cookies.get("nifty_owner_session")
-    owner = client.get("/admin/manage")
+    owner = client.get("/admin")
     assert owner.status_code == 200
     assert "Bot administration" in owner.text
+    assert 'action="/admin/mode" inert' not in owner.text
     assert "www-authenticate" not in owner.headers
 
 
@@ -92,12 +95,12 @@ def test_different_zerodha_account_never_activates_token(monkeypatch, tmp_path) 
         lambda *_: (_ for _ in ()).throw(AssertionError("not the owner")),
     )
     result = client.post(
-        "/admin/kite/complete",
+        "/admin/token",
         data={"owner_state": state, "request_token": "request"},
         headers={"origin": "https://65.0.255.84"},
     )
     assert result.status_code == 403
-    assert client.get("/admin/manage", follow_redirects=False).status_code == 303
+    assert client.get("/admin/manage", follow_redirects=False).status_code == 200
 
 
 def test_missing_challenge_or_cross_origin_cannot_rotate(monkeypatch, tmp_path) -> None:
@@ -108,7 +111,7 @@ def test_missing_challenge_or_cross_origin_cannot_rotate(monkeypatch, tmp_path) 
         ("forged", "https://evil.invalid"),
     ):
         response = client.post(
-            "/admin/kite/complete",
+            "/admin/token",
             data={"owner_state": state, "request_token": "request"},
             headers={"origin": origin},
         )
@@ -117,9 +120,9 @@ def test_missing_challenge_or_cross_origin_cannot_rotate(monkeypatch, tmp_path) 
 
 def test_no_owner_configuration_fails_closed(monkeypatch, tmp_path) -> None:
     client = _setup(monkeypatch, tmp_path, owner="")
-    result = client.get("/admin/kite/start")
+    result = client.get("/admin")
     assert result.status_code == 503
-    assert "not configured" in result.text.lower()
+    assert result.json()["detail"] == "admin_owner_not_configured"
 
 
 def test_http_never_allows_owner_login_or_mutation(monkeypatch, tmp_path) -> None:
@@ -130,7 +133,7 @@ def test_http_never_allows_owner_login_or_mutation(monkeypatch, tmp_path) -> Non
     assert client.get("/admin/kite/start").status_code == 403
     assert (
         client.post(
-            "/admin/kite/complete",
+            "/admin/token",
             data={"owner_state": "forged", "request_token": "request"},
         ).status_code
         == 403
