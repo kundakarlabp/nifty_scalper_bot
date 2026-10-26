@@ -601,9 +601,8 @@ def _approved_smc_freshness_block(
     if str(getattr(signal, "action", "")).upper() not in {"BUY", "SELL"}:
         return None
     metadata = dict(getattr(signal, "metadata", {}) or {})
-    strategy = str(
-        metadata.get("strategy_name") or metadata.get("strategy") or ""
-    ).strip().upper()
+    strategy_name = metadata.get("strategy_name") or metadata.get("strategy")
+    strategy = str(strategy_name or "").strip().upper()
     if strategy != "SMC":
         return None
     sweep_epoch = _coerce_epoch_seconds(metadata.get("sweep_timestamp"))
@@ -716,8 +715,6 @@ def _final_filter(manager: Any, signal: Signal, trace_id: str | None) -> Signal 
         if isinstance(filtered, Signal):
             return filtered
     return signal
-
-
 
 
 def apply_patches() -> None:
