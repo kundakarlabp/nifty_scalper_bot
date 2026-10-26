@@ -1858,6 +1858,7 @@ def test_pending_exchange_stop_ratchet_reconciles_without_duplicate_modification
     broker.statuses[stop_id] = "TRIGGER PENDING"
     assert manager._confirm_exchange_protective_stop(bracket)
     assert bracket.exchange_stop_degraded_reason is None
+    assert bracket.trailing_config["trail_history"][-1]["broker_confirmed"] is True
     assert bracket.exchange_stop_modify_count == 1
     assert len(order_manager.modify_calls) == 1
 
