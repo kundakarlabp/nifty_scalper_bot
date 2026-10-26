@@ -43,11 +43,14 @@ def test_public_admin_status_needs_no_basic_credentials(monkeypatch) -> None:
     assert "private-test-password" not in response.text
 
 
-def test_public_admin_status_cannot_fall_back_to_cleartext_http(monkeypatch) -> None:
+def test_existing_http_8080_gets_only_passwordless_status(monkeypatch) -> None:
     monkeypatch.setenv("DEPLOYMENT_PLATFORM", "aws_lightsail")
     response = _client(https=False).get("/admin")
-    assert response.status_code == 403
-    assert response.json()["detail"] == "admin_https_required"
+    assert response.status_code == 200
+    assert "No admin login required" in response.text
+    assert 'action="/admin/mode"' not in response.text
+    assert "www-authenticate" not in response.headers
+    assert _client(https=False).get("/admin/manage").status_code == 403
 
 
 def test_operator_controls_still_require_authentication(monkeypatch) -> None:
