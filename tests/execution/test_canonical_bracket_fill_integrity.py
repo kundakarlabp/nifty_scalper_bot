@@ -284,3 +284,68 @@ def test_stale_rescue_fill_with_residual_uses_same_fail_closed_rule() -> None:
     assert bracket.remaining_quantity == 20
     assert bracket.position_flat_confirmed is False
     assert order_manager.place_calls == []
+
+
+def test_tp1_residual_stop_arm_failure_blocks_entries_and_never_claims_proof(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, _, broker = _manager()
+    bracket = _mark_exit_submitted(
+        manager,
+        broker,
+        order_id="tp1-stop-rearm-failed",
+        reason="TP1 Hit (110.00)",
+        residual_quantity=65,
+        average_price=110.0,
+    )
+    observed_events: list[str] = []
+    manager.set_notifier(lambda event, _data: observed_events.append(event))
+    monkeypatch.setattr(manager, "_is_live_execution", lambda: True)
+    manager._exchange_protective_stop_enabled = True
+    attempts: list[int] = []
+
+    def failed_rearm(active: Any) -> bool:
+        attempts.append(int(active.remaining_quantity))
+        return False
+
+    monkeypatch.setattr(manager, "_ensure_exchange_protective_stop", failed_rearm)
+
+    assert manager._reconcile_exit_state(bracket, requested_by="tp1") is False
+    assert attempts == [65]
+    assert bracket.remaining_quantity == 65
+    assert bracket.exit_state == BracketExitLifecycle.OPEN_ACTIVE.value
+    assert bracket.exchange_stop_degraded_reason == (
+        "placement_unverified:partial_target"
+    )
+    assert manager.has_unresolved_exit() is True
+    assert manager.get_first_unresolved_exit_bracket_id() == bracket.bracket_id
+    assert "PARTIAL_EXIT_RESIDUAL_STOP_UNVERIFIED" in observed_events
+    assert "PARTIAL_EXIT_CONFIRMED" in observed_events
+
+
+def test_tp1_residual_stop_arm_exception_remains_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, _, broker = _manager()
+    bracket = _mark_exit_submitted(
+        manager,
+        broker,
+        order_id="tp1-stop-rearm-exception",
+        reason="TP1 Hit (110.00)",
+        residual_quantity=65,
+        average_price=110.0,
+    )
+    monkeypatch.setattr(manager, "_is_live_execution", lambda: True)
+    manager._exchange_protective_stop_enabled = True
+
+    def raising_rearm(_active: Any) -> bool:
+        raise RuntimeError("broker orderbook temporarily unavailable")
+
+    monkeypatch.setattr(manager, "_ensure_exchange_protective_stop", raising_rearm)
+
+    assert manager._reconcile_exit_state(bracket, requested_by="tp1") is False
+    assert bracket.remaining_quantity == 65
+    assert bracket.exchange_stop_degraded_reason == (
+        "placement_unverified:partial_target"
+    )
+    assert manager.has_unresolved_exit() is True
