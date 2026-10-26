@@ -5613,17 +5613,32 @@ class BracketManager:
             unsettled_broker_stop = str(
                 bracket.exchange_stop_degraded_reason or ""
             ).startswith("broker_stop_")
-        if unsettled_broker_stop and not self._confirm_exchange_protective_stop(
-            bracket
-        ):
-            return False
+            recorded_qty = int(bracket.exchange_stop_quantity or 0)
+            quantity_repair_needed = (
+                recorded_qty > 0
+                and int(bracket.remaining_quantity) != recorded_qty
+            )
+        broker_proven = not unsettled_broker_stop
+        if unsettled_broker_stop:
+            broker_proven = self._confirm_exchange_protective_stop(bracket)
+            if not broker_proven and not quantity_repair_needed:
+                return False
         with self._lock:
             if str(bracket.exchange_stop_order_id or "") != order_id:
                 return False
             current_trigger = float(bracket.exchange_stop_trigger_price or 0.0)
+            # A late partial fill changes the held quantity immediately.
+            # Updating coverage on the SAME broker order ID takes precedence
+            # over optional price improvements. Until prior broker geometry
+            # is verified, preserve the recorded stop price in that resize.
+            requested_sl = (
+                bracket.sl_trigger_price
+                if broker_proven
+                else current_trigger
+            )
             trigger, limit_price = self._exchange_stop_prices(
                 bracket,
-                bracket.sl_trigger_price,
+                requested_sl,
             )
             modify_count = max(0, int(bracket.exchange_stop_modify_count or 0))
             desired_quantity = int(bracket.remaining_quantity)
