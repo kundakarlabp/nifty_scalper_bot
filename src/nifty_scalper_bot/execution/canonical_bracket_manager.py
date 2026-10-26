@@ -197,15 +197,66 @@ class CanonicalBracketManager(HardenedBracketManager):
 
         self._move_sl_to_breakeven(bracket)
         # TP1 retires the old full-quantity exchange stop before the partial
-        # exit. Synchronising the virtual SL alone cannot recreate that order:
-        # arm one fresh stop for the broker-confirmed residual position.
-        if self._is_live_execution():
-            self._ensure_exchange_protective_stop(bracket)
+        # exit. Only broker-confirmed residual SL geometry can be described as
+        # protected. An unsuccessful arm must remain an explicit entry blocker,
+        # not an optimistic "RESIDUAL_PROTECTED" success marker.
+        protection_required = bool(
+            self._is_live_execution() and self._exchange_protective_stop_enabled
+        )
+        protection_verified = not protection_required
+        if protection_required:
+            try:
+                protection_verified = bool(
+                    self._ensure_exchange_protective_stop(bracket)
+                )
+            except Exception as exc:  # noqa: BLE001
+                _core.LOGGER.critical(
+                    "PARTIAL_EXIT_RESIDUAL_STOP_ARM_EXCEPTION "
+                    "bracket_id=%s symbol=%s error=%s",
+                    bracket.bracket_id,
+                    bracket.symbol,
+                    exc,
+                )
+        if protection_required and not protection_verified:
+            with self._lock:
+                if not bracket.exchange_stop_degraded_reason:
+                    bracket.exchange_stop_degraded_reason = (
+                        "placement_unverified:partial_target"
+                    )
+                bracket.updated_at = time.time()
+            _core.LOGGER.critical(
+                "PARTIAL_EXIT_RESIDUAL_STOP_UNVERIFIED "
+                "bracket_id=%s symbol=%s target=%s remaining_qty=%s "
+                "order_id=%s reason=%s",
+                bracket.bracket_id,
+                bracket.symbol,
+                target.name,
+                residual_quantity,
+                bracket.exchange_stop_order_id,
+                bracket.exchange_stop_degraded_reason,
+                extra={
+                    "event": "PARTIAL_EXIT_RESIDUAL_STOP_UNVERIFIED",
+                    "bracket_id": bracket.bracket_id,
+                    "symbol": bracket.symbol,
+                    "remaining_qty": residual_quantity,
+                },
+            )
+            with suppress(Exception):
+                self._notify_event(
+                    "PARTIAL_EXIT_RESIDUAL_STOP_UNVERIFIED",
+                    {
+                        "symbol": bracket.symbol,
+                        "target": str(target.name),
+                        "remaining_qty": residual_quantity,
+                        "reason": bracket.exchange_stop_degraded_reason,
+                    },
+                )
         with suppress(Exception):
             self.save_state()
         _core.LOGGER.info(
-            "PARTIAL_EXIT_CONFIRMED_RESIDUAL_PROTECTED bracket_id=%s symbol=%s "
-            "target=%s filled_qty=%s remaining_qty=%s fill_price=%s requested_by=%s",
+            "PARTIAL_EXIT_CONFIRMED_RESIDUAL_%s bracket_id=%%s symbol=%%s "
+            "target=%%s filled_qty=%%s remaining_qty=%%s fill_price=%%s requested_by=%%s"
+            % ("PROTECTED" if protection_verified else "STOP_UNVERIFIED"),
             bracket.bracket_id,
             bracket.symbol,
             target.name,
