@@ -219,9 +219,13 @@ class CanonicalBracketManager(HardenedBracketManager):
                 )
         if protection_required and not protection_verified:
             with self._lock:
-                if not bracket.exchange_stop_degraded_reason:
+                if not self._exchange_stop_protection_degraded(bracket):
+                    previous_reason = str(
+                        bracket.exchange_stop_degraded_reason or ""
+                    )
                     bracket.exchange_stop_degraded_reason = (
                         "placement_unverified:partial_target"
+                        + (f":{previous_reason}" if previous_reason else "")
                     )
                 bracket.updated_at = time.time()
             _core.LOGGER.critical(
