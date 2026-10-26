@@ -62,7 +62,9 @@ def test_https_admin_entry_routes_directly_to_owner_login(monkeypatch) -> None:
     assert response.status_code == 401
 
 
-def test_signed_owner_gets_existing_full_dashboard_without_admin_password(monkeypatch) -> None:
+def test_signed_owner_gets_existing_full_dashboard_without_admin_password(
+    monkeypatch,
+) -> None:
     _owner(monkeypatch, authenticated=True)
     monkeypatch.delenv("ADMIN_PASSWORD", raising=False)
     response = _client().get("/admin")
