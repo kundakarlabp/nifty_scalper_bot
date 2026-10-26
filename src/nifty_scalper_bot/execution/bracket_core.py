@@ -794,6 +794,9 @@ class BracketManager:
         # Serialize broker-side SL modifications: multiple trailing owners can
         # otherwise acknowledge out of order and weaken the resting exchange stop.
         self._exchange_stop_modify_mutex = threading.RLock()
+        # Broker status probes belong on the watchdog, not the market-data
+        # callback. Throttle unsettled modifications by exchange order ID.
+        self._exchange_stop_verify_next_at: Dict[str, float] = {}
         self._watchdog_thread = threading.Thread(
             target=self._watchdog_exit_loop,
             name="bracket-watchdog",
@@ -1008,11 +1011,28 @@ class BracketManager:
             try:
                 pending: list[tuple[BracketState, dict[str, Any]]] = []
                 reconcile_candidates: list[BracketState] = []
+                stop_verify_candidates: list[BracketState] = []
                 with self._lock:
                     for bracket in self._brackets.values():
                         if bracket.exit_state == BracketExitLifecycle.CLOSED.value:
                             continue
                         reconcile_candidates.append(bracket)
+                        stop_id = str(bracket.exchange_stop_order_id or "")
+                        if (
+                            stop_id
+                            and bracket.active
+                            and bracket.entry_confirmed
+                            and bracket.remaining_quantity > 0
+                            and not bracket.exit_pending
+                            and not bracket.exit_executed
+                            and bracket.exchange_stop_degraded_reason
+                        ):
+                            due = self._exchange_stop_verify_next_at.get(stop_id, 0.0)
+                            if time.monotonic() >= due:
+                                self._exchange_stop_verify_next_at[stop_id] = (
+                                    time.monotonic() + 2.0
+                                )
+                                stop_verify_candidates.append(bracket)
                         ltp = float(bracket.last_ltp or 0.0)
                         if bracket.exit_pending and bracket.remaining_quantity > 0:
                             pending.append(
@@ -1076,6 +1096,13 @@ class BracketManager:
                             pending.append((bracket, action))
                 for bracket in reconcile_candidates:
                     self._reconcile_pending_entry(bracket)
+                for bracket in stop_verify_candidates:
+                    # The order may have become TRIGGER PENDING after the
+                    # immediate post-modify read returned MODIFY PENDING.
+                    # Reconcile through the one broker-stop mutex so ratchets
+                    # and status proofs cannot cross in flight.
+                    with self._exchange_stop_modify_mutex:
+                        self._confirm_exchange_protective_stop(bracket)
                 if pending:
                     self._log_throttled(
                         "critical",
@@ -5187,6 +5214,27 @@ class BracketManager:
         meta: Mapping[str, object] | None = None,
     ) -> None:
         """Queue one bracket event using the bracket's durable trade provenance."""
+        if event_type == "TRAIL_UPDATED" and meta is not None:
+            # Persist a bounded virtual-stop trail in bracket state. The
+            # broker orderbook separately decides whether a ratchet is proven.
+            # Journal availability must not determine whether history survives.
+            with self._lock:
+                records = bracket.trailing_config.setdefault("trail_history", [])
+                if not isinstance(records, list):
+                    records = []
+                records.append(
+                    {
+                        "timestamp": time.time(),
+                        "old_sl": meta.get("old_sl"),
+                        "new_sl": meta.get("new_sl"),
+                        "ltp": meta.get("ltp"),
+                        "revision": meta.get("trail_revision"),
+                        "source": meta.get("source"),
+                        "exchange_order_id": bracket.exchange_stop_order_id,
+                        "broker_confirmed": False,
+                    }
+                )
+                bracket.trailing_config["trail_history"] = records[-64:]
         journal = self._trade_journal
         if journal is None:
             return
@@ -5312,8 +5360,52 @@ class BracketManager:
         with self._lock:
             if str(bracket.exchange_stop_order_id or "") != order_id:
                 return False
+            prior_reason = bracket.exchange_stop_degraded_reason
             bracket.exchange_stop_degraded_reason = reason
             bracket.updated_at = time.time()
+            trail_proven = False
+            if confirmed:
+                # A virtual trail is not an exchange ratchet until orderbook
+                # fields match. Attribute proof to its exact stop revision.
+                history = (getattr(bracket, "trailing_config", None) or {}).get(
+                    "trail_history", []
+                )
+                if isinstance(history, list):
+                    for record in reversed(history):
+                        if not isinstance(record, dict):
+                            continue
+                        if record.get("exchange_order_id") != order_id:
+                            continue
+                        try:
+                            matching = abs(
+                                float(record.get("new_sl"))
+                                - float(bracket.exchange_stop_trigger_price)
+                            ) <= 1e-6
+                        except (TypeError, ValueError):
+                            matching = False
+                        if matching:
+                            if not record.get("broker_confirmed"):
+                                record["broker_confirmed"] = True
+                                record["broker_confirmed_at"] = time.time()
+                                trail_proven = True
+                            break
+        if confirmed and (prior_reason or trail_proven):
+            LOGGER.info(
+                "EXCHANGE_PROTECTIVE_STOP_RECONCILED order_id=%s symbol=%s "
+                "trigger=%s quantity=%s prior_reason=%s",
+                order_id,
+                bracket.symbol,
+                bracket.exchange_stop_trigger_price,
+                requested_qty,
+                prior_reason,
+                extra={
+                    "event": "EXCHANGE_PROTECTIVE_STOP_RECONCILED",
+                    "order_id": order_id,
+                    "symbol": bracket.symbol,
+                },
+            )
+            with suppress(Exception):
+                self.save_state()
         if not confirmed:
             LOGGER.critical(
                 "EXCHANGE_PROTECTIVE_STOP_UNVERIFIED order_id=%s symbol=%s "

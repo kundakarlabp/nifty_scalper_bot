@@ -1812,3 +1812,68 @@ def test_prior_day_404_reconcile_fails_closed_without_full_proof(
     assert manager.get_bracket("entry-1") is bracket
     assert status_calls == ["old-stop"]
     assert broker.cancel_calls == []
+
+
+def test_pending_exchange_stop_ratchet_reconciles_without_duplicate_modification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A broker MODIFY PENDING is not proof, but must converge once accepted."""
+    manager, order_manager, broker = _manager()
+    manager._exchange_protective_stop_enabled = True
+    monkeypatch.setattr(manager, "_is_live_execution", lambda: True)
+    monkeypatch.setattr(manager, "save_state", lambda: None)
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    assert manager._ensure_exchange_protective_stop(bracket)
+    stop_id = bracket.exchange_stop_order_id
+    assert stop_id is not None
+    assert bracket.exchange_stop_degraded_reason is None
+
+    original_modify = order_manager.modify_order
+
+    def pending_modify(order_id: str, **kwargs: Any) -> bool:
+        accepted = original_modify(order_id, **kwargs)
+        broker.statuses[order_id] = "MODIFY PENDING"
+        return accepted
+
+    monkeypatch.setattr(order_manager, "modify_order", pending_modify)
+    bracket.last_ltp = 160.0
+    assert manager._virtual_modify_sl(bracket.virtual_sl_id, 150.0)
+    assert bracket.sl_trigger_price == pytest.approx(150.0)
+    assert bracket.exchange_stop_degraded_reason == (
+        "broker_stop_status_unverified:MODIFY PENDING"
+    )
+    assert len(order_manager.modify_calls) == 1
+    trail = bracket.trailing_config["trail_history"]
+    assert len(trail) == 1
+    assert trail[0]["old_sl"] == pytest.approx(140.0)
+    assert trail[0]["new_sl"] == pytest.approx(150.0)
+    assert trail[0]["broker_confirmed"] is False
+
+    # Repeated ratchet attempts must never create another modification
+    # while the broker has not settled the first one.
+    assert not manager._sync_exchange_protective_stop(bracket)
+    assert len(order_manager.modify_calls) == 1
+
+    broker.statuses[stop_id] = "TRIGGER PENDING"
+    assert manager._confirm_exchange_protective_stop(bracket)
+    assert bracket.exchange_stop_degraded_reason is None
+    assert bracket.trailing_config["trail_history"][-1]["broker_confirmed"] is True
+    assert bracket.exchange_stop_modify_count == 1
+    assert len(order_manager.modify_calls) == 1
+
+
+def test_persisted_bracket_contains_bounded_trailing_history(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, _, _ = _manager()
+    monkeypatch.setattr(manager, "save_state", lambda: None)
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    bracket.last_ltp = 160.0
+    assert manager._virtual_modify_sl(bracket.virtual_sl_id, 150.0)
+    serialized = bracket.to_dict()
+    record = serialized["trailing_config"]["trail_history"][0]
+    assert record["new_sl"] == pytest.approx(150.0)
+    assert record["revision"] == 1
+    assert record["exchange_order_id"] is None
