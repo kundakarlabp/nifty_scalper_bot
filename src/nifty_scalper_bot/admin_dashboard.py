@@ -476,7 +476,7 @@ a{color:#83bcff}small{color:#afc0cf}
 <div><dt>Revision</dt><dd id="revision">Checking…</dd></div></dl>
 <p><small>Trading readiness and broker authentication are not established
 by process liveness.</small></p>
-<p><a href="/admin/manage">Protected trading controls</a> (sign in with Zerodha)</p></section>
+<p><a href="https://65.0.255.84/admin/kite/start">Sign in with Zerodha (HTTPS)</a> · <a href="/admin/manage">Protected trading controls</a></p></section>
 <script>
 async function refresh(){
   try{
