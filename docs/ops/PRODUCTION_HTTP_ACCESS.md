@@ -17,7 +17,7 @@
 | `http://65.0.255.84:8080/releasez` | Public deployed GitHub SHA and release provenance | HTTP 200; compare `effective_sha` with GitHub main |
 | `http://65.0.255.84:8501/_stcore/health` | Public Streamlit process liveness | HTTP 200, `ok` |
 | `http://65.0.255.84:8080/health/trading` | Operational trading readiness | May be 404 while off-hours `AUTO` deliberately unloads the engine |
-| `https://65.0.255.84/admin` | Password-free sanitized process-status home | Trusted HTTPS only; no broker tokens, positions, trade controls or privileged logs |
+| `http://65.0.255.84:8080/admin` and `https://65.0.255.84/admin` | Password-free sanitized process-status home | Public process fields only; no broker tokens, positions, trade controls or privileged logs |
 | `https://65.0.255.84/admin/manage` | Protected interactive trading operator dashboard | Trusted HTTPS and existing admin authentication required for credentials, LIVE switches, restarts and risk controls |
 | `http://127.0.0.1:8081/healthz` | Host-local independent admin process liveness | HTTP 200, `status=ok`; never require public TCP 8081 |
 
@@ -96,7 +96,7 @@ HTTP liveness or the absence of an exchange holiday.
 
 ## Passwordless admin status (2026-10-26)
 
-The ordinary public HTTPS `/admin` page is a **read-only status view** with no
+The ordinary public HTTP or HTTPS `/admin` page is a **read-only status view** with no
 username/password prompt. It displays only the liveness, operating mode and
 GitHub release SHA from the canonical `/livez` and `/releasez` endpoints.
 It must not read the host environment, render Zerodha tokens, expose trading
