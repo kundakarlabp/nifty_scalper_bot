@@ -301,6 +301,8 @@ def test_tp1_residual_stop_arm_failure_blocks_entries_and_never_claims_proof(
     observed_events: list[str] = []
     manager.set_notifier(lambda event, _data: observed_events.append(event))
     monkeypatch.setattr(manager, "_is_live_execution", lambda: True)
+    # Simulate live broker-stop semantics without LIVE writing to pytest /tmp.
+    monkeypatch.setattr(manager, "save_state", lambda: None)
     manager._exchange_protective_stop_enabled = True
     attempts: list[int] = []
 
@@ -336,6 +338,8 @@ def test_tp1_residual_stop_arm_exception_remains_fail_closed(
         average_price=110.0,
     )
     monkeypatch.setattr(manager, "_is_live_execution", lambda: True)
+    # Simulate live broker-stop semantics without LIVE writing to pytest /tmp.
+    monkeypatch.setattr(manager, "save_state", lambda: None)
     manager._exchange_protective_stop_enabled = True
 
     def raising_rearm(_active: Any) -> bool:
@@ -366,6 +370,8 @@ def test_tp1_verified_live_residual_stop_keeps_entries_unblocked(
     events: list[str] = []
     manager.set_notifier(lambda event, _payload: events.append(event))
     monkeypatch.setattr(manager, "_is_live_execution", lambda: True)
+    # Simulate live broker-stop semantics without LIVE writing to pytest /tmp.
+    monkeypatch.setattr(manager, "save_state", lambda: None)
     manager._exchange_protective_stop_enabled = True
     monkeypatch.setattr(manager, "_ensure_exchange_protective_stop", lambda _b: True)
 
