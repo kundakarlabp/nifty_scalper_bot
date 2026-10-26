@@ -19355,14 +19355,14 @@ class StrategyRunner:
 
                     orig_expiry = _expiry_key(original_symbol)
                     new_expiry = _expiry_key(selected_symbol)
-                    if (
-                        replacement_blocked_reason is None
-                        and strict_replace
-                        and orig_expiry
-                        and new_expiry
-                        and orig_expiry != new_expiry
-                    ):
-                        replacement_blocked_reason = "expiry_mismatch"
+                    if replacement_blocked_reason is None and strict_replace:
+                        # A missing expiry proof cannot be treated as a match.
+                        # Both contracts must independently resolve to an
+                        # identical expiry identity before replacement.
+                        if not orig_expiry or not new_expiry:
+                            replacement_blocked_reason = "expiry_unverified"
+                        elif orig_expiry != new_expiry:
+                            replacement_blocked_reason = "expiry_mismatch"
                     orig_strike = self._extract_strike_from_symbol(original_symbol)
                     new_strike = self._extract_strike_from_symbol(selected_symbol)
                     if (
