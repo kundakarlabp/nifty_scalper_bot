@@ -212,9 +212,7 @@ class CanonicalBracketManager(HardenedBracketManager):
         protection_verified = not protection_required
         if protection_required:
             try:
-                protection_verified = bool(
-                    self._ensure_exchange_protective_stop(bracket)
-                )
+                protection_verified = bool(self._ensure_exchange_protective_stop(bracket))
             except Exception as exc:  # noqa: BLE001
                 _core.LOGGER.critical(
                     "PARTIAL_EXIT_RESIDUAL_STOP_ARM_EXCEPTION "
@@ -226,9 +224,7 @@ class CanonicalBracketManager(HardenedBracketManager):
         if protection_required and not protection_verified:
             with self._lock:
                 if not self._exchange_stop_protection_degraded(bracket):
-                    previous_reason = str(
-                        bracket.exchange_stop_degraded_reason or ""
-                    )
+                    previous_reason = str(bracket.exchange_stop_degraded_reason or "")
                     bracket.exchange_stop_degraded_reason = (
                         "placement_unverified:partial_target"
                         + (f":{previous_reason}" if previous_reason else "")
