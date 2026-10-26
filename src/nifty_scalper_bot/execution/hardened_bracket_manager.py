@@ -3,6 +3,11 @@
 The core manager remains the implementation owner. This subclass tightens its
 state transitions, rescues stale protective orders without duplicate exposure,
 and installs a final unresolved-exit guard on the attached OrderManager.
+
+Responsibilities: Apply live bracket safety checks and only initialize the
+first-fill extrema. Later cumulative fills must preserve the existing trail.
+Ownership: Core owns entry/stop geometry; hardened subclass enforces recovery.
+Safety: A late broker callback must not reset high/low watermarks or exit state.
 """
 
 from __future__ import annotations
