@@ -1587,13 +1587,27 @@ def test_exchange_stop_cannot_be_loosened_by_stale_virtual_trail() -> None:
 def test_parallel_virtual_ratchets_preserve_latest_broker_stop(monkeypatch) -> None:
     from threading import Event, Thread
 
-    manager, order_manager, _broker = _manager()
+    manager, order_manager, broker = _manager()
     bracket = manager.get_bracket("entry-1")
     assert bracket is not None
     bracket.exchange_stop_order_id = "protect-1"
     bracket.exchange_stop_trigger_price = 140.0
     bracket.exchange_stop_limit_price = 133.0
     bracket.sl_trigger_price = 145.0
+    broker.statuses["protect-1"] = "TRIGGER PENDING"
+    broker.quantities["protect-1"] = 65
+    broker.protective_order_fields["protect-1"] = {
+        "order_id": "protect-1",
+        "tradingsymbol": SYMBOL.removeprefix("NFO:"),
+        "exchange": "NFO",
+        "transaction_type": "SELL",
+        "product": "MIS",
+        "order_type": "SL",
+        "pending_quantity": 65,
+        "filled_quantity": 0,
+        "trigger_price": 140.0,
+        "price": 133.0,
+    }
     entered = Event()
     release = Event()
     acknowledged: list[float] = []
@@ -1605,6 +1619,10 @@ def test_parallel_virtual_ratchets_preserve_latest_broker_stop(monkeypatch) -> N
             entered.set()
             assert release.wait(2.0)
         acknowledged.append(trigger)
+        # Return from modify only after exchange orderbook fields match the
+        # acknowledged trigger; the serialized second ratchet needs proof.
+        broker.protective_order_fields[order_id]["trigger_price"] = trigger
+        broker.protective_order_fields[order_id]["price"] = changes["price"]
         return True
 
     monkeypatch.setattr(order_manager, "modify_order", delayed_modify)
