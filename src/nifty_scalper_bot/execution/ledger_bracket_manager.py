@@ -753,8 +753,30 @@ class LedgerBracketManager(CanonicalBracketManager):
             trail_activation_r = round(float(self._trail_activation_r(bracket)), 4)
         trail_revision = int(getattr(bracket, "trail_revision", 0) or 0)
         final_stop_price = _finite(getattr(bracket, "sl_trigger_price", None))
+        broker_stop_trigger = _finite(
+            getattr(bracket, "exchange_stop_trigger_price", None)
+        )
+        stop_fill_deviation = None
+        if (
+            str(getattr(bracket, "exit_order_type", "") or "").upper() == "SL"
+            and broker_stop_trigger is not None
+            and resolved_exit is not None
+        ):
+            # Signed loss of fill quality against the resting exchange trigger,
+            # *not* quote-arrival slippage. Positive means a worse fill.
+            stop_fill_deviation = (
+                broker_stop_trigger - float(resolved_exit)
+                if side == "BUY"
+                else float(resolved_exit) - broker_stop_trigger
+            )
 
         execution_quality = {
+            "exchange_stop_trigger_price": broker_stop_trigger,
+            "stop_trigger_fill_deviation_points": (
+                round(stop_fill_deviation, 4)
+                if stop_fill_deviation is not None
+                else None
+            ),
             "entry_arrival_price": entry_arrival,
             "entry_quote_bid": entry_bid,
             "entry_quote_ask": entry_ask,
