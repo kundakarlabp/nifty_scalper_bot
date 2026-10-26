@@ -283,6 +283,10 @@ class RiskManager:
         self._restore_operator_reset_baseline()
         self._seed_day_pnl_from_persisted_state()
         self._restore_risk_circuit_from_persisted_state()
+        # Checkpoint today's initial loss envelope even when the first verified
+        # balance equals the startup balance. Otherwise a restart during the
+        # first live position could rebase the cap to premium-debited free cash.
+        self._persist_risk_circuit_state()
         self._risk_state = self.risk_state
         self._lot_size_lookup = None
         self._lot_size_symbol = None
