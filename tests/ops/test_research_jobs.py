@@ -492,6 +492,8 @@ def test_worker_completes_component_research_without_claiming_live_parity(
                 "corrupt_or_untrusted_files": 1,
                 "synchronized_contract_minutes": 165978,
                 "staged_session_dates": retained_dates,
+                "orb_opening_range_ready_staged_session_dates": retained_dates[:1],
+                "orb_opening_range_incomplete_staged_session_dates": retained_dates[1:],
                 "staging_rejections": {"2026-09-28": "historical_spot_unavailable"},
             },
         )
@@ -617,6 +619,18 @@ def test_worker_completes_component_research_without_claiming_live_parity(
         165978 if retained_sessions else 0
     )
     assert result["retained_cache_coverage"]["staged_session_dates"] == retained_dates
+    assert (
+        result["retained_cache_coverage"][
+            "orb_opening_range_ready_staged_session_dates"
+        ]
+        == retained_dates[:1]
+    )
+    assert (
+        result["retained_cache_coverage"][
+            "orb_opening_range_incomplete_staged_session_dates"
+        ]
+        == retained_dates[1:]
+    )
     assert result["retained_cache_coverage"]["promotion_eligible"] is False
     assert len(result["retained_session_research"]) == min(5, retained_sessions)
     assert result["retained_session_research_deferred"] == max(0, retained_sessions - 5)
