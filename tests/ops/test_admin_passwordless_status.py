@@ -20,8 +20,10 @@ def _client(*, https: bool = True) -> TestClient:
     )
 
 
-def _owner(monkeypatch, *, authenticated: bool) -> None:
+def _owner(monkeypatch, *, authenticated: bool, tmp_path=None) -> None:
     monkeypatch.setenv("DEPLOYMENT_PLATFORM", "aws_lightsail")
+    if tmp_path is not None:
+        monkeypatch.setenv("NIFTYBOT_CONFIG_DIR", str(tmp_path))
     monkeypatch.setattr(
         dashboard,
         "_read_env",
@@ -44,8 +46,10 @@ def test_http_bookmark_redirects_to_secure_admin_without_basic(monkeypatch) -> N
     assert _client(https=False).get("/admin/manage").status_code == 403
 
 
-def test_https_admin_opens_dashboard_without_extra_login_page(monkeypatch) -> None:
-    _owner(monkeypatch, authenticated=False)
+def test_https_admin_opens_dashboard_without_extra_login_page(
+    monkeypatch, tmp_path
+) -> None:
+    _owner(monkeypatch, authenticated=False, tmp_path=tmp_path)
     client = _client()
     for path in ("/admin", "/admin/manage"):
         response = client.get(path, follow_redirects=False)
@@ -78,8 +82,10 @@ def test_signed_owner_gets_existing_full_dashboard_without_admin_password(
     assert "www-authenticate" not in response.headers
 
 
-def test_existing_password_cannot_bypass_zerodha_ownership(monkeypatch) -> None:
-    _owner(monkeypatch, authenticated=False)
+def test_existing_password_cannot_bypass_zerodha_ownership(
+    monkeypatch, tmp_path
+) -> None:
+    _owner(monkeypatch, authenticated=False, tmp_path=tmp_path)
     monkeypatch.setenv("ADMIN_PASSWORD", "obsolete")
     response = _client().get(
         "/admin/manage",
