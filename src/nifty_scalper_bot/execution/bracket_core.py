@@ -5367,7 +5367,9 @@ class BracketManager:
             if confirmed:
                 # A virtual trail is not an exchange ratchet until orderbook
                 # fields match. Attribute proof to its exact stop revision.
-                history = bracket.trailing_config.get("trail_history", [])
+                history = (getattr(bracket, "trailing_config", None) or {}).get(
+                    "trail_history", []
+                )
                 if isinstance(history, list):
                     for record in reversed(history):
                         if not isinstance(record, dict):
