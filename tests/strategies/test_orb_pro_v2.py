@@ -1164,6 +1164,7 @@ def test_orb_nonfinite_numeric_configuration_uses_safe_defaults(
     assert actual.stop_loss == pytest.approx(baseline.stop_loss)
     assert actual.take_profit == pytest.approx(baseline.take_profit)
 
+
 def test_orb_retest_retries_same_bar_after_slope_alignment_recovers(
     monkeypatch,
 ) -> None:
@@ -1174,8 +1175,12 @@ def test_orb_retest_retries_same_bar_after_slope_alignment_recovers(
     rows = _opening_rows()
     rows.append(
         _bar(
-            15, open_=24_014.0, high=24_034.0, low=24_012.0,
-            close=24_030.0, volume=1_600.0,
+            15,
+            open_=24_014.0,
+            high=24_034.0,
+            low=24_012.0,
+            close=24_030.0,
+            volume=1_600.0,
         )
     )
     strategy = _strategy({FUTURE: rows})
@@ -1183,8 +1188,12 @@ def test_orb_retest_retries_same_bar_after_slope_alignment_recovers(
     assert strategy.generate_signal(CE, first, 50.0) is None
     rows.append(
         _bar(
-            16, open_=24_024.0, high=24_026.0, low=24_019.0,
-            close=24_021.0, volume=400.0,
+            16,
+            open_=24_024.0,
+            high=24_026.0,
+            low=24_019.0,
+            close=24_021.0,
+            volume=400.0,
         )
     )
     context = _base_indicators("CE", rows[-1]["timestamp"])
@@ -1213,8 +1222,12 @@ def test_orb_wrong_slope_at_breakout_can_only_recover_with_later_retest(
     rows = _opening_rows()
     rows.append(
         _bar(
-            15, open_=24_008.0, high=24_034.0, low=24_006.0,
-            close=24_030.0, volume=3_000.0,
+            15,
+            open_=24_008.0,
+            high=24_034.0,
+            low=24_006.0,
+            close=24_030.0,
+            volume=3_000.0,
         )
     )
     strategy = _strategy({FUTURE: rows})
@@ -1228,8 +1241,12 @@ def test_orb_wrong_slope_at_breakout_can_only_recover_with_later_retest(
     assert strategy.last_no_vote_reason == "awaiting_orb_retest"
     rows.append(
         _bar(
-            16, open_=24_024.0, high=24_026.0, low=24_019.0,
-            close=24_021.0, volume=400.0,
+            16,
+            open_=24_024.0,
+            high=24_026.0,
+            low=24_019.0,
+            close=24_021.0,
+            volume=400.0,
         )
     )
     retest = _base_indicators("CE", rows[-1]["timestamp"])
@@ -1248,18 +1265,29 @@ def test_orb_immutable_breakout_volume_failure_remains_terminal(
     rows = _opening_rows()
     rows.append(
         _bar(
-            15, open_=24_014.0, high=24_034.0, low=24_012.0,
-            close=24_030.0, volume=900.0,
+            15,
+            open_=24_014.0,
+            high=24_034.0,
+            low=24_012.0,
+            close=24_030.0,
+            volume=900.0,
         )
     )
     strategy = _strategy({FUTURE: rows})
-    assert strategy.generate_signal(
-        CE, _base_indicators("CE", rows[-1]["timestamp"]), 50.0
-    ) is None
+    assert (
+        strategy.generate_signal(
+            CE, _base_indicators("CE", rows[-1]["timestamp"]), 50.0
+        )
+        is None
+    )
     rows.append(
         _bar(
-            16, open_=24_024.0, high=24_026.0, low=24_019.0,
-            close=24_021.0, volume=400.0,
+            16,
+            open_=24_024.0,
+            high=24_026.0,
+            low=24_019.0,
+            close=24_021.0,
+            volume=400.0,
         )
     )
     context = _base_indicators("CE", rows[-1]["timestamp"])
