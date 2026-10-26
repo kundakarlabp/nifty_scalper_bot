@@ -50,9 +50,7 @@ def test_nonfinite_tick_never_contaminates_bracket_or_exits(monkeypatch, tmp_pat
     assert not bracket.exit_pending
 
 
-def test_nonfinite_quote_cannot_be_cached_as_executable_depth(
-    monkeypatch, tmp_path
-):
+def test_nonfinite_quote_cannot_be_cached_as_executable_depth(monkeypatch, tmp_path):
     manager = _manager(monkeypatch, tmp_path)
     for bid, ask in (
         (float("nan"), 102.0),
@@ -77,9 +75,7 @@ def test_corrupt_cached_depth_falls_back_to_ltp(monkeypatch, tmp_path):
     )
 
 
-def test_nonfinite_atr_is_rejected_from_provider_and_manual_feed(
-    monkeypatch, tmp_path
-):
+def test_nonfinite_atr_is_rejected_from_provider_and_manual_feed(monkeypatch, tmp_path):
     manager = _manager(monkeypatch, tmp_path)
     manager._atr_provider = Mock()
     manager._current_atr[SYMBOL] = 2.5
