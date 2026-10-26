@@ -196,16 +196,13 @@ def replacement_plan_rejection_reason(
     selected_entry = _positive_float(candidate_entry_price)
     selected_stop = _positive_float(candidate_stop_loss)
     selected_target = _positive_float(candidate_target)
-    if any(
-        value is None for value in (entry, selected_entry, selected_stop, selected_target)
+    if (
+        entry is None
+        or selected_entry is None
+        or selected_stop is None
+        or selected_target is None
     ):
         return "replacement_candidate_geometry_unverified"
-    assert (
-        entry is not None
-        and selected_entry is not None
-        and selected_stop is not None
-        and selected_target is not None
-    )
     if (
         abs(entry - selected_entry) > _TICK_SIZE
         or not (0.0 < selected_stop < selected_entry < selected_target)
