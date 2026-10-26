@@ -197,8 +197,7 @@ def replacement_plan_rejection_reason(
     selected_stop = _positive_float(candidate_stop_loss)
     selected_target = _positive_float(candidate_target)
     if any(
-        value is None
-        for value in (entry, selected_entry, selected_stop, selected_target)
+        value is None for value in (entry, selected_entry, selected_stop, selected_target)
     ):
         return "replacement_candidate_geometry_unverified"
     assert (
