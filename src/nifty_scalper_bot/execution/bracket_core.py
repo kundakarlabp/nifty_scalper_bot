@@ -8,6 +8,8 @@ Runtime role:
   stop-loss and take-profit for each open position.
 - Supports ATR trailing, multi-target exits (TP1/TP2), partial scaling, and
   orphan/position resync.
+- Reconciles later cumulative entry fills via _reconcile_active_entry_vwap
+  without resetting the original trade clock, protective ratchet or exit state.
 
 Position in the pipeline:
     execution/order_manager.py -> THIS FILE (bracket_manager.py)
