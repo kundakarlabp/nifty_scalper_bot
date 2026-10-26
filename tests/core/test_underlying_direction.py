@@ -79,3 +79,34 @@ def test_20260928_losing_ce_replay_fails_closed_on_spot_futures_conflict() -> No
     assert resolved.executable_bias is None
     assert resolved.state is UnderlyingDirectionState.TRANSITION
     assert resolved.reason == "fresh_spot_futures_disagreement"
+
+@pytest.mark.parametrize("invalid", [float("nan"), float("inf"), float("-inf")])
+@pytest.mark.parametrize("field", ["confidence", "age_seconds"])
+def test_direction_observation_rejects_nonfinite_numeric_evidence(
+    invalid, field
+) -> None:
+    kwargs = {
+        "bias": "CE",
+        "confidence": 0.8,
+        "age_seconds": 0.2,
+        "source": "futures_context",
+    }
+    kwargs[field] = invalid
+    with pytest.raises(ValueError, match="finite"):
+        UnderlyingDirectionObservation(**kwargs)
+
+
+def test_direction_observation_retains_finite_clamping_and_zero_age() -> None:
+    confident = _obs("PE", source="spot_context", age=0.0, confidence=1.8)
+    assert confident.confidence == 1.0
+    assert confident.age_seconds == 0.0
+    cautious = _obs("PE", source="spot_context", age=0.3, confidence=-0.4)
+    assert cautious.confidence == 0.0
+
+
+@pytest.mark.parametrize("invalid", ["invalid", None])
+def test_direction_observation_rejects_non_numeric_age(invalid) -> None:
+    with pytest.raises(ValueError, match="numeric"):
+        UnderlyingDirectionObservation(
+            bias="CE", confidence=0.8, age_seconds=invalid, source="spot_context"
+        )
