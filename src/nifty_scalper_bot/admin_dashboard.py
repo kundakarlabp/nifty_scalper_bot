@@ -934,8 +934,18 @@ def update_from_github(request: Request) -> Response:
 # fmt: off  # Short, stable JSON UI endpoints.
 @router.get("/admin/api/overview")  # type: ignore[untyped-decorator]
 def overview_api(request: Request) -> JSONResponse:
-    """Lightweight independent heartbeat for mobile auto-refresh."""
-    _check_auth(request)
+    """Show the existing sanitized runtime heartbeat before daily owner login.
+
+    quick_overview returns fixed process, broker-auth state and release
+    labels, never credentials, orders, account IDs or private journal lines.
+    Browser ownership is required for *mutating* admin controls, not for
+    recognizing a broker session already verified by the running engine.
+    """
+    if (
+        os.getenv("DEPLOYMENT_PLATFORM") == "aws_lightsail"
+        and request.url.scheme != "https"
+    ):
+        raise HTTPException(status_code=403, detail="admin_https_required")
     return JSONResponse(quick_overview(), headers={"Cache-Control": "no-store"})
 
 
