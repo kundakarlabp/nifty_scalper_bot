@@ -99,7 +99,8 @@ def test_service_status_link_is_read_only_without_owner_cookie(
 ) -> None:
     _owner(monkeypatch, authenticated=False, tmp_path=tmp_path)
     monkeypatch.setattr(
-        dashboard, "quick_overview",
+        dashboard,
+        "quick_overview",
         lambda: {"engine_ok": True, "quiet": False, "bot_loaded": True},
     )
     dashboard._STATUS_CACHE.update({"at": 0.0, "label": "", "color": ""})
