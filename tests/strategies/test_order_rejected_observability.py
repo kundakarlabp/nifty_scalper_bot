@@ -317,9 +317,12 @@ def test_capacity_rejection_is_persisted_with_bounded_cash_risk_evidence() -> No
     assert first["effective_one_lot_risk_budget"] == 305.28
     assert "trace_id" not in first
     assert "ignore_me" not in first
-    assert entry["candidate_capacity_decisions"]["NFO:NIFTY26OCT22600CE"][
-        "capacity_blocker"
-    ] == "cash"
+    assert (
+        entry["candidate_capacity_decisions"]["NFO:NIFTY26OCT22600CE"][
+            "capacity_blocker"
+        ]
+        == "cash"
+    )
 
 
 def test_reject_signal_execution_forwards_capacity_details_to_existing_journal() -> (
