@@ -1,3 +1,12 @@
+"""Underlying-led SMC liquidity-sweep, reclaim and displacement strategy.
+
+Runtime role: discover causal futures-based structural setups for tradable
+options and emit candidates only when directional, temporal and local
+confirmation conditions hold. Safety boundary: manager enrichment must
+timestamp every live local indicator used to corroborate the sweep;
+StrategyManager and the live-safety guard independently own final admission.
+"""
+
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -1144,7 +1153,11 @@ class SMCStrategy(EliteStrategy):
                     if not bool(indicators.get(feature)):
                         return False
                     if not manager_enriched:
-                        return True
+                        # An unversioned prepared indicator may be historical.
+                        # Only non-live research/replay keeps this compatibility.
+                        # Real LIVE entries require sweep-relative event time
+                        # provenance from the canonical enrichment pass.
+                        return not is_live
                     evidence_ts = _safe_float(indicators.get(timestamp_key))
                     return bool(
                         evidence_ts is not None

@@ -20458,6 +20458,18 @@ class StrategyRunner:
                     "approval_path": metadata.get("approval_path"),
                     "direction_contract": metadata.get("direction_contract"),
                     "setup_contract": metadata.get("setup_contract"),
+                    "smc_sweep_timestamp": (
+                        str(metadata["sweep_timestamp"])
+                        if metadata.get("sweep_timestamp") is not None
+                        else None
+                    ),
+                    "smc_regime": metadata.get("smc_regime"),
+                    "smc_local_support_sources": list(
+                        metadata.get("smc_local_support_sources") or []
+                    ),
+                    "smc_quality_corroborated": metadata.get(
+                        "smc_quality_corroborated"
+                    ),
                     "confirmation_contract": metadata.get("confirmation_contract"),
                     "confirming_trigger_strategies": list(
                         metadata.get("confirming_trigger_strategies") or []
