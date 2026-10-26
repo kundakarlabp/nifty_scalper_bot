@@ -11,9 +11,13 @@ Runtime role:
 Direction-authority invariant:
 - OPTION PREMIUM DATA MUST NEVER AUTHORIZE UNDERLYING DIRECTION.
 - Only fresh NIFTY spot/futures context may authorize CE/PE direction.
+- _context_snapshot_fresh rejects non-finite or future-dated underlying ticks;
+  the same bounded freshness rule is used before arbitrating spot/futures.
 - Direction, freshness age and source are one atomic observation.
 - Fresh spot/futures disagreement fails closed; source order never breaks ties.
-- The final option combiner gate independently revalidates direction alignment."""
+- The final option combiner gate independently revalidates direction alignment.
+- SMC-only independent confirmation cannot veto a separately confirmed VWAP
+  trigger on the same underlying side; opposing context still fails closed."""
 
 from __future__ import annotations
 
