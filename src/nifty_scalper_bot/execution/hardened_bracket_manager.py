@@ -195,7 +195,11 @@ class HardenedBracketManager(_CoreBracketManager):
     def confirm_entry_fill(
         self, order_id: str, fill_price: float, filled_qty: int | None = None
     ) -> None:
+        existing = self.get_bracket(order_id)
+        was_confirmed = bool(existing and existing.entry_confirmed)
         _CoreBracketManager.confirm_entry_fill(self, order_id, fill_price, filled_qty)
+        if was_confirmed:
+            return
         bracket = self.get_bracket(order_id)
         if bracket is None:
             return
