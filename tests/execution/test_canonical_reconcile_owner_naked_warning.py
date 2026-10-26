@@ -6,10 +6,10 @@ registry; a matching broker quantity is not evidence of an orphan.
 
 from __future__ import annotations
 
-from threading import Lock, RLock
+import threading
 import time
-from types import SimpleNamespace
-from unittest.mock import Mock
+import types
+import unittest.mock
 
 from nifty_scalper_bot.execution.order_manager_core import OrderManager
 
@@ -17,19 +17,19 @@ from nifty_scalper_bot.execution.order_manager_core import OrderManager
 SYMBOL = "NFO:NIFTY26OCT22650CE"
 
 
-def _manager(*, managed: bool, local_present: bool = True) -> SimpleNamespace:
-    canonical_brackets = SimpleNamespace(
-        _reconcile_lock=Lock(),
-        is_symbol_managed=Mock(return_value=managed),
-        has_active_bracket=Mock(return_value=managed),
+def _manager(*, managed: bool, local_present: bool = True) -> types.SimpleNamespace:
+    canonical_brackets = types.SimpleNamespace(
+        _reconcile_lock=threading.Lock(),
+        is_symbol_managed=unittest.mock.Mock(return_value=managed),
+        has_active_bracket=unittest.mock.Mock(return_value=managed),
     )
     positions = (
-        [SimpleNamespace(symbol=SYMBOL, quantity=65, entry_price=146.65)]
+        [types.SimpleNamespace(symbol=SYMBOL, quantity=65, entry_price=146.65)]
         if local_present
         else []
     )
-    return SimpleNamespace(
-        _broker=SimpleNamespace(
+    return types.SimpleNamespace(
+        _broker=types.SimpleNamespace(
             get_positions=lambda: [
                 {
                     "tradingsymbol": "NIFTY26OCT22650CE",
@@ -39,17 +39,17 @@ def _manager(*, managed: bool, local_present: bool = True) -> SimpleNamespace:
                 }
             ]
         ),
-        _positions=SimpleNamespace(get_open_positions=lambda: positions),
+        _positions=types.SimpleNamespace(get_open_positions=lambda: positions),
         _bracket_manager=canonical_brackets,
         _brackets={},  # Legacy registry intentionally empty on the live path.
-        _lock=RLock(),
+        _lock=threading.RLock(),
         _missing_counts={},
         _orders={},
         _entries_in_flight={},
         ENTRY_INFLIGHT_TTL_SEC=30.0,
         _recent_orphans=set(),
-        _logger=Mock(),
-        guard_orphan_position=Mock(return_value=True),
+        _logger=unittest.mock.Mock(),
+        guard_orphan_position=unittest.mock.Mock(return_value=True),
     )
 
 
