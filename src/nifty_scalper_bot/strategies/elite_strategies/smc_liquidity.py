@@ -1,3 +1,12 @@
+"""Underlying-led SMC liquidity-sweep, reclaim and displacement strategy.
+
+Runtime role: discover causal futures-based structural setups for tradable
+options and emit candidates only when directional, temporal and local
+confirmation conditions hold. Safety boundary: manager enrichment must
+timestamp every live local indicator used to corroborate the sweep;
+StrategyManager and the live-safety guard independently own final admission.
+"""
+
 from __future__ import annotations
 
 from datetime import datetime, timezone
