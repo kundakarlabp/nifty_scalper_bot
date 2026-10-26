@@ -333,6 +333,30 @@ class LedgerBracketManager(CanonicalBracketManager):
                             "error": str(exc),
                         },
                     )
+                    # The authoritative broker fill already increased held
+                    # quantity. A broken fill ledger must block NEW entries,
+                    # not interrupt resize of the EXISTING protective stop.
+                    # Keep the original ledger exception visible after an
+                    # independent best-effort broker-protection attempt.
+                    try:
+                        covered = self._ensure_exchange_protective_stop(bracket)
+                    except Exception as stop_exc:  # noqa: BLE001
+                        covered = False
+                        _core.LOGGER.critical(
+                            "ENTRY_FILL_LEDGER_FAILURE_STOP_SYNC_EXCEPTION "
+                            "order_id=%s symbol=%s error=%s",
+                            order_id,
+                            bracket.symbol,
+                            stop_exc,
+                        )
+                    if not covered:
+                        _core.LOGGER.critical(
+                            "ENTRY_FILL_LEDGER_FAILURE_STOP_UNVERIFIED "
+                            "order_id=%s symbol=%s filled_qty=%s",
+                            order_id,
+                            bracket.symbol,
+                            reported,
+                        )
                     raise
             _core.LOGGER.warning(
                 "FILL_LEDGER_ENTRY_QTY_RECONCILED order_id=%s symbol=%s "

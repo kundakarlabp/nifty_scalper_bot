@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from unittest.mock import Mock
 
+import pytest
+
 from nifty_scalper_bot.execution.bracket_manager import BracketManager
+from nifty_scalper_bot.execution.fill_ledger import FillLedgerError
 
 SYMBOL = "NFO:NIFTY2680724500CE"
 
@@ -276,3 +279,65 @@ def test_late_lower_vwap_never_loosens_a_raised_long_stop(
     assert bracket.sl_trigger_price >= 102.0
     _, entry_leg = _entry_fill(manager)
     assert entry_leg.price == 99.50
+
+
+def test_fill_ledger_failure_still_resizes_existing_broker_stop(
+    monkeypatch, tmp_path
+) -> None:
+    """Newly confirmed units still need exchange cover if SQLite fails."""
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("EXCHANGE_PROTECTIVE_STOP_ENABLED", "true")
+    manager = _manager(monkeypatch, tmp_path)
+    monkeypatch.setattr(manager, "_is_live_execution", lambda: True)
+    manager.order_manager.place_order.return_value = "stop-1"
+    manager.order_manager.modify_order.return_value = True
+    manager.confirm_entry_fill("entry-partial", 100.0, 30)
+    bracket = manager.get_bracket("entry-partial")
+    assert bracket is not None
+    assert manager._fill_ledger is not None
+    monkeypatch.setattr(
+        manager._fill_ledger,
+        "reconcile_entry_quantity",
+        Mock(side_effect=FillLedgerError("temporary SQLite failure")),
+    )
+
+    with pytest.raises(FillLedgerError, match="temporary SQLite failure"):
+        manager.confirm_entry_fill("entry-partial", 100.0, 65)
+
+    assert bracket.quantity == 65
+    assert bracket.remaining_quantity == 65
+    assert bracket.exchange_stop_quantity == 65
+    assert bracket.exchange_stop_order_id == "stop-1"
+    assert manager.order_manager.place_order.call_count == 1
+    assert manager.order_manager.modify_order.call_count == 1
+    assert manager.order_manager.modify_order.call_args.kwargs["quantity"] == 65
+    assert bracket.bracket_id in manager._ledger_blocked
+
+
+def test_fill_ledger_and_broker_resize_failure_remain_fail_closed(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("EXCHANGE_PROTECTIVE_STOP_ENABLED", "true")
+    manager = _manager(monkeypatch, tmp_path)
+    monkeypatch.setattr(manager, "_is_live_execution", lambda: True)
+    manager.order_manager.place_order.return_value = "stop-1"
+    manager.order_manager.modify_order.return_value = False
+    manager.confirm_entry_fill("entry-partial", 100.0, 30)
+    bracket = manager.get_bracket("entry-partial")
+    assert bracket is not None
+    assert manager._fill_ledger is not None
+    monkeypatch.setattr(
+        manager._fill_ledger,
+        "reconcile_entry_quantity",
+        Mock(side_effect=FillLedgerError("temporary SQLite failure")),
+    )
+
+    with pytest.raises(FillLedgerError, match="temporary SQLite failure"):
+        manager.confirm_entry_fill("entry-partial", 100.0, 65)
+
+    assert bracket.remaining_quantity == 65
+    assert bracket.exchange_stop_quantity == 30
+    assert bracket.exchange_stop_degraded_reason == "modify_failed"
+    assert bracket.bracket_id in manager._ledger_blocked
+    assert manager.order_manager.place_order.call_count == 1
