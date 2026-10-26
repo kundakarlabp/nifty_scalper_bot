@@ -4,6 +4,8 @@ Real LIVE mode fails closed on cold history, explicit DataHub indicator
 unreadiness, approved-signal filter bypass, and unsafe OrderFlow candidates.
 Deterministic signal identity is generated at the live-safety boundary so
 approved signals are idempotent without depending on every strategy to stamp it.
+The approved SMC freshness guard rejects stale or unproven original sweeps
+using the live wall clock; it leaves close and non-SMC signals unchanged.
 """
 
 from __future__ import annotations
@@ -585,7 +587,6 @@ def _add_identity(signal: Signal) -> Signal:
     metadata.setdefault("signal_timestamp", metadata.get("timestamp"))
     metadata.setdefault("identity_source", "strategy_live_safety")
     return signal.with_metadata(**metadata)
-
 
 
 def _approved_smc_freshness_block(
