@@ -101,8 +101,12 @@ SCRIPT = r"""
     var params = new URLSearchParams({ lines: logLines.value, contains: query });
     getJSON("/admin/api/logs?" + params.toString(), 14000).then(function (data) {
       logOutput.textContent = data.text || "No matching log lines.";
-    }).catch(function () { logOutput.textContent = "Logs unavailable. Try again or use Download Logs."; })
-      .finally(function () { logButton.disabled = false; });
+    }).catch(function (error) {
+      var denied = /HTTP (401|403)/.test(String(error && error.message || error));
+      logOutput.textContent = denied
+        ? "Detailed logs require this browser to be verified using the existing daily Zerodha token field above. The engine and broker may already be healthy; see live status above."
+        : "Live logs could not be loaded. Check admin service health or retry.";
+    }).finally(function () { logButton.disabled = false; });
   }
   if (logButton) {
     logButton.addEventListener("click", logs);
