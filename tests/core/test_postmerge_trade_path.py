@@ -8,6 +8,7 @@ from nifty_scalper_bot.core.strategy_manager import (
     Signal,
     StrategyEvidence,
     StrategyManager,
+    _context_snapshot_fresh,
 )
 from nifty_scalper_bot.data.market_data_manager import MarketDataManager
 
@@ -637,3 +638,37 @@ def test_near_atm_accepts_valid_unsigned_distance() -> None:
     )
     assert eligible is True
     assert metadata["selected_ok_reason"] == "near_atm"
+
+
+@pytest.mark.parametrize(
+    "context",
+    [
+        {"timestamp": 1_800_000_000.5},
+        {"last_tick_ts_ms": 1_800_000_000_500.0, "tick_age_ms": 100},
+        {"last_tick_ts_ms": float("inf"), "tick_age_ms": 100},
+        {"timestamp": float("nan")},
+    ],
+)
+def test_underlying_context_never_trusts_future_or_nonfinite_times(context) -> None:
+    assert (
+        _context_snapshot_fresh(
+            context,
+            max_age_seconds=5.0,
+            now_ts=1_800_000_000.0,
+        )
+        is False
+    )
+
+
+def test_underlying_context_timestamp_age_is_bounded() -> None:
+    now_ts = 1_800_000_000.0
+    assert _context_snapshot_fresh(
+        {"timestamp": now_ts - 1.0},
+        max_age_seconds=5.0,
+        now_ts=now_ts,
+    )
+    assert not _context_snapshot_fresh(
+        {"timestamp": now_ts - 6.0},
+        max_age_seconds=5.0,
+        now_ts=now_ts,
+    )
