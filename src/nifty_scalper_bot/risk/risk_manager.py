@@ -357,6 +357,27 @@ class RiskManager:
         previous = float(getattr(switches, "max_day_loss", 0.0) or 0.0)
         if updated <= 0.0 or abs(updated - previous) < 1e-8:
             return
+        # Free cash falls when a BUY option premium is debited; it is not a
+        # loss of account equity. Freeze the day's cap once exposure/trading
+        # starts, in both directions, rather than shrinking it mid-position.
+        # The actual available cash remains authoritative for affordability.
+        try:
+            count = getattr(self.position_manager, "trades_today", None)
+            positions = getattr(self.position_manager, "get_open_positions", None)
+            if not callable(positions):
+                positions = getattr(self.position_manager, "get_all_positions", None)
+            if (
+                self._breaker_tripped
+                or self._completed_trade_costs_today > 0
+                or abs(float(self._last_pnl_snapshot)) > 1e-8
+                or not callable(count)
+                or not callable(positions)
+                or int(count()) > 0
+                or bool(positions())
+            ):
+                return
+        except (TypeError, ValueError, AttributeError, RuntimeError):
+            return
         if updated > previous:
             if self._breaker_tripped or self._completed_trade_costs_today > 0:
                 return
@@ -376,6 +397,9 @@ class RiskManager:
             except (TypeError, ValueError, AttributeError, RuntimeError):
                 return
         switches.max_day_loss = updated
+        # Persist the verified pre-entry risk envelope for restart recovery.
+        # The next process must not derive a smaller cap from cash tied in premium.
+        self._persist_risk_circuit_state()
         self._logger.info(
             "risk_daily_cap_reconciled",
             extra={
@@ -1773,6 +1797,18 @@ class RiskManager:
             return
         if not isinstance(state, dict) or not state:
             return
+        trading_day = str(state.get("trading_date") or "")
+        today_reader = getattr(self.position_manager, "_trading_date_ist", None)
+        today = (
+            str(today_reader())
+            if callable(today_reader)
+            else datetime.now(timezone(timedelta(hours=5, minutes=30))).date().isoformat()
+        )
+        if trading_day and trading_day != today:
+            return
+        persisted_cap = _finite_float(state.get("daily_loss_cap"))
+        if persisted_cap is not None and persisted_cap > 0.0:
+            self._switches.max_day_loss = persisted_cap
         costs = abs(float(state.get("completed_trade_costs_today", 0.0) or 0.0))
         if costs > 0:
             self._completed_trade_costs_today = costs
@@ -1805,6 +1841,7 @@ class RiskManager:
             return
         try:
             writer(
+                daily_loss_cap=float(self._switches.max_day_loss),
                 completed_trade_costs_today=float(
                     getattr(self, "_completed_trade_costs_today", 0.0) or 0.0
                 ),
