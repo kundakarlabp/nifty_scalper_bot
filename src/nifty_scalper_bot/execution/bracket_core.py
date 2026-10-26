@@ -5631,11 +5631,7 @@ class BracketManager:
             # Updating coverage on the SAME broker order ID takes precedence
             # over optional price improvements. Until prior broker geometry
             # is verified, preserve the recorded stop price in that resize.
-            requested_sl = (
-                bracket.sl_trigger_price
-                if broker_proven
-                else current_trigger
-            )
+            requested_sl = bracket.sl_trigger_price if broker_proven else current_trigger
             trigger, limit_price = self._exchange_stop_prices(
                 bracket,
                 requested_sl,
