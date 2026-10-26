@@ -1,10 +1,10 @@
 """Purpose: Expose daily broker authentication and operational admin controls.
 
 Responsibilities:
-- dashboard serves password-free, process-only status on the production /admin home.
-- admin_manage and _full_dashboard serve the authenticated interactive operator UI.
-- Expose owner-allowlisted Zerodha sign-in, signed browser sessions, daily token rotation and mode operations.
-- Keep legacy Basic credentials as emergency fallback; anonymous controls always fail closed.
+- dashboard redirects legacy HTTP /admin to the complete secure operator dashboard.
+- admin_manage and _full_dashboard serve owner-verified editable trading controls.
+- Retain the existing Zerodha request-token form and daily access-token rotation.
+- Signed Zerodha owner session replaces the redundant admin Basic password.
 - Serve sanitized runtime overview, protected logs and research-status endpoints.
 - Route GitHub-update/restart requests through service-control owners.
 
@@ -18,7 +18,6 @@ Do not collect Kite passwords/TOTP or bypass broker release safeguards.
 # ruff: noqa: E501
 from __future__ import annotations
 
-import base64
 import hashlib
 import hmac
 import html
@@ -116,69 +115,29 @@ def _write_env(updates: dict[str, str]) -> None:
 
 
 def _check_auth(request: Request) -> None:
-    """Keep host-local controls usable; require authenticated HTTPS on Lightsail.
+    """Require the verified Zerodha-owner session, never a second admin password.
 
-    The engine's public HTTP port also mounts these routes, so changing only
-    the independent admin service bind address cannot protect them.
+    The public engine also mounts these routes, so HTTP access to mutable
+    controls remains denied. Host-local diagnostics stay available.
     """
     if os.getenv("DEPLOYMENT_PLATFORM") != "aws_lightsail":
         return
     peer = request.client.host if request.client else ""
-    # Caddy itself connects from loopback, but forwarded public clients
-    # must never inherit the host-local bypass when proxy headers are absent.
     if peer in {"127.0.0.1", "::1"} and not request.headers.get("x-forwarded-for"):
         return
     if request.url.scheme != "https":
         raise HTTPException(status_code=403, detail="admin_https_required")
-
-    # A recent, verified owner Kite login grants access without another password.
-    # Explicitly supplied legacy Basic credentials remain an emergency fallback.
     owner = owner_user_id(_read_env())
-    if owner and valid_owner_session(request, owner):
-        if request.method.upper() not in {"GET", "HEAD", "OPTIONS"}:
-            source = request.headers.get("origin") or request.headers.get("referer", "")
-            parsed = urllib.parse.urlsplit(source)
-            expected_host = request.headers.get("host")
-            if parsed.scheme != "https" or parsed.netloc != expected_host:
-                raise HTTPException(
-                    status_code=403, detail="admin_same_origin_required"
-                )
-        return
-    if owner and not request.headers.get("authorization"):
+    if not owner:
+        raise HTTPException(status_code=503, detail="admin_owner_not_configured")
+    if not valid_owner_session(request, owner):
+        # No WWW-Authenticate: browsers must never show an admin Basic popup.
         raise HTTPException(status_code=401, detail="owner_login_required")
-
-    password = os.getenv("ADMIN_PASSWORD") or _read_env().get("ADMIN_PASSWORD", "")
-    if not password:
-        raise HTTPException(status_code=503, detail="admin_password_not_configured")
-    challenge = {"WWW-Authenticate": 'Basic realm="Nifty Bot Admin"'}
-    raw = request.headers.get("authorization", "")
-    if not raw.lower().startswith("basic "):
-        raise HTTPException(
-            status_code=401, detail="admin_auth_required", headers=challenge
-        )
-    try:
-        decoded = base64.b64decode(raw[6:].strip(), validate=True).decode("utf-8")
-        username, supplied = decoded.split(":", 1)
-    except (ValueError, UnicodeDecodeError):
-        raise HTTPException(
-            status_code=401, detail="admin_auth_required", headers=challenge
-        ) from None
-    if not (
-        hmac.compare_digest(username, "admin")
-        and hmac.compare_digest(supplied, password)
-    ):
-        raise HTTPException(
-            status_code=401, detail="admin_auth_required", headers=challenge
-        )
     if request.method.upper() not in {"GET", "HEAD", "OPTIONS"}:
         source = request.headers.get("origin") or request.headers.get("referer", "")
         parsed = urllib.parse.urlsplit(source)
         if parsed.scheme != "https" or parsed.netloc != request.headers.get("host"):
             raise HTTPException(status_code=403, detail="admin_same_origin_required")
-
-
-def _admin_password() -> str:
-    return ""
 
 
 # ---------------- Zerodha daily session ----------------
@@ -460,76 +419,30 @@ def _flash(request: Request) -> str:
     return ""
 
 
-def _passwordless_status_page() -> HTMLResponse:
-    """Render public process-only status; never leak credentials or controls."""
-    body = """<!doctype html><html lang="en"><head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Nifty Scalper · Status</title>
-<style>
-body{font:16px system-ui,sans-serif;background:#0b1522;color:#edf3fa;
-max-width:650px;margin:8vh auto;padding:20px}
-section{background:#162434;border:1px solid #304055;border-radius:14px;padding:22px}
-h1{font-size:1.5rem}dl{display:grid;grid-template-columns:1fr 1fr;gap:14px}
-dt{color:#afc0cf}dd{margin:5px 0;font-weight:600;overflow-wrap:anywhere}
-a{color:#83bcff}small{color:#afc0cf}
-</style></head><body><section><h1>Nifty Scalper · Status</h1>
-<p>Read-only process diagnostics. No admin login required.</p>
-<dl><div><dt>Engine</dt><dd id="engine">Checking…</dd></div>
-<div><dt>Operating mode</dt><dd id="mode">Checking…</dd></div>
-<div><dt>Release</dt><dd id="release">Checking…</dd></div>
-<div><dt>Revision</dt><dd id="revision">Checking…</dd></div></dl>
-<p><small>Trading readiness and broker authentication are not established
-by process liveness.</small></p>
-<p><a href="https://65.0.255.84/admin/kite/start">Sign in with Zerodha (HTTPS)</a> · <a href="/admin/manage">Protected trading controls</a></p></section>
-<script>
-async function refresh(){
-  try{
-    const responses=await Promise.all([
-      fetch("/livez",{cache:"no-store",credentials:"omit"}),
-      fetch("/releasez",{cache:"no-store",credentials:"omit"})
-    ]);
-    if(!responses.every(r=>r.ok))throw Error("unavailable");
-    const [live,release]=await Promise.all(responses.map(r=>r.json()));
-    document.getElementById("engine").textContent =
-      live.quiet===true?"QUIET":live.bot_loaded===true?"Loaded":"Not loaded";
-    document.getElementById("mode").textContent =
-      String(live.operating_mode||release.operating_mode||"Unknown");
-    document.getElementById("release").textContent =
-      String(release.status||"Unknown");
-    document.getElementById("revision").textContent =
-      String(release.effective_sha||release.runtime_sha||"Unknown").slice(0,12);
-  }catch{
-    document.getElementById("engine").textContent="Unavailable";
-  }
-}
-refresh();setInterval(refresh,15000);
-</script></body></html>"""
-    return HTMLResponse(
-        body,
-        headers={
-            "Cache-Control": "no-store",
-            "X-Content-Type-Options": "nosniff",
-            "Referrer-Policy": "no-referrer",
-        },
-    )
-
-
 @router.get("/admin", response_class=HTMLResponse)
-def dashboard(request: Request) -> HTMLResponse:
-    """Use password-free sanitized status, never anonymous operator controls."""
+def dashboard(request: Request) -> Response:
+    """Use the familiar /admin URL for complete owner controls over HTTPS."""
     if os.getenv("DEPLOYMENT_PLATFORM") == "aws_lightsail":
-        # Public HTTP already exposes /livez and /releasez. The status home
-        # reads only those same fields; no private control or session data.
-        return _passwordless_status_page()
+        if request.url.scheme != "https":
+            # The old :8080 bookmark opens the secure dashboard, not a dead end.
+            return RedirectResponse(
+                "https://65.0.255.84/admin", status_code=307,
+                headers={"Cache-Control": "no-store"},
+            )
+        return admin_manage(request)
     return _full_dashboard(request)
 
 
 @router.get("/admin/manage", response_class=HTMLResponse)  # type: ignore[untyped-decorator]
 def admin_manage(request: Request) -> Response:
-    """Provide controls to a verified owner without a separate admin login."""
-    if os.getenv("DEPLOYMENT_PLATFORM") == "aws_lightsail" and request.url.scheme == "https":
+    """Full operator controls; one official Zerodha sign-in, no Basic popup."""
+    if os.getenv("DEPLOYMENT_PLATFORM") == "aws_lightsail":
+        if request.url.scheme != "https":
+            raise HTTPException(status_code=403, detail="admin_https_required")
         owner = owner_user_id(_read_env())
-        if owner and not request.headers.get("authorization") and not valid_owner_session(request, owner):
+        if not owner:
+            raise HTTPException(status_code=503, detail="admin_owner_not_configured")
+        if not valid_owner_session(request, owner):
             return RedirectResponse("/admin/kite/start", status_code=303)
     return _full_dashboard(request)
 

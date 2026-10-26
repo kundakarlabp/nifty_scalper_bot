@@ -17,8 +17,8 @@
 | `http://65.0.255.84:8080/releasez` | Public deployed GitHub SHA and release provenance | HTTP 200; compare `effective_sha` with GitHub main |
 | `http://65.0.255.84:8501/_stcore/health` | Public Streamlit process liveness | HTTP 200, `ok` |
 | `http://65.0.255.84:8080/health/trading` | Operational trading readiness | May be 404 while off-hours `AUTO` deliberately unloads the engine |
-| `http://65.0.255.84:8080/admin` and `https://65.0.255.84/admin` | Password-free sanitized process-status home | Public process fields only; no broker tokens, positions, trade controls or privileged logs |
-| `https://65.0.255.84/admin/manage` | Protected interactive trading operator dashboard | Trusted HTTPS and existing admin authentication required for credentials, LIVE switches, restarts and risk controls |
+| `http://65.0.255.84:8080/admin` | Legacy admin bookmark | HTTP 307 redirect to `https://65.0.255.84/admin`; never expose control actions in cleartext |\n| `https://65.0.255.84/admin` | Full operator dashboard | Existing settings, daily Zerodha token form and trading controls after owner session |
+| `https://65.0.255.84/admin/manage` | Compatibility alias | Same full owner-verified dashboard; no separate admin username/password |
 | `http://127.0.0.1:8081/healthz` | Host-local independent admin process liveness | HTTP 200, `status=ok`; never require public TCP 8081 |
 
 On 2026-10-25, external HTTP from an independent browser/scrape client returned 200 on `:8080/livez`, `:8080/releasez`, `:8501/_stcore/health` **and** `:8081/healthz`. `/releasez` gave `runtime_sha=c86e6f627cb2`; Supabase confirmed full `c86e6f627cb24d97ed63dd9a6dc8f75fdf7ada21`, `release_state=current`, local HTTP 200, locally responsive admin and Streamlit. From the Supabase database-side HTTP extension, ports 80/443/8080/8501 timed out, even though other public sites succeeded: **this probe is not conclusive evidence that AWS is down or its port blocked**. An alternative external HTTP client conclusively disproved the 8080/8501 outage theory.
@@ -27,14 +27,14 @@ On 2026-10-25, external HTTP from an independent browser/scrape client returned 
 
 The owner's 2026-10-25 AWS console screenshots show `niftyscalper2` **running**, static IPv4 `65.0.255.84`, and inbound Lightsail IPv4 rules allowing TCP `80`, `8080–8081`, `22`, `8501`, `443` from any IPv4. `8080 -> 8081` on that screen is a **port range**, not a port-forwarding rule.
 
-The independent HTTPS client could not negotiate trusted TLS on `:443` under the historical Caddy config (`:443 { tls internal ... }`), and `:8081` was public even though the admin server historically relied on firewall isolation rather than credentials. **Never treat that historical state as secure.** The desired boundary: leave harmless public liveness/diagnostic access on 8080; require encrypted authenticated access for `/admin/manage`, mutations and `/power`; the public `/admin` status home must contain only sanitized process data; bind the independent admin process to `127.0.0.1:8081`; use an ACME publicly trusted short-lived IP certificate on `443`, not Caddy's private `tls internal`. Let's Encrypt supports short-lived IP-address certificates since January 2026. Caddy **2.10.1+** supports IP identifiers; an explicit ACME `shortlived` profile is required. Verify public HTTPS and certificate validity **after** rollout, never assume issuance from a syntactically valid Caddyfile.
+The independent HTTPS client could not negotiate trusted TLS on `:443` under the historical Caddy config (`:443 { tls internal ... }`), and `:8081` was public even though the admin server historically relied on firewall isolation rather than credentials. **Never treat that historical state as secure.** The desired boundary: leave harmless public liveness/diagnostic access on 8080; require encrypted owner-verified access for `/admin`, `/admin/manage`, mutations and `/power`; legacy HTTP `/admin` redirects to HTTPS; bind the independent admin process to `127.0.0.1:8081`; use an ACME publicly trusted short-lived IP certificate on `443`, not Caddy's private `tls internal`. Let's Encrypt supports short-lived IP-address certificates since January 2026. Caddy **2.10.1+** supports IP identifiers; an explicit ACME `shortlived` profile is required. Verify public HTTPS and certificate validity **after** rollout, never assume issuance from a syntactically valid Caddyfile.
 
 ## Repeatable troubleshooting order
 
 1. Verify GitHub `main` and the most recent successful **push-triggered** CI run for its exact SHA.
 2. Read fresh Supabase heartbeat (`received_at`, `build_sha`, `http_status`, `trading_status`, `release_state`, `admin_http_responsive`, `streamlit_http_responsive`); check heartbeat age. `quiet`/`auto_quiet` with HTTP 200 is normal off-hours.
 3. Probe external `/livez` and `/releasez` at `:8080`, and `/_stcore/health` at `:8501` using an independently network-enabled HTTP client (fresh requests, no cache). If one probe times out, try a second network vantage before alleging outage.
-4. Check HTTPS `https://65.0.255.84/admin` (password-free read-only) and `https://65.0.255.84/admin/manage` (authenticated) with certificate verification **enabled**. A TLS error is different from a TCP timeout; never enter credentials through insecure HTTP or `-k`.
+4. Check HTTPS `https://65.0.255.84/admin` (full controls after owner Zerodha sign-in) and legacy HTTP `:8080/admin` (HTTPS redirect, no Basic prompt) with certificate verification **enabled**. A TLS error is different from a TCP timeout; never enter credentials through insecure HTTP or `-k`.
 5. If public TCP remains inaccessible from multiple independent networks, compare AWS **Networking > IPv4 firewall** with desired listeners, then check host `ufw`/`nftables`/actual systemd listener state using an authorized AWS management method. GitHub and Supabase cannot inspect the live AWS firewall or socket table.
 6. Mark deployment complete **only** after Supabase SHA equals merged main and `release_state=current`. CI and HTTP liveness do not prove LIVE entry readiness. Never restart a LIVE-exposed engine merely to fix dashboard ingress.
 
@@ -94,60 +94,44 @@ Zerodha access tokens are session-bound. Monday, 2026-10-26 is scheduled
 as an NSE derivatives session. Do not infer live order permissions from
 HTTP liveness or the absence of an exchange holiday.
 
-## Passwordless admin status (2026-10-26)
+## Single admin URL with owner-verified controls (26 October 2026)
 
-The ordinary public HTTP or HTTPS `/admin` page is a **read-only status view** with no
-username/password prompt. It displays only the liveness, operating mode and
-GitHub release SHA from the canonical `/livez` and `/releasez` endpoints.
-It must not read the host environment, render Zerodha tokens, expose trading
-controls, fetch privileged journals or support anonymous mutations.
+One URL is canonical: `https://65.0.255.84/admin`. The former
+`http://65.0.255.84:8080/admin` bookmark redirects to the same HTTPS
+address; HTTP does not render broker credentials or permit mutations.
+There is no separate bot username or Basic admin password. The same existing
+full dashboard (`/admin`, also accessible as `/admin/manage`) includes
+daily Kite login/request-token submission, access-token rotation, settings,
+operating mode, logs, risk operations, and validated GitHub update/restart.
 
-The full operator dashboard moved to `/admin/manage` and still requires
-HTTPS Basic authentication; the existing `/admin/*` write APIs, detailed
-logs and `/power` remain protected. This is intentional: removing all
-credentials from public broker-token, LIVE-order and risk-reset controls
-would allow arbitrary internet users to operate real-money trading.
+On the first access each day, the browser is directed to
+`/admin/kite/start`: authenticate on Zerodha's official website, paste
+the request token or redirect URL into that one form, and the server exchanges
+the token and verifies the account against the **preconfigured**
+`ADMIN_ZERODHA_USER_ID`. After that, the protected browser session opens the
+full admin page directly without another username/password. Only the
+existing authorized Kite account can open real-money operations. The
+`ADMIN_ZERODHA_USER_ID` must already be securely set in the private host
+environment; no anonymous enrollment or fallback is permitted. There is
+no paid authentication service. The Zerodha broker API subscription, if
+applicable, is separate from admin authentication.
 
-## Passwordless owner controls via daily Zerodha login
+A daily request token is one-time-use and expires; the application stores
+verified broker access-token aliases in the existing protected host file
+and **queues** the existing validated restart. A queued restart does
+not prove broker readiness. Both the original daily token form inside the
+full dashboard and the owner-login form continue to work.
 
-The public `http://65.0.255.84:8080/admin` remains a sanitized read-only status
-page. The full `https://65.0.255.84/admin/manage` uses a verified owner
-browser session instead of requiring a *second* admin username/password.
-Owner sessions are short-lived, HMAC signed with a private host-generated
-key, Secure/HttpOnly/SameSite cookies, and are rejected on cleartext HTTP.
+The old HTTP Basic scheme, popup challenge and `ADMIN_PASSWORD` fallback
+are not accepted by public admin routes. Cleartext access to privileged
+API routes stays blocked. Do not remove the broker-flat, order-terminal,
+entry-hold or risk controls: these are trading safety checks, not admin
+logins, and there is no clock-based ban on intraday safe releases.
 
-**One-time operator prerequisite (do not paste credentials into chat):**
-Set `ADMIN_ZERODHA_USER_ID=<your exact Kite user ID>` in the protected
-`/home/ubuntu/.config/niftybot/niftybot.env`. The operator must be
-explicitly allowlisted; the first anonymous visitor must never claim the
-dashboard. An existing `ZERODHA_USER_ID` or `KITE_USER_ID` also supplies
-the owner allowlist. The signing key is stored outside Git in the private
-`NIFTYBOT_CONFIG_DIR/owner_session_key` file.
-
-**Daily routine:** Open `https://65.0.255.84/admin/kite/start`, click
-official Zerodha sign-in, copy the Kite redirect URL or request token into
-the browser form (unless the configured Kite redirect URL is this server's
-`/admin/kite/callback`, which supports automatic return). The server
-checks a signed login challenge and exchanges the one-time request token,
-verifies the returned account using Kite `/user/profile`, checks exact
-allowlisted owner ID and only then stores the new broker token and queues
-the existing validated restart. No admin user ID/password is entered into
-this dashboard; Kite's own login/TOTP remains required. A queued restart
-does not establish broker readiness. A separate signed owner cookie
-authorizes the complete dashboard for up to ten hours. Existing Basic
-authentication may remain as a controlled emergency fallback.
-
-**Never** expose `/admin/kite/complete` over HTTP, allow an unrecognized
-Zerodha account to exchange/store its token, or remove the broker-flat,
-nonterminal-order and entry-hold checks from release. There is no blanket
-market-hour prohibition on code validation: the release guard accepts safe
-broker-flat releases intraday and defers when actual exposure is unknown.
-Safe nontrading admin recovery must remain independent of engine restarts.
-
-Deployment verification requires both the exact GitHub main SHA running
-on AWS with healthy services and these four HTTP contracts:
-- HTTP `/admin` gives public read-only 200 without Basic challenge.
-- HTTPS `/admin/kite/start` offers owner login and never embeds secrets.
-- HTTPS `/admin/manage` redirects unauthenticated owners to Kite login,
-  and serves the full operator dashboard after verified owner login.
-- HTTP `/admin/manage` and anonymous mutations remain blocked.
+Verification after release:
+- HTTP `:8080/admin` returns a 307 redirect to HTTPS; no Basic challenge.
+- HTTPS `/admin` redirects an unknown browser to Zerodha login (303).
+- HTTPS `/admin` opens the **full** editable dashboard for the signed owner.
+- HTTP `/admin/manage` and unauthenticated mutations remain forbidden.
+- Check actual AWS build SHA against merged GitHub main and complete release
+  state before claiming the deployment is active.

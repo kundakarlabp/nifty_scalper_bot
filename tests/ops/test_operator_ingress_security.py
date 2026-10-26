@@ -1,8 +1,7 @@
-"""Regression contracts for production-only HTTPS admin access and ingress sync."""
+"""Regression contracts for HTTPS owner controls and safe ingress synchronization."""
 
 from __future__ import annotations
 
-import base64
 import subprocess
 from pathlib import Path
 
@@ -46,68 +45,58 @@ def _request(
     )
 
 
-def _basic(password: str) -> str:
-    return "Basic " + base64.b64encode(f"admin:{password}".encode()).decode()
+def _owner(monkeypatch, verified: bool) -> None:
+    monkeypatch.setenv("DEPLOYMENT_PLATFORM", "aws_lightsail")
+    monkeypatch.setattr(
+        admin_dashboard, "_read_env", lambda: {"ADMIN_ZERODHA_USER_ID": "AB1234"}
+    )
+    monkeypatch.setattr(admin_dashboard, "valid_owner_session", lambda *_: verified)
 
 
 @pytest.mark.parametrize(
     ("case_request", "status"),
     [
-        (_request(scheme="http", authorization=_basic("long-test-pass")), 403),
+        (_request(scheme="http"), 403),
         (_request(), 401),
-        (_request(authorization=_basic("incorrect")), 401),
-        (_request(authorization="Basic not-base64"), 401),
-        (
-            _request(
-                method="POST",
-                authorization=_basic("long-test-pass"),
-                origin="https://evil.example",
-            ),
-            403,
-        ),
+        (_request(authorization="Basic YWRtaW46b2Jzb2xldGU="), 401),
+        (_request(method="POST", origin="https://evil.example"), 401),
     ],
 )
-def test_public_production_controls_fail_closed(
-    monkeypatch, case_request, status
-) -> None:
-    monkeypatch.setenv("DEPLOYMENT_PLATFORM", "aws_lightsail")
-    monkeypatch.setenv("ADMIN_PASSWORD", "long-test-pass")
+def test_public_controls_require_verified_owner(monkeypatch, case_request, status):
+    _owner(monkeypatch, verified=False)
     with pytest.raises(HTTPException) as failed:
         admin_dashboard._check_auth(case_request)
     assert failed.value.status_code == status
+    assert "WWW-Authenticate" not in (failed.value.headers or {})
 
 
-def test_public_https_requires_correct_admin_password_and_origin(monkeypatch) -> None:
-    monkeypatch.setenv("DEPLOYMENT_PLATFORM", "aws_lightsail")
-    monkeypatch.setenv("ADMIN_PASSWORD", "long-test-pass")
-    admin_dashboard._check_auth(_request(authorization=_basic("long-test-pass")))
-    admin_dashboard._check_auth(
-        _request(
-            method="POST",
-            authorization=_basic("long-test-pass"),
-            origin="https://65.0.255.84",
+def test_verified_owner_controls_require_same_origin_for_writes(monkeypatch):
+    _owner(monkeypatch, verified=True)
+    admin_dashboard._check_auth(_request())
+    admin_dashboard._check_auth(_request(method="POST", origin="https://65.0.255.84"))
+    with pytest.raises(HTTPException) as failed:
+        admin_dashboard._check_auth(
+            _request(method="POST", origin="https://evil.example")
         )
-    )
+    assert failed.value.status_code == 403
 
 
-def test_public_missing_password_fails_closed(monkeypatch) -> None:
-    monkeypatch.setenv("DEPLOYMENT_PLATFORM", "aws_lightsail")
-    monkeypatch.delenv("ADMIN_PASSWORD", raising=False)
+def test_missing_owner_fails_closed_without_basic_prompt(monkeypatch):
+    _owner(monkeypatch, verified=False)
     monkeypatch.setattr(admin_dashboard, "_read_env", lambda: {})
     with pytest.raises(HTTPException) as failed:
         admin_dashboard._check_auth(_request())
     assert failed.value.status_code == 503
+    assert "WWW-Authenticate" not in (failed.value.headers or {})
 
 
-def test_host_local_process_probes_need_no_browser_credentials(monkeypatch) -> None:
-    monkeypatch.setenv("DEPLOYMENT_PLATFORM", "aws_lightsail")
-    monkeypatch.delenv("ADMIN_PASSWORD", raising=False)
+def test_local_diagnostics_need_no_browser_cookie(monkeypatch):
+    _owner(monkeypatch, verified=False)
     admin_dashboard._check_auth(_request(scheme="http", peer="127.0.0.1"))
 
 
-def test_forwarded_public_client_cannot_skip_auth_as_loopback(monkeypatch) -> None:
-    monkeypatch.setenv("DEPLOYMENT_PLATFORM", "aws_lightsail")
-    monkeypatch.setenv("ADMIN_PASSWORD", "long-test-pass")
+def test_forwarded_public_client_cannot_skip_owner_session(monkeypatch):
+    _owner(monkeypatch, verified=False)
     with pytest.raises(HTTPException) as failed:
         admin_dashboard._check_auth(
             _request(
@@ -119,7 +108,7 @@ def test_forwarded_public_client_cannot_skip_auth_as_loopback(monkeypatch) -> No
     assert failed.value.status_code == 401
 
 
-def test_other_platforms_keep_existing_dev_route_behavior(monkeypatch) -> None:
+def test_other_platforms_keep_existing_dev_route_behavior(monkeypatch):
     monkeypatch.delenv("DEPLOYMENT_PLATFORM", raising=False)
     admin_dashboard._check_auth(_request(scheme="http"))
 
