@@ -97,6 +97,30 @@ def _safe_float_value(value: t.Any) -> float | None:
     return result
 
 
+def _context_snapshot_fresh(
+    ctx: t.Mapping[str, t.Any], *, max_age_seconds: float, now_ts: float
+) -> bool:
+    """Only valid non-future underlying timestamps may prove freshness."""
+    raw_tick_ts_ms = ctx.get("last_tick_ts_ms")
+    if raw_tick_ts_ms not in (None, "", 0, 0.0):
+        try:
+            tick_ts_ms = float(raw_tick_ts_ms)
+        except (TypeError, ValueError, OverflowError):
+            return False
+        # A future real tick cannot be rescued by cached quote-age or a
+        # different fallback timestamp.
+        if not isfinite(tick_ts_ms) or tick_ts_ms > now_ts * 1000.0:
+            return False
+    age_seconds = resolve_tick_age_seconds(ctx)
+    if age_seconds is not None:
+        return isfinite(age_seconds) and 0.0 <= age_seconds <= max_age_seconds
+    try:
+        ts = float(ctx.get("timestamp") or ctx.get("context_timestamp_epoch") or 0.0)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return isfinite(ts) and ts > 0 and 0.0 <= now_ts - ts <= max_age_seconds
+
+
 def _normalise_ohlcv_bars(bars: t.Any) -> list[dict[str, float]]:
     normalised: list[dict[str, float]] = []
     rows: t.Iterable[t.Any]
@@ -3215,24 +3239,9 @@ class StrategyManager(_BaseStrategyManager):
             max_context_age = self._live_context_max_age_seconds()
             now_ts = time.time()
             def _fresh(ctx: t.Mapping[str, t.Any]) -> bool:
-                age_seconds = resolve_tick_age_seconds(ctx)
-                raw_tick_ts_ms = ctx.get("last_tick_ts_ms")
-                if raw_tick_ts_ms not in (None, "", 0, 0.0):
-                    try:
-                        tick_ts_ms = float(raw_tick_ts_ms)
-                    except (TypeError, ValueError, OverflowError):
-                        return False
-                    # A future-dated real tick must not be resurrected by an
-                    # older fallback context timestamp or cached age.
-                    if not isfinite(tick_ts_ms) or tick_ts_ms > now_ts * 1000.0:
-                        return False
-                if age_seconds is not None:
-                    return isfinite(age_seconds) and 0.0 <= age_seconds <= max_context_age
-                try:
-                    ts = float(ctx.get("timestamp") or ctx.get("context_timestamp_epoch") or 0.0)
-                    return isfinite(ts) and ts > 0 and 0.0 <= now_ts - ts <= max_context_age
-                except (TypeError, ValueError, OverflowError):
-                    return False
+                return _context_snapshot_fresh(
+                    ctx, max_age_seconds=max_context_age, now_ts=now_ts
+                )
             spot_fresh = _fresh(spot_ctx)
             fut_fresh = _fresh(fut_ctx)
             spot_direction_valid = self._context_direction_valid(spot_ctx)
