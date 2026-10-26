@@ -6,6 +6,8 @@
 Responsibilities:
 - LedgerBracketManager coordinates canonical bracket state and fill-ledger storage.
 - Reconcile confirmed fills, exit state and broker-flat evidence before rearming.
+- Apply cumulative entry VWAP revisions to the existing ledger entry identity,
+  then update the active bracket without a second entry activation.
 - Keep trading ledger persistence distinct from the live protective mechanism.
 
 Boundaries: BoundBracket/core remain authoritative for protective broker actions.
@@ -281,6 +283,8 @@ class LedgerBracketManager(CanonicalBracketManager):
         order_id: str,
         bracket: Any,
         filled_qty: int | None,
+        *,
+        fill_price: float | None = None,
     ) -> bool:
         """Reconcile cumulative broker fills before entry-ledger persistence."""
         reported = self._positive_filled_quantity(filled_qty)
@@ -317,6 +321,7 @@ class LedgerBracketManager(CanonicalBracketManager):
                         self._entry_fill_id(str(order_id)),
                         reported,
                         maximum_quantity=requested,
+                        fill_price=fill_price,
                     )
                 except Exception as exc:  # noqa: BLE001
                     self._block_ledger_release(
@@ -356,6 +361,7 @@ class LedgerBracketManager(CanonicalBracketManager):
             order_id,
             bracket,
             filled_qty,
+            fill_price=fill_price,
         )
         try:
             price = float(fill_price)
@@ -394,6 +400,44 @@ class LedgerBracketManager(CanonicalBracketManager):
                 # reactivating the bracket. Reconcile its existing broker SL.
                 self._ensure_exchange_protective_stop(bracket)
             return True  # type: ignore[return-value]
+
+        # A later cumulative broker fill can revise the confirmed entry
+        # VWAP without creating a new order/fill ID. The existing entry leg
+        # must be revised atomically, not inserted again (which raises a
+        # false FillConflictError and latches the ledger gate). Preserve the
+        # active bracket lifecycle while its stop is resynchronized.
+        if (
+            bracket is not None
+            and bracket.entry_confirmed
+            and prior is not None
+            and price is not None
+            and math.isfinite(price)
+            and price > 0
+            and abs(price - prior) >= 1e-9
+        ):
+            vwap_persisted = True
+            try:
+                if self._fill_ledger is None:
+                    raise FillLedgerError("fill ledger unavailable for cumulative VWAP")
+                self._fill_ledger.reconcile_entry_quantity(
+                    self._entry_fill_id(str(order_id)),
+                    int(bracket.quantity),
+                    maximum_quantity=int(
+                        bracket.requested_entry_quantity or bracket.quantity
+                    ),
+                    fill_price=price,
+                )
+            except Exception as exc:  # noqa: BLE001
+                vwap_persisted = False
+                self._block_ledger_release(
+                    bracket,
+                    reason="cumulative_entry_vwap_reconcile_failed",
+                    payload={"order_id": order_id, "error": str(exc)},
+                )
+            super().confirm_entry_fill(order_id, fill_price, filled_qty)
+            if vwap_persisted:
+                self._clear_ledger_release(bracket)
+            return
 
         ledger_ok = True
         if bracket is not None:

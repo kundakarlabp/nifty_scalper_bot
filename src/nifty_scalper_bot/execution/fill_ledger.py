@@ -1,4 +1,14 @@
-"""Restart-safe, idempotent fill ledger for the canonical BO lifecycle."""
+"""Restart-safe, idempotent fill ledger for the canonical BO lifecycle.
+
+Responsibilities:
+- Persist exactly one identity per broker entry/exit leg and reject conflicts.
+Ownership: Durable SQLite fill economics; not order submission or stop protection.
+Safety: Broker-confirmed cumulative VWAP/quantity changes must remain atomic.
+- Reconcile an entry order's confirmed cumulative quantity and broker VWAP
+  together using a compare-and-swap transaction. Original order, side and
+  exit identities are never rewritten.
+- Expose the durable fills used to calculate final gross/net realized P&L.
+"""
 
 from __future__ import annotations
 
@@ -278,12 +288,14 @@ class BracketFillLedgerStore:
         filled_qty: int,
         *,
         maximum_quantity: int | None = None,
+        fill_price: float | None = None,
     ) -> bool:
-        """Set an ENTRY fill to an authoritative cumulative broker quantity.
+        """Reconcile a single ENTRY fill to broker cumulative qty and VWAP.
 
-        Fill rows stay immutable except for this explicit partial-fill correction.
-        Growth is allowed only up to the caller-supplied original order quantity;
-        price, side, fees and identity remain immutable.
+        Broker cumulative fills may legitimately update average_price as well
+        as quantity. Preserve the fill identity and update the two economic
+        fields atomically; side, fees, order ID and all EXIT legs remain immutable.
+        Growth remains bounded by the original requested entry quantity.
         """
         quantity = int(filled_qty or 0)
         if quantity <= 0:
@@ -299,7 +311,13 @@ class BracketFillLedgerStore:
             return False
         if existing.kind != "ENTRY":
             raise FillConflictError(f"fill_id {key!r} is not an entry fill")
-        if quantity == existing.quantity:
+        try:
+            price = existing.price if fill_price is None else float(fill_price)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise FillValidationError("entry VWAP must be numeric") from exc
+        if not math.isfinite(price) or price <= 0:
+            raise FillValidationError("entry VWAP must be finite and positive")
+        if quantity == existing.quantity and abs(price - existing.price) < 1e-9:
             return False
         if quantity > existing.quantity and maximum_quantity is None:
             return False
@@ -308,10 +326,11 @@ class BracketFillLedgerStore:
                 cursor = connection.execute(
                     """
                     UPDATE bracket_fill_legs
-                    SET quantity = ?
-                    WHERE fill_id = ? AND kind = 'ENTRY' AND quantity != ?
+                    SET quantity = ?, price = ?
+                    WHERE fill_id = ? AND kind = 'ENTRY'
+                      AND quantity = ? AND price = ?
                     """,
-                    (quantity, key, quantity),
+                    (quantity, price, key, existing.quantity, existing.price),
                 )
                 changed = cursor.rowcount > 0
         except sqlite3.Error as exc:
@@ -319,9 +338,14 @@ class BracketFillLedgerStore:
                 f"unable to reconcile entry fill {key}: {exc}"
             ) from exc
         current = self.get_fill(key)
-        if current is None or current.kind != "ENTRY" or current.quantity != quantity:
+        if (
+            current is None
+            or current.kind != "ENTRY"
+            or current.quantity != quantity
+            or abs(current.price - price) >= 1e-9
+        ):
             raise FillConflictError(
-                f"entry fill {key!r} quantity reconciliation was not durable"
+                f"entry fill {key!r} cumulative economics reconciliation failed"
             )
         return changed
 
