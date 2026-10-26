@@ -11,9 +11,13 @@ Runtime role:
 Direction-authority invariant:
 - OPTION PREMIUM DATA MUST NEVER AUTHORIZE UNDERLYING DIRECTION.
 - Only fresh NIFTY spot/futures context may authorize CE/PE direction.
+- _context_snapshot_fresh rejects non-finite or future-dated underlying ticks;
+  the same bounded freshness rule is used before arbitrating spot/futures.
 - Direction, freshness age and source are one atomic observation.
 - Fresh spot/futures disagreement fails closed; source order never breaks ties.
-- The final option combiner gate independently revalidates direction alignment."""
+- The final option combiner gate independently revalidates direction alignment.
+- SMC-only independent confirmation cannot veto a separately confirmed VWAP
+  trigger on the same underlying side; opposing context still fails closed."""
 
 from __future__ import annotations
 
@@ -95,6 +99,30 @@ def _safe_float_value(value: t.Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return result
+
+
+def _context_snapshot_fresh(
+    ctx: t.Mapping[str, t.Any], *, max_age_seconds: float, now_ts: float
+) -> bool:
+    """Only valid non-future underlying timestamps may prove freshness."""
+    raw_tick_ts_ms = ctx.get("last_tick_ts_ms")
+    if raw_tick_ts_ms not in (None, "", 0, 0.0):
+        try:
+            tick_ts_ms = float(raw_tick_ts_ms)
+        except (TypeError, ValueError, OverflowError):
+            return False
+        # A future real tick cannot be rescued by cached quote-age or a
+        # different fallback timestamp.
+        if not isfinite(tick_ts_ms) or tick_ts_ms > now_ts * 1000.0:
+            return False
+    age_seconds = resolve_tick_age_seconds(ctx)
+    if age_seconds is not None:
+        return isfinite(age_seconds) and 0.0 <= age_seconds <= max_age_seconds
+    try:
+        ts = float(ctx.get("timestamp") or ctx.get("context_timestamp_epoch") or 0.0)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return isfinite(ts) and ts > 0 and 0.0 <= now_ts - ts <= max_age_seconds
 
 
 def _normalise_ohlcv_bars(bars: t.Any) -> list[dict[str, float]]:
@@ -3215,14 +3243,9 @@ class StrategyManager(_BaseStrategyManager):
             max_context_age = self._live_context_max_age_seconds()
             now_ts = time.time()
             def _fresh(ctx: t.Mapping[str, t.Any]) -> bool:
-                age_seconds = resolve_tick_age_seconds(ctx)
-                if age_seconds is not None:
-                    return age_seconds <= max_context_age
-                try:
-                    ts = float(ctx.get("timestamp") or ctx.get("context_timestamp_epoch") or 0.0)
-                    return ts > 0 and (now_ts - ts) <= max_context_age
-                except (TypeError, ValueError):
-                    return False
+                return _context_snapshot_fresh(
+                    ctx, max_age_seconds=max_context_age, now_ts=now_ts
+                )
             spot_fresh = _fresh(spot_ctx)
             fut_fresh = _fresh(fut_ctx)
             spot_direction_valid = self._context_direction_valid(spot_ctx)
@@ -4059,7 +4082,13 @@ class StrategyManager(_BaseStrategyManager):
         strike_distance_from_atm = metadata.get("strike_distance_from_atm", indicators.get("strike_distance_from_atm"))
         try:
             strike_distance = float(strike_distance_from_atm)
-            near_atm = strike_distance <= near_atm_threshold
+            near_atm = bool(
+                isfinite(strike_distance)
+                and 0.0 <= strike_distance
+                and isfinite(near_atm_threshold)
+                and 0.0 <= near_atm_threshold
+                and strike_distance <= near_atm_threshold
+            )
         except (TypeError, ValueError):
             strike_distance = None
             near_atm = False
@@ -4351,16 +4380,6 @@ class StrategyManager(_BaseStrategyManager):
             )
             for signal, evidence in trigger_votes
         )
-        if capacity_retry_requires_consensus and not independent_trigger_confirmation:
-            _record_no_signal(
-                "strategy_confirmation_missing",
-                "capacity_retry_independent_confirmation_missing",
-                "context_contract",
-                trigger_vote_count=len(trigger_votes),
-                context_vote_count=len(context_votes),
-            )
-            _observe_smc_confirmation_wait("capacity_retry_independent_confirmation_missing")
-            return None
         # A one-second OrderFlow/OFI vote is context, not independent SMC
         # entry confirmation. Keep OrderFlow's adverse-context veto above,
         # but require a separate strategy or independent trigger for SMC.
@@ -4424,7 +4443,11 @@ class StrategyManager(_BaseStrategyManager):
                 smc_sustained_flow_confirmed = bool(
                     smc_flow_enabled and smc_sustained_flow_observed
                 )
-        if (
+        # SMC's stricter independent-confirmation contract belongs to SMC,
+        # not to unrelated valid triggers sharing the same option candidate.
+        # In particular, an unconfirmed SMC sweep must never veto a VWAPPro
+        # trigger that independently qualifies on fresh same-side OrderFlow.
+        smc_orderflow_only = bool(
             smc_trigger_present
             and not independent_trigger_confirmation
             and same_side_context
@@ -4433,16 +4456,46 @@ class StrategyManager(_BaseStrategyManager):
                 str(evidence.strategy or "").strip().upper() == "ORDERFLOW"
                 for evidence in same_side_context
             )
-        ):
-            _record_no_signal(
-                "strategy_confirmation_missing",
-                "smc_independent_confirmation_missing",
-                "context_contract",
-                trigger_vote_count=len(trigger_votes),
-                context_vote_count=len(context_votes),
+        )
+        smc_confirmation_block_reason = (
+            "capacity_retry_independent_confirmation_missing"
+            if capacity_retry_requires_consensus and not independent_trigger_confirmation
+            else "smc_independent_confirmation_missing"
+            if smc_orderflow_only
+            else None
+        )
+        excluded_unconfirmed_triggers: list[str] = []
+        if smc_confirmation_block_reason is not None:
+            remaining_triggers = [
+                (signal, evidence)
+                for signal, evidence in trigger_votes
+                if str(evidence.strategy or "").strip().upper() != "SMC"
+            ]
+            if not remaining_triggers:
+                _record_no_signal(
+                    "strategy_confirmation_missing",
+                    smc_confirmation_block_reason,
+                    "context_contract",
+                    trigger_vote_count=len(trigger_votes),
+                    context_vote_count=len(context_votes),
+                )
+                _observe_smc_confirmation_wait(smc_confirmation_block_reason)
+                return None
+            trigger_votes = remaining_triggers
+            excluded_unconfirmed_triggers.append("SMC")
+            _observe_smc_confirmation_wait(smc_confirmation_block_reason)
+            log.info(
+                "STRATEGY_TRIGGER_EXCLUDED symbol=%s strategy=SMC reason=%s remaining=%s",
+                symbol_norm,
+                smc_confirmation_block_reason,
+                [evidence.strategy for _signal, evidence in trigger_votes],
+                extra={
+                    "event": "STRATEGY_TRIGGER_EXCLUDED",
+                    "symbol": symbol_norm,
+                    "strategy": "SMC",
+                    "reason": smc_confirmation_block_reason,
+                },
             )
-            _observe_smc_confirmation_wait("smc_independent_confirmation_missing")
-            return None
         if (
             not independent_trigger_confirmation
             and not same_side_context
@@ -4566,6 +4619,7 @@ class StrategyManager(_BaseStrategyManager):
                 },
                 "confirming_trigger_strategies": confirming_trigger_strategies,
                 "context_confirmation_strategies": context_strategies,
+                "excluded_unconfirmed_triggers": excluded_unconfirmed_triggers,
             }
         )
         transition_setup(
