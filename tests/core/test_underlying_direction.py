@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from nifty_scalper_bot.core.underlying_direction import (
     UnderlyingDirectionObservation,
     UnderlyingDirectionState,
