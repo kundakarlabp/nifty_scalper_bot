@@ -1715,6 +1715,13 @@ class OrderManager:
                     bracket_manager.set_notifier(self._notify_bracket_event)
                 if hasattr(bracket_manager, "attach_exit_executor"):
                     bracket_manager.attach_exit_executor(self.exit_position)
+                # A restored canonical owner supersedes any pre-existing
+                # legacy direct-broker trailing controller for that symbol.
+                for entry_id, (controller, _) in list(
+                    getattr(self, "_trailing", {}).items()
+                ):
+                    if bracket_manager.is_symbol_managed(controller.symbol):
+                        self.stop_trailing(entry_id)
                 self._logger.info(
                     "Bracket manager attached to order manager",
                     extra={"event": "order_manager.bracket_manager_attached"},
@@ -1857,12 +1864,34 @@ class OrderManager:
         spec: TrailingSpec,
         variety: str = "regular",
     ) -> str:
-        """Attach a trailing stop controller to an existing bracket order."""
+        """Attach a legacy trailing controller only for legacy-owned orders.
+
+        Canonical BracketManager already owns every virtual stop, broker
+        ratchet and protection proof for its symbols. A second market-data
+        listener with direct broker.modify_order access must never coexist.
+        """
 
         if not entry_order_id:
             raise ValueError("entry_order_id is required for trailing stops")
         if not sl_order_id:
             raise ValueError("sl_order_id is required for trailing stops")
+        canonical = self._bracket_manager
+        if canonical is not None and canonical.is_symbol_managed(symbol):
+            # Also detach any older legacy listener when canonical ownership
+            # was acquired after the listener was originally registered.
+            self.stop_trailing(entry_order_id)
+            self._logger.info(
+                "LEGACY_TRAILING_SKIPPED_CANONICAL_OWNER symbol=%s entry_id=%s",
+                symbol,
+                entry_order_id,
+                extra={"event": "LEGACY_TRAILING_SKIPPED_CANONICAL_OWNER"},
+            )
+            return entry_order_id
+        prior = self._trailing.get(entry_order_id)
+        if prior is not None:
+            if str(getattr(prior[0], "order_id", "")) == str(sl_order_id):
+                return entry_order_id
+            self.stop_trailing(entry_order_id)
         if self._market_data is None:
             raise RuntimeError(
                 "MarketDataManager must be configured before attaching trailing stops"
@@ -1926,9 +1955,17 @@ class OrderManager:
         def _listener(tick: dict[str, Any]) -> None:
             controller.on_tick(tick)
 
-        md.subscribe(symbol, _listener)
+        # Use the single DataHub/MDM subscription route so cleanup targets the
+        # SAME callback provider; a direct md.subscribe() leaked callbacks
+        # whenever DataHub was also configured.
+        if not self._subscribe_market_callback(symbol, _listener):
+            raise RuntimeError("Market-data tick subscription unavailable")
         self._trailing[entry_order_id] = (controller, _listener)
-        controller.on_tick(None)
+        try:
+            controller.on_tick(None)
+        except Exception:
+            self.stop_trailing(entry_order_id)
+            raise
         return entry_order_id
 
     def attach_dynamic_tp(
@@ -1998,9 +2035,7 @@ class OrderManager:
             return False
         controller, callback = record
         try:
-            hub = self._data_hub or self._market_data
-            if hub is not None:
-                hub.unsubscribe(controller.symbol, callback)
+            self._unsubscribe_market_callback(controller.symbol, callback)
             self._trailing_journal.delete(controller.order_id)
         except Exception as exc:
             self._logger.warning(
@@ -14499,7 +14534,13 @@ class OrderManager:
                 if entry_id in self._trailing or state.remaining_position() <= 0:
                     continue
 
-                # Check if this bracket HAD a trailing spec
+                # Canonical BracketManager restores its own trailing state.
+                # Never resurrect the legacy broker-modifying controller on
+                # top of that live owner.
+                if self._bracket_manager and self._bracket_manager.is_symbol_managed(
+                    state.symbol
+                ):
+                    continue
                 if not state.trailing_spec:
                     continue
 
