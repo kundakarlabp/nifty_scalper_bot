@@ -5606,22 +5606,35 @@ class BracketManager:
             order_id = str(bracket.exchange_stop_order_id or "").strip()
             if not order_id:
                 return False
-            # An accepted broker modification is not necessarily settled.
-            # Do not submit a second ratchet against a MODIFY PENDING order;
-            # reconcile its actual broker state before modifying again.
-            pending_modify = (
-                bracket.exchange_stop_degraded_reason
-                == "broker_stop_status_unverified:MODIFY PENDING"
+            # A broker may report the old trigger with TRIGGER PENDING, not
+            # only MODIFY PENDING, while an accepted amendment propagates.
+            # Every unverified broker-stop status/geometry must be reconciled
+            # before another modification can be sent to this order ID.
+            unsettled_broker_stop = str(
+                bracket.exchange_stop_degraded_reason or ""
+            ).startswith("broker_stop_")
+            recorded_qty = int(bracket.exchange_stop_quantity or 0)
+            quantity_repair_needed = (
+                recorded_qty > 0
+                and int(bracket.remaining_quantity) != recorded_qty
             )
-        if pending_modify and not self._confirm_exchange_protective_stop(bracket):
-            return False
+        broker_proven = not unsettled_broker_stop
+        if unsettled_broker_stop:
+            broker_proven = self._confirm_exchange_protective_stop(bracket)
+            if not broker_proven and not quantity_repair_needed:
+                return False
         with self._lock:
             if str(bracket.exchange_stop_order_id or "") != order_id:
                 return False
             current_trigger = float(bracket.exchange_stop_trigger_price or 0.0)
+            # A late partial fill changes the held quantity immediately.
+            # Updating coverage on the SAME broker order ID takes precedence
+            # over optional price improvements. Until prior broker geometry
+            # is verified, preserve the recorded stop price in that resize.
+            requested_sl = bracket.sl_trigger_price if broker_proven else current_trigger
             trigger, limit_price = self._exchange_stop_prices(
                 bracket,
-                bracket.sl_trigger_price,
+                requested_sl,
             )
             modify_count = max(0, int(bracket.exchange_stop_modify_count or 0))
             desired_quantity = int(bracket.remaining_quantity)
