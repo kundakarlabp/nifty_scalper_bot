@@ -50,9 +50,7 @@ def _owner(monkeypatch, verified: bool) -> None:
     monkeypatch.setattr(
         admin_dashboard, "_read_env", lambda: {"ADMIN_ZERODHA_USER_ID": "AB1234"}
     )
-    monkeypatch.setattr(
-        admin_dashboard, "valid_owner_session", lambda *_: verified
-    )
+    monkeypatch.setattr(admin_dashboard, "valid_owner_session", lambda *_: verified)
 
 
 @pytest.mark.parametrize(
@@ -75,9 +73,7 @@ def test_public_controls_require_verified_owner(monkeypatch, case_request, statu
 def test_verified_owner_controls_require_same_origin_for_writes(monkeypatch):
     _owner(monkeypatch, verified=True)
     admin_dashboard._check_auth(_request())
-    admin_dashboard._check_auth(
-        _request(method="POST", origin="https://65.0.255.84")
-    )
+    admin_dashboard._check_auth(_request(method="POST", origin="https://65.0.255.84"))
     with pytest.raises(HTTPException) as failed:
         admin_dashboard._check_auth(
             _request(method="POST", origin="https://evil.example")
@@ -104,7 +100,8 @@ def test_forwarded_public_client_cannot_skip_owner_session(monkeypatch):
     with pytest.raises(HTTPException) as failed:
         admin_dashboard._check_auth(
             _request(
-                scheme="https", peer="127.0.0.1",
+                scheme="https",
+                peer="127.0.0.1",
                 forwarded_for="203.0.113.5",
             )
         )
