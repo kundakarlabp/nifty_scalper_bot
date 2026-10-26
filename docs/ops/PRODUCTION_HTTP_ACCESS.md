@@ -17,7 +17,8 @@
 | `http://65.0.255.84:8080/releasez` | Public deployed GitHub SHA and release provenance | HTTP 200; compare `effective_sha` with GitHub main |
 | `http://65.0.255.84:8501/_stcore/health` | Public Streamlit process liveness | HTTP 200, `ok` |
 | `http://65.0.255.84:8080/health/trading` | Operational trading readiness | May be 404 while off-hours `AUTO` deliberately unloads the engine |
-| `https://65.0.255.84/admin` | Sensitive authenticated operator dashboard | Requires a valid public TLS certificate and admin authentication; **do not send credentials over HTTP** |
+| `https://65.0.255.84/admin` | Password-free sanitized process-status home | Trusted HTTPS only; no broker tokens, positions, trade controls or privileged logs |
+| `https://65.0.255.84/admin/manage` | Protected interactive trading operator dashboard | Trusted HTTPS and existing admin authentication required for credentials, LIVE switches, restarts and risk controls |
 | `http://127.0.0.1:8081/healthz` | Host-local independent admin process liveness | HTTP 200, `status=ok`; never require public TCP 8081 |
 
 On 2026-10-25, external HTTP from an independent browser/scrape client returned 200 on `:8080/livez`, `:8080/releasez`, `:8501/_stcore/health` **and** `:8081/healthz`. `/releasez` gave `runtime_sha=c86e6f627cb2`; Supabase confirmed full `c86e6f627cb24d97ed63dd9a6dc8f75fdf7ada21`, `release_state=current`, local HTTP 200, locally responsive admin and Streamlit. From the Supabase database-side HTTP extension, ports 80/443/8080/8501 timed out, even though other public sites succeeded: **this probe is not conclusive evidence that AWS is down or its port blocked**. An alternative external HTTP client conclusively disproved the 8080/8501 outage theory.
@@ -26,14 +27,14 @@ On 2026-10-25, external HTTP from an independent browser/scrape client returned 
 
 The owner's 2026-10-25 AWS console screenshots show `niftyscalper2` **running**, static IPv4 `65.0.255.84`, and inbound Lightsail IPv4 rules allowing TCP `80`, `8080–8081`, `22`, `8501`, `443` from any IPv4. `8080 -> 8081` on that screen is a **port range**, not a port-forwarding rule.
 
-The independent HTTPS client could not negotiate trusted TLS on `:443` under the historical Caddy config (`:443 { tls internal ... }`), and `:8081` was public even though the admin server historically relied on firewall isolation rather than credentials. **Never treat that historical state as secure.** The desired boundary: leave harmless public liveness/diagnostic access on 8080; require encrypted authenticated access for `/admin` and `/power`; bind the independent admin process to `127.0.0.1:8081`; use an ACME publicly trusted short-lived IP certificate on `443`, not Caddy's private `tls internal`. Let's Encrypt supports short-lived IP-address certificates since January 2026. Caddy **2.10.1+** supports IP identifiers; an explicit ACME `shortlived` profile is required. Verify public HTTPS and certificate validity **after** rollout, never assume issuance from a syntactically valid Caddyfile.
+The independent HTTPS client could not negotiate trusted TLS on `:443` under the historical Caddy config (`:443 { tls internal ... }`), and `:8081` was public even though the admin server historically relied on firewall isolation rather than credentials. **Never treat that historical state as secure.** The desired boundary: leave harmless public liveness/diagnostic access on 8080; require encrypted authenticated access for `/admin/manage`, mutations and `/power`; the public `/admin` status home must contain only sanitized process data; bind the independent admin process to `127.0.0.1:8081`; use an ACME publicly trusted short-lived IP certificate on `443`, not Caddy's private `tls internal`. Let's Encrypt supports short-lived IP-address certificates since January 2026. Caddy **2.10.1+** supports IP identifiers; an explicit ACME `shortlived` profile is required. Verify public HTTPS and certificate validity **after** rollout, never assume issuance from a syntactically valid Caddyfile.
 
 ## Repeatable troubleshooting order
 
 1. Verify GitHub `main` and the most recent successful **push-triggered** CI run for its exact SHA.
 2. Read fresh Supabase heartbeat (`received_at`, `build_sha`, `http_status`, `trading_status`, `release_state`, `admin_http_responsive`, `streamlit_http_responsive`); check heartbeat age. `quiet`/`auto_quiet` with HTTP 200 is normal off-hours.
 3. Probe external `/livez` and `/releasez` at `:8080`, and `/_stcore/health` at `:8501` using an independently network-enabled HTTP client (fresh requests, no cache). If one probe times out, try a second network vantage before alleging outage.
-4. Check HTTPS `https://65.0.255.84/admin` with certificate verification **enabled**. A TLS error is different from a TCP timeout; never enter credentials through insecure HTTP or `-k`.
+4. Check HTTPS `https://65.0.255.84/admin` (password-free read-only) and `https://65.0.255.84/admin/manage` (authenticated) with certificate verification **enabled**. A TLS error is different from a TCP timeout; never enter credentials through insecure HTTP or `-k`.
 5. If public TCP remains inaccessible from multiple independent networks, compare AWS **Networking > IPv4 firewall** with desired listeners, then check host `ufw`/`nftables`/actual systemd listener state using an authorized AWS management method. GitHub and Supabase cannot inspect the live AWS firewall or socket table.
 6. Mark deployment complete **only** after Supabase SHA equals merged main and `release_state=current`. CI and HTTP liveness do not prove LIVE entry readiness. Never restart a LIVE-exposed engine merely to fix dashboard ingress.
 
@@ -92,3 +93,17 @@ engine manually on Sunday merely to prove Monday's broker authorization;
 Zerodha access tokens are session-bound. Monday, 2026-10-26 is scheduled
 as an NSE derivatives session. Do not infer live order permissions from
 HTTP liveness or the absence of an exchange holiday.
+
+## Passwordless admin status (2026-10-26)
+
+The ordinary public HTTPS `/admin` page is a **read-only status view** with no
+username/password prompt. It displays only the liveness, operating mode and
+GitHub release SHA from the canonical `/livez` and `/releasez` endpoints.
+It must not read the host environment, render Zerodha tokens, expose trading
+controls, fetch privileged journals or support anonymous mutations.
+
+The full operator dashboard moved to `/admin/manage` and still requires
+HTTPS Basic authentication; the existing `/admin/*` write APIs, detailed
+logs and `/power` remain protected. This is intentional: removing all
+credentials from public broker-token, LIVE-order and risk-reset controls
+would allow arbitrary internet users to operate real-money trading.
