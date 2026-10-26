@@ -1,3 +1,15 @@
+"""Causal, futures-led NIFTY opening-range breakout implementation.
+
+Responsibilities:
+- Build ORB evidence from completed futures candles and selected option quotes.
+- Track one setup per breakout and admit momentum or a later confirmed retest.
+- Re-evaluate a dynamic futures-VWAP slope conflict on the same completed
+  retest candle without reviving permanently invalid breakouts.
+
+Boundaries: No spot-volume proxy, option-led direction, or future-candle access.
+Safety: Missing data fail closed; immutable breakout failures remain terminal.
+"""
+
 from __future__ import annotations
 
 import math
