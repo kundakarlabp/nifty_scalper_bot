@@ -8,6 +8,12 @@ adds only fill-integrity invariants:
 * a confirmed TP1 fill resumes protection for the residual position;
 * any other FILLED/non-flat mismatch fails closed and blocks new entries.
 
+Responsibility: Reconcile TP1 fills, residual positions and broker-flat truth.
+Ownership: Core bracket manager owns virtual stops and exchange-resident SLs;
+this layer enforces canonical broker-position and residual-stop proof.
+Safety: Unverified residual broker protection blocks new live entries rather
+than being reported as protected.
+
 The compatibility inheritance is temporary. Later stages will fold these
 invariants into the single explicit bracket implementation and remove runtime
 class replacement.
