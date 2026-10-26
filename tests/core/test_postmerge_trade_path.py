@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import time
 
+import pytest
+
 from nifty_scalper_bot.core.strategy_manager import (
     Signal,
     StrategyEvidence,
@@ -581,3 +583,57 @@ def test_smc_capacity_rejection_still_requires_independent_trigger(monkeypatch):
     assert result is None
     decision = manager._last_no_signal_decision_by_symbol[_CE]
     assert decision.reason == "capacity_retry_independent_confirmation_missing"
+
+
+@pytest.mark.parametrize("trigger_order", [("SMC", "VWAPPro"), ("VWAPPro", "SMC")])
+@pytest.mark.parametrize("capacity_retry", [False, True])
+def test_unconfirmed_smc_cannot_veto_independently_confirmed_vwap(
+    monkeypatch, trigger_order, capacity_retry
+) -> None:
+    """An SMC-only corroboration rule must not suppress a valid VWAP entry."""
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("SMC_SUSTAINED_FLOW_CONFIRMATION_ENABLED", "false")
+    manager = _manager()
+    votes = []
+    for name in trigger_order:
+        signal, evidence = _signal_evidence(name)
+        signal.metadata["setup_id"] = f"{name}:setup-1"
+        evidence.metadata["setup_id"] = signal.metadata["setup_id"]
+        if name == "SMC" and capacity_retry:
+            signal.metadata["capacity_rejection_retry"] = True
+        votes.append((signal, evidence))
+    votes.append(_signal_evidence("OrderFlow", role="context"))
+
+    approved = manager._combine_strategy_votes(
+        symbol=_CE,
+        signals=votes,
+        indicators=_live_indicators(),
+    )
+
+    assert approved is not None
+    assert approved.metadata["strategy_name"] == "VWAPPro"
+    assert approved.metadata["approval_path"] == "single_trigger_context_confirmed"
+    assert approved.metadata["excluded_unconfirmed_triggers"] == ["SMC"]
+    assert approved.metadata["confirmation_contract"]["passed"] is True
+
+
+@pytest.mark.parametrize("strike_distance", [-25.0, float("inf"), float("nan")])
+def test_near_atm_rejects_invalid_distance(strike_distance) -> None:
+    manager = _manager()
+    eligible, _metadata = manager._is_selected_or_near_atm(
+        "NFO:NIFTY26102622900CE",
+        {"strike_distance_from_atm": strike_distance},
+        {"selected_ce": _CE, "selected_pe": _PE},
+    )
+    assert eligible is False
+
+
+def test_near_atm_accepts_valid_unsigned_distance() -> None:
+    manager = _manager()
+    eligible, metadata = manager._is_selected_or_near_atm(
+        "NFO:NIFTY26102622900CE",
+        {"strike_distance_from_atm": 25.0},
+        {"selected_ce": _CE, "selected_pe": _PE},
+    )
+    assert eligible is True
+    assert metadata["selected_ok_reason"] == "near_atm"
