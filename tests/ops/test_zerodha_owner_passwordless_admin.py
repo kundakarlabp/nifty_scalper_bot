@@ -122,7 +122,7 @@ def test_no_owner_configuration_fails_closed(monkeypatch, tmp_path) -> None:
     client = _setup(monkeypatch, tmp_path, owner="")
     result = client.get("/admin")
     assert result.status_code == 503
-    assert "not configured" in result.text.lower()
+    assert result.json()["detail"] == "admin_owner_not_configured"
 
 
 def test_http_never_allows_owner_login_or_mutation(monkeypatch, tmp_path) -> None:
