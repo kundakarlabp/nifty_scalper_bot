@@ -60,9 +60,13 @@ def _signing_key() -> bytes:
 
 
 def _pack(payload: dict[str, object]) -> str:
-    value = base64.urlsafe_b64encode(
-        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-    ).decode().rstrip("=")
+    value = (
+        base64.urlsafe_b64encode(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        )
+        .decode()
+        .rstrip("=")
+    )
     mac = hmac.new(_signing_key(), value.encode(), hashlib.sha256).hexdigest()
     return value + "." + mac
 
@@ -75,9 +79,7 @@ def _unpack(value: str) -> dict[str, object] | None:
         expected = hmac.new(_signing_key(), body.encode(), hashlib.sha256).hexdigest()
         if not hmac.compare_digest(expected, signature):
             return None
-        payload = json.loads(
-            base64.urlsafe_b64decode(body + "=" * (-len(body) % 4))
-        )
+        payload = json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)))
         if not isinstance(payload, dict):
             return None
         issued = payload.get("iat")
@@ -109,8 +111,13 @@ def create_challenge(response: Response) -> str:
         {"kind": "login", "nonce": secrets.token_urlsafe(24), "iat": int(time.time())}
     )
     response.set_cookie(
-        LOGIN_COOKIE, token, secure=True, httponly=True, samesite="lax",
-        max_age=LOGIN_TTL_SECONDS, path="/admin",
+        LOGIN_COOKIE,
+        token,
+        secure=True,
+        httponly=True,
+        samesite="lax",
+        max_age=LOGIN_TTL_SECONDS,
+        path="/admin",
     )
     return token
 
@@ -121,7 +128,8 @@ def verify_challenge(request: Request, submitted: str) -> bool:
         return False
     payload = _unpack(cookie)
     return bool(
-        payload and payload.get("kind") == "login"
+        payload
+        and payload.get("kind") == "login"
         and isinstance(payload.get("nonce"), str)
         and time.time() - int(payload["iat"]) <= LOGIN_TTL_SECONDS
     )
@@ -136,8 +144,13 @@ def clear_challenge(response: Response) -> None:
 def grant_owner_session(response: Response, user_id: str) -> None:
     cookie = _pack({"kind": "session", "uid": user_id, "iat": int(time.time())})
     response.set_cookie(
-        SESSION_COOKIE, cookie, secure=True, httponly=True, samesite="strict",
-        max_age=SESSION_TTL_SECONDS, path="/admin",
+        SESSION_COOKIE,
+        cookie,
+        secure=True,
+        httponly=True,
+        samesite="strict",
+        max_age=SESSION_TTL_SECONDS,
+        path="/admin",
     )
 
 
@@ -146,7 +159,8 @@ def valid_owner_session(request: Request, expected_user_id: str) -> bool:
         return False
     payload = _unpack(request.cookies.get(SESSION_COOKIE, ""))
     return bool(
-        payload and payload.get("kind") == "session"
+        payload
+        and payload.get("kind") == "session"
         and isinstance(payload.get("uid"), str)
         and hmac.compare_digest(str(payload["uid"]), expected_user_id)
         and time.time() - int(payload["iat"]) <= SESSION_TTL_SECONDS
