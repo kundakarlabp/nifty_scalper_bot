@@ -192,6 +192,9 @@ def run_worker(request: dict[str, Any], env_file: Path) -> dict[str, Any]:
             "orb_opening_range_incomplete_staged_session_dates": retained.get(
                 "orb_opening_range_incomplete_staged_session_dates", []
             ),
+            "orb_opening_range_missing_futures_minutes": retained.get(
+                "orb_opening_range_missing_futures_minutes", {}
+            ),
             "staging_rejections": retained["staging_rejections"],
             "valid_cached_files": retained["valid_cached_files"],
             "corrupt_or_untrusted_files": retained["corrupt_or_untrusted_files"],
@@ -233,6 +236,10 @@ def run_worker(request: dict[str, Any], env_file: Path) -> dict[str, Any]:
         0, len(retained["staged_session_dates"]) - max_retained_sessions
     )
     for session_day in retained["staged_session_dates"][:max_retained_sessions]:
+        orb_missing_opening = retained.get(
+            "orb_opening_range_missing_futures_minutes", {}
+        ).get(session_day)
+        orb_opening_complete = orb_missing_opening == 0
         session_report = run_archived_research(
             directory / "retained_sessions" / session_day
         )
@@ -243,6 +250,8 @@ def run_worker(request: dict[str, Any], env_file: Path) -> dict[str, Any]:
                 "scope": "retained_observed_pair_component_research",
                 "session_date": session_day,
                 "historical_active_universe_proven": False,
+                "orb_opening_range_complete": orb_opening_complete,
+                "orb_opening_range_missing_futures_minutes": orb_missing_opening,
                 "promotion_eligible": False,
                 "component_report": session_report,
             },
@@ -251,6 +260,8 @@ def run_worker(request: dict[str, Any], env_file: Path) -> dict[str, Any]:
             {
                 "session_date": session_day,
                 "report": filename,
+                "orb_opening_range_complete": orb_opening_complete,
+                "orb_opening_range_missing_futures_minutes": orb_missing_opening,
                 "promotion_eligible": False,
                 "scenarios": [
                     {
