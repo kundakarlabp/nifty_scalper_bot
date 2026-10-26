@@ -343,12 +343,12 @@ class RiskManager:
         return max(pct_cap, abs_cap)
 
     def _sync_daily_cap_from_verified_balance(self, balance: float) -> None:
-        """Repair a stale startup cap without resetting today's risk accounting.
+        """Establish today's loss cap from verified funds before any exposure.
 
-        Increasing today's loss allowance is safe only before the first trade,
-        position or realized P&L. Subsequent balance increases (including
-        deposits) must not reset a trading day's loss limit. Decreases tighten
-        the cap immediately. This is called ONLY after verified DataHub funds.
+        Broker available cash is lower while option premium is deployed. That
+        debit is not an equity drawdown, so the daily loss allowance is frozen
+        after the first trade or open exposure, regardless of cash movements.
+        The separate affordability guard continues to use free cash.
         """
         switches = getattr(self, "_switches", None)
         if switches is None:
@@ -357,10 +357,6 @@ class RiskManager:
         previous = float(getattr(switches, "max_day_loss", 0.0) or 0.0)
         if updated <= 0.0 or abs(updated - previous) < 1e-8:
             return
-        # Free cash falls when a BUY option premium is debited; it is not a
-        # loss of account equity. Freeze the day's cap once exposure/trading
-        # starts, in both directions, rather than shrinking it mid-position.
-        # The actual available cash remains authoritative for affordability.
         try:
             count = getattr(self.position_manager, "trades_today", None)
             positions = getattr(self.position_manager, "get_open_positions", None)
@@ -374,31 +370,15 @@ class RiskManager:
                 or not callable(positions)
                 or int(count()) > 0
                 or bool(positions())
+                or (
+                    updated > previous
+                    and abs(float(switches.day_loss())) > 1e-8
+                )
             ):
                 return
         except (TypeError, ValueError, AttributeError, RuntimeError):
             return
-        if updated > previous:
-            if self._breaker_tripped or self._completed_trade_costs_today > 0:
-                return
-            try:
-                if abs(float(switches.day_loss())) > 1e-8:
-                    return
-                if abs(float(self._last_pnl_snapshot)) > 1e-8:
-                    return
-                count = getattr(self.position_manager, "trades_today", None)
-                if not callable(count) or int(count()) != 0:
-                    return
-                positions = getattr(self.position_manager, "get_open_positions", None)
-                if not callable(positions):
-                    positions = getattr(self.position_manager, "get_all_positions", None)
-                if not callable(positions) or bool(positions()):
-                    return
-            except (TypeError, ValueError, AttributeError, RuntimeError):
-                return
         switches.max_day_loss = updated
-        # Persist the verified pre-entry risk envelope for restart recovery.
-        # The next process must not derive a smaller cap from cash tied in premium.
         self._persist_risk_circuit_state()
         self._logger.info(
             "risk_daily_cap_reconciled",
