@@ -1,7 +1,9 @@
 """Restart-safe, idempotent fill ledger for the canonical BO lifecycle.
 
-Core contracts:
+Responsibilities:
 - Persist exactly one identity per broker entry/exit leg and reject conflicts.
+Ownership: Durable SQLite fill economics; not order submission or stop protection.
+Safety: Broker-confirmed cumulative VWAP/quantity changes must remain atomic.
 - Reconcile an entry order's confirmed cumulative quantity and broker VWAP
   together using a compare-and-swap transaction. Original order, side and
   exit identities are never rewritten.
