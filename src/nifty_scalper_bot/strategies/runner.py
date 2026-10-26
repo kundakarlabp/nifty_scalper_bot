@@ -11,6 +11,8 @@ Runtime role:
 - Maintains per-symbol runner/indicator history counts used by the readiness SSOT.
 - Persists bounded, read-only candidate cash/risk rejection evidence in the
   existing trade-decision journal without adding a second risk authority.
+- Checks independently parsed original/replacement expiries using the pure
+  _strict_replacement_expiry_block_reason helper before a strict substitution.
 
 Position in the pipeline:
     data/data_hub.py / data/market_data_manager.py -> THIS FILE (runner.py)
