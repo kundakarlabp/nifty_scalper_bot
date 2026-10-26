@@ -14535,9 +14535,8 @@ class OrderManager:
                 # Canonical BracketManager restores its own trailing state.
                 # Never resurrect the legacy broker-modifying controller on
                 # top of that live owner.
-                if (
-                    self._bracket_manager
-                    and self._bracket_manager.is_symbol_managed(state.symbol)
+                if self._bracket_manager and self._bracket_manager.is_symbol_managed(
+                    state.symbol
                 ):
                     continue
                 if not state.trailing_spec:
