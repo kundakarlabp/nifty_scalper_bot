@@ -1,12 +1,16 @@
 """Purpose: Expose daily broker authentication and operational admin controls.
 
 Responsibilities:
+- dashboard serves password-free, process-only status on the production /admin home.
+- admin_manage and _full_dashboard serve the authenticated interactive operator UI.
 - Provide Kite request-token callback, token entry and mode operations.
-- Serve sanitized runtime overview, logs and research-status endpoints.
+- Serve sanitized runtime overview, protected logs and research-status endpoints.
 - Route GitHub-update/restart requests through service-control owners.
 
 Boundaries: The release runner and engine retain execution authority.
-Safety: Do not collect Kite passwords/TOTP or bypass broker release safeguards.
+Safety: Public status never exposes secrets, logs, or mutable broker controls.
+Sensitive writes and the full UI keep HTTPS/authentication and broker release gates.
+Do not collect Kite passwords/TOTP or bypass broker release safeguards.
 """
 
 # Embedded HTML/CSS/JS assets have intentional long literal lines.
@@ -430,9 +434,77 @@ def _flash(request: Request) -> str:
     return ""
 
 
+def _passwordless_status_page() -> HTMLResponse:
+    """Render public process-only status; never leak credentials or controls."""
+    body = """<!doctype html><html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Nifty Scalper · Status</title>
+<style>
+body{font:16px system-ui,sans-serif;background:#0b1522;color:#edf3fa;
+max-width:650px;margin:8vh auto;padding:20px}
+section{background:#162434;border:1px solid #304055;border-radius:14px;padding:22px}
+h1{font-size:1.5rem}dl{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+dt{color:#afc0cf}dd{margin:5px 0;font-weight:600;overflow-wrap:anywhere}
+a{color:#83bcff}small{color:#afc0cf}
+</style></head><body><section><h1>Nifty Scalper · Status</h1>
+<p>Read-only process diagnostics. No admin login required.</p>
+<dl><div><dt>Engine</dt><dd id="engine">Checking…</dd></div>
+<div><dt>Operating mode</dt><dd id="mode">Checking…</dd></div>
+<div><dt>Release</dt><dd id="release">Checking…</dd></div>
+<div><dt>Revision</dt><dd id="revision">Checking…</dd></div></dl>
+<p><small>Trading readiness and broker authentication are not established
+by process liveness.</small></p>
+<p><a href="/admin/manage">Protected trading controls</a></p></section>
+<script>
+async function refresh(){
+  try{
+    const responses=await Promise.all([
+      fetch("/livez",{cache:"no-store",credentials:"omit"}),
+      fetch("/releasez",{cache:"no-store",credentials:"omit"})
+    ]);
+    if(!responses.every(r=>r.ok))throw Error("unavailable");
+    const [live,release]=await Promise.all(responses.map(r=>r.json()));
+    document.getElementById("engine").textContent =
+      live.quiet===true?"QUIET":live.bot_loaded===true?"Loaded":"Not loaded";
+    document.getElementById("mode").textContent =
+      String(live.operating_mode||release.operating_mode||"Unknown");
+    document.getElementById("release").textContent =
+      String(release.status||"Unknown");
+    document.getElementById("revision").textContent =
+      String(release.effective_sha||release.runtime_sha||"Unknown").slice(0,12);
+  }catch{
+    document.getElementById("engine").textContent="Unavailable";
+  }
+}
+refresh();setInterval(refresh,15000);
+</script></body></html>"""
+    return HTMLResponse(
+        body,
+        headers={
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+            "Referrer-Policy": "no-referrer",
+        },
+    )
+
+
 @router.get("/admin", response_class=HTMLResponse)
 def dashboard(request: Request) -> HTMLResponse:
-    """Serve the UI immediately; live metrics are fetched independently on demand."""
+    """Use password-free sanitized status, never anonymous operator controls."""
+    if os.getenv("DEPLOYMENT_PLATFORM") == "aws_lightsail":
+        # Public HTTP already exposes /livez and /releasez. The status home
+        # reads only those same fields; no private control or session data.
+        return _passwordless_status_page()
+    return _full_dashboard(request)
+
+
+@router.get("/admin/manage", response_class=HTMLResponse)  # type: ignore[untyped-decorator]
+def admin_manage(request: Request) -> HTMLResponse:
+    """Provide broker credentials and mutable controls only after auth."""
+    return _full_dashboard(request)
+
+
+def _full_dashboard(request: Request) -> HTMLResponse:
     _check_auth(request)
     env = _read_env()
     live_on = (
