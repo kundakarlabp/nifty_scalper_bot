@@ -492,12 +492,8 @@ refresh();setInterval(refresh,15000);
 def dashboard(request: Request) -> HTMLResponse:
     """Use password-free sanitized status, never anonymous operator controls."""
     if os.getenv("DEPLOYMENT_PLATFORM") == "aws_lightsail":
-        peer = request.client.host if request.client else ""
-        local = peer in {"127.0.0.1", "::1"} and not request.headers.get(
-            "x-forwarded-for"
-        )
-        if request.url.scheme != "https" and not local:
-            raise HTTPException(status_code=403, detail="admin_https_required")
+        # Public HTTP already exposes /livez and /releasez. The status home
+        # reads only those same fields; no private control or session data.
         return _passwordless_status_page()
     return _full_dashboard(request)
 
