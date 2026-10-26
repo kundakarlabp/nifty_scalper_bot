@@ -14,8 +14,8 @@ from __future__ import annotations
 DEFAULT_BROKER_BASE_URL = "https://api.example.com"
 DEFAULT_BROKER_WEBSOCKET_URL = "wss://ws.example.com/stream"
 
-# Single GitHub-owned current LIVE risk envelope. Keep observed exposure
-# unchanged in this infrastructure-only refactor; sizing review is separate.
+# Single GitHub-owned, user-authorized LIVE risk envelope: 5% per trade
+# and 5% daily loss, with independent cost-inclusive stop and risk controls.
 DEFAULT_LIVE_PER_TRADE_RISK_PCT = "5.0"
 DEFAULT_LIVE_DAILY_LOSS_PCT = "5.0"
 

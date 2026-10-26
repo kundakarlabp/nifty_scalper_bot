@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from nifty_scalper_bot.analytics.regime_gate import RegimeGateConfig
+from nifty_scalper_bot.config import defaults
 from nifty_scalper_bot.config.base import AppConfig
 from nifty_scalper_bot.config.env import load_from_env
 from nifty_scalper_bot.config.env_utils import normalise_live_env_defaults
@@ -764,10 +765,10 @@ class OrderSettings:
 class RiskSettings:
     """Risk guardrails enforced before routing live orders."""
 
-    daily_loss_pct: float = 2.0
-    daily_pnl_cap_pct: float = 2.0
+    daily_loss_pct: float = float(defaults.DEFAULT_LIVE_DAILY_LOSS_PCT)
+    daily_pnl_cap_pct: float = float(defaults.DEFAULT_LIVE_DAILY_LOSS_PCT)
     max_daily_loss_absolute: float = 0.0
-    per_trade_risk_pct: float = 0.75
+    per_trade_risk_pct: float = float(defaults.DEFAULT_LIVE_PER_TRADE_RISK_PCT)
     per_trade_cap_pct: float = 25.0
     max_consecutive_losses: int = 3
     max_trades_per_day: int = 6  # enforced by RiskManager failsafe; 0 = unlimited
@@ -1207,7 +1208,11 @@ def _build_order_settings() -> OrderSettings:
 
 
 def _build_risk_settings() -> RiskSettings:
-    daily_loss_pct = _env_float("RISK_DAILY_LOSS_PCT", default=2.0, minimum=0.0)
+    daily_loss_pct = _env_float(
+        "RISK_DAILY_LOSS_PCT",
+        default=float(defaults.DEFAULT_LIVE_DAILY_LOSS_PCT),
+        minimum=0.0,
+    )
     abs_loss_cap = _env_float(
         "RISK__MAX_DAY_LOSS", "RISK_MAX_DAY_LOSS", default=0.0, minimum=0.0
     )
@@ -1246,7 +1251,7 @@ def _build_risk_settings() -> RiskSettings:
         per_trade_risk_pct=_env_float(
             "RISK__PER_TRADE_RISK_PCT",
             "RISK_PER_TRADE_PCT",
-            default=0.75,
+            default=float(defaults.DEFAULT_LIVE_PER_TRADE_RISK_PCT),
             minimum=0.0,
         ),
         per_trade_cap_pct=_env_float(
