@@ -203,10 +203,9 @@ def replacement_plan_rejection_reason(
         or selected_target is None
     ):
         return "replacement_candidate_geometry_unverified"
-    if (
-        abs(entry - selected_entry) > _TICK_SIZE
-        or not (0.0 < selected_stop < selected_entry < selected_target)
-    ):
+    if abs(entry - selected_entry) > _TICK_SIZE:
+        return "replacement_candidate_geometry_invalid"
+    if not (0.0 < selected_stop < selected_entry < selected_target):
         return "replacement_candidate_geometry_invalid"
 
     stop = _positive_float(getattr(signal, "stop_loss", None))
