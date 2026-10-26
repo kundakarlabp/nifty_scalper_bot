@@ -390,6 +390,7 @@ def test_geometry_helper_has_no_class_mutation_hooks() -> None:
     assert "install_runner_geometry_hardening" not in source
     assert "install_bracket_exit_provenance_hardening" not in source
 
+
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
 def test_nonfinite_premium_or_geometry_is_not_materialized(value) -> None:
     signal = _signal(
