@@ -1,8 +1,12 @@
 """Canonical entry-evidence helpers.
 
-This module contains objective execution evidence only; admission remains
-structural and fail-closed: direction, setup validity, market-data freshness,
-quote executability, post-cost economics and risk retain separate owners.
+Responsibilities:
+- Parse finite top-of-book bid/ask and observed spread into quote evidence.
+- Treat the producer tradable_quote bit as provisional, not executable proof.
+- Preserve separate structural, freshness, post-cost and broker risk owners.
+
+Safety: missing or non-finite quote fields never set execution_evidence_pass;
+the final runner/order readiness remains the broker-order authority.
 """
 
 from __future__ import annotations
