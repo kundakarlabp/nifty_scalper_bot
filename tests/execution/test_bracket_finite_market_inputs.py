@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-import math
-import unittest.mock
+from unittest.mock import Mock
 
 import pytest
 
@@ -16,7 +15,7 @@ SYMBOL = "NFO:NIFTY26OCT22700CE"
 @pytest.fixture
 def manager(monkeypatch, tmp_path):
     monkeypatch.setenv("BRACKET_FILL_LEDGER_PATH", str(tmp_path / "fill-ledger.db"))
-    owner = BracketManager(order_manager=unittest.mock.Mock())
+    owner = BracketManager(order_manager=Mock())
     owner._running = False
     owner._watchdog_thread.join(timeout=1.0)
     owner.register_virtual_bracket(
@@ -33,7 +32,7 @@ def manager(monkeypatch, tmp_path):
     owner._running = False
 
 
-@pytest.mark.parametrize("bad", [math.nan, math.inf, -math.inf])
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
 def test_nonfinite_tick_never_contaminates_bracket_or_exits(manager, bad):
     bracket = manager.get_bracket("entry-finite")
     assert bracket is not None
@@ -58,10 +57,10 @@ def test_nonfinite_tick_never_contaminates_bracket_or_exits(manager, bad):
 @pytest.mark.parametrize(
     ("bid", "ask"),
     [
-        (math.nan, 102.0),
-        (99.0, math.nan),
-        (math.inf, 102.0),
-        (99.0, math.inf),
+        (float("nan"), 102.0),
+        (99.0, float("nan")),
+        (float("inf"), 102.0),
+        (99.0, float("inf")),
     ],
 )
 def test_nonfinite_quote_is_not_considered_fresh_executable_depth(
@@ -76,14 +75,14 @@ def test_nonfinite_quote_is_not_considered_fresh_executable_depth(
 def test_corrupt_cached_depth_falls_back_to_ltp(manager):
     bracket = manager.get_bracket("entry-finite")
     assert bracket is not None
-    manager._exit_quotes[SYMBOL] = (math.nan, math.inf, 1.0)
+    manager._exit_quotes[SYMBOL] = (float("nan"), float("inf"), 1.0)
     assert manager._executable_exit_price(bracket, 99.0) == (
         99.0,
         "ltp_stale_quote",
     )
 
 
-@pytest.mark.parametrize("bad", [math.inf, math.nan, -math.inf])
+@pytest.mark.parametrize("bad", [float("inf"), float("nan"), float("-inf")])
 def test_nonfinite_atr_provider_and_external_updates_fail_closed(manager, bad):
     manager._atr_provider = Mock()
     manager._atr_provider.get_current_atr.return_value = bad
