@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
-"""Poll a GitHub research request or run its fixed read-only worker.
+"""Run the fixed, read-only historical research and coverage worker.
 
-History, strategy component bar research and completed-trade evidence are saved
-locally. Modeled component research is never presented as live-pipeline parity.
+Responsibilities:
+- Collect supported broker history and stage verified retained option sessions.
+- Persist per-session ORB opening-futures gaps, strategy component comparisons
+  and completed-trade evidence under the canonical research output location.
+- Report source, missing-data and exit limitations without trading-policy edits.
+
+Modeled component research never proves live-pipeline parity or profitability.
+No order placement, automatic LIVE promotion or parallel research collector.
 """
 
 from __future__ import annotations
@@ -186,6 +192,15 @@ def run_worker(request: dict[str, Any], env_file: Path) -> dict[str, Any]:
         status["retained_cache_coverage"] = {
             "scope": "verified_retained_pairs_not_full_historical_universe",
             "staged_session_dates": retained["staged_session_dates"],
+            "orb_opening_range_ready_staged_session_dates": retained.get(
+                "orb_opening_range_ready_staged_session_dates", []
+            ),
+            "orb_opening_range_incomplete_staged_session_dates": retained.get(
+                "orb_opening_range_incomplete_staged_session_dates", []
+            ),
+            "orb_opening_range_missing_futures_minutes": retained.get(
+                "orb_opening_range_missing_futures_minutes", {}
+            ),
             "staging_rejections": retained["staging_rejections"],
             "valid_cached_files": retained["valid_cached_files"],
             "corrupt_or_untrusted_files": retained["corrupt_or_untrusted_files"],
@@ -227,6 +242,10 @@ def run_worker(request: dict[str, Any], env_file: Path) -> dict[str, Any]:
         0, len(retained["staged_session_dates"]) - max_retained_sessions
     )
     for session_day in retained["staged_session_dates"][:max_retained_sessions]:
+        orb_missing_opening = retained.get(
+            "orb_opening_range_missing_futures_minutes", {}
+        ).get(session_day)
+        orb_opening_complete = orb_missing_opening == 0
         session_report = run_archived_research(
             directory / "retained_sessions" / session_day
         )
@@ -237,6 +256,8 @@ def run_worker(request: dict[str, Any], env_file: Path) -> dict[str, Any]:
                 "scope": "retained_observed_pair_component_research",
                 "session_date": session_day,
                 "historical_active_universe_proven": False,
+                "orb_opening_range_complete": orb_opening_complete,
+                "orb_opening_range_missing_futures_minutes": orb_missing_opening,
                 "promotion_eligible": False,
                 "component_report": session_report,
             },
@@ -245,6 +266,8 @@ def run_worker(request: dict[str, Any], env_file: Path) -> dict[str, Any]:
             {
                 "session_date": session_day,
                 "report": filename,
+                "orb_opening_range_complete": orb_opening_complete,
+                "orb_opening_range_missing_futures_minutes": orb_missing_opening,
                 "promotion_eligible": False,
                 "scenarios": [
                     {
