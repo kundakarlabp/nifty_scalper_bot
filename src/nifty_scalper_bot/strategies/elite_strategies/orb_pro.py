@@ -112,9 +112,7 @@ class ORBProStrategy(EliteStrategy):
         Breakout volume, penetration and opening-range geometry are immutable
         completed-bar evidence. They must remain terminal rejections.
         """
-        return self.last_structural_failure_reasons == (
-            "futures_vwap_slope_alignment",
-        )
+        return self.last_structural_failure_reasons == ("futures_vwap_slope_alignment",)
 
     def notify_entry_accepted(self, side: str, *, setup_id: str | None = None) -> None:
         """Consume an ORB setup only after the canonical entry-accepted callback."""
