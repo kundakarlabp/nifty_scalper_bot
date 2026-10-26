@@ -1915,10 +1915,11 @@ def test_unsettled_broker_trigger_readback_blocks_competing_ratchets(
     bracket.last_ltp = 165.0
     assert manager._virtual_modify_sl(bracket.virtual_sl_id, 152.0)
     assert len(order_manager.modify_calls) == 1
-    assert [r["broker_confirmed"] for r in bracket.trailing_config["trail_history"]] == [
-        False,
-        False,
+    statuses = [
+        row["broker_confirmed"]
+        for row in bracket.trailing_config["trail_history"]
     ]
+    assert statuses == [False, False]
 
     # Broker eventually catches up to the first order modification.
     first = order_manager.modify_calls[0][1]
