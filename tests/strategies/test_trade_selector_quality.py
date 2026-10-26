@@ -246,9 +246,12 @@ def test_bad_candidate_strike_is_rejected_not_raised(monkeypatch, strike):
     monkeypatch.setattr(selector_module, "expiry_theta_block", lambda: (False, ""))
     monkeypatch.setattr(selector_module, "midday_pause_block", lambda: (False, ""))
     selector = TradeCandidateSelector()
-    assert selector.select_ranked_candidates(
-        direction_bias="CE", atm_strike=22000, snapshots=[base(strike=strike)]
-    ) == []
+    assert (
+        selector.select_ranked_candidates(
+            direction_bias="CE", atm_strike=22000, snapshots=[base(strike=strike)]
+        )
+        == []
+    )
     assert selector._last_rejects["invalid_strike"] == 1
 
 
@@ -267,9 +270,12 @@ def test_invalid_selection_context_cannot_admit_candidate(monkeypatch, atm, rr):
     monkeypatch.setattr(selector_module, "expiry_theta_block", lambda: (False, ""))
     monkeypatch.setattr(selector_module, "midday_pause_block", lambda: (False, ""))
     selector = TradeCandidateSelector()
-    assert selector.select_ranked_candidates(
-        direction_bias="CE", atm_strike=atm, snapshots=[base()], gross_rr=rr
-    ) == []
+    assert (
+        selector.select_ranked_candidates(
+            direction_bias="CE", atm_strike=atm, snapshots=[base()], gross_rr=rr
+        )
+        == []
+    )
     assert selector._last_rejects["invalid_selection_context"] == 1
 
 
