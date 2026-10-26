@@ -1,4 +1,12 @@
-"""Restart-safe, idempotent fill ledger for the canonical BO lifecycle."""
+"""Restart-safe, idempotent fill ledger for the canonical BO lifecycle.
+
+Core contracts:
+- Persist exactly one identity per broker entry/exit leg and reject conflicts.
+- Reconcile an entry order's confirmed cumulative quantity and broker VWAP
+  together using a compare-and-swap transaction. Original order, side and
+  exit identities are never rewritten.
+- Expose the durable fills used to calculate final gross/net realized P&L.
+"""
 
 from __future__ import annotations
 
