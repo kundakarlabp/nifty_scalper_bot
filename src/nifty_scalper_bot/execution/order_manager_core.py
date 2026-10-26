@@ -14595,12 +14595,14 @@ class OrderManager:
                     if broker_sym in recently_handled:
                         continue
 
-                    recently_handled.add(broker_sym)
-                    self._recent_orphans = recently_handled
-
+                    # The canonical BracketManager owns both active and
+                    # pending-entry lifecycles. A legacy OrderManager bracket
+                    # map is not proof of missing protection. Do not mark
+                    # managed broker exposure as an orphan in the dedup set:
+                    # if ownership later disappears, true recovery must work.
                     if (
                         self._bracket_manager
-                        and self._bracket_manager.has_active_bracket(broker_sym)
+                        and self._bracket_manager.is_symbol_managed(broker_sym)
                     ):
                         continue
 
@@ -14658,8 +14660,13 @@ class OrderManager:
                                     break
 
                     if is_active_locally:
-                        # self._logger.debug(f"⏳ Skipping Orphan Check for {broker_sym} (Busy)")
+                        # An in-flight entry or recent fill can acquire its
+                        # canonical bracket on the next reconciliation. Do not
+                        # latch it as an orphan before that can happen.
                         continue
+
+                    recently_handled.add(broker_sym)
+                    self._recent_orphans = recently_handled
 
                     # If we get here, it is a TRUE Orphan (Manual/Old trade)
                     self._logger.warning(
@@ -14739,18 +14746,19 @@ class OrderManager:
                 # CASE C: Perfect Match... BUT IS IT SAFE? (The Missing Link)
                 elif broker_positions[lsym]["qty"] == pos.quantity:
                     self._missing_counts[lsym] = 0
-                    # 1. Check if a bracket is actually managing this symbol
-                    is_managed = False
-                    if self._bracket_manager:
-                        # Fast check: Does bracket manager know this order ID or symbol?
-                        # We iterate because bracket ID != Position ID usually
-                        with self._lock:
-                            for b in self._brackets.values():
-                                if b.symbol == lsym and b.active:
-                                    is_managed = True
-                                    break
+                    # Only the canonical bracket lifecycle owns virtual stops,
+                    # pending entries, and broker SL evidence. OrderManager's
+                    # legacy self._brackets may be empty for a fully managed
+                    # trade; using it here falsely emitted "Naked Position"
+                    # every 15 seconds and repeatedly entered orphan recovery.
+                    # Ownership is distinct from broker-confirmed stop proof:
+                    # the BracketManager enforces that separately, fail-closed.
+                    is_managed = bool(
+                        self._bracket_manager
+                        and self._bracket_manager.is_symbol_managed(lsym)
+                    )
 
-                    # 2. If not managed, WE MUST ADOPT IT NOW
+                    # Only genuinely unmanaged broker exposure needs rescue.
                     if not is_managed:
                         self._logger.warning(
                             f"🛡️ Naked Position Detected (Qty Match): {lsym}. Forcing Guard...",
