@@ -2,7 +2,8 @@
 
 Responsibilities:
 - normalise_live_env_defaults enforces explicit LIVE authorization and risk caps.
-- _bounded_live_risk_pct reconciles restrictive operator aliases without widening.
+- _bounded_live_risk_pct reconciles restrictive operator aliases and migrates
+  the superseded 2% LIVE envelope to the authorized 5% GitHub policy.
 - supabase_telemetry_enabled controls monitoring; parse_float_env and
   resolve_build_sha provide safe configuration and release identity.
 
@@ -129,11 +130,14 @@ def supabase_telemetry_enabled(key: str) -> bool:
     return (os.getenv("DEPLOYMENT_PLATFORM") or "").strip().lower() == "aws_lightsail"
 
 
-def _bounded_live_risk_pct(keys: tuple[str, ...], ceiling: str) -> str:
-    """Use the strictest finite positive operator cap, never above GitHub policy.
+def _bounded_live_risk_pct(
+    keys: tuple[str, ...], ceiling: str, *, superseded_pct: float | None = None
+) -> str:
+    """Use the strictest valid cap, migrating the explicitly retired LIVE 2%.
 
-    All active aliases are inspected, not merely the first one: a stale
-    permissive alias must never overrule a more protective operator limit.
+    The user-authorized 5% policy supersedes legacy 2% risk aliases. Other
+    explicitly stricter caps still win, and values above GitHub's ceiling
+    cannot widen risk. All aliases are inspected and invalid values fail closed.
     """
     selected = float(ceiling)
     for key in keys:
@@ -146,6 +150,14 @@ def _bounded_live_risk_pct(keys: tuple[str, ...], ceiling: str) -> str:
             raise ValueError(f"invalid_live_risk_limit:{key}") from exc
         if not math.isfinite(value) or value <= 0:
             raise ValueError(f"invalid_live_risk_limit:{key}")
+        if superseded_pct is not None and value == superseded_pct:
+            LOGGER.warning(
+                "LIVE_RISK_LEGACY_CAP_MIGRATED key=%s old_pct=%s new_pct=%s",
+                key,
+                value,
+                ceiling,
+            )
+            continue
         selected = min(selected, value)
     return str(selected)
 
@@ -167,6 +179,7 @@ def normalise_live_env_defaults() -> None:
             per_trade_limit = _bounded_live_risk_pct(
                 ("RISK__PER_TRADE_RISK_PCT", "RISK_PER_TRADE_PCT"),
                 LIVE_PER_TRADE_RISK_PCT,
+                superseded_pct=2.0,
             )
             daily_limit = _bounded_live_risk_pct(
                 (
@@ -176,6 +189,7 @@ def normalise_live_env_defaults() -> None:
                     "DAILY_PNL_CAP_PCT",
                 ),
                 LIVE_DAILY_LOSS_PCT,
+                superseded_pct=2.0,
             )
         except ValueError as exc:
             invalid_live_risk = exc
@@ -241,8 +255,9 @@ def normalise_live_env_defaults() -> None:
             truthy(os.getenv("ORDERFLOW_OFI_ADAPTIVE_HOLDOFF_ENABLED")),
         )
 
-        # Preserve the existing LIVE risk profile. The canonical values live
-        # in config/defaults.py; aliases are normalized for older consumers.
+        # Apply the current user-authorized 5% LIVE envelope. The canonical
+        # values live in config/defaults.py; aliases are normalized for older
+        # consumers, with superseded 2% operator settings migrated above.
         os.environ["RISK__PER_TRADE_RISK_PCT"] = per_trade_limit
         os.environ["RISK_PER_TRADE_PCT"] = per_trade_limit
         os.environ["RISK_DAILY_LOSS_PCT"] = daily_limit
