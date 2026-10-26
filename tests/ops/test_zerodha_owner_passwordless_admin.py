@@ -55,7 +55,8 @@ def test_zerodha_owner_session_replaces_separate_admin_prompt(
     monkeypatch.setattr(dashboard, "_verify_access_token", lambda *_: (True, "AB1234"))
     actions: list[str] = []
     monkeypatch.setattr(
-        dashboard, "_activate_access_token",
+        dashboard,
+        "_activate_access_token",
         lambda token: (
             actions.append(token) or ControlResult(True, "restart_bot", "queued")
         ),
@@ -86,7 +87,8 @@ def test_different_zerodha_account_never_activates_token(monkeypatch, tmp_path) 
         dashboard, "_verify_access_token", lambda *_: (True, "NOTOWNER")
     )
     monkeypatch.setattr(
-        dashboard, "_activate_access_token",
+        dashboard,
+        "_activate_access_token",
         lambda *_: (_ for _ in ()).throw(AssertionError("not the owner")),
     )
     result = client.post(
@@ -101,7 +103,10 @@ def test_different_zerodha_account_never_activates_token(monkeypatch, tmp_path) 
 def test_missing_challenge_or_cross_origin_cannot_rotate(monkeypatch, tmp_path) -> None:
     client = _setup(monkeypatch, tmp_path)
     _start(client)
-    for state, origin in (("forged", "https://65.0.255.84"), ("forged", "https://evil.invalid")):
+    for state, origin in (
+        ("forged", "https://65.0.255.84"),
+        ("forged", "https://evil.invalid"),
+    ):
         response = client.post(
             "/admin/kite/complete",
             data={"owner_state": state, "request_token": "request"},
@@ -123,8 +128,11 @@ def test_http_never_allows_owner_login_or_mutation(monkeypatch, tmp_path) -> Non
     app.include_router(dashboard.router)
     client = TestClient(app, base_url="http://65.0.255.84")
     assert client.get("/admin/kite/start").status_code == 403
-    assert client.post(
-        "/admin/kite/complete",
-        data={"owner_state": "forged", "request_token": "request"},
-    ).status_code == 403
+    assert (
+        client.post(
+            "/admin/kite/complete",
+            data={"owner_state": "forged", "request_token": "request"},
+        ).status_code
+        == 403
+    )
     assert client.get("/admin/manage").status_code == 403
