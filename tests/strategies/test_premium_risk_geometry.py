@@ -11,6 +11,7 @@ from nifty_scalper_bot.strategies.premium_risk_geometry import (
     anchor_option_geometry_to_execution,
     apply_cost_aware_risk_floor,
     apply_premium_risk_contract,
+    replacement_plan_rejection_reason,
     validate_option_premium_geometry,
 )
 from nifty_scalper_bot.strategies.signal_generator import Signal
@@ -388,3 +389,84 @@ def test_geometry_helper_has_no_class_mutation_hooks() -> None:
     assert "StrategyManager.generate_signal =" not in source
     assert "install_runner_geometry_hardening" not in source
     assert "install_bracket_exit_provenance_hardening" not in source
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_nonfinite_premium_or_geometry_is_not_materialized(value) -> None:
+    signal = _signal(
+        premium_stop_distance=value,
+        premium_target_rr=2.0,
+        invalidation_level_domain="option_premium",
+    )
+    assert apply_premium_risk_contract(signal, 100.0) is signal
+    valid = _signal(
+        premium_stop_distance=5.0,
+        invalidation_level_domain="option_premium",
+    )
+    assert apply_premium_risk_contract(valid, value) is valid
+
+
+def _replacement_reason(
+    *,
+    stop: float | None = 92.0,
+    target: float | None = 115.0,
+    selected_symbol: str = "NFO:NIFTY2680424400PE",
+    candidate_entry: float | None = 100.0,
+    candidate_stop: float | None = 90.0,
+    candidate_target: float | None = 114.0,
+    execution_entry: float = 100.0,
+    metadata_symbol: str = "NFO:NIFTY2680424400PE",
+) -> str | None:
+    signal = _signal(
+        stop_loss=stop,
+        take_profit=target,
+        candidate_selected=True,
+        candidate_symbol=metadata_symbol,
+        bracket_anchor_mode="distance",
+    )
+    return replacement_plan_rejection_reason(
+        signal,
+        selected_symbol=selected_symbol,
+        candidate_entry_price=candidate_entry,
+        candidate_stop_loss=candidate_stop,
+        candidate_target=candidate_target,
+        execution_price=execution_entry,
+    )
+
+
+def test_valid_replacement_can_tighten_but_not_widen_stop() -> None:
+    assert _replacement_reason(stop=92.0) is None
+    assert _replacement_reason(stop=90.0) is None
+    assert _replacement_reason(stop=86.0) == "replacement_stop_widened"
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "reason"),
+    [
+        ("candidate_entry", float("nan"), "replacement_candidate_geometry_unverified"),
+        ("candidate_entry", float("inf"), "replacement_candidate_geometry_unverified"),
+        ("candidate_stop", None, "replacement_candidate_geometry_unverified"),
+        ("candidate_stop", float("inf"), "replacement_candidate_geometry_unverified"),
+        ("candidate_target", float("nan"), "replacement_candidate_geometry_unverified"),
+        ("candidate_stop", 104.0, "replacement_candidate_geometry_invalid"),
+        ("candidate_target", 95.0, "replacement_candidate_geometry_invalid"),
+        ("execution_entry", 105.0, "replacement_candidate_geometry_invalid"),
+        ("stop", float("inf"), "replacement_final_geometry_invalid"),
+        ("target", float("nan"), "replacement_final_geometry_invalid"),
+        ("stop", 101.0, "replacement_final_geometry_invalid"),
+        ("target", 99.0, "replacement_final_geometry_invalid"),
+        (
+            "metadata_symbol",
+            "NFO:NIFTY2680424500PE",
+            "replacement_symbol_identity_mismatch",
+        ),
+        (
+            "selected_symbol",
+            "NFO:NIFTY2680424500PE",
+            "replacement_symbol_identity_mismatch",
+        ),
+    ],
+)
+def test_replacement_fail_closed_on_invalid_final_evidence(
+    field: str, value: object, reason: str
+) -> None:
+    assert _replacement_reason(**{field: value}) == reason
