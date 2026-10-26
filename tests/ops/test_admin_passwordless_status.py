@@ -44,13 +44,17 @@ def test_http_bookmark_redirects_to_secure_admin_without_basic(monkeypatch) -> N
     assert _client(https=False).get("/admin/manage").status_code == 403
 
 
-def test_https_admin_entry_routes_directly_to_owner_login(monkeypatch) -> None:
+def test_https_admin_opens_dashboard_without_extra_login_page(monkeypatch) -> None:
     _owner(monkeypatch, authenticated=False)
     client = _client()
     for path in ("/admin", "/admin/manage"):
         response = client.get(path, follow_redirects=False)
-        assert response.status_code == 303
-        assert response.headers["location"] == "/admin/kite/start"
+        assert response.status_code == 200
+        assert "Bot administration" in response.text
+        assert 'action="/admin/token"' in response.text
+        assert 'name="owner_state"' in response.text
+        assert '<details open><summary>Paste callback URL' in response.text
+        assert 'action="/admin/mode" inert' in response.text
         assert "www-authenticate" not in response.headers
     for path in ("/admin/api/logs", "/admin/trades.json"):
         response = client.get(path)
@@ -82,6 +86,6 @@ def test_existing_password_cannot_bypass_zerodha_ownership(monkeypatch) -> None:
         headers={"authorization": "Basic YWRtaW46b2Jzb2xldGU="},
         follow_redirects=False,
     )
-    assert response.status_code == 303
-    assert response.headers["location"] == "/admin/kite/start"
+    assert response.status_code == 200
+    assert "Bot administration" in response.text
     assert "www-authenticate" not in response.headers
