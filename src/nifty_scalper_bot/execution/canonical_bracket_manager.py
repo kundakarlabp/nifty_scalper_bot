@@ -212,7 +212,8 @@ class CanonicalBracketManager(HardenedBracketManager):
         protection_verified = not protection_required
         if protection_required:
             try:
-                protection_verified = bool(self._ensure_exchange_protective_stop(bracket))
+                confirmed_stop = self._ensure_exchange_protective_stop(bracket)
+                protection_verified = bool(confirmed_stop)
             except Exception as exc:  # noqa: BLE001
                 _core.LOGGER.critical(
                     "PARTIAL_EXIT_RESIDUAL_STOP_ARM_EXCEPTION "
