@@ -302,6 +302,22 @@ def _derive_strike_distance_from_atm(
     return abs(strike - atm)
 
 
+def _strict_replacement_expiry_block_reason(
+    original_expiry: str | None,
+    selected_expiry: str | None,
+    *,
+    strict: bool,
+) -> str | None:
+    """Reject an unverified or conflicting expiry before any strict replacement."""
+    if not strict:
+        return None
+    if not original_expiry or not selected_expiry:
+        return "expiry_unverified"
+    if original_expiry != selected_expiry:
+        return "expiry_mismatch"
+    return None
+
+
 class EntryEvaluationRoute(str, Enum):
     UNDERLYING = "underlying"
     OPTION_CANDIDATE = "option_candidate"
@@ -19355,14 +19371,14 @@ class StrategyRunner:
 
                     orig_expiry = _expiry_key(original_symbol)
                     new_expiry = _expiry_key(selected_symbol)
-                    if replacement_blocked_reason is None and strict_replace:
-                        # A missing expiry proof cannot be treated as a match.
-                        # Both contracts must independently resolve to an
-                        # identical expiry identity before replacement.
-                        if not orig_expiry or not new_expiry:
-                            replacement_blocked_reason = "expiry_unverified"
-                        elif orig_expiry != new_expiry:
-                            replacement_blocked_reason = "expiry_mismatch"
+                    if replacement_blocked_reason is None:
+                        replacement_blocked_reason = (
+                            _strict_replacement_expiry_block_reason(
+                                orig_expiry,
+                                new_expiry,
+                                strict=strict_replace,
+                            )
+                        )
                     orig_strike = self._extract_strike_from_symbol(original_symbol)
                     new_strike = self._extract_strike_from_symbol(selected_symbol)
                     if (
