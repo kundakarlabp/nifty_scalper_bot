@@ -20,9 +20,10 @@ def _not_production_migration(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("previous_limit", "expected"), [("2.0", "2.0"), ("7.0", "5.0")]
+    ("previous_limit", "expected"),
+    [("2.0", "5.0"), ("7.0", "5.0"), ("1.5", "1.5")],
 )
-def test_live_mode_caps_risk_without_overwriting_stricter_settings(
+def test_live_mode_migrates_superseded_2pct_but_preserves_other_stricter_caps(
     monkeypatch, previous_limit, expected
 ) -> None:
     monkeypatch.setenv("ENABLE_LIVE", "true")
@@ -201,3 +202,42 @@ def test_inconsistent_mode_flags_do_not_admit_live_features(
 
     normalise_live_env_defaults()
     assert all(os.getenv(key) is None for key in _ENTRY_FLAGS)
+
+
+def test_only_legacy_2pct_alias_is_migrated_without_widening_other_safety_caps(
+    monkeypatch,
+) -> None:
+    _track_admission_test_environment(monkeypatch)
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    for key in ("RISK__PER_TRADE_RISK_PCT", "RISK_PER_TRADE_PCT"):
+        monkeypatch.setenv(key, "5.0")
+    monkeypatch.setenv("RISK_DAILY_LOSS_PCT", "5.0")
+    monkeypatch.setenv("RISK_DAILY_PNL_CAP_PCT", "2.00")
+    monkeypatch.setenv("RISK_MAX_DAILY_LOSS_PCT", "5.0")
+    monkeypatch.setenv("DAILY_PNL_CAP_PCT", "5.0")
+
+    normalise_live_env_defaults()
+
+    assert os.environ["RISK_DAILY_LOSS_PCT"] == "5.0"
+    assert os.environ["RISK_DAILY_PNL_CAP_PCT"] == "5.0"
+    assert os.environ["RISK_MAX_DAILY_LOSS_PCT"] == "5.0"
+    assert os.environ["DAILY_PNL_CAP_PCT"] == "5.0"
+    assert _build_risk_settings().daily_loss_pct == pytest.approx(5.0)
+    # A second normalization must not reintroduce the retired 2% cap.
+    normalise_live_env_defaults()
+    assert _build_risk_settings().daily_loss_pct == pytest.approx(5.0)
+
+
+def test_unset_risk_settings_use_single_5pct_policy(monkeypatch) -> None:
+    for key in (
+        "RISK_DAILY_LOSS_PCT",
+        "RISK_DAILY_PNL_CAP_PCT",
+        "RISK__PER_TRADE_RISK_PCT",
+        "RISK_PER_TRADE_PCT",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    risk = _build_risk_settings()
+    assert risk.daily_loss_pct == pytest.approx(5.0)
+    assert risk.daily_pnl_cap_pct == pytest.approx(5.0)
+    assert risk.per_trade_risk_pct == pytest.approx(5.0)
