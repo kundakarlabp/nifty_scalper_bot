@@ -228,6 +228,8 @@ def test_opposite_side_option_structure_does_not_confirm_ce_sweep(
         "latest_bar_ts": rows[-1]["timestamp"],
         "bos_confirmed": feature == "bos",
         "choch_confirmed": feature == "choch",
+        "smc_enrichment_source": "strategy_manager_pre_strategy",
+        f"{feature}_ts_epoch": rows[-1]["timestamp"].timestamp(),
     }
     opposite_vote = opposite.generate_signal(
         CE, _indicators(**features, **{f"{feature}_side": "PE"}), 103.0
@@ -755,6 +757,9 @@ def test_regime_aware_smc_requires_corroboration_in_ranges(
     assert strategy.generate_signal(CE, indicators, 102.0) is None
     rows.append(_bar(31, open_=23984, high=23999, low=23982, close=23997, volume=1000))
     indicators["latest_bar_ts"] = rows[-1]["timestamp"]
+    indicators["smc_enrichment_source"] = "strategy_manager_pre_strategy"
+    if structure:
+        indicators["bos_ts_epoch"] = rows[-1]["timestamp"].timestamp()
     signal = strategy.generate_signal(CE, indicators, 103.0)
 
     if should_vote:
@@ -979,7 +984,7 @@ def test_smc_lagged_option_cannot_use_later_futures_displacement(monkeypatch) ->
     ("manager_enriched", "expected_structure_domain"),
     [
         (True, "option_premium"),
-        (False, "prepared_indicator_unverified"),
+        (False, None),
     ],
 )
 def test_smc_separates_futures_setup_from_premium_structure_evidence(
@@ -1024,7 +1029,8 @@ def test_smc_separates_futures_setup_from_premium_structure_evidence(
     signal = strategy.generate_signal(CE, confirmed, 103.0)
 
     assert signal is not None
-    assert signal.metadata["structure_confirmed"] is True
+    # Unversioned historical premium structure is no longer LIVE corroboration.
+    assert signal.metadata["structure_confirmed"] is manager_enriched
     assert signal.metadata["structure_confirmation_domain"] == (
         expected_structure_domain
     )
