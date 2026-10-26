@@ -1198,7 +1198,10 @@ def test_orb_retest_retries_same_bar_after_slope_alignment_recovers(
     recovered = strategy.generate_signal(CE, context, 50.0)
     assert recovered is not None
     assert recovered.metadata["entry_branch"] == "retest"
-    assert recovered.metadata["breakout_timestamp"] < recovered.metadata["retest_timestamp"]
+    assert (
+        recovered.metadata["breakout_timestamp"]
+        < recovered.metadata["retest_timestamp"]
+    )
 
 
 def test_orb_wrong_slope_at_breakout_can_only_recover_with_later_retest(
