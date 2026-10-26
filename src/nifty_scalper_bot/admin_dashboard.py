@@ -770,7 +770,9 @@ def update_token(
             source = request.headers.get("origin") or request.headers.get("referer", "")
             parsed = urllib.parse.urlsplit(source)
             if parsed.scheme != "https" or parsed.netloc != request.headers.get("host"):
-                raise HTTPException(status_code=403, detail="admin_same_origin_required")
+                raise HTTPException(
+                    status_code=403, detail="admin_same_origin_required"
+                )
             if access_token:
                 raise HTTPException(status_code=401, detail="owner_login_required")
             return _finish_owner_login(request, owner_state, request_token)
