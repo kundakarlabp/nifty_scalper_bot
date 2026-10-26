@@ -1717,7 +1717,9 @@ class OrderManager:
                     bracket_manager.attach_exit_executor(self.exit_position)
                 # A restored canonical owner supersedes any pre-existing
                 # legacy direct-broker trailing controller for that symbol.
-                for entry_id, (controller, _) in list(self._trailing.items()):
+                for entry_id, (controller, _) in list(
+                    getattr(self, "_trailing", {}).items()
+                ):
                     if bracket_manager.is_symbol_managed(controller.symbol):
                         self.stop_trailing(entry_id)
                 self._logger.info(
