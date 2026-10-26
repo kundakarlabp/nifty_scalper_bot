@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
-"""Poll a GitHub research request or run its fixed read-only worker.
+"""Run the fixed, read-only historical research and coverage worker.
 
-History, strategy component bar research and completed-trade evidence are saved
-locally. Modeled component research is never presented as live-pipeline parity.
+Responsibilities:
+- Collect supported broker history and stage verified retained option sessions.
+- Persist per-session ORB opening-futures gaps, strategy component comparisons
+  and completed-trade evidence under the canonical research output location.
+- Report source, missing-data and exit limitations without trading-policy edits.
+
+Modeled component research never proves live-pipeline parity or profitability.
+No order placement, automatic LIVE promotion or parallel research collector.
 """
 
 from __future__ import annotations
