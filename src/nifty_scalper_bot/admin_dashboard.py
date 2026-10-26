@@ -643,9 +643,10 @@ def _full_dashboard(request: Request, *, preview: bool = False) -> HTMLResponse:
         )
         body = body.replace(
             '<div class="intro">',
-            '<p class="flash">Dashboard is open. Enter the usual Zerodha '
-            'request token below to activate controls for this browser; '
-            'no separate admin password.</p><div class="intro">', 1,
+            '<p id="admin-access-note" class="flash">Dashboard is open. '
+            'Loading the real engine and broker status below; a browser '
+            'session is not the same as Zerodha broker authentication.'
+            '</p><div class="intro">', 1,
         )
         response = HTMLResponse(
             "", headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"}
