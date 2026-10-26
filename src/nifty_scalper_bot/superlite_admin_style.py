@@ -55,8 +55,16 @@ SCRIPT = r"""
     var quiet = online && data.quiet === true;
     setText("engine-value", !online ? "Unreachable" : quiet ? "QUIET (planned)" : data.bot_loaded ? "Running" : "Starting");
     highlight("engine-value", !online ? "failure" : quiet || data.bot_loaded ? "good" : "warning");
-    setText("broker-value", online && !quiet ? labelBroker(data.broker_authenticated) : "Not checked");
-    highlight("broker-value", online && !quiet && labelBroker(data.broker_authenticated) === "Authenticated" ? "good" : "warning");
+    var brokerLabel = online && !quiet ? labelBroker(data.broker_authenticated) : "Not checked";
+    setText("broker-value", brokerLabel);
+    highlight("broker-value", brokerLabel === "Authenticated" ? "good" : "warning");
+    var ownerNote = document.getElementById("admin-access-note");
+    if (ownerNote && brokerLabel === "Authenticated")
+      ownerNote.textContent = "Zerodha is already authenticated on the running bot. No additional broker token renewal is needed. Engine and release status below are independent of this browser session. Owner verification is only needed before changing private trading controls.";
+    else if (ownerNote && brokerLabel === "Login required")
+      ownerNote.textContent = "Zerodha broker login is required. Use the existing daily request-token field below to renew the broker session and enable controls.";
+    else if (ownerNote)
+      ownerNote.textContent = "Dashboard is accessible; broker authentication is not yet confirmed by the engine. Do not assume an expired token or a healthy session until the engine reports it.";
     setText("mode-value", quiet ? "AUTO · QUIET" : online ? data.mode : "Unknown");
     setText("blocker-value", quiet ? "Scheduled idle" : online ? (data.primary_blocker || "None") : "Engine unavailable");
     setText("release-value", data.updater_state || "Unknown");
