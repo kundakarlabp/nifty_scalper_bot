@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from math import isfinite
 
 _VALID_DIRECTIONS = {"CE", "PE"}
 
@@ -47,13 +48,18 @@ class UnderlyingDirectionObservation:
         bias = str(self.bias or "").upper()
         if bias not in _VALID_DIRECTIONS:
             raise ValueError(f"invalid underlying direction: {self.bias!r}")
-        if self.age_seconds < 0:
-            raise ValueError("direction observation age cannot be negative")
+        try:
+            age = float(self.age_seconds)
+            confidence = float(self.confidence)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("invalid numeric direction observation") from exc
+        if not isfinite(age) or age < 0:
+            raise ValueError("direction observation age must be finite and nonnegative")
+        if not isfinite(confidence):
+            raise ValueError("direction observation confidence must be finite")
         object.__setattr__(self, "bias", bias)
-        object.__setattr__(
-            self, "confidence", max(0.0, min(1.0, float(self.confidence)))
-        )
-        object.__setattr__(self, "age_seconds", float(self.age_seconds))
+        object.__setattr__(self, "confidence", max(0.0, min(1.0, confidence)))
+        object.__setattr__(self, "age_seconds", age)
         object.__setattr__(self, "source", str(self.source or "unknown"))
 
 
