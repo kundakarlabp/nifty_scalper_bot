@@ -864,6 +864,20 @@ class LedgerBracketManager(CanonicalBracketManager):
             "mae_pnl": round(mae_points * quantity, 2),
             "holding_seconds": round(max(0.0, closed_at - opened_at), 3),
             "trail_revision": trail_revision,
+            "trailing_history": list(
+                (getattr(bracket, "trailing_config", None) or {}).get(
+                    "trail_history", []
+                )
+            )[-64:],
+            "exchange_stop_evidence": {
+                "order_id": getattr(bracket, "exchange_stop_order_id", None),
+                "trigger_price": getattr(bracket, "exchange_stop_trigger_price", None),
+                "quantity": getattr(bracket, "exchange_stop_quantity", 0),
+                "modifications": getattr(bracket, "exchange_stop_modify_count", 0),
+                "degraded_reason": getattr(
+                    bracket, "exchange_stop_degraded_reason", None
+                ),
+            },
             "trail_activation_r": trail_activation_r,
             "final_stop_price": final_stop_price,
             "execution_quality": execution_quality,
