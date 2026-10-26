@@ -13,6 +13,8 @@ Runtime role:
   existing trade-decision journal without adding a second risk authority.
 - Checks independently parsed original/replacement expiries using the pure
   _strict_replacement_expiry_block_reason helper before a strict substitution.
+- Rejects changed-contract premium plans whose materialized stop widens beyond
+  the selected candidate or lacks finite, same-contract entry/exit geometry.
 
 Position in the pipeline:
     data/data_hub.py / data/market_data_manager.py -> THIS FILE (runner.py)
@@ -164,6 +166,7 @@ from nifty_scalper_bot.strategies.premium_risk_geometry import (
     anchor_option_geometry_to_execution,
     apply_cost_aware_risk_floor,
     apply_premium_risk_contract,
+    replacement_plan_rejection_reason,
     validate_option_premium_geometry,
 )
 from nifty_scalper_bot.strategies.quote_update_identity import (
@@ -19759,6 +19762,36 @@ class StrategyRunner:
                 )
                 metadata["stop_loss"] = signal.stop_loss
                 metadata["take_profit"] = signal.take_profit
+                if candidate is not None and selected_symbol != original_symbol:
+                    replacement_rejection = replacement_plan_rejection_reason(
+                        signal,
+                        selected_symbol=selected_symbol,
+                        candidate_entry_price=candidate.entry_price,
+                        candidate_stop_loss=candidate.stop_loss,
+                        candidate_target=candidate.target,
+                        execution_price=trade_price,
+                    )
+                    if replacement_rejection is not None:
+                        self._logger.warning(
+                            "REPLACEMENT_FINAL_PLAN_REJECTED symbol=%s "
+                            "reason=%s entry=%s stop=%s target=%s trace_id=%s",
+                            selected_symbol,
+                            replacement_rejection,
+                            trade_price,
+                            signal.stop_loss,
+                            signal.take_profit,
+                            trace_id,
+                        )
+                        return _reject_after_dedup(
+                            reason=replacement_rejection,
+                            details={
+                                "selected_symbol": selected_symbol,
+                                "candidate_stop": candidate.stop_loss,
+                                "final_stop": signal.stop_loss,
+                                "candidate_entry": candidate.entry_price,
+                                "execution_entry": trade_price,
+                            },
+                        )
             except Exception as materialize_exc:
                 candidate_symbol = None if candidate is None else candidate.symbol
                 self._logger.exception(
