@@ -3,7 +3,8 @@
 Responsibilities:
 - dashboard serves password-free, process-only status on the production /admin home.
 - admin_manage and _full_dashboard serve the authenticated interactive operator UI.
-- Provide Kite request-token callback, token entry and mode operations.
+- Expose owner-allowlisted Zerodha sign-in, signed browser sessions, daily token rotation and mode operations.
+- Keep legacy Basic credentials as emergency fallback; anonymous controls always fail closed.
 - Serve sanitized runtime overview, protected logs and research-status endpoints.
 - Route GitHub-update/restart requests through service-control owners.
 
