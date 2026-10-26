@@ -94,6 +94,16 @@ class ORBProStrategy(EliteStrategy):
         # Diagnostic only; never changes whether a setup can generate a vote.
         self.last_structural_failure_reasons: tuple[str, ...] = ()
 
+    def _recoverable_structural_context_gap(self) -> bool:
+        """Only a dynamic slope disagreement may be retried on the same bar.
+
+        Breakout volume, penetration and opening-range geometry are immutable
+        completed-bar evidence. They must remain terminal rejections.
+        """
+        return self.last_structural_failure_reasons == (
+            "futures_vwap_slope_alignment",
+        )
+
     def notify_entry_accepted(self, side: str, *, setup_id: str | None = None) -> None:
         """Consume an ORB setup only after the canonical entry-accepted callback."""
         if not setup_id:
@@ -512,6 +522,7 @@ class ORBProStrategy(EliteStrategy):
         retest_timestamp: datetime | None,
         strict_retest_wick: bool,
     ) -> EliteSignal | None:
+        self.last_structural_failure_reasons = ()
         option_atr = max(
             _safe_float(indicators.get("atr")) or 0.0, current_price * 0.01, 1.0
         )
@@ -923,6 +934,12 @@ class ORBProStrategy(EliteStrategy):
                     strict_retest_wick=strict_retest_wick,
                 )
                 if signal is None:
+                    if self._recoverable_structural_context_gap():
+                        # Keep this completed-bar event awaiting a future causal
+                        # retest; never re-emit same-bar momentum on recovery.
+                        self._last_bar_by_key.pop(key, None)
+                        self._no_vote("orb_futures_vwap_slope_not_aligned")
+                        return None
                     event["status"] = "CONTRACT_REJECTED"
                     transition_setup(
                         SetupStage.CONTRACT_REJECTED,
@@ -1060,6 +1077,12 @@ class ORBProStrategy(EliteStrategy):
             strict_retest_wick=strict_retest_wick,
         )
         if signal is None:
+            if self._recoverable_structural_context_gap():
+                # Recheck only this same completed retest bar as asynchronous
+                # context arrives; never replay the retest on a later bar.
+                self._last_bar_by_key.pop(key, None)
+                self._no_vote("orb_futures_vwap_slope_not_aligned")
+                return None
             event["status"] = "CONTRACT_REJECTED"
             transition_setup(
                 SetupStage.CONTRACT_REJECTED,
