@@ -1,12 +1,16 @@
 """Purpose: Expose daily broker authentication and operational admin controls.
 
 Responsibilities:
+- dashboard serves password-free, process-only status on the production /admin home.
+- admin_manage and _full_dashboard serve the authenticated interactive operator UI.
 - Provide Kite request-token callback, token entry and mode operations.
-- Serve sanitized runtime overview, logs and research-status endpoints.
+- Serve sanitized runtime overview, protected logs and research-status endpoints.
 - Route GitHub-update/restart requests through service-control owners.
 
 Boundaries: The release runner and engine retain execution authority.
-Safety: Do not collect Kite passwords/TOTP or bypass broker release safeguards.
+Safety: Public status never exposes secrets, logs, or mutable broker controls.
+Sensitive writes and the full UI keep HTTPS/authentication and broker release gates.
+Do not collect Kite passwords/TOTP or bypass broker release safeguards.
 """
 
 # Embedded HTML/CSS/JS assets have intentional long literal lines.
