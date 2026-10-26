@@ -1144,7 +1144,11 @@ class SMCStrategy(EliteStrategy):
                     if not bool(indicators.get(feature)):
                         return False
                     if not manager_enriched:
-                        return True
+                        # An unversioned prepared indicator may be historical.
+                        # Only non-live research/replay keeps this compatibility.
+                        # Real LIVE entries require sweep-relative event time
+                        # provenance from the canonical enrichment pass.
+                        return not is_live
                     evidence_ts = _safe_float(indicators.get(timestamp_key))
                     return bool(
                         evidence_ts is not None
