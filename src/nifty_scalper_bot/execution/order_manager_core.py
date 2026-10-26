@@ -14606,9 +14606,6 @@ class OrderManager:
                     ):
                         continue
 
-                    recently_handled.add(broker_sym)
-                    self._recent_orphans = recently_handled
-
                     # [FIX 1] RACE CONDITION GUARD:
                     # Check if we have touched this symbol recently (Pending Orders or Recent Fills).
                     # This stops the "Infinite Rescue Loop".
@@ -14663,8 +14660,13 @@ class OrderManager:
                                     break
 
                     if is_active_locally:
-                        # self._logger.debug(f"⏳ Skipping Orphan Check for {broker_sym} (Busy)")
+                        # An in-flight entry or recent fill can acquire its
+                        # canonical bracket on the next reconciliation. Do not
+                        # latch it as an orphan before that can happen.
                         continue
+
+                    recently_handled.add(broker_sym)
+                    self._recent_orphans = recently_handled
 
                     # If we get here, it is a TRUE Orphan (Manual/Old trade)
                     self._logger.warning(
