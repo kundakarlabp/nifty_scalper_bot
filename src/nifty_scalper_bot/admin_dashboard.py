@@ -702,6 +702,7 @@ def _full_dashboard(request: Request) -> HTMLResponse:
 
 
 
+# fmt: off  # This block owns intentional long embedded HTML literals.
 # A single official Zerodha login can both rotate the daily broker token and
 # establish a short-lived, HttpOnly owner session. No public unauthenticated
 # token, LIVE-mode, or restart endpoint is created.
@@ -825,6 +826,9 @@ def kite_callback(request: Request, request_token: str = "", status: str = "", a
     if not req_tok:
         return RedirectResponse("/admin?token=err&msg=no+request+token+received", status_code=303)
     return _complete_kite_session(req_tok)
+
+
+# fmt: on
 
 
 @router.post("/admin/token")
