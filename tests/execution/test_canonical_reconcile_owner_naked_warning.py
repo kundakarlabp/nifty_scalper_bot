@@ -6,6 +6,7 @@ registry; a matching broker quantity is not evidence of an orphan.
 
 from __future__ import annotations
 
+import time
 from threading import Lock, RLock
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -45,6 +46,7 @@ def _manager(*, managed: bool, local_present: bool = True) -> SimpleNamespace:
         _missing_counts={},
         _orders={},
         _entries_in_flight={},
+        ENTRY_INFLIGHT_TTL_SEC=30.0,
         _recent_orphans=set(),
         _logger=Mock(),
         guard_orphan_position=Mock(return_value=True),
@@ -85,6 +87,20 @@ def test_broker_visible_pending_owner_is_not_permanently_marked_orphan() -> None
 def test_genuine_orphan_is_adopted_only_once_per_reconcile_session() -> None:
     manager = _manager(managed=False, local_present=False)
     OrderManager._reconcile_positions(manager)
+    OrderManager._reconcile_positions(manager)
+    manager.guard_orphan_position.assert_called_once_with(
+        SYMBOL, 65, 146.65
+    )
+
+
+def test_recent_pending_entry_is_not_latched_as_orphan() -> None:
+    manager = _manager(managed=False, local_present=False)
+    manager._entries_in_flight[SYMBOL] = time.time()
+    OrderManager._reconcile_positions(manager)
+    manager.guard_orphan_position.assert_not_called()
+    assert SYMBOL not in manager._recent_orphans
+
+    manager._entries_in_flight.clear()
     OrderManager._reconcile_positions(manager)
     manager.guard_orphan_position.assert_called_once_with(
         SYMBOL, 65, 146.65
