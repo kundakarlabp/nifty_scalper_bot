@@ -6,6 +6,8 @@
 Responsibilities:
 - LedgerBracketManager coordinates canonical bracket state and fill-ledger storage.
 - Reconcile confirmed fills, exit state and broker-flat evidence before rearming.
+- Apply cumulative entry VWAP revisions to the existing ledger entry identity,
+  then update the active bracket without a second entry activation.
 - Keep trading ledger persistence distinct from the live protective mechanism.
 
 Boundaries: BoundBracket/core remain authoritative for protective broker actions.
