@@ -349,3 +349,30 @@ def test_tp1_residual_stop_arm_exception_remains_fail_closed(
         "placement_unverified:partial_target"
     )
     assert manager.has_unresolved_exit() is True
+
+
+def test_tp1_verified_live_residual_stop_keeps_entries_unblocked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, _, broker = _manager()
+    bracket = _mark_exit_submitted(
+        manager,
+        broker,
+        order_id="tp1-stop-proven",
+        reason="TP1 Hit (110.00)",
+        residual_quantity=65,
+        average_price=110.0,
+    )
+    events: list[str] = []
+    manager.set_notifier(lambda event, _payload: events.append(event))
+    monkeypatch.setattr(manager, "_is_live_execution", lambda: True)
+    manager._exchange_protective_stop_enabled = True
+    monkeypatch.setattr(manager, "_ensure_exchange_protective_stop", lambda _b: True)
+
+    assert manager._reconcile_exit_state(bracket, requested_by="tp1") is False
+    assert bracket.remaining_quantity == 65
+    assert bracket.exit_state == BracketExitLifecycle.OPEN_ACTIVE.value
+    assert bracket.exchange_stop_degraded_reason is None
+    assert manager.has_unresolved_exit() is False
+    assert "PARTIAL_EXIT_RESIDUAL_STOP_UNVERIFIED" not in events
+    assert "PARTIAL_EXIT_CONFIRMED" in events
