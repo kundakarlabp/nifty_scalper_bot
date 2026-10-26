@@ -54,7 +54,9 @@ def _signing_key() -> bytes:
             raise OSError("invalid session key size")
         return key
     except OSError:
-        raise HTTPException(status_code=503, detail="owner_session_config_unavailable") from None
+        raise HTTPException(
+            status_code=503, detail="owner_session_config_unavailable"
+        ) from None
 
 
 def _pack(payload: dict[str, object]) -> str:
@@ -103,7 +105,9 @@ def owner_user_id(env: dict[str, str]) -> str:
 
 
 def create_challenge(response: Response) -> str:
-    token = _pack({"kind": "login", "nonce": secrets.token_urlsafe(24), "iat": int(time.time())})
+    token = _pack(
+        {"kind": "login", "nonce": secrets.token_urlsafe(24), "iat": int(time.time())}
+    )
     response.set_cookie(
         LOGIN_COOKIE, token, secure=True, httponly=True, samesite="lax",
         max_age=LOGIN_TTL_SECONDS, path="/admin",
@@ -124,7 +128,9 @@ def verify_challenge(request: Request, submitted: str) -> bool:
 
 
 def clear_challenge(response: Response) -> None:
-    response.delete_cookie(LOGIN_COOKIE, path="/admin", secure=True, httponly=True, samesite="lax")
+    response.delete_cookie(
+        LOGIN_COOKIE, path="/admin", secure=True, httponly=True, samesite="lax"
+    )
 
 
 def grant_owner_session(response: Response, user_id: str) -> None:
