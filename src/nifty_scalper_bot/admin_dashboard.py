@@ -38,6 +38,15 @@ from fastapi.responses import (
     RedirectResponse,
 )
 
+from nifty_scalper_bot.admin_owner_auth import (
+    clear_challenge,
+    create_challenge,
+    grant_owner_session,
+    owner_user_id,
+    require_https,
+    valid_owner_session,
+    verify_challenge,
+)
 from nifty_scalper_bot.ops.service_control import (
     ControlResult,
     queue_validated_restart,
@@ -120,6 +129,19 @@ def _check_auth(request: Request) -> None:
         return
     if request.url.scheme != "https":
         raise HTTPException(status_code=403, detail="admin_https_required")
+
+    # A recent, verified owner Kite login grants access without another password.
+    # Explicitly supplied legacy Basic credentials remain an emergency fallback.
+    owner = owner_user_id(_read_env())
+    if owner and valid_owner_session(request, owner):
+        if request.method.upper() not in {"GET", "HEAD", "OPTIONS"}:
+            source = request.headers.get("origin") or request.headers.get("referer", "")
+            parsed = urllib.parse.urlsplit(source)
+            if parsed.scheme != "https" or parsed.netloc != request.headers.get("host"):
+                raise HTTPException(status_code=403, detail="admin_same_origin_required")
+        return
+    if owner and not request.headers.get("authorization"):
+        raise HTTPException(status_code=401, detail="owner_login_required")
 
     password = os.getenv("ADMIN_PASSWORD") or _read_env().get("ADMIN_PASSWORD", "")
     if not password:
@@ -454,7 +476,7 @@ a{color:#83bcff}small{color:#afc0cf}
 <div><dt>Revision</dt><dd id="revision">Checking…</dd></div></dl>
 <p><small>Trading readiness and broker authentication are not established
 by process liveness.</small></p>
-<p><a href="/admin/manage">Protected trading controls</a></p></section>
+<p><a href="/admin/manage">Protected trading controls</a> (sign in with Zerodha)</p></section>
 <script>
 async function refresh(){
   try{
@@ -499,8 +521,12 @@ def dashboard(request: Request) -> HTMLResponse:
 
 
 @router.get("/admin/manage", response_class=HTMLResponse)  # type: ignore[untyped-decorator]
-def admin_manage(request: Request) -> HTMLResponse:
-    """Provide broker credentials and mutable controls only after auth."""
+def admin_manage(request: Request) -> Response:
+    """Provide controls to a verified owner without a separate admin login."""
+    if os.getenv("DEPLOYMENT_PLATFORM") == "aws_lightsail" and request.url.scheme == "https":
+        owner = owner_user_id(_read_env())
+        if owner and not request.headers.get("authorization") and not valid_owner_session(request, owner):
+            return RedirectResponse("/admin/kite/start", status_code=303)
     return _full_dashboard(request)
 
 
@@ -674,9 +700,123 @@ def _full_dashboard(request: Request) -> HTMLResponse:
 # fmt: on
 
 
+
+# A single official Zerodha login can both rotate the daily broker token and
+# establish a short-lived, HttpOnly owner session. No public unauthenticated
+# token, LIVE-mode, or restart endpoint is created.
+@router.get("/admin/kite/start", response_class=HTMLResponse)  # type: ignore[untyped-decorator]
+def owner_login_start(request: Request) -> HTMLResponse:
+    require_https(request)
+    env = _read_env()
+    if not owner_user_id(env):
+        return HTMLResponse(
+            "<h2>Owner account not configured</h2>"
+            "<p>Set ADMIN_ZERODHA_USER_ID in the private Lightsail environment "
+            "to your exact Zerodha user ID. No public registration is permitted.</p>",
+            status_code=503,
+            headers={"Cache-Control": "no-store"},
+        )
+    key = next(
+        (
+            env[k].strip()
+            for k in ("BROKER_API_KEY", "ZERODHA_API_KEY", "KITE_API_KEY")
+            if env.get(k, "").strip()
+        ),
+        "",
+    )
+    if not key:
+        raise HTTPException(status_code=503, detail="kite_api_key_missing")
+    response = HTMLResponse("", headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
+    challenge = create_challenge(response)
+    redirect_params = urllib.parse.urlencode({"owner_state": challenge})
+    login_url = _kite_login_url(key) + "&" + urllib.parse.urlencode(
+        {"redirect_params": redirect_params}
+    )
+    response.body = (
+        "<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>"
+        "<title>Zerodha owner login</title></head>"
+        "<body style='max-width:540px;margin:6vh auto;padding:20px;font:17px system-ui'>"
+        "<h2>Verify owner with Zerodha</h2>"
+        "<p>There is no separate Nifty Bot username or password. Log in on the "
+        "official Zerodha site, then paste the returned redirect URL here.</p>"
+        f"<p><a href='{html.escape(login_url, quote=True)}' target='_blank' rel='noopener noreferrer'>"
+        "Open official Zerodha login</a></p>"
+        "<form method='post' action='/admin/kite/complete'>"
+        f"<input type='hidden' name='owner_state' value='{html.escape(challenge, quote=True)}'>"
+        "<label>Redirect URL or request token"
+        "<input type='password' name='request_token' required autocomplete='off' "
+        "style='display:block;width:100%;box-sizing:border-box;padding:12px;margin:12px 0'>"
+        "</label><button type='submit' style='padding:12px'>Verify, rotate and open admin</button>"
+        "</form><p><small>Only your allowlisted Zerodha account is authorized. "
+        "Request tokens are not stored in browser sessions.</small></p></body></html>"
+    ).encode("utf-8")
+    response.headers["content-length"] = str(len(response.body))
+    return response
+
+
+def _finish_owner_login(request: Request, owner_state: str, request_token: str) -> RedirectResponse:
+    require_https(request)
+    if not verify_challenge(request, owner_state):
+        raise HTTPException(status_code=403, detail="owner_login_challenge_invalid")
+    env = _read_env()
+    owner = owner_user_id(env)
+    if not owner:
+        raise HTTPException(status_code=503, detail="owner_account_not_configured")
+    key = next(
+        (env[k].strip() for k in ("BROKER_API_KEY", "ZERODHA_API_KEY", "KITE_API_KEY")
+         if env.get(k, "").strip()), ""
+    )
+    secret = next(
+        (env[k].strip() for k in ("BROKER_API_SECRET", "ZERODHA_API_SECRET", "KITE_API_SECRET")
+         if env.get(k, "").strip()), ""
+    )
+    if not key or not secret:
+        raise HTTPException(status_code=503, detail="kite_credentials_missing")
+    token = _extract_request_token(request_token)
+    if not token:
+        raise HTTPException(status_code=422, detail="request_token_missing")
+    ok, access_token = _exchange_request_token(key, secret, token)
+    if not ok:
+        # Never return raw exchange errors to an unauthenticated browser.
+        raise HTTPException(status_code=401, detail="kite_token_exchange_failed")
+    verified, user_id = _verify_access_token(key, access_token)
+    if not verified or not hmac.compare_digest(user_id, owner):
+        raise HTTPException(status_code=403, detail="zerodha_owner_mismatch")
+    restart = _activate_access_token(access_token)
+    location = (
+        "/admin/manage?token=ok"
+        if restart.ok
+        else "/admin/manage?token=saved_not_applied"
+    )
+    response = RedirectResponse(location, status_code=303)
+    clear_challenge(response)
+    grant_owner_session(response, owner)
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@router.post("/admin/kite/complete")  # type: ignore[untyped-decorator]
+def owner_login_complete(
+    request: Request,
+    owner_state: str = Form(...),
+    request_token: str = Form(...),
+) -> RedirectResponse:
+    # Same-origin form submission + signed one-time login challenge.
+    require_https(request)
+    source = request.headers.get("origin") or request.headers.get("referer", "")
+    parsed = urllib.parse.urlsplit(source)
+    if parsed.scheme != "https" or parsed.netloc != request.headers.get("host"):
+        raise HTTPException(status_code=403, detail="owner_login_same_origin_required")
+    return _finish_owner_login(request, owner_state, request_token)
+
+
 @router.get("/admin/kite/callback")
-def kite_callback(request: Request, request_token: str = "", status: str = "", action: str = "") -> RedirectResponse:
-    """Registered Kite redirect target; no request/access token is rendered back to the browser."""
+def kite_callback(request: Request, request_token: str = "", status: str = "", action: str = "", owner_state: str = "") -> RedirectResponse:
+    """Registered Kite redirect; owner-state permits passwordless verification."""
+    if owner_state:
+        if status and status.lower() not in {"success", "ok"}:
+            raise HTTPException(status_code=401, detail="zerodha_login_failed")
+        return _finish_owner_login(request, owner_state, request_token)
     _check_auth(request)
     req_tok = _extract_request_token(request_token)
     if status and status.lower() not in {"success", "ok"}:
