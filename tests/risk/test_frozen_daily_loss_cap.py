@@ -73,7 +73,7 @@ def test_premium_debit_and_release_cannot_rebase_traded_day() -> None:
     assert manager._switches.max_day_loss == pytest.approx(763.21)
 
 
-def test_existing_broker_exposure_prevents_cap_rebase_before_local_trade_count() -> None:
+def test_broker_exposure_freezes_cap_without_local_trade_count() -> None:
     evidence = PositionEvidence()
     manager = _owner(evidence, starting_cap=763.21)
     evidence.positions = [object()]
