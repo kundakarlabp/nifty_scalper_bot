@@ -8,6 +8,7 @@ quote executability, post-cost economics and risk retain separate owners.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from math import isfinite
 from typing import Any, Mapping, cast
 
 from nifty_scalper_bot.config.entry_policy import resolve_entry_policy
@@ -35,8 +36,9 @@ class ExecutionEvidence:
         return bool(
             self.required_data_present
             and not self.stale_data_used
-            and (self.tradable_quote or self.bid_ask_valid)
-            and self.spread_ok is not False
+            and self.bid_ask_valid
+            and self.spread_observed
+            and self.spread_ok is True
         )
 
     def to_metadata(self) -> dict[str, object]:
@@ -106,16 +108,21 @@ def build_execution_evidence(
     try:
         bid = float(cast(Any, payload.get("bid") or 0.0))
         ask = float(cast(Any, payload.get("ask") or 0.0))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         bid = ask = 0.0
-    bid_ask_valid = bid > 0.0 and ask >= bid
+    bid_ask_valid = (
+        isfinite(bid) and isfinite(ask) and bid > 0.0 and ask >= bid
+    )
 
     spread_observed = payload.get("spread_pct") is not None
     try:
         spread_pct = (
             float(cast(Any, payload.get("spread_pct"))) if spread_observed else None
         )
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        spread_pct = None
+        spread_observed = False
+    if spread_pct is None or not isfinite(spread_pct) or spread_pct < 0:
         spread_pct = None
         spread_observed = False
     if not spread_observed and bid_ask_valid:
