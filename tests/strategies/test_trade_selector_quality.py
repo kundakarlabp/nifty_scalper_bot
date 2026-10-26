@@ -237,7 +237,9 @@ def test_nonfinite_or_invalid_candidate_limits_are_rejected(field, invalid):
         TradeCandidateSelector(**{field: invalid})
 
 
-@pytest.mark.parametrize("strike", [None, "bad", float("nan"), float("inf"), 22000.5, 0])
+@pytest.mark.parametrize(
+    "strike", [None, "bad", float("nan"), float("inf"), 22000.5, 0]
+)
 def test_bad_candidate_strike_is_rejected_not_raised(monkeypatch, strike):
     import nifty_scalper_bot.strategies.trade_selector as selector_module
 
@@ -252,7 +254,12 @@ def test_bad_candidate_strike_is_rejected_not_raised(monkeypatch, strike):
 
 @pytest.mark.parametrize(
     ("atm", "rr"),
-    [(float("nan"), 2.0), (float("inf"), 2.0), (22000, float("nan")), (22000, float("inf"))],
+    [
+        (float("nan"), 2.0),
+        (float("inf"), 2.0),
+        (22000, float("nan")),
+        (22000, float("inf")),
+    ],
 )
 def test_invalid_selection_context_cannot_admit_candidate(monkeypatch, atm, rr):
     import nifty_scalper_bot.strategies.trade_selector as selector_module
