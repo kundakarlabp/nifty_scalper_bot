@@ -253,10 +253,15 @@ class CanonicalBracketManager(HardenedBracketManager):
                 )
         with suppress(Exception):
             self.save_state()
+        event_name = (
+            "PARTIAL_EXIT_CONFIRMED_RESIDUAL_PROTECTED"
+            if protection_verified
+            else "PARTIAL_EXIT_CONFIRMED_RESIDUAL_STOP_UNVERIFIED"
+        )
         _core.LOGGER.info(
-            "PARTIAL_EXIT_CONFIRMED_RESIDUAL_%s bracket_id=%%s symbol=%%s "
-            "target=%%s filled_qty=%%s remaining_qty=%%s fill_price=%%s requested_by=%%s"
-            % ("PROTECTED" if protection_verified else "STOP_UNVERIFIED"),
+            "%s bracket_id=%s symbol=%s target=%s filled_qty=%s "
+            "remaining_qty=%s fill_price=%s requested_by=%s",
+            event_name,
             bracket.bracket_id,
             bracket.symbol,
             target.name,
