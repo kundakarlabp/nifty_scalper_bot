@@ -107,3 +107,47 @@ HTTPS Basic authentication; the existing `/admin/*` write APIs, detailed
 logs and `/power` remain protected. This is intentional: removing all
 credentials from public broker-token, LIVE-order and risk-reset controls
 would allow arbitrary internet users to operate real-money trading.
+
+## Passwordless owner controls via daily Zerodha login
+
+The public `http://65.0.255.84:8080/admin` remains a sanitized read-only status
+page. The full `https://65.0.255.84/admin/manage` uses a verified owner
+browser session instead of requiring a *second* admin username/password.
+Owner sessions are short-lived, HMAC signed with a private host-generated
+key, Secure/HttpOnly/SameSite cookies, and are rejected on cleartext HTTP.
+
+**One-time operator prerequisite (do not paste credentials into chat):**
+Set `ADMIN_ZERODHA_USER_ID=<your exact Kite user ID>` in the protected
+`/home/ubuntu/.config/niftybot/niftybot.env`. The operator must be
+explicitly allowlisted; the first anonymous visitor must never claim the
+dashboard. An existing `ZERODHA_USER_ID` or `KITE_USER_ID` also supplies
+the owner allowlist. The signing key is stored outside Git in the private
+`NIFTYBOT_CONFIG_DIR/owner_session_key` file.
+
+**Daily routine:** Open `https://65.0.255.84/admin/kite/start`, click
+official Zerodha sign-in, copy the Kite redirect URL or request token into
+the browser form (unless the configured Kite redirect URL is this server's
+`/admin/kite/callback`, which supports automatic return). The server
+checks a signed login challenge and exchanges the one-time request token,
+verifies the returned account using Kite `/user/profile`, checks exact
+allowlisted owner ID and only then stores the new broker token and queues
+the existing validated restart. No admin user ID/password is entered into
+this dashboard; Kite's own login/TOTP remains required. A queued restart
+does not establish broker readiness. A separate signed owner cookie
+authorizes the complete dashboard for up to ten hours. Existing Basic
+authentication may remain as a controlled emergency fallback.
+
+**Never** expose `/admin/kite/complete` over HTTP, allow an unrecognized
+Zerodha account to exchange/store its token, or remove the broker-flat,
+nonterminal-order and entry-hold checks from release. There is no blanket
+market-hour prohibition on code validation: the release guard accepts safe
+broker-flat releases intraday and defers when actual exposure is unknown.
+Safe nontrading admin recovery must remain independent of engine restarts.
+
+Deployment verification requires both the exact GitHub main SHA running
+on AWS with healthy services and these four HTTP contracts:
+- HTTP `/admin` gives public read-only 200 without Basic challenge.
+- HTTPS `/admin/kite/start` offers owner login and never embeds secrets.
+- HTTPS `/admin/manage` redirects unauthenticated owners to Kite login,
+  and serves the full operator dashboard after verified owner login.
+- HTTP `/admin/manage` and anonymous mutations remain blocked.
