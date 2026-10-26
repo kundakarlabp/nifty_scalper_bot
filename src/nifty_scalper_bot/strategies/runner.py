@@ -9,6 +9,8 @@ Runtime role:
 - On an accepted signal, prepares execution state and hands off to the order
   path (OrderManager) for placement.
 - Maintains per-symbol runner/indicator history counts used by the readiness SSOT.
+- Persists bounded, read-only candidate cash/risk rejection evidence in the
+  existing trade-decision journal without adding a second risk authority.
 
 Position in the pipeline:
     data/data_hub.py / data/market_data_manager.py -> THIS FILE (runner.py)
@@ -461,6 +463,7 @@ class TradeDecisionSnapshot:
     live_orders_armed: bool
     candidate_count: int | None = None
     candidate_rejects: Mapping[str, Any] | None = None
+    candidate_capacity_decisions: Mapping[str, Any] | None = None
     selected_candidate: str | None = None
     strategy_allowed: bool | None = None
     risk_allowed: bool | None = None
@@ -5289,6 +5292,7 @@ class StrategyRunner:
         final_reason: str | None,
         candidate_count: int | None = None,
         candidate_rejects: Mapping[str, Any] | None = None,
+        candidate_capacity_decisions: Mapping[str, Any] | None = None,
         selected_candidate: str | None = None,
         strategy_allowed: bool | None = None,
         risk_allowed: bool | None = None,
@@ -5307,6 +5311,25 @@ class StrategyRunner:
                 live_orders_armed=bool(self._runtime_live_orders_armed),
                 candidate_count=candidate_count,
                 candidate_rejects=dict(candidate_rejects or {}),
+                candidate_capacity_decisions={
+                    str(symbol): {
+                        key: decision.get(key)
+                        for key in (
+                            "reason",
+                            "capacity_blocker",
+                            "cash_affordable",
+                            "plan_risk_affordable",
+                            "required",
+                            "executable_capacity",
+                            "plan_cost_inclusive_risk",
+                            "effective_one_lot_risk_budget",
+                            "remaining_daily_risk_budget",
+                        )
+                        if key in decision
+                    }
+                    for symbol, decision in (candidate_capacity_decisions or {}).items()
+                    if isinstance(decision, Mapping)
+                },
                 selected_candidate=selected_candidate,
                 strategy_allowed=strategy_allowed,
                 risk_allowed=risk_allowed,
@@ -5364,6 +5387,11 @@ class StrategyRunner:
             candidate_rejects=(
                 payload.get("candidate_rejects")
                 if isinstance(payload.get("candidate_rejects"), Mapping)
+                else None
+            ),
+            candidate_capacity_decisions=(
+                payload.get("candidate_capacity_decisions")
+                if isinstance(payload.get("candidate_capacity_decisions"), Mapping)
                 else None
             ),
             selected_candidate=str(payload.get("selected_candidate") or "") or None,
