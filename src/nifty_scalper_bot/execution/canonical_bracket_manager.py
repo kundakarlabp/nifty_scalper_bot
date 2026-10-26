@@ -255,8 +255,12 @@ class CanonicalBracketManager(HardenedBracketManager):
             self.save_state()
         event_name = (
             "PARTIAL_EXIT_CONFIRMED_RESIDUAL_PROTECTED"
-            if protection_verified
-            else "PARTIAL_EXIT_CONFIRMED_RESIDUAL_STOP_UNVERIFIED"
+            if protection_required and protection_verified
+            else (
+                "PARTIAL_EXIT_CONFIRMED_RESIDUAL_STOP_UNVERIFIED"
+                if protection_required
+                else "PARTIAL_EXIT_CONFIRMED_RESIDUAL_SIMULATED"
+            )
         )
         _core.LOGGER.info(
             "%s bracket_id=%s symbol=%s target=%s filled_qty=%s "
@@ -270,7 +274,7 @@ class CanonicalBracketManager(HardenedBracketManager):
             fill_price,
             requested_by,
             extra={
-                "event": "PARTIAL_EXIT_CONFIRMED_RESIDUAL_PROTECTED",
+                "event": event_name,
                 "bracket_id": bracket.bracket_id,
                 "symbol": bracket.symbol,
                 "target": str(target.name),
