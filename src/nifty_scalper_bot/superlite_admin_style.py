@@ -1,4 +1,13 @@
-"""Single source of truth for the mobile-first admin CSS and progressive enhancement."""
+"""Purpose: Single source of truth for the mobile-first admin CSS and JavaScript.
+
+Responsibilities:
+- Render live engine/broker readiness without separate browser owner login.
+- Distinguish privileged journal access errors from engine unavailability.
+- Preserve daily token-entry form and operator control affordances.
+
+Boundaries: Visual-only assets; browser scripts do not own broker or release state.
+Safety: Render only fixed read-only status fields before owner verification.
+"""
 
 # Embedded HTML/CSS/JS assets have intentional long literal lines.
 # ruff: noqa: E501
