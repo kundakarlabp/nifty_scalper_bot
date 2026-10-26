@@ -104,9 +104,9 @@ def test_proven_quote_evidence_requires_finite_bid_ask_and_spread(monkeypatch) -
         "bid": 99.9,
         "ask": 100.1,
     }
-    assert build_execution_evidence(baseline, side="CE")[
-        "execution_evidence_pass"
-    ] is True
+    assert (
+        build_execution_evidence(baseline, side="CE")["execution_evidence_pass"] is True
+    )
     for invalid in (
         {"bid": float("nan")},
         {"ask": float("inf")},
@@ -115,6 +115,9 @@ def test_proven_quote_evidence_requires_finite_bid_ask_and_spread(monkeypatch) -
         {"required_data_present": False},
         {"bid": None, "ask": None},
     ):
-        assert build_execution_evidence({**baseline, **invalid}, side="CE")[
-            "execution_evidence_pass"
-        ] is False
+        assert (
+            build_execution_evidence({**baseline, **invalid}, side="CE")[
+                "execution_evidence_pass"
+            ]
+            is False
+        )
