@@ -1697,6 +1697,105 @@ class BracketManager:
         )
         return True
 
+    def _reconcile_active_entry_vwap(
+        self, order_id: str, fill_price: float, filled_qty: int | None
+    ) -> bool:
+        """Reconcile a later cumulative fill without a second activation.
+
+        The broker may update the cumulative entry VWAP after a partial fill.
+        Do not reset the original fill time, executable price extrema, stop
+        ratchet, or a concurrent EXIT_PENDING state. Never loosen the existing
+        virtual stop when the average-price correction moves its anchor.
+        """
+        with self._lock:
+            bracket = self._brackets.get(order_id)
+            if bracket is None or not bracket.entry_confirmed:
+                return False
+            qty_before = int(bracket.quantity or 0)
+            self._reconcile_entry_fill_quantity(bracket, filled_qty)
+            old_price = float(bracket.entry_price or 0.0)
+            try:
+                new_price = float(fill_price)
+            except (TypeError, ValueError, OverflowError):
+                new_price = 0.0
+            price_changed = (
+                math.isfinite(new_price)
+                and new_price > 0
+                and abs(new_price - old_price) > 1e-9
+            )
+            if price_changed:
+                old_stop = float(bracket.sl_trigger_price or 0.0)
+                old_initial_stop = float(
+                    bracket.initial_sl_trigger_price or old_stop
+                )
+                mode = str(
+                    (bracket.trade_provenance or {}).get("bracket_anchor_mode")
+                    or "distance"
+                ).lower()
+                delta = new_price - old_price
+                if mode == "distance":
+                    if old_initial_stop > 0:
+                        bracket.initial_sl_trigger_price = _round_to_tick(
+                            old_initial_stop + delta
+                        )
+                    if old_stop > 0:
+                        proposed_stop = _round_to_tick(old_stop + delta)
+                        bracket.sl_trigger_price = (
+                            max(old_stop, proposed_stop)
+                            if bracket.side == "BUY"
+                            else min(old_stop, proposed_stop)
+                        )
+                    if bracket.tp_trigger_price > 0:
+                        bracket.tp_trigger_price = _round_to_tick(
+                            bracket.tp_trigger_price + delta
+                        )
+                    for level in bracket.tp_levels:
+                        if not level.executed and level.price > 0:
+                            level.price = _round_to_tick(level.price + delta)
+                bracket.entry_price = new_price
+                bracket.entry_fill_price = new_price
+            if not price_changed and int(bracket.quantity or 0) == qty_before:
+                return True
+            bracket.updated_at = time.time()
+            LOGGER.info(
+                "BRACKET_CUMULATIVE_ENTRY_RECONCILED order_id=%s symbol=%s "
+                "quantity=%s previous_quantity=%s entry_vwap=%s old_vwap=%s "
+                "stop=%s exit_state=%s",
+                order_id,
+                bracket.symbol,
+                bracket.quantity,
+                qty_before,
+                bracket.entry_price,
+                old_price,
+                bracket.sl_trigger_price,
+                bracket.exit_state,
+            )
+            self._log_bracket_event(
+                "BRACKET_CUMULATIVE_ENTRY_RECONCILED",
+                bracket,
+                meta={
+                    "prior_qty": qty_before,
+                    "current_qty": bracket.quantity,
+                    "prior_vwap": old_price,
+                    "current_vwap": bracket.entry_price,
+                    "stop": bracket.sl_trigger_price,
+                },
+            )
+            try:
+                self.save_state()
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.critical(
+                    "BRACKET_CUMULATIVE_ENTRY_PERSIST_FAILED "
+                    "order_id=%s symbol=%s error=%s",
+                    order_id,
+                    bracket.symbol,
+                    exc,
+                )
+        # Outside the bracket lock, retain the existing exchange order ID
+        # and resize it for an increased broker-confirmed position quantity.
+        self._ensure_exchange_protective_stop(bracket)
+        return True
+
     def confirm_entry_fill(
         self, order_id: str, fill_price: float, filled_qty: int | None = None
     ) -> None:
@@ -1716,6 +1815,8 @@ class BracketManager:
         Raises:
             None.
         """
+        if self._reconcile_active_entry_vwap(order_id, fill_price, filled_qty):
+            return
         with self._lock:
             bracket = self._brackets.get(order_id)
             if not bracket:
