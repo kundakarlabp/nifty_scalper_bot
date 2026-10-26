@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from nifty_scalper_bot.strategies.runner import StrategyRunner
+from nifty_scalper_bot.strategies.runner import (
+    StrategyRunner,
+    _strict_replacement_expiry_block_reason,
+)
 
 
 def test_extract_strike_from_symbol_parses_nfo_options() -> None:
@@ -27,3 +30,14 @@ def test_strategy_runner_required_helpers_exist() -> None:
     ]
     for helper_name in required_helpers:
         assert hasattr(StrategyRunner, helper_name)
+
+
+def test_strict_replacement_requires_both_matching_expiry_identities() -> None:
+    check = _strict_replacement_expiry_block_reason
+    assert check("NIFTY26OCT", "NIFTY26OCT", strict=True) is None
+    assert check("NIFTY26OCT", "NIFTY26NOV", strict=True) == "expiry_mismatch"
+    assert check(None, "NIFTY26OCT", strict=True) == "expiry_unverified"
+    assert check("NIFTY26OCT", None, strict=True) == "expiry_unverified"
+    assert check("", "", strict=True) == "expiry_unverified"
+    # Explicitly non-strict compatibility is not secretly rewritten.
+    assert check(None, "NIFTY26OCT", strict=False) is None

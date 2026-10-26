@@ -1,3 +1,7 @@
+"""Regression gates for finite candidate configuration and contract snapshots."""
+
+import pytest
+
 from nifty_scalper_bot.risk.cost_model import evaluate_net_reward_risk
 from nifty_scalper_bot.strategies.trade_selector import TradeCandidateSelector
 
@@ -211,3 +215,81 @@ def test_candidate_uses_canonical_quote_spread_value(monkeypatch):
     )
     assert len(ranked) == 1
     assert ranked[0].spread_pct == expected
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid"),
+    [
+        ("min_option_premium", float("nan")),
+        ("min_option_premium", float("inf")),
+        ("max_option_premium", float("nan")),
+        ("max_option_premium", float("-inf")),
+        ("max_tick_age_s", float("nan")),
+        ("max_tick_age_s", float("inf")),
+        ("max_tick_age_s", 0.0),
+        ("max_option_spread_pct", float("nan")),
+        ("max_option_spread_pct", float("inf")),
+        ("max_option_spread_pct", -1.0),
+    ],
+)
+def test_nonfinite_or_invalid_candidate_limits_are_rejected(field, invalid):
+    with pytest.raises(ValueError):
+        TradeCandidateSelector(**{field: invalid})
+
+
+@pytest.mark.parametrize(
+    "strike", [None, "bad", float("nan"), float("inf"), 22000.5, 0]
+)
+def test_bad_candidate_strike_is_rejected_not_raised(monkeypatch, strike):
+    import nifty_scalper_bot.strategies.trade_selector as selector_module
+
+    monkeypatch.setattr(selector_module, "expiry_theta_block", lambda: (False, ""))
+    monkeypatch.setattr(selector_module, "midday_pause_block", lambda: (False, ""))
+    selector = TradeCandidateSelector()
+    assert (
+        selector.select_ranked_candidates(
+            direction_bias="CE", atm_strike=22000, snapshots=[base(strike=strike)]
+        )
+        == []
+    )
+    assert selector._last_rejects["invalid_strike"] == 1
+
+
+@pytest.mark.parametrize(
+    ("atm", "rr"),
+    [
+        (float("nan"), 2.0),
+        (float("inf"), 2.0),
+        (22000, float("nan")),
+        (22000, float("inf")),
+    ],
+)
+def test_invalid_selection_context_cannot_admit_candidate(monkeypatch, atm, rr):
+    import nifty_scalper_bot.strategies.trade_selector as selector_module
+
+    monkeypatch.setattr(selector_module, "expiry_theta_block", lambda: (False, ""))
+    monkeypatch.setattr(selector_module, "midday_pause_block", lambda: (False, ""))
+    selector = TradeCandidateSelector()
+    assert (
+        selector.select_ranked_candidates(
+            direction_bias="CE", atm_strike=atm, snapshots=[base()], gross_rr=rr
+        )
+        == []
+    )
+    assert selector._last_rejects["invalid_selection_context"] == 1
+
+
+def test_nonfinite_live_age_env_cannot_relax_bound(monkeypatch):
+    import nifty_scalper_bot.strategies.trade_selector as selector_module
+
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    monkeypatch.setenv("PAPER_MODE", "false")
+    monkeypatch.setenv("PAPER__ENABLED", "false")
+    monkeypatch.setenv("SHADOW_MODE", "false")
+    monkeypatch.setenv("LIVE_CANDIDATE_MAX_TICK_AGE_S", "nan")
+    selector = TradeCandidateSelector()
+    _spread, age, _ticks, is_live = selector._effective_limits()
+    assert is_live is True
+    assert age <= 2.5
+    assert selector_module._float_env("LIVE_CANDIDATE_MAX_TICK_AGE_S", 2.5) == 2.5

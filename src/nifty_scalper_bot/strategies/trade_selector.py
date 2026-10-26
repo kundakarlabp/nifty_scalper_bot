@@ -33,7 +33,9 @@ LOGGER = get_logger(__name__)
 def _float_env(name: str, default: float, *, minimum: float = 0.0) -> float:
     try:
         value = float(os.getenv(name, str(default)) or default)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        value = default
+    if not isfinite(value):
         value = default
     return max(float(minimum), float(value))
 
@@ -89,12 +91,37 @@ class TradeCandidateSelector:
         self.max_option_premium = float(
             max_option_premium if max_option_premium is not None else policy.max_premium
         )
-        if self.min_option_premium <= 0:
-            raise ValueError("min_option_premium must be > 0")
-        if self.max_option_premium <= self.min_option_premium:
-            raise ValueError("max_option_premium must be > min_option_premium")
+        if not isfinite(self.min_option_premium) or self.min_option_premium <= 0:
+            raise ValueError("min_option_premium must be finite and > 0")
+        if (
+            not isfinite(self.max_option_premium)
+            or self.max_option_premium <= self.min_option_premium
+        ):
+            raise ValueError(
+                "max_option_premium must be finite and > min_option_premium"
+            )
         self.max_tick_age_s = max_tick_age_s
         self.max_option_spread_pct = max_option_spread_pct
+        for label, limit, allow_zero in (
+            ("max_tick_age_s", max_tick_age_s, False),
+            ("max_option_spread_pct", max_option_spread_pct, True),
+        ):
+            if limit is not None:
+                value = self._f(limit)
+                if value is None or (value < 0 if allow_zero else value <= 0):
+                    raise ValueError(f"{label} must be finite and valid")
+        if require_real_ticks_last_60s is not None and (
+            isinstance(require_real_ticks_last_60s, bool)
+            or not isinstance(require_real_ticks_last_60s, int)
+            or require_real_ticks_last_60s < 0
+        ):
+            raise ValueError("require_real_ticks_last_60s must be a nonnegative int")
+        if (
+            isinstance(option_strike_window_each_side, bool)
+            or not isinstance(option_strike_window_each_side, int)
+            or option_strike_window_each_side < 0
+        ):
+            raise ValueError("option_strike_window_each_side must be a nonnegative int")
         self.require_real_ticks_last_60s = require_real_ticks_last_60s
         self._last_rejects: dict[str, int] = {}
         self._candidate_reject_log_throttle_seconds = max(
@@ -190,6 +217,21 @@ class TradeCandidateSelector:
             return []
 
         max_spread, max_age, min_ticks, is_live = self._effective_limits()
+        atm_value = self._f(atm_strike)
+        rr_value = self._f(gross_rr)
+        if (
+            atm_value is None
+            or atm_value <= 0
+            or not atm_value.is_integer()
+            or rr_value is None
+            or rr_value <= 0
+        ):
+            self._last_rejects = {"invalid_selection_context": len(snapshots)}
+            LOGGER.warning(
+                "CANDIDATE_SELECTION_BLOCKED reason=invalid_selection_context"
+            )
+            return []
+        atm_strike = int(atm_value)
         allow_ltp_only = (not is_live) and os.getenv(
             "ALLOW_LTP_ONLY_CANDIDATE", "false"
         ).lower() in {"1", "true", "yes", "on"}
@@ -197,6 +239,7 @@ class TradeCandidateSelector:
         rejects = {
             "side_mismatch": 0,
             "atm_distance": 0,
+            "invalid_strike": 0,
             "missing_bid_ask": 0,
             "live_bid_ask_required": 0,
             "premium_out_of_range": 0,
@@ -221,10 +264,22 @@ class TradeCandidateSelector:
                     expected_direction=direction_bias,
                 )
                 continue
-            strike = int(s.get("strike") or 0)
-            atm_distance = (
-                abs((strike - atm_strike) // 50) if strike and atm_strike else 999
-            )
+            strike_value = self._f(s.get("strike"))
+            if (
+                strike_value is None
+                or strike_value <= 0
+                or not strike_value.is_integer()
+            ):
+                rejects["invalid_strike"] += 1
+                self._log_reject(
+                    "invalid_strike",
+                    symbol,
+                    throttle_key_parts=("invalid_strike", symbol),
+                    strike=s.get("strike"),
+                )
+                continue
+            strike = int(strike_value)
+            atm_distance = abs(strike - atm_strike) // 50
             if atm_distance > self.option_strike_window_each_side:
                 rejects["atm_distance"] += 1
                 self._log_reject(
@@ -382,7 +437,7 @@ class TradeCandidateSelector:
             half_spread = (
                 (((ask or 0.0) - (bid or 0.0)) / 2.0) if has_bid_ask else entry * 0.003
             )
-            strategy_rr = max(0.0, float(gross_rr or 0.0))
+            strategy_rr = rr_value
             economic_floor = minimum_risk_distance_for_net_rr(
                 entry_price=entry,
                 gross_rr=strategy_rr,
@@ -598,7 +653,7 @@ class TradeCandidateSelector:
     def _f(v: Any) -> float | None:
         try:
             number = float(v)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             return None
         return number if isfinite(number) else None
 

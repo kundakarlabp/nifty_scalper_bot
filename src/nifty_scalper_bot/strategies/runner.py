@@ -11,6 +11,8 @@ Runtime role:
 - Maintains per-symbol runner/indicator history counts used by the readiness SSOT.
 - Persists bounded, read-only candidate cash/risk rejection evidence in the
   existing trade-decision journal without adding a second risk authority.
+- Checks independently parsed original/replacement expiries using the pure
+  _strict_replacement_expiry_block_reason helper before a strict substitution.
 
 Position in the pipeline:
     data/data_hub.py / data/market_data_manager.py -> THIS FILE (runner.py)
@@ -300,6 +302,22 @@ def _derive_strike_distance_from_atm(
     if strike is None or strike <= 0:
         return None
     return abs(strike - atm)
+
+
+def _strict_replacement_expiry_block_reason(
+    original_expiry: str | None,
+    selected_expiry: str | None,
+    *,
+    strict: bool,
+) -> str | None:
+    """Reject an unverified or conflicting expiry before any strict replacement."""
+    if not strict:
+        return None
+    if not original_expiry or not selected_expiry:
+        return "expiry_unverified"
+    if original_expiry != selected_expiry:
+        return "expiry_mismatch"
+    return None
 
 
 class EntryEvaluationRoute(str, Enum):
@@ -19355,14 +19373,14 @@ class StrategyRunner:
 
                     orig_expiry = _expiry_key(original_symbol)
                     new_expiry = _expiry_key(selected_symbol)
-                    if (
-                        replacement_blocked_reason is None
-                        and strict_replace
-                        and orig_expiry
-                        and new_expiry
-                        and orig_expiry != new_expiry
-                    ):
-                        replacement_blocked_reason = "expiry_mismatch"
+                    if replacement_blocked_reason is None:
+                        replacement_blocked_reason = (
+                            _strict_replacement_expiry_block_reason(
+                                orig_expiry,
+                                new_expiry,
+                                strict=strict_replace,
+                            )
+                        )
                     orig_strike = self._extract_strike_from_symbol(original_symbol)
                     new_strike = self._extract_strike_from_symbol(selected_symbol)
                     if (
