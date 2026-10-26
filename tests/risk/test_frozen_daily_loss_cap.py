@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from nifty_scalper_bot.config.settings import RiskSettings
 from nifty_scalper_bot.risk.limits import RiskSwitches
 from nifty_scalper_bot.risk.risk_manager import RiskManager
 
@@ -33,9 +34,7 @@ class PositionEvidence:
         return dict(self.state)
 
 
-def _owner(
-    positions: PositionEvidence, *, starting_cap: float = 0.0
-) -> RiskManager:
+def _owner(positions: PositionEvidence, *, starting_cap: float = 0.0) -> RiskManager:
     manager = object.__new__(RiskManager)
     manager.position_manager = positions
     manager._switches = RiskSwitches(
@@ -52,7 +51,7 @@ def _owner(
         warning=lambda *_a, **_k: None,
     )
     # Test the broker-funds transition without initializing the full engine.
-    manager._configured_daily_loss_cap = lambda funds: float(funds) * 0.05
+    manager.settings = RiskSettings(daily_loss_pct=5.0, per_trade_risk_pct=5.0)
     return manager
 
 
