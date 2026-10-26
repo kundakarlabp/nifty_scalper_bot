@@ -5363,7 +5363,31 @@ class BracketManager:
             prior_reason = bracket.exchange_stop_degraded_reason
             bracket.exchange_stop_degraded_reason = reason
             bracket.updated_at = time.time()
-        if confirmed and prior_reason:
+            trail_proven = False
+            if confirmed:
+                # A virtual trail is not an exchange ratchet until orderbook
+                # fields match. Attribute proof to its exact stop revision.
+                history = bracket.trailing_config.get("trail_history", [])
+                if isinstance(history, list):
+                    for record in reversed(history):
+                        if not isinstance(record, dict):
+                            continue
+                        if record.get("exchange_order_id") != order_id:
+                            continue
+                        try:
+                            matching = abs(
+                                float(record.get("new_sl"))
+                                - float(bracket.exchange_stop_trigger_price)
+                            ) <= 1e-6
+                        except (TypeError, ValueError):
+                            matching = False
+                        if matching:
+                            if not record.get("broker_confirmed"):
+                                record["broker_confirmed"] = True
+                                record["broker_confirmed_at"] = time.time()
+                                trail_proven = True
+                            break
+        if confirmed and (prior_reason or trail_proven):
             LOGGER.info(
                 "EXCHANGE_PROTECTIVE_STOP_RECONCILED order_id=%s symbol=%s "
                 "trigger=%s quantity=%s prior_reason=%s",
