@@ -68,6 +68,55 @@ def test_https_admin_opens_dashboard_without_extra_login_page(
     assert response.status_code == 401
 
 
+def test_unverified_browser_sees_real_engine_and_broker_status(
+    monkeypatch, tmp_path
+) -> None:
+    _owner(monkeypatch, authenticated=False, tmp_path=tmp_path)
+    probe = {
+        "engine_ok": True,
+        "bot_loaded": True,
+        "quiet": False,
+        "broker_authenticated": "authenticated",
+        "mode": "LIVE",
+        "primary_blocker": "",
+        "runtime_sha": "ea18b5da485954e05f3a697bd58ce5dce6900ed3",
+        "updater_state": "current",
+        "checked_at": 1793000000,
+    }
+    monkeypatch.setattr(dashboard, "quick_overview", lambda: dict(probe))
+    response = _client().get("/admin/api/overview")
+    assert response.status_code == 200
+    assert response.json() == probe
+    assert response.headers["cache-control"] == "no-store"
+    assert "www-authenticate" not in response.headers
+    # The same unverified browser cannot fetch journals or change LIVE mode.
+    assert _client().get("/admin/api/logs").status_code == 401
+    assert _client().post("/admin/mode", data={"mode": "shadow"}).status_code == 401
+
+
+def test_service_status_link_is_read_only_without_owner_cookie(
+    monkeypatch, tmp_path
+) -> None:
+    _owner(monkeypatch, authenticated=False, tmp_path=tmp_path)
+    monkeypatch.setattr(
+        dashboard,
+        "quick_overview",
+        lambda: {"engine_ok": True, "quiet": False, "bot_loaded": True},
+    )
+    dashboard._STATUS_CACHE.update({"at": 0.0, "label": "", "color": ""})
+    response = _client().get("/admin/status.json")
+    assert response.status_code == 200
+    assert response.json()["label"] == "operational"
+    assert "www-authenticate" not in response.headers
+    assert set(response.json()) == {"label", "color"}
+
+
+def test_public_engine_port_cannot_fetch_secure_admin_overview(monkeypatch) -> None:
+    monkeypatch.setenv("DEPLOYMENT_PLATFORM", "aws_lightsail")
+    response = _client(https=False).get("/admin/api/overview")
+    assert response.status_code == 403
+
+
 def test_signed_owner_gets_existing_full_dashboard_without_admin_password(
     monkeypatch,
 ) -> None:

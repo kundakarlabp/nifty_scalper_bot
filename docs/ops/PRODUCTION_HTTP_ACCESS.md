@@ -137,3 +137,36 @@ Verification after release:
 - HTTP `/admin/manage` and unauthenticated mutations remain forbidden.
 - Check actual AWS build SHA against merged GitHub main and complete release
   state before claiming the deployment is active.
+
+## 2026-10-26 dashboard broker-state fix and release freshness
+
+The independent HTTPS `/admin` dashboard intentionally renders before the browser
+obtains its owner session. Its read-only JavaScript calls
+`GET /admin/api/overview` every 20 seconds. This endpoint must be available
+**without a separate owner session**, because it returns only the existing fixed
+engine/broker-auth/mode/blocker/release fields from `quick_overview()`.
+`GET /admin/status.json` similarly returns a process-status label and colour.
+Both reject cleartext HTTP on production.
+
+The previous failure was a 401 from `_check_auth()` on that read-only overview:
+the browser permanently displayed "Checking" despite authenticated Zerodha
+and a healthy engine. **Broker authenticated** and **owner browser authorized
+for writes** are two different states. Never conflate them. If `/health/trading`
+reports authenticated and armed, **do not ask the operator to rotate an
+already-valid broker token merely to fix status display**.
+
+Privileged journal API, detailed diagnostics, account/settings values and all
+mutations still require the verified owner browser session. Their HTTP 401 is
+not evidence of broker failure; the page explains that explicitly. Avoid
+introducing a second login page, new secret in the browser, duplicated health
+polling or new paid service.
+
+The canonical release runner already uses the **host's 30-second
+OnUnitInactiveSec timer** to poll GitHub main; any non-current SHA is
+validated against the **exact post-merge push CI proof**, then deployed through
+the broker-safe handoff. A 30-second timer is a retry/check cadence, **not**
+a promise that a release can interrupt an open real-money position or that
+CI/deployment completes in 30 seconds. Check both GitHub main SHA and fresh
+Supabase `build_sha`/`release_state` before reporting sync. Do not add
+another deployer or bypass CI, position reconciliation, order-terminal, or
+entry-hold checks.

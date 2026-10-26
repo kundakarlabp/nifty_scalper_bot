@@ -643,9 +643,10 @@ def _full_dashboard(request: Request, *, preview: bool = False) -> HTMLResponse:
         )
         body = body.replace(
             '<div class="intro">',
-            '<p class="flash">Dashboard is open. Enter the usual Zerodha '
-            'request token below to activate controls for this browser; '
-            'no separate admin password.</p><div class="intro">', 1,
+            '<p id="admin-access-note" class="flash">Dashboard is open. '
+            'Loading the real engine and broker status below; a browser '
+            'session is not the same as Zerodha broker authentication.'
+            '</p><div class="intro">', 1,
         )
         response = HTMLResponse(
             "", headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"}
@@ -934,8 +935,18 @@ def update_from_github(request: Request) -> Response:
 # fmt: off  # Short, stable JSON UI endpoints.
 @router.get("/admin/api/overview")  # type: ignore[untyped-decorator]
 def overview_api(request: Request) -> JSONResponse:
-    """Lightweight independent heartbeat for mobile auto-refresh."""
-    _check_auth(request)
+    """Show the existing sanitized runtime heartbeat before daily owner login.
+
+    quick_overview returns fixed process, broker-auth state and release
+    labels, never credentials, orders, account IDs or private journal lines.
+    Browser ownership is required for *mutating* admin controls, not for
+    recognizing a broker session already verified by the running engine.
+    """
+    if (
+        os.getenv("DEPLOYMENT_PLATFORM") == "aws_lightsail"
+        and request.url.scheme != "https"
+    ):
+        raise HTTPException(status_code=403, detail="admin_https_required")
     return JSONResponse(quick_overview(), headers={"Cache-Control": "no-store"})
 
 
@@ -961,7 +972,12 @@ _STATUS_CACHE: dict[str, object] = {"at": 0.0, "label": "running", "color": "#3f
 
 @router.get("/admin/status.json")
 def status_json(request: Request) -> JSONResponse:
-    _check_auth(request)
+    """Expose only the process-status label; no private controls or logs."""
+    if (
+        os.getenv("DEPLOYMENT_PLATFORM") == "aws_lightsail"
+        and request.url.scheme != "https"
+    ):
+        raise HTTPException(status_code=403, detail="admin_https_required")
     now = time.time()
     ttl = float(os.getenv("ADMIN_STATUS_CACHE_SECONDS", "10") or "10")
     if now - float(_STATUS_CACHE["at"]) < ttl:
