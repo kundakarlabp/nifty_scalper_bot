@@ -1891,7 +1891,12 @@ class BracketManager:
         self, symbol: str, atr: float = 0.0, volume: float = 0.0
     ) -> None:
         """Feed external calculations (ATR) into the manager."""
-        if atr > 0:
+        try:
+            atr_value = float(atr)
+        except (TypeError, ValueError, OverflowError):
+            return
+        if math.isfinite(atr_value) and atr_value > 0:
+            atr = atr_value
             # Update Legacy Cache
             self._current_atr[symbol] = atr
             # Feed Safe Provider if available
@@ -1919,7 +1924,7 @@ class BracketManager:
 
     def _trail_activation_r(self, bracket: BracketState) -> float:
         try:
-            return float(
+            activation = float(
                 bracket.trailing_config.get(
                     "breakeven_activation_r",
                     os.getenv("TRAIL_BREAKEVEN_ACTIVATION_R", 0.60),
@@ -1927,6 +1932,7 @@ class BracketManager:
             )
         except (TypeError, ValueError):
             return 0.60
+        return activation if math.isfinite(activation) and activation > 0 else 0.60
 
     def _trailing_executable_state(
         self, bracket: BracketState, ltp: float
@@ -2072,7 +2078,14 @@ class BracketManager:
         if not relevant_ids:
             return
 
-        if ltp <= 0:
+        # Reject NaN/Inf before they can mutate last_ltp, extrema,
+        # stop-cross checks or trailing watermarks. The broker-resident
+        # protective SL and independent watchdog remain active.
+        try:
+            ltp = float(ltp)
+        except (TypeError, ValueError, OverflowError):
+            return
+        if not math.isfinite(ltp) or ltp <= 0:
             return
 
         # ═══════════════════════════════════════════════════════════
@@ -2309,7 +2322,15 @@ class BracketManager:
             bid, ask, _spread, source = resolve_quote_bid_ask_spread(tick)
         except Exception:  # noqa: BLE001 - a malformed tick must not stop exits
             return False
-        if source == "missing" or not bid or not ask or bid <= 0 or ask < bid:
+        if (
+            source == "missing"
+            or bid is None
+            or ask is None
+            or not math.isfinite(float(bid))
+            or not math.isfinite(float(ask))
+            or bid <= 0
+            or ask < bid
+        ):
             return False
         self._exit_quotes[symbol] = (float(bid), float(ask), time.time())
         return True
@@ -2328,7 +2349,12 @@ class BracketManager:
         if quote is None:
             return float(ltp), "ltp"
         bid, ask, captured_at = quote
-        if (time.time() - captured_at) > self._exit_quote_max_age:
+        if (
+            not math.isfinite(float(bid))
+            or not math.isfinite(float(ask))
+            or not math.isfinite(float(captured_at))
+            or (time.time() - captured_at) > self._exit_quote_max_age
+        ):
             return float(ltp), "ltp_stale_quote"
         price = bid if bracket.side == "BUY" else ask
         if price <= 0:
@@ -3153,7 +3179,13 @@ class BracketManager:
         try:
             symbol = str(tick.get("symbol") or "")
             ltp = tick.get("last_price") or tick.get("ltp")
-            if not symbol or not isinstance(ltp, (int, float)):
+            if (
+                not symbol
+                or not isinstance(ltp, (int, float))
+                or isinstance(ltp, bool)
+                or not math.isfinite(float(ltp))
+                or ltp <= 0
+            ):
                 return
             exchange_ts = tick_exchange_epoch(tick)
             self._capture_exit_quote(normalize_symbol(symbol), tick)
@@ -3664,8 +3696,10 @@ class BracketManager:
                 elif hasattr(self._atr_provider, "get_atr"):
                     snapshot = self._atr_provider.get_atr(symbol)
                     atr_value = getattr(snapshot, "value", snapshot)
-                if atr_value is not None and float(atr_value) > 0:
-                    return float(atr_value)
+                if atr_value is not None:
+                    candidate = float(atr_value)
+                    if math.isfinite(candidate) and candidate > 0:
+                        return candidate
             except Exception as exc:  # noqa: BLE001 - hot path must retain SL/TP checks
                 self._log_throttled(
                     "warning",
