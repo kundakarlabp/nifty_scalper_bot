@@ -61,9 +61,7 @@ def test_old_sweep_cannot_be_made_fresh_by_new_signal_timestamp(
     ],
 )
 def test_missing_or_invalid_sweep_proof_fails_closed(sweep) -> None:
-    result = _approved_smc_freshness_block(
-        _signal(sweep=sweep), now_epoch=EPOCH
-    )
+    result = _approved_smc_freshness_block(_signal(sweep=sweep), now_epoch=EPOCH)
     assert result is not None
     assert result["reason"] == "live_smc_sweep_timestamp_missing"
 
@@ -71,9 +69,9 @@ def test_missing_or_invalid_sweep_proof_fails_closed(sweep) -> None:
 def test_epoch_ms_and_iso_string_are_accepted() -> None:
     when = NOW - timedelta(seconds=25)
     for sweep in (when.timestamp(), when.timestamp() * 1000, when.isoformat()):
-        assert _approved_smc_freshness_block(
-            _signal(sweep=sweep), now_epoch=EPOCH
-        ) is None
+        assert (
+            _approved_smc_freshness_block(_signal(sweep=sweep), now_epoch=EPOCH) is None
+        )
 
 
 def test_future_sweep_timestamp_fails_closed() -> None:
@@ -85,9 +83,7 @@ def test_future_sweep_timestamp_fails_closed() -> None:
 
 
 def test_nonfinite_wall_clock_fails_closed() -> None:
-    result = _approved_smc_freshness_block(
-        _signal(sweep=NOW), now_epoch=float("nan")
-    )
+    result = _approved_smc_freshness_block(_signal(sweep=NOW), now_epoch=float("nan"))
     assert result is not None
     assert result["reason"] == "live_smc_clock_unavailable"
 
@@ -116,16 +112,25 @@ def test_operator_override_cannot_extend_window_beyond_five_minutes(
 @pytest.mark.parametrize("value", ["nan", "inf", "not-a-number"])
 def test_invalid_window_does_not_bypass_protection(monkeypatch, value) -> None:
     monkeypatch.setenv("SMC_CONFIRMATION_MAX_MINUTES", value)
-    assert _approved_smc_freshness_block(
-        _signal(sweep=NOW - timedelta(minutes=6)), now_epoch=EPOCH
-    )["reason"] == "live_smc_sweep_expired"
+    assert (
+        _approved_smc_freshness_block(
+            _signal(sweep=NOW - timedelta(minutes=6)), now_epoch=EPOCH
+        )["reason"]
+        == "live_smc_sweep_expired"
+    )
 
 
 def test_close_signals_and_other_strategies_unchanged() -> None:
     stale = NOW - timedelta(hours=1)
-    assert _approved_smc_freshness_block(
-        _signal(action="CLOSE_LONG", sweep=stale), now_epoch=EPOCH
-    ) is None
-    assert _approved_smc_freshness_block(
-        _signal(strategy="VWAPPro", sweep=stale), now_epoch=EPOCH
-    ) is None
+    assert (
+        _approved_smc_freshness_block(
+            _signal(action="CLOSE_LONG", sweep=stale), now_epoch=EPOCH
+        )
+        is None
+    )
+    assert (
+        _approved_smc_freshness_block(
+            _signal(strategy="VWAPPro", sweep=stale), now_epoch=EPOCH
+        )
+        is None
+    )
