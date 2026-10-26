@@ -12,6 +12,7 @@ Direction-authority invariant:
 - OPTION PREMIUM DATA MUST NEVER AUTHORIZE UNDERLYING DIRECTION.
 - Only fresh NIFTY spot/futures context may authorize CE/PE direction.
 - _context_snapshot_fresh rejects non-finite or future-dated underlying ticks;
+  direction observations reject non-finite source confidence and age;
   the same bounded freshness rule is used before arbitrating spot/futures.
 - Direction, freshness age and source are one atomic observation.
 - Fresh spot/futures disagreement fails closed; source order never breaks ties.
@@ -3311,16 +3312,23 @@ class StrategyManager(_BaseStrategyManager):
                         age_s = max(0.0, now_ts - ts) if ts > 0 else None
                     except (TypeError, ValueError):
                         age_s = None
-                if age_s is None or age_s > max_context_age:
+                if (
+                    age_s is None
+                    or not isfinite(age_s)
+                    or age_s < 0.0
+                    or age_s > max_context_age
+                ):
                     return None
                 try:
                     confidence_value = float(confidence or 0.0)
-                except (TypeError, ValueError):
-                    confidence_value = 0.0
+                except (TypeError, ValueError, OverflowError):
+                    return None
+                if not isfinite(confidence_value):
+                    return None
                 return UnderlyingDirectionObservation(
                     bias=bias_norm,
                     confidence=confidence_value,
-                    age_seconds=max(0.0, float(age_s)),
+                    age_seconds=float(age_s),
                     source=source,
                 )
 
@@ -4347,11 +4355,19 @@ class StrategyManager(_BaseStrategyManager):
             and bool((evidence.metadata or {}).get("effective_context_alignment"))
         ]
 
+        # Capture SMC provenance before filtering unconfirmed votes: a valid
+        # VWAP vote must not erase SMC's distinct confirmation-wait record.
+        smc_trigger_votes = [
+            (signal, evidence)
+            for signal, evidence in trigger_votes
+            if str(evidence.strategy or "").strip().upper() == "SMC"
+        ]
+
         def _observe_smc_confirmation_wait(reason: str) -> None:
             # Keep the already-qualified trigger's lifecycle stage. A move
             # back to CONFIRMING would be ignored by the monotonic registry.
             # This is observability only: no additional vote or admission.
-            for candidate_signal, evidence in trigger_votes:
+            for candidate_signal, evidence in smc_trigger_votes:
                 if str(evidence.strategy or "").strip().upper() != "SMC":
                     continue
                 metadata = dict(candidate_signal.metadata or {})
@@ -4383,10 +4399,7 @@ class StrategyManager(_BaseStrategyManager):
         # A one-second OrderFlow/OFI vote is context, not independent SMC
         # entry confirmation. Keep OrderFlow's adverse-context veto above,
         # but require a separate strategy or independent trigger for SMC.
-        smc_trigger_present = any(
-            str(evidence.strategy or "").strip().upper() == "SMC"
-            for _signal, evidence in trigger_votes
-        )
+        smc_trigger_present = bool(smc_trigger_votes)
         # Research opt-in: independently timed sustained option-book evidence
         # can corroborate a fully qualified underlying SMC structural trigger.
         # OrderFlow remains context-only. Broker/risk gates remain mandatory.
@@ -4572,6 +4585,24 @@ class StrategyManager(_BaseStrategyManager):
             _observe_smc_confirmation_wait("independent_confirmation_missing")
             return None
 
+        # Observational comparison of already-approved structural candidates.
+        # Keep first-eligible selection unchanged until cost-adjusted,
+        # chronological evidence can support a quality-ranked alternative.
+        qualified_trigger_candidates = [
+            {
+                "strategy": evidence.strategy,
+                "signal_family": canonical_signal_family(evidence.strategy),
+                "setup_id": (
+                    str(
+                        (signal.metadata or {}).get("setup_id")
+                        or (evidence.metadata or {}).get("setup_id")
+                        or ""
+                    )
+                    or None
+                ),
+            }
+            for signal, evidence in trigger_votes
+        ]
         primary_signal, primary_evidence = trigger_votes[0]
         metadata = dict(primary_signal.metadata or {})
         approval_path = (
@@ -4620,6 +4651,12 @@ class StrategyManager(_BaseStrategyManager):
                 "confirming_trigger_strategies": confirming_trigger_strategies,
                 "context_confirmation_strategies": context_strategies,
                 "excluded_unconfirmed_triggers": excluded_unconfirmed_triggers,
+                "primary_selection_policy": "first_eligible_trigger",
+                "qualified_trigger_candidates": qualified_trigger_candidates,
+                # confidence=1.0 here is a binary gate result, not a
+                # calibrated probability of winning a net-cost trade.
+                "confidence_semantics": "binary_structural_admission",
+                "confidence_calibrated": False,
             }
         )
         transition_setup(
