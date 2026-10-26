@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-"""Archive active Kite contract history for offline research; never submit orders."""
+"""Archive Kite history and validate date-causal retained research sessions.
+
+Responsibilities:
+- Validate observed instruments, token uniqueness, weekly expiry and ATM pairs.
+- Atomically stage only independently observed, synchronized historical bars.
+- Distinguish 09:15–09:29 futures opening-range completeness for ORB research.
+
+Historical current-master coverage cannot reconstruct expired weekly options.
+The collector never places trades, fabricates quotes or promotes LIVE policy.
+"""
 
 from __future__ import annotations
 
