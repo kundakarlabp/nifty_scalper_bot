@@ -1877,3 +1877,66 @@ def test_persisted_bracket_contains_bounded_trailing_history(
     assert record["new_sl"] == pytest.approx(150.0)
     assert record["revision"] == 1
     assert record["exchange_order_id"] is None
+
+
+def test_unsettled_broker_trigger_readback_blocks_competing_ratchets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Do not stack stop modifications while the broker still has old geometry.
+
+    Zerodha can report TRIGGER PENDING with the previous trigger even after
+    acknowledging a modify request; status alone cannot prove the ratchet.
+    """
+    manager, order_manager, broker = _manager()
+    manager._exchange_protective_stop_enabled = True
+    monkeypatch.setattr(manager, "_is_live_execution", lambda: True)
+    monkeypatch.setattr(manager, "save_state", lambda: None)
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    assert manager._ensure_exchange_protective_stop(bracket)
+    stop_id = bracket.exchange_stop_order_id
+    assert stop_id is not None
+    broker.statuses[stop_id] = "TRIGGER PENDING"
+
+    # Broker accepts the request, but the orderbook still shows old 140 SL.
+    def delayed_modify(order_id: str, **kwargs: Any) -> bool:
+        order_manager.modify_calls.append((str(order_id), dict(kwargs)))
+        return True
+
+    monkeypatch.setattr(order_manager, "modify_order", delayed_modify)
+    bracket.last_ltp = 160.0
+    assert manager._virtual_modify_sl(bracket.virtual_sl_id, 150.0)
+    assert len(order_manager.modify_calls) == 1
+    assert bracket.exchange_stop_degraded_reason == "broker_stop_trigger_mismatch"
+    assert manager.has_unresolved_exit()
+
+    # A second virtual improvement is allowed, but NOT another broker request
+    # until the first orderbook trigger/limit has been independently verified.
+    bracket.last_ltp = 165.0
+    assert manager._virtual_modify_sl(bracket.virtual_sl_id, 152.0)
+    assert len(order_manager.modify_calls) == 1
+    assert [r["broker_confirmed"] for r in bracket.trailing_config["trail_history"]] == [
+        False,
+        False,
+    ]
+
+    # Broker eventually catches up to the first order modification.
+    first = order_manager.modify_calls[0][1]
+    broker.protective_order_fields[stop_id]["trigger_price"] = first["trigger_price"]
+    broker.protective_order_fields[stop_id]["price"] = first["price"]
+    assert manager._confirm_exchange_protective_stop(bracket)
+    assert bracket.exchange_stop_degraded_reason is None
+    assert bracket.trailing_config["trail_history"][0]["broker_confirmed"] is True
+    assert bracket.trailing_config["trail_history"][1]["broker_confirmed"] is False
+
+    # Only after proof can the later desired stop be submitted.
+    manager._sync_exchange_protective_stop(bracket)
+    assert len(order_manager.modify_calls) == 2
+    second = order_manager.modify_calls[1][1]
+    broker.protective_order_fields[stop_id]["trigger_price"] = second["trigger_price"]
+    broker.protective_order_fields[stop_id]["price"] = second["price"]
+    assert manager._confirm_exchange_protective_stop(bracket)
+    assert all(
+        record["broker_confirmed"]
+        for record in bracket.trailing_config["trail_history"]
+    )
