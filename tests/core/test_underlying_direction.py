@@ -82,6 +82,7 @@ def test_20260928_losing_ce_replay_fails_closed_on_spot_futures_conflict() -> No
     assert resolved.state is UnderlyingDirectionState.TRANSITION
     assert resolved.reason == "fresh_spot_futures_disagreement"
 
+
 @pytest.mark.parametrize("invalid", [float("nan"), float("inf"), float("-inf")])
 @pytest.mark.parametrize("field", ["confidence", "age_seconds"])
 def test_direction_observation_rejects_nonfinite_numeric_evidence(
