@@ -398,6 +398,14 @@ def test_two_independent_same_side_triggers_can_confirm(monkeypatch) -> None:
     assert result.metadata["approval_path"] == "aligned_trigger_consensus"
     assert result.metadata["confirmation_contract"]["trigger_consensus"] is True
     assert result.metadata["confirming_trigger_strategies"] == ["ORBPro"]
+    assert result.metadata["strategy_name"] == "VWAPPro"
+    assert result.metadata["primary_selection_policy"] == "first_eligible_trigger"
+    assert [
+        vote["strategy"] for vote in result.metadata["qualified_trigger_candidates"]
+    ] == ["VWAPPro", "ORBPro"]
+    assert result.metadata["confidence_semantics"] == "binary_structural_admission"
+    assert result.metadata["confidence_calibrated"] is False
+    assert result.confidence == 1.0
 
 
 def test_fresh_same_side_context_conflict_vetoes_trigger_consensus(
@@ -592,6 +600,10 @@ def test_unconfirmed_smc_cannot_veto_independently_confirmed_vwap(
     monkeypatch, trigger_order, capacity_retry
 ) -> None:
     """An SMC-only corroboration rule must not suppress a valid VWAP entry."""
+    from nifty_scalper_bot.strategies import setup_lifecycle
+
+    registry = setup_lifecycle.SetupLifecycleRegistry()
+    monkeypatch.setattr(setup_lifecycle, "SETUP_LIFECYCLE", registry)
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     monkeypatch.setenv("SMC_SUSTAINED_FLOW_CONFIRMATION_ENABLED", "false")
     manager = _manager()
@@ -616,6 +628,21 @@ def test_unconfirmed_smc_cannot_veto_independently_confirmed_vwap(
     assert approved.metadata["approval_path"] == "single_trigger_context_confirmed"
     assert approved.metadata["excluded_unconfirmed_triggers"] == ["SMC"]
     assert approved.metadata["confirmation_contract"]["passed"] is True
+    assert approved.metadata["primary_selection_policy"] == "first_eligible_trigger"
+    assert [
+        item["strategy"] for item in approved.metadata["qualified_trigger_candidates"]
+    ] == ["VWAPPro"]
+    smc_records = [
+        item for item in registry.snapshot()["active"] if item["strategy"] == "SMC"
+    ]
+    assert len(smc_records) == 1
+    assert smc_records[0]["setup_id"] == "SMC:setup-1"
+    assert smc_records[0]["stage"] == "TRIGGER_QUALIFIED"
+    assert smc_records[0]["reason"] == (
+        "capacity_retry_independent_confirmation_missing"
+        if capacity_retry
+        else "smc_independent_confirmation_missing"
+    )
 
 
 @pytest.mark.parametrize("strike_distance", [-25.0, float("inf"), float("nan")])
