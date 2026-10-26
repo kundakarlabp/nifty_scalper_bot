@@ -97,7 +97,9 @@ class TradeCandidateSelector:
             not isfinite(self.max_option_premium)
             or self.max_option_premium <= self.min_option_premium
         ):
-            raise ValueError("max_option_premium must be finite and > min_option_premium")
+            raise ValueError(
+                "max_option_premium must be finite and > min_option_premium"
+            )
         self.max_tick_age_s = max_tick_age_s
         self.max_option_spread_pct = max_option_spread_pct
         for label, limit, allow_zero in (
