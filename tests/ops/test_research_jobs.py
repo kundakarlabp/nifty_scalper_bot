@@ -638,9 +638,7 @@ def test_worker_completes_component_research_without_claiming_live_parity(
     assert result["retained_cache_coverage"]["promotion_eligible"] is False
     assert result["retained_cache_coverage"][
         "orb_opening_range_missing_futures_minutes"
-    ] == {
-        day: 0 if index == 0 else 15 for index, day in enumerate(retained_dates)
-    }
+    ] == {day: 0 if index == 0 else 15 for index, day in enumerate(retained_dates)}
     assert len(result["retained_session_research"]) == min(5, retained_sessions)
     assert result["retained_session_research_deferred"] == max(0, retained_sessions - 5)
     assert len(mock_research_calls) == 1 + min(5, retained_sessions)
@@ -662,12 +660,14 @@ def test_worker_completes_component_research_without_claiming_live_parity(
         assert saved.is_file()
         recorded = json.loads(saved.read_text())
         assert recorded["promotion_eligible"] is False
-        assert recorded["orb_opening_range_complete"] is session[
-            "orb_opening_range_complete"
-        ]
-        assert recorded["orb_opening_range_missing_futures_minutes"] == session[
-            "orb_opening_range_missing_futures_minutes"
-        ]
+        assert (
+            recorded["orb_opening_range_complete"]
+            is session["orb_opening_range_complete"]
+        )
+        assert (
+            recorded["orb_opening_range_missing_futures_minutes"]
+            == session["orb_opening_range_missing_futures_minutes"]
+        )
     inventory_file = tmp_path / "data/research/real-job/historical_cache_inventory.json"
     assert inventory_file.is_file()
     assert json.loads(inventory_file.read_text())["promotion_eligible"] is False
