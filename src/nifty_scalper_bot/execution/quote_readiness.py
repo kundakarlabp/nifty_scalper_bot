@@ -1,4 +1,12 @@
-"""Canonical option-quote readiness evaluation for live execution gates."""
+"""Canonical option-quote readiness evaluation for live execution gates.
+
+Responsibilities:
+- Resolve explicit tick timestamps, quote age, bid/ask quality and depth.
+- Publish deterministic live-quote eligibility and reason codes.
+
+Boundaries: Pure quote validation; no strategy scoring or order placement.
+Safety: Missing, non-finite, or future-dated broker ticks cannot authorize LIVE.
+"""
 
 from __future__ import annotations
 
