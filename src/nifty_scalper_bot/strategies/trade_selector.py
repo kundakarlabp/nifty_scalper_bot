@@ -110,13 +110,10 @@ class TradeCandidateSelector:
                 value = self._f(limit)
                 if value is None or (value < 0 if allow_zero else value <= 0):
                     raise ValueError(f"{label} must be finite and valid")
-        if (
-            require_real_ticks_last_60s is not None
-            and (
-                isinstance(require_real_ticks_last_60s, bool)
-                or not isinstance(require_real_ticks_last_60s, int)
-                or require_real_ticks_last_60s < 0
-            )
+        if require_real_ticks_last_60s is not None and (
+            isinstance(require_real_ticks_last_60s, bool)
+            or not isinstance(require_real_ticks_last_60s, int)
+            or require_real_ticks_last_60s < 0
         ):
             raise ValueError("require_real_ticks_last_60s must be a nonnegative int")
         if (
