@@ -12,6 +12,7 @@ Direction-authority invariant:
 - OPTION PREMIUM DATA MUST NEVER AUTHORIZE UNDERLYING DIRECTION.
 - Only fresh NIFTY spot/futures context may authorize CE/PE direction.
 - _context_snapshot_fresh rejects non-finite or future-dated underlying ticks;
+  direction observations reject non-finite source confidence and age;
   the same bounded freshness rule is used before arbitrating spot/futures.
 - Direction, freshness age and source are one atomic observation.
 - Fresh spot/futures disagreement fails closed; source order never breaks ties.
@@ -3311,16 +3312,23 @@ class StrategyManager(_BaseStrategyManager):
                         age_s = max(0.0, now_ts - ts) if ts > 0 else None
                     except (TypeError, ValueError):
                         age_s = None
-                if age_s is None or age_s > max_context_age:
+                if (
+                    age_s is None
+                    or not isfinite(age_s)
+                    or age_s < 0.0
+                    or age_s > max_context_age
+                ):
                     return None
                 try:
                     confidence_value = float(confidence or 0.0)
-                except (TypeError, ValueError):
-                    confidence_value = 0.0
+                except (TypeError, ValueError, OverflowError):
+                    return None
+                if not isfinite(confidence_value):
+                    return None
                 return UnderlyingDirectionObservation(
                     bias=bias_norm,
                     confidence=confidence_value,
-                    age_seconds=max(0.0, float(age_s)),
+                    age_seconds=float(age_s),
                     source=source,
                 )
 
