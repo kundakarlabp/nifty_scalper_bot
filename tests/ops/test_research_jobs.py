@@ -494,6 +494,10 @@ def test_worker_completes_component_research_without_claiming_live_parity(
                 "staged_session_dates": retained_dates,
                 "orb_opening_range_ready_staged_session_dates": retained_dates[:1],
                 "orb_opening_range_incomplete_staged_session_dates": retained_dates[1:],
+                "orb_opening_range_missing_futures_minutes": {
+                    day: 0 if index == 0 else 15
+                    for index, day in enumerate(retained_dates)
+                },
                 "staging_rejections": {"2026-09-28": "historical_spot_unavailable"},
             },
         )
@@ -632,11 +636,22 @@ def test_worker_completes_component_research_without_claiming_live_parity(
         == retained_dates[1:]
     )
     assert result["retained_cache_coverage"]["promotion_eligible"] is False
+    assert result["retained_cache_coverage"][
+        "orb_opening_range_missing_futures_minutes"
+    ] == {
+        day: 0 if index == 0 else 15 for index, day in enumerate(retained_dates)
+    }
     assert len(result["retained_session_research"]) == min(5, retained_sessions)
     assert result["retained_session_research_deferred"] == max(0, retained_sessions - 5)
     assert len(mock_research_calls) == 1 + min(5, retained_sessions)
     for session in result["retained_session_research"]:
         assert session["promotion_eligible"] is False
+        assert session["orb_opening_range_complete"] is (
+            session["session_date"] == retained_dates[0]
+        )
+        assert session["orb_opening_range_missing_futures_minutes"] == (
+            0 if session["orb_opening_range_complete"] else 15
+        )
         assert session["scenarios"][0]["strategies"]["ORBPro"] == {
             "signals_emitted": 3,
             "resolved_trades": 1,
@@ -645,7 +660,14 @@ def test_worker_completes_component_research_without_claiming_live_parity(
         }
         saved = tmp_path / "data/research/real-job" / session["report"]
         assert saved.is_file()
-        assert json.loads(saved.read_text())["promotion_eligible"] is False
+        recorded = json.loads(saved.read_text())
+        assert recorded["promotion_eligible"] is False
+        assert recorded["orb_opening_range_complete"] is session[
+            "orb_opening_range_complete"
+        ]
+        assert recorded["orb_opening_range_missing_futures_minutes"] == session[
+            "orb_opening_range_missing_futures_minutes"
+        ]
     inventory_file = tmp_path / "data/research/real-job/historical_cache_inventory.json"
     assert inventory_file.is_file()
     assert json.loads(inventory_file.read_text())["promotion_eligible"] is False
