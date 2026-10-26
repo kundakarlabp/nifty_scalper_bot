@@ -5606,14 +5606,16 @@ class BracketManager:
             order_id = str(bracket.exchange_stop_order_id or "").strip()
             if not order_id:
                 return False
-            # An accepted broker modification is not necessarily settled.
-            # Do not submit a second ratchet against a MODIFY PENDING order;
-            # reconcile its actual broker state before modifying again.
-            pending_modify = (
-                bracket.exchange_stop_degraded_reason
-                == "broker_stop_status_unverified:MODIFY PENDING"
-            )
-        if pending_modify and not self._confirm_exchange_protective_stop(bracket):
+            # A broker may report the old trigger with TRIGGER PENDING, not
+            # only MODIFY PENDING, while an accepted amendment propagates.
+            # Every unverified broker-stop status/geometry must be reconciled
+            # before another modification can be sent to this order ID.
+            unsettled_broker_stop = str(
+                bracket.exchange_stop_degraded_reason or ""
+            ).startswith("broker_stop_")
+        if unsettled_broker_stop and not self._confirm_exchange_protective_stop(
+            bracket
+        ):
             return False
         with self._lock:
             if str(bracket.exchange_stop_order_id or "") != order_id:
