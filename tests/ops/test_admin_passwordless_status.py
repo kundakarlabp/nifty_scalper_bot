@@ -94,6 +94,22 @@ def test_unverified_browser_sees_real_engine_and_broker_status(
     assert _client().post("/admin/mode", data={"mode": "shadow"}).status_code == 401
 
 
+def test_service_status_link_is_read_only_without_owner_cookie(
+    monkeypatch, tmp_path
+) -> None:
+    _owner(monkeypatch, authenticated=False, tmp_path=tmp_path)
+    monkeypatch.setattr(
+        dashboard, "quick_overview",
+        lambda: {"engine_ok": True, "quiet": False, "bot_loaded": True},
+    )
+    dashboard._STATUS_CACHE.update({"at": 0.0, "label": "", "color": ""})
+    response = _client().get("/admin/status.json")
+    assert response.status_code == 200
+    assert response.json()["label"] == "operational"
+    assert "www-authenticate" not in response.headers
+    assert set(response.json()) == {"label", "color"}
+
+
 def test_public_engine_port_cannot_fetch_secure_admin_overview(monkeypatch) -> None:
     monkeypatch.setenv("DEPLOYMENT_PLATFORM", "aws_lightsail")
     response = _client(https=False).get("/admin/api/overview")
