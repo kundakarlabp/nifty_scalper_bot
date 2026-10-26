@@ -1,14 +1,19 @@
 """Canonical option-premium risk geometry.
 
-This module is deliberately side-effect free. StrategyRunner calls these
-functions directly, so live, paper, replay, and tests use identical geometry
-without import-order hooks or class mutation.
+Responsibilities:
+- Provide side-effect-free premium stop/target materialization and cost repair.
+- Validate selected replacement contract geometry before execution handoff.
+- Reject non-finite numeric proof and never widen a selected candidate stop.
+
+Safety: final quote/risk/broker checks remain with StrategyRunner and
+OrderManager. The module never places orders or changes live risk thresholds.
 """
 
 from __future__ import annotations
 
 import dataclasses
 from contextlib import suppress
+from math import isfinite
 from typing import Any, Mapping
 
 from nifty_scalper_bot.risk.net_rr_gate import (
@@ -21,9 +26,9 @@ _TICK_SIZE = 0.05
 
 
 def _positive_float(value: Any) -> float | None:
-    with suppress(TypeError, ValueError):
+    with suppress(TypeError, ValueError, OverflowError):
         parsed = float(value)
-        if parsed > 0.0:
+        if isfinite(parsed) and parsed > 0.0:
             return parsed
     return None
 
@@ -164,9 +169,59 @@ def _risk_distance(
     return distance, rr, source, trusted
 
 
+def replacement_plan_rejection_reason(
+    signal: Any,
+    *,
+    selected_symbol: str,
+    candidate_entry_price: Any,
+    candidate_stop_loss: Any,
+    candidate_target: Any,
+    execution_price: Any,
+) -> str | None:
+    """Prove final replacement geometry without changing it or risk policy.
+
+    The runner invokes this only when the selected contract differs from the
+    original strategy contract, after premium materialization and before the
+    existing independent net-R:R, daily-risk and broker preflight gates.
+    """
+    selected = str(selected_symbol or "").strip().upper()
+    actual = str(getattr(signal, "symbol", "") or "").strip().upper()
+    metadata = _metadata(signal)
+    candidate = str(metadata.get("candidate_symbol") or "").strip().upper()
+    if not selected or actual != selected or candidate != selected:
+        return "replacement_symbol_identity_mismatch"
+    if str(getattr(signal, "action", "") or "").strip().upper() != "BUY":
+        return "replacement_side_not_long"
+    entry = _positive_float(execution_price)
+    selected_entry = _positive_float(candidate_entry_price)
+    selected_stop = _positive_float(candidate_stop_loss)
+    selected_target = _positive_float(candidate_target)
+    if (
+        entry is None
+        or selected_entry is None
+        or selected_stop is None
+        or selected_target is None
+    ):
+        return "replacement_candidate_geometry_unverified"
+    if abs(entry - selected_entry) > _TICK_SIZE:
+        return "replacement_candidate_geometry_invalid"
+    if not (0.0 < selected_stop < selected_entry < selected_target):
+        return "replacement_candidate_geometry_invalid"
+
+    stop = _positive_float(getattr(signal, "stop_loss", None))
+    target = _positive_float(getattr(signal, "take_profit", None))
+    if stop is None or target is None or not (0.0 < stop < entry < target):
+        return "replacement_final_geometry_invalid"
+    # A materializer may preserve or tighten the candidate stop; it may not
+    # expand the selected contract's worst-case loss without fresh risk proof.
+    if stop < selected_stop - _TICK_SIZE:
+        return "replacement_stop_widened"
+    return None
+
+
 def apply_premium_risk_contract(signal: Any, premium: float) -> Any:
     """Fill missing option-premium SL/TP from explicit strategy distance."""
-    if signal is None or premium <= 0.0:
+    if signal is None or not isfinite(premium) or premium <= 0.0:
         return signal
     action = str(getattr(signal, "action", "") or "").upper()
     symbol = str(getattr(signal, "symbol", "") or "").upper()
@@ -481,5 +536,6 @@ __all__ = [
     "anchor_option_geometry_to_execution",
     "apply_cost_aware_risk_floor",
     "apply_premium_risk_contract",
+    "replacement_plan_rejection_reason",
     "validate_option_premium_geometry",
 ]
