@@ -41,18 +41,24 @@ def _start(client: TestClient) -> str:
     return challenge.group(1)
 
 
-def test_zerodha_owner_session_replaces_separate_admin_prompt(monkeypatch, tmp_path) -> None:
+def test_zerodha_owner_session_replaces_separate_admin_prompt(
+    monkeypatch, tmp_path
+) -> None:
     client = _setup(monkeypatch, tmp_path)
     login = client.get("/admin/manage", follow_redirects=False)
     assert login.status_code == 303
     assert login.headers["location"] == "/admin/kite/start"
     state = _start(client)
-    monkeypatch.setattr(dashboard, "_exchange_request_token", lambda *_: (True, "access-secret"))
+    monkeypatch.setattr(
+        dashboard, "_exchange_request_token", lambda *_: (True, "access-secret")
+    )
     monkeypatch.setattr(dashboard, "_verify_access_token", lambda *_: (True, "AB1234"))
     actions: list[str] = []
     monkeypatch.setattr(
         dashboard, "_activate_access_token",
-        lambda token: (actions.append(token) or ControlResult(True, "restart_bot", "queued")),
+        lambda token: (
+            actions.append(token) or ControlResult(True, "restart_bot", "queued")
+        ),
     )
     result = client.post(
         "/admin/kite/complete",
@@ -73,8 +79,12 @@ def test_zerodha_owner_session_replaces_separate_admin_prompt(monkeypatch, tmp_p
 def test_different_zerodha_account_never_activates_token(monkeypatch, tmp_path) -> None:
     client = _setup(monkeypatch, tmp_path)
     state = _start(client)
-    monkeypatch.setattr(dashboard, "_exchange_request_token", lambda *_: (True, "other-account"))
-    monkeypatch.setattr(dashboard, "_verify_access_token", lambda *_: (True, "NOTOWNER"))
+    monkeypatch.setattr(
+        dashboard, "_exchange_request_token", lambda *_: (True, "other-account")
+    )
+    monkeypatch.setattr(
+        dashboard, "_verify_access_token", lambda *_: (True, "NOTOWNER")
+    )
     monkeypatch.setattr(
         dashboard, "_activate_access_token",
         lambda *_: (_ for _ in ()).throw(AssertionError("not the owner")),
