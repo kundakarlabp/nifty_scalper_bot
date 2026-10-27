@@ -63,11 +63,6 @@ def _evidence(line: str, at: datetime) -> Evidence | None:
     reason = fields.get("block_reason", "unknown")
     version_float = _float(fields, "quote_version", 0)
     version = int(version_float) if math.isfinite(version_float) else 0
-    hard = (
-        fields.get("conflict") == "True"
-        or fields.get("ofi_reversal_holdoff") == "True"
-        or reason not in NEUTRAL_REASONS | {"None"}
-    )
     qualifies = (
         fields.get("aligned") == "True"
         and fields.get("conflict") == "False"
@@ -81,6 +76,11 @@ def _evidence(line: str, at: datetime) -> Evidence | None:
         and _float(fields, "ofi_updates_3s") >= 3
         and _float(fields, "ofi_3s_span") >= 1.5
         and version > 0
+    )
+    hard = (
+        fields.get("conflict") == "True"
+        or fields.get("ofi_reversal_holdoff") == "True"
+        or (not qualifies and reason not in NEUTRAL_REASONS)
     )
     classification = "hard_reset" if hard else "qualifying" if qualifies else "neutral"
     return Evidence(at, symbol, version, reason, classification)
