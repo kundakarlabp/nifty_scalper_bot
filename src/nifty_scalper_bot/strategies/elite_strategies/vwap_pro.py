@@ -1,6 +1,13 @@
 # fmt: off
 # ruff: noqa: E501,I001,F841
 # mypy: ignore-errors
+"""Purpose: Evaluate causally confirmed VWAPPro continuation/pullback signals.
+
+Responsibilities: Calculate premium and underlying evidence, scope VWAP thesis
+to the originating option contract, and report effective context gate settings.
+Safety: Never bypass fresh bars, bid/ask quality, trend proof, risk geometry or
+live trade safeguards merely to increase candidate frequency.
+"""
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
