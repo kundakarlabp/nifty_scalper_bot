@@ -81,7 +81,7 @@ validated-CI deployment guards are unchanged by this research.
 
 ## Verification
 
-Nine local tests passed for deduplication, rejected side conflicts,
+Twelve local tests passed for deduplication, rejected side conflicts,
 distinct versions and time separation, adverse resets, three-second OFI
 misalignment, missing evidence and a truly neutral research variant.
 The tool is research-only and makes no order or live configuration change.
