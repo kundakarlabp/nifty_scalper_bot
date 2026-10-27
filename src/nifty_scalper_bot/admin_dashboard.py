@@ -256,7 +256,9 @@ def _complete_kite_session(request_token: str) -> RedirectResponse:
     if os.getenv("DEPLOYMENT_PLATFORM") == "aws_lightsail":
         expected_owner = owner_user_id(env)
         if not expected_owner or not hmac.compare_digest(detail, expected_owner):
-            return RedirectResponse("/admin?token=err&msg=Zerodha+account+mismatch", status_code=303)
+            return RedirectResponse(
+                "/admin?token=err&msg=Zerodha+account+mismatch", status_code=303
+            )
     restart_result = _activate_access_token(result)
     if restart_result.ok:
         return RedirectResponse("/admin?token=ok", status_code=303)
