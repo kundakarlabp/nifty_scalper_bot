@@ -1,5 +1,7 @@
 """Broker-free regression for a submitted order with a delayed response."""
 
+import pytest
+
 from nifty_scalper_bot.execution import order_manager_core
 from nifty_scalper_bot.execution.order_manager import OrderManager, OrderType
 from nifty_scalper_bot.execution.position_manager import PositionManager
@@ -38,10 +40,18 @@ def test_hung_submission_keeps_first_reconciled_order(monkeypatch, tmp_path):
     monkeypatch.setattr(manager, "_confirm_fill_fast", lambda *args, **kwargs: False)
     lookups = []
 
-    def find_order(_client_id):
+    def find_order(client_id):
         lookups.append(1)
         if len(lookups) == 1:
-            return {"order_id": "BROKER-1", "status": "OPEN"}
+            return {
+                "order_id": "BROKER-1",
+                "status": "OPEN",
+                "client_order_id": client_id,
+                "tradingsymbol": "NIFTY2671423950CE",
+                "transaction_type": "BUY",
+                "quantity": 65,
+                "product": "MIS",
+            }
         return None
 
     monkeypatch.setattr(manager, "_find_open_order", find_order)
@@ -64,8 +74,20 @@ def test_hung_submission_keeps_first_reconciled_order(monkeypatch, tmp_path):
     assert BlockedThread.starts == 1
 
 
-def test_hung_submission_does_not_adopt_order_for_another_contract(
-    monkeypatch, tmp_path
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("tradingsymbol", "NIFTY2671423950PE"),
+        ("transaction_type", "SELL"),
+        ("quantity", 130),
+        ("product", "CNC"),
+        ("client_order_id", "wrong-id"),
+        ("client_order_id", None),
+        ("quantity", None),
+    ],
+)
+def test_hung_submission_does_not_adopt_unverified_order(
+    monkeypatch, tmp_path, field, value
 ):
     monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
@@ -99,15 +121,17 @@ def test_hung_submission_does_not_adopt_order_for_another_contract(
 
     def wrong_contract(client_id):
         lookups.append(client_id)
-        return {
+        order = {
             "order_id": "OTHER-1",
             "status": "OPEN",
             "client_order_id": client_id,
-            "tradingsymbol": "NIFTY2671423950PE",
+            "tradingsymbol": "NIFTY2671423950CE",
             "transaction_type": "BUY",
             "quantity": 65,
             "product": "MIS",
         }
+        order[field] = value
+        return order
 
     monkeypatch.setattr(manager, "_find_open_order", wrong_contract)
     order_id = manager.place_order(
