@@ -251,7 +251,8 @@ def analyze(log_text: str, *, window_seconds: int = 120) -> dict[str, Any]:
             "neutral_tolerant_logged_pair": None,
         }
         if (
-            not result["identity_conflict"]
+            item["lifecycle_stage_observed"]
+            and not result["identity_conflict"]
             and result["unmatched_votes"] == 0
             and matched
         ):
@@ -266,7 +267,7 @@ def analyze(log_text: str, *, window_seconds: int = 120) -> dict[str, Any]:
         "execution_or_pnl_replay_valid": False,
         "reason": (
             "Missing complete quote/candle/bid-ask/stop/fill provenance; "
-            "runtime calls may be throttled"
+            "runtime calls may be throttled; vote-only setups lack lifecycle provenance"
         ),
         "setup_count": len(report),
         "lifecycle_stage_setup_count": sum(
