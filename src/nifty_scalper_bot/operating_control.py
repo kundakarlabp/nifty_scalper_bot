@@ -1,10 +1,14 @@
 """Purpose: Bound production AUTO/QUIET/ACTIVE operating modes and transitions.
 
 Responsibilities:
-- Compute the weekday engine warm-up/quiet window in IST.
-- Queue an AUTO boundary restart through the canonical validated release runner.
-- Retry rejected queue requests so a transient control failure cannot strand
-  the engine unloaded for a trading session.
+- Compute AUTO schedule-target state (08:55–15:40 IST weekdays) while keeping
+  operating-mode selection separate from LIVE/SHADOW order authorization.
+- Render authenticated AUTO, ACTIVE and QUIET controls on the independent admin
+  process and accept changes at /admin/power/mode (owner cookie path /admin).
+- Persist changes through the canonical protected environment writer and queue
+  a guarded restart; display whether it was queued, never claim activation.
+- Queue/retry AUTO boundary transitions through the validated release runner
+  without relaxing live position, exit-order, or broker-authentication checks.
 
 Safety: Never restart trading directly or bypass broker-flat release gates.
 Off-hours unloading reduces CPU work, not the fixed Lightsail bundle price.
