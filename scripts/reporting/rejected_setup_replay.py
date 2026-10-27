@@ -62,13 +62,18 @@ def _float(fields: dict[str, str], name: str, default: float = -1.0) -> float:
 def _evidence(line: str, at: datetime) -> Evidence | None:
     fields = _fields(line)
     symbol = fields.get("symbol", "")
-    if not symbol.startswith("NFO:") or not symbol.endswith(("CE", "PE")):
+    if (
+        not symbol.startswith("NFO:")
+        or not symbol.endswith(("CE", "PE"))
+        or fields.get("side") != symbol[-2:]
+    ):
         return None
     reason = fields.get("block_reason", "unknown")
     version_float = _float(fields, "quote_version", 0)
     version = int(version_float) if math.isfinite(version_float) else 0
     qualifies = (
-        fields.get("aligned") == "True"
+        fields.get("eligible") == "True"
+        and fields.get("aligned") == "True"
         and fields.get("conflict") == "False"
         and fields.get("source") == "temporal_ofi"
         and fields.get("ofi_ready") == "True"
@@ -82,7 +87,9 @@ def _evidence(line: str, at: datetime) -> Evidence | None:
         and version > 0
     )
     hard = (
-        fields.get("conflict") == "True"
+        fields.get("eligible") != "True"
+        or not 0 <= _float(fields, "age_s") <= 3
+        or fields.get("conflict") == "True"
         or fields.get("ofi_reversal_holdoff") == "True"
         or (not qualifies and reason not in NEUTRAL_REASONS)
     )
@@ -118,7 +125,7 @@ def analyze(log_text: str, *, window_seconds: int = 120) -> dict[str, Any]:
     if window_seconds < 1:
         raise ValueError("window_seconds must be positive")
     setups: dict[str, dict[str, Any]] = {}
-    votes: list[tuple[str, str, datetime]] = []
+    votes: list[tuple[str, str, datetime, int]] = []
     flow: list[Evidence] = []
     restarts = 0
     submission_lines = 0
@@ -167,7 +174,9 @@ def analyze(log_text: str, *, window_seconds: int = 120) -> dict[str, Any]:
             }
         elif "STRATEGY_TRIGGER_VOTE strategy=SMC" in line:
             if fields.get("setup_id") and fields.get("symbol"):
-                votes.append((fields["setup_id"], fields["symbol"], at))
+                version_float = _float(fields, "quote_update_version", 0)
+                version = int(version_float) if math.isfinite(version_float) else 0
+                votes.append((fields["setup_id"], fields["symbol"], at, version))
         elif "ORDERFLOW_CONTEXT_EVIDENCE" in line:
             item = _evidence(line, at)
             if item is not None:
@@ -179,8 +188,8 @@ def analyze(log_text: str, *, window_seconds: int = 120) -> dict[str, Any]:
         symbol = item["symbol"]
         setup_id = item["setup_id"]
         selected = [
-            (vote_time, symbol)
-            for vote_setup, vote_symbol, vote_time in votes
+            (vote_time, symbol, vote_version)
+            for vote_setup, vote_symbol, vote_time, vote_version in votes
             if vote_setup == setup_id
             and vote_symbol == symbol
             and at <= vote_time <= at + timedelta(seconds=window_seconds)
@@ -190,12 +199,15 @@ def analyze(log_text: str, *, window_seconds: int = 120) -> dict[str, Any]:
         # the engine did not evaluate a setup at that instant.
         used: set[int] = set()
         matched: list[Evidence] = []
-        for vote_at, _ in sorted(set(selected)):
+        unique_votes = sorted(set(selected))
+        for vote_at, _, vote_version in unique_votes:
             matches = [
                 (j, entry)
                 for j, entry in enumerate(flow)
                 if j not in used
                 and entry.symbol == symbol
+                and entry.quote_version == vote_version
+                and vote_version > 0
                 and abs((entry.at - vote_at).total_seconds()) <= 1
             ]
             if not matches:
@@ -217,8 +229,9 @@ def analyze(log_text: str, *, window_seconds: int = 120) -> dict[str, Any]:
             "side": item["side"],
             "identity_conflict": item["identity_conflict"],
             "trigger_vote_lines": len(selected),
+            "distinct_vote_snapshots": len(unique_votes),
             "matched_book_observations": len(matched),
-            "unmatched_votes": len(selected) - len(matched),
+            "unmatched_votes": len(unique_votes) - len(matched),
             "qualifying_book_observations": counts["qualifying"],
             "neutral_observations": counts["neutral"],
             "hard_reset_observations": counts["hard_reset"],
