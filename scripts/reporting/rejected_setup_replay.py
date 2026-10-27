@@ -1,9 +1,13 @@
 """Research-only comparison of SMC confirmation evidence in archived journald.
 
-This audits *logged* evidence, not the real-time strategy state machine. Logs
-may be throttled and omit candles, orders, bid/ask and timestamps of every
-book change. Neither a hypothetical pair nor its absence proves a tradable,
-profitable or missed entry. Nothing in this module can send an order.
+Responsibilities: deduplicate strategy-owned SMC setup markers, compare
+strict and conservative neutral-tolerant logged confirmation sequences,
+and report incompleteness without fabricating executable opportunities.
+
+Safety boundary: audits *logged* evidence, not the real-time strategy state
+machine. Journald may omit ticks, candles, fills, bid/ask and book updates.
+Neither an observed pair nor its absence proves a missed profitable entry.
+This module cannot alter live strategy policy or place an order.
 """
 
 from __future__ import annotations
