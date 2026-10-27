@@ -533,7 +533,7 @@ def _live_order_readiness(ctx, *, blockers=None):  # noqa: ANN001
     return {"ready": ready, "missing": list(dict.fromkeys(missing))}
 
 
-def _signal_observability(ctx):  # noqa: ANN001
+def _signal_observability(ctx: Any) -> dict[str, Any]:
     """Return bounded, read-only strategy observability for health consumers."""
     runner = getattr(ctx, "strategy_runner", None)
     getter = getattr(runner, "get_status", None)
