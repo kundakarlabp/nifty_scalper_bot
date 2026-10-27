@@ -3796,7 +3796,29 @@ class OrderManager:
             try:
                 existing = self._find_open_order(unique_client_id)
                 if isinstance(existing, Mapping):
-                    return dict(existing)
+                    # The legacy finder can return a partial-tag match. Never
+                    # adopt it as this order without exact identity and geometry.
+                    found_id = str(existing.get("client_order_id") or "").strip()
+                    found_symbol = str(
+                        existing.get("tradingsymbol") or existing.get("symbol") or ""
+                    ).strip().upper().split(":")[-1]
+                    found_side = str(
+                        existing.get("transaction_type") or existing.get("side") or ""
+                    ).strip().upper()
+                    found_product = str(existing.get("product") or "").strip().upper()
+                    try:
+                        found_qty = float(existing.get("quantity"))
+                    except (TypeError, ValueError, OverflowError):
+                        return None
+                    if (
+                        found_id == unique_client_id
+                        and found_symbol == normalized_symbol.upper().split(":")[-1]
+                        and found_side == normalized_side
+                        and found_product == str(product).strip().upper()
+                        and math.isfinite(found_qty)
+                        and found_qty == quantity
+                    ):
+                        return dict(existing)
             except Exception as exc:
                 self._logger.warning(
                     "ORDER_RECONCILE_AFTER_TIMEOUT_FAILED signal_id=%s client_order_id=%s error=%s",
@@ -3816,7 +3838,7 @@ class OrderManager:
             return None
 
         if self._is_uncertain_order(unique_client_id):
-            existing_uncertain = self._find_open_order(unique_client_id)
+            existing_uncertain = _find_existing_order_after_uncertain_submit()
             if existing_uncertain is not None:
                 existing_order_id = _extract_order_id(existing_uncertain)
                 if existing_order_id:
@@ -3836,7 +3858,7 @@ class OrderManager:
 
         for attempt in range(1, 4):
             if self._is_uncertain_order(unique_client_id):
-                existing_uncertain = self._find_open_order(unique_client_id)
+                existing_uncertain = _find_existing_order_after_uncertain_submit()
                 if existing_uncertain is not None:
                     existing_order_id = _extract_order_id(existing_uncertain)
                     if existing_order_id:
