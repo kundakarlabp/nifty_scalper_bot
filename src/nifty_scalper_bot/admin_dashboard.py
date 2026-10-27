@@ -53,12 +53,17 @@ from nifty_scalper_bot.ops.service_control import (
     queue_validated_restart,
     restart_deployer,
 )
-from nifty_scalper_bot.superlite_admin_core import bounded_logs, quick_overview
+from nifty_scalper_bot.superlite_admin_core import (
+    ENV_PATH as CANONICAL_ENV_PATH,
+    bounded_logs,
+    quick_overview,
+    write_env as write_canonical_env,
+)
 from nifty_scalper_bot.superlite_admin_style import SCRIPT as _SCRIPT, STYLE as _CSS
 
 router = APIRouter()
 
-ENV_PATH = Path(os.getenv("BOT_ENV_FILE", "/home/ubuntu/nifty_scalper_bot/.env"))
+ENV_PATH = CANONICAL_ENV_PATH
 LOG_PATH = Path(os.getenv("BOT_LOG_FILE", str(Path(os.getenv("LOG_DIR", "logs")).expanduser() / "bot.log")))
 SERVICE_NAME = os.getenv("BOT_SERVICE_NAME", "niftybot")
 APP_DIR = Path(os.getenv("BOT_APP_DIR", "/home/ubuntu/nifty_scalper_bot"))
@@ -92,28 +97,9 @@ def _read_env() -> dict[str, str]:
 
 
 def _write_env(updates: dict[str, str]) -> None:
-    existing = ENV_PATH.read_text().splitlines() if ENV_PATH.exists() else []
-    seen: set[str] = set()
-    out: list[str] = []
-    for line in existing:
-        s = line.strip()
-        if not s or s.startswith("#") or "=" not in s:
-            out.append(line)
-            continue
-        key = s.split("=", 1)[0].strip()
-        if key in updates:
-            out.append(f"{key}={updates[key]}")
-            seen.add(key)
-        else:
-            out.append(line)
-    for k, v in updates.items():
-        if k not in seen:
-            out.append(f"{k}={v}")
-    ENV_PATH.parent.mkdir(parents=True, exist_ok=True)
-    ENV_PATH.write_text("\n".join(out) + "\n")
-    os.chmod(ENV_PATH, 0o600)
+    """Update the same protected environment that the runtime reads."""
+    write_canonical_env(updates)
     _ENV_CACHE.update({"at": 0.0, "data": {}})
-
 
 def _check_auth(request: Request) -> None:
     """Require the verified Zerodha-owner session, never a second admin password.
