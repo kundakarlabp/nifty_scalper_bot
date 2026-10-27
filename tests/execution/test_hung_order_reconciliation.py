@@ -8,7 +8,10 @@ from nifty_scalper_bot.execution.position_manager import PositionManager
 from nifty_scalper_bot.utils.rate_limiter import RateLimiter
 
 
-def test_hung_submission_keeps_first_reconciled_order(monkeypatch, tmp_path):
+@pytest.mark.parametrize("identity_field", ["client_order_id", "tag"])
+def test_hung_submission_keeps_first_reconciled_order(
+    monkeypatch, tmp_path, identity_field
+):
     monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
 
@@ -43,15 +46,16 @@ def test_hung_submission_keeps_first_reconciled_order(monkeypatch, tmp_path):
     def find_order(client_id):
         lookups.append(1)
         if len(lookups) == 1:
-            return {
+            order = {
                 "order_id": "BROKER-1",
                 "status": "OPEN",
-                "client_order_id": client_id,
                 "tradingsymbol": "NIFTY2671423950CE",
                 "transaction_type": "BUY",
                 "quantity": 65,
                 "product": "MIS",
             }
+            order[identity_field] = client_id
+            return order
         return None
 
     monkeypatch.setattr(manager, "_find_open_order", find_order)
