@@ -1,4 +1,12 @@
-"""Deterministic 1-minute candle engine and strict OHLC validation helpers."""
+"""Purpose: Build and validate the canonical one-minute OHLC candle history.
+
+Responsibilities: CandleEngine ingests normalized ticks, merges history/backfill,
+validates OHLC and timestamps, and detects/repairs bar gaps and conflicts.
+Key interfaces: CandleEngine, sanitize, validate_dataframe, import_candle_history.
+Boundaries: MarketDataManager owns feed subscriptions and historical fetch policy;
+DataHub only reads bars; do not create a parallel trading-bar authority.
+Safety: Never use an incomplete, future-dated or conflicting bar as confirmed.
+"""
 
 from __future__ import annotations
 

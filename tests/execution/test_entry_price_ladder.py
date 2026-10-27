@@ -109,3 +109,40 @@ def test_reference_price_allows_market_protect_when_enabled() -> None:
     )
     assert price is None
     assert meta.market_protect is True
+
+
+def test_reference_price_rejects_crossed_or_locked_book_without_fallback() -> None:
+    for bid, ask in ((101.0, 100.0), (100.0, 100.0)):
+        mdm = DummyMDM(
+            quote={"bid": bid, "ask": ask, "ltp": 100.5},
+            age_ms=100,
+        )
+        price, meta = resolve_reference_price(
+            "NFO:NIFTY24OCT20000CE",
+            mdm=mdm,
+            require_depth=True,
+            max_age_ms=app_settings.ORDER_MAX_QUOTE_AGE_MS,
+            allow_ltp_fallback=False,
+            allow_market_protect=False,
+            protect_slippage_bps=app_settings.ORDER_PROTECT_SLIPPAGE_BPS,
+        )
+        assert price is None
+        assert meta.market_protect is False
+
+
+def test_reference_price_keeps_valid_uncrossed_mid() -> None:
+    mdm = DummyMDM(
+        quote={"bid": 99.5, "ask": 100.5},
+        age_ms=100,
+    )
+    price, meta = resolve_reference_price(
+        "NFO:NIFTY24OCT20000CE",
+        mdm=mdm,
+        require_depth=True,
+        max_age_ms=app_settings.ORDER_MAX_QUOTE_AGE_MS,
+        allow_ltp_fallback=False,
+        allow_market_protect=False,
+        protect_slippage_bps=app_settings.ORDER_PROTECT_SLIPPAGE_BPS,
+    )
+    assert price == pytest.approx(100.0)
+    assert meta.source == "mid"

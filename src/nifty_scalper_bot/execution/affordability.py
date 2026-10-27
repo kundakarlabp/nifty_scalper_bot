@@ -1,9 +1,12 @@
-"""Minimum executable-lot affordability for live readiness.
+"""Purpose: Evaluate whether one chosen NIFTY option lot is affordable.
 
-This module evaluates one supplied contract and never chooses a strike. Callers
-may use the result only after strategy, side, expiry and liquidity ranking; the
-authoritative order-manager margin/risk gates still run immediately before
-submission.
+Responsibilities:
+- evaluate_minimum_lot_affordability combines cash, lot, margin and stop risk.
+- MinimumLotAffordability reports determinate/blocked state and reasons.
+- Reuse shared cost and margin estimators, not duplicate heuristics.
+
+Boundaries: Does not select strikes, approve signals or place orders.
+Safety: Final risk, margin and broker preflight still govern submission.
 """
 
 from __future__ import annotations

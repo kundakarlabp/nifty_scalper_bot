@@ -1,4 +1,13 @@
-"""Deterministic broker rejection classification and permitted recovery action."""
+"""Purpose: Classify broker failures and recommend bounded recovery.
+
+Responsibilities:
+- classify_broker_failure maps broker errors to BrokerFailure categories.
+- decide_recovery returns a RecoveryAction with retry/reconciliation flags.
+- RecoveryDecision describes the allowed response without placing orders.
+
+Boundaries: Callers revalidate broker state and execute any permitted retry.
+Safety: Ambiguous order state requires reconciliation before another attempt.
+"""
 
 from __future__ import annotations
 

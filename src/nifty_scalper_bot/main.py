@@ -1,11 +1,14 @@
-"""
-nifty_scalper_bot.main
+"""Purpose: Host the production FastAPI process and its trading runtime lifecycle.
 
-Production Entrypoint
-- Preserves existing bot logic
-- Prevents zombie / false-alive state
-- Fails fast on core app crash
-- ✅ FIX: Data directory permission handling
+Responsibilities: Initialize canonical settings, supervise the app background task,
+expose /livez, /readyz, /releasez and structured health/status diagnostics,
+and provide explicit startup/shutdown management.
+Health labels separate execution permission from observed signal pipeline activity.
+Key interfaces: lifespan, livez, readyz and trading/status handlers.
+Boundaries: This HTTP shell does not own market direction, risk or order policy;
+core/app.py orchestrates the trading components.
+Safety: A responsive HTTP server is not proof of a trading-ready broker session;
+failed startup must remain observable and must not report false readiness.
 """
 
 import asyncio
@@ -14,23 +17,23 @@ import os
 import socket
 import sys
 from contextlib import asynccontextmanager, suppress
+from importlib import import_module
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from nifty_scalper_bot.config.defaults import (
     DEFAULT_OPTION_EXEC_MIN_BARS as _DEFAULT_OPT_MIN_BARS,
 )
-from nifty_scalper_bot.config.env_utils import normalise_live_env_defaults
 from nifty_scalper_bot.config.paths import get_data_dir
 from nifty_scalper_bot.core.runtime_install_proof import build_runtime_install_proof
 from nifty_scalper_bot.infra.scheduled_tasks import (
     get_trade_replication_status,
     start_daily_log_archive_task,
+    start_runtime_heartbeat_task,
     start_trade_replication_task,
 )
 from nifty_scalper_bot.journal.trade_ledger import load_trade_ledger_rows
@@ -45,41 +48,12 @@ sys.stdout.reconfigure(line_buffering=True)
 
 
 def _load_env_file() -> None:
-    """Load .env defaults only. Args: none. Returns: None. Raises: none."""
-    search_paths = [
-        Path.cwd() / ".env",
-        Path("/app/.env"),
-        Path(__file__).resolve().parents[3] / ".env",
-        Path(__file__).resolve().parents[2] / ".env",
-    ]
+    """Initialize the canonical settings loader; never search dotenv here.
 
-    loaded_from: Path | None = None
-    for env_path in search_paths:
-        if env_path.exists() and env_path.is_file():
-            load_dotenv(dotenv_path=str(env_path), override=False)
-            loaded_from = env_path
-            break
-
-    normalise_live_env_defaults()
-
-    if loaded_from is not None:
-        print(f"✅ ENV FILE FOUND (defaults only): {loaded_from}", flush=True)
-    else:
-        print("⚠️ WARNING: No .env file found! Using system env vars only.", flush=True)
-
-    effective_keys = [
-        "ENABLE_LIVE",
-        "ENABLE_LIVE_TRADING",
-        "EXECUTION_MODE",
-        "ORDERS__ENABLE_LIVE",
-        "PAPER__ENABLED",
-        "PAPER_MODE",
-        "SHADOW_MODE",
-        "DATA_DIR",
-        "PORT",
-    ]
-    for key in effective_keys:
-        print(f"   🔧 {key} = {os.getenv(key, 'NOT_SET')}", flush=True)
+    Importing settings runs its validated, fail-closed bootstrap once per
+    process. Repeated imports cannot introduce another configuration path.
+    """
+    import_module("nifty_scalper_bot.config.settings")
 
 
 def _ensure_data_directory() -> None:
@@ -284,12 +258,19 @@ async def lifespan(app: FastAPI):
 
     replication_task = start_trade_replication_task(get_data_dir() / "trades.db")
     log_archive_task = start_daily_log_archive_task()
+    heartbeat_task = start_runtime_heartbeat_task()
     task = safe_task(_run_bot_background(app))
     lag_task = safe_task(_event_loop_lag_monitor())
     yield
 
     try:
-        for running_task in (replication_task, log_archive_task, task, lag_task):
+        for running_task in (
+            replication_task,
+            log_archive_task,
+            heartbeat_task,
+            task,
+            lag_task,
+        ):
             if running_task is not None and not running_task.done():
                 running_task.cancel()
                 with suppress(asyncio.CancelledError):
@@ -552,7 +533,7 @@ def _live_order_readiness(ctx, *, blockers=None):  # noqa: ANN001
     return {"ready": ready, "missing": list(dict.fromkeys(missing))}
 
 
-def _signal_observability(ctx):  # noqa: ANN001
+def _signal_observability(ctx: Any) -> dict[str, Any]:
     """Return bounded, read-only strategy observability for health consumers."""
     runner = getattr(ctx, "strategy_runner", None)
     getter = getattr(runner, "get_status", None)
@@ -689,6 +670,22 @@ def _no_trade_diagnostics(
         "risk_limit_is_independent_of_signal_generation": True,
         "setup_lifecycle": signals.get("setup_lifecycle") or {},
     }
+
+
+def _trade_pipeline_state(
+    live_orders_armed: bool, diagnostics: dict[str, Any]
+) -> dict[str, str]:
+    """Describe observed pipeline evidence, not a promise of an order."""
+    if not live_orders_armed:
+        return {"stage": "NOT_ARMED", "reason": "live_order_readiness_blocked"}
+    reason = str(diagnostics.get("reason") or "strategy_telemetry_unavailable")
+    stages = {
+        "awaiting_strategy_evaluations": "EVALUATION_PENDING",
+        "no_valid_strategy_trigger_since_start": "SIGNAL_WAITING",
+        "candidates_not_approved_since_start": "CANDIDATE_NOT_APPROVED",
+        "approved_candidate_seen_since_start": "CANDIDATE_SEEN_HISTORICALLY",
+    }
+    return {"stage": stages.get(reason, "UNKNOWN"), "reason": reason}
 
 
 def _bar_minute_identity(row):  # noqa: ANN001
@@ -947,6 +944,11 @@ def _structured_runtime_status(ctx):  # noqa: ANN001
         "history_diagnostics": _history_count_diagnostics(
             history, ctx=ctx, selected=selected
         ),
+        "selected_execution_ready": {
+            symbol: bool(getattr(ctx, f"selected_{side}_exec_ready", False))
+            for side, symbol in (("ce", selected_ce), ("pe", selected_pe))
+            if symbol
+        },
         "state": {
             "startup_ready": bool(
                 getattr(ctx, "startup_ready", getattr(ctx, "data_hard_ready", False))
@@ -1043,6 +1045,9 @@ def readyz():
 
 @app.get("/health/trading")
 def health_trading():
+    from nifty_scalper_bot.core.trading_switch import release_entry_hold_active
+
+    release_hold = release_entry_hold_active()
     ctx = _latest_context()
     if ctx is None:
         return JSONResponse(
@@ -1058,9 +1063,12 @@ def health_trading():
         )
     decision = getattr(ctx, "readiness_decision", None)
     blockers = _context_blockers(ctx)
+    if release_hold and "release_entry_hold" not in blockers:
+        blockers = [*blockers, "release_entry_hold"]
     live_orders_armed = bool(
         getattr(decision, "live_orders_armed", getattr(ctx, "live_orders_armed", False))
     )
+    live_orders_armed = live_orders_armed and not release_hold
     execution_ready = bool(
         getattr(decision, "execution_ready", getattr(ctx, "execution_armed", False))
     )
@@ -1080,12 +1088,16 @@ def health_trading():
     no_trade_diagnostics = _no_trade_diagnostics(
         signal_observability, structured_status.get("minimum_lot_affordability")
     )
+    trade_pipeline_state = _trade_pipeline_state(
+        live_orders_armed and not blockers, no_trade_diagnostics
+    )
     return JSONResponse(
         status_code=200,
         content={
             "status": "armed" if live_orders_armed else "blocked",
             "ready": execution_ready and not blockers,
             "live_orders_armed": live_orders_armed and not blockers,
+            "release_entry_hold_active": release_hold,
             "primary_blocker": primary,
             "blockers": [b for b in blockers if b],
             "trade_replication": get_trade_replication_status(),
@@ -1123,6 +1135,7 @@ def health_trading():
             },
             "signal_observability": signal_observability,
             "no_trade_diagnostics": no_trade_diagnostics,
+            "trade_pipeline_state": trade_pipeline_state,
             "live_order_readiness": live_order_readiness,
             "reconciliation": {
                 "started": bool(getattr(ctx, "position_reconciliation_started", False)),
@@ -1219,6 +1232,13 @@ def trading_status():
         and isinstance(runtime_state, dict)
         and runtime_state.get("live_orders_armed")
     )
+    signal_observability = _signal_observability(ctx) if ctx is not None else {}
+    no_trade_diagnostics = _no_trade_diagnostics(
+        signal_observability, structured.get("minimum_lot_affordability")
+    )
+    trade_pipeline_state = _trade_pipeline_state(
+        can_place_live_order_now, no_trade_diagnostics
+    )
     return {
         "enable_live": enable_live,
         "research_job": read_status(
@@ -1237,9 +1257,11 @@ def trading_status():
         "execution_mode": exec_mode,
         "configured_for_live": configured_for_live,
         "can_place_live_order_now": can_place_live_order_now,
-        # Compatibility key: now reflects current executable readiness rather
-        # than configuration intent.
+        # Compatibility key reports execution permission, never a signal,
+        # an order attempt or a successful fill.
         "will_trade": can_place_live_order_now,
+        "will_trade_semantics": "execution_permission_only_not_signal_or_order",
+        "trade_pipeline_state": trade_pipeline_state,
         "engine_http_responsive": True,
         "bot_loaded": app.state.bot is not None,
         "event_loop_lag_ms": round(float(_EVENT_LOOP_LAG_MS), 3),

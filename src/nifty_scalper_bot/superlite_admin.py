@@ -1,6 +1,17 @@
-"""Independent low-overhead host for the existing Nifty admin controls."""
+"""Purpose: Host the isolated operator admin API independently of trading.
+
+Responsibilities:
+- _guard enforces canonical authentication and same-origin on admin routes.
+- service_health and status expose authenticated bounded diagnostics.
+- Expose cached host-local liveness for engine, admin and Streamlit services.
+- Preserve requested release validation and operator authentication handling.
+
+Boundaries: The admin process does not place broker orders or own execution.
+Safety: Liveness proof is not market readiness or external accessibility proof.
+"""
 from __future__ import annotations
 
+import importlib
 import os
 import subprocess
 import threading
@@ -18,12 +29,14 @@ from nifty_scalper_bot.superlite_admin_core import (
     bounded_logs,
     read_env,
     same_origin,
+    service_health_snapshot,
     status_snapshot,
     write_env,
 )
 from nifty_scalper_bot.superlite_admin_style import STYLE
 
 _ORIGINAL_FLASH = dashboard._flash
+_CANONICAL_AUTH = dashboard._check_auth
 
 
 def _revision() -> str:
@@ -57,6 +70,7 @@ threading.Thread(target=_watch_revision, daemon=True, name="admin-revision-watch
 
 
 def _guard(request: Request) -> None:
+    _CANONICAL_AUTH(request)
     if request.method.upper() not in {"GET", "HEAD", "OPTIONS"}:
         same_origin(request)
 
@@ -107,8 +121,13 @@ dashboard._flash = _flash
 dashboard._CSS = STYLE
 dashboard.FIELDS = [(label, key, True) for label, key, _secret in dashboard.FIELDS]
 
+# Import after the canonical admin helpers are bound to the protected host
+# configuration; this does not load the trading engine.
+operating_router = importlib.import_module("nifty_scalper_bot.operating_control").router
+
 app = FastAPI(title="Nifty Bot Admin", docs_url=None, redoc_url=None)
 app.include_router(dashboard.router)
+app.include_router(operating_router)
 
 
 @app.get("/")
@@ -121,8 +140,18 @@ def healthz() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/admin/api/service-health")  # type: ignore[untyped-decorator]
+def service_health(request: Request) -> JSONResponse:
+    """Lightweight allowlisted host-local liveness for the operator console."""
+    _guard(request)
+    return JSONResponse(
+        service_health_snapshot(), headers={"Cache-Control": "no-store"}
+    )
+
+
 @app.get("/admin/api/status")
-def status() -> JSONResponse:
+def status(request: Request) -> JSONResponse:
+    _guard(request)
     data = status_snapshot()
     proof = data.get("install_proof") if isinstance(data.get("install_proof"), dict) else _engine_install_proof()
     data["install_proof"] = proof

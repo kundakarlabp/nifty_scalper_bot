@@ -78,6 +78,24 @@ def _env_bool(name: str, default: bool) -> bool:
     return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def adaptive_profit_lock_enabled(manager: Any) -> bool:
+    """Enable canonical adaptive trailing in real broker LIVE by default.
+
+    Explicit operator false disables it immediately for subsequent evaluations.
+    Paper, shadow, offline replay and unknown broker states remain opt-in.
+    """
+    override = os.getenv("ADAPTIVE_PROFIT_LOCK_ENABLED")
+    if override is not None:
+        return _env_bool("ADAPTIVE_PROFIT_LOCK_ENABLED", False)
+    live_checker = getattr(manager, "_is_live_execution", None)
+    if not callable(live_checker):
+        return False
+    try:
+        return bool(live_checker())
+    except Exception:  # noqa: BLE001 - unknown broker mode fails closed
+        return False
+
+
 def _env_float(name: str, default: float) -> float:
     try:
         return float(os.getenv(name, str(default)))
@@ -1177,9 +1195,10 @@ def tighten_adaptive_profit_lock(manager: Any, bracket: Any, ltp: float) -> bool
     """Propose one cost-aware, quality-scaled giveback stop from executable bids.
 
     Only the canonical BracketManager can submit the resulting modification.
-    Research-only: disabled unless explicitly enabled after replay validation.
+    Enabled by default for verified broker-live execution, with an explicit
+    ADAPTIVE_PROFIT_LOCK_ENABLED=false operator override.
     """
-    if not _env_bool("ADAPTIVE_PROFIT_LOCK_ENABLED", False):
+    if not adaptive_profit_lock_enabled(manager):
         return False
     if (
         str(getattr(bracket, "side", "")).upper() != "BUY"
@@ -1429,5 +1448,6 @@ __all__ = [
     "capture_entry_market_baseline",
     "extend_final_target_if_supported",
     "tighten_market_aware_floor",
+    "adaptive_profit_lock_enabled",
     "tighten_adaptive_profit_lock",
 ]

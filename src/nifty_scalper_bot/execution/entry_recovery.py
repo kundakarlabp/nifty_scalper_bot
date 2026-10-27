@@ -1,8 +1,14 @@
-"""Bounded recovery for the authoritative runner-facing entry path.
+"""Purpose: Recover bounded entry failures in the existing order-manager path.
 
-Wraps existing OrderManager methods without replacing the class. Recovery stays
-bounded, reconciles uncertain broker outcomes before retrying, keeps quantities
-whole-lot, and protects partial entry fills.
+Responsibilities:
+- Classify failures via broker_recovery recovery decisions and action limits.
+- Revalidate fresh quotes, available size and whole-lot quantities before retry.
+- Reconcile uncertain responses against exact broker orderbook identity and
+  contract; preserve unresolved same-symbol orders and partial-fill exposure.
+
+Boundaries: Wrap existing OrderManager operations; no new independent entry route.
+Safety: Never retry ambiguous broker outcomes before reconciliation. Terminal
+zero-fill cancellation is released only after confirmed flat broker exposure.
 """
 
 from __future__ import annotations
@@ -494,52 +500,56 @@ def _broker_positions(manager: Any) -> list[Mapping[str, Any]] | None:
 def _reconcile_intent(
     manager: Any, plan: Any
 ) -> tuple[str, str | None, dict[str, Any]]:
-    keys = [
-        str(getattr(plan, name, "") or "") for name in ("signal_id", "trace_id", "tag")
-    ]
-    finder = getattr(manager, "_find_open_order", None)
-    if callable(finder):
-        for key in keys:
-            if not key:
-                continue
-            try:
-                order = finder(key)
-            except Exception:
-                order = None
-            if isinstance(order, Mapping):
-                oid = str(order.get("order_id") or order.get("id") or "")
-                if oid:
-                    return "order_found", oid, {"order": dict(order)}
-
+    # The broker orderbook is the sole reconciliation evidence: the generic
+    # open-order finder permits substring matches without contract checking.
+    # Neither generic strategy tags nor truncated/suffix IDs prove identity.
+    wanted = {
+        str(getattr(plan, name, "") or "").strip().upper()
+        for name in (
+            "client_order_id",
+            "signal_id",
+            "trace_id",
+            "trade_lifecycle_id",
+        )
+    }
+    wanted.discard("")
     orders = _broker_orders(manager)
     if orders is None:
         return "unknown", None, {"reason": "orders_unavailable"}
     wanted_symbol = _symbol_key(plan.symbol)
-    wanted = {key.upper() for key in keys if key}
+    unresolved_same_symbol = False
     for order in orders:
         if (
             _symbol_key(order.get("tradingsymbol") or order.get("symbol"))
             != wanted_symbol
         ):
             continue
-        candidates = {
-            str(order.get(key) or "").upper()
-            for key in ("tag", "client_order_id", "guid")
-        }
-        if wanted and not any(
-            key == candidate or (key and candidate and key[-8:] in candidate)
-            for key in wanted
-            for candidate in candidates
-        ):
+        status = str(order.get("status") or "").strip().upper()
+        if status in {"REJECTED", "CANCELLED", "CANCELED", "EXPIRED"}:
             continue
-        if str(order.get("status") or "").upper() not in {
-            "REJECTED",
-            "CANCELLED",
-            "CANCELED",
-            "EXPIRED",
-        }:
+        candidates = {
+            str(order.get(key) or "").strip().upper()
+            for key in (
+                "tag",
+                "client_order_id",
+                "guid",
+                "signal_id",
+                "trace_id",
+                "trade_lifecycle_id",
+            )
+        }
+        candidates.discard("")
+        if wanted & candidates:
             oid = str(order.get("order_id") or order.get("id") or "")
-            return "order_found", oid or None, {"order": dict(order)}
+            if oid:
+                return "order_found", oid, {"order": dict(order)}
+            return "unknown", None, {"reason": "matching_order_id_missing"}
+        if status not in {"COMPLETE", "COMPLETED", "FILLED"}:
+            unresolved_same_symbol = True
+
+    if unresolved_same_symbol:
+        reason = "same_symbol_order_without_verified_identity"
+        return "unknown", None, {"reason": reason}
 
     positions = _broker_positions(manager)
     if positions is None:
@@ -958,6 +968,14 @@ def _finalize_partial_entry(
     }
     if status not in handled:
         return
+    terminal = status in {
+        "COMPLETE",
+        "FILLED",
+        "CANCELLED",
+        "CANCELED",
+        "REJECTED",
+        "EXPIRED",
+    }
     order_id = str(getattr(order, "order_id", "") or "")
     if not order_id:
         return
@@ -1008,7 +1026,7 @@ def _finalize_partial_entry(
         payload,
         "pending_quantity",
         "pending",
-        default=max(requested_quantity - broker_filled, 0),
+        default=0 if terminal else max(requested_quantity - broker_filled, 0),
     )
     broker_cancelled = _payload_int(
         payload,
@@ -1071,15 +1089,43 @@ def _finalize_partial_entry(
         }
     )
 
-    terminal = status in {
-        "COMPLETE",
-        "FILLED",
-        "CANCELLED",
-        "CANCELED",
-        "REJECTED",
-        "EXPIRED",
-    }
+    if terminal and pending_lots > 0:
+        state["state"] = "ENTRY_RECONCILIATION_UNKNOWN"
+        state["last_error"] = "terminal_entry_pending_quantity_positive"
+        _latch_entry_blocker(
+            manager, order, "terminal_entry_pending_quantity_positive", state=state
+        )
+        return
+
     if filled_lots == 0:
+        if terminal:
+            # Cancelled/rejected does not prove no execution. A delayed fill
+            # may already be held at the broker despite the zero-fill payload.
+            broker_position = _broker_position_quantity(
+                manager, str(getattr(order, "symbol", ""))
+            )
+            state["broker_position_quantity"] = broker_position
+            if (
+                broker_position is None
+                or broker_position > 0
+                or int(state.get("protected_lots") or 0) > 0
+            ):
+                state["state"] = "ENTRY_RECONCILIATION_UNKNOWN"
+                state["last_error"] = "zero_fill_terminal_position_unverified"
+                _latch_entry_blocker(
+                    manager,
+                    order,
+                    "zero_fill_terminal_position_unverified",
+                    state=state,
+                )
+                return
+            if status in {"COMPLETE", "FILLED"}:
+                state["state"] = "ENTRY_RECONCILIATION_UNKNOWN"
+                state["last_error"] = "terminal_entry_fill_evidence_missing"
+                _latch_entry_blocker(
+                    manager, order, "terminal_entry_fill_evidence_missing", state=state
+                )
+                return
         if status in {"CANCELLED", "CANCELED"}:
             state["state"] = "ENTRY_CANCELLED"
             state["terminal_confirmed_at"] = now

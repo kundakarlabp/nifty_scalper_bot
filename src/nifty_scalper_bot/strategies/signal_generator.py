@@ -1688,12 +1688,15 @@ class StrategyManager:
         data_hub = self._data_hub
         if data_hub is None:
             return
+        # Resolve the active contract *before* the first quote fetch, then
+        # share one observation between its volume, LTP and VWAP metrics.
+        active_future = self._resolve_active_futures_symbol_for_metrics()
 
         # ═══════════════════════════════════════════════════════════
         # 1. FUTURES VOLUME DATA
         # ═══════════════════════════════════════════════════════════
         try:
-            quote = data_hub.get_quote(self._futures_symbol)
+            quote = data_hub.get_quote(active_future) if active_future else None
         except Exception as exc:
             self._logger.error(
                 "Failure in StrategyManager._augment_futures_metrics futures quote: %s",
@@ -1775,168 +1778,90 @@ class StrategyManager:
                             },
                         )
 
-        # ═══════════════════════════════════════════════════════════
-        # ✅ 2. INDEX LTP AND VWAP DATA (NEW)
-        # ═══════════════════════════════════════════════════════════
+        # Spot index has an LTP, but it has no exchange-traded volume.
+        # Never relabel futures LTP, quote average price or a fixed-basis
+        # adjustment as an index VWAP. Futures VWAP has its own domain.
         try:
-            index_quote = data_hub.get_quote("NSE:NIFTY", allow_pull=True)
-            if index_quote:
-                index_ltp = self._extract_float(
-                    index_quote, ("last_price", "ltp", "close")
+            index_quote = data_hub.get_quote("NSE:NIFTY", allow_pull=True) or {}
+            index_ltp = self._extract_float(index_quote, ("last_price", "ltp", "close"))
+            indicators["nifty_index_vwap"] = None
+            indicators["nifty_index_vwap_source"] = "untraded_index_no_vwap"
+            index_quote_average = self._extract_float(
+                index_quote, ("vwap", "average_price")
+            )
+            if (
+                index_quote_average is not None
+                and math.isfinite(index_quote_average)
+                and index_quote_average > 0
+            ):
+                indicators["nifty_index_quote_average_price"] = index_quote_average
+
+            now_ts = dt.datetime.now().timestamp()
+            if index_ltp is not None and math.isfinite(index_ltp) and index_ltp > 0:
+                indicators["nifty_index_ltp"] = index_ltp
+                indicators["nifty_index_ltp_source"] = "spot_quote_ltp"
+                self._last_index_ltp = index_ltp
+                self._last_index_update_ts = now_ts
+            elif (
+                self._last_index_ltp is not None
+                and self._last_index_update_ts is not None
+            ):
+                cache_age = now_ts - self._last_index_update_ts
+                if 0 <= cache_age <= 120.0:
+                    indicators["nifty_index_ltp"] = self._last_index_ltp
+                    indicators["nifty_index_ltp_source"] = "spot_quote_ltp_cached"
+                    indicators["nifty_index_ltp_age_s"] = round(cache_age, 2)
+
+            if active_future:
+                # Use one coherent futures quote for cumulative volume,
+                # LTP and VWAP when the active symbol matches the earlier
+                # volume observation. A second fetch may advance the source.
+                if active_future == self._futures_symbol:
+                    futures_quote = quote or {}
+                else:
+                    futures_quote = (
+                        data_hub.get_quote(active_future, allow_pull=True) or {}
+                    )
+                futures_ltp = self._extract_float(
+                    futures_quote, ("last_price", "ltp", "close")
                 )
-                index_vwap = self._extract_float(index_quote, ("vwap", "average_price"))
-
-                if index_ltp and index_ltp > 0:
-                    indicators["nifty_index_ltp"] = index_ltp
-
-                if index_vwap and index_vwap > 0:
-                    indicators["nifty_index_vwap"] = index_vwap
-
-            cache_now = dt.datetime.now().timestamp()
-            if indicators.get("nifty_index_ltp") or indicators.get("nifty_index_vwap"):
-                self._last_index_ltp = indicators.get("nifty_index_ltp")
-                self._last_index_vwap = indicators.get("nifty_index_vwap")
-                self._last_index_update_ts = cache_now
+                futures_vwap = self._extract_float(
+                    futures_quote, ("vwap", "average_price")
+                )
+                if (
+                    futures_ltp is not None
+                    and math.isfinite(futures_ltp)
+                    and futures_ltp > 0
+                ):
+                    indicators["futures_ltp"] = futures_ltp
+                    indicators["nifty_fut_ltp"] = futures_ltp
+                    indicators["futures_ltp_source"] = "active_future_quote_ltp"
+                if (
+                    futures_vwap is not None
+                    and math.isfinite(futures_vwap)
+                    and futures_vwap > 0
+                ):
+                    indicators["futures_vwap"] = futures_vwap
+                    indicators["nifty_fut_vwap"] = futures_vwap
+                    indicators["futures_vwap_source"] = "active_future_quote_vwap"
+                elif (
+                    futures_ltp is not None
+                    and math.isfinite(futures_ltp)
+                    and futures_ltp > 0
+                ):
+                    log_throttled(
+                        self._logger,
+                        f"future_vwap_missing:{active_future}",
+                        "FUTURES_VWAP_UNAVAILABLE_LTP_NOT_SUBSTITUTED symbol=%s",
+                        active_future,
+                        interval_sec=300.0,
+                    )
             else:
-                cache_age = None
-                if self._last_index_update_ts is not None:
-                    cache_age = cache_now - self._last_index_update_ts
-                if cache_age is not None and cache_age <= 120.0:
-                    if not indicators.get("nifty_index_ltp") and self._last_index_ltp:
-                        indicators["nifty_index_ltp"] = self._last_index_ltp
-                    if not indicators.get("nifty_index_vwap") and self._last_index_vwap:
-                        indicators["nifty_index_vwap"] = self._last_index_vwap
-                    log_age = (
-                        cache_now - self._index_cache_log_ts
-                        if self._index_cache_log_ts is not None
-                        else None
-                    )
-                    if log_age is None or log_age >= 60.0:
-                        self._logger.info(
-                            "Condition met: index_cache_used",
-                            extra={
-                                "event": "index_cache_used",
-                                "age_sec": round(cache_age, 1),
-                            },
-                        )
-                        self._index_cache_log_ts = cache_now
-
-            # ═══════════════════════════════════════════════════════
-            # ✅ FALLBACK: Use futures VWAP if index VWAP unavailable
-            # ═══════════════════════════════════════════════════════
-            if not indicators.get("nifty_index_vwap"):
-                symbols_to_try: list[str] = []
-                active_fut = self._resolve_active_futures_symbol_for_metrics()
-                if active_fut:
-                    symbols_to_try.append(active_fut)
-
-                if not symbols_to_try:
-                    self._logger.warning(
-                        "FUTURES_VWAP_FALLBACK_SKIPPED reason=active_future_unresolved",
-                        extra={
-                            "event": "FUTURES_VWAP_FALLBACK_SKIPPED",
-                            "reason": "active_future_unresolved",
-                            "configured_futures_symbol": self._futures_symbol,
-                        },
-                    )
-
-                usable_fut_quote = None
-                working_symbol = None
-
-                for fut_sym in symbols_to_try:
-                    try:
-                        candidate_quote = (
-                            data_hub.get_quote(fut_sym, allow_pull=True) or {}
-                        )
-                        if not candidate_quote:
-                            continue
-                        if (
-                            self._extract_float(
-                                candidate_quote,
-                                ("vwap", "average_price", "last_price", "ltp", "close"),
-                            )
-                            is None
-                        ):
-                            continue
-                        usable_fut_quote = candidate_quote
-                        working_symbol = fut_sym
-                        if not getattr(self, "_vwap_source_logged", False):
-                            self._logger.info(
-                                f"✅ Futures VWAP source resolved: {fut_sym}",
-                                extra={
-                                    "event": "futures_vwap_resolved",
-                                    "symbol": fut_sym,
-                                },
-                            )
-                            self._vwap_source_logged = True
-                        break
-                    except Exception as e:
-                        self._logger.debug("Futures symbol %s failed: %s", fut_sym, e)
-                        continue
-
-                if not usable_fut_quote:
-                    self._logger.warning(
-                        "FUTURES_VWAP_FALLBACK_FAILED symbols_tried=%s",
-                        symbols_to_try,
-                        extra={
-                            "event": "futures_vwap_fallback_failed",
-                            "symbols_tried": symbols_to_try,
-                        },
-                    )
-                    return
-
-                fut_quote = usable_fut_quote
-                if fut_quote:
-                    fut_vwap = self._extract_float(fut_quote, ("vwap", "average_price"))
-                    fut_ltp = self._extract_float(
-                        fut_quote, ("last_price", "ltp", "close")
-                    )
-
-                    if (not fut_vwap or fut_vwap <= 0) and fut_ltp and fut_ltp > 0:
-                        fut_vwap = fut_ltp
-                        proxy_logged = getattr(self, "_vwap_proxy_logged_symbols", None)
-                        if proxy_logged is None:
-                            proxy_logged = set()
-                            self._vwap_proxy_logged_symbols = proxy_logged
-                        if working_symbol not in proxy_logged:
-                            self._logger.info(
-                                "Condition met: futures_vwap_proxy_used",
-                                extra={
-                                    "event": "futures_vwap_proxy_used",
-                                    "symbol": working_symbol,
-                                    "ltp": fut_ltp,
-                                },
-                            )
-                            proxy_logged.add(working_symbol)
-
-                    if fut_vwap and fut_vwap > 0:
-                        # Adjust for basis (futures typically trades at ~0.2% premium)
-                        basis_adjustment = 0.998
-                        indicators["nifty_index_vwap"] = fut_vwap * basis_adjustment
-                        self._logger.debug(
-                            f"📊 Set nifty_index_vwap={indicators['nifty_index_vwap']:.2f} from {working_symbol}"
-                        )
-
-                    # Also use futures LTP if index LTP unavailable
-                    if (
-                        not indicators.get("nifty_index_ltp")
-                        and fut_ltp
-                        and fut_ltp > 0
-                    ):
-                        indicators["nifty_index_ltp"] = fut_ltp * 0.998
-
-            # ✅ FIX: Set BOTH key variants for strategy compatibility
-            if indicators.get("nifty_index_ltp"):
-                indicators["nifty_fut_ltp"] = indicators["nifty_index_ltp"]
-            if indicators.get("nifty_index_vwap"):
-                indicators["nifty_fut_vwap"] = indicators["nifty_index_vwap"]
-                indicators["futures_vwap"] = indicators["nifty_index_vwap"]
-
-            # Log for debugging
-            if indicators.get("nifty_index_ltp") or indicators.get("nifty_index_vwap"):
-                self._logger.debug(
-                    f"📊 Index data: LTP={indicators.get('nifty_index_ltp')}, "
-                    f"VWAP={indicators.get('nifty_index_vwap')}"
+                log_throttled(
+                    self._logger,
+                    "active_futures_missing_vwap_context",
+                    "FUTURES_VWAP_UNAVAILABLE reason=active_future_unresolved",
+                    interval_sec=300.0,
                 )
 
         except Exception as e:

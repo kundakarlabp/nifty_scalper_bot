@@ -492,6 +492,12 @@ def test_worker_completes_component_research_without_claiming_live_parity(
                 "corrupt_or_untrusted_files": 1,
                 "synchronized_contract_minutes": 165978,
                 "staged_session_dates": retained_dates,
+                "orb_opening_range_ready_staged_session_dates": retained_dates[:1],
+                "orb_opening_range_incomplete_staged_session_dates": retained_dates[1:],
+                "orb_opening_range_missing_futures_minutes": {
+                    day: 0 if index == 0 else 15
+                    for index, day in enumerate(retained_dates)
+                },
                 "staging_rejections": {"2026-09-28": "historical_spot_unavailable"},
             },
         )
@@ -617,12 +623,33 @@ def test_worker_completes_component_research_without_claiming_live_parity(
         165978 if retained_sessions else 0
     )
     assert result["retained_cache_coverage"]["staged_session_dates"] == retained_dates
+    assert (
+        result["retained_cache_coverage"][
+            "orb_opening_range_ready_staged_session_dates"
+        ]
+        == retained_dates[:1]
+    )
+    assert (
+        result["retained_cache_coverage"][
+            "orb_opening_range_incomplete_staged_session_dates"
+        ]
+        == retained_dates[1:]
+    )
     assert result["retained_cache_coverage"]["promotion_eligible"] is False
+    assert result["retained_cache_coverage"][
+        "orb_opening_range_missing_futures_minutes"
+    ] == {day: 0 if index == 0 else 15 for index, day in enumerate(retained_dates)}
     assert len(result["retained_session_research"]) == min(5, retained_sessions)
     assert result["retained_session_research_deferred"] == max(0, retained_sessions - 5)
     assert len(mock_research_calls) == 1 + min(5, retained_sessions)
     for session in result["retained_session_research"]:
         assert session["promotion_eligible"] is False
+        assert session["orb_opening_range_complete"] is (
+            session["session_date"] == retained_dates[0]
+        )
+        assert session["orb_opening_range_missing_futures_minutes"] == (
+            0 if session["orb_opening_range_complete"] else 15
+        )
         assert session["scenarios"][0]["strategies"]["ORBPro"] == {
             "signals_emitted": 3,
             "resolved_trades": 1,
@@ -631,7 +658,16 @@ def test_worker_completes_component_research_without_claiming_live_parity(
         }
         saved = tmp_path / "data/research/real-job" / session["report"]
         assert saved.is_file()
-        assert json.loads(saved.read_text())["promotion_eligible"] is False
+        recorded = json.loads(saved.read_text())
+        assert recorded["promotion_eligible"] is False
+        assert (
+            recorded["orb_opening_range_complete"]
+            is session["orb_opening_range_complete"]
+        )
+        assert (
+            recorded["orb_opening_range_missing_futures_minutes"]
+            == session["orb_opening_range_missing_futures_minutes"]
+        )
     inventory_file = tmp_path / "data/research/real-job/historical_cache_inventory.json"
     assert inventory_file.is_file()
     assert json.loads(inventory_file.read_text())["promotion_eligible"] is False
@@ -815,7 +851,12 @@ def test_recorded_replay_budget_exhaustion_is_partial_not_completed(
     monkeypatch.setattr(
         "nifty_scalper_bot.config.paths.get_data_dir", lambda: tmp_path / "data"
     )
-    clock = iter([0.0, 1.0, 1501.0])
+    # This test targets deadline bookkeeping, not archive parsing.
+    monkeypatch.setattr(
+        "nifty_scalper_bot.ops.research_jobs.partition_replay_runs",
+        lambda path, destination: [("0123456789abcdef0123456789abcdef", path)],
+    )
+    clock = iter([0.0, 1.0, 2.0, 1501.0])
     monkeypatch.setattr(
         "nifty_scalper_bot.ops.research_jobs.time.monotonic",
         lambda: next(clock),
@@ -823,8 +864,8 @@ def test_recorded_replay_budget_exhaustion_is_partial_not_completed(
 
     def replay(command, **kwargs):
         output = Path(command[command.index("--output") + 1])
-        (output / "report.json").write_text(
-            json.dumps({"events_processed": 10}),
+        (output / "paired-comparison.json").write_text(
+            json.dumps({"state": "MODELED_COMPARISON_ONLY", "stress": []}),
             encoding="utf-8",
         )
         return SimpleNamespace(returncode=0)
@@ -872,3 +913,63 @@ def test_runtime_mode_is_bounded_and_requires_no_operator_login(tmp_path, monkey
     ]
     with pytest.raises(ValueError):
         validate_request({"id": "bad", "mode": "shell"})
+
+
+def test_recorded_replay_exposes_sanitized_child_failure_in_status(
+    tmp_path, monkeypatch
+):
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from nifty_scalper_bot.ops.research_jobs import run_recorded_replays
+
+    archive = tmp_path / "data/replay_archive"
+    archive.mkdir(parents=True)
+    session = archive / "2026-09-30.jsonl"
+    session.write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "nifty_scalper_bot.config.paths.get_data_dir", lambda: tmp_path / "data"
+    )
+    monkeypatch.setattr(
+        "nifty_scalper_bot.ops.research_jobs.partition_replay_runs",
+        lambda path, destination: [("0123456789abcdef0123456789abcdef", path)],
+    )
+
+    def failed_replay(command, **kwargs):
+        del kwargs
+        output = Path(command[command.index("--output") + 1])
+        (output / "paired-comparison.json").write_text(
+            json.dumps(
+                {
+                    "state": "BLOCKED",
+                    "blocker": "paired_replay_worker_failed",
+                    "worker_error_code": "replay_session_incomplete",
+                    "failed_scenario": {
+                        "policy": "baseline",
+                        "slippage_bps": 10,
+                    },
+                    "stress": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return SimpleNamespace(returncode=1)
+
+    monkeypatch.setattr(
+        "nifty_scalper_bot.ops.research_jobs.subprocess.run", failed_replay
+    )
+    request = validate_request(
+        {"id": "worker-diagnosis", "mode": "runtime", "days": 1},
+        today=date(2026, 10, 1),
+    )
+    report = run_recorded_replays(tmp_path, request)
+    assert report["state"] == "blocked"
+    assert report["completed_sessions"] == 0
+    assert report["failed_sessions"] == 1
+    failure = report["sessions"][0]
+    assert failure["error_code"] == "paired_replay_worker_failed"
+    assert failure["worker_error_code"] == "replay_session_incomplete"
+    assert failure["failed_scenario"] == {
+        "policy": "baseline",
+        "slippage_bps": 10,
+    }

@@ -1,11 +1,17 @@
 # fmt: off
 # ruff: noqa: E501,I001,F401,F841,E402
 # mypy: ignore-errors
-"""Canonical bracket lifecycle with durable confirmed-fill accounting.
+"""Purpose: Keep the protective bracket lifecycle tied to durable fill evidence.
 
-Protective execution never depends on the ledger being healthy.  A persistence
-failure therefore cannot stop SL/TP handling, but it does block the runner from
-re-arming until fill history and broker-flat state are reconciled.
+Responsibilities:
+- LedgerBracketManager coordinates canonical bracket state and fill-ledger storage.
+- Reconcile confirmed fills, exit state and broker-flat evidence before rearming.
+- Apply cumulative entry VWAP revisions to the existing ledger entry identity,
+  then update the active bracket without a second entry activation.
+- Keep trading ledger persistence distinct from the live protective mechanism.
+
+Boundaries: BoundBracket/core remain authoritative for protective broker actions.
+Safety: Ledger failure cannot suppress SL/TP exits; uncertain fills block new entries.
 """
 
 from __future__ import annotations
@@ -277,6 +283,8 @@ class LedgerBracketManager(CanonicalBracketManager):
         order_id: str,
         bracket: Any,
         filled_qty: int | None,
+        *,
+        fill_price: float | None = None,
     ) -> bool:
         """Reconcile cumulative broker fills before entry-ledger persistence."""
         reported = self._positive_filled_quantity(filled_qty)
@@ -313,6 +321,7 @@ class LedgerBracketManager(CanonicalBracketManager):
                         self._entry_fill_id(str(order_id)),
                         reported,
                         maximum_quantity=requested,
+                        fill_price=fill_price,
                     )
                 except Exception as exc:  # noqa: BLE001
                     self._block_ledger_release(
@@ -324,6 +333,30 @@ class LedgerBracketManager(CanonicalBracketManager):
                             "error": str(exc),
                         },
                     )
+                    # The authoritative broker fill already increased held
+                    # quantity. A broken fill ledger must block NEW entries,
+                    # not interrupt resize of the EXISTING protective stop.
+                    # Keep the original ledger exception visible after an
+                    # independent best-effort broker-protection attempt.
+                    try:
+                        covered = self._ensure_exchange_protective_stop(bracket)
+                    except Exception as stop_exc:  # noqa: BLE001
+                        covered = False
+                        _core.LOGGER.critical(
+                            "ENTRY_FILL_LEDGER_FAILURE_STOP_SYNC_EXCEPTION "
+                            "order_id=%s symbol=%s error=%s",
+                            order_id,
+                            bracket.symbol,
+                            stop_exc,
+                        )
+                    if not covered:
+                        _core.LOGGER.critical(
+                            "ENTRY_FILL_LEDGER_FAILURE_STOP_UNVERIFIED "
+                            "order_id=%s symbol=%s filled_qty=%s",
+                            order_id,
+                            bracket.symbol,
+                            reported,
+                        )
                     raise
             _core.LOGGER.warning(
                 "FILL_LEDGER_ENTRY_QTY_RECONCILED order_id=%s symbol=%s "
@@ -352,6 +385,7 @@ class LedgerBracketManager(CanonicalBracketManager):
             order_id,
             bracket,
             filled_qty,
+            fill_price=fill_price,
         )
         try:
             price = float(fill_price)
@@ -390,6 +424,44 @@ class LedgerBracketManager(CanonicalBracketManager):
                 # reactivating the bracket. Reconcile its existing broker SL.
                 self._ensure_exchange_protective_stop(bracket)
             return True  # type: ignore[return-value]
+
+        # A later cumulative broker fill can revise the confirmed entry
+        # VWAP without creating a new order/fill ID. The existing entry leg
+        # must be revised atomically, not inserted again (which raises a
+        # false FillConflictError and latches the ledger gate). Preserve the
+        # active bracket lifecycle while its stop is resynchronized.
+        if (
+            bracket is not None
+            and bracket.entry_confirmed
+            and prior is not None
+            and price is not None
+            and math.isfinite(price)
+            and price > 0
+            and abs(price - prior) >= 1e-9
+        ):
+            vwap_persisted = True
+            try:
+                if self._fill_ledger is None:
+                    raise FillLedgerError("fill ledger unavailable for cumulative VWAP")
+                self._fill_ledger.reconcile_entry_quantity(
+                    self._entry_fill_id(str(order_id)),
+                    int(bracket.quantity),
+                    maximum_quantity=int(
+                        bracket.requested_entry_quantity or bracket.quantity
+                    ),
+                    fill_price=price,
+                )
+            except Exception as exc:  # noqa: BLE001
+                vwap_persisted = False
+                self._block_ledger_release(
+                    bracket,
+                    reason="cumulative_entry_vwap_reconcile_failed",
+                    payload={"order_id": order_id, "error": str(exc)},
+                )
+            super().confirm_entry_fill(order_id, fill_price, filled_qty)
+            if vwap_persisted:
+                self._clear_ledger_release(bracket)
+            return
 
         ledger_ok = True
         if bracket is not None:
@@ -749,8 +821,30 @@ class LedgerBracketManager(CanonicalBracketManager):
             trail_activation_r = round(float(self._trail_activation_r(bracket)), 4)
         trail_revision = int(getattr(bracket, "trail_revision", 0) or 0)
         final_stop_price = _finite(getattr(bracket, "sl_trigger_price", None))
+        broker_stop_trigger = _finite(
+            getattr(bracket, "exchange_stop_trigger_price", None)
+        )
+        stop_fill_deviation = None
+        if (
+            str(getattr(bracket, "exit_order_type", "") or "").upper() == "SL"
+            and broker_stop_trigger is not None
+            and resolved_exit is not None
+        ):
+            # Signed loss of fill quality against the resting exchange trigger,
+            # *not* quote-arrival slippage. Positive means a worse fill.
+            stop_fill_deviation = (
+                broker_stop_trigger - float(resolved_exit)
+                if side == "BUY"
+                else float(resolved_exit) - broker_stop_trigger
+            )
 
         execution_quality = {
+            "exchange_stop_trigger_price": broker_stop_trigger,
+            "stop_trigger_fill_deviation_points": (
+                round(stop_fill_deviation, 4)
+                if stop_fill_deviation is not None
+                else None
+            ),
             "entry_arrival_price": entry_arrival,
             "entry_quote_bid": entry_bid,
             "entry_quote_ask": entry_ask,
@@ -860,6 +954,20 @@ class LedgerBracketManager(CanonicalBracketManager):
             "mae_pnl": round(mae_points * quantity, 2),
             "holding_seconds": round(max(0.0, closed_at - opened_at), 3),
             "trail_revision": trail_revision,
+            "trailing_history": list(
+                (getattr(bracket, "trailing_config", None) or {}).get(
+                    "trail_history", []
+                )
+            )[-64:],
+            "exchange_stop_evidence": {
+                "order_id": getattr(bracket, "exchange_stop_order_id", None),
+                "trigger_price": getattr(bracket, "exchange_stop_trigger_price", None),
+                "quantity": getattr(bracket, "exchange_stop_quantity", 0),
+                "modifications": getattr(bracket, "exchange_stop_modify_count", 0),
+                "degraded_reason": getattr(
+                    bracket, "exchange_stop_degraded_reason", None
+                ),
+            },
             "trail_activation_r": trail_activation_r,
             "final_stop_price": final_stop_price,
             "execution_quality": execution_quality,

@@ -12,8 +12,11 @@ from pathlib import Path
 
 EXPECTED_PHASES = {"development": 461, "validation": 229, "final": 215}
 EXPECTED_STRATEGIES = {
-    "ORBNetGateBaseline", "ORBRangeScaledResearch",
-    "PullbackResearch", "CompressionResearch", "MomentumResearch",
+    "ORBNetGateBaseline",
+    "ORBRangeScaledResearch",
+    "PullbackResearch",
+    "CompressionResearch",
+    "MomentumResearch",
 }
 EXPECTED_SLIPPAGE = {10.0, 25.0, 50.0}
 
@@ -54,19 +57,29 @@ def diagnose(report: dict) -> list[dict]:
             raise ValueError(f"fill/exit mismatch: {key}")
         if intents > signals or fills > intents or rr_rejected > intents:
             raise ValueError(f"invalid funnel ordering: {key}")
-        output.append({
-            "phase": phase, "strategy": strategy, "slippage_bps_per_side": slip,
-            "sessions": row["session_count"],
-            "evaluations": int(funnel.get("evaluations", 0)),
-            "signals": signals, "geometry_valid": int(funnel.get("geometry_valid", 0)),
-            "next_bar_intents": intents, "cost_net_rr_rejected": rr_rejected,
-            "accepted_fills": fills, "resolved": resolved, "unresolved": unresolved,
-            "cost_rejection_share_of_intents": (
-                round(rr_rejected / intents, 6) if intents else None
-            ),
-            "other_nonfilled_intents": intents - fills - rr_rejected,
-            "no_vote_reasons_json": json.dumps(reasons, sort_keys=True),
-        })
+        if fills + rr_rejected > intents:
+            raise ValueError(f"funnel stage counts exceed intents: {key}")
+        output.append(
+            {
+                "phase": phase,
+                "strategy": strategy,
+                "slippage_bps_per_side": slip,
+                "sessions": row["session_count"],
+                "evaluations": int(funnel.get("evaluations", 0)),
+                "signals": signals,
+                "geometry_valid": int(funnel.get("geometry_valid", 0)),
+                "next_bar_intents": intents,
+                "cost_net_rr_rejected": rr_rejected,
+                "accepted_fills": fills,
+                "resolved": resolved,
+                "unresolved": unresolved,
+                "cost_rejection_share_of_intents": (
+                    round(rr_rejected / intents, 6) if intents else None
+                ),
+                "other_nonfilled_intents": intents - fills - rr_rejected,
+                "no_vote_reasons_json": json.dumps(reasons, sort_keys=True),
+            }
+        )
     expected = {
         (p, s, b)
         for p in EXPECTED_PHASES

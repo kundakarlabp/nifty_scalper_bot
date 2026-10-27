@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-SCRIPT = (\n    Path(__file__).resolve().parents[2]\n    / "scripts"\n    / "diagnose_fixed_hypothesis_funnel.py"\n)
+SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "diagnose_fixed_hypothesis_funnel.py"
 spec = importlib.util.spec_from_file_location("funnel_diagnostic", SCRIPT)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
@@ -16,15 +16,26 @@ def fixture_report():
     for phase, sessions in module.EXPECTED_PHASES.items():
         for strategy in module.EXPECTED_STRATEGIES:
             for bps in module.EXPECTED_SLIPPAGE:
-                results.append({
-                    "phase": phase, "candidate": strategy,
-                    "slippage_bps_per_side": bps, "session_count": sessions,
-                    "entry_funnel": {"evaluations": 100, "signals_emitted": 10,
-                                     "geometry_valid": 10, "next_bar_intents": 10,
-                                     "accepted_fills": 2},
-                    "no_vote_reasons": {"cost_net_rr_rejected": 7},
-                    "data_quality": {\n                        "resolved_exit_count": 1,\n                        "unresolved_exit_count": 1,\n                    },
-                })
+                results.append(
+                    {
+                        "phase": phase,
+                        "candidate": strategy,
+                        "slippage_bps_per_side": bps,
+                        "session_count": sessions,
+                        "entry_funnel": {
+                            "evaluations": 100,
+                            "signals_emitted": 10,
+                            "geometry_valid": 10,
+                            "next_bar_intents": 10,
+                            "accepted_fills": 2,
+                        },
+                        "no_vote_reasons": {"cost_net_rr_rejected": 7},
+                        "data_quality": {
+                            "resolved_exit_count": 1,
+                            "unresolved_exit_count": 1,
+                        },
+                    }
+                )
     return {"results": results}
 
 
@@ -35,9 +46,10 @@ def test_valid_cells_and_denominators():
     assert all(row["other_nonfilled_intents"] == 1 for row in rows)
 
 
-@pytest.mark.parametrize("field,value", [
-    ("session_count", 460), ("candidate", "unknown"),
-])
+@pytest.mark.parametrize(
+    "field,value",
+    [("session_count", 460), ("candidate", "unknown")],
+)
 def test_invalid_cells_rejected(field, value):
     report = fixture_report()
     report["results"][0][field] = value
@@ -56,4 +68,10 @@ def test_duplicate_cell_rejected():
     report = fixture_report()
     report["results"][1] = copy.deepcopy(report["results"][0])
     with pytest.raises(ValueError, match="duplicate result"):
+        module.diagnose(report)
+
+def test_overlapping_funnel_counts_are_rejected():
+    report = fixture_report()
+    report["results"][0]["no_vote_reasons"]["cost_net_rr_rejected"] = 9
+    with pytest.raises(ValueError, match="funnel stage counts exceed intents"):
         module.diagnose(report)

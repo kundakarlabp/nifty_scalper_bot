@@ -1,0 +1,251 @@
+"""Purpose: Mirror sanitized Lightsail runtime health to optional Supabase.
+
+Responsibilities:
+- build_runtime_heartbeat configures remote heartbeat transport.
+- RuntimeHeartbeat reports engine and release state off the trading hot path.
+- Sample independent operator-service HTTP liveness without broker operations.
+- heartbeat_interval_seconds bounds reporting frequency and overhead.
+
+Boundaries: Telemetry only; the host/broker remain authoritative for trading.
+Safety: Never send tokens, balances, orders or execution-control commands.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+from collections.abc import Callable, Mapping
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+import requests
+
+from nifty_scalper_bot.config.defaults import DEFAULT_SUPABASE_HEARTBEAT_URL
+from nifty_scalper_bot.config.env_utils import (
+    resolve_build_sha,
+    supabase_telemetry_enabled,
+)
+
+DEFAULT_HEARTBEAT_URL = DEFAULT_SUPABASE_HEARTBEAT_URL
+_HEX_SHA = re.compile(r"^[0-9a-f]{7,40}$")
+HeartbeatTransport = Callable[[str, Mapping[str, Any], float], Mapping[str, Any]]
+HealthReader = Callable[[], tuple[int, Mapping[str, Any]]]
+ServiceHealthReader = Callable[[], Mapping[str, Any]]
+
+
+def heartbeat_interval_seconds() -> float:
+    try:
+        return max(
+            60.0, float(os.getenv("SUPABASE_RUNTIME_HEARTBEAT_INTERVAL_SECONDS", "120"))
+        )
+    except (TypeError, ValueError):
+        return 120.0
+
+
+def build_runtime_heartbeat() -> "RuntimeHeartbeat | None":
+    if not supabase_telemetry_enabled("SUPABASE_RUNTIME_HEARTBEAT_ENABLED"):
+        return None
+    return RuntimeHeartbeat(
+        endpoint_url=os.getenv("SUPABASE_RUNTIME_HEARTBEAT_URL", DEFAULT_HEARTBEAT_URL)
+    )
+
+
+class RuntimeHeartbeat:
+    """Emit only whitelisted local health fields through private ingestion."""
+
+    def __init__(
+        self,
+        *,
+        endpoint_url: str,
+        health_reader: HealthReader | None = None,
+        service_health_reader: ServiceHealthReader | None = None,
+        transport: HeartbeatTransport | None = None,
+        timeout_seconds: float = 5.0,
+    ) -> None:
+        self.endpoint_url = endpoint_url
+        self.health_reader = health_reader or _read_local_health
+        self.service_health_reader = service_health_reader or _read_local_services
+        self.transport = transport or _post_json
+        self.timeout_seconds = max(1.0, min(10.0, float(timeout_seconds)))
+
+    def report_once(self, now: datetime | None = None) -> dict[str, Any]:
+        current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        engine_healthy = False
+        http_status: int | None = None
+        status: str | None = None
+        failure_reason: str | None = None
+        blockers: list[str] = []
+        try:
+            http_status, raw = self.health_reader()
+            # QUIET is a planned unloaded-engine state, not a process outage.
+            engine_healthy = http_status == 200 and raw.get("status") != "quiet"
+            if http_status == 200:
+                candidate = raw.get("status")
+                if isinstance(candidate, str) and re.fullmatch(
+                    r"[a-zA-Z0-9_:-]{1,90}", candidate
+                ):
+                    status = candidate
+                block_list = raw.get("blockers")
+                if isinstance(block_list, list):
+                    blockers = [
+                        item
+                        for item in block_list[:20]
+                        if isinstance(item, str)
+                        and re.fullmatch(r"[a-zA-Z0-9_:-]{1,90}", item)
+                    ]
+            else:
+                failure_reason = "local_health_http_error"
+        except (requests.RequestException, TimeoutError, OSError, ValueError):
+            failure_reason = "local_health_unavailable"
+        sha = str(resolve_build_sha() or "").strip().lower()
+        release_state, release_updated_at = _local_release_state()
+        try:
+            service_health = self.service_health_reader()
+        except Exception:
+            # Monitoring failure must never block engine/release heartbeat delivery.
+            service_health = {}
+        if not isinstance(service_health, Mapping):
+            service_health = {}
+        admin_ok = service_health.get("admin_http_responsive")
+        streamlit_ok = service_health.get("streamlit_http_responsive")
+        payload = {
+            "observed_at": current.isoformat(),
+            "build_sha": sha if _HEX_SHA.fullmatch(sha) else None,
+            "engine_healthy": engine_healthy,
+            "http_status": http_status,
+            "trading_status": status,
+            "blockers": blockers,
+            "failure_reason": failure_reason,
+            "release_state": release_state,
+            "release_updated_at": release_updated_at,
+            "admin_http_responsive": admin_ok if isinstance(admin_ok, bool) else None,
+            "streamlit_http_responsive": (
+                streamlit_ok if isinstance(streamlit_ok, bool) else None
+            ),
+        }
+        reply = self.transport(self.endpoint_url, payload, self.timeout_seconds)
+        if reply.get("ok") is not True:
+            raise RuntimeError("runtime_heartbeat_ingest_failed")
+        return {"published": True, "engine_healthy": engine_healthy}
+
+
+def _local_release_state() -> tuple[str | None, str | None]:
+    """Read only two allowlisted fields from the canonical host release state."""
+    root = Path(os.getenv("BOT_APP_DIR", "/home/ubuntu/nifty_scalper_bot"))
+    status_path = Path(
+        os.getenv(
+            "BOT_UPDATE_STATUS_FILE",
+            str(root / "data" / "auto_update_status.json"),
+        )
+    )
+    try:
+        record = json.loads(status_path.read_text(encoding="utf-8"))
+        if not isinstance(record, dict):
+            return None, None
+        state = record.get("state")
+        if not isinstance(state, str) or not re.fullmatch(r"[a-z_]{1,60}", state):
+            state = None
+        when = record.get("updated_at")
+        if isinstance(when, str):
+            stamped = datetime.fromisoformat(when.replace("Z", "+00:00"))
+            if stamped.tzinfo is not None:
+                return state, stamped.astimezone(timezone.utc).isoformat()
+        return state, None
+    except (OSError, TypeError, ValueError):
+        return None, None
+
+
+def _read_local_health() -> tuple[int, Mapping[str, Any]]:
+    try:
+        port = int(os.getenv("PORT", "8080"))
+    except ValueError:
+        port = 8080
+    if port < 1 or port > 65535:
+        port = 8080
+    reply = requests.get(
+        f"http://127.0.0.1:{port}/health/trading",
+        timeout=2.0,
+        allow_redirects=False,
+    )
+    if reply.status_code == 404:
+        # AUTO's off-hours ASGI wrapper intentionally has no trading endpoint.
+        live = requests.get(
+            f"http://127.0.0.1:{port}/livez",
+            timeout=2.0,
+            allow_redirects=False,
+        )
+        if live.status_code == 200:
+            body = live.json()
+            if (
+                isinstance(body, Mapping)
+                and body.get("quiet") is True
+                and body.get("bot_loaded") is False
+                and body.get("engine_http_responsive") is True
+            ):
+                return 200, {"status": "quiet", "blockers": ["auto_quiet"]}
+    body = reply.json() if reply.status_code == 200 else {}
+    return reply.status_code, body if isinstance(body, Mapping) else {}
+
+
+def _read_local_services() -> Mapping[str, bool]:
+    """Probe fixed localhost HTTP endpoints independently of the trading engine.
+
+    These off-hot-path GETs cannot submit orders or follow an HTTP redirect.
+    A connection failure means unavailable *from the host*, not publicly down.
+    """
+    admin_ok = False
+    streamlit_ok = False
+    try:
+        response = requests.get(
+            "http://127.0.0.1:8081/healthz",
+            timeout=1.0,
+            allow_redirects=False,
+        )
+        if response.status_code == 200:
+            body = response.json()
+            admin_ok = isinstance(body, Mapping) and body.get("status") == "ok"
+    except (requests.RequestException, OSError, ValueError):
+        pass
+    try:
+        response = requests.get(
+            "http://127.0.0.1:8501/_stcore/health",
+            timeout=1.0,
+            allow_redirects=False,
+        )
+        streamlit_ok = response.status_code == 200 and response.text.strip() == "ok"
+    except (requests.RequestException, OSError, ValueError):
+        pass
+    return {
+        "admin_http_responsive": admin_ok,
+        "streamlit_http_responsive": streamlit_ok,
+    }
+
+
+def _post_json(
+    url: str, payload: Mapping[str, Any], timeout_seconds: float
+) -> Mapping[str, Any]:
+    reply = requests.post(
+        url,
+        json=dict(payload),
+        timeout=timeout_seconds,
+        headers={
+            "Content-Type": "application/json",
+            "X-Nifty-Source": "lightsail-heartbeat-v1",
+        },
+        allow_redirects=False,
+    )
+    reply.raise_for_status()
+    parsed = reply.json()
+    if not isinstance(parsed, Mapping):
+        raise RuntimeError("runtime_heartbeat_invalid_response")
+    return parsed
+
+
+__all__ = [
+    "DEFAULT_HEARTBEAT_URL",
+    "RuntimeHeartbeat",
+    "build_runtime_heartbeat",
+    "heartbeat_interval_seconds",
+]

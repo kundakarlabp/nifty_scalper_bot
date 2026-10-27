@@ -3,18 +3,27 @@
 ## Safety and status
 
 The canonical `BracketManager` owns all stop orders. This change adds an
-**opt-in**, after-canonical ratchet inside
+**broker-live-default**, after-canonical ratchet inside
 `execution/market_aware_profit_extension.py`; the existing
-`BoundBracketManager._apply_trailing_math` invokes it. It is **disabled by
-default** (`ADAPTIVE_PROFIT_LOCK_ENABLED=false`), and does not weaken or
+`BoundBracketManager._apply_trailing_math` invokes it. For a **verified
+real-broker LIVE** manager it is **enabled by default**, while paper,
+shadow and historical replay remain disabled unless explicitly opted in.
+To disable adaptive trailing immediately on subsequent evaluations set
+`ADAPTIVE_PROFIT_LOCK_ENABLED=false` in the runtime environment and
+restart/reload through the validated release process. To force it on in
+replay, set `ADAPTIVE_PROFIT_LOCK_ENABLED=true`. It does not weaken or
 replace the exchange stop, maximum daily loss, sizing, hard SL/TP,
 reconciliation, or entry/readiness gates.
 
-**Research status:** `RESEARCH_CANDIDATE`, engineering validation only.
-Do not enable in production until quote-level, fill-aware chronological replay
-and independent holdout support a specific policy, followed by a separately
-approved gradual controlled rollout. Passing pytest/CI does not demonstrate
-improved profit or expectancy.
+**Evidence status:** `LIVE_DEFAULT_UNVALIDATED_EXIT_POLICY`.
+Live default activation was explicitly requested without a completed
+fill-aware historical holdout. It is an **experimental live financial risk**
+and is not evidence of improved profit or expectancy. An existing exchange
+protective stop is still mandatory for live adaptive ratchets. The
+`ADAPTIVE_PROFIT_LOCK_ENABLED=false` operator override allows reverting
+to the previous market-aware trailing policy without removing canonical
+protection. The broker-stop owner still determines whether a submitted
+modification is confirmed; a virtual lock is not a guaranteed fill.
 
 ## Design
 
@@ -86,11 +95,11 @@ segment by trend/range, strategy, time of day and risk per trade. Avoid
 selecting the best configuration from one day or the 12 complete VWAPPro
 trades available in October 2026.
 
-## Config values (off unless explicitly enabled)
+## Config values (enabled by default only in verified broker LIVE)
 
 | Variable | Research default | Max accepted |
 |---|---:|---:|
-| `ADAPTIVE_PROFIT_LOCK_ENABLED` | false | boolean |
+| `ADAPTIVE_PROFIT_LOCK_ENABLED` | real broker LIVE: true; other modes: false | operator true/false |
 | `ADAPTIVE_PROFIT_MIN_POINTS` | 1.0 | 3.0 |
 | `ADAPTIVE_PROFIT_SLIPPAGE_POINTS` | 0.50 | 3.0 |
 | `ADAPTIVE_PROFIT_QUOTE_MAX_AGE_SEC` | 3.0 | 5.0 |

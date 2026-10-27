@@ -1,7 +1,14 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import sqlite3
 from pathlib import Path
+
+from nifty_scalper_bot.journal.trade_ledger import (
+    ensure_trade_ledger_schema,
+    materialize_trade_events,
+)
 
 SCRIPT = (
     Path(__file__).resolve().parents[2]
@@ -127,3 +134,67 @@ def test_build_analysis_emits_repeatable_realized_post_cost_evidence() -> None:
     )
     exit_reason = report["realized_post_cost_evidence"]["by_exit_reason"][0]
     assert exit_reason["value"] == "TARGET"
+
+
+def test_cli_reports_all_historical_states_without_claiming_open_broker_orders(
+    tmp_path, capsys
+) -> None:
+    database = tmp_path / "journal.db"
+    with sqlite3.connect(database) as conn:
+        ensure_trade_ledger_schema(conn)
+        materialize_trade_events(
+            conn,
+            [
+                {
+                    "trade_id": "old-submission",
+                    "event_name": "order.acknowledged",
+                    "timestamp": 1.0,
+                    "build_sha": "a" * 40,
+                },
+                {
+                    "trade_id": "old-fill",
+                    "event_name": "entry.filled",
+                    "timestamp": 2.0,
+                    "build_sha": "a" * 40,
+                },
+            ],
+        )
+
+    assert module.main(["--trades-db", str(database)]) == 0
+    result = json.loads(capsys.readouterr().out)
+    integrity = result["ledger_integrity"]
+    assert integrity["total_ledger_rows"] == 2
+    assert integrity["completed_closed_rows"] == 0
+    assert integrity["nonclosed_historical_rows"] == 2
+    assert integrity["state_counts"] == {"ENTRY_FILLED": 1, "ENTRY_SUBMITTED": 1}
+    assert integrity["live_open_positions_inferred"] is False
+    assert integrity["broker_reconciled"] is False
+    assert result["overall_post_cost"]["trade_count"] == 0
+
+
+def test_cli_broker_tradebook_audit_requires_explicit_csv(tmp_path, capsys) -> None:
+    database = tmp_path / "journal.db"
+    with sqlite3.connect(database) as conn:
+        ensure_trade_ledger_schema(conn)
+    assert module.main(["--trades-db", str(database)]) == 0
+    absent = json.loads(capsys.readouterr().out)
+    assert absent["broker_tradebook_reconciliation"]["ready"] is False
+
+    csv_path = tmp_path / "broker_trades.csv"
+    csv_path.write_text(
+        "trade_id,order_id,tradingsymbol,transaction_type,quantity,average_price\n"
+        "k1,broker-entry,NIFTYCE,BUY,65,100\n",
+        encoding="utf-8",
+    )
+    assert (
+        module.main(
+            ["--trades-db", str(database), "--broker-trades-csv", str(csv_path)]
+        )
+        == 0
+    )
+    present = json.loads(capsys.readouterr().out)
+    evidence = present["broker_tradebook_reconciliation"]
+    assert evidence["broker_tradebook_fill_rows"] == 1
+    assert evidence["completed_ledger_rows"] == 0
+    assert evidence["unreferenced_broker_order_count"] == 1
+    assert evidence["final_net_pnl_broker_reconciled"] is False

@@ -1,5 +1,10 @@
 # Nifty Scalper Bot — Canonical Trading Path
 
+> For a concise end-to-end flowchart read [the lifecycle guide](docs/TRADING_LIFECYCLE.md).
+> For module-header format and automatic drift checks see
+> [module documentation](docs/MODULE_DOCUMENTATION.md). This document owns the
+> detailed runtime handoffs; the architecture manifest owns machine-readable paths.
+
 ## Authoritative production deployment
 
 1. **AWS Lightsail host**

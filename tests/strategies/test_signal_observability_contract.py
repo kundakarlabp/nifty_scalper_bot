@@ -340,3 +340,30 @@ def test_strategy_manager_observability_window_reset_preserves_totals() -> None:
         "SMC": 2,
         "VWAPPro": 1,
     }
+
+
+def test_zero_volume_rejection_has_bounded_provenance_log_without_admission_change():
+    """Operator telemetry must not synthesize option trades or an entry."""
+    import inspect
+
+    from nifty_scalper_bot.core.strategy_manager import StrategyManager
+    from nifty_scalper_bot.strategies.elite_strategies.vwap_pro import (
+        VWAPProStrategy,
+    )
+
+    manager_source = inspect.getsource(StrategyManager)
+    vwap_source = inspect.getsource(VWAPProStrategy)
+    assert 'reason == "option_candle_no_trades"' in manager_source
+    assert '"VWAP_OPTION_VOLUME_REJECT' in manager_source
+    assert 'f"vwap_zero_volume:{symbol}"' in manager_source
+    assert "interval_sec=60.0" in manager_source
+    assert '"raw_volume": indicators.get("volume")' in manager_source
+    assert '"bar_ts": evidence["history_bar_ts"]' in manager_source
+    assert "describe_option_volume_evidence(" in manager_source
+    assert '"volume_evidence": evidence' in manager_source
+    assert 'count=5, field="bars"' in manager_source
+    assert '"get_ohlc_bars", None' in manager_source
+    assert '"completed_bar_parity"' in manager_source
+    assert '"_option_volume_parity_sampled_at"' in manager_source
+    assert 'self._no_vote("option_candle_no_trades")' in vwap_source
+    assert "if vol <= 0:" in vwap_source

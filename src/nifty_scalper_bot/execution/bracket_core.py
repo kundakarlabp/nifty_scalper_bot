@@ -8,6 +8,8 @@ Runtime role:
   stop-loss and take-profit for each open position.
 - Supports ATR trailing, multi-target exits (TP1/TP2), partial scaling, and
   orphan/position resync.
+- Reconciles later cumulative entry fills via _reconcile_active_entry_vwap
+  without resetting the original trade clock, protective ratchet or exit state.
 
 Position in the pipeline:
     execution/order_manager.py -> THIS FILE (bracket_manager.py)
@@ -64,6 +66,7 @@ from typing import (
 from nifty_scalper_bot.utils.log_throttle import log_throttled as log_throttled_live
 from nifty_scalper_bot.utils.logging import get_logger
 from nifty_scalper_bot.utils.symbols import normalize_symbol
+from nifty_scalper_bot.execution.exchange_stop_proof import verify_exchange_stop_order
 from nifty_scalper_bot.execution.position_snapshot import (
     PositionSnapshot,
     PositionSnapshotError,
@@ -151,6 +154,9 @@ def _normalize_bracket_side(side: str) -> str:
 
 _FILLED_STATUSES = {"FILLED", "COMPLETE", "COMPLETED"}
 _CANCELLED_STATUSES = {"CANCELLED", "REJECTED", "CANCELED"}
+_ENTRY_WITH_FILL_EVIDENCE_STATUSES = _FILLED_STATUSES | _CANCELLED_STATUSES | {
+    "OPEN", "PARTIAL", "PARTIAL_FILLED", "PARTIALLY FILLED", "PARTIALLY_FILLED",
+}
 _TERMINAL_OWNERSHIP_STATES = {"CLOSED", "EXIT_FILLED", "EXIT_RECONCILED_FLAT"}
 
 
@@ -650,6 +656,9 @@ class BracketManager:
         self._trail_notify_sl: Dict[str, float] = {}
         self._tick_error_logged: Dict[str, bool] = {}
         self._throttle_log_at: Dict[str, float] = {}
+        # Broker orderbook follow-up for partially filled active entries.
+        self._partial_entry_probe_next_at: Dict[str, float] = {}
+        self._partial_entry_terminal_orders: set[str] = set()
         self._lock = _RLOCK_CLASS()
         self._reconcile_lock = threading.Lock()
         self._exit_dispatch_scheduled: set[str] = set()
@@ -793,6 +802,9 @@ class BracketManager:
         # Serialize broker-side SL modifications: multiple trailing owners can
         # otherwise acknowledge out of order and weaken the resting exchange stop.
         self._exchange_stop_modify_mutex = threading.RLock()
+        # Broker status probes belong on the watchdog, not the market-data
+        # callback. Throttle unsettled modifications by exchange order ID.
+        self._exchange_stop_verify_next_at: Dict[str, float] = {}
         self._watchdog_thread = threading.Thread(
             target=self._watchdog_exit_loop,
             name="bracket-watchdog",
@@ -1007,11 +1019,28 @@ class BracketManager:
             try:
                 pending: list[tuple[BracketState, dict[str, Any]]] = []
                 reconcile_candidates: list[BracketState] = []
+                stop_verify_candidates: list[BracketState] = []
                 with self._lock:
                     for bracket in self._brackets.values():
                         if bracket.exit_state == BracketExitLifecycle.CLOSED.value:
                             continue
                         reconcile_candidates.append(bracket)
+                        stop_id = str(bracket.exchange_stop_order_id or "")
+                        if (
+                            stop_id
+                            and bracket.active
+                            and bracket.entry_confirmed
+                            and bracket.remaining_quantity > 0
+                            and not bracket.exit_pending
+                            and not bracket.exit_executed
+                            and bracket.exchange_stop_degraded_reason
+                        ):
+                            due = self._exchange_stop_verify_next_at.get(stop_id, 0.0)
+                            if time.monotonic() >= due:
+                                self._exchange_stop_verify_next_at[stop_id] = (
+                                    time.monotonic() + 2.0
+                                )
+                                stop_verify_candidates.append(bracket)
                         ltp = float(bracket.last_ltp or 0.0)
                         if bracket.exit_pending and bracket.remaining_quantity > 0:
                             pending.append(
@@ -1075,6 +1104,13 @@ class BracketManager:
                             pending.append((bracket, action))
                 for bracket in reconcile_candidates:
                     self._reconcile_pending_entry(bracket)
+                for bracket in stop_verify_candidates:
+                    # The order may have become TRIGGER PENDING after the
+                    # immediate post-modify read returned MODIFY PENDING.
+                    # Reconcile through the one broker-stop mutex so ratchets
+                    # and status proofs cannot cross in flight.
+                    with self._exchange_stop_modify_mutex:
+                        self._confirm_exchange_protective_stop(bracket)
                 if pending:
                     self._log_throttled(
                         "critical",
@@ -1140,34 +1176,89 @@ class BracketManager:
             return True, None
 
     def _reconcile_pending_entry(self, bracket: BracketState) -> None:
-        if bracket.entry_confirmed or bracket.monitoring_only:
+        """Protect broker partial fills, including cancelled remainders.
+
+        An active partial bracket continues polling the broker orderbook at
+        most once per two seconds until the entry is complete or terminal.
+        Repeated cumulative snapshots must not reactivate an unchanged fill.
+        """
+        if bracket.monitoring_only:
+            return
+        order_id = str(bracket.entry_order_id)
+        requested = int(bracket.requested_entry_quantity or bracket.quantity or 0)
+        active_partial = (
+            bracket.entry_confirmed
+            and bracket.active
+            and int(bracket.quantity or 0) < requested
+            and bracket.remaining_quantity > 0
+            and order_id not in self._partial_entry_terminal_orders
+        )
+        if bracket.entry_confirmed and not active_partial:
             return
         age = time.time() - float(bracket.created_at or 0.0)
         if age < self._pending_entry_reconcile_after_sec:
             return
-        status, status_known = self._broker_entry_order_status(
-            bracket.entry_order_id
-        )
-        status_text = str(status.get("status") or "").upper()
-        if status_text in _FILLED_STATUSES:
+        if active_partial:
+            now = time.monotonic()
+            if now < self._partial_entry_probe_next_at.get(order_id, 0.0):
+                return
+            self._partial_entry_probe_next_at[order_id] = now + 2.0
+
+        status, status_known = self._broker_entry_order_status(order_id)
+        status_text = str(status.get("status") or "").strip().upper()
+        if status_known and status_text in _ENTRY_WITH_FILL_EVIDENCE_STATUSES:
             filled_qty = self._extract_status_filled_quantity(status)
             fill_price = self._extract_status_fill_price(status)
-            if filled_qty > 0 and fill_price is not None:
-                self.confirm_entry_fill(
-                    bracket.entry_order_id,
-                    fill_price,
+            if filled_qty > requested > 0:
+                self._recovery_degraded_reason = "entry_fill_exceeds_request"
+                LOGGER.critical(
+                    "ENTRY_FILL_EXCEEDS_REQUEST entry_order_id=%s symbol=%s "
+                    "requested=%s broker_filled=%s",
+                    order_id,
+                    bracket.symbol,
+                    requested,
                     filled_qty,
                 )
                 return
-            LOGGER.warning(
-                "PENDING_ENTRY_FILL_EVIDENCE_INCOMPLETE entry_order_id=%s "
-                "symbol=%s status=%s filled_qty=%s fill_price=%s",
-                bracket.entry_order_id,
-                bracket.symbol,
-                status_text,
-                filled_qty,
-                fill_price,
-            )
+            if (
+                filled_qty > 0
+                and fill_price is not None
+                and math.isfinite(float(fill_price))
+                and fill_price > 0
+            ):
+                if (
+                    not bracket.entry_confirmed
+                    or filled_qty > int(bracket.quantity or 0)
+                    or abs(fill_price - float(bracket.entry_price)) > 1e-8
+                ):
+                    self.confirm_entry_fill(order_id, fill_price, filled_qty)
+                    LOGGER.info(
+                        "BROKER_PARTIAL_ENTRY_RECONCILED entry_order_id=%s "
+                        "symbol=%s status=%s broker_filled=%s avg_price=%.2f",
+                        order_id,
+                        bracket.symbol,
+                        status_text,
+                        filled_qty,
+                        fill_price,
+                    )
+                if status_text in _CANCELLED_STATUSES:
+                    self._partial_entry_terminal_orders.add(order_id)
+                return
+            if status_text in _FILLED_STATUSES:
+                LOGGER.warning(
+                    "PENDING_ENTRY_FILL_EVIDENCE_INCOMPLETE entry_order_id=%s "
+                    "symbol=%s status=%s filled_qty=%s fill_price=%s",
+                    order_id,
+                    bracket.symbol,
+                    status_text,
+                    filled_qty,
+                    fill_price,
+                )
+                return
+
+        if bracket.entry_confirmed:
+            if status_text in _CANCELLED_STATUSES:
+                self._partial_entry_terminal_orders.add(order_id)
             return
         terminal_unfilled = status_text in _CANCELLED_STATUSES
         authoritatively_absent = (
@@ -1180,20 +1271,21 @@ class BracketManager:
         if not self._position_flat_for_symbol(bracket.symbol):
             return
         LOGGER.warning(
-            "PENDING_ENTRY_RECONCILED_FLAT entry_order_id=%s symbol=%s order_status=%s age_s=%.1f",
-            bracket.entry_order_id,
+            "PENDING_ENTRY_RECONCILED_FLAT entry_order_id=%s symbol=%s "
+            "order_status=%s age_s=%.1f",
+            order_id,
             bracket.symbol,
             status_text or "ABSENT",
             age,
             extra={
                 "event": "PENDING_ENTRY_RECONCILED_FLAT",
-                "entry_order_id": bracket.entry_order_id,
+                "entry_order_id": order_id,
                 "symbol": bracket.symbol,
                 "order_status": status_text or "ABSENT",
                 "age_seconds": age,
             },
         )
-        self.unregister_bracket(bracket.entry_order_id)
+        self.unregister_bracket(order_id)
 
     def _log_throttled(
         self,
@@ -1669,6 +1761,105 @@ class BracketManager:
         )
         return True
 
+    def _reconcile_active_entry_vwap(
+        self, order_id: str, fill_price: float, filled_qty: int | None
+    ) -> bool:
+        """Reconcile a later cumulative fill without a second activation.
+
+        The broker may update the cumulative entry VWAP after a partial fill.
+        Do not reset the original fill time, executable price extrema, stop
+        ratchet, or a concurrent EXIT_PENDING state. Never loosen the existing
+        virtual stop when the average-price correction moves its anchor.
+        """
+        with self._lock:
+            bracket = self._brackets.get(order_id)
+            if bracket is None or not bracket.entry_confirmed:
+                return False
+            qty_before = int(bracket.quantity or 0)
+            self._reconcile_entry_fill_quantity(bracket, filled_qty)
+            old_price = float(bracket.entry_price or 0.0)
+            try:
+                new_price = float(fill_price)
+            except (TypeError, ValueError, OverflowError):
+                new_price = 0.0
+            price_changed = (
+                math.isfinite(new_price)
+                and new_price > 0
+                and abs(new_price - old_price) > 1e-9
+            )
+            if price_changed:
+                old_stop = float(bracket.sl_trigger_price or 0.0)
+                old_initial_stop = float(
+                    bracket.initial_sl_trigger_price or old_stop
+                )
+                mode = str(
+                    (bracket.trade_provenance or {}).get("bracket_anchor_mode")
+                    or "distance"
+                ).lower()
+                delta = new_price - old_price
+                if mode == "distance":
+                    if old_initial_stop > 0:
+                        bracket.initial_sl_trigger_price = _round_to_tick(
+                            old_initial_stop + delta
+                        )
+                    if old_stop > 0:
+                        proposed_stop = _round_to_tick(old_stop + delta)
+                        bracket.sl_trigger_price = (
+                            max(old_stop, proposed_stop)
+                            if bracket.side == "BUY"
+                            else min(old_stop, proposed_stop)
+                        )
+                    if bracket.tp_trigger_price > 0:
+                        bracket.tp_trigger_price = _round_to_tick(
+                            bracket.tp_trigger_price + delta
+                        )
+                    for level in bracket.tp_levels:
+                        if not level.executed and level.price > 0:
+                            level.price = _round_to_tick(level.price + delta)
+                bracket.entry_price = new_price
+                bracket.entry_fill_price = new_price
+            if not price_changed and int(bracket.quantity or 0) == qty_before:
+                return True
+            bracket.updated_at = time.time()
+            LOGGER.info(
+                "BRACKET_CUMULATIVE_ENTRY_RECONCILED order_id=%s symbol=%s "
+                "quantity=%s previous_quantity=%s entry_vwap=%s old_vwap=%s "
+                "stop=%s exit_state=%s",
+                order_id,
+                bracket.symbol,
+                bracket.quantity,
+                qty_before,
+                bracket.entry_price,
+                old_price,
+                bracket.sl_trigger_price,
+                bracket.exit_state,
+            )
+            self._log_bracket_event(
+                "BRACKET_CUMULATIVE_ENTRY_RECONCILED",
+                bracket,
+                meta={
+                    "prior_qty": qty_before,
+                    "current_qty": bracket.quantity,
+                    "prior_vwap": old_price,
+                    "current_vwap": bracket.entry_price,
+                    "stop": bracket.sl_trigger_price,
+                },
+            )
+            try:
+                self.save_state()
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.critical(
+                    "BRACKET_CUMULATIVE_ENTRY_PERSIST_FAILED "
+                    "order_id=%s symbol=%s error=%s",
+                    order_id,
+                    bracket.symbol,
+                    exc,
+                )
+        # Outside the bracket lock, retain the existing exchange order ID
+        # and resize it for an increased broker-confirmed position quantity.
+        self._ensure_exchange_protective_stop(bracket)
+        return True
+
     def confirm_entry_fill(
         self, order_id: str, fill_price: float, filled_qty: int | None = None
     ) -> None:
@@ -1688,6 +1879,8 @@ class BracketManager:
         Raises:
             None.
         """
+        if self._reconcile_active_entry_vwap(order_id, fill_price, filled_qty):
+            return
         with self._lock:
             bracket = self._brackets.get(order_id)
             if not bracket:
@@ -1863,7 +2056,12 @@ class BracketManager:
         self, symbol: str, atr: float = 0.0, volume: float = 0.0
     ) -> None:
         """Feed external calculations (ATR) into the manager."""
-        if atr > 0:
+        try:
+            atr_value = float(atr)
+        except (TypeError, ValueError, OverflowError):
+            return
+        if math.isfinite(atr_value) and atr_value > 0:
+            atr = atr_value
             # Update Legacy Cache
             self._current_atr[symbol] = atr
             # Feed Safe Provider if available
@@ -1891,7 +2089,7 @@ class BracketManager:
 
     def _trail_activation_r(self, bracket: BracketState) -> float:
         try:
-            return float(
+            activation = float(
                 bracket.trailing_config.get(
                     "breakeven_activation_r",
                     os.getenv("TRAIL_BREAKEVEN_ACTIVATION_R", 0.60),
@@ -1899,6 +2097,7 @@ class BracketManager:
             )
         except (TypeError, ValueError):
             return 0.60
+        return activation if math.isfinite(activation) and activation > 0 else 0.60
 
     def _trailing_executable_state(
         self, bracket: BracketState, ltp: float
@@ -2044,7 +2243,14 @@ class BracketManager:
         if not relevant_ids:
             return
 
-        if ltp <= 0:
+        # Reject NaN/Inf before they can mutate last_ltp, extrema,
+        # stop-cross checks or trailing watermarks. The broker-resident
+        # protective SL and independent watchdog remain active.
+        try:
+            ltp = float(ltp)
+        except (TypeError, ValueError, OverflowError):
+            return
+        if not math.isfinite(ltp) or ltp <= 0:
             return
 
         # ═══════════════════════════════════════════════════════════
@@ -2281,7 +2487,15 @@ class BracketManager:
             bid, ask, _spread, source = resolve_quote_bid_ask_spread(tick)
         except Exception:  # noqa: BLE001 - a malformed tick must not stop exits
             return False
-        if source == "missing" or not bid or not ask or bid <= 0 or ask < bid:
+        if (
+            source == "missing"
+            or bid is None
+            or ask is None
+            or not math.isfinite(float(bid))
+            or not math.isfinite(float(ask))
+            or bid <= 0
+            or ask < bid
+        ):
             return False
         self._exit_quotes[symbol] = (float(bid), float(ask), time.time())
         return True
@@ -2300,7 +2514,12 @@ class BracketManager:
         if quote is None:
             return float(ltp), "ltp"
         bid, ask, captured_at = quote
-        if (time.time() - captured_at) > self._exit_quote_max_age:
+        if (
+            not math.isfinite(float(bid))
+            or not math.isfinite(float(ask))
+            or not math.isfinite(float(captured_at))
+            or (time.time() - captured_at) > self._exit_quote_max_age
+        ):
             return float(ltp), "ltp_stale_quote"
         price = bid if bracket.side == "BUY" else ask
         if price <= 0:
@@ -3125,7 +3344,13 @@ class BracketManager:
         try:
             symbol = str(tick.get("symbol") or "")
             ltp = tick.get("last_price") or tick.get("ltp")
-            if not symbol or not isinstance(ltp, (int, float)):
+            if (
+                not symbol
+                or not isinstance(ltp, (int, float))
+                or isinstance(ltp, bool)
+                or not math.isfinite(float(ltp))
+                or ltp <= 0
+            ):
                 return
             exchange_ts = tick_exchange_epoch(tick)
             self._capture_exit_quote(normalize_symbol(symbol), tick)
@@ -3636,8 +3861,10 @@ class BracketManager:
                 elif hasattr(self._atr_provider, "get_atr"):
                     snapshot = self._atr_provider.get_atr(symbol)
                     atr_value = getattr(snapshot, "value", snapshot)
-                if atr_value is not None and float(atr_value) > 0:
-                    return float(atr_value)
+                if atr_value is not None:
+                    candidate = float(atr_value)
+                    if math.isfinite(candidate) and candidate > 0:
+                        return candidate
             except Exception as exc:  # noqa: BLE001 - hot path must retain SL/TP checks
                 self._log_throttled(
                     "warning",
@@ -4430,10 +4657,30 @@ class BracketManager:
             history = getter(order_id)
             if isinstance(history, Mapping):
                 result = history
-                if str(history.get("status") or "").strip().upper() not in {
-                    "", "UNKNOWN"
-                }:
-                    return history
+                state = str(history.get("status") or "").strip().upper()
+                if state not in {"", "UNKNOWN"}:
+                    # Nonterminal history can omit stop identity and geometry.
+                    # Only a complete broker record counts as protective proof.
+                    # Terminal states remain authoritative: never override a
+                    # cancellation or fill with an earlier OPEN orderbook row.
+                    required = (
+                        "order_id",
+                        "exchange",
+                        "tradingsymbol",
+                        "transaction_type",
+                        "product",
+                        "order_type",
+                        "quantity",
+                        "trigger_price",
+                    )
+                    complete = all(
+                        history.get(name) not in (None, "") for name in required
+                    ) and (
+                        str(history.get("order_type") or "").upper() != "SL"
+                        or history.get("price") not in (None, "")
+                    )
+                    if state not in {"OPEN", "TRIGGER PENDING"} or complete:
+                        return history
         getter = getattr(broker, "get_orders", None) if broker is not None else None
         if callable(getter):
             orders = getter()
@@ -4476,7 +4723,7 @@ class BracketManager:
                 value = float(status.get(key) or 0.0)
             except (TypeError, ValueError):
                 continue
-            if value > 0:
+            if math.isfinite(value) and value > 0:
                 return value
         return None
 
@@ -4497,7 +4744,7 @@ class BracketManager:
                     )
                 ),
             )
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             return 0
 
     def _position_flat_for_symbol(self, symbol: str) -> bool:
@@ -5166,6 +5413,27 @@ class BracketManager:
         meta: Mapping[str, object] | None = None,
     ) -> None:
         """Queue one bracket event using the bracket's durable trade provenance."""
+        if event_type == "TRAIL_UPDATED" and meta is not None:
+            # Persist a bounded virtual-stop trail in bracket state. The
+            # broker orderbook separately decides whether a ratchet is proven.
+            # Journal availability must not determine whether history survives.
+            with self._lock:
+                records = bracket.trailing_config.setdefault("trail_history", [])
+                if not isinstance(records, list):
+                    records = []
+                records.append(
+                    {
+                        "timestamp": time.time(),
+                        "old_sl": meta.get("old_sl"),
+                        "new_sl": meta.get("new_sl"),
+                        "ltp": meta.get("ltp"),
+                        "revision": meta.get("trail_revision"),
+                        "source": meta.get("source"),
+                        "exchange_order_id": bracket.exchange_stop_order_id,
+                        "broker_confirmed": False,
+                    }
+                )
+                bracket.trailing_config["trail_history"] = records[-64:]
         journal = self._trade_journal
         if journal is None:
             return
@@ -5277,32 +5545,66 @@ class BracketManager:
             )
             evidence = {}
         status = str(evidence.get("status") or "").strip().upper()
-        try:
-            broker_qty = int(evidence["quantity"])
-        except (KeyError, TypeError, ValueError, OverflowError):
-            broker_qty = None
-        confirmed = (
-            status in {"OPEN", "TRIGGER PENDING"}
-            and broker_qty is not None
-            and broker_qty == requested_qty
-            and requested_qty > 0
-        )
-        reason = (
-            None
-            if confirmed
-            else (
-                "broker_stop_quantity_unverified"
-                if broker_qty is None and status in {"OPEN", "TRIGGER PENDING"}
-                else "broker_stop_quantity_mismatch"
-                if status in {"OPEN", "TRIGGER PENDING"}
-                else f"broker_stop_status_unverified:{status or 'UNKNOWN'}"
-            )
+        broker_qty = evidence.get("quantity")
+        confirmed, reason = verify_exchange_stop_order(
+            evidence,
+            order_id=order_id,
+            symbol=bracket.symbol,
+            entry_side=bracket.side,
+            product=bracket.product,
+            quantity=requested_qty,
+            trigger_price=bracket.exchange_stop_trigger_price,
+            limit_price=bracket.exchange_stop_limit_price,
         )
         with self._lock:
             if str(bracket.exchange_stop_order_id or "") != order_id:
                 return False
+            prior_reason = bracket.exchange_stop_degraded_reason
             bracket.exchange_stop_degraded_reason = reason
             bracket.updated_at = time.time()
+            trail_proven = False
+            if confirmed:
+                # A virtual trail is not an exchange ratchet until orderbook
+                # fields match. Attribute proof to its exact stop revision.
+                history = (getattr(bracket, "trailing_config", None) or {}).get(
+                    "trail_history", []
+                )
+                if isinstance(history, list):
+                    for record in reversed(history):
+                        if not isinstance(record, dict):
+                            continue
+                        if record.get("exchange_order_id") != order_id:
+                            continue
+                        try:
+                            matching = abs(
+                                float(record.get("new_sl"))
+                                - float(bracket.exchange_stop_trigger_price)
+                            ) <= 1e-6
+                        except (TypeError, ValueError):
+                            matching = False
+                        if matching:
+                            if not record.get("broker_confirmed"):
+                                record["broker_confirmed"] = True
+                                record["broker_confirmed_at"] = time.time()
+                                trail_proven = True
+                            break
+        if confirmed and (prior_reason or trail_proven):
+            LOGGER.info(
+                "EXCHANGE_PROTECTIVE_STOP_RECONCILED order_id=%s symbol=%s "
+                "trigger=%s quantity=%s prior_reason=%s",
+                order_id,
+                bracket.symbol,
+                bracket.exchange_stop_trigger_price,
+                requested_qty,
+                prior_reason,
+                extra={
+                    "event": "EXCHANGE_PROTECTIVE_STOP_RECONCILED",
+                    "order_id": order_id,
+                    "symbol": bracket.symbol,
+                },
+            )
+            with suppress(Exception):
+                self.save_state()
         if not confirmed:
             LOGGER.critical(
                 "EXCHANGE_PROTECTIVE_STOP_UNVERIFIED order_id=%s symbol=%s "
@@ -5503,22 +5805,35 @@ class BracketManager:
             order_id = str(bracket.exchange_stop_order_id or "").strip()
             if not order_id:
                 return False
-            # An accepted broker modification is not necessarily settled.
-            # Do not submit a second ratchet against a MODIFY PENDING order;
-            # reconcile its actual broker state before modifying again.
-            pending_modify = (
-                bracket.exchange_stop_degraded_reason
-                == "broker_stop_status_unverified:MODIFY PENDING"
+            # A broker may report the old trigger with TRIGGER PENDING, not
+            # only MODIFY PENDING, while an accepted amendment propagates.
+            # Every unverified broker-stop status/geometry must be reconciled
+            # before another modification can be sent to this order ID.
+            unsettled_broker_stop = str(
+                bracket.exchange_stop_degraded_reason or ""
+            ).startswith("broker_stop_")
+            recorded_qty = int(bracket.exchange_stop_quantity or 0)
+            quantity_repair_needed = (
+                recorded_qty > 0
+                and int(bracket.remaining_quantity) != recorded_qty
             )
-        if pending_modify and not self._confirm_exchange_protective_stop(bracket):
-            return False
+        broker_proven = not unsettled_broker_stop
+        if unsettled_broker_stop:
+            broker_proven = self._confirm_exchange_protective_stop(bracket)
+            if not broker_proven and not quantity_repair_needed:
+                return False
         with self._lock:
             if str(bracket.exchange_stop_order_id or "") != order_id:
                 return False
             current_trigger = float(bracket.exchange_stop_trigger_price or 0.0)
+            # A late partial fill changes the held quantity immediately.
+            # Updating coverage on the SAME broker order ID takes precedence
+            # over optional price improvements. Until prior broker geometry
+            # is verified, preserve the recorded stop price in that resize.
+            requested_sl = bracket.sl_trigger_price if broker_proven else current_trigger
             trigger, limit_price = self._exchange_stop_prices(
                 bracket,
-                bracket.sl_trigger_price,
+                requested_sl,
             )
             modify_count = max(0, int(bracket.exchange_stop_modify_count or 0))
             desired_quantity = int(bracket.remaining_quantity)
@@ -5633,7 +5948,7 @@ class BracketManager:
             bracket.updated_at = time.time()
         if modified:
             LOGGER.info(
-                "EXCHANGE_PROTECTIVE_STOP_RATCHETED order_id=%s symbol=%s "
+                "EXCHANGE_PROTECTIVE_STOP_MODIFY_SUBMITTED order_id=%s symbol=%s "
                 "trigger=%s limit=%s count=%s/%s",
                 order_id,
                 bracket.symbol,
@@ -5642,7 +5957,7 @@ class BracketManager:
                 modify_count + 1,
                 max_modifications,
                 extra={
-                    "event": "EXCHANGE_PROTECTIVE_STOP_RATCHETED",
+                    "event": "EXCHANGE_PROTECTIVE_STOP_MODIFY_SUBMITTED",
                     "order_id": order_id,
                     "symbol": bracket.symbol,
                     "trigger_price": trigger,
@@ -5652,6 +5967,17 @@ class BracketManager:
                 },
             )
         confirmed = self._confirm_exchange_protective_stop(bracket) if modified else False
+        if confirmed:
+            LOGGER.info(
+                "EXCHANGE_PROTECTIVE_STOP_RATCHET_CONFIRMED order_id=%s symbol=%s",
+                order_id,
+                bracket.symbol,
+                extra={
+                    "event": "EXCHANGE_PROTECTIVE_STOP_RATCHET_CONFIRMED",
+                    "order_id": order_id,
+                    "symbol": bracket.symbol,
+                },
+            )
         with suppress(Exception):
             self.save_state()
         return confirmed

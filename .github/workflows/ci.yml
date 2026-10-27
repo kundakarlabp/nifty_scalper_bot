@@ -40,6 +40,10 @@ jobs:
         run: python -m pip install -e '.[dev]' -q
       - name: Fetch pull-request base
         run: git fetch --no-tags origin "${{ github.base_ref }}" --depth=50
+      - name: Validate module documentation and interface drift
+        run: python scripts/module_doc_guard.py --base-ref "origin/${{ github.base_ref }}"
+      - name: Check generated module index
+        run: python -m scripts.module_index --check
       - name: Run focused draft validation
         run: >-
           python scripts/agent_task.py check
@@ -80,6 +84,10 @@ jobs:
           fi
           printf 'Changed Python files:\n'
           cat /tmp/changed-python.txt
+      - name: Validate critical module documentation
+        run: python scripts/module_doc_guard.py --base-ref "$(cat /tmp/quality-base.txt)"
+      - name: Check generated module index
+        run: python -m scripts.module_index --check
       - uses: actions/setup-python@v5
         if: steps.changed.outputs.has_python == 'true'
         with:
@@ -180,6 +188,29 @@ jobs:
             e2e_candles.json
           if-no-files-found: ignore
           retention-days: 3
+
+  # Free, GitHub-native exact-SHA proof; no unauthenticated API polling.
+  publish-main-ci-proof:
+    name: publish-main-ci-proof
+    if: ${{ github.event_name == 'push' }}
+    needs: [final-validation]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+      - name: Publish exact-commit successful CI ref
+        env:
+          VALIDATION: ${{ needs.final-validation.result }}
+        shell: bash
+        run: |
+          test "$VALIDATION" = "success"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          proof_ref="refs/tags/nifty-ci-passed/$GITHUB_SHA"
+          git push origin "$GITHUB_SHA:$proof_ref"
 
   final-validation:
     name: final-validation

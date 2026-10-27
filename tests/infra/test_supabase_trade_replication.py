@@ -449,6 +449,7 @@ def test_replication_builder_is_opt_in(
     tmp_path: Any,
 ) -> None:
     db_path = tmp_path / "trades.db"
+    monkeypatch.setenv("DEPLOYMENT_PLATFORM", "development")
     monkeypatch.delenv("SUPABASE_TRADE_REPLICATION_ENABLED", raising=False)
     assert build_supabase_trade_replicator(db_path) is None
 

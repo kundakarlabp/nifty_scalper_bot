@@ -144,7 +144,7 @@ def test_verified_deposit_cannot_increase_day_cap_after_a_trade() -> None:
     assert risk._switches.max_day_loss == pytest.approx(2.96)
 
 
-def test_verified_balance_decrease_tightens_risk_even_after_trade() -> None:
+def test_premium_debit_cannot_shrink_frozen_day_cap_after_trade() -> None:
     risk = RiskManager(
         settings=RiskSettings(daily_loss_pct=5.0),
         position_manager=_Positions(trades=1),
@@ -154,7 +154,10 @@ def test_verified_balance_decrease_tightens_risk_even_after_trade() -> None:
 
     risk.refresh_account_balance(force=True)
 
-    assert risk._switches.max_day_loss == pytest.approx(500.0)
+    # Free cash still shrinks for affordability; the daily loss allowance
+    # is established from pre-entry capital, not option premium debits.
+    assert risk.account_balance == pytest.approx(10_000.0)
+    assert risk._switches.max_day_loss == pytest.approx(752.96)
 
 
 def test_open_breaker_cannot_be_relaxed_by_balance_reconciliation() -> None:

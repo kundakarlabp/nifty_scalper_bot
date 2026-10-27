@@ -1,6 +1,11 @@
-# File Header Standard
+# File Header Standard — legacy critical-file labels
 
-Every production or deployment file modified in this repository must begin with a concise header that explains the file before implementation details.
+> [MODULE_DOCUMENTATION.md](MODULE_DOCUMENTATION.md) is the canonical policy.
+> This page retains strict three-label formatting for the subset already
+> checked by `tests/architecture/test_file_header_standard.py`; other
+> production Python modules may use equivalent descriptive docstrings.
+
+Every changed production or deployment file needs a concise explanatory header under the canonical policy. The strict labels below remain required for the explicitly tested legacy critical-file subset.
 
 ## Required content
 

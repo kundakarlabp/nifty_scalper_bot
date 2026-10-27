@@ -1,9 +1,23 @@
-"""Default configuration values for the Nifty scalper bot."""
+"""Purpose: Define version-controlled broker, risk and monitoring defaults.
+
+Responsibilities:
+- Provide the existing LIVE risk limits without host-side parameter copies.
+- Define canonical, nonsecret Supabase Edge monitoring endpoints.
+- Expose quote, order and service constants to their owning subsystems.
+
+Boundaries: Constants only; no environment mutation, network or broker actions.
+Safety: Never store credentials here; trading limits are unchanged by telemetry.
+"""
 
 from __future__ import annotations
 
 DEFAULT_BROKER_BASE_URL = "https://api.example.com"
 DEFAULT_BROKER_WEBSOCKET_URL = "wss://ws.example.com/stream"
+
+# Single GitHub-owned, user-authorized LIVE risk envelope: 5% per trade
+# and 5% daily loss, with independent cost-inclusive stop and risk controls.
+DEFAULT_LIVE_PER_TRADE_RISK_PCT = "5.0"
+DEFAULT_LIVE_DAILY_LOSS_PCT = "5.0"
 
 DEFAULT_RISK_MAX_DAILY_TRADES = 20
 DEFAULT_RISK_MAX_ORDER_NOTIONAL = 200_000.0
@@ -15,6 +29,15 @@ DEFAULT_RISK_MAX_TOTAL_EXPOSURE_PCT = 80.0
 DEFAULT_RISK_MAX_CONCURRENT_POSITIONS = 1
 DEFAULT_RISK_MAX_POSITIONS_PER_SYMBOL = 1
 DEFAULT_RISK_MIN_RISK_REWARD_RATIO = 1.5
+
+# Canonical read-only off-hot-path telemetry destinations. The Supabase Edge
+# receiver is source/IP allowlisted; these URLs contain no credentials.
+SUPABASE_FUNCTIONS_BASE_URL = "https://dehdptgkqbrkyzyodicd.supabase.co/functions/v1"
+DEFAULT_SUPABASE_TRADE_URL = SUPABASE_FUNCTIONS_BASE_URL + "/nifty-trade-ingest"
+DEFAULT_SUPABASE_ARCHIVE_URL = SUPABASE_FUNCTIONS_BASE_URL + "/nifty-log-archive-ingest"
+DEFAULT_SUPABASE_HEARTBEAT_URL = (
+    SUPABASE_FUNCTIONS_BASE_URL + "/nifty-runtime-heartbeat-ingest"
+)
 
 DEFAULT_LOG_LEVEL = "INFO"
 

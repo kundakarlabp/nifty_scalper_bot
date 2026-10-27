@@ -7,8 +7,14 @@ Runtime role:
 - Runs strategy evaluation over the active basket symbols using cached bars and
   live quotes; applies readiness, regime, and quality gates.
 - On an accepted signal, prepares execution state and hands off to the order
-  path (OrderManager) for placement.
+  path (OrderManager) for placement; there is no separate runner executor.
 - Maintains per-symbol runner/indicator history counts used by the readiness SSOT.
+- Persists bounded, read-only candidate cash/risk rejection evidence in the
+  existing trade-decision journal without adding a second risk authority.
+- Checks independently parsed original/replacement expiries using the pure
+  _strict_replacement_expiry_block_reason helper before a strict substitution.
+- Rejects changed-contract premium plans whose materialized stop widens beyond
+  the selected candidate or lacks finite, same-contract entry/exit geometry.
 
 Position in the pipeline:
     data/data_hub.py / data/market_data_manager.py -> THIS FILE (runner.py)
@@ -96,7 +102,6 @@ from nifty_scalper_bot.core.history_roles import (
 )
 from nifty_scalper_bot.core.message_bus import Message, MessageBus
 from nifty_scalper_bot.core.strategy_manager import StrategyManager
-from nifty_scalper_bot.core.trade_manager import TradeManager
 from nifty_scalper_bot.core.universe_controller import UniverseController
 
 # Assumes you created the data/constants.py file as advised
@@ -109,10 +114,6 @@ from nifty_scalper_bot.strategies.order_flow_evidence import TemporalOfiAccumula
 from nifty_scalper_bot.data.pipeline import (
     MarketDataPipeline,
     get_pipeline,
-)
-from nifty_scalper_bot.data.source import (
-    DataIntegrityError,
-    ensure_ltp,
 )
 
 # Signals route directly through OrderManager submit/place APIs; no execution hub layer.
@@ -148,18 +149,13 @@ from nifty_scalper_bot.options.strike_selector import (
 )
 from nifty_scalper_bot.risk import RiskManager
 from nifty_scalper_bot.risk.expiry_gate import expiry_theta_block, midday_pause_block
-from nifty_scalper_bot.risk.position_sizing import (
-    RiskManager as DeterministicRiskManager,
-)
-from nifty_scalper_bot.risk.position_sizing import (
-    RiskSnapshot,
-)
 from nifty_scalper_bot.strategies.bar_builder import OneMinuteBar, OneMinuteBarBuilder
 from nifty_scalper_bot.strategies.indicators import IndicatorEngine
 from nifty_scalper_bot.strategies.premium_risk_geometry import (
     anchor_option_geometry_to_execution,
     apply_cost_aware_risk_floor,
     apply_premium_risk_contract,
+    replacement_plan_rejection_reason,
     validate_option_premium_geometry,
 )
 from nifty_scalper_bot.strategies.quote_update_identity import (
@@ -177,7 +173,7 @@ from nifty_scalper_bot.utils.log_throttle import (
 from nifty_scalper_bot.utils.log_throttle import (
     log_throttled as log_throttled_live,
 )
-from nifty_scalper_bot.utils.logging import LogThrottle, get_logger, log_throttled
+from nifty_scalper_bot.utils.logging import get_logger, log_throttled
 from nifty_scalper_bot.utils.market_hours import (
     SAFE_END,
     SAFE_START,
@@ -298,6 +294,22 @@ def _derive_strike_distance_from_atm(
     if strike is None or strike <= 0:
         return None
     return abs(strike - atm)
+
+
+def _strict_replacement_expiry_block_reason(
+    original_expiry: str | None,
+    selected_expiry: str | None,
+    *,
+    strict: bool,
+) -> str | None:
+    """Reject an unverified or conflicting expiry before any strict replacement."""
+    if not strict:
+        return None
+    if not original_expiry or not selected_expiry:
+        return "expiry_unverified"
+    if original_expiry != selected_expiry:
+        return "expiry_mismatch"
+    return None
 
 
 class EntryEvaluationRoute(str, Enum):
@@ -461,6 +473,7 @@ class TradeDecisionSnapshot:
     live_orders_armed: bool
     candidate_count: int | None = None
     candidate_rejects: Mapping[str, Any] | None = None
+    candidate_capacity_decisions: Mapping[str, Any] | None = None
     selected_candidate: str | None = None
     strategy_allowed: bool | None = None
     risk_allowed: bool | None = None
@@ -468,48 +481,6 @@ class TradeDecisionSnapshot:
 
 
 LAST_TRADE_DECISION_SNAPSHOT: TradeDecisionSnapshot | None = None
-
-
-@dataclass(slots=True)
-class DeterministicExecutionPipeline:
-    """Data->signal->validation->risk->execution pipeline."""
-
-    trade_manager: TradeManager
-    risk_manager: DeterministicRiskManager
-    order_executor: Any
-    log_throttle: LogThrottle
-
-    def on_new_candle(
-        self, symbol: str, signal: Signal | None, ltp: float, risk: RiskSnapshot
-    ) -> str:
-        """Process one closed-candle decision. Args: symbol/signal/ltp/risk. Returns: status. Raises: Exception."""
-        if signal is None:
-            return "NO_SIGNAL"
-        try:
-            _ = ensure_ltp(ltp)
-            signal = signal.with_metadata(signal_price=ltp, pipeline="deterministic")
-            order_id = self.order_executor.execute(signal)
-            if not order_id:
-                LOGGER.info(
-                    '{"event":"SIGNAL_REJECTED","symbol":"%s","reason":"execution_rejected"}',
-                    symbol,
-                )
-                return "REJECTED_EXECUTION"
-            return "ORDER_PLACED"
-        except DataIntegrityError:
-            LOGGER.info(
-                '{"event":"SIGNAL_REJECTED","symbol":"%s","reason":"data_integrity"}',
-                symbol,
-            )
-            raise
-        except Exception as e:
-            LOGGER.exception(
-                '{"event":"ORDER_FAILED","symbol":"%s","error":"%s"}',
-                symbol,
-                e,
-                exc_info=True,
-            )
-            raise
 
 
 class OrderRouter(Protocol):
@@ -858,9 +829,6 @@ class StrategyRunner:
         self._position_manager = position_manager
         self._message_bus = message_bus
         self._config = config or StrategyRunnerConfig()
-        self._execution_engine = (
-            None  # Removed — signals route directly via order_manager
-        )
         self._logger = get_logger(__name__)
         self._logger.debug(
             "StrategyRunner using MessageBus id=%s", id(self._message_bus)
@@ -905,8 +873,6 @@ class StrategyRunner:
         self._legacy_tick_subscription_mode = os.getenv(
             "STRATEGY_RUNNER_LEGACY_SUBSCRIBE", "false"
         ).strip().lower() in {"1", "true", "yes", "on"}
-        # Time block logging throttle
-        self._time_block_logged: Dict[str, float] = {}
         self._allow_eval_without_new_bar = os.getenv(
             "RUNNER_ALLOW_EVAL_WITHOUT_NEW_BAR", "true"
         ).strip().lower() in {"1", "true", "yes", "on"}
@@ -1011,7 +977,6 @@ class StrategyRunner:
         self._max_order_attempts_per_minute = max(
             1, int(os.getenv("RUNNER_MAX_ORDER_ATTEMPTS_PER_MINUTE", "5") or 5)
         )
-        self._last_execution_halted_log_ts: float = 0.0
         self._runtime_data_hard_ready = False
         self._runtime_evaluation_ready = False
         self._runtime_live_orders_armed = False
@@ -1096,7 +1061,6 @@ class StrategyRunner:
         self._trade_counter_by_symbol_candle: Dict[str, dict] = {}
         self._settings = get_settings()
         self._lock = threading.RLock()
-        self._eval_lock = threading.Lock()
         self._trade_counter_lock = threading.Lock()
         self._running = False
         self._trading_paused = False
@@ -1189,7 +1153,6 @@ class StrategyRunner:
         )
         self._last_ws_stale_log_ts_by_symbol: dict[str, float] = defaultdict(float)
         self._last_ws_reconnect_attempt_ts: float = 0.0
-        self._last_stall_warn_ts: float = 0.0  # throttle stall warnings to 30s
         # Health-watchdog cadence: the scan was previously executed for every
         # accepted tick on the tick thread.
         self._health_watchdog_lock = threading.Lock()
@@ -1212,8 +1175,6 @@ class StrategyRunner:
         self._candle_engines: dict[str, Any] = {}
         # STEP 1/4: Single deterministic pipeline — ticks flow here → closed candles only
         self._pipeline: MarketDataPipeline = get_pipeline(store_maxlen=1500)
-        # STEP 5: counter for "invalid data" drops — never silently discarded
-        self._invalid_data_skip_counter: int = 0
         self._symbol_history: dict[str, list[OneMinuteBar]] = {}
         self._recent_history_cache: dict[str, list[OneMinuteBar]] = {}
         self._restored_from_cache_symbols: set[str] = set()
@@ -1295,10 +1256,6 @@ class StrategyRunner:
         self._structural_approved_total_count = 0
         self._regime_block_counter = 0
         self._capital_block_counter = 0
-        self._last_candle_eval: dict[str, float] = {}
-        self._regime_skip_log_ts: dict[str, float] = {}
-        self._qty_zero_log_ts: dict[str, float] = {}
-        self._last_spot_warn_ts = 0.0
         self._spot_stale_flag = False
         self._last_summary_log = time.monotonic()
         self._last_system_heartbeat_log = time.monotonic()
@@ -1332,8 +1289,6 @@ class StrategyRunner:
         # BUG W2 FIX: emit a one-shot INFO log when indicator warmup first clears
         # for each symbol so Railway logs confirm the moment strategies become active.
         self._warmup_complete_logged: set[str] = set()
-        self._max_trades_per_symbol_per_candle = 1
-        self._min_trade_interval_seconds = 60.0
         self._session_allow_out_of_hours = allow_offhours_testing_safe()
         self._max_nifty_positions = int(os.getenv("MAX_NIFTY_POSITIONS", "1"))
         self._last_regime_by_symbol: dict[str, MarketRegime] = {}
@@ -3380,6 +3335,20 @@ class StrategyRunner:
                                 },
                             )
                 snap = self._market_data.get_symbol_snapshot(sym)
+                if snap is None:
+                    # A missing candidate is pending, not a reason to discard
+                    # valid snapshots for other contracts in the same basket.
+                    any_refresh_pending = True
+                    self._logger.warning(
+                        "CANDIDATE_SNAPSHOT_PENDING_REFRESH symbol=%s reason=snapshot_missing",
+                        sym,
+                        extra={
+                            "event": "CANDIDATE_SNAPSHOT_PENDING_REFRESH",
+                            "symbol": sym,
+                            "reason": "snapshot_missing",
+                        },
+                    )
+                    continue
                 if symbol_refresh_pending and (
                     snap.ltp is None or not snap.tradable_quote
                 ):
@@ -3391,11 +3360,9 @@ class StrategyRunner:
                             "symbol": sym,
                         },
                     )
-                spread_pct = None
-                if snap.bid and snap.ask and snap.bid > 0 and snap.ask > 0:
-                    mid = (snap.bid + snap.ask) / 2.0
-                    if mid > 0:
-                        spread_pct = (snap.ask - snap.bid) / mid
+                # Use the single quote authority: spread_pct means percent,
+                # and crossed/invalid books cannot carry synthetic spread proof.
+                _, _, spread_pct, _ = resolve_quote_bid_ask_spread(snap)
                 candidates.append(
                     {
                         "symbol": snap.canonical_symbol,
@@ -5277,6 +5244,7 @@ class StrategyRunner:
         final_reason: str | None,
         candidate_count: int | None = None,
         candidate_rejects: Mapping[str, Any] | None = None,
+        candidate_capacity_decisions: Mapping[str, Any] | None = None,
         selected_candidate: str | None = None,
         strategy_allowed: bool | None = None,
         risk_allowed: bool | None = None,
@@ -5295,6 +5263,25 @@ class StrategyRunner:
                 live_orders_armed=bool(self._runtime_live_orders_armed),
                 candidate_count=candidate_count,
                 candidate_rejects=dict(candidate_rejects or {}),
+                candidate_capacity_decisions={
+                    str(symbol): {
+                        key: decision.get(key)
+                        for key in (
+                            "reason",
+                            "capacity_blocker",
+                            "cash_affordable",
+                            "plan_risk_affordable",
+                            "required",
+                            "executable_capacity",
+                            "plan_cost_inclusive_risk",
+                            "effective_one_lot_risk_budget",
+                            "remaining_daily_risk_budget",
+                        )
+                        if key in decision
+                    }
+                    for symbol, decision in (candidate_capacity_decisions or {}).items()
+                    if isinstance(decision, Mapping)
+                },
                 selected_candidate=selected_candidate,
                 strategy_allowed=strategy_allowed,
                 risk_allowed=risk_allowed,
@@ -5352,6 +5339,11 @@ class StrategyRunner:
             candidate_rejects=(
                 payload.get("candidate_rejects")
                 if isinstance(payload.get("candidate_rejects"), Mapping)
+                else None
+            ),
+            candidate_capacity_decisions=(
+                payload.get("candidate_capacity_decisions")
+                if isinstance(payload.get("candidate_capacity_decisions"), Mapping)
                 else None
             ),
             selected_candidate=str(payload.get("selected_candidate") or "") or None,
@@ -16526,14 +16518,55 @@ class StrategyRunner:
                                         else "direction_context_missing_live"
                                     )
                                 )
+                                # An unresolved direction can coexist with
+                                # fresh spot/futures ticks. Preserve both
+                                # underlying classifications in the decision
+                                # log without inventing a fallback CE/PE bias.
+                                spot_snapshot = refreshed_context.get("spot_context")
+                                futures_snapshot = refreshed_context.get(
+                                    "futures_context"
+                                )
+                                spot_snapshot = (
+                                    spot_snapshot
+                                    if isinstance(spot_snapshot, Mapping)
+                                    else {}
+                                )
+                                futures_snapshot = (
+                                    futures_snapshot
+                                    if isinstance(futures_snapshot, Mapping)
+                                    else {}
+                                )
+                                spot_bias = (
+                                    spot_snapshot.get("underlying_direction_bias")
+                                    or spot_snapshot.get("direction_bias")
+                                    or None
+                                )
+                                futures_bias = (
+                                    futures_snapshot.get("underlying_direction_bias")
+                                    or futures_snapshot.get("direction_bias")
+                                    or None
+                                )
+                                spot_direction_reasons = spot_snapshot.get(
+                                    "direction_context_reasons"
+                                )
+                                futures_direction_reasons = futures_snapshot.get(
+                                    "direction_context_reasons"
+                                )
                                 log_throttled(
                                     self._logger,
                                     f"direction_context_blocked:{symbol}:{direction_reason}",
-                                    "TRIGGER_EVAL_SKIPPED symbol=%s reason=%s spot_fresh=%s fut_fresh=%s",
+                                    "TRIGGER_EVAL_SKIPPED symbol=%s reason=%s "
+                                    "spot_fresh=%s fut_fresh=%s spot_bias=%s "
+                                    "fut_bias=%s spot_direction_reasons=%s "
+                                    "fut_direction_reasons=%s",
                                     symbol,
                                     direction_reason,
                                     spot_fresh,
                                     fut_fresh,
+                                    spot_bias,
+                                    futures_bias,
+                                    spot_direction_reasons,
+                                    futures_direction_reasons,
                                     interval_sec=30.0,
                                     level=logging.WARNING,
                                     extra={
@@ -16542,6 +16575,14 @@ class StrategyRunner:
                                         "symbol": symbol,
                                         "spot_fresh": spot_fresh,
                                         "fut_fresh": fut_fresh,
+                                        "spot_bias": spot_bias,
+                                        "fut_bias": futures_bias,
+                                        "spot_direction_reasons": (
+                                            spot_direction_reasons
+                                        ),
+                                        "fut_direction_reasons": (
+                                            futures_direction_reasons
+                                        ),
                                     },
                                 )
                                 self._emit_runner_eval_decision(
@@ -18654,10 +18695,7 @@ class StrategyRunner:
                 trade_symbol or base_symbol or signal.symbol
             )
             selected_snapshot: dict[str, Any] = {}
-            dedup_reserved = False
-            dedup_key_context: dict[str, str] | None = None
-
-            def reject_after_dedup(
+            def _reject_after_dedup(
                 *,
                 reason: str,
                 details: Mapping[str, Any] | None = None,
@@ -18669,8 +18707,8 @@ class StrategyRunner:
                         reason=reason_key,
                     )
                 self._reset_execution_state(base_symbol)
-                rejection_details = dict(details or {})
-                if decision_research_context:
+                rejection_details = details if dedup_reserved else dict(details or {})
+                if not dedup_reserved and decision_research_context:
                     rejection_details.setdefault(
                         "research_context",
                         {
@@ -18686,7 +18724,6 @@ class StrategyRunner:
                     details=rejection_details,
                 )
 
-            _reject_after_dedup = reject_after_dedup
             existing_snapshots = (
                 candidate_snapshots_obj
                 if isinstance(candidate_snapshots_obj, list)
@@ -19315,14 +19352,14 @@ class StrategyRunner:
 
                     orig_expiry = _expiry_key(original_symbol)
                     new_expiry = _expiry_key(selected_symbol)
-                    if (
-                        replacement_blocked_reason is None
-                        and strict_replace
-                        and orig_expiry
-                        and new_expiry
-                        and orig_expiry != new_expiry
-                    ):
-                        replacement_blocked_reason = "expiry_mismatch"
+                    if replacement_blocked_reason is None:
+                        replacement_blocked_reason = (
+                            _strict_replacement_expiry_block_reason(
+                                orig_expiry,
+                                new_expiry,
+                                strict=strict_replace,
+                            )
+                        )
                     orig_strike = self._extract_strike_from_symbol(original_symbol)
                     new_strike = self._extract_strike_from_symbol(selected_symbol)
                     if (
@@ -19607,25 +19644,6 @@ class StrategyRunner:
                     "reason": reason_key,
                 }
 
-                def _reject_after_dedup(
-                    *,
-                    reason: str,
-                    details: Mapping[str, Any] | None = None,
-                ) -> SignalExecutionResult:
-                    if dedup_reserved:
-                        self._mark_directional_dedup_failed(
-                            underlying=underlying,
-                            option_side=option_side,
-                            reason=reason_key,
-                        )
-                    self._reset_execution_state(base_symbol)
-                    return self._reject_signal_execution(
-                        symbol=base_symbol,
-                        trace_id=trace_id,
-                        reason=reason,
-                        details=details,
-                    )
-
                 if is_live_mode:
                     readiness = self._ensure_symbol_execution_ready_result(
                         trade_symbol or base_symbol, trace_id=trace_id
@@ -19701,6 +19719,36 @@ class StrategyRunner:
                 )
                 metadata["stop_loss"] = signal.stop_loss
                 metadata["take_profit"] = signal.take_profit
+                if candidate is not None and selected_symbol != original_symbol:
+                    replacement_rejection = replacement_plan_rejection_reason(
+                        signal,
+                        selected_symbol=selected_symbol,
+                        candidate_entry_price=candidate.entry_price,
+                        candidate_stop_loss=candidate.stop_loss,
+                        candidate_target=candidate.target,
+                        execution_price=trade_price,
+                    )
+                    if replacement_rejection is not None:
+                        self._logger.warning(
+                            "REPLACEMENT_FINAL_PLAN_REJECTED symbol=%s "
+                            "reason=%s entry=%s stop=%s target=%s trace_id=%s",
+                            selected_symbol,
+                            replacement_rejection,
+                            trade_price,
+                            signal.stop_loss,
+                            signal.take_profit,
+                            trace_id,
+                        )
+                        return _reject_after_dedup(
+                            reason=replacement_rejection,
+                            details={
+                                "selected_symbol": selected_symbol,
+                                "candidate_stop": candidate.stop_loss,
+                                "final_stop": signal.stop_loss,
+                                "candidate_entry": candidate.entry_price,
+                                "execution_entry": trade_price,
+                            },
+                        )
             except Exception as materialize_exc:
                 candidate_symbol = None if candidate is None else candidate.symbol
                 self._logger.exception(
@@ -20418,6 +20466,18 @@ class StrategyRunner:
                     "approval_path": metadata.get("approval_path"),
                     "direction_contract": metadata.get("direction_contract"),
                     "setup_contract": metadata.get("setup_contract"),
+                    "smc_sweep_timestamp": (
+                        str(metadata["sweep_timestamp"])
+                        if metadata.get("sweep_timestamp") is not None
+                        else None
+                    ),
+                    "smc_regime": metadata.get("smc_regime"),
+                    "smc_local_support_sources": list(
+                        metadata.get("smc_local_support_sources") or []
+                    ),
+                    "smc_quality_corroborated": metadata.get(
+                        "smc_quality_corroborated"
+                    ),
                     "confirmation_contract": metadata.get("confirmation_contract"),
                     "confirming_trigger_strategies": list(
                         metadata.get("confirming_trigger_strategies") or []

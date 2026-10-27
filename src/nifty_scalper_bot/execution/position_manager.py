@@ -1,7 +1,17 @@
 # fmt: off
 # ruff: noqa: E501,I001,F841
 # mypy: ignore-errors
-"""Position and order state tracking for the scalper bot."""
+"""Purpose: Track broker orders, confirmed positions and local exposure lifecycle.
+
+Responsibilities: PositionManager maintains pending/terminal order state,
+reconciles broker snapshots with local positions and persists recovery state.
+Key interfaces: PositionManager and broker order/position reconciliation helpers.
+Boundaries: OrderManager submits orders; BracketManager chooses protective exits;
+position bookkeeping must not create independent entry or stop decisions.
+Safety: Requested/acknowledged quantity is not a fill. Unknown, partial or
+rejected exposure remains explicit until broker state is reconciled.
+Late cumulative fills on cancelled orders must be accounted for exactly once.
+"""
 
 from __future__ import annotations
 
@@ -3252,8 +3262,14 @@ class PositionManager:
 
         fill_result = FillApplicationResult()
         if (
-            order.status in ("PARTIALLY_FILLED", "FILLED")
-            and order.fill_price is not None
+            order.fill_price is not None
+            and (
+                order.status in ("PARTIALLY_FILLED", "FILLED")
+                or (
+                    order.status in ("CANCELLED", "REJECTED", "EXPIRED")
+                    and order.filled_quantity > order.applied_filled_quantity
+                )
+            )
         ):
             if order.filled_quantity <= 0:
                 order.filled_quantity = order.quantity
@@ -3346,7 +3362,9 @@ class PositionManager:
                 ) or broker_payload.get("filled")
                 if order is not None and filled_qty is not None:
                     with suppress(Exception):
-                        order.filled_quantity = int(float(filled_qty))
+                        order.filled_quantity = max(
+                            order.filled_quantity, int(float(filled_qty))
+                        )
                 fill_price: float | None = None
                 if fill_price_raw is not None:
                     with suppress(Exception):

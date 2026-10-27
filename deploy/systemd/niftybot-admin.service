@@ -1,3 +1,6 @@
+# File purpose: Run the independent Lightsail admin control server.
+# Key responsibilities: Serve authenticated operator pages only through localhost/Caddy.
+# Operational constraints: Never bind port 8081 publicly or restart trading.
 [Unit]
 Description=Nifty Bot Lightweight Admin Controls
 After=network-online.target niftybot.service
@@ -14,7 +17,7 @@ Environment=BOT_SERVICE_NAME=niftybot
 Environment=BOT_APP_DIR=/home/ubuntu/nifty_scalper_bot
 Environment=PYTHONPATH=/home/ubuntu/nifty_scalper_bot:/home/ubuntu/nifty_scalper_bot/src
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/home/ubuntu/nifty_scalper_bot/.venv/bin/python -m uvicorn nifty_scalper_bot.superlite_admin:app --host 0.0.0.0 --port 8081 --workers 1 --no-access-log
+ExecStart=/home/ubuntu/nifty_scalper_bot/.venv/bin/python -m uvicorn nifty_scalper_bot.superlite_admin:app --host 127.0.0.1 --port 8081 --workers 1 --no-access-log --proxy-headers --forwarded-allow-ips 127.0.0.1
 Restart=always
 RestartSec=2
 TimeoutStopSec=15

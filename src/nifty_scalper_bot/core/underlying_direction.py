@@ -1,16 +1,19 @@
-"""Canonical arbitration for NIFTY underlying direction.
+"""Purpose: Arbitrate underlying NIFTY direction from fresh market evidence.
 
-Option-premium data may trigger a setup but must never authorize NIFTY direction.
-Only fresh spot/futures observations participate. Futures is the primary
-price-discovery source when both underlying sources agree; spot is confirmation.
-Any fresh disagreement remains fail-closed. This treats opposing underlying
-views as a transition/reversal warning instead of forcing a CE/PE decision.
+Responsibilities:
+- UnderlyingDirectionObservation binds source, age, confidence and direction.
+- arbitrate_underlying_direction resolves spot/futures observations.
+- UnderlyingDirectionResolution identifies confirmation or transition.
+
+Boundaries: Option price momentum is setup evidence, never direction authority.
+Safety: Missing, stale or conflicting fresh underlying views fail closed.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from math import isfinite
 
 _VALID_DIRECTIONS = {"CE", "PE"}
 
@@ -45,13 +48,18 @@ class UnderlyingDirectionObservation:
         bias = str(self.bias or "").upper()
         if bias not in _VALID_DIRECTIONS:
             raise ValueError(f"invalid underlying direction: {self.bias!r}")
-        if self.age_seconds < 0:
-            raise ValueError("direction observation age cannot be negative")
+        try:
+            age = float(self.age_seconds)
+            confidence = float(self.confidence)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("invalid numeric direction observation") from exc
+        if not isfinite(age) or age < 0:
+            raise ValueError("direction observation age must be finite and nonnegative")
+        if not isfinite(confidence):
+            raise ValueError("direction observation confidence must be finite")
         object.__setattr__(self, "bias", bias)
-        object.__setattr__(
-            self, "confidence", max(0.0, min(1.0, float(self.confidence)))
-        )
-        object.__setattr__(self, "age_seconds", float(self.age_seconds))
+        object.__setattr__(self, "confidence", max(0.0, min(1.0, confidence)))
+        object.__setattr__(self, "age_seconds", age)
         object.__setattr__(self, "source", str(self.source or "unknown"))
 
 

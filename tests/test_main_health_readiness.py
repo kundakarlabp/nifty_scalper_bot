@@ -848,6 +848,9 @@ def test_trading_status_distinguishes_live_configuration_from_current_arming(
     assert armed["configured_for_live"] is True
     assert armed["can_place_live_order_now"] is True
     assert armed["will_trade"] is True
+    semantics = armed["will_trade_semantics"]
+    assert semantics == "execution_permission_only_not_signal_or_order"
+    assert armed["trade_pipeline_state"]["stage"] == "UNKNOWN"
 
 
 def test_health_trading_exposes_signal_observability_without_changing_readiness():
@@ -913,6 +916,10 @@ def test_health_trading_exposes_signal_observability_without_changing_readiness(
     assert body["live_order_readiness"]["ready"] is True
     diagnostic = body["no_trade_diagnostics"]
     assert diagnostic["reason"] == "candidates_not_approved_since_start"
+    assert body["trade_pipeline_state"] == {
+        "stage": "CANDIDATE_NOT_APPROVED",
+        "reason": "candidates_not_approved_since_start",
+    }
     assert diagnostic["basis"] == "recent_window"
     assert diagnostic["top_no_vote_reason_by_strategy"]["ORBPro"] == {
         "reason": "non_breakout_regime",
@@ -1046,3 +1053,72 @@ def test_signal_health_includes_canonical_regime_evidence() -> None:
     assert evidence["raw_reason"] == "adx_trending"
     assert evidence["stable_updated_at"] == 1780000100.0
     assert signals["runner_tick_count"] == 10
+
+
+def test_health_reports_selected_option_execution_without_changing_gates() -> None:
+    ctx = _ctx(
+        selected_ce="NFO:NIFTY26OCT22600CE",
+        selected_pe="NFO:NIFTY26OCT22600PE",
+        selected_ce_exec_ready=True,
+        selected_pe_exec_ready=False,
+        live_orders_armed=False,
+    )
+    main.app.state.bot = SimpleNamespace(_ctx=ctx)
+
+    body = _json(main.health_trading())
+
+    assert body["selected_execution_ready"] == {
+        "NFO:NIFTY26OCT22600CE": True,
+        "NFO:NIFTY26OCT22600PE": False,
+    }
+    assert body["live_orders_armed"] is False
+
+
+@pytest.mark.parametrize(
+    ("reason", "stage"),
+    [
+        ("awaiting_strategy_evaluations", "EVALUATION_PENDING"),
+        ("no_valid_strategy_trigger_since_start", "SIGNAL_WAITING"),
+        ("candidates_not_approved_since_start", "CANDIDATE_NOT_APPROVED"),
+        ("approved_candidate_seen_since_start", "CANDIDATE_SEEN_HISTORICALLY"),
+        ("strategy_telemetry_unavailable", "UNKNOWN"),
+    ],
+)
+def test_trade_pipeline_status_distinguishes_signal_stage_from_arming(reason, stage):
+    diagnostic = {"reason": reason}
+    assert main._trade_pipeline_state(True, diagnostic) == {
+        "stage": stage,
+        "reason": reason,
+    }
+    assert main._trade_pipeline_state(False, diagnostic) == {
+        "stage": "NOT_ARMED",
+        "reason": "live_order_readiness_blocked",
+    }
+
+
+def test_armed_trading_status_does_not_misreport_no_signal_as_order(
+    monkeypatch,
+):
+    monkeypatch.setenv("ENABLE_LIVE", "true")
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+
+    class Runner:
+        def get_status(self):
+            return {
+                "completed_strategy_evaluations_window": {
+                    "SMC": 3,
+                    "VWAPPro": 3,
+                },
+                "candidate_generated_count": 0,
+                "approved_candidate_count": 0,
+            }
+
+    ctx = _ctx(live_orders_armed=True, strategy_runner=Runner())
+    ctx.live_orders_armed = True
+    main.app.state.bot = SimpleNamespace(_ctx=ctx)
+    status = main.trading_status()
+    assert status["can_place_live_order_now"] is True
+    assert status["trade_pipeline_state"] == {
+        "stage": "SIGNAL_WAITING",
+        "reason": "no_valid_strategy_trigger_since_start",
+    }

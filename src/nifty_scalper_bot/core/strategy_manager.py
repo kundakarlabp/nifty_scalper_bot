@@ -11,9 +11,14 @@ Runtime role:
 Direction-authority invariant:
 - OPTION PREMIUM DATA MUST NEVER AUTHORIZE UNDERLYING DIRECTION.
 - Only fresh NIFTY spot/futures context may authorize CE/PE direction.
+- _context_snapshot_fresh rejects non-finite or future-dated underlying ticks;
+  direction observations reject non-finite source confidence and age;
+  the same bounded freshness rule is used before arbitrating spot/futures.
 - Direction, freshness age and source are one atomic observation.
 - Fresh spot/futures disagreement fails closed; source order never breaks ties.
-- The final option combiner gate independently revalidates direction alignment."""
+- The final option combiner gate independently revalidates direction alignment.
+- SMC-only independent confirmation cannot veto a separately confirmed VWAP
+  trigger on the same underlying side; opposing context still fails closed."""
 
 from __future__ import annotations
 
@@ -43,10 +48,12 @@ from nifty_scalper_bot.core.adaptive_calibration import (
 )
 from nifty_scalper_bot.core.market_regime import RegimeSnapshot
 from nifty_scalper_bot.core.market_regime_manager import MarketRegimeManager
+from nifty_scalper_bot.core.option_volume_diagnostics import describe_option_volume_evidence
 from nifty_scalper_bot.core.strategy_vote_policy import (
     independent_same_side_confirmation,
     partition_votes,
 )
+from nifty_scalper_bot.core.smc_flow_confirmation import SustainedSMCFlow
 from nifty_scalper_bot.core.underlying_direction import (
     UnderlyingDirectionObservation,
     UnderlyingDirectionState,
@@ -94,6 +101,30 @@ def _safe_float_value(value: t.Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return result
+
+
+def _context_snapshot_fresh(
+    ctx: t.Mapping[str, t.Any], *, max_age_seconds: float, now_ts: float
+) -> bool:
+    """Only valid non-future underlying timestamps may prove freshness."""
+    raw_tick_ts_ms = ctx.get("last_tick_ts_ms")
+    if raw_tick_ts_ms not in (None, "", 0, 0.0):
+        try:
+            tick_ts_ms = float(raw_tick_ts_ms)
+        except (TypeError, ValueError, OverflowError):
+            return False
+        # A future real tick cannot be rescued by cached quote-age or a
+        # different fallback timestamp.
+        if not isfinite(tick_ts_ms) or tick_ts_ms > now_ts * 1000.0:
+            return False
+    age_seconds = resolve_tick_age_seconds(ctx)
+    if age_seconds is not None:
+        return isfinite(age_seconds) and 0.0 <= age_seconds <= max_age_seconds
+    try:
+        ts = float(ctx.get("timestamp") or ctx.get("context_timestamp_epoch") or 0.0)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return isfinite(ts) and ts > 0 and 0.0 <= now_ts - ts <= max_age_seconds
 
 
 def _normalise_ohlcv_bars(bars: t.Any) -> list[dict[str, float]]:
@@ -2959,6 +2990,7 @@ class StrategyManager(_BaseStrategyManager):
         indicators["symbol_role"] = symbol_role
         indicators["_regime_adjustments"] = adjustments
         self._augment_futures_metrics(indicators)
+        opt_quote = None
         # ✅ FIX S3: Inject exchange VWAP for options
         if self._data_hub is not None:
             try:
@@ -3214,14 +3246,9 @@ class StrategyManager(_BaseStrategyManager):
             max_context_age = self._live_context_max_age_seconds()
             now_ts = time.time()
             def _fresh(ctx: t.Mapping[str, t.Any]) -> bool:
-                age_seconds = resolve_tick_age_seconds(ctx)
-                if age_seconds is not None:
-                    return age_seconds <= max_context_age
-                try:
-                    ts = float(ctx.get("timestamp") or ctx.get("context_timestamp_epoch") or 0.0)
-                    return ts > 0 and (now_ts - ts) <= max_context_age
-                except (TypeError, ValueError):
-                    return False
+                return _context_snapshot_fresh(
+                    ctx, max_age_seconds=max_context_age, now_ts=now_ts
+                )
             spot_fresh = _fresh(spot_ctx)
             fut_fresh = _fresh(fut_ctx)
             spot_direction_valid = self._context_direction_valid(spot_ctx)
@@ -3287,16 +3314,23 @@ class StrategyManager(_BaseStrategyManager):
                         age_s = max(0.0, now_ts - ts) if ts > 0 else None
                     except (TypeError, ValueError):
                         age_s = None
-                if age_s is None or age_s > max_context_age:
+                if (
+                    age_s is None
+                    or not isfinite(age_s)
+                    or age_s < 0.0
+                    or age_s > max_context_age
+                ):
                     return None
                 try:
                     confidence_value = float(confidence or 0.0)
-                except (TypeError, ValueError):
-                    confidence_value = 0.0
+                except (TypeError, ValueError, OverflowError):
+                    return None
+                if not isfinite(confidence_value):
+                    return None
                 return UnderlyingDirectionObservation(
                     bias=bias_norm,
                     confidence=confidence_value,
-                    age_seconds=max(0.0, float(age_s)),
+                    age_seconds=float(age_s),
                     source=source,
                 )
 
@@ -3700,6 +3734,103 @@ class StrategyManager(_BaseStrategyManager):
                 self._record_strategy_no_vote_observability(strategy_name, reason)
                 no_vote_reason_counts[reason] = no_vote_reason_counts.get(reason, 0) + 1
                 strategy_reasons[strategy.name] = reason
+                # Quote freshness does not prove that this option candle traded.
+                # A bounded, per-symbol sample distinguishes an absent volume
+                # field from a genuine zero without relaxing this no-vote gate.
+                if strategy_name == "VWAPPro" and reason == "option_candle_no_trades":
+                    # This is strictly a sampled diagnostic. The no-vote
+                    # remains unchanged. Sampling before history calls also
+                    # bounds the read overhead, not only the log emission.
+                    seen = getattr(self, "_option_volume_parity_sampled_at", None)
+                    if not isinstance(seen, dict):
+                        seen = {}
+                        self._option_volume_parity_sampled_at = seen
+                    now_sample = time.monotonic()
+                    if now_sample - float(seen.get(symbol, -1e10)) >= 60.0:
+                        seen[symbol] = now_sample
+                        latest_bar = None
+                        indicator_complete = None
+                        canonical_complete = None
+                        history_getter = getattr(
+                            self._indicator_engine, "get_history", None
+                        )
+                        if callable(history_getter):
+                            try:
+                                history_tail = history_getter(
+                                    symbol, count=5, field="bars"
+                                )
+                                if history_tail:
+                                    if isinstance(history_tail[-1], t.Mapping):
+                                        latest_bar = history_tail[-1]
+                                    indicator_complete = next(
+                                        (
+                                            bar
+                                            for bar in reversed(history_tail)
+                                            if isinstance(bar, t.Mapping)
+                                            and bar.get("is_complete") is not False
+                                            and bar.get("is_provisional") is not True
+                                        ),
+                                        None,
+                                    )
+                            except Exception:
+                                pass  # Read-only diagnostic must not affect admission.
+                        if self._data_hub is not None:
+                            get_canonical_bars = getattr(
+                                self._data_hub, "get_ohlc_bars", None
+                            )
+                            if callable(get_canonical_bars):
+                                try:
+                                    bars = get_canonical_bars(symbol, limit=1)
+                                    if bars and isinstance(bars[-1], t.Mapping):
+                                        canonical_complete = bars[-1]
+                                except Exception:
+                                    pass
+                        evidence = describe_option_volume_evidence(
+                            indicators,
+                            latest_bar=latest_bar,
+                            quote=(
+                                opt_quote if isinstance(opt_quote, t.Mapping) else None
+                            ),
+                            indicator_completed_bar=indicator_complete,
+                            canonical_completed_bar=canonical_complete,
+                        )
+                        log_throttled(
+                            log,
+                            f"vwap_zero_volume:{symbol}",
+                            "VWAP_OPTION_VOLUME_REJECT symbol=%s raw_volume=%r avg_volume=%r bar_ts=%s bar_complete=%s bar_provisional=%s quote_version=%s data_age_s=%s history_source=%s evidence_state=%s history_bar_volume=%s quote_delta=%s quote_cumulative=%s quote_transition=%s quote_source=%s parity=%s indicator_completed_ts=%s indicator_completed_volume=%s canonical_completed_ts=%s canonical_completed_volume=%s",
+                            symbol,
+                            indicators.get("volume"),
+                            indicators.get("avg_volume"),
+                            evidence["history_bar_ts"],
+                            evidence["history_bar_complete"],
+                            evidence["history_bar_provisional"],
+                            indicators.get("quote_update_version"),
+                            indicators.get("data_age_seconds"),
+                            indicators.get("history_source"),
+                            evidence["state"],
+                            evidence["history_bar_volume"],
+                            evidence["quote_volume_delta"],
+                            evidence["quote_volume_cumulative"],
+                            evidence["quote_volume_transition_state"],
+                            evidence["quote_source"],
+                            evidence["completed_bar_parity"],
+                            evidence["indicator_completed_ts"],
+                            evidence["indicator_completed_volume"],
+                            evidence["canonical_completed_ts"],
+                            evidence["canonical_completed_volume"],
+                            interval_sec=60.0,
+                            level=logging.INFO,
+                            extra={
+                                "event": "VWAP_OPTION_VOLUME_REJECT",
+                                "symbol": symbol,
+                                "raw_volume": indicators.get("volume"),
+                                "bar_ts": evidence["history_bar_ts"],
+                                "quote_version": indicators.get(
+                                    "quote_update_version"
+                                ),
+                                "volume_evidence": evidence,
+                            },
+                        )
                 continue
             adjusted = base_signal
             signals.append(adjusted)
@@ -4058,7 +4189,13 @@ class StrategyManager(_BaseStrategyManager):
         strike_distance_from_atm = metadata.get("strike_distance_from_atm", indicators.get("strike_distance_from_atm"))
         try:
             strike_distance = float(strike_distance_from_atm)
-            near_atm = strike_distance <= near_atm_threshold
+            near_atm = bool(
+                isfinite(strike_distance)
+                and 0.0 <= strike_distance
+                and isfinite(near_atm_threshold)
+                and 0.0 <= near_atm_threshold
+                and strike_distance <= near_atm_threshold
+            )
         except (TypeError, ValueError):
             strike_distance = None
             near_atm = False
@@ -4291,6 +4428,36 @@ class StrategyManager(_BaseStrategyManager):
             )
             return None
 
+        # Capture SMC provenance before filtering unconfirmed votes: a valid
+        # VWAP vote must not erase SMC's distinct confirmation-wait record.
+        smc_trigger_votes = [
+            (signal, evidence)
+            for signal, evidence in trigger_votes
+            if str(evidence.strategy or "").strip().upper() == "SMC"
+        ]
+
+        def _observe_smc_confirmation_wait(reason: str) -> None:
+            # Keep the already-qualified trigger's lifecycle stage. A move
+            # back to CONFIRMING would be ignored by the monotonic registry.
+            # This is observability only: no additional vote or admission.
+            for candidate_signal, evidence in smc_trigger_votes:
+                if str(evidence.strategy or "").strip().upper() != "SMC":
+                    continue
+                metadata = dict(candidate_signal.metadata or {})
+                setup_id = metadata.get("setup_id") or (
+                    evidence.metadata or {}
+                ).get("setup_id")
+                if not setup_id:
+                    continue
+                transition_setup(
+                    SetupStage.TRIGGER_QUALIFIED,
+                    strategy="SMC",
+                    setup_id=setup_id,
+                    symbol=candidate_signal.symbol,
+                    side=side,
+                    reason=reason,
+                )
+
         conflicting_context = [
             evidence
             for _signal, evidence in context_votes
@@ -4299,6 +4466,9 @@ class StrategyManager(_BaseStrategyManager):
             and bool((evidence.metadata or {}).get("effective_context_conflict"))
         ]
         if conflicting_context:
+            # Preserve the SMC trigger lifecycle even when adverse fresh OFI
+            # vetoes admission. This is attribution only, not a new entry.
+            _observe_smc_confirmation_wait("fresh_opposing_context")
             _record_no_signal(
                 "context_conflict",
                 "fresh_opposing_context",
@@ -4317,28 +4487,6 @@ class StrategyManager(_BaseStrategyManager):
             and bool((evidence.metadata or {}).get("effective_context_alignment"))
         ]
 
-        def _observe_smc_confirmation_wait(reason: str) -> None:
-            # Keep the already-qualified trigger's lifecycle stage. A move
-            # back to CONFIRMING would be ignored by the monotonic registry.
-            # This is observability only: no additional vote or admission.
-            for candidate_signal, evidence in trigger_votes:
-                if str(evidence.strategy or "").strip().upper() != "SMC":
-                    continue
-                metadata = dict(candidate_signal.metadata or {})
-                setup_id = metadata.get("setup_id") or (
-                    evidence.metadata or {}
-                ).get("setup_id")
-                if not setup_id:
-                    continue
-                transition_setup(
-                    SetupStage.TRIGGER_QUALIFIED,
-                    strategy="SMC",
-                    setup_id=setup_id,
-                    symbol=candidate_signal.symbol,
-                    side=side,
-                    reason=reason,
-                )
-
         independent_trigger_confirmation, confirming_trigger_strategies = (
             independent_same_side_confirmation(trigger_votes)
         )
@@ -4350,42 +4498,124 @@ class StrategyManager(_BaseStrategyManager):
             )
             for signal, evidence in trigger_votes
         )
-        if capacity_retry_requires_consensus and not independent_trigger_confirmation:
-            _record_no_signal(
-                "strategy_confirmation_missing",
-                "capacity_retry_independent_confirmation_missing",
-                "context_contract",
-                trigger_vote_count=len(trigger_votes),
-                context_vote_count=len(context_votes),
-            )
-            _observe_smc_confirmation_wait("capacity_retry_independent_confirmation_missing")
-            return None
         # A one-second OrderFlow/OFI vote is context, not independent SMC
         # entry confirmation. Keep OrderFlow's adverse-context veto above,
         # but require a separate strategy or independent trigger for SMC.
-        smc_trigger_present = any(
-            str(evidence.strategy or "").strip().upper() == "SMC"
-            for _signal, evidence in trigger_votes
+        smc_trigger_present = bool(smc_trigger_votes)
+        # Research opt-in: independently timed sustained option-book evidence
+        # can corroborate a fully qualified underlying SMC structural trigger.
+        # OrderFlow remains context-only. Broker/risk gates remain mandatory.
+        smc_sustained_flow_confirmed = False
+        smc_flow_enabled = (
+            str(os.getenv("SMC_SUSTAINED_FLOW_CONFIRMATION_ENABLED", "false"))
+            .strip()
+            .lower()
+            in {"1", "true", "yes", "on"}
         )
+        # Observe the SAME setup-keyed two-book mechanism even when admission
+        # is disabled. This yields a non-trading counterfactual audit without
+        # inventing a second SMC arbiter or silently changing live eligibility.
         if (
             smc_trigger_present
             and not independent_trigger_confirmation
+            and not capacity_retry_requires_consensus
+        ):
+            smc_setup_ids = {
+                str(
+                    (signal.metadata or {}).get("setup_id")
+                    or (evidence.metadata or {}).get("setup_id")
+                    or ""
+                )
+                for signal, evidence in trigger_votes
+                if str(evidence.strategy or "").strip().upper() == "SMC"
+            }
+            if len(smc_setup_ids) == 1 and next(iter(smc_setup_ids)):
+                tracker = getattr(self, "_smc_sustained_flow_tracker", None)
+                if tracker is None:
+                    tracker = SustainedSMCFlow()
+                    self._smc_sustained_flow_tracker = tracker
+                smc_sustained_flow_observed = tracker.observe(
+                    setup_id=next(iter(smc_setup_ids)),
+                    symbol=symbol_norm,
+                    side=side,
+                    votes=context_votes,
+                    monotonic_now=time.monotonic(),
+                )
+                if smc_sustained_flow_observed:
+                    log.info(
+                        "SMC_SUSTAINED_FLOW_PROOF symbol=%s setup_id=%s admission_enabled=%s",
+                        symbol_norm,
+                        next(iter(smc_setup_ids)),
+                        smc_flow_enabled,
+                        extra={
+                            "event": "SMC_SUSTAINED_FLOW_PROOF",
+                            "symbol": symbol_norm,
+                            "setup_id": next(iter(smc_setup_ids)),
+                            "admission_enabled": smc_flow_enabled,
+                            "is_counterfactual": not smc_flow_enabled,
+                        },
+                    )
+                smc_sustained_flow_confirmed = bool(
+                    smc_flow_enabled and smc_sustained_flow_observed
+                )
+        # SMC's stricter independent-confirmation contract belongs to SMC,
+        # not to unrelated valid triggers sharing the same option candidate.
+        # In particular, an unconfirmed SMC sweep must never veto a VWAPPro
+        # trigger that independently qualifies on fresh same-side OrderFlow.
+        smc_orderflow_only = bool(
+            smc_trigger_present
+            and not independent_trigger_confirmation
             and same_side_context
+            and not smc_sustained_flow_confirmed
             and all(
                 str(evidence.strategy or "").strip().upper() == "ORDERFLOW"
                 for evidence in same_side_context
             )
-        ):
-            _record_no_signal(
-                "strategy_confirmation_missing",
-                "smc_independent_confirmation_missing",
-                "context_contract",
-                trigger_vote_count=len(trigger_votes),
-                context_vote_count=len(context_votes),
+        )
+        smc_confirmation_block_reason = (
+            "capacity_retry_independent_confirmation_missing"
+            if capacity_retry_requires_consensus and not independent_trigger_confirmation
+            else "smc_independent_confirmation_missing"
+            if smc_orderflow_only
+            else None
+        )
+        excluded_unconfirmed_triggers: list[str] = []
+        if smc_confirmation_block_reason is not None:
+            remaining_triggers = [
+                (signal, evidence)
+                for signal, evidence in trigger_votes
+                if str(evidence.strategy or "").strip().upper() != "SMC"
+            ]
+            if not remaining_triggers:
+                _record_no_signal(
+                    "strategy_confirmation_missing",
+                    smc_confirmation_block_reason,
+                    "context_contract",
+                    trigger_vote_count=len(trigger_votes),
+                    context_vote_count=len(context_votes),
+                )
+                _observe_smc_confirmation_wait(smc_confirmation_block_reason)
+                return None
+            trigger_votes = remaining_triggers
+            excluded_unconfirmed_triggers.append("SMC")
+            _observe_smc_confirmation_wait(smc_confirmation_block_reason)
+            log.info(
+                "STRATEGY_TRIGGER_EXCLUDED symbol=%s strategy=SMC reason=%s remaining=%s",
+                symbol_norm,
+                smc_confirmation_block_reason,
+                [evidence.strategy for _signal, evidence in trigger_votes],
+                extra={
+                    "event": "STRATEGY_TRIGGER_EXCLUDED",
+                    "symbol": symbol_norm,
+                    "strategy": "SMC",
+                    "reason": smc_confirmation_block_reason,
+                },
             )
-            _observe_smc_confirmation_wait("smc_independent_confirmation_missing")
-            return None
-        if not independent_trigger_confirmation and not same_side_context:
+        if (
+            not independent_trigger_confirmation
+            and not same_side_context
+            and not smc_sustained_flow_confirmed
+        ):
             context_diagnostics = [
                 {
                     "strategy": evidence.strategy,
@@ -4457,12 +4687,34 @@ class StrategyManager(_BaseStrategyManager):
             _observe_smc_confirmation_wait("independent_confirmation_missing")
             return None
 
+        # Observational comparison of already-approved structural candidates.
+        # Keep first-eligible selection unchanged until cost-adjusted,
+        # chronological evidence can support a quality-ranked alternative.
+        qualified_trigger_candidates = [
+            {
+                "strategy": evidence.strategy,
+                "signal_family": canonical_signal_family(evidence.strategy),
+                "setup_id": (
+                    str(
+                        (signal.metadata or {}).get("setup_id")
+                        or (evidence.metadata or {}).get("setup_id")
+                        or ""
+                    )
+                    or None
+                ),
+            }
+            for signal, evidence in trigger_votes
+        ]
         primary_signal, primary_evidence = trigger_votes[0]
         metadata = dict(primary_signal.metadata or {})
         approval_path = (
             "aligned_trigger_consensus"
             if independent_trigger_confirmation
-            else "single_trigger_context_confirmed"
+            else (
+                "smc_sustained_orderflow_confirmed"
+                if smc_sustained_flow_confirmed
+                else "single_trigger_context_confirmed"
+            )
         )
         context_strategies = sorted(
             {str(evidence.strategy) for evidence in same_side_context}
@@ -4494,11 +4746,19 @@ class StrategyManager(_BaseStrategyManager):
                 "confirmation_contract": {
                     "passed": True,
                     "trigger_consensus": independent_trigger_confirmation,
+                    "smc_sustained_flow_confirmed": smc_sustained_flow_confirmed,
                     "confirming_trigger_strategies": confirming_trigger_strategies,
                     "context_strategies": context_strategies,
                 },
                 "confirming_trigger_strategies": confirming_trigger_strategies,
                 "context_confirmation_strategies": context_strategies,
+                "excluded_unconfirmed_triggers": excluded_unconfirmed_triggers,
+                "primary_selection_policy": "first_eligible_trigger",
+                "qualified_trigger_candidates": qualified_trigger_candidates,
+                # confidence=1.0 here is a binary gate result, not a
+                # calibrated probability of winning a net-cost trade.
+                "confidence_semantics": "binary_structural_admission",
+                "confidence_calibrated": False,
             }
         )
         transition_setup(

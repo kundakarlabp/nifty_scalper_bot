@@ -1,4 +1,13 @@
-"""Session readiness and startup-orchestration adapters."""
+"""Purpose: Adapt startup readiness and initial tick replay for the live app.
+
+Responsibilities:
+- adapt_compute_live_readiness preserves explicit session and entry blockers.
+- adapt_replay_latest_mdm_ticks_to_bus replays cached market-data observations.
+- Connect startup/runner wiring without creating an alternate trading authority.
+
+Boundaries: Adapter layer; IndicatorEngine/MDM own underlying history and ticks.
+Safety: Unready startup must not silently arm entries or hide reason codes.
+"""
 
 from __future__ import annotations
 

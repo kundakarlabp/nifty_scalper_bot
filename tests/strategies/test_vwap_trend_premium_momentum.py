@@ -12,8 +12,16 @@ from nifty_scalper_bot.strategies.elite_strategies.config_models import (
 from nifty_scalper_bot.strategies.elite_strategies.vwap_pro import VWAPProStrategy
 
 
-def _evaluate(monkeypatch, *, side="CE", enabled=True, retest=False, **updates):
-    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+def _evaluate(
+    monkeypatch,
+    *,
+    side="CE",
+    enabled=True,
+    retest=False,
+    execution_mode="LIVE",
+    **updates,
+):
+    monkeypatch.setenv("EXECUTION_MODE", execution_mode)
     monkeypatch.setenv("VWAP_TREND_MOMENTUM_ENABLED", "true" if enabled else "false")
     monkeypatch.setenv("VWAP_TREND_MOMENTUM_OPTION_RVOL_MIN", "1.5")
     monkeypatch.setenv("VWAP_TREND_REQUIRE_RETEST", "true" if retest else "false")
@@ -50,10 +58,10 @@ def _evaluate(monkeypatch, *, side="CE", enabled=True, retest=False, **updates):
                 {
                     "timestamp": current_ts
                     - timedelta(minutes=max(i, indicators.get("prior_gap_minutes", 1))),
-                    "open": 100.0,
-                    "high": 103.0,
-                    "low": 98.0,
-                    "close": 101.0,
+                    "open": indicators.get("prior_open", 100.0),
+                    "high": indicators.get("prior_high", 103.0),
+                    "low": indicators.get("prior_low", 98.0),
+                    "close": indicators.get("prior_close", 101.0),
                     "volume": v,
                     "is_complete": True,
                     "is_provisional": False,
@@ -85,7 +93,11 @@ def _evaluate(monkeypatch, *, side="CE", enabled=True, retest=False, **updates):
             return indicators.get("prior_session_vwap", 100.0)
 
     strategy = VWAPProStrategy(VWAPProStrategyConfig(), _CompletedBarEngine())
-    signal = strategy._evaluate_signal(f"NFO:NIFTY2691523400{side}", indicators, 103.0)
+    signal = strategy._evaluate_signal(
+        f"NFO:NIFTY2691523400{side}",
+        indicators,
+        indicators.get("current_price", 103.0),
+    )
     return strategy, signal
 
 
@@ -401,3 +413,359 @@ def test_retest_preserves_genuine_prior_reclaim_when_prior_vwap_available(
     assert signal is not None
     assert signal.metadata["trend_momentum_retest_confirmed"] is True
     assert signal.metadata["trend_momentum_prior_session_vwap"] == 100.0
+
+
+@pytest.mark.parametrize("side", ["CE", "PE"])
+def test_research_neutral_futures_slope_requires_explicit_shadow_opt_in(
+    monkeypatch, side
+):
+    near_neutral_same_side = 0.0001 if side == "CE" else -0.0001
+    _, baseline = _evaluate(
+        monkeypatch,
+        side=side,
+        execution_mode="SHADOW",
+        futures_vwap_slope=near_neutral_same_side,
+    )
+    assert baseline is None
+
+    monkeypatch.setenv("VWAP_RESEARCH_NEUTRAL_FUTURES_SLOPE", "true")
+    strategy, admitted = _evaluate(
+        monkeypatch,
+        side=side,
+        execution_mode="SHADOW",
+        futures_vwap_slope=near_neutral_same_side,
+    )
+    assert admitted is not None
+    assert admitted.metadata["research_neutral_slope_admitted"] is True
+    assert admitted.metadata["futures_slope_alignment"] is False
+    assert admitted.metadata["trend_momentum_completed_option_rvol"] >= 1.5
+    assert admitted.metadata["setup_pass"] is True
+
+    # The original SHADOW flag must never override an explicit LIVE kill switch.
+    monkeypatch.setenv("VWAP_LIVE_NEUTRAL_SLOPE_ENABLED", "false")
+    live_strategy, live = _evaluate(
+        monkeypatch,
+        side=side,
+        execution_mode="LIVE",
+        futures_vwap_slope=near_neutral_same_side,
+    )
+    assert live is None
+    assert live_strategy.last_no_vote_reason == "futures_slope_not_aligned"
+
+
+@pytest.mark.parametrize(
+    "side, updates, expected_reason",
+    [
+        ("CE", {"futures_vwap_slope": -0.0001}, "futures_slope_not_aligned"),
+        ("PE", {"futures_vwap_slope": 0.0001}, "futures_slope_not_aligned"),
+        ("CE", {"futures_vwap_slope": None}, "futures_slope_not_aligned"),
+        ("CE", {"futures_vwap_slope": float("inf")}, "futures_slope_not_aligned"),
+        (
+            "CE",
+            {"futures_vwap_slope": 0.0001, "futures_volume_ratio": 0.4},
+            "futures_slope_not_aligned",
+        ),
+        (
+            "CE",
+            {"futures_vwap_slope": 0.0001, "underlying_direction_confidence": 0.4},
+            "trend_momentum_underlying_quality_unconfirmed",
+        ),
+        (
+            "CE",
+            {"futures_vwap_slope": 0.0001, "context_age_seconds": 10.0},
+            "trend_momentum_underlying_quality_unconfirmed",
+        ),
+        (
+            "CE",
+            {"futures_vwap_slope": 0.0001, "regime": "RANGE"},
+            "trend_momentum_regime_not_trend",
+        ),
+        (
+            "CE",
+            {"futures_vwap_slope": 0.0001, "volume": 0.0},
+            "option_candle_no_trades",
+        ),
+        (
+            "CE",
+            {
+                "futures_vwap_slope": 0.0001,
+                "history_timestamp": "2026-09-10T09:59:00+05:30",
+            },
+            "trend_momentum_bar_unconfirmed",
+        ),
+    ],
+)
+def test_research_neutral_slope_does_not_override_quality_guards(
+    monkeypatch, side, updates, expected_reason
+):
+    monkeypatch.setenv("VWAP_RESEARCH_NEUTRAL_FUTURES_SLOPE", "true")
+    strategy, admitted = _evaluate(
+        monkeypatch, side=side, execution_mode="SHADOW", **updates
+    )
+    assert admitted is None
+    assert strategy.last_no_vote_reason == expected_reason
+
+
+def test_research_neutral_slope_needs_completed_option_momentum(monkeypatch):
+    monkeypatch.setenv("VWAP_RESEARCH_NEUTRAL_FUTURES_SLOPE", "true")
+    strategy, signal = _evaluate(
+        monkeypatch,
+        execution_mode="SHADOW",
+        enabled=False,
+        futures_vwap_slope=0.0001,
+    )
+    assert signal is None
+    assert strategy.last_no_vote_reason == "futures_slope_not_aligned"
+
+
+@pytest.mark.parametrize("side", ["CE", "PE"])
+def test_live_neutral_slope_enables_quality_proven_entry_by_default(monkeypatch, side):
+    monkeypatch.delenv("VWAP_LIVE_NEUTRAL_SLOPE_ENABLED", raising=False)
+    near_neutral = 0.0001 if side == "CE" else -0.0001
+    _, signal = _evaluate(
+        monkeypatch,
+        side=side,
+        enabled=False,
+        execution_mode="LIVE",
+        futures_vwap_slope=near_neutral,
+    )
+    assert signal is not None
+    assert signal.metadata["live_neutral_slope_enabled"] is True
+    assert signal.metadata["live_neutral_slope_admitted"] is True
+    assert signal.metadata["research_neutral_slope_admitted"] is False
+    assert signal.metadata["vwap_finalized_bar_confirmed"] is True
+    assert signal.metadata["vwap_neutral_slope_premium_proof_required"] is True
+    assert signal.metadata["trend_momentum_completed_option_rvol"] >= 1.5
+    assert signal.metadata["futures_slope_alignment"] is False
+    assert "live_neutral_futures_slope" in signal.metadata["setup_reasons"]
+
+
+@pytest.mark.parametrize("side", ["CE", "PE"])
+def test_live_neutral_slope_rolls_back_with_one_switch(monkeypatch, side):
+    monkeypatch.setenv("VWAP_LIVE_NEUTRAL_SLOPE_ENABLED", "false")
+    near_neutral = 0.0001 if side == "CE" else -0.0001
+    strategy, signal = _evaluate(
+        monkeypatch,
+        side=side,
+        enabled=False,
+        execution_mode="LIVE",
+        futures_vwap_slope=near_neutral,
+    )
+    assert signal is None
+    assert strategy.last_no_vote_reason == "futures_slope_not_aligned"
+
+
+@pytest.mark.parametrize(
+    "side, updates, reason",
+    [
+        ("CE", {"futures_vwap_slope": -0.0001}, "futures_slope_not_aligned"),
+        ("PE", {"futures_vwap_slope": 0.0001}, "futures_slope_not_aligned"),
+        ("CE", {"futures_vwap_slope": None}, "futures_slope_not_aligned"),
+        ("CE", {"futures_vwap_slope": float("nan")}, "futures_slope_not_aligned"),
+        (
+            "CE",
+            {"futures_vwap_slope": 0.0001, "regime": "RANGE"},
+            "trend_momentum_regime_not_trend",
+        ),
+        (
+            "CE",
+            {"futures_vwap_slope": 0.0001, "underlying_direction_bias": "PE"},
+            "underlying_direction_conflict",
+        ),
+        (
+            "CE",
+            {"futures_vwap_slope": 0.0001, "underlying_direction_confidence": 0.5},
+            "trend_momentum_underlying_quality_unconfirmed",
+        ),
+        (
+            "CE",
+            {"futures_vwap_slope": 0.0001, "context_age_seconds": 8.0},
+            "trend_momentum_underlying_quality_unconfirmed",
+        ),
+        (
+            "CE",
+            {"futures_vwap_slope": 0.0001, "history_volume": 300.0},
+            "trend_momentum_option_volume_not_confirmed",
+        ),
+        (
+            "CE",
+            {"futures_vwap_slope": 0.0001, "futures_volume_ratio": 0.5},
+            "futures_slope_not_aligned",
+        ),
+        (
+            "CE",
+            {"futures_vwap_slope": 0.0001, "history_high": 101.0},
+            "trend_momentum_bar_unconfirmed",
+        ),
+        (
+            "CE",
+            {"futures_vwap_slope": 0.0001, "is_complete": False},
+            "trend_momentum_bar_unconfirmed",
+        ),
+        (
+            "CE",
+            {"futures_vwap_slope": 0.0001, "open": 102.8},
+            "trend_momentum_premium_not_confirmed",
+        ),
+        (
+            "CE",
+            {"futures_vwap_slope": 0.0001, "session_vwap": None},
+            "trend_momentum_session_vwap_unavailable",
+        ),
+    ],
+)
+def test_live_neutral_slope_preserves_structural_guards(
+    monkeypatch, side, updates, reason
+):
+    monkeypatch.delenv("VWAP_LIVE_NEUTRAL_SLOPE_ENABLED", raising=False)
+    strategy, signal = _evaluate(
+        monkeypatch, side=side, enabled=False, execution_mode="LIVE", **updates
+    )
+    assert signal is None
+    assert strategy.last_no_vote_reason == reason
+
+
+def test_live_strong_slope_baseline_is_not_tightened(monkeypatch):
+    monkeypatch.delenv("VWAP_LIVE_NEUTRAL_SLOPE_ENABLED", raising=False)
+    _, signal = _evaluate(
+        monkeypatch,
+        enabled=False,
+        execution_mode="LIVE",
+        futures_vwap_slope=0.01,
+        is_complete=False,
+        regime="RANGE",
+    )
+    assert signal is not None
+    assert signal.metadata["live_neutral_slope_admitted"] is False
+    assert signal.metadata["vwap_neutral_slope_premium_proof_required"] is False
+
+
+@pytest.mark.parametrize("side", ["CE", "PE"])
+def test_opt_in_trend_retest_extension_requires_completed_pullback_rebreak(
+    monkeypatch, side
+):
+    inputs = dict(
+        enabled=False,
+        side=side,
+        atr=1.2,
+        open=102.0,
+        high=105.0,
+        low=101.0,
+        close=104.0,
+        current_price=104.0,
+        prior_open=102.0,
+        prior_close=101.0,
+    )
+    monkeypatch.setenv("VWAP_TREND_RETEST_EXTENSION_ENABLED", "false")
+    baseline_strategy, baseline = _evaluate(monkeypatch, **inputs)
+    assert baseline is None
+    assert baseline_strategy.last_no_vote_reason == "distance_outside_band"
+
+    monkeypatch.setenv("VWAP_TREND_RETEST_EXTENSION_ENABLED", "true")
+    extension_strategy, extension = _evaluate(monkeypatch, **inputs)
+    assert extension is not None
+    assert extension.metadata["setup_type"] == "vwap_trend_pullback_retest"
+    assert extension.metadata["vwap_trend_retest_extension_admitted"] is True
+    assert extension.metadata["vwap_distance_atr"] > 3.0
+    assert extension.metadata["requires_runner_execution_validation"] is True
+    assert extension.metadata["trend_alignment"] is True
+
+
+@pytest.mark.parametrize(
+    "updates, expected",
+    [
+        (
+            {"prior_open": 100.0, "prior_close": 101.0},
+            "trend_retest_structure_unconfirmed",
+        ),
+        ({"prior_gap_minutes": 2}, "trend_retest_structure_unconfirmed"),
+        ({"prior_volumes": [900.0] * 9 + [0.0]}, "trend_retest_structure_unconfirmed"),
+        ({"low": 102.0}, "trend_momentum_weak_close"),
+        ({"history_high": 101.0}, "trend_momentum_bar_unconfirmed"),
+        ({"underlying_direction_bias": "PE"}, "distance_outside_band"),
+        ({"context_age_seconds": 10.0}, "distance_outside_band"),
+        ({"regime": "RANGE"}, "trend_momentum_regime_not_trend"),
+        ({"futures_vwap_slope": -0.01}, "futures_slope_not_aligned"),
+    ],
+)
+def test_trend_retest_extension_fails_closed_on_missing_structural_quality(
+    monkeypatch, updates, expected
+):
+    monkeypatch.setenv("VWAP_TREND_RETEST_EXTENSION_ENABLED", "true")
+    inputs = dict(
+        enabled=False,
+        atr=1.2,
+        open=102.0,
+        high=105.0,
+        low=101.0,
+        close=104.0,
+        current_price=104.0,
+        prior_open=102.0,
+        prior_close=101.0,
+    )
+    inputs.update(updates)
+    strategy, signal = _evaluate(monkeypatch, **inputs)
+    assert signal is None
+    assert strategy.last_no_vote_reason == expected
+
+
+@pytest.mark.parametrize(
+    ("configured_floor", "admitted"),
+    [("0.90", False), ("0.80", True)],
+)
+def test_vwap_confidence_floor_counterfactual_is_only_a_unit_fixture(
+    monkeypatch, configured_floor, admitted
+):
+    """Compare one unchanged completed bar; do not claim economic replay."""
+    monkeypatch.setenv("VWAP_EARLY_TREND_MIN_CONTEXT_CONF", configured_floor)
+    strategy, signal = _evaluate(monkeypatch, underlying_direction_confidence=0.80)
+    assert strategy._early_trend_min_context_conf == float(configured_floor)
+    assert (signal is not None) is admitted
+    if not admitted:
+        assert (
+            strategy.last_no_vote_reason
+            == "trend_momentum_underlying_quality_unconfirmed"
+        )
+    else:
+        assert signal.metadata["trend_momentum_underlying_quality_confirmed"]
+
+
+@pytest.mark.parametrize(
+    ("changes", "reason"),
+    [
+        ({"context_age_seconds": 3.0}, "trend_momentum_underlying_quality_unconfirmed"),
+        ({"regime": "RANGE"}, "trend_momentum_regime_not_trend"),
+        ({"is_complete": False}, "trend_momentum_bar_unconfirmed"),
+    ],
+)
+def test_research_080_floor_still_requires_fresh_trend_and_final_bar(
+    monkeypatch, changes, reason
+):
+    """An alternate confidence floor cannot replace independent proof."""
+    monkeypatch.setenv("VWAP_EARLY_TREND_MIN_CONTEXT_CONF", "0.80")
+    strategy, signal = _evaluate(
+        monkeypatch, underlying_direction_confidence=0.80, **changes
+    )
+    assert signal is None
+    assert strategy.last_no_vote_reason == reason
+
+
+@pytest.mark.parametrize(
+    ("confidence", "eligible"),
+    [(0.79, False), (0.80, True), (0.85, True)],
+)
+def test_default_080_confidence_floor_accepts_080_but_not_weaker_context(
+    monkeypatch, confidence, eligible
+):
+    """Exact live default boundary; do not replace independent quality checks."""
+    monkeypatch.delenv("VWAP_EARLY_TREND_MIN_CONTEXT_CONF", raising=False)
+    strategy, signal = _evaluate(
+        monkeypatch, underlying_direction_confidence=confidence
+    )
+    assert strategy._early_trend_min_context_conf == 0.80
+    assert (signal is not None) is eligible
+    if not eligible:
+        assert (
+            strategy.last_no_vote_reason
+            == "trend_momentum_underlying_quality_unconfirmed"
+        )

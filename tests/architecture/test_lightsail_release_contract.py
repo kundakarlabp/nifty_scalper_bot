@@ -8,6 +8,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -26,6 +28,33 @@ def test_dotenv_is_not_tracked() -> None:
     assert result.stdout.strip() == ""
     assert ".env" in _text(".gitignore").splitlines()
     assert (ROOT / ".env.example").is_file()
+
+
+def test_fresh_host_never_copies_full_strategy_template_to_secret_env() -> None:
+    setup = _text("deploy/lightsail_setup.sh")
+    assert 'cp "$APP_DIR/.env.example" "$ENV_FILE"' not in setup
+    assert "ENABLE_LIVE=false" in setup
+    assert "EXECUTION_MODE=SHADOW" in setup
+    assert "KITE_API_SECRET=" in setup
+    assert "TELEGRAM_BOT_TOKEN=" in setup
+    # Existing installs must preserve credentials and operator-selected mode.
+    assert 'log "Preserving external environment and credentials"' in setup
+
+
+def test_release_never_migrates_repo_dotenv_into_protected_credentials() -> None:
+    """Release is not a credentials migration or LIVE authorization authority."""
+    release = _text("deploy/lightsail_release.sh")
+    setup = _text("deploy/lightsail_setup.sh")
+
+    assert 'cp -p "$APP_DIR/.env" "$ENV_FILE"' not in release
+    assert 'cp -p "$LEGACY_ENV" "$ENV_FILE"' not in release
+    assert "validate_environment\n" in release
+    assert 'write_status env_missing "environment file missing:' in release
+
+    # Historical one-time import remains only in explicit operator setup.
+    assert 'cp -p "$LEGACY_ENV" "$ENV_FILE"' in setup
+    assert "ENABLE_LIVE=false" in setup
+    assert "EXECUTION_MODE=SHADOW" in setup
 
 
 def test_lightsail_uses_external_environment_file() -> None:
@@ -156,6 +185,128 @@ def test_retired_dashboard_and_adhoc_tooling_are_absent() -> None:
     assert (ROOT / "dashboard/superlite_console.py").is_file()
     assert (ROOT / "dashboard/streamlit_app.py").is_file()
     assert (ROOT / "dashboard/log_export.py").is_file()
+
+
+def test_code_only_release_reuses_installed_editable_environment() -> None:
+    release = _text("deploy/lightsail_release.sh")
+    assert 'git diff --quiet "$BEFORE" "$AFTER" --' in release
+    assert "pyproject.toml" in release
+    assert "requirements/" in release
+    assert 'find_spec("nifty_scalper_bot")' in release
+    assert "BOT_DEPLOY_APP_DIR" in release
+    assert "is_relative_to" in release
+    assert "Skipping pip install: installed editable package" in release
+    assert "PACKAGE_INSTALL_ATTEMPTED=false" in release
+    assert 'if [ "$PACKAGE_INSTALL_ATTEMPTED" = true ]; then' in release
+    assert "auto_release_should_defer" in release
+    assert "intraday_flat_broker_confirmed" in release
+
+
+@pytest.mark.parametrize(
+    (
+        "same_sha",
+        "manifest_changed",
+        "pip_exit",
+        "prior_failure",
+        "expected_calls",
+        "degraded",
+    ),
+    [
+        (True, True, 0, False, 0, False),
+        (False, False, 0, False, 0, False),
+        (False, True, 0, False, 1, False),
+        (False, True, 1, False, 1, True),
+        (True, False, 1, True, 1, True),
+        (True, False, 0, True, 1, False),
+    ],
+)
+def test_dashboard_dependency_refresh_is_changed_manifest_only_and_observable(
+    tmp_path: Path,
+    same_sha: bool,
+    manifest_changed: bool,
+    pip_exit: int,
+    prior_failure: bool,
+    expected_calls: int,
+    degraded: bool,
+) -> None:
+    """Console pip failures must never masquerade as a healthy console release."""
+    release = _text("deploy/lightsail_release.sh")
+    start = "# Failed console dependency updates survive a restart and later code-only"
+    dependency_block = (
+        start
+        + release.split(start, 1)[1].split(
+            '\nif ! set_runtime_build_sha "$AFTER"; then', 1
+        )[0]
+    )
+
+    (tmp_path / "dashboard").mkdir()
+    (tmp_path / "dashboard" / "requirements.txt").write_text(
+        "streamlit>=1,<2\n", encoding="utf-8"
+    )
+    python = tmp_path / "streamlit-venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.write_text(
+        '#!/bin/sh\nprintf "pip\\n" >> "$PIP_CALLS"\nexit "$PIP_EXIT"\n',
+        encoding="utf-8",
+    )
+    python.chmod(0o755)
+    calls = tmp_path / "pip-calls.txt"
+    failure_marker = tmp_path / "protected" / "console-install-failed"
+    failure_marker.parent.mkdir()
+    if prior_failure:
+        failure_marker.touch()
+    shell = (
+        """
+set -eu
+git() {
+  if [ "$MANIFEST_CHANGED" = "true" ]; then return 1; fi
+  return 0
+}
+log() { :; }
+"""
+        + dependency_block
+        + """
+printf "degraded=%s\\n" "$STREAMLIT_DEPENDENCY_FAILED"
+"""
+    )
+    env = dict(
+        os.environ,
+        BEFORE="sha-a",
+        AFTER="sha-a" if same_sha else "sha-b",
+        STREAMLIT_VENV=str(python.parent.parent),
+        MANIFEST_CHANGED="true" if manifest_changed else "false",
+        PIP_EXIT=str(pip_exit),
+        PIP_CALLS=str(calls),
+        STREAMLIT_DEPENDENCY_FAILED="false",
+        STREAMLIT_DEPENDENCY_FAILURE_MARKER=str(failure_marker),
+    )
+    done = subprocess.run(
+        ["bash", "-c", shell],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert done.returncode == 0, done.stderr
+    call_count = calls.read_text().count("pip") if calls.exists() else 0
+    assert call_count == expected_calls
+    assert failure_marker.exists() is degraded
+    assert f"degraded={str(degraded).lower()}" in done.stdout
+
+
+def test_failed_console_dependencies_are_reported_as_degraded() -> None:
+    release = _text("deploy/lightsail_release.sh")
+    assert "deployed_console_dependencies_degraded" in release
+    assert "STREAMLIT_DEPENDENCY_FAILURE_MARKER" in release
+    assert 'rm -f "$STREAMLIT_DEPENDENCY_FAILURE_MARKER"' in release
+    # Both no-change early exits must retain the persistent degraded signal.
+    no_change_fast_path = release.split("# Auto mode checks remote revisions", 1)[
+        1
+    ].split("CANDIDATE=", 1)[0]
+    assert no_change_fast_path.count("current_console_dependencies_degraded") == 2
+    assert 'if [ "$STREAMLIT_DEPENDENCY_FAILED" = true ]; then' in release
+    assert "WARNING: dashboard dependency refresh failed" not in release
 
 
 def test_release_runner_validates_and_rolls_back() -> None:
@@ -293,6 +444,64 @@ def test_unchanged_release_confirms_health_failure_before_restart() -> None:
     assert 'service_healthy "$BEFORE"' not in unchanged
 
 
+def test_admin_recovery_is_independent_of_broker_and_ci_gates() -> None:
+    release = _text("deploy/lightsail_release.sh")
+    entry = release.index("exec 9>")
+    recovery_call = release.index("recover_admin_control || true", entry)
+    broker_gate = release.index("if auto_release_should_defer; then", entry)
+    ci_gate = release.index('if [ "$BEFORE" != "$AFTER" ]; then', broker_gate)
+    assert entry < recovery_call < broker_gate < ci_gate
+    assert "http://127.0.0.1:${ADMIN_PORT}/healthz" in release
+    assert 'http://127.0.0.1:${ADMIN_PORT}/admin"' in release
+    recovery = release.split("recover_admin_control() {", 1)[1].split(
+        "\nrestart_streamlit()", 1
+    )[0]
+    assert "restart_admin && admin_healthy" in recovery
+    assert 'systemctl restart "$SERVICE"' not in recovery
+    assert "intraday_flat_broker_confirmed" not in recovery
+
+
+def test_isolated_admin_recovery_success_and_failure(tmp_path: Path) -> None:
+    release = _text("deploy/lightsail_release.sh")
+    recovery = (
+        "recover_admin_control() {"
+        + release.split("recover_admin_control() {", 1)[1].split(
+            "\nrestart_streamlit()", 1
+        )[0]
+    )
+    shell = recovery + """
+log() { printf "%s\\n" "$*" >> "$LOGFILE"; }
+admin_healthy() { [ "$ADMIN_STATE" = "healthy" ]; }
+restart_admin() {
+  printf "restart-admin\\n" >> "$LOGFILE"
+  if [ "$RESTART_SUCCEEDS" = "true" ]; then ADMIN_STATE=healthy; return 0; fi
+  return 1
+}
+recover_admin_control
+"""
+    for initial, restarted, expected in (
+        ("healthy", "false", 0),
+        ("unhealthy", "true", 0),
+        ("unhealthy", "false", 1),
+    ):
+        logfile = tmp_path / "admin.log"
+        logfile.unlink(missing_ok=True)
+        env = dict(
+            os.environ,
+            LOGFILE=str(logfile),
+            ADMIN_STATE=initial,
+            RESTART_SUCCEEDS=restarted,
+            ADMIN_SERVICE="niftybot-admin",
+        )
+        result = subprocess.run(
+            ["bash", "-c", shell], capture_output=True, text=True, env=env, check=False
+        )
+        assert result.returncode == expected, result.stderr
+        logged = logfile.read_text() if logfile.exists() else ""
+        assert logged.count("restart-admin") == (0 if initial == "healthy" else 1)
+        assert "trading engine unchanged" in logged or initial == "healthy"
+
+
 def test_changed_release_restarts_current_revision_admin_before_research_poll() -> None:
     release = _text("deploy/lightsail_release.sh")
 
@@ -300,7 +509,11 @@ def test_changed_release_restarts_current_revision_admin_before_research_poll() 
     assert "restart_admin()" in release
     helper = release.split("restart_admin()", 1)[1].split("restart_streamlit()", 1)[0]
     assert 'systemctl restart "$ADMIN_SERVICE"' in helper
-    assert "http://127.0.0.1:${ADMIN_PORT}/admin/api/status" in helper
+    assert 'http://127.0.0.1:${ADMIN_PORT}/healthz"' in helper
+    assert 'http://127.0.0.1:${ADMIN_PORT}/admin"' in helper
+    assert "http://127.0.0.1:${ADMIN_PORT}/admin/api/status" not in helper
+    assert "--max-time 2" in helper
+    assert "--max-time 3" in helper
 
     deployed = release.split('if wait_for_service "$AFTER"; then', 1)[1].split(
         "exit 0", 1
@@ -394,35 +607,25 @@ def test_release_runner_publishes_exact_runtime_build_sha() -> None:
     assert "FORCE_RESTART=true" in no_change_block
 
 
-def test_release_enables_existing_daily_log_archive() -> None:
+def test_telemetry_urls_and_enablement_are_owned_by_github() -> None:
     release = _text("deploy/lightsail_release.sh")
     setup = _text("deploy/lightsail_setup.sh")
-    example = _text(".env.example")
-    endpoint = (
-        "https://dehdptgkqbrkyzyodicd.supabase.co/functions/v1/nifty-log-archive-ingest"
-    )
+    defaults = _text("src/nifty_scalper_bot/config/defaults.py")
+    env_utils = _text("src/nifty_scalper_bot/config/env_utils.py")
 
-    assert "set_env_value SUPABASE_LOG_ARCHIVE_ENABLED true" in release
-    for text in (release, setup):
-        assert endpoint in text
-        assert "SUPABASE_LOG_ARCHIVE_INTERVAL_SECONDS 300" in text
-    assert "SUPABASE_LOG_ARCHIVE_ENABLED=true" in example
-
-
-def test_release_provisions_nonsecret_trade_replication_settings() -> None:
-    release = _text("deploy/lightsail_release.sh")
-    setup = _text("deploy/lightsail_setup.sh")
-    endpoint = (
-        "https://dehdptgkqbrkyzyodicd.supabase.co/functions/v1/nifty-trade-ingest"
-    )
-    for text in (release, setup):
-        assert "SUPABASE_TRADE_REPLICATION_ENABLED true" in text
-        assert endpoint in text
-        assert "SUPABASE_SERVICE_ROLE" not in text
-        assert "SUPABASE_SECRET" not in text
-    assert (
-        'if [ "$RUNTIME_ENV_CHANGED" = true ]; then FORCE_RESTART=true; fi' in release
-    )
+    for script in (setup, release):
+        assert "ensure_env_default SUPABASE_" not in script
+        assert "set_env_value SUPABASE_" not in script
+        assert "supabase.co/functions/v1" not in script
+        assert "SUPABASE_SECRET" not in script
+        assert "SUPABASE_SERVICE_ROLE" not in script
+    assert "nifty-trade-ingest" in defaults
+    assert "nifty-log-archive-ingest" in defaults
+    assert "nifty-runtime-heartbeat-ingest" in defaults
+    assert 'os.getenv("DEPLOYMENT_PLATFORM")' in env_utils
+    assert "supabase_telemetry_enabled" in env_utils
+    restart_marker = 'if [ "$RUNTIME_ENV_CHANGED" = true ]; then FORCE_RESTART=true; fi'
+    assert restart_marker in release
     assert "tests/infra/test_supabase_trade_replication.py" in release
 
 
@@ -447,11 +650,141 @@ def _auto_release_helpers() -> str:
     assert "TZ=Asia/Kolkata date +%u" not in release
     assert release.count("auto_release_should_defer() {") == 1
     return (
-        "intraday_flat_broker_confirmed() {"
+        "RELEASE_HOLD_ACTIVE=true\n"
+        + "intraday_flat_broker_confirmed() {"
         + release.split("intraday_flat_broker_confirmed() {", 1)[1].split(
             "\nexec 9>", 1
         )[0]
     )
+
+
+def test_broker_guard_diagnostic_never_authorizes_release() -> None:
+    """Diagnostic codes must not replace either of the broker-flat samples."""
+    import ast
+
+    release = _text("deploy/lightsail_release.sh")
+    guard = release.split("<<'PY_FLAT_GUARD'\n", 1)[1].split("\nPY_FLAT_GUARD", 1)[0]
+    parsed = ast.parse(guard)
+    blocked = next(
+        node
+        for node in parsed.body
+        if isinstance(node, ast.FunctionDef) and node.name == "blocked"
+    )
+    is_safe = next(
+        node
+        for node in parsed.body
+        if isinstance(node, ast.FunctionDef) and node.name == "is_safe"
+    )
+    blocked_returns = [
+        node for node in ast.walk(blocked) if isinstance(node, ast.Return)
+    ]
+    assert len(blocked_returns) == 1
+    assert isinstance(blocked_returns[0].value, ast.Constant)
+    assert blocked_returns[0].value.value is False
+    reasons = {
+        node.args[0].value
+        for node in ast.walk(is_safe)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "blocked"
+        and len(node.args) == 1
+        and isinstance(node.args[0], ast.Constant)
+    }
+    assert reasons >= {
+        "entry_hold_not_acknowledged",
+        "local_reconciliation_incomplete",
+        "local_reconciliation_failed",
+        "broker_snapshot_shape_invalid",
+        "broker_position_nonflat",
+        "broker_order_not_terminal",
+        "local_broker_auth_unverified",
+    }
+    assert not any(
+        isinstance(node, ast.Return)
+        and isinstance(node.value, ast.Constant)
+        and node.value.value is False
+        for node in ast.walk(is_safe)
+    )
+    assert guard.count("if not is_safe():") == 2
+    assert "time.sleep(1)" in guard
+    assert "kite.positions()" in guard and "kite.orders()" in guard
+    assert 'print(f"intraday_release_guard_blocked: {reason}"' in guard
+
+
+def test_default_auto_release_defers_when_broker_exposure_is_unverified() -> None:
+    """A validated release cannot bypass unknown broker positions or orders."""
+    helpers = _auto_release_helpers()
+    shell = helpers + """
+AUTO_MODE=true
+BEFORE=oldrevision
+AFTER=newrevision
+FORCE_RESTART=false
+intraday_flat_broker_confirmed() {
+  printf 'BROKER_PROBED\\n' >&2
+  return 1
+}
+if auto_release_should_defer; then
+  exit 77
+fi
+"""
+    result = subprocess.run(
+        ["bash", "-c", shell], capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 77, result.stderr
+    assert "BROKER_PROBED" in result.stderr
+
+    release = _text("deploy/lightsail_release.sh")
+    assert release.count("if auto_release_should_defer; then") == 3
+    assert "BOT_AUTO_DEPLOY_EXPOSURE_GUARD_ENABLED:-false" not in release
+    assert "acquire_release_entry_hold" in release
+    assert 'BOT_RELEASE_ENTRY_HOLD_REQUIRED="$RELEASE_HOLD_ACTIVE"' in release
+    assert "git worktree add" in release
+    assert "verify_release_ci.py" in release
+    assert "wait_for_service" in release
+    assert "rolled_back" in release
+
+
+def test_release_hold_precedes_checkout_and_engine_restart() -> None:
+    release = _text("deploy/lightsail_release.sh")
+    acquired = release.index("if ! acquire_release_entry_hold; then")
+    checked = release.index("if auto_release_should_defer; then", acquired)
+    checkout = release.index('git reset --hard --quiet "$AFTER"', checked)
+    restarted = release.index('sudo systemctl restart "$SERVICE"', checkout)
+    assert acquired < checked < checkout < restarted
+    assert "flock -w 10 8" in release
+    assert 'rm -f "$RELEASE_HOLD_FILE"' in release
+    assert "release_entry_hold_active" in _text("src/nifty_scalper_bot/main.py")
+    assert "live_entry_submission_slot" in _text(
+        "src/nifty_scalper_bot/execution/order_manager_core.py"
+    )
+
+
+def test_release_hold_marker_records_owner_pid_and_releases_lock(tmp_path) -> None:
+    """The actual owner PID, not a literal dollar sign, must be written."""
+    release = _text("deploy/lightsail_release.sh")
+    function_body = release.split("acquire_release_entry_hold() {", 1)[1].split(
+        "\nauto_release_should_defer() {", 1
+    )[0]
+    shell = "acquire_release_entry_hold() {" + function_body + """
+CONFIG_DIR="$1"
+RELEASE_HOLD_FILE="$CONFIG_DIR/auto_release_entry_hold"
+RELEASE_ENTRY_LOCK_FILE="$CONFIG_DIR/auto_release_entry_lock"
+RELEASE_HOLD_ACTIVE=false
+log() { :; }
+acquire_release_entry_hold
+test "$RELEASE_HOLD_ACTIVE" = true
+test "$(cat "$RELEASE_HOLD_FILE")" = "$BASHPID"
+test "$(stat -c '%a' "$RELEASE_HOLD_FILE")" = 600
+flock -u 8
+"""
+    result = subprocess.run(
+        ["bash", "-euo", "pipefail", "-c", shell, "release-test", str(tmp_path)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "auto_release_entry_hold").is_file()
 
 
 def test_auto_release_has_no_market_hours_blackout() -> None:
@@ -475,7 +808,7 @@ auto_release_should_defer
         assert (result.returncode == 0) is defer, (safe, result.stderr)
 
 
-def test_auto_release_and_manual_restart_have_independent_exposure_policy() -> None:
+def test_auto_release_and_manual_restart_both_require_broker_flat() -> None:
     helpers = _auto_release_helpers()
     shell = helpers + """
 AUTO_MODE="$1"
@@ -488,7 +821,7 @@ auto_release_should_defer
     for mode, safe, defer in (
         ("true", "true", False),
         ("true", "false", True),
-        ("false", "false", False),
+        ("false", "false", True),
     ):
         result = subprocess.run(
             ["bash", "-c", shell, "fixture", mode, safe],
@@ -759,3 +1092,64 @@ def test_auto_release_fails_closed_if_exposure_restore_fails() -> None:
     assert boundary.index("write_status runtime_restore_failed") < boundary.index(
         "write_status deferred_broker_exposure"
     )
+
+
+def test_successful_engine_release_never_hides_failed_admin(tmp_path: Path) -> None:
+    """A healthy engine must not mask a broken independent admin service."""
+    release = _text("deploy/lightsail_release.sh")
+    start = release.index('if wait_for_service "$AFTER"; then')
+    end = release.index('\nif [ "$BEFORE" != "$AFTER" ]; then\n  git reset', start)
+    success_block = release[start:end]
+
+    script = (
+        "wait_for_service() { return 0; }\n"
+        'restart_admin() { [ "$ADMIN_OK" = "yes" ]; }\n'
+        'restart_streamlit() { [ "$CONSOLE_OK" = "yes" ]; }\n'
+        'broker_auth_dependency_degraded() { [ "$BROKER_DEGRADED" = "yes" ]; }\n'
+        'write_status() { printf "%s\\n" "$1" > "$STATUS_OUTPUT"; }\n'
+        "logger() { :; }\n"
+        "log() { :; }\n"
+        "poll_research_request() { :; }\n" + success_block
+    )
+    cases = (
+        ("yes", "yes", "no", "deployed"),
+        ("no", "yes", "no", "deployed_admin_degraded"),
+        ("no", "no", "no", "deployed_controls_degraded"),
+        ("yes", "yes", "yes", "deployed_dependency_degraded"),
+        ("no", "yes", "yes", "deployed_admin_and_broker_degraded"),
+    )
+    for admin_ok, console_ok, broker_degraded, expected in cases:
+        state_file = tmp_path / "state.txt"
+        result = subprocess.run(
+            ["bash", "-c", script],
+            env={
+                **os.environ,
+                "ADMIN_OK": admin_ok,
+                "CONSOLE_OK": console_ok,
+                "BROKER_DEGRADED": broker_degraded,
+                "STATUS_OUTPUT": str(state_file),
+                "RESTART_PENDING_FILE": str(tmp_path / "pending"),
+                "AFTER": "f" * 40,
+                "BEFORE": "e" * 40,
+            },
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        assert state_file.read_text(encoding="utf-8").strip() == expected
+
+
+def test_current_release_status_surfaces_failed_admin_recovery() -> None:
+    release = _text("deploy/lightsail_release.sh")
+    assert release.count("write_status current_admin_degraded") == 2
+    assert release.count("if admin_healthy; then") >= 2
+    assert "admin service unavailable after recovery attempt" in release
+
+
+def test_admin_status_link_is_valid_on_engine_and_isolated_admin() -> None:
+    page = _text("src/nifty_scalper_bot/admin_dashboard.py")
+    assert 'href="/admin/status.json">Service status</a>' in page
+    assert 'href="/health">Health</a>' not in page
+    assert '@router.get("/admin/status.json")' in page

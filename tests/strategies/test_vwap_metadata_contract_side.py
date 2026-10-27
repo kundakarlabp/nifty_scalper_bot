@@ -366,6 +366,8 @@ def test_vwap_default_strong_trend_distance_cap_is_three_atr(monkeypatch):
 
 def test_vwap_futures_slope_uses_bps_floor(monkeypatch):
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    # Isolate the original strict-slope contract from the new LIVE opt-in lane.
+    monkeypatch.setenv("VWAP_LIVE_NEUTRAL_SLOPE_ENABLED", "false")
     monkeypatch.setenv("VWAP_FUTURES_SLOPE_MIN_BPS", "1.0")
     strategy = VWAPProStrategy(VWAPProStrategyConfig(), _DummyEngine())
 

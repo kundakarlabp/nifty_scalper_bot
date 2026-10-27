@@ -1,4 +1,13 @@
-"""Read-only command and observability console for Nifty Scalper Bot."""
+"""Purpose: Present read-only option-trading status and log diagnostics.
+
+Responsibilities:
+- Fetch runtime status and event feeds for operator display.
+- Show funnel metrics, admission blockers and recent events.
+- Offer bounded read-only exports for investigating trading sessions.
+
+Boundaries: Dashboard display does not approve or submit orders.
+Safety: Missing or partial telemetry is not broker-confirmed truth.
+"""
 from __future__ import annotations
 import csv, io, os, re
 from collections import Counter
