@@ -48,6 +48,7 @@ from nifty_scalper_bot.core.adaptive_calibration import (
 )
 from nifty_scalper_bot.core.market_regime import RegimeSnapshot
 from nifty_scalper_bot.core.market_regime_manager import MarketRegimeManager
+from nifty_scalper_bot.core.option_volume_diagnostics import describe_option_volume_evidence
 from nifty_scalper_bot.core.strategy_vote_policy import (
     independent_same_side_confirmation,
     partition_votes,
@@ -2989,6 +2990,7 @@ class StrategyManager(_BaseStrategyManager):
         indicators["symbol_role"] = symbol_role
         indicators["_regime_adjustments"] = adjustments
         self._augment_futures_metrics(indicators)
+        opt_quote = None
         # ✅ FIX S3: Inject exchange VWAP for options
         if self._data_hub is not None:
             try:
@@ -3736,27 +3738,52 @@ class StrategyManager(_BaseStrategyManager):
                 # A bounded, per-symbol sample distinguishes an absent volume
                 # field from a genuine zero without relaxing this no-vote gate.
                 if strategy_name == "VWAPPro" and reason == "option_candle_no_trades":
+                    # The indicator snapshot does not include completeness
+                    # flags. Fetch the ACTUAL indicator-history tail so the
+                    # diagnostic can distinguish provisional from zero bars.
+                    # Never change the VWAPPro rejection from this observation.
+                    latest_bar = None
+                    history_getter = getattr(self._indicator_engine, "get_history", None)
+                    if callable(history_getter):
+                        try:
+                            history_tail = history_getter(symbol, count=1, field="bars")
+                            if history_tail and isinstance(history_tail[-1], t.Mapping):
+                                latest_bar = history_tail[-1]
+                        except Exception:
+                            pass  # Diagnostic failure cannot authorize an entry.
+                    evidence = describe_option_volume_evidence(
+                        indicators,
+                        latest_bar=latest_bar,
+                        quote=opt_quote if isinstance(opt_quote, t.Mapping) else None,
+                    )
                     log_throttled(
                         log,
                         f"vwap_zero_volume:{symbol}",
-                        "VWAP_OPTION_VOLUME_REJECT symbol=%s raw_volume=%r avg_volume=%r bar_ts=%s bar_complete=%s bar_provisional=%s quote_version=%s data_age_s=%s history_source=%s",
+                        "VWAP_OPTION_VOLUME_REJECT symbol=%s raw_volume=%r avg_volume=%r bar_ts=%s bar_complete=%s bar_provisional=%s quote_version=%s data_age_s=%s history_source=%s evidence_state=%s history_bar_volume=%s quote_delta=%s quote_cumulative=%s quote_transition=%s quote_source=%s",
                         symbol,
                         indicators.get("volume"),
                         indicators.get("avg_volume"),
-                        indicators.get("latest_bar_ts"),
-                        indicators.get("is_complete"),
-                        indicators.get("is_provisional"),
+                        evidence["history_bar_ts"],
+                        evidence["history_bar_complete"],
+                        evidence["history_bar_provisional"],
                         indicators.get("quote_update_version"),
                         indicators.get("data_age_seconds"),
                         indicators.get("history_source"),
+                        evidence["state"],
+                        evidence["history_bar_volume"],
+                        evidence["quote_volume_delta"],
+                        evidence["quote_volume_cumulative"],
+                        evidence["quote_volume_transition_state"],
+                        evidence["quote_source"],
                         interval_sec=60.0,
                         level=logging.INFO,
                         extra={
                             "event": "VWAP_OPTION_VOLUME_REJECT",
                             "symbol": symbol,
                             "raw_volume": indicators.get("volume"),
-                            "bar_ts": indicators.get("latest_bar_ts"),
+                            "bar_ts": evidence["history_bar_ts"],
                             "quote_version": indicators.get("quote_update_version"),
+                            "volume_evidence": evidence,
                         },
                     )
                 continue

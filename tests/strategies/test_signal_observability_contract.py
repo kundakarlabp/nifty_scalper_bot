@@ -358,6 +358,8 @@ def test_zero_volume_rejection_has_bounded_provenance_log_without_admission_chan
     assert 'f"vwap_zero_volume:{symbol}"' in manager_source
     assert "interval_sec=60.0" in manager_source
     assert '"raw_volume": indicators.get("volume")' in manager_source
-    assert '"bar_ts": indicators.get("latest_bar_ts")' in manager_source
+    assert '"bar_ts": evidence["history_bar_ts"]' in manager_source
+    assert "describe_option_volume_evidence(" in manager_source
+    assert '"volume_evidence": evidence' in manager_source
     assert 'self._no_vote("option_candle_no_trades")' in vwap_source
     assert "if vol <= 0:" in vwap_source
