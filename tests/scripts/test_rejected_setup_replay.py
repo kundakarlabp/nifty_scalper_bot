@@ -112,6 +112,21 @@ def test_three_second_ofi_misalignment_resets_both_arms() -> None:
     assert sample["hard_reset_observations"] == 1
 
 
+def test_missing_fields_with_none_reason_do_not_make_neutral_proof() -> None:
+    lines = [
+        setup(),
+        vote(5),
+        book(5, 10),
+        vote(8),
+        book(8, 11, reason="None", aligned=False),
+        vote(11),
+        book(11, 20),
+    ]
+    sample = analyze("\n".join(lines))["setups"][0]
+    assert sample["neutral_tolerant_logged_pair"] is False
+    assert sample["hard_reset_observations"] == 1
+
+
 def test_unmatched_throttled_vote_produces_unknown_not_negative() -> None:
     sample = analyze("\n".join([setup(), vote(5), book(5, 10), vote(11)]))[
         "setups"
