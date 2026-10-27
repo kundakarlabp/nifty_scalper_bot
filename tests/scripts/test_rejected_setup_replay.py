@@ -201,6 +201,7 @@ def test_invalid_identity_is_not_promoted() -> None:
     assert sample["identity_conflict"] is True
     assert sample["strict_logged_pair"] is None
 
+
 def test_vote_only_smc_setup_is_counted_but_never_assumed_confirmed() -> None:
     fifth = "smcv2:NFO:NIFTY26OCTFUT:CE:2026-10-27T08:43:00+00:00"
     lines = [
@@ -257,4 +258,3 @@ def test_mismatched_vote_only_symbol_is_not_validated_as_same_setup() -> None:
     sample = analyze("\n".join(lines))["setups"][0]
     assert sample["identity_conflict"] is True
     assert sample["strict_logged_pair"] is None
-
