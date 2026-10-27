@@ -244,18 +244,15 @@ def _bounded_smc_book_observation(
         return int(number)
 
     version = positive_version(metadata.get("quote_update_version"))
-    same_version = (
-        version is not None
-        and version == positive_version(indicators.get("quote_update_version"))
+    same_version = version is not None and version == positive_version(
+        indicators.get("quote_update_version")
     )
     bid = positive_number(indicators.get("bid")) if same_version else None
     ask = positive_number(indicators.get("ask")) if same_version else None
     state = (
         "indicator_book_present"
         if bid is not None and ask is not None and ask >= bid
-        else "book_missing_or_incoherent"
-        if same_version
-        else "quote_version_unproven"
+        else "book_missing_or_incoherent" if same_version else "quote_version_unproven"
     )
     if state != "indicator_book_present":
         bid = ask = None
