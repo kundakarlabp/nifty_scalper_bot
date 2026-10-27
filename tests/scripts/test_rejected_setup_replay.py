@@ -258,3 +258,88 @@ def test_mismatched_vote_only_symbol_is_not_validated_as_same_setup() -> None:
     sample = analyze("\n".join(lines))["setups"][0]
     assert sample["identity_conflict"] is True
     assert sample["strict_logged_pair"] is None
+
+
+def test_original_sweep_age_at_qualification_26_october_two_trades() -> None:
+    """Do not confuse fresh order-flow votes with a fresh SMC sweep."""
+    setups = (
+        (
+            "smcv2:NFO:NIFTY26OCTFUT:CE:2026-10-26T08:13:00+00:00",
+            "NFO:NIFTY26OCT22650CE",
+            "13:45:26",
+            "13:45:28",
+        ),
+        (
+            "smcv2:NFO:NIFTY26OCTFUT:CE:2026-10-26T08:33:00+00:00",
+            "NFO:NIFTY26OCT22700CE",
+            "14:09:27",
+            "14:09:29",
+        ),
+    )
+    lines = []
+    for setup_id, symbol, manager_clock, broker_clock in setups:
+        for clock, stage in (
+            (manager_clock, "TRIGGER_QUALIFIED"),
+            (manager_clock, "MANAGER_QUALIFIED"),
+            (broker_clock, "BROKER_ACCEPTED"),
+        ):
+            lines.append(
+                f"[2026-10-26 {clock} IST] "
+                f"SETUP_LIFECYCLE stage={stage} strategy=SMC "
+                f"symbol={symbol} side=CE setup_id={setup_id} reason=None"
+            )
+
+    result = analyze("\n".join(lines))
+    assert result["setup_count"] == 2
+    assert result["manager_qualified_setup_count"] == 2
+    assert result["manager_qualified_5m_reference_rejections"] == 1
+    by_symbol = {item["symbol"]: item for item in result["setups"]}
+    first = by_symbol["NFO:NIFTY26OCT22650CE"]
+    second = by_symbol["NFO:NIFTY26OCT22700CE"]
+    assert first["sweep_age_at_manager_qualification_seconds"] == 146.0
+    assert first["five_minute_reference"] == "within_five_minute_limit"
+    assert second["sweep_age_at_manager_qualification_seconds"] == 387.0
+    assert second["sweep_age_at_broker_acceptance_seconds"] == 389.0
+    assert second["five_minute_reference"] == "would_reject_stale_sweep"
+    assert result["execution_or_pnl_replay_valid"] is False
+
+
+def test_missing_manager_marker_not_misclassified_as_accepted() -> None:
+    sample = analyze("\n".join([setup(), vote(5, 10), book(5, 10)]))[
+        "setups"
+    ][0]
+    assert sample["five_minute_reference"] == "no_manager_qualification_logged"
+    assert sample["manager_qualified_at_ist"] is None
+
+
+def test_malformed_and_future_sweep_do_not_pass_reference_gate() -> None:
+    for anchor, expected in (
+        ("unparseable", "unknown_original_sweep"),
+        ("2026-10-27T06:59:00+00:00", "invalid_future_anchor"),
+    ):
+        setup_id = f"smcv2:NFO:NIFTY26OCTFUT:CE:{anchor}"
+        lines = [
+            setup(setup_id=setup_id),
+            logged(
+                7,
+                "SETUP_LIFECYCLE stage=MANAGER_QUALIFIED strategy=SMC "
+                f"symbol={SYMBOL} side=CE setup_id={setup_id} reason=None",
+            ),
+        ]
+        entry = analyze("\n".join(lines))["setups"][0]
+        assert entry["five_minute_reference"] == expected
+
+
+def test_wrong_symbol_manager_event_cannot_validate_another_setup() -> None:
+    lines = [
+        setup(),
+        logged(
+            7,
+            "SETUP_LIFECYCLE stage=MANAGER_QUALIFIED strategy=SMC "
+            "symbol=NFO:NIFTY26OCT22700PE side=PE "
+            f"setup_id={SETUP} reason=None",
+        ),
+    ]
+    entry = analyze("\n".join(lines))["setups"][0]
+    assert entry["manager_qualified_at_ist"] is None
+    assert entry["five_minute_reference"] == "no_manager_qualification_logged"
