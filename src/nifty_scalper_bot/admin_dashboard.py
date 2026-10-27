@@ -253,6 +253,10 @@ def _complete_kite_session(request_token: str) -> RedirectResponse:
     verified, detail = _verify_access_token(api_key, result)
     if not verified:
         return RedirectResponse(f"/admin?token=err&msg={urllib.parse.quote(('verification failed: ' + detail)[:120])}", status_code=303)
+    if os.getenv("DEPLOYMENT_PLATFORM") == "aws_lightsail":
+        expected_owner = owner_user_id(env)
+        if not expected_owner or not hmac.compare_digest(detail, expected_owner):
+            return RedirectResponse("/admin?token=err&msg=Zerodha+account+mismatch", status_code=303)
     restart_result = _activate_access_token(result)
     if restart_result.ok:
         return RedirectResponse("/admin?token=ok", status_code=303)
