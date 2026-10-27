@@ -341,3 +341,65 @@ def test_wrong_symbol_manager_event_cannot_validate_another_setup() -> None:
     entry = analyze("\n".join(lines))["setups"][0]
     assert entry["manager_qualified_at_ist"] is None
     assert entry["five_minute_reference"] == "no_manager_qualification_logged"
+
+
+def test_smc_indicator_book_sample_matches_exact_setup_vote_version() -> None:
+    lines = [
+        setup(),
+        vote(5, 10),
+        book(5, 10),
+        logged(
+            5,
+            "SMC_QUOTE_OBSERVATION "
+            f"symbol={SYMBOL} setup_id={SETUP} quote_update_version=10 "
+            "evaluation_snapshot_id=abc book_state=indicator_book_present "
+            "book_bid=99.5 book_ask=100 book_tick_ts_ms=None depth_present=True",
+        ),
+        vote(11, 20),
+        book(11, 20),
+        logged(
+            11,
+            "SMC_QUOTE_OBSERVATION "
+            f"symbol={SYMBOL} setup_id={SETUP} quote_update_version=20 "
+            "evaluation_snapshot_id=def book_state=book_missing_or_incoherent "
+            "book_bid=None book_ask=None book_tick_ts_ms=None depth_present=False",
+        ),
+        logged(
+            11,
+            "SMC_QUOTE_OBSERVATION "
+            f"symbol={SYMBOL} setup_id={SETUP} quote_update_version=99 "
+            "evaluation_snapshot_id=foreign book_state=indicator_book_present "
+            "book_bid=99.5 book_ask=100 book_tick_ts_ms=None depth_present=True",
+        ),
+    ]
+    result = analyze("\n".join(lines))
+    item = result["setups"][0]
+    assert item["indicator_book_samples"] == 2
+    assert item["indicator_book_present_samples"] == 1
+    assert item["indicator_book_missing_samples"] == 1
+    assert item["indicator_book_unproven_version_samples"] == 0
+    assert item["complete_executable_quote_path"] is False
+    assert result["execution_or_pnl_replay_valid"] is False
+
+
+def test_quote_sample_from_unrelated_setup_does_not_prove_bid_ask() -> None:
+    foreign = "smcv2:NFO:NIFTY26OCTFUT:CE:2026-10-27T06:00:00+00:00"
+    lines = [
+        setup(),
+        vote(5, 10),
+        logged(
+            5,
+            "SMC_QUOTE_OBSERVATION "
+            f"symbol={SYMBOL} setup_id={foreign} quote_update_version=10 "
+            "book_state=indicator_book_present book_bid=99 book_ask=100",
+        ),
+    ]
+    item = analyze("\n".join(lines))["setups"][0]
+    assert item["indicator_book_samples"] == 0
+    assert item["indicator_book_present_samples"] == 0
+
+
+def test_old_journal_without_book_samples_is_not_assumed_quote_complete() -> None:
+    item = analyze("\n".join([setup(), vote(5, 10), book(5, 10)]))["setups"][0]
+    assert item["indicator_book_samples"] == 0
+    assert item["complete_executable_quote_path"] is False

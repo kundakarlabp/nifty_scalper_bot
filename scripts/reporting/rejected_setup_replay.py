@@ -3,8 +3,8 @@
 Responsibilities: deduplicate both SMC lifecycle and trigger-vote setup IDs, compare
 strict and conservative neutral-tolerant logged confirmation sequences,
 reconstruct the original smcv2 structural sweep timestamp at manager approval
-and broker acceptance (using explicit timezone-aware event provenance), and
-report missing or invalid evidence without fabricating executable opportunities.
+and broker acceptance, and count optional version-matched SMC indicator-book
+samples (never an executable path). Missing proof remains indeterminate.
 
 Safety boundary: audits *logged* evidence, not the real-time strategy state
 machine. Journald may omit ticks, candles, fills, bid/ask and book updates.
@@ -150,6 +150,8 @@ def analyze(log_text: str, *, window_seconds: int = 120) -> dict[str, Any]:
     setups: dict[str, dict[str, Any]] = {}
     votes: list[tuple[str, str, datetime, int]] = []
     flow: list[Evidence] = []
+    # Optional log-only observational samples emitted from canonical SMC votes.
+    quote_samples: list[tuple[str, str, datetime, int, str]] = []
 
     def observe_setup(
         setup_id: str, symbol: str, side: str, at: datetime, *, stage: bool
@@ -200,6 +202,7 @@ def analyze(log_text: str, *, window_seconds: int = 120) -> dict[str, Any]:
                 "SETUP_LIFECYCLE stage=BROKER_ACCEPTED",
                 "STRATEGY_TRIGGER_VOTE strategy=SMC",
                 "ORDERFLOW_CONTEXT_EVIDENCE",
+                "SMC_QUOTE_OBSERVATION",
             )
         ):
             continue
@@ -245,6 +248,20 @@ def analyze(log_text: str, *, window_seconds: int = 120) -> dict[str, Any]:
             item = _evidence(line, at)
             if item is not None:
                 flow.append(item)
+        elif "SMC_QUOTE_OBSERVATION" in line:
+            setup_id = fields.get("setup_id", "")
+            symbol = fields.get("symbol", "")
+            version_raw = _float(fields, "quote_update_version", 0)
+            valid_version = (
+                math.isfinite(version_raw)
+                and version_raw > 0
+                and version_raw.is_integer()
+            )
+            version = int(version_raw) if valid_version else 0
+            if setup_id and symbol.endswith(("CE", "PE")) and version > 0:
+                quote_samples.append(
+                    (setup_id, symbol, at, version, fields.get("book_state", "unknown"))
+                )
 
     report: list[dict[str, Any]] = []
     for item in sorted(setups.values(), key=lambda entry: entry["first_at"]):
@@ -284,6 +301,20 @@ def analyze(log_text: str, *, window_seconds: int = 120) -> dict[str, Any]:
             matched.append(entry)
         matched.sort(key=lambda evidence: (evidence.at, evidence.quote_version))
         counts = Counter(event.classification for event in matched)
+        # Each sample must match the setup, option, version and same-second
+        # trigger. These are indicator-book observations, not executable quotes.
+        matched_quote_samples = {
+            (book_at, version, state)
+            for sid, sym, book_at, version, state in quote_samples
+            if sid == setup_id
+            and sym == symbol
+            and any(
+                vote_version == version
+                and abs((book_at - vote_at).total_seconds()) <= 1
+                for vote_at, _, vote_version in unique_votes
+            )
+        }
+        quote_states = Counter(item[2] for item in matched_quote_samples)
         recorded = admission_events.get(setup_id, {"manager": [], "broker": []})
         manager_times = sorted(
             timestamp
@@ -332,6 +363,15 @@ def analyze(log_text: str, *, window_seconds: int = 120) -> dict[str, Any]:
             "trigger_vote_lines": len(selected),
             "distinct_vote_snapshots": len(unique_votes),
             "matched_book_observations": len(matched),
+            "indicator_book_samples": len(matched_quote_samples),
+            "indicator_book_present_samples": quote_states["indicator_book_present"],
+            "indicator_book_missing_samples": quote_states[
+                "book_missing_or_incoherent"
+            ],
+            "indicator_book_unproven_version_samples": quote_states[
+                "quote_version_unproven"
+            ],
+            "complete_executable_quote_path": False,
             "unmatched_votes": len(unique_votes) - len(matched),
             "qualifying_book_observations": counts["qualifying"],
             "neutral_observations": counts["neutral"],
