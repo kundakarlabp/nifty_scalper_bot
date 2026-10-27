@@ -7,13 +7,14 @@ the trading engine, and must not perform real broker operations.
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from fastapi.testclient import TestClient
 
 from nifty_scalper_bot import admin_dashboard as dashboard
 from nifty_scalper_bot import operating_control as power
-from nifty_scalper_bot.superlite_admin import app
+from nifty_scalper_bot.admin_app import app
 
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -175,3 +176,9 @@ def test_power_mode_does_not_change_live_order_mode(monkeypatch):
     assert result.status_code == 303
     assert result.headers["location"] == "/admin?power=saved_not_applied"
     assert not any("ENABLE_LIVE" in item or "EXECUTION_MODE" in item for item in saves)
+
+
+def test_production_independent_admin_mounts_the_same_mode_router():
+    source = Path("src/nifty_scalper_bot/superlite_admin.py").read_text()
+    assert 'import_module("nifty_scalper_bot.operating_control").router' in source
+    assert "app.include_router(operating_router)" in source
