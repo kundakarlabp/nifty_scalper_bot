@@ -96,7 +96,9 @@ def test_finalized_candle_parity_matches_aware_timestamps_and_volume() -> None:
 
     indicator = _bar(150.0)
     canonical = {
-        "timestamp": datetime(2026, 10, 27, 14, 0, tzinfo=timezone(timedelta(hours=5, minutes=30))),
+        "timestamp": datetime(
+            2026, 10, 27, 14, 0, tzinfo=timezone(timedelta(hours=5, minutes=30))
+        ),
         "volume": 150.0,
     }
     out = describe_option_volume_evidence(
