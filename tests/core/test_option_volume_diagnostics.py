@@ -42,9 +42,7 @@ def test_provisional_tail_does_not_pretend_to_be_finalized() -> None:
 
 
 def test_positive_final_bar_with_zero_indicator_is_mismatch() -> None:
-    out = describe_option_volume_evidence(
-        {"volume": 0.0}, latest_bar=_bar(145.0)
-    )
+    out = describe_option_volume_evidence({"volume": 0.0}, latest_bar=_bar(145.0))
     assert out["state"] == "indicator_history_volume_mismatch"
     assert out["history_bar_volume"] == 145.0
 
