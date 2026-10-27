@@ -708,6 +708,7 @@ def test_trend_retest_extension_fails_closed_on_missing_structural_quality(
     assert signal is None
     assert strategy.last_no_vote_reason == expected
 
+
 @pytest.mark.parametrize(
     ("configured_floor", "admitted"),
     [("0.90", False), ("0.80", True)],
@@ -717,9 +718,7 @@ def test_vwap_confidence_floor_counterfactual_is_only_a_unit_fixture(
 ):
     """Compare one unchanged completed bar; do not claim economic replay."""
     monkeypatch.setenv("VWAP_EARLY_TREND_MIN_CONTEXT_CONF", configured_floor)
-    strategy, signal = _evaluate(
-        monkeypatch, underlying_direction_confidence=0.80
-    )
+    strategy, signal = _evaluate(monkeypatch, underlying_direction_confidence=0.80)
     assert strategy._early_trend_min_context_conf == float(configured_floor)
     assert (signal is not None) is admitted
     if not admitted:
