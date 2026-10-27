@@ -629,14 +629,14 @@ def _full_dashboard(request: Request, *, preview: bool = False) -> HTMLResponse:
     </div>
     <div class="footer">Nifty Scalper · Independent admin control plane · All times reflect your device’s clock.</div>
     </main>"""
+    # Always expose the existing daily token paste form on mobile.
+    body = body.replace(
+        "<details><summary>Paste callback URL / request token instead</summary>",
+        "<details open><summary>Paste callback URL / request token</summary>",
+        1,
+    )
     if preview and not owner_verified:
-        # Keep the original daily token entry visible without an intermediate
-        # owner-verification page. All other forms remain non-interactive here.
-        body = body.replace(
-            "<details><summary>Paste callback URL / request token instead</summary>",
-            "<details open><summary>Paste callback URL / request token</summary>",
-            1,
-        )
+        # Other controls remain unavailable until Kite owner verification.
         body = re.sub(
             r'(<form method="post" action="/admin/(?!token\b)[^"]+")',
             r"\1 inert", body,
