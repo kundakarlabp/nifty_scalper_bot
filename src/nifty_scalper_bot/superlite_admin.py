@@ -11,6 +11,7 @@ Safety: Liveness proof is not market readiness or external accessibility proof.
 """
 from __future__ import annotations
 
+import importlib
 import os
 import subprocess
 import threading
@@ -120,7 +121,9 @@ dashboard._flash = _flash
 dashboard._CSS = STYLE
 dashboard.FIELDS = [(label, key, True) for label, key, _secret in dashboard.FIELDS]
 
-from nifty_scalper_bot.operating_control import router as operating_router
+# Import after the canonical admin helpers are bound to the protected host
+# configuration; this does not load the trading engine.
+operating_router = importlib.import_module("nifty_scalper_bot.operating_control").router
 
 app = FastAPI(title="Nifty Bot Admin", docs_url=None, redoc_url=None)
 app.include_router(dashboard.router)
