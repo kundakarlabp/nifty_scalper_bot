@@ -216,3 +216,17 @@ def test_hung_exit_with_unverified_tag_is_not_resubmitted(monkeypatch, tmp_path)
     assert order_id is None
     assert BlockedThread.starts == 1
     assert manager._is_uncertain_order(lookups[-1])
+
+    later = order_manager_core.time.time() + 120
+    monkeypatch.setattr(order_manager_core.time, "time", lambda: later)
+    second = manager.place_order(
+        symbol="NFO:NIFTY2671423950CE",
+        side="SELL",
+        quantity=65,
+        order_type=OrderType.MARKET,
+        check_risk=False,
+        intent="EXIT",
+        tag="manual-square-off",
+    )
+    assert second is None
+    assert BlockedThread.starts == 1
