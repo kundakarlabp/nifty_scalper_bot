@@ -91,6 +91,7 @@ def test_nonfinite_quote_volume_is_not_logged_as_legitimate_volume() -> None:
     assert out["quote_volume_cumulative"] is None
     assert out["quote_volume_delta"] is None
 
+
 def test_finalized_candle_parity_matches_aware_timestamps_and_volume() -> None:
     from datetime import timedelta
 
