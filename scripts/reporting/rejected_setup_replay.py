@@ -130,16 +130,22 @@ def analyze(log_text: str, *, window_seconds: int = 120) -> dict[str, Any]:
         setup_id: str, symbol: str, side: str, at: datetime, *, stage: bool
     ) -> None:
         """Count a unique vote-only setup without inventing its missing stage."""
-        if not setup_id or side not in {"CE", "PE"} or not symbol.endswith(side):
+        if not setup_id:
             return
         existing = setups.get(setup_id)
         if existing is not None:
-            if existing["side"] != side or existing["symbol"] != symbol:
+            if (
+                existing["side"] != side
+                or existing["symbol"] != symbol
+                or not symbol.endswith(side)
+            ):
                 existing["identity_conflict"] = True
             existing["lifecycle_stage_observed"] |= stage
             if at < existing["first_at"]:
                 existing["first_at"] = at
                 existing["first_trigger_at_ist"] = at.isoformat()
+            return
+        if side not in {"CE", "PE"} or not symbol.endswith(side):
             return
         setups[setup_id] = {
             "setup_id": setup_id,
