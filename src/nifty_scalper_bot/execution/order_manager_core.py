@@ -3800,12 +3800,15 @@ class OrderManager:
                     # adopt it as this order without exact identity and geometry.
                     found_id = str(existing.get("client_order_id") or "").strip()
                     found_tag = str(existing.get("tag") or "").strip()
-                    found_symbol = str(
-                        existing.get("tradingsymbol") or existing.get("symbol") or ""
-                    ).strip().upper().split(":")[-1]
-                    found_side = str(
-                        existing.get("transaction_type") or existing.get("side") or ""
-                    ).strip().upper()
+                    found_symbol = existing.get("tradingsymbol") or existing.get(
+                        "symbol"
+                    )
+                    found_symbol = str(found_symbol or "").strip().upper()
+                    found_symbol = found_symbol.split(":")[-1]
+                    found_side = existing.get("transaction_type") or existing.get(
+                        "side"
+                    )
+                    found_side = str(found_side or "").strip().upper()
                     found_product = str(existing.get("product") or "").strip().upper()
                     try:
                         found_qty = float(existing.get("quantity"))
