@@ -602,6 +602,18 @@ def _full_dashboard(request: Request, *, preview: bool = False) -> HTMLResponse:
             Never share an access token in screenshots.</p>
             <form method="post" action="/admin/save">{rows}
               <button type="submit" class="full">Save settings</button></form>
+            <div class="subheading">Daily Zerodha request token</div>
+            <p>Paste the full Zerodha callback URL or one-time request token.
+            Verification exchanges it for an access token, checks your broker
+            account and queues the safe engine refresh. The request token is
+            never stored in settings.</p>
+            <form method="post" action="/admin/token">
+              <label for="settings-request-token">Request token / callback URL</label>
+              <input id="settings-request-token" name="request_token"
+                type="text" autocomplete="off" spellcheck="false"
+                placeholder="Paste fresh Zerodha request token or URL" required>
+              <button type="submit" class="full green">Verify and save Zerodha token</button>
+            </form>
           </div></details>
           <details><summary>Research &amp; backtesting</summary><div class="detail-body">
             <p>On-demand replay and component analysis, separate from live order execution.</p>
@@ -648,7 +660,6 @@ def _full_dashboard(request: Request, *, preview: bool = False) -> HTMLResponse:
             '<form method="post" action="/admin/token">',
             '<form method="post" action="/admin/token">'
             f'<input type="hidden" name="owner_state" value="{html.escape(challenge, quote=True)}">',
-            1,
         )
         response.body = _page(body).encode("utf-8")
         response.headers["content-length"] = str(len(response.body))
