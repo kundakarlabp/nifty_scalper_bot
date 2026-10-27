@@ -363,8 +363,8 @@ def analyze(log_text: str, *, window_seconds: int = 120) -> dict[str, Any]:
         "execution_or_pnl_replay_valid": False,
         "reason": (
             "Missing complete quote/candle/bid-ask/stop/fill provenance; "
-            "runtime calls may be throttled; vote-only setups lack lifecycle provenance; "
-            "historical sweep-age reconstruction from setup IDs is not an executable replay"
+            "runtime calls may be throttled; vote-only setups lack stages; "
+            "historical setup-ID sweep ages are not executable P&L replay"
         ),
         "setup_count": len(report),
         "manager_qualified_setup_count": sum(
