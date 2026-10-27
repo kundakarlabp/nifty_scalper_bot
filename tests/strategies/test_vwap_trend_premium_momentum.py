@@ -758,7 +758,9 @@ def test_default_080_confidence_floor_accepts_080_but_not_weaker_context(
 ):
     """Exact live default boundary; do not replace independent quality checks."""
     monkeypatch.delenv("VWAP_EARLY_TREND_MIN_CONTEXT_CONF", raising=False)
-    strategy, signal = _evaluate(monkeypatch, underlying_direction_confidence=confidence)
+    strategy, signal = _evaluate(
+        monkeypatch, underlying_direction_confidence=confidence
+    )
     assert strategy._early_trend_min_context_conf == 0.80
     assert (signal is not None) is eligible
     if not eligible:
