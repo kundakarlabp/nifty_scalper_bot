@@ -181,6 +181,7 @@ def test_futures_volume_resets_baseline_when_contract_changes() -> None:
     assert indicators["futures_volume_ratio"] is None
     assert indicators["futures_volume_trusted"] is True
 
+
 class _PriceHub(_Hub):
     def __init__(self, spot: dict[str, float], future: dict[str, float]) -> None:
         super().__init__()
@@ -254,4 +255,3 @@ def test_invalid_future_vwap_is_not_replaced_with_ltp() -> None:
     assert indicators.get("futures_vwap") is None
     assert indicators.get("nifty_fut_vwap") is None
     assert indicators["futures_ltp"] == 24120.0
-
