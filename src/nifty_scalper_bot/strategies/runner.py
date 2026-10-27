@@ -7,7 +7,7 @@ Runtime role:
 - Runs strategy evaluation over the active basket symbols using cached bars and
   live quotes; applies readiness, regime, and quality gates.
 - On an accepted signal, prepares execution state and hands off to the order
-  path (OrderManager) for placement.
+  path (OrderManager) for placement; there is no separate runner executor.
 - Maintains per-symbol runner/indicator history counts used by the readiness SSOT.
 - Persists bounded, read-only candidate cash/risk rejection evidence in the
   existing trade-decision journal without adding a second risk authority.
@@ -102,7 +102,6 @@ from nifty_scalper_bot.core.history_roles import (
 )
 from nifty_scalper_bot.core.message_bus import Message, MessageBus
 from nifty_scalper_bot.core.strategy_manager import StrategyManager
-from nifty_scalper_bot.core.trade_manager import TradeManager
 from nifty_scalper_bot.core.universe_controller import UniverseController
 
 # Assumes you created the data/constants.py file as advised
@@ -115,10 +114,6 @@ from nifty_scalper_bot.strategies.order_flow_evidence import TemporalOfiAccumula
 from nifty_scalper_bot.data.pipeline import (
     MarketDataPipeline,
     get_pipeline,
-)
-from nifty_scalper_bot.data.source import (
-    DataIntegrityError,
-    ensure_ltp,
 )
 
 # Signals route directly through OrderManager submit/place APIs; no execution hub layer.
@@ -154,12 +149,6 @@ from nifty_scalper_bot.options.strike_selector import (
 )
 from nifty_scalper_bot.risk import RiskManager
 from nifty_scalper_bot.risk.expiry_gate import expiry_theta_block, midday_pause_block
-from nifty_scalper_bot.risk.position_sizing import (
-    RiskManager as DeterministicRiskManager,
-)
-from nifty_scalper_bot.risk.position_sizing import (
-    RiskSnapshot,
-)
 from nifty_scalper_bot.strategies.bar_builder import OneMinuteBar, OneMinuteBarBuilder
 from nifty_scalper_bot.strategies.indicators import IndicatorEngine
 from nifty_scalper_bot.strategies.premium_risk_geometry import (
@@ -184,7 +173,7 @@ from nifty_scalper_bot.utils.log_throttle import (
 from nifty_scalper_bot.utils.log_throttle import (
     log_throttled as log_throttled_live,
 )
-from nifty_scalper_bot.utils.logging import LogThrottle, get_logger, log_throttled
+from nifty_scalper_bot.utils.logging import get_logger, log_throttled
 from nifty_scalper_bot.utils.market_hours import (
     SAFE_END,
     SAFE_START,
@@ -492,48 +481,6 @@ class TradeDecisionSnapshot:
 
 
 LAST_TRADE_DECISION_SNAPSHOT: TradeDecisionSnapshot | None = None
-
-
-@dataclass(slots=True)
-class DeterministicExecutionPipeline:
-    """Data->signal->validation->risk->execution pipeline."""
-
-    trade_manager: TradeManager
-    risk_manager: DeterministicRiskManager
-    order_executor: Any
-    log_throttle: LogThrottle
-
-    def on_new_candle(
-        self, symbol: str, signal: Signal | None, ltp: float, risk: RiskSnapshot
-    ) -> str:
-        """Process one closed-candle decision. Args: symbol/signal/ltp/risk. Returns: status. Raises: Exception."""
-        if signal is None:
-            return "NO_SIGNAL"
-        try:
-            _ = ensure_ltp(ltp)
-            signal = signal.with_metadata(signal_price=ltp, pipeline="deterministic")
-            order_id = self.order_executor.execute(signal)
-            if not order_id:
-                LOGGER.info(
-                    '{"event":"SIGNAL_REJECTED","symbol":"%s","reason":"execution_rejected"}',
-                    symbol,
-                )
-                return "REJECTED_EXECUTION"
-            return "ORDER_PLACED"
-        except DataIntegrityError:
-            LOGGER.info(
-                '{"event":"SIGNAL_REJECTED","symbol":"%s","reason":"data_integrity"}',
-                symbol,
-            )
-            raise
-        except Exception as e:
-            LOGGER.exception(
-                '{"event":"ORDER_FAILED","symbol":"%s","error":"%s"}',
-                symbol,
-                e,
-                exc_info=True,
-            )
-            raise
 
 
 class OrderRouter(Protocol):
