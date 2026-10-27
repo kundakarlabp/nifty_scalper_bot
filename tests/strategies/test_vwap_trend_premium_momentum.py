@@ -749,6 +749,7 @@ def test_research_080_floor_still_requires_fresh_trend_and_final_bar(
     assert signal is None
     assert strategy.last_no_vote_reason == reason
 
+
 @pytest.mark.parametrize(
     ("confidence", "eligible"),
     [(0.79, False), (0.80, True), (0.85, True)],
