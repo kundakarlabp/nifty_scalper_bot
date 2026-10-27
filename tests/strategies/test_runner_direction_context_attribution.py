@@ -24,9 +24,7 @@ def _runner_with_context(monkeypatch, *, spot: dict, futures: dict) -> StrategyR
         },
         _live_context_max_age_seconds=lambda: 60.0,
     )
-    monkeypatch.setattr(
-        "nifty_scalper_bot.strategies.runner.time.time", lambda: 1000.0
-    )
+    monkeypatch.setattr("nifty_scalper_bot.strategies.runner.time.time", lambda: 1000.0)
     return runner
 
 
