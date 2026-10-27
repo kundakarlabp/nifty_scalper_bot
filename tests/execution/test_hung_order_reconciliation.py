@@ -154,3 +154,65 @@ def test_hung_submission_does_not_adopt_unverified_order(
     assert lookups
     assert order_id is None
     assert BlockedThread.starts == 1
+
+
+def test_hung_exit_with_unverified_tag_is_not_resubmitted(monkeypatch, tmp_path):
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+
+    class Broker:
+        is_simulated_adapter = True
+
+    class BlockedThread:
+        starts = 0
+
+        def __init__(self, **kwargs):
+            pass
+
+        def start(self):
+            type(self).starts += 1
+
+        def join(self, timeout=None):
+            pass
+
+        def is_alive(self):
+            return True
+
+    manager = OrderManager(
+        Broker(), PositionManager(str(tmp_path / "positions.json")), RateLimiter()
+    )
+    manager._positions.open_position(
+        "NFO:NIFTY2671423950CE", "LONG", 65, 100.0, order_id="entry-1"
+    )
+    monkeypatch.setattr(order_manager_core, "Thread", BlockedThread)
+    monkeypatch.setattr(order_manager_core.time, "sleep", lambda _: None)
+    monkeypatch.setattr(manager, "_lot_size_for_symbol", lambda _: 65)
+    lookups = []
+
+    def unverified_exit(client_id):
+        lookups.append(client_id)
+        return {
+            "order_id": "EXIT-1",
+            "tag": "manual-square-off",
+            "status": "OPEN",
+            "tradingsymbol": "NIFTY2671423950CE",
+            "transaction_type": "SELL",
+            "quantity": 65,
+            "product": "MIS",
+        }
+
+    monkeypatch.setattr(manager, "_find_open_order", unverified_exit)
+    order_id = manager.place_order(
+        symbol="NFO:NIFTY2671423950CE",
+        side="SELL",
+        quantity=65,
+        order_type=OrderType.MARKET,
+        check_risk=False,
+        intent="EXIT",
+        tag="manual-square-off",
+    )
+
+    assert lookups
+    assert order_id is None
+    assert BlockedThread.starts == 1
+    assert manager._is_uncertain_order(lookups[-1])
