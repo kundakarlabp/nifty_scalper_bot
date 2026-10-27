@@ -1,4 +1,5 @@
 """Contract tests for the read-only historical entry-funnel exporter."""
+
 import copy
 import importlib.util
 from pathlib import Path
@@ -73,6 +74,7 @@ def test_duplicate_cell_rejected():
     report["results"][1] = copy.deepcopy(report["results"][0])
     with pytest.raises(ValueError, match="duplicate result"):
         module.diagnose(report)
+
 
 def test_overlapping_funnel_counts_are_rejected():
     report = fixture_report()

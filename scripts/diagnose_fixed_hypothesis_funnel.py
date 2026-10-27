@@ -8,6 +8,7 @@ Boundaries: Reads a research JSON artifact without importing broker or trading
 runtime modules; the research generator owns observations and trade simulation.
 Safety: Reject inconsistent counts; no live strategy or execution mutations.
 """
+
 from __future__ import annotations
 
 import argparse
