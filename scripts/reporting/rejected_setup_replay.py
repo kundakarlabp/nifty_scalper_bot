@@ -2,7 +2,9 @@
 
 Responsibilities: deduplicate both SMC lifecycle and trigger-vote setup IDs, compare
 strict and conservative neutral-tolerant logged confirmation sequences,
-and report incompleteness without fabricating executable opportunities.
+reconstruct the original smcv2 structural sweep timestamp at manager approval
+and broker acceptance (using explicit timezone-aware event provenance), and
+report missing or invalid evidence without fabricating executable opportunities.
 
 Safety boundary: audits *logged* evidence, not the real-time strategy state
 machine. Journald may omit ticks, candles, fills, bid/ask and book updates.
