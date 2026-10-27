@@ -238,7 +238,7 @@ if ops[1].button("Check GitHub update", type="primary", width="stretch"):
     st.cache_data.clear()
     accepted, message = _post("/admin/update")
     (st.info if accepted else st.error)(message)
-ops[2].link_button("Hard admin", ADMIN_PUBLIC, width="stretch")
+ops[2].link_button("Paste request token", ADMIN_PUBLIC, width="stretch")
 ops[3].caption(
     "Controls request the validated deployment service. "
     "Updates and restarts can interrupt LIVE position and stop management. "
