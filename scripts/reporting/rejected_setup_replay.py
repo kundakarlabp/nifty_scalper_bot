@@ -252,12 +252,12 @@ def analyze(log_text: str, *, window_seconds: int = 120) -> dict[str, Any]:
             setup_id = fields.get("setup_id", "")
             symbol = fields.get("symbol", "")
             version_raw = _float(fields, "quote_update_version", 0)
-            version = (
-                int(version_raw)
-                if math.isfinite(version_raw) and version_raw > 0
+            valid_version = (
+                math.isfinite(version_raw)
+                and version_raw > 0
                 and version_raw.is_integer()
-                else 0
             )
+            version = int(version_raw) if valid_version else 0
             if setup_id and symbol.endswith(("CE", "PE")) and version > 0:
                 quote_samples.append(
                     (setup_id, symbol, at, version, fields.get("book_state", "unknown"))
@@ -305,12 +305,12 @@ def analyze(log_text: str, *, window_seconds: int = 120) -> dict[str, Any]:
         # trigger. These are indicator-book observations, not executable quotes.
         matched_quote_samples = {
             (sample_at, sample_version, state)
-            for sample_setup, sample_symbol, sample_at, sample_version, state in quote_samples
-            if sample_setup == setup_id
-            and sample_symbol == symbol
+            for sid, sym, book_at, version, state in quote_samples
+            if sid == setup_id
+            and sym == symbol
             and any(
-                vote_version == sample_version
-                and abs((sample_at - vote_at).total_seconds()) <= 1
+                vote_version == version
+                and abs((book_at - vote_at).total_seconds()) <= 1
                 for vote_at, _, vote_version in unique_votes
             )
         }
