@@ -4,6 +4,10 @@ Responsibilities:
 - Compare strategy indicator volume with the latest actual history bar.
 - Record quote cumulative versus interval volume without conflating them.
 - Classify missing, provisional, zero or contradictory candle evidence.
+- Normalize aware candle timestamps to UTC minutes with _minute_key.
+- Compare describe_option_volume_evidence's last completed indicator bar
+  against the same-minute canonical CandleEngine bar without zero-filling,
+  using _bar_summary. A mismatched minute is not a volume mismatch.
 
 Safety boundary: This module never generates signals, synthesizes volume or
 weakens the option-candle-no-trades admission gate. No broker calls.
