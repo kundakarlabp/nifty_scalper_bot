@@ -357,7 +357,16 @@ def _topbar(live_on: bool) -> str:
 
 def _flash(request: Request) -> str:
     q = request.query_params
-    if q.get("saved"): return '<div class="flash ok">Settings saved. Restart to apply.</div>'
+    if q.get("saved"):
+        return '<div class="flash ok">Settings saved. Engine changes require a validated restart.</div>'
+    if q.get("power") == "queued":
+        return ('<div class="flash ok">Operating mode saved; safe transition '
+                'queued. Watch the Engine status for confirmation.</div>')
+    if q.get("power") == "saved_not_applied":
+        return ('<div class="flash err">Operating mode saved, but the validated '
+                'transition could not be queued. Engine state is unchanged.</div>')
+    if q.get("power") == "unchanged":
+        return '<div class="flash ok">Operating mode is already selected.</div>'
     if q.get("token") == "ok":
         return (
             '<div class="flash ok">Zerodha token verified and saved; '
@@ -472,6 +481,10 @@ def _full_dashboard(request: Request, *, preview: bool = False) -> HTMLResponse:
         ),
         "",
     )
+    # Import lazily: operating_control uses this module for canonical writes.
+    from nifty_scalper_bot.operating_control import admin_power_card
+
+    power_card = admin_power_card(editable=owner_verified)
     login_url = _kite_login_url(api_key) if api_key else ""
     login_button = (
         f'<a class="btn primary full" href="{html.escape(login_url, quote=True)}" rel="noopener">'
@@ -523,6 +536,7 @@ def _full_dashboard(request: Request, *, preview: bool = False) -> HTMLResponse:
       <div class="metric"><div class="k">Blocker</div><div class="v" id="blocker-value">Checking…</div>
       <small>Trading readiness</small></div>
     </section>
+    {power_card}
     <div class="cta-strip"><div class="statusline">
       <span>Release: <b id="release-value">Checking…</b></span>
       <span>Engine SHA: <b id="revision-value">—</b></span>

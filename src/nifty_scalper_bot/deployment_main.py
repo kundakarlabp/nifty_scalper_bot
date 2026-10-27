@@ -26,7 +26,6 @@ from nifty_scalper_bot.core.release_guard import (
 )
 from nifty_scalper_bot.operating_control import (
     engine_should_run,
-    install_admin_power_card,
     operating_mode,
     start_transition_watchdog,
 )
@@ -85,8 +84,7 @@ else:
         }
 
 
-# The same card is visible in the canonical /admin page in both ACTIVE and QUIET.
-install_admin_power_card()
+# The canonical admin renders its operating card in both ACTIVE and QUIET.
 app.include_router(operating_router)
 app.state.release = _RELEASE.as_dict()
 app.state.release_watchdog_started = _RELEASE_WATCHDOG is not None
