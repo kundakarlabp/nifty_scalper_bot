@@ -56,9 +56,7 @@ def test_cancelled_entry_with_executed_quantity_activates_partial_protection(
     monkeypatch, tmp_path
 ):
     manager, broker, bracket = _fixture(monkeypatch, tmp_path)
-    broker.order.update(
-        status="CANCELLED", filled_quantity=30, average_price=101.25
-    )
+    broker.order.update(status="CANCELLED", filled_quantity=30, average_price=101.25)
     broker.positions = [{"symbol": SYMBOL, "quantity": 30}]
     manager._reconcile_pending_entry(bracket)
 
@@ -108,9 +106,7 @@ def test_open_partial_then_later_cumulative_fill_reconciles_without_reset(
     assert fills[0].price == 102.0
 
 
-def test_broker_open_unfilled_does_not_optimistically_activate(
-    monkeypatch, tmp_path
-):
+def test_broker_open_unfilled_does_not_optimistically_activate(monkeypatch, tmp_path):
     manager, broker, bracket = _fixture(monkeypatch, tmp_path)
     broker.order.update(status="OPEN", filled_quantity=0, average_price=0)
     manager._reconcile_pending_entry(bracket)
