@@ -34,9 +34,7 @@ def _unloaded_guard(live: object, release: object) -> int:
         'case "$*" in '
         '*"/livez"*) printf "%s" "$LIVE_BODY" ;; '
         '*"/releasez"*) printf "%s" "$RELEASE_BODY" ;; '
-        "*) return 1 ;; esac; }\n"
-        + function
-        + "\nquiet_control_plane_unloaded\n"
+        "*) return 1 ;; esac; }\n" + function + "\nquiet_control_plane_unloaded\n"
     )
     process = subprocess.run(
         ["bash", "-c", script],
@@ -85,10 +83,7 @@ def test_unloaded_quiet_can_wake_without_broker_http_or_token() -> None:
 def test_guard_never_waives_proof_for_active_or_uncertain_engine(
     live_change, release_change
 ) -> None:
-    assert (
-        _unloaded_guard(_live() | live_change, _release() | release_change)
-        != 0
-    )
+    assert _unloaded_guard(_live() | live_change, _release() | release_change) != 0
 
 
 def test_corrupt_local_evidence_does_not_authorize_restart() -> None:
