@@ -67,9 +67,7 @@ def _smc_setup_anchor_time(setup_id: str) -> datetime | None:
     return when if when.tzinfo is not None and when.utcoffset() is not None else None
 
 
-def _reference_sweep_age(
-    setup_id: str, observed_at: datetime | None
-) -> float | None:
+def _reference_sweep_age(setup_id: str, observed_at: datetime | None) -> float | None:
     """Retrospective proxy only; does not replay final live signal metadata."""
     sweep_at = _smc_setup_anchor_time(setup_id)
     if sweep_at is None or observed_at is None:
@@ -230,11 +228,7 @@ def analyze(log_text: str, *, window_seconds: int = 120) -> dict[str, Any]:
             side = fields.get("side", "")
             if not setup_id or side not in {"CE", "PE"} or not symbol.endswith(side):
                 continue
-            stage_key = (
-                "manager"
-                if "stage=MANAGER_QUALIFIED" in line
-                else "broker"
-            )
+            stage_key = "manager" if "stage=MANAGER_QUALIFIED" in line else "broker"
             admission_events.setdefault(setup_id, {"manager": [], "broker": []})[
                 stage_key
             ].append((at, symbol, side))
@@ -306,17 +300,16 @@ def analyze(log_text: str, *, window_seconds: int = 120) -> dict[str, Any]:
         manager_sweep_age = _reference_sweep_age(setup_id, manager_at)
         broker_sweep_age = _reference_sweep_age(setup_id, broker_at)
         # Missing/malformed historical provenance is indeterminate, not "pass".
-        five_minute_reference = (
-            "no_manager_qualification_logged"
-            if manager_at is None
-            else "unknown_original_sweep"
-            if manager_sweep_age is None
-            else "invalid_future_anchor"
-            if manager_sweep_age < 0
-            else "would_reject_stale_sweep"
-            if manager_sweep_age > 300
-            else "within_five_minute_limit"
-        )
+        if manager_at is None:
+            five_minute_reference = "no_manager_qualification_logged"
+        elif manager_sweep_age is None:
+            five_minute_reference = "unknown_original_sweep"
+        elif manager_sweep_age < 0:
+            five_minute_reference = "invalid_future_anchor"
+        elif manager_sweep_age > 300:
+            five_minute_reference = "would_reject_stale_sweep"
+        else:
+            five_minute_reference = "within_five_minute_limit"
         result = {
             "manager_qualified_at_ist": (
                 manager_at.isoformat() if manager_at else None
