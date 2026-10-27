@@ -191,7 +191,7 @@ def admin_power_card(*, editable: bool = True) -> str:
         f"Schedule target now: <b>{target}</b></p>"
         f"<p><b>AUTO</b>: engine requested {start}–{stop} IST "
         "Monday–Friday; QUIET outside the window. "
-        "AUTO's weekday window is not a holiday calendar; " 
+        "AUTO's weekday window is not a holiday calendar; "
         "broker readiness remains a separate requirement. "
         "<b>ACTIVE</b>: manual always-on override. "
         "<b>QUIET</b>: manual control-only override.</p>"
