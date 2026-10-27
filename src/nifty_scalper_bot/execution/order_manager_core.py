@@ -3810,8 +3810,11 @@ class OrderManager:
                     )
                     found_side = str(found_side or "").strip().upper()
                     found_product = str(existing.get("product") or "").strip().upper()
+                    raw_qty = existing.get("quantity")
+                    if raw_qty is None or isinstance(raw_qty, bool):
+                        return None
                     try:
-                        found_qty = float(existing.get("quantity"))
+                        found_qty = float(raw_qty)
                     except (TypeError, ValueError, OverflowError):
                         return None
                     if (
