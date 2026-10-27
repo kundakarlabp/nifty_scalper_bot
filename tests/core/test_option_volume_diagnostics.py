@@ -171,4 +171,3 @@ def test_equal_minute_missing_volume_is_unknown_not_zero() -> None:
         canonical_completed_bar=_bar(0.0),
     )
     assert out["completed_bar_parity"] == "missing_or_invalid_completed_volume"
-
