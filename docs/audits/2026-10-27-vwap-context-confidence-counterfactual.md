@@ -1,5 +1,7 @@
 # 27 October 2026 — VWAPPro live context-confidence counterfactual
 
+> **Later operator-directed change (27 October 2026):** The trading operator explicitly authorized reducing the VWAP early-trend context confidence **default** from 0.90 to 0.80. This supersedes the historical no-go *decision* below, not its empirical limitations. There is still no demonstrated after-cost advantage for incremental candidates. The effective deployed value can be overridden by `VWAP_EARLY_TREND_MIN_CONTEXT_CONF`; verify the `VWAP_EARLY_TREND_CONTEXT_GATE_CONFIG` startup event. The 0.80 threshold remains accompanied by underlying-side agreement, freshness, trend regime, finalized premium-candle, spread/volume, other execution and broker-risk requirements. To revert, restore 0.90 through the same configuration and guarded release process.
+
 **Decision: NO LIVE THRESHOLD CHANGE.** This is a read-only evidence and diagnostics correction. A lower confidence floor remains an unapproved experiment until a matched chronological executable-quote replay has demonstrated an improvement in net performance and acceptable drawdown.
 
 ## Reproducible code finding
