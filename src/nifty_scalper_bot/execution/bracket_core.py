@@ -154,6 +154,9 @@ def _normalize_bracket_side(side: str) -> str:
 
 _FILLED_STATUSES = {"FILLED", "COMPLETE", "COMPLETED"}
 _CANCELLED_STATUSES = {"CANCELLED", "REJECTED", "CANCELED"}
+_ENTRY_WITH_FILL_EVIDENCE_STATUSES = _FILLED_STATUSES | _CANCELLED_STATUSES | {
+    "OPEN", "PARTIAL", "PARTIAL_FILLED", "PARTIALLY FILLED", "PARTIALLY_FILLED",
+}
 _TERMINAL_OWNERSHIP_STATES = {"CLOSED", "EXIT_FILLED", "EXIT_RECONCILED_FLAT"}
 
 
@@ -653,6 +656,9 @@ class BracketManager:
         self._trail_notify_sl: Dict[str, float] = {}
         self._tick_error_logged: Dict[str, bool] = {}
         self._throttle_log_at: Dict[str, float] = {}
+        # Broker orderbook follow-up for partially filled active entries.
+        self._partial_entry_probe_next_at: Dict[str, float] = {}
+        self._partial_entry_terminal_orders: set[str] = set()
         self._lock = _RLOCK_CLASS()
         self._reconcile_lock = threading.Lock()
         self._exit_dispatch_scheduled: set[str] = set()
@@ -1170,34 +1176,89 @@ class BracketManager:
             return True, None
 
     def _reconcile_pending_entry(self, bracket: BracketState) -> None:
-        if bracket.entry_confirmed or bracket.monitoring_only:
+        """Protect broker partial fills, including cancelled remainders.
+
+        An active partial bracket continues polling the broker orderbook at
+        most once per two seconds until the entry is complete or terminal.
+        Repeated cumulative snapshots must not reactivate an unchanged fill.
+        """
+        if bracket.monitoring_only:
+            return
+        order_id = str(bracket.entry_order_id)
+        requested = int(bracket.requested_entry_quantity or bracket.quantity or 0)
+        active_partial = (
+            bracket.entry_confirmed
+            and bracket.active
+            and int(bracket.quantity or 0) < requested
+            and bracket.remaining_quantity > 0
+            and order_id not in self._partial_entry_terminal_orders
+        )
+        if bracket.entry_confirmed and not active_partial:
             return
         age = time.time() - float(bracket.created_at or 0.0)
         if age < self._pending_entry_reconcile_after_sec:
             return
-        status, status_known = self._broker_entry_order_status(
-            bracket.entry_order_id
-        )
-        status_text = str(status.get("status") or "").upper()
-        if status_text in _FILLED_STATUSES:
+        if active_partial:
+            now = time.monotonic()
+            if now < self._partial_entry_probe_next_at.get(order_id, 0.0):
+                return
+            self._partial_entry_probe_next_at[order_id] = now + 2.0
+
+        status, status_known = self._broker_entry_order_status(order_id)
+        status_text = str(status.get("status") or "").strip().upper()
+        if status_known and status_text in _ENTRY_WITH_FILL_EVIDENCE_STATUSES:
             filled_qty = self._extract_status_filled_quantity(status)
             fill_price = self._extract_status_fill_price(status)
-            if filled_qty > 0 and fill_price is not None:
-                self.confirm_entry_fill(
-                    bracket.entry_order_id,
-                    fill_price,
+            if filled_qty > requested > 0:
+                self._recovery_degraded_reason = "entry_fill_exceeds_request"
+                LOGGER.critical(
+                    "ENTRY_FILL_EXCEEDS_REQUEST entry_order_id=%s symbol=%s "
+                    "requested=%s broker_filled=%s",
+                    order_id,
+                    bracket.symbol,
+                    requested,
                     filled_qty,
                 )
                 return
-            LOGGER.warning(
-                "PENDING_ENTRY_FILL_EVIDENCE_INCOMPLETE entry_order_id=%s "
-                "symbol=%s status=%s filled_qty=%s fill_price=%s",
-                bracket.entry_order_id,
-                bracket.symbol,
-                status_text,
-                filled_qty,
-                fill_price,
-            )
+            if (
+                filled_qty > 0
+                and fill_price is not None
+                and math.isfinite(float(fill_price))
+                and fill_price > 0
+            ):
+                if (
+                    not bracket.entry_confirmed
+                    or filled_qty > int(bracket.quantity or 0)
+                    or abs(fill_price - float(bracket.entry_price)) > 1e-8
+                ):
+                    self.confirm_entry_fill(order_id, fill_price, filled_qty)
+                    LOGGER.info(
+                        "BROKER_PARTIAL_ENTRY_RECONCILED entry_order_id=%s "
+                        "symbol=%s status=%s broker_filled=%s avg_price=%.2f",
+                        order_id,
+                        bracket.symbol,
+                        status_text,
+                        filled_qty,
+                        fill_price,
+                    )
+                if status_text in _CANCELLED_STATUSES:
+                    self._partial_entry_terminal_orders.add(order_id)
+                return
+            if status_text in _FILLED_STATUSES:
+                LOGGER.warning(
+                    "PENDING_ENTRY_FILL_EVIDENCE_INCOMPLETE entry_order_id=%s "
+                    "symbol=%s status=%s filled_qty=%s fill_price=%s",
+                    order_id,
+                    bracket.symbol,
+                    status_text,
+                    filled_qty,
+                    fill_price,
+                )
+                return
+
+        if bracket.entry_confirmed:
+            if status_text in _CANCELLED_STATUSES:
+                self._partial_entry_terminal_orders.add(order_id)
             return
         terminal_unfilled = status_text in _CANCELLED_STATUSES
         authoritatively_absent = (
@@ -1210,20 +1271,21 @@ class BracketManager:
         if not self._position_flat_for_symbol(bracket.symbol):
             return
         LOGGER.warning(
-            "PENDING_ENTRY_RECONCILED_FLAT entry_order_id=%s symbol=%s order_status=%s age_s=%.1f",
-            bracket.entry_order_id,
+            "PENDING_ENTRY_RECONCILED_FLAT entry_order_id=%s symbol=%s "
+            "order_status=%s age_s=%.1f",
+            order_id,
             bracket.symbol,
             status_text or "ABSENT",
             age,
             extra={
                 "event": "PENDING_ENTRY_RECONCILED_FLAT",
-                "entry_order_id": bracket.entry_order_id,
+                "entry_order_id": order_id,
                 "symbol": bracket.symbol,
                 "order_status": status_text or "ABSENT",
                 "age_seconds": age,
             },
         )
-        self.unregister_bracket(bracket.entry_order_id)
+        self.unregister_bracket(order_id)
 
     def _log_throttled(
         self,
@@ -4661,7 +4723,7 @@ class BracketManager:
                 value = float(status.get(key) or 0.0)
             except (TypeError, ValueError):
                 continue
-            if value > 0:
+            if math.isfinite(value) and value > 0:
                 return value
         return None
 
@@ -4682,7 +4744,7 @@ class BracketManager:
                     )
                 ),
             )
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             return 0
 
     def _position_flat_for_symbol(self, symbol: str) -> bool:
