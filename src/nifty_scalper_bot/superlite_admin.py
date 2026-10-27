@@ -120,8 +120,11 @@ dashboard._flash = _flash
 dashboard._CSS = STYLE
 dashboard.FIELDS = [(label, key, True) for label, key, _secret in dashboard.FIELDS]
 
+from nifty_scalper_bot.operating_control import router as operating_router
+
 app = FastAPI(title="Nifty Bot Admin", docs_url=None, redoc_url=None)
 app.include_router(dashboard.router)
+app.include_router(operating_router)
 
 
 @app.get("/")
