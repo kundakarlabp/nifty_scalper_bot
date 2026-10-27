@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+import pytest
+
 from nifty_scalper_bot.data.market_data_manager import MarketDataManager
 
 
@@ -15,7 +17,7 @@ def _mdm() -> MarketDataManager:
     return mdm
 
 
-def _raw(cumulative: int, *, token: int = 1, ts: int = 1) -> dict:
+def _raw(cumulative: int | float | str, *, token: int = 1, ts: int = 1) -> dict:
     return {
         "symbol": "NFO:NIFTY26JUN24000CE",
         "instrument_token": token,
@@ -43,6 +45,40 @@ def test_option_volume_baseline_normal_delta_generation_reset_and_duplicate() ->
     assert duplicate["volume_delta"] == 0
     assert reset["volume_transition"]["state"] == "baseline_initialized"
     assert reset["volume_delta"] == 0
+
+
+@pytest.mark.parametrize("invalid", [float("nan"), float("inf"), float("-inf"), "nan"])
+def test_nonfinite_cumulative_volume_does_not_poison_baseline(
+    invalid: float | str,
+) -> None:
+    mdm = _mdm()
+    symbol = "NFO:NIFTY26JUN24000CE"
+    mdm._normalise_tick_volume_delta(symbol, _raw(1_000, ts=1))
+    malformed = mdm._normalise_tick_volume_delta(symbol, _raw(invalid, ts=2))
+    after = mdm._normalise_tick_volume_delta(symbol, _raw(1_025, ts=3))
+
+    assert malformed["volume_transition"]["state"] == "invalid"
+    assert malformed["volume_delta_untrusted"] is True
+    assert malformed["volume_delta"] == 0
+    assert after["volume_transition"]["state"] == "accepted"
+    assert after["volume_delta"] == 25
+
+
+@pytest.mark.parametrize("invalid", [float("nan"), float("inf"), "nan"])
+def test_nonfinite_first_volume_does_not_initialize_baseline(
+    invalid: float | str,
+) -> None:
+    mdm = _mdm()
+    symbol = "NFO:NIFTY26JUN24000CE"
+    malformed = mdm._normalise_tick_volume_delta(symbol, _raw(invalid, ts=1))
+    first = mdm._normalise_tick_volume_delta(symbol, _raw(1_000, ts=2))
+    after = mdm._normalise_tick_volume_delta(symbol, _raw(1_025, ts=3))
+
+    assert malformed["volume_transition"]["state"] == "invalid"
+    assert malformed["volume_delta_untrusted"] is True
+    assert first["volume_transition"]["state"] == "baseline_initialized"
+    assert first["volume_delta"] == 0
+    assert after["volume_delta"] == 25
 
 
 def test_option_volume_rollback_and_large_monotonic_delta_preserve_integrity() -> None:
