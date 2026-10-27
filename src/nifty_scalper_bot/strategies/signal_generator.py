@@ -1688,12 +1688,15 @@ class StrategyManager:
         data_hub = self._data_hub
         if data_hub is None:
             return
+        # Resolve the active contract *before* the first quote fetch, then
+        # share one observation between its volume, LTP and VWAP metrics.
+        active_future = self._resolve_active_futures_symbol_for_metrics()
 
         # ═══════════════════════════════════════════════════════════
         # 1. FUTURES VOLUME DATA
         # ═══════════════════════════════════════════════════════════
         try:
-            quote = data_hub.get_quote(self._futures_symbol)
+            quote = data_hub.get_quote(active_future) if active_future else None
         except Exception as exc:
             self._logger.error(
                 "Failure in StrategyManager._augment_futures_metrics futures quote: %s",
@@ -1809,7 +1812,6 @@ class StrategyManager:
                     indicators["nifty_index_ltp_source"] = "spot_quote_ltp_cached"
                     indicators["nifty_index_ltp_age_s"] = round(cache_age, 2)
 
-            active_future = self._resolve_active_futures_symbol_for_metrics()
             if active_future:
                 # Use one coherent futures quote for cumulative volume,
                 # LTP and VWAP when the active symbol matches the earlier
