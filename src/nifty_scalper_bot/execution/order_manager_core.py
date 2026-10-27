@@ -3799,6 +3799,7 @@ class OrderManager:
                     # The legacy finder can return a partial-tag match. Never
                     # adopt it as this order without exact identity and geometry.
                     found_id = str(existing.get("client_order_id") or "").strip()
+                    found_tag = str(existing.get("tag") or "").strip()
                     found_symbol = str(
                         existing.get("tradingsymbol") or existing.get("symbol") or ""
                     ).strip().upper().split(":")[-1]
@@ -3811,7 +3812,10 @@ class OrderManager:
                     except (TypeError, ValueError, OverflowError):
                         return None
                     if (
-                        found_id == unique_client_id
+                        (
+                            found_id == unique_client_id
+                            or (entry_lifecycle and found_tag == unique_client_id)
+                        )
                         and found_symbol == normalized_symbol.upper().split(":")[-1]
                         and found_side == normalized_side
                         and found_product == str(product).strip().upper()
