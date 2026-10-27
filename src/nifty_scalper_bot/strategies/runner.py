@@ -16646,8 +16646,12 @@ class StrategyRunner:
                                         "fut_fresh": fut_fresh,
                                         "spot_bias": spot_bias,
                                         "fut_bias": futures_bias,
-                                        "spot_direction_reasons": spot_direction_reasons,
-                                        "fut_direction_reasons": futures_direction_reasons,
+                                        "spot_direction_reasons": (
+                                            spot_direction_reasons
+                                        ),
+                                        "fut_direction_reasons": (
+                                            futures_direction_reasons
+                                        ),
                                     },
                                 )
                                 self._emit_runner_eval_decision(
