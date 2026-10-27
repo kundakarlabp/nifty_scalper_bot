@@ -152,7 +152,7 @@ def _mode_controls(
         disabled = " disabled" if mode == value or not editable else ""
         css = "gray" if value == "QUIET" else "blu" if value == "ACTIVE" else ""
         buttons.append(
-            '<form method="post" action="/power/mode" style="display:inline">'
+            '<form method="post" action="/admin/power/mode" style="display:inline">'
             f'<input type="hidden" name="mode" value="{value}">'
             f'<input type="hidden" name="return_to" value="{safe_return}">'
             f'<button class="{css}" type="submit"{disabled}>'
@@ -201,7 +201,7 @@ def admin_power_card(*, editable: bool = True) -> str:
 
 def _mode_page(mode: str, running: bool) -> str:
     state = "FULL ENGINE ACTIVE" if running else "QUIET — ADMIN ONLY"
-    controls = _mode_controls(mode, return_to="/power")
+    controls = _mode_controls(mode, return_to="/admin/power")
     transition = next_auto_transition()
     return (
         "<!doctype html><html><head>"
@@ -226,14 +226,14 @@ def _mode_page(mode: str, running: bool) -> str:
     )
 
 
-@router.get("/power", response_class=HTMLResponse)
+@router.get("/admin/power", response_class=HTMLResponse)
 def power_page(request: Request) -> HTMLResponse:
     """Render the operating-mode control page."""
     _check_auth(request)
     return HTMLResponse(_mode_page(operating_mode(), engine_should_run()))
 
 
-@router.post("/power/mode")
+@router.post("/admin/power/mode")
 def set_operating_mode(
     request: Request,
     mode: str = Form(...),
@@ -242,7 +242,7 @@ def set_operating_mode(
     """Persist a validated operating mode and restart the service."""
     _check_auth(request)
     selected = mode.strip().upper()
-    target = return_to if return_to in {"/admin", "/power"} else "/admin"
+    target = return_to if return_to in {"/admin", "/admin/power"} else "/admin"
     if selected not in VALID_MODES:
         return RedirectResponse(target, status_code=303)
     if selected == operating_mode():
