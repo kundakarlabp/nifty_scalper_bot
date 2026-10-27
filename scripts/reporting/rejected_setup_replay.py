@@ -2,7 +2,9 @@
 
 Responsibilities: deduplicate both SMC lifecycle and trigger-vote setup IDs, compare
 strict and conservative neutral-tolerant logged confirmation sequences,
-and report incompleteness without fabricating executable opportunities.
+reconstruct the original smcv2 structural sweep timestamp at manager approval
+and broker acceptance (using explicit timezone-aware event provenance), and
+report missing or invalid evidence without fabricating executable opportunities.
 
 Safety boundary: audits *logged* evidence, not the real-time strategy state
 machine. Journald may omit ticks, candles, fills, bid/ask and book updates.
@@ -48,6 +50,29 @@ def _when(line: str) -> datetime | None:
     if match is None:
         return None
     return datetime.strptime(match.group(1), "%Y-%m-%d %H:%M:%S").replace(tzinfo=IST)
+
+
+def _smc_setup_anchor_time(setup_id: str) -> datetime | None:
+    """Parse only the original timezone-aware structural anchor from smcv2 IDs."""
+    prefix = "smcv2:NFO:"
+    if not setup_id.startswith(prefix):
+        return None
+    pieces = setup_id.split(":", 4)
+    if len(pieces) != 5 or pieces[3] not in {"CE", "PE"}:
+        return None
+    try:
+        when = datetime.fromisoformat(pieces[4].replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return when if when.tzinfo is not None and when.utcoffset() is not None else None
+
+
+def _reference_sweep_age(setup_id: str, observed_at: datetime | None) -> float | None:
+    """Retrospective proxy only; does not replay final live signal metadata."""
+    sweep_at = _smc_setup_anchor_time(setup_id)
+    if sweep_at is None or observed_at is None:
+        return None
+    return round((observed_at - sweep_at).total_seconds(), 3)
 
 
 def _float(fields: dict[str, str], name: str, default: float = -1.0) -> float:
@@ -157,6 +182,9 @@ def analyze(log_text: str, *, window_seconds: int = 120) -> dict[str, Any]:
             "identity_conflict": False,
         }
 
+    # Read-only lifecycle markers; qualification must precede broker acceptance
+    # and must not be mislabeled a fresh structural setup.
+    admission_events: dict[str, dict[str, list[tuple[datetime, str, str]]]] = {}
     restarts = 0
     submission_lines = 0
     for line in log_text.splitlines():
@@ -168,6 +196,8 @@ def analyze(log_text: str, *, window_seconds: int = 120) -> dict[str, Any]:
             tag in line
             for tag in (
                 "SETUP_LIFECYCLE stage=TRIGGER_QUALIFIED",
+                "SETUP_LIFECYCLE stage=MANAGER_QUALIFIED",
+                "SETUP_LIFECYCLE stage=BROKER_ACCEPTED",
                 "STRATEGY_TRIGGER_VOTE strategy=SMC",
                 "ORDERFLOW_CONTEXT_EVIDENCE",
             )
@@ -187,6 +217,21 @@ def analyze(log_text: str, *, window_seconds: int = 120) -> dict[str, Any]:
                 at,
                 stage=True,
             )
+        elif (
+            "SETUP_LIFECYCLE stage=MANAGER_QUALIFIED" in line
+            or "SETUP_LIFECYCLE stage=BROKER_ACCEPTED" in line
+        ):
+            if fields.get("strategy") != "SMC":
+                continue
+            setup_id = fields.get("setup_id", "")
+            symbol = fields.get("symbol", "")
+            side = fields.get("side", "")
+            if not setup_id or side not in {"CE", "PE"} or not symbol.endswith(side):
+                continue
+            stage_key = "manager" if "stage=MANAGER_QUALIFIED" in line else "broker"
+            admission_events.setdefault(setup_id, {"manager": [], "broker": []})[
+                stage_key
+            ].append((at, symbol, side))
         elif "STRATEGY_TRIGGER_VOTE strategy=SMC" in line:
             setup_id = fields.get("setup_id", "")
             symbol = fields.get("symbol", "")
@@ -239,7 +284,45 @@ def analyze(log_text: str, *, window_seconds: int = 120) -> dict[str, Any]:
             matched.append(entry)
         matched.sort(key=lambda evidence: (evidence.at, evidence.quote_version))
         counts = Counter(event.classification for event in matched)
+        recorded = admission_events.get(setup_id, {"manager": [], "broker": []})
+        manager_times = sorted(
+            timestamp
+            for timestamp, observed_symbol, observed_side in recorded["manager"]
+            if observed_symbol == symbol and observed_side == item["side"]
+        )
+        broker_times = sorted(
+            timestamp
+            for timestamp, observed_symbol, observed_side in recorded["broker"]
+            if observed_symbol == symbol and observed_side == item["side"]
+        )
+        manager_at = manager_times[0] if manager_times else None
+        broker_at = broker_times[0] if broker_times else None
+        manager_sweep_age = _reference_sweep_age(setup_id, manager_at)
+        broker_sweep_age = _reference_sweep_age(setup_id, broker_at)
+        # Missing/malformed historical provenance is indeterminate, not "pass".
+        if manager_at is None:
+            five_minute_reference = "no_manager_qualification_logged"
+        elif manager_sweep_age is None:
+            five_minute_reference = "unknown_original_sweep"
+        elif manager_sweep_age < 0:
+            five_minute_reference = "invalid_future_anchor"
+        elif manager_sweep_age > 300:
+            five_minute_reference = "would_reject_stale_sweep"
+        else:
+            five_minute_reference = "within_five_minute_limit"
         result = {
+            "manager_qualified_at_ist": (
+                manager_at.isoformat() if manager_at else None
+            ),
+            "broker_accepted_at_ist": broker_at.isoformat() if broker_at else None,
+            "original_sweep_at_ist": (
+                _smc_setup_anchor_time(setup_id).astimezone(IST).isoformat()
+                if _smc_setup_anchor_time(setup_id) is not None
+                else None
+            ),
+            "sweep_age_at_manager_qualification_seconds": manager_sweep_age,
+            "sweep_age_at_broker_acceptance_seconds": broker_sweep_age,
+            "five_minute_reference": five_minute_reference,
             "setup_id": setup_id,
             "first_trigger_at_ist": item["first_trigger_at_ist"],
             "symbol": symbol,
@@ -273,9 +356,17 @@ def analyze(log_text: str, *, window_seconds: int = 120) -> dict[str, Any]:
         "execution_or_pnl_replay_valid": False,
         "reason": (
             "Missing complete quote/candle/bid-ask/stop/fill provenance; "
-            "runtime calls may be throttled; vote-only setups lack lifecycle provenance"
+            "runtime calls may be throttled; vote-only setups lack stages; "
+            "historical setup-ID sweep ages are not executable P&L replay"
         ),
         "setup_count": len(report),
+        "manager_qualified_setup_count": sum(
+            entry["manager_qualified_at_ist"] is not None for entry in report
+        ),
+        "manager_qualified_5m_reference_rejections": sum(
+            entry["five_minute_reference"] == "would_reject_stale_sweep"
+            for entry in report
+        ),
         "lifecycle_stage_setup_count": sum(
             bool(item["lifecycle_stage_observed"]) for item in report
         ),
