@@ -47,9 +47,7 @@ def _when(line: str) -> datetime | None:
     match = TIME_PATTERN.match(line)
     if match is None:
         return None
-    return datetime.strptime(match.group(1), "%Y-%m-%d %H:%M:%S").replace(
-        tzinfo=IST
-    )
+    return datetime.strptime(match.group(1), "%Y-%m-%d %H:%M:%S").replace(tzinfo=IST)
 
 
 def _float(fields: dict[str, str], name: str, default: float = -1.0) -> float:
@@ -214,9 +212,7 @@ def analyze(log_text: str, *, window_seconds: int = 120) -> dict[str, Any]:
                 continue
             j, entry = min(
                 matches,
-                key=lambda pair: (
-                    abs((pair[1].at - vote_at).total_seconds()), pair[0]
-                ),
+                key=lambda pair: (abs((pair[1].at - vote_at).total_seconds()), pair[0]),
             )
             used.add(j)
             matched.append(entry)
@@ -243,9 +239,7 @@ def analyze(log_text: str, *, window_seconds: int = 120) -> dict[str, Any]:
             and result["unmatched_votes"] == 0
             and matched
         ):
-            result["strict_logged_pair"] = _has_pair(
-                matched, allow_one_neutral=False
-            )
+            result["strict_logged_pair"] = _has_pair(matched, allow_one_neutral=False)
             result["neutral_tolerant_logged_pair"] = _has_pair(
                 matched, allow_one_neutral=True
             )
