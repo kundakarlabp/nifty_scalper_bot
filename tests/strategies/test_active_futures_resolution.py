@@ -180,3 +180,78 @@ def test_futures_volume_resets_baseline_when_contract_changes() -> None:
     assert list(manager._futures_volume_history) == []
     assert indicators["futures_volume_ratio"] is None
     assert indicators["futures_volume_trusted"] is True
+
+class _PriceHub(_Hub):
+    def __init__(self, spot: dict[str, float], future: dict[str, float]) -> None:
+        super().__init__()
+        self.spot = spot
+        self.future = future
+
+    def get_quote(self, symbol: str, allow_pull: bool = False):
+        del allow_pull
+        self.calls.append(symbol)
+        if symbol == "NSE:NIFTY":
+            return self.spot
+        if symbol == "NFO:NIFTY26JUNFUT":
+            return self.future
+        return {}
+
+
+def test_index_vwap_never_derived_from_futures_ltp_only() -> None:
+    hub = _PriceHub({"ltp": 24000.0}, {"ltp": 24120.0})
+    manager = _manager(hub=hub)
+    indicators: dict[str, Any] = {}
+    manager._augment_futures_metrics(indicators)
+
+    assert indicators["nifty_index_vwap"] is None
+    assert indicators["nifty_index_vwap_source"] == "untraded_index_no_vwap"
+    assert indicators["nifty_index_ltp"] == 24000.0
+    assert indicators["nifty_index_ltp_source"] == "spot_quote_ltp"
+    assert indicators["futures_ltp"] == 24120.0
+    assert indicators["nifty_fut_ltp"] == 24120.0
+    assert indicators.get("futures_vwap") is None
+    assert indicators.get("nifty_fut_vwap") is None
+
+
+def test_actual_futures_vwap_keeps_its_own_contract_domain() -> None:
+    hub = _PriceHub(
+        {"ltp": 24000.0, "vwap": 23990.0},
+        {"ltp": 24120.0, "vwap": 24100.0},
+    )
+    manager = _manager(hub=hub)
+    indicators: dict[str, Any] = {}
+    manager._augment_futures_metrics(indicators)
+
+    assert indicators["nifty_index_vwap"] is None
+    assert indicators["nifty_index_quote_average_price"] == 23990.0
+    assert indicators["nifty_index_ltp"] == 24000.0
+    assert indicators["futures_vwap"] == 24100.0
+    assert indicators["nifty_fut_vwap"] == 24100.0
+    assert indicators["futures_vwap_source"] == "active_future_quote_vwap"
+    assert indicators["futures_ltp"] == 24120.0
+    assert indicators["nifty_fut_ltp"] == 24120.0
+
+
+def test_no_spot_quote_never_invents_index_price_from_futures() -> None:
+    hub = _PriceHub({}, {"ltp": 24120.0, "vwap": 24100.0})
+    manager = _manager(hub=hub)
+    indicators: dict[str, Any] = {}
+    manager._augment_futures_metrics(indicators)
+
+    assert indicators["nifty_index_ltp"] is None
+    assert indicators["nifty_index_vwap"] is None
+    assert indicators["futures_ltp"] == 24120.0
+    assert indicators["futures_vwap"] == 24100.0
+
+
+def test_invalid_future_vwap_is_not_replaced_with_ltp() -> None:
+    hub = _PriceHub({"ltp": 24000.0}, {"ltp": 24120.0, "vwap": -1.0})
+    manager = _manager(hub=hub)
+    indicators: dict[str, Any] = {}
+    manager._augment_futures_metrics(indicators)
+
+    assert indicators["nifty_index_vwap"] is None
+    assert indicators.get("futures_vwap") is None
+    assert indicators.get("nifty_fut_vwap") is None
+    assert indicators["futures_ltp"] == 24120.0
+
