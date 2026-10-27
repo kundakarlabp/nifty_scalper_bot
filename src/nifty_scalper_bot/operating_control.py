@@ -142,12 +142,14 @@ def start_transition_watchdog(
     return thread
 
 
-def _mode_controls(mode: str, *, return_to: str = "/admin") -> str:
+def _mode_controls(
+    mode: str, *, return_to: str = "/admin", editable: bool = True
+) -> str:
     buttons: list[str] = []
     choices = (("AUTO", "AUTO"), ("ACTIVE", "ACTIVE"), ("QUIET", "QUIET"))
     safe_return = html.escape(return_to, quote=True)
     for value, label in choices:
-        disabled = " disabled" if mode == value else ""
+        disabled = " disabled" if mode == value or not editable else ""
         css = "gray" if value == "QUIET" else "blu" if value == "ACTIVE" else ""
         buttons.append(
             '<form method="post" action="/power/mode" style="display:inline">'
@@ -159,49 +161,43 @@ def _mode_controls(mode: str, *, return_to: str = "/admin") -> str:
     return "".join(buttons)
 
 
-def admin_power_card() -> str:
-    """Render operating controls inside the existing admin dashboard."""
+def admin_power_card(*, editable: bool = True) -> str:
+    """Render operating mode controls in the independently hosted admin page.
+
+    The schedule is a requested target, never evidence of a loaded engine.
+    Token login unlocks writes; rendering this panel does not contact Kite.
+    """
     mode = operating_mode()
-    running = engine_should_run()
-    state = "FULL ENGINE ACTIVE" if running else "QUIET — ADMIN ONLY"
-    state_class = "on" if running else "off"
+    scheduled_active = engine_should_run()
+    target = "ACTIVE" if scheduled_active else "QUIET"
     start = _clock("BOT_AUTO_START_IST", DEFAULT_START).strftime("%H:%M")
     stop = _clock("BOT_AUTO_STOP_IST", DEFAULT_STOP).strftime("%H:%M")
     transition = next_auto_transition()
-    controls = _mode_controls(mode)
-    return (
-        '<div class="card session">'
-        "<h2>Operating Mode &amp; Off-hours Power</h2>"
-        f'<p><span class="pill {state_class}">● {state}</span> '
-        f"&nbsp; Configured: <b>{mode}</b></p>"
-        f"<p><b>AUTO (recommended)</b> runs the full trading engine "
-        f"{start}–{stop} IST on weekdays and keeps only the lightweight "
-        "admin/API process outside that window.</p>"
-        f'<div class="row">{controls}</div>'
-        '<p class="muted" style="margin-top:12px">'
-        f"Next AUTO transition: <b>{transition}</b>. ACTIVE is a manual "
-        "always-on override; QUIET is a manual sleep override. Changing "
-        "mode restarts the bot service once.</p></div>"
+    controls = _mode_controls(mode, editable=editable)
+    auth_note = (
+        ""
+        if editable
+        else '<p class="muted">Verify your Zerodha owner session using '
+        "the request-token form above to enable mode changes.</p>"
     )
-
-
-def install_admin_power_card() -> None:
-    """Inject the operating card into the existing admin page."""
-    from nifty_scalper_bot import admin_dashboard
-
-    if getattr(admin_dashboard, "_OPERATING_CARD_INSTALLED", False):
-        return
-    original_page = admin_dashboard._page
-
-    def page_with_operating_card(body: str) -> str:
-        marker = "<div class=wrap>"
-        if marker in body:
-            body = body.replace(marker, marker + admin_power_card(), 1)
-        return original_page(body)
-
-    admin_dashboard._page = page_with_operating_card
-    admin_dashboard._OPERATING_CARD_INSTALLED = True
-
+    return (
+        '<section class="card" id="operating-mode">'
+        "<h2>Operating mode</h2>"
+        f'<p>Configured: <b>{html.escape(mode)}</b> · '
+        f'Schedule target now: <b>{target}</b></p>'
+        f'<p><b>AUTO</b>: engine requested {start}–{stop} IST '
+        "Monday–Friday; QUIET outside the window. "
+        "Market holidays and broker readiness are checked separately. "
+        "<b>ACTIVE</b>: manual always-on override. "
+        "<b>QUIET</b>: manual control-only override.</p>"
+        f'<div class="row">{controls}</div>'
+        f"{auth_note}"
+        '<p class="muted">Changing mode queues a guarded release. '
+        "The live Engine and Zerodha indicators above determine whether "
+        "the new state actually became ready.</p>"
+        f'<p class="muted">Next AUTO transition: '
+        f"{html.escape(transition)}</p></section>"
+    )
 
 def _mode_page(mode: str, running: bool) -> str:
     state = "FULL ENGINE ACTIVE" if running else "QUIET — ADMIN ONLY"
@@ -249,6 +245,8 @@ def set_operating_mode(
     target = return_to if return_to in {"/admin", "/power"} else "/admin"
     if selected not in VALID_MODES:
         return RedirectResponse(target, status_code=303)
+    if selected == operating_mode():
+        return RedirectResponse(target + "?power=unchanged", status_code=303)
     _write_env(
         {
             "BOT_OPERATING_MODE": selected,
@@ -256,5 +254,9 @@ def set_operating_mode(
             "BOT_AUTO_STOP_IST": "15:40",
         }
     )
-    _restart_service()
-    return RedirectResponse(target, status_code=303)
+    restart = _restart_service()
+    if restart.ok:
+        return RedirectResponse(target + "?power=queued", status_code=303)
+    return RedirectResponse(
+        target + "?power=saved_not_applied", status_code=303
+    )
