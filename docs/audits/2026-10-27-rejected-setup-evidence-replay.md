@@ -17,13 +17,13 @@ Run:
 
     python scripts/reporting/rejected_setup_replay.py exported-journald.txt --output setup_replay.json
 
-The tool deduplicates first SMC trigger per strategy-owned setup ID, matches
+The tool deduplicates lifecycle-stage and vote-only SMC evidence by setup ID, matches
 a same-symbol OrderFlow event to a trigger vote within one second, and requires
 two distinct qualifying book quote versions 4–12 seconds apart. A research
 comparator permits one non-directional missing-confirmation observation between
 the two votes but resets on reversal holdoff, adverse flow, OFI 3s misalignment,
 direction conflict, incomplete coverage, or invalid provenance.
-Unmatched votes return an indeterminate null, never a fabricated negative.
+Unmatched votes and vote-only setups without a lifecycle transition return an\nindeterminate null, never a fabricated negative or a fabricated stage.
 
 ## Observed 27 October session
 
@@ -37,9 +37,9 @@ markers contained 44 same-setup vote/book pairs.
 | 11:34:05 | 22750 CE | 12 | 3 | 6 | 3 | No | No |
 | 11:58:00 | 22750 CE | 12 | 1 | 7 | 4 | No | No |
 | 13:04:06 | 22750 PE | 9 | 1 | 6 | 2 | No | No |
-| 13:46:06 | 22700 PE | 11 | 2 | 9 | 0 | No | No |
+| 13:46:06 | 22700 PE | 11 | 2 | 9 | 0 | No | No |\n| 14:15:04 | 22650 PE | 2 | 1 | 1 | 0 | Indeterminate (stage missing) | Indeterminate (stage missing) |
 
-A log marker is not a complete quote trace. These results do not prove that
+The final setup has two different quote versions (252 at 14:15:04 and\n412 at 14:17:00); the first book observation was aligned, but the second\nwas explicitly adverse (`fresh_opposing_context`). The vote-only setup is\nreported without inventing an unobserved lifecycle transition.\n\nA log marker is not a complete quote trace. These results do not prove that
 the actual trading state machine invoked the confirmation method on every
 book update. The live day logged zero SMC_SUSTAINED_FLOW_PROOF events,
 zero manager-qualified events, and zero order submissions.
@@ -81,7 +81,7 @@ validated-CI deployment guards are unchanged by this research.
 
 ## Verification
 
-Twelve local tests passed for deduplication, rejected side conflicts,
+Sixteen focused tests cover lifecycle/vote-only deduplication, rejected side conflicts,
 distinct versions and time separation, adverse resets, three-second OFI
 misalignment, missing evidence and a truly neutral research variant.
 The tool is research-only and makes no order or live configuration change.
