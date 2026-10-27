@@ -1803,7 +1803,10 @@ class StrategyManager:
                 indicators["nifty_index_ltp_source"] = "spot_quote_ltp"
                 self._last_index_ltp = index_ltp
                 self._last_index_update_ts = now_ts
-            elif self._last_index_ltp is not None and self._last_index_update_ts is not None:
+            elif (
+                self._last_index_ltp is not None
+                and self._last_index_update_ts is not None
+            ):
                 cache_age = now_ts - self._last_index_update_ts
                 if 0 <= cache_age <= 120.0:
                     indicators["nifty_index_ltp"] = self._last_index_ltp
@@ -1821,15 +1824,27 @@ class StrategyManager:
                 futures_vwap = self._extract_float(
                     futures_quote, ("vwap", "average_price")
                 )
-                if futures_ltp is not None and math.isfinite(futures_ltp) and futures_ltp > 0:
+                if (
+                    futures_ltp is not None
+                    and math.isfinite(futures_ltp)
+                    and futures_ltp > 0
+                ):
                     indicators["futures_ltp"] = futures_ltp
                     indicators["nifty_fut_ltp"] = futures_ltp
                     indicators["futures_ltp_source"] = "active_future_quote_ltp"
-                if futures_vwap is not None and math.isfinite(futures_vwap) and futures_vwap > 0:
+                if (
+                    futures_vwap is not None
+                    and math.isfinite(futures_vwap)
+                    and futures_vwap > 0
+                ):
                     indicators["futures_vwap"] = futures_vwap
                     indicators["nifty_fut_vwap"] = futures_vwap
                     indicators["futures_vwap_source"] = "active_future_quote_vwap"
-                elif futures_ltp is not None and math.isfinite(futures_ltp) and futures_ltp > 0:
+                elif (
+                    futures_ltp is not None
+                    and math.isfinite(futures_ltp)
+                    and futures_ltp > 0
+                ):
                     log_throttled(
                         self._logger,
                         f"future_vwap_missing:{active_future}",
