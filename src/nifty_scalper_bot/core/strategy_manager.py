@@ -4356,32 +4356,6 @@ class StrategyManager(_BaseStrategyManager):
             )
             return None
 
-        conflicting_context = [
-            evidence
-            for _signal, evidence in context_votes
-            if self._context_vote_is_timestamped(evidence)
-            and bool((evidence.metadata or {}).get("context_quality_eligible"))
-            and bool((evidence.metadata or {}).get("effective_context_conflict"))
-        ]
-        if conflicting_context:
-            _record_no_signal(
-                "context_conflict",
-                "fresh_opposing_context",
-                "context_contract",
-                trigger_vote_count=len(trigger_votes),
-                context_vote_count=len(context_votes),
-            )
-            return None
-
-        same_side_context = [
-            evidence
-            for _signal, evidence in context_votes
-            if str(evidence.side or "").upper() == side
-            and self._context_vote_is_timestamped(evidence)
-            and bool((evidence.metadata or {}).get("context_quality_eligible"))
-            and bool((evidence.metadata or {}).get("effective_context_alignment"))
-        ]
-
         # Capture SMC provenance before filtering unconfirmed votes: a valid
         # VWAP vote must not erase SMC's distinct confirmation-wait record.
         smc_trigger_votes = [
@@ -4411,6 +4385,35 @@ class StrategyManager(_BaseStrategyManager):
                     side=side,
                     reason=reason,
                 )
+
+        conflicting_context = [
+            evidence
+            for _signal, evidence in context_votes
+            if self._context_vote_is_timestamped(evidence)
+            and bool((evidence.metadata or {}).get("context_quality_eligible"))
+            and bool((evidence.metadata or {}).get("effective_context_conflict"))
+        ]
+        if conflicting_context:
+            # Preserve the SMC trigger lifecycle even when adverse fresh OFI
+            # vetoes admission. This is attribution only, not a new entry.
+            _observe_smc_confirmation_wait("fresh_opposing_context")
+            _record_no_signal(
+                "context_conflict",
+                "fresh_opposing_context",
+                "context_contract",
+                trigger_vote_count=len(trigger_votes),
+                context_vote_count=len(context_votes),
+            )
+            return None
+
+        same_side_context = [
+            evidence
+            for _signal, evidence in context_votes
+            if str(evidence.side or "").upper() == side
+            and self._context_vote_is_timestamped(evidence)
+            and bool((evidence.metadata or {}).get("context_quality_eligible"))
+            and bool((evidence.metadata or {}).get("effective_context_alignment"))
+        ]
 
         independent_trigger_confirmation, confirming_trigger_strategies = (
             independent_same_side_confirmation(trigger_votes)
