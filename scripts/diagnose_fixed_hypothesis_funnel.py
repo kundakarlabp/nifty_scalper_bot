@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
-"""Read-only diagnostics of fixed monthly-option hypothesis artifacts.
+"""Export validated monthly-option research entry funnels as a CSV.
 
-No strategy configuration, trade execution, or broker integration is imported.
+Responsibilities: Validate the fixed phase/strategy/slippage matrix, reconcile
+accepted fills with recorded exit outcomes, and tabulate rejection stages.
+Key interfaces: diagnose and the offline command-line main entrypoint.
+Boundaries: Reads a research JSON artifact without importing broker or trading
+runtime modules; the research generator owns observations and trade simulation.
+Safety: Reject inconsistent counts; no live strategy or execution mutations.
 """
 from __future__ import annotations
 
