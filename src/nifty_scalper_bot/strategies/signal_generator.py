@@ -1780,9 +1780,7 @@ class StrategyManager:
         # adjustment as an index VWAP. Futures VWAP has its own domain.
         try:
             index_quote = data_hub.get_quote("NSE:NIFTY", allow_pull=True) or {}
-            index_ltp = self._extract_float(
-                index_quote, ("last_price", "ltp", "close")
-            )
+            index_ltp = self._extract_float(index_quote, ("last_price", "ltp", "close"))
             indicators["nifty_index_vwap"] = None
             indicators["nifty_index_vwap_source"] = "untraded_index_no_vwap"
             index_quote_average = self._extract_float(
@@ -1793,9 +1791,7 @@ class StrategyManager:
                 and math.isfinite(index_quote_average)
                 and index_quote_average > 0
             ):
-                indicators["nifty_index_quote_average_price"] = (
-                    index_quote_average
-                )
+                indicators["nifty_index_quote_average_price"] = index_quote_average
 
             now_ts = dt.datetime.now().timestamp()
             if index_ltp is not None and math.isfinite(index_ltp) and index_ltp > 0:
