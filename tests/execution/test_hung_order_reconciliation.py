@@ -40,7 +40,9 @@ def test_hung_submission_keeps_first_reconciled_order(monkeypatch, tmp_path):
 
     def find_order(_client_id):
         lookups.append(1)
-        return {"order_id": "BROKER-1", "status": "OPEN"} if len(lookups) == 1 else None
+        if len(lookups) == 1:
+            return {"order_id": "BROKER-1", "status": "OPEN"}
+        return None
 
     monkeypatch.setattr(manager, "_find_open_order", find_order)
     order_id = manager.place_order(
