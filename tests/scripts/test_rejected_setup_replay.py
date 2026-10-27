@@ -343,7 +343,6 @@ def test_wrong_symbol_manager_event_cannot_validate_another_setup() -> None:
     assert entry["five_minute_reference"] == "no_manager_qualification_logged"
 
 
-
 def test_smc_indicator_book_sample_matches_exact_setup_vote_version() -> None:
     lines = [
         setup(),
@@ -401,8 +400,6 @@ def test_quote_sample_from_unrelated_setup_does_not_prove_bid_ask() -> None:
 
 
 def test_old_journal_without_book_samples_is_not_assumed_quote_complete() -> None:
-    item = analyze("\n".join([setup(), vote(5, 10), book(5, 10)]))[
-        "setups"
-    ][0]
+    item = analyze("\n".join([setup(), vote(5, 10), book(5, 10)]))["setups"][0]
     assert item["indicator_book_samples"] == 0
     assert item["complete_executable_quote_path"] is False
