@@ -3885,6 +3885,7 @@ class OrderManager:
                 t.start()
                 t.join(timeout=8.0)
 
+                response = None
                 if t.is_alive():
                     self._logger.warning(
                         "Broker call exceeded 8s for %s (attempt %s); waiting recovery window",
@@ -3918,7 +3919,8 @@ class OrderManager:
                         normalized_symbol,
                     )
 
-                response = result_holder["resp"]
+                if response is None:
+                    response = result_holder["resp"]
                 if response is None:
                     existing_after_timeout = (
                         _find_existing_order_after_uncertain_submit()
