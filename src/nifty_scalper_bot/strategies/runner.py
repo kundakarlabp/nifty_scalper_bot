@@ -829,9 +829,6 @@ class StrategyRunner:
         self._position_manager = position_manager
         self._message_bus = message_bus
         self._config = config or StrategyRunnerConfig()
-        self._execution_engine = (
-            None  # Removed — signals route directly via order_manager
-        )
         self._logger = get_logger(__name__)
         self._logger.debug(
             "StrategyRunner using MessageBus id=%s", id(self._message_bus)
@@ -876,8 +873,6 @@ class StrategyRunner:
         self._legacy_tick_subscription_mode = os.getenv(
             "STRATEGY_RUNNER_LEGACY_SUBSCRIBE", "false"
         ).strip().lower() in {"1", "true", "yes", "on"}
-        # Time block logging throttle
-        self._time_block_logged: Dict[str, float] = {}
         self._allow_eval_without_new_bar = os.getenv(
             "RUNNER_ALLOW_EVAL_WITHOUT_NEW_BAR", "true"
         ).strip().lower() in {"1", "true", "yes", "on"}
@@ -982,7 +977,6 @@ class StrategyRunner:
         self._max_order_attempts_per_minute = max(
             1, int(os.getenv("RUNNER_MAX_ORDER_ATTEMPTS_PER_MINUTE", "5") or 5)
         )
-        self._last_execution_halted_log_ts: float = 0.0
         self._runtime_data_hard_ready = False
         self._runtime_evaluation_ready = False
         self._runtime_live_orders_armed = False
@@ -1067,7 +1061,6 @@ class StrategyRunner:
         self._trade_counter_by_symbol_candle: Dict[str, dict] = {}
         self._settings = get_settings()
         self._lock = threading.RLock()
-        self._eval_lock = threading.Lock()
         self._trade_counter_lock = threading.Lock()
         self._running = False
         self._trading_paused = False
@@ -1160,7 +1153,6 @@ class StrategyRunner:
         )
         self._last_ws_stale_log_ts_by_symbol: dict[str, float] = defaultdict(float)
         self._last_ws_reconnect_attempt_ts: float = 0.0
-        self._last_stall_warn_ts: float = 0.0  # throttle stall warnings to 30s
         # Health-watchdog cadence: the scan was previously executed for every
         # accepted tick on the tick thread.
         self._health_watchdog_lock = threading.Lock()
@@ -1183,8 +1175,6 @@ class StrategyRunner:
         self._candle_engines: dict[str, Any] = {}
         # STEP 1/4: Single deterministic pipeline — ticks flow here → closed candles only
         self._pipeline: MarketDataPipeline = get_pipeline(store_maxlen=1500)
-        # STEP 5: counter for "invalid data" drops — never silently discarded
-        self._invalid_data_skip_counter: int = 0
         self._symbol_history: dict[str, list[OneMinuteBar]] = {}
         self._recent_history_cache: dict[str, list[OneMinuteBar]] = {}
         self._restored_from_cache_symbols: set[str] = set()
@@ -1266,10 +1256,6 @@ class StrategyRunner:
         self._structural_approved_total_count = 0
         self._regime_block_counter = 0
         self._capital_block_counter = 0
-        self._last_candle_eval: dict[str, float] = {}
-        self._regime_skip_log_ts: dict[str, float] = {}
-        self._qty_zero_log_ts: dict[str, float] = {}
-        self._last_spot_warn_ts = 0.0
         self._spot_stale_flag = False
         self._last_summary_log = time.monotonic()
         self._last_system_heartbeat_log = time.monotonic()
@@ -1303,8 +1289,6 @@ class StrategyRunner:
         # BUG W2 FIX: emit a one-shot INFO log when indicator warmup first clears
         # for each symbol so Railway logs confirm the moment strategies become active.
         self._warmup_complete_logged: set[str] = set()
-        self._max_trades_per_symbol_per_candle = 1
-        self._min_trade_interval_seconds = 60.0
         self._session_allow_out_of_hours = allow_offhours_testing_safe()
         self._max_nifty_positions = int(os.getenv("MAX_NIFTY_POSITIONS", "1"))
         self._last_regime_by_symbol: dict[str, MarketRegime] = {}
