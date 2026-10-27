@@ -71,3 +71,38 @@ changed-code quality and broker-free E2E CI before merging. New
 trade orders, changing risk, relaxing VWAP volume requirements, exposing
 secrets or invoking broker trade actions are explicitly out of scope.
 Verify post-merge main CI and production deployed SHA via Supabase heartbeat.
+
+## Follow-up: bounded completed-bar reconciliation
+
+The latest indicator bar is not necessarily a finalized bar. The
+`IndicatorEngine` explicitly reports zero volume when its most recent bar
+is provisional. That behavior is fail-closed and remains unchanged.
+
+The next read-only diagnostic sample (at most one per option symbol per
+60 seconds of zero-volume rejections) now records:
+
+- the newest indicator-history bar and whether it is finalized;
+- the last finalized indicator-history bar (from a bounded five-bar tail);
+- the latest canonical CandleEngine completed bar, via DataHub;
+- explicit UTC-minute alignment and volume comparison, only when both
+  sources provide aware timestamps;
+- separate recorded quote cumulative and interval volume evidence.
+
+`completed_bar_parity` distinguishes
+`same_minute_volume_match`,
+`same_minute_volume_mismatch`,
+`different_completed_minutes`,
+`missing_or_invalid_completed_timestamp`, and
+`missing_or_invalid_completed_volume`.
+
+A mismatch between two finalized bars for the **same symbol and minute**
+will be strong evidence of an indicator-versus-CandleEngine ingestion
+defect. If the latest indicator bar is provisional while the prior
+completed bars match, a zero latest-bar volume may instead reflect an
+unfinished observation. Neither observation automatically licenses a
+VWAPPro entry, and quote cumulative volume cannot be substituted for
+the volume of a specific minute without precise temporal reconciliation.
+
+The finalized 27 October archive predates this logging. Market-hours
+values must be collected on the next trading session; no after-hours
+heartbeat can prove real-time data correctness.

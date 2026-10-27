@@ -3738,54 +3738,99 @@ class StrategyManager(_BaseStrategyManager):
                 # A bounded, per-symbol sample distinguishes an absent volume
                 # field from a genuine zero without relaxing this no-vote gate.
                 if strategy_name == "VWAPPro" and reason == "option_candle_no_trades":
-                    # The indicator snapshot does not include completeness
-                    # flags. Fetch the ACTUAL indicator-history tail so the
-                    # diagnostic can distinguish provisional from zero bars.
-                    # Never change the VWAPPro rejection from this observation.
-                    latest_bar = None
-                    history_getter = getattr(self._indicator_engine, "get_history", None)
-                    if callable(history_getter):
-                        try:
-                            history_tail = history_getter(symbol, count=1, field="bars")
-                            if history_tail and isinstance(history_tail[-1], t.Mapping):
-                                latest_bar = history_tail[-1]
-                        except Exception:
-                            pass  # Diagnostic failure cannot authorize an entry.
-                    evidence = describe_option_volume_evidence(
-                        indicators,
-                        latest_bar=latest_bar,
-                        quote=opt_quote if isinstance(opt_quote, t.Mapping) else None,
-                    )
-                    log_throttled(
-                        log,
-                        f"vwap_zero_volume:{symbol}",
-                        "VWAP_OPTION_VOLUME_REJECT symbol=%s raw_volume=%r avg_volume=%r bar_ts=%s bar_complete=%s bar_provisional=%s quote_version=%s data_age_s=%s history_source=%s evidence_state=%s history_bar_volume=%s quote_delta=%s quote_cumulative=%s quote_transition=%s quote_source=%s",
-                        symbol,
-                        indicators.get("volume"),
-                        indicators.get("avg_volume"),
-                        evidence["history_bar_ts"],
-                        evidence["history_bar_complete"],
-                        evidence["history_bar_provisional"],
-                        indicators.get("quote_update_version"),
-                        indicators.get("data_age_seconds"),
-                        indicators.get("history_source"),
-                        evidence["state"],
-                        evidence["history_bar_volume"],
-                        evidence["quote_volume_delta"],
-                        evidence["quote_volume_cumulative"],
-                        evidence["quote_volume_transition_state"],
-                        evidence["quote_source"],
-                        interval_sec=60.0,
-                        level=logging.INFO,
-                        extra={
-                            "event": "VWAP_OPTION_VOLUME_REJECT",
-                            "symbol": symbol,
-                            "raw_volume": indicators.get("volume"),
-                            "bar_ts": evidence["history_bar_ts"],
-                            "quote_version": indicators.get("quote_update_version"),
-                            "volume_evidence": evidence,
-                        },
-                    )
+                    # This is strictly a sampled diagnostic. The no-vote
+                    # remains unchanged. Sampling before history calls also
+                    # bounds the read overhead, not only the log emission.
+                    seen = getattr(self, "_option_volume_parity_sampled_at", None)
+                    if not isinstance(seen, dict):
+                        seen = {}
+                        self._option_volume_parity_sampled_at = seen
+                    now_sample = time.monotonic()
+                    if now_sample - float(seen.get(symbol, -1e10)) >= 60.0:
+                        seen[symbol] = now_sample
+                        latest_bar = None
+                        indicator_complete = None
+                        canonical_complete = None
+                        history_getter = getattr(
+                            self._indicator_engine, "get_history", None
+                        )
+                        if callable(history_getter):
+                            try:
+                                history_tail = history_getter(
+                                    symbol, count=5, field="bars"
+                                )
+                                if history_tail:
+                                    if isinstance(history_tail[-1], t.Mapping):
+                                        latest_bar = history_tail[-1]
+                                    indicator_complete = next(
+                                        (
+                                            bar
+                                            for bar in reversed(history_tail)
+                                            if isinstance(bar, t.Mapping)
+                                            and bar.get("is_complete") is not False
+                                            and bar.get("is_provisional") is not True
+                                        ),
+                                        None,
+                                    )
+                            except Exception:
+                                pass  # Read-only diagnostic must not affect admission.
+                        if self._data_hub is not None:
+                            get_canonical_bars = getattr(
+                                self._data_hub, "get_ohlc_bars", None
+                            )
+                            if callable(get_canonical_bars):
+                                try:
+                                    bars = get_canonical_bars(symbol, limit=1)
+                                    if bars and isinstance(bars[-1], t.Mapping):
+                                        canonical_complete = bars[-1]
+                                except Exception:
+                                    pass
+                        evidence = describe_option_volume_evidence(
+                            indicators,
+                            latest_bar=latest_bar,
+                            quote=(
+                                opt_quote if isinstance(opt_quote, t.Mapping) else None
+                            ),
+                            indicator_completed_bar=indicator_complete,
+                            canonical_completed_bar=canonical_complete,
+                        )
+                        log_throttled(
+                            log,
+                            f"vwap_zero_volume:{symbol}",
+                            "VWAP_OPTION_VOLUME_REJECT symbol=%s raw_volume=%r avg_volume=%r bar_ts=%s bar_complete=%s bar_provisional=%s quote_version=%s data_age_s=%s history_source=%s evidence_state=%s history_bar_volume=%s quote_delta=%s quote_cumulative=%s quote_transition=%s quote_source=%s parity=%s indicator_completed_ts=%s indicator_completed_volume=%s canonical_completed_ts=%s canonical_completed_volume=%s",
+                            symbol,
+                            indicators.get("volume"),
+                            indicators.get("avg_volume"),
+                            evidence["history_bar_ts"],
+                            evidence["history_bar_complete"],
+                            evidence["history_bar_provisional"],
+                            indicators.get("quote_update_version"),
+                            indicators.get("data_age_seconds"),
+                            indicators.get("history_source"),
+                            evidence["state"],
+                            evidence["history_bar_volume"],
+                            evidence["quote_volume_delta"],
+                            evidence["quote_volume_cumulative"],
+                            evidence["quote_volume_transition_state"],
+                            evidence["quote_source"],
+                            evidence["completed_bar_parity"],
+                            evidence["indicator_completed_ts"],
+                            evidence["indicator_completed_volume"],
+                            evidence["canonical_completed_ts"],
+                            evidence["canonical_completed_volume"],
+                            interval_sec=60.0,
+                            level=logging.INFO,
+                            extra={
+                                "event": "VWAP_OPTION_VOLUME_REJECT",
+                                "symbol": symbol,
+                                "raw_volume": indicators.get("volume"),
+                                "bar_ts": evidence["history_bar_ts"],
+                                "quote_version": indicators.get(
+                                    "quote_update_version"
+                                ),
+                                "volume_evidence": evidence,
+                            },
+                        )
                 continue
             adjusted = base_signal
             signals.append(adjusted)
