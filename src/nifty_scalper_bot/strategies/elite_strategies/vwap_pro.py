@@ -1,6 +1,13 @@
 # fmt: off
 # ruff: noqa: E501,I001,F841
 # mypy: ignore-errors
+"""Purpose: Evaluate causally confirmed VWAPPro continuation/pullback signals.
+
+Responsibilities: Calculate premium and underlying evidence, scope VWAP thesis
+to the originating option contract, and report effective context gate settings.
+Safety: Never bypass fresh bars, bid/ask quality, trend proof, risk geometry or
+live trade safeguards merely to increase candidate frequency.
+"""
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
@@ -210,6 +217,17 @@ class VWAPProStrategy(EliteStrategy):
         )
         self._early_trend_max_context_age = float(
             os.getenv("VWAP_EARLY_TREND_MAX_CONTEXT_AGE", "2.0") or 2.0
+        )
+
+        # Read-only operating evidence: report effective settings, including
+        # deployment-local overrides, without changing candidate admission.
+        LOGGER.info(
+            "VWAP_EARLY_TREND_CONTEXT_GATE_CONFIG min_conf=%.2f max_age_s=%.2f trend_momentum_enabled=%s live_neutral_slope_enabled=%s",
+            self._early_trend_min_context_conf,
+            self._early_trend_max_context_age,
+            self._trend_momentum_enabled,
+            self._live_neutral_slope_enabled,
+            extra={"event": "VWAP_EARLY_TREND_CONTEXT_GATE_CONFIG"},
         )
 
     def get_required_indicators(self) -> set[str]:
