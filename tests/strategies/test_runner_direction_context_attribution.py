@@ -96,8 +96,8 @@ def test_direction_skip_log_carries_underlying_provenance_and_still_rejects() ->
         "fut_direction_reasons=%s",
         '"spot_bias": spot_bias',
         '"fut_bias": futures_bias',
-        '"spot_direction_reasons": spot_direction_reasons',
-        '"fut_direction_reasons": futures_direction_reasons',
+        '"spot_direction_reasons": (',
+        '"fut_direction_reasons": (',
         "level=logging.WARNING",
     ):
         assert marker in diagnostic
