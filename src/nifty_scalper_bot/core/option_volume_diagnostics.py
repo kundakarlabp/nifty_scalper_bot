@@ -37,7 +37,6 @@ def _first_present_number(
     return None
 
 
-
 def _minute_key(value: Any) -> str | None:
     """Align aware candle timestamps to their UTC minute without guessing TZ."""
     if isinstance(value, datetime):
@@ -51,9 +50,7 @@ def _minute_key(value: Any) -> str | None:
         return None
     if stamp.tzinfo is None or stamp.utcoffset() is None:
         return None
-    return stamp.astimezone(timezone.utc).replace(
-        second=0, microsecond=0
-    ).isoformat()
+    return stamp.astimezone(timezone.utc).replace(second=0, microsecond=0).isoformat()
 
 
 def _bar_summary(bar: Mapping[str, Any] | None) -> tuple[str | None, float | None]:
@@ -108,12 +105,8 @@ def describe_option_volume_evidence(
     else:
         evidence_state = "negative_history_volume_invalid"
 
-    indicator_ts, indicator_completed_volume = _bar_summary(
-        indicator_completed_bar
-    )
-    canonical_ts, canonical_completed_volume = _bar_summary(
-        canonical_completed_bar
-    )
+    indicator_ts, indicator_completed_volume = _bar_summary(indicator_completed_bar)
+    canonical_ts, canonical_completed_volume = _bar_summary(canonical_completed_bar)
     if indicator_ts is None or canonical_ts is None:
         parity = "missing_or_invalid_completed_timestamp"
     elif indicator_ts != canonical_ts:
