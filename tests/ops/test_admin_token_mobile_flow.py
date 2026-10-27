@@ -35,11 +35,16 @@ def operator_client(monkeypatch, tmp_path: Path) -> TestClient:
     ("submission", "expected"),
     [
         ("opaque-request", "opaque-request"),
-        ("https://callback.example/path?request_token=opaque-request&status=success", "opaque-request"),
+        (
+            "https://callback.example/path?request_token=opaque-request&status=success",
+            "opaque-request",
+        ),
         ("request_token=opaque-request&status=success", "opaque-request"),
     ],
 )
-def test_paste_form_accepts_raw_token_or_full_url(monkeypatch, tmp_path, submission, expected):
+def test_paste_form_accepts_raw_token_or_full_url(
+    monkeypatch, tmp_path, submission, expected
+):
     client = operator_client(monkeypatch, tmp_path)
     page = client.get("/admin")
     assert page.status_code == 200
@@ -56,7 +61,8 @@ def test_paste_form_accepts_raw_token_or_full_url(monkeypatch, tmp_path, submiss
     queued = []
     monkeypatch.setattr(
         dashboard, "_activate_access_token",
-        lambda token: queued.append(token) or ControlResult(True, "restart_bot", "queued"),
+        lambda token: queued.append(token)
+        or ControlResult(True, "restart_bot", "queued"),
     )
     result = client.post(
         "/admin/token",
@@ -73,10 +79,14 @@ def test_paste_form_accepts_raw_token_or_full_url(monkeypatch, tmp_path, submiss
     assert '<details open><summary>Paste callback URL / request token' in again.text
 
 
-def test_existing_owner_session_cannot_rotate_to_wrong_kite_account(monkeypatch, tmp_path):
+def test_existing_owner_session_cannot_rotate_to_wrong_kite_account(
+    monkeypatch, tmp_path
+):
     client = operator_client(monkeypatch, tmp_path)
     monkeypatch.setattr(dashboard, "valid_owner_session", lambda *_: True)
-    monkeypatch.setattr(dashboard, "_exchange_request_token", lambda *_: (True, "foreign-access"))
+    monkeypatch.setattr(
+        dashboard, "_exchange_request_token", lambda *_: (True, "foreign-access")
+    )
     monkeypatch.setattr(dashboard, "_verify_access_token", lambda *_: (True, "ZZ9999"))
     monkeypatch.setattr(
         dashboard, "_activate_access_token",
@@ -96,7 +106,9 @@ def test_existing_owner_session_cannot_rotate_to_wrong_kite_account(monkeypatch,
 def test_admin_uses_canonical_atomic_environment_writer(monkeypatch):
     assert dashboard.ENV_PATH == core.ENV_PATH
     written = []
-    monkeypatch.setattr(dashboard, "write_canonical_env", lambda updates: written.append(updates))
+    monkeypatch.setattr(
+        dashboard, "write_canonical_env", lambda updates: written.append(updates)
+    )
     dashboard._ENV_CACHE.update({"at": 100, "data": {"old": "stale"}})
     dashboard._write_env({"KITE_ACCESS_TOKEN": "sample"})
     assert written == [{"KITE_ACCESS_TOKEN": "sample"}]
@@ -104,7 +116,9 @@ def test_admin_uses_canonical_atomic_environment_writer(monkeypatch):
 
 
 def test_review_links_target_secure_token_form():
-    source = (Path(__file__).resolve().parents[2] / "dashboard/superlite_console.py").read_text()
+    source = (
+        Path(__file__).resolve().parents[2] / "dashboard/superlite_console.py"
+    ).read_text()
     assert '_parsed_admin.scheme != "https"' in source
     assert 'ADMIN_PUBLIC = f"https://{_public_ip}/admin#session"' in source
     assert 'link_button("Paste request token", ADMIN_PUBLIC' in source
