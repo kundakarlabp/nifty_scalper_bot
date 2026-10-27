@@ -1155,14 +1155,20 @@ def test_conflicting_completed_futures_candles_fail_closed(
     assert signal is None
     assert strategy.last_no_vote_reason == "underlying_context_not_ready"
 
+
 def test_range_smc_requires_distinct_support(monkeypatch) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     rows = _base_rows()
     strategy = _strategy(rows, volume_spike_mult=1.5)
     rows.append(_bar(30, open_=23988, high=23991, low=23974, close=23984, volume=2400))
-    ctx = _indicators(latest_bar_ts=rows[-1]["timestamp"], regime="RANGE",
-                      bos_confirmed=False, choch_confirmed=False,
-                      retest_confirmed=False, premium_reclaim=False)
+    ctx = _indicators(
+        latest_bar_ts=rows[-1]["timestamp"],
+        regime="RANGE",
+        bos_confirmed=False,
+        choch_confirmed=False,
+        retest_confirmed=False,
+        premium_reclaim=False,
+    )
     assert strategy.generate_signal(CE, ctx, 102.0) is None
     rows.append(_bar(31, open_=23984, high=23999, low=23982, close=23997, volume=1000))
     ctx["latest_bar_ts"] = rows[-1]["timestamp"]
@@ -1174,15 +1180,23 @@ def test_range_smc_accepts_timestamped_retest_reclaim(monkeypatch) -> None:
     rows = _base_rows()
     strategy = _strategy(rows, volume_spike_mult=10.0)
     rows.append(_bar(30, open_=23988, high=23991, low=23974, close=23984, volume=1000))
-    ctx = _indicators(latest_bar_ts=rows[-1]["timestamp"], regime="RANGE",
-                      bos_confirmed=False, choch_confirmed=False,
-                      retest_confirmed=True, premium_reclaim=True,
-                      smc_enrichment_source="strategy_manager_pre_strategy")
+    ctx = _indicators(
+        latest_bar_ts=rows[-1]["timestamp"],
+        regime="RANGE",
+        bos_confirmed=False,
+        choch_confirmed=False,
+        retest_confirmed=True,
+        premium_reclaim=True,
+        smc_enrichment_source="strategy_manager_pre_strategy",
+    )
     assert strategy.generate_signal(CE, ctx, 102.0) is None
     rows.append(_bar(31, open_=23984, high=23999, low=23982, close=23997, volume=1000))
     stamp = rows[-1]["timestamp"].timestamp()
-    ctx.update(latest_bar_ts=rows[-1]["timestamp"], retest_ts_epoch=stamp,
-               premium_reclaim_ts_epoch=stamp)
+    ctx.update(
+        latest_bar_ts=rows[-1]["timestamp"],
+        retest_ts_epoch=stamp,
+        premium_reclaim_ts_epoch=stamp,
+    )
     signal = strategy.generate_signal(CE, ctx, 103.0)
     assert signal is not None
     assert signal.metadata["smc_quality_corroborated"] is True
