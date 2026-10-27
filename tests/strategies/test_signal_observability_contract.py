@@ -361,5 +361,9 @@ def test_zero_volume_rejection_has_bounded_provenance_log_without_admission_chan
     assert '"bar_ts": evidence["history_bar_ts"]' in manager_source
     assert "describe_option_volume_evidence(" in manager_source
     assert '"volume_evidence": evidence' in manager_source
+    assert 'count=5, field="bars"' in manager_source
+    assert '"get_ohlc_bars", None' in manager_source
+    assert '"completed_bar_parity"' in manager_source
+    assert '"_option_volume_parity_sampled_at"' in manager_source
     assert 'self._no_vote("option_candle_no_trades")' in vwap_source
     assert "if vol <= 0:" in vwap_source
