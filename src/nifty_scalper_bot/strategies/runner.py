@@ -18695,10 +18695,7 @@ class StrategyRunner:
                 trade_symbol or base_symbol or signal.symbol
             )
             selected_snapshot: dict[str, Any] = {}
-            dedup_reserved = False
-            dedup_key_context: dict[str, str] | None = None
-
-            def reject_after_dedup(
+            def _reject_after_dedup(
                 *,
                 reason: str,
                 details: Mapping[str, Any] | None = None,
@@ -18710,8 +18707,8 @@ class StrategyRunner:
                         reason=reason_key,
                     )
                 self._reset_execution_state(base_symbol)
-                rejection_details = dict(details or {})
-                if decision_research_context:
+                rejection_details = details if dedup_reserved else dict(details or {})
+                if not dedup_reserved and decision_research_context:
                     rejection_details.setdefault(
                         "research_context",
                         {
@@ -18727,7 +18724,6 @@ class StrategyRunner:
                     details=rejection_details,
                 )
 
-            _reject_after_dedup = reject_after_dedup
             existing_snapshots = (
                 candidate_snapshots_obj
                 if isinstance(candidate_snapshots_obj, list)
@@ -19647,25 +19643,6 @@ class StrategyRunner:
                     "option_side": option_side,
                     "reason": reason_key,
                 }
-
-                def _reject_after_dedup(
-                    *,
-                    reason: str,
-                    details: Mapping[str, Any] | None = None,
-                ) -> SignalExecutionResult:
-                    if dedup_reserved:
-                        self._mark_directional_dedup_failed(
-                            underlying=underlying,
-                            option_side=option_side,
-                            reason=reason_key,
-                        )
-                    self._reset_execution_state(base_symbol)
-                    return self._reject_signal_execution(
-                        symbol=base_symbol,
-                        trace_id=trace_id,
-                        reason=reason,
-                        details=details,
-                    )
 
                 if is_live_mode:
                     readiness = self._ensure_symbol_execution_ready_result(
