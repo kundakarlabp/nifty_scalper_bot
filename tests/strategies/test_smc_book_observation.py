@@ -34,9 +34,7 @@ def test_missing_mismatched_or_bad_book_never_claims_valid(
 ) -> None:
     indicators = {"quote_update_version": 8, "bid": 99.5, "ask": 100.0}
     indicators.update(overrides)
-    result = _bounded_smc_book_observation(
-        indicators, {"quote_update_version": 8}
-    )
+    result = _bounded_smc_book_observation(indicators, {"quote_update_version": 8})
     assert result["book_state"] == expected_state
     if expected_state != "indicator_book_present":
         assert result["book_bid"] is None
@@ -94,13 +92,16 @@ def test_observability_emits_companion_event_without_changing_signal(caplog) -> 
     assert events[0].book_state == "indicator_book_present"
     assert events[0].book_bid == 99.5
     assert events[0].quote_update_version == 8
-    assert len(
-        [
-            record
-            for record in caplog.records
-            if getattr(record, "event", "") == "STRATEGY_TRIGGER_VOTE"
-        ]
-    ) == 1
+    assert (
+        len(
+            [
+                record
+                for record in caplog.records
+                if getattr(record, "event", "") == "STRATEGY_TRIGGER_VOTE"
+            ]
+        )
+        == 1
+    )
 
 
 def test_unrelated_strategy_has_no_smc_book_event(caplog) -> None:
