@@ -16587,14 +16587,55 @@ class StrategyRunner:
                                         else "direction_context_missing_live"
                                     )
                                 )
+                                # An unresolved direction can coexist with
+                                # fresh spot/futures ticks. Preserve both
+                                # underlying classifications in the decision
+                                # log without inventing a fallback CE/PE bias.
+                                spot_snapshot = refreshed_context.get("spot_context")
+                                futures_snapshot = refreshed_context.get(
+                                    "futures_context"
+                                )
+                                spot_snapshot = (
+                                    spot_snapshot
+                                    if isinstance(spot_snapshot, Mapping)
+                                    else {}
+                                )
+                                futures_snapshot = (
+                                    futures_snapshot
+                                    if isinstance(futures_snapshot, Mapping)
+                                    else {}
+                                )
+                                spot_bias = (
+                                    spot_snapshot.get("underlying_direction_bias")
+                                    or spot_snapshot.get("direction_bias")
+                                    or None
+                                )
+                                futures_bias = (
+                                    futures_snapshot.get("underlying_direction_bias")
+                                    or futures_snapshot.get("direction_bias")
+                                    or None
+                                )
+                                spot_direction_reasons = spot_snapshot.get(
+                                    "direction_context_reasons"
+                                )
+                                futures_direction_reasons = futures_snapshot.get(
+                                    "direction_context_reasons"
+                                )
                                 log_throttled(
                                     self._logger,
                                     f"direction_context_blocked:{symbol}:{direction_reason}",
-                                    "TRIGGER_EVAL_SKIPPED symbol=%s reason=%s spot_fresh=%s fut_fresh=%s",
+                                    "TRIGGER_EVAL_SKIPPED symbol=%s reason=%s "
+                                    "spot_fresh=%s fut_fresh=%s spot_bias=%s "
+                                    "fut_bias=%s spot_direction_reasons=%s "
+                                    "fut_direction_reasons=%s",
                                     symbol,
                                     direction_reason,
                                     spot_fresh,
                                     fut_fresh,
+                                    spot_bias,
+                                    futures_bias,
+                                    spot_direction_reasons,
+                                    futures_direction_reasons,
                                     interval_sec=30.0,
                                     level=logging.WARNING,
                                     extra={
@@ -16603,6 +16644,10 @@ class StrategyRunner:
                                         "symbol": symbol,
                                         "spot_fresh": spot_fresh,
                                         "fut_fresh": fut_fresh,
+                                        "spot_bias": spot_bias,
+                                        "fut_bias": futures_bias,
+                                        "spot_direction_reasons": spot_direction_reasons,
+                                        "fut_direction_reasons": futures_direction_reasons,
                                     },
                                 )
                                 self._emit_runner_eval_decision(
