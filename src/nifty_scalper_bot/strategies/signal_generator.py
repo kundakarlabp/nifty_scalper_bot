@@ -1815,9 +1815,15 @@ class StrategyManager:
 
             active_future = self._resolve_active_futures_symbol_for_metrics()
             if active_future:
-                futures_quote = (
-                    data_hub.get_quote(active_future, allow_pull=True) or {}
-                )
+                # Use one coherent futures quote for cumulative volume,
+                # LTP and VWAP when the active symbol matches the earlier
+                # volume observation. A second fetch may advance the source.
+                if active_future == self._futures_symbol:
+                    futures_quote = quote or {}
+                else:
+                    futures_quote = (
+                        data_hub.get_quote(active_future, allow_pull=True) or {}
+                    )
                 futures_ltp = self._extract_float(
                     futures_quote, ("last_price", "ltp", "close")
                 )
