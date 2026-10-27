@@ -56,8 +56,9 @@ def test_admin_mode_buttons_are_visible_without_engine_or_broker(monkeypatch):
     assert "API Key" in page.text
 
 
-def test_guest_sees_mode_but_cannot_change_settings(monkeypatch):
+def test_guest_sees_mode_but_cannot_change_settings(monkeypatch, tmp_path):
     _owner(monkeypatch, verified=False)
+    monkeypatch.setenv("NIFTYBOT_CONFIG_DIR", str(tmp_path))
     with _client() as client:
         page = client.get("/admin")
         assert page.status_code == 200
