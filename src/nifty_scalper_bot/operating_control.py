@@ -187,11 +187,12 @@ def admin_power_card(*, editable: bool = True) -> str:
     return (
         '<section class="card" id="operating-mode">'
         "<h2>Operating mode</h2>"
-        f'<p>Configured: <b>{html.escape(mode)}</b> · '
-        f'Schedule target now: <b>{target}</b></p>'
-        f'<p><b>AUTO</b>: engine requested {start}–{stop} IST '
+        f"<p>Configured: <b>{html.escape(mode)}</b> · "
+        f"Schedule target now: <b>{target}</b></p>"
+        f"<p><b>AUTO</b>: engine requested {start}–{stop} IST "
         "Monday–Friday; QUIET outside the window. "
-        "Market holidays and broker readiness are checked separately. "
+        "AUTO's weekday window is not a holiday calendar; " 
+        "broker readiness remains a separate requirement. "
         "<b>ACTIVE</b>: manual always-on override. "
         "<b>QUIET</b>: manual control-only override.</p>"
         f'<div class="row">{controls}</div>'
@@ -202,6 +203,7 @@ def admin_power_card(*, editable: bool = True) -> str:
         f'<p class="muted">Next AUTO transition: '
         f"{html.escape(transition)}</p></section>"
     )
+
 
 def _mode_page(mode: str, running: bool) -> str:
     state = "FULL ENGINE ACTIVE" if running else "QUIET — ADMIN ONLY"
@@ -261,6 +263,4 @@ def set_operating_mode(
     restart = _restart_service()
     if restart.ok:
         return RedirectResponse(target + "?power=queued", status_code=303)
-    return RedirectResponse(
-        target + "?power=saved_not_applied", status_code=303
-    )
+    return RedirectResponse(target + "?power=saved_not_applied", status_code=303)
