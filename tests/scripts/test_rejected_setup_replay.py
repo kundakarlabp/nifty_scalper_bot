@@ -166,9 +166,7 @@ def test_repeated_same_quote_vote_does_not_create_a_false_missing_row() -> None:
 
 
 def test_mismatched_quote_version_is_indeterminate() -> None:
-    sample = analyze("\n".join([setup(), vote(5, 10), book(5, 11)]))[
-        "setups"
-    ][0]
+    sample = analyze("\n".join([setup(), vote(5, 10), book(5, 11)]))["setups"][0]
     assert sample["unmatched_votes"] == 1
     assert sample["strict_logged_pair"] is None
 
@@ -179,8 +177,9 @@ def test_stale_or_ineligible_book_resets_both_arms() -> None:
         vote(5, 10),
         book(5, 10),
         vote(8, 11),
-        book(8, 11, reason="no_independent_flow_confirmation", aligned=False)
-        .replace("eligible=True", "eligible=False"),
+        book(8, 11, reason="no_independent_flow_confirmation", aligned=False).replace(
+            "eligible=True", "eligible=False"
+        ),
         vote(11, 20),
         book(11, 20),
     ]
