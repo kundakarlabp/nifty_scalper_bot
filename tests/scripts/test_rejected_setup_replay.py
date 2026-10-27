@@ -305,9 +305,7 @@ def test_original_sweep_age_at_qualification_26_october_two_trades() -> None:
 
 
 def test_missing_manager_marker_not_misclassified_as_accepted() -> None:
-    sample = analyze("\n".join([setup(), vote(5, 10), book(5, 10)]))[
-        "setups"
-    ][0]
+    sample = analyze("\n".join([setup(), vote(5, 10), book(5, 10)]))["setups"][0]
     assert sample["five_minute_reference"] == "no_manager_qualification_logged"
     assert sample["manager_qualified_at_ist"] is None
 
