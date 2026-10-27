@@ -5,7 +5,11 @@ from pathlib import Path
 
 import pytest
 
-SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "diagnose_fixed_hypothesis_funnel.py"
+SCRIPT = (
+    Path(__file__).resolve().parents[2]
+    / "scripts"
+    / "diagnose_fixed_hypothesis_funnel.py"
+)
 spec = importlib.util.spec_from_file_location("funnel_diagnostic", SCRIPT)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
