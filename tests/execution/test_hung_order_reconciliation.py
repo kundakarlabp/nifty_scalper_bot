@@ -58,5 +58,7 @@ def test_hung_submission_keeps_first_reconciled_order(monkeypatch, tmp_path):
         signal_id="hung-order-test",
     )
 
+    assert BlockedThread.starts >= 1
+    assert lookups
     assert order_id == "BROKER-1"
     assert BlockedThread.starts == 1
