@@ -1255,17 +1255,26 @@ class SMCStrategy(EliteStrategy):
                 regime = normalize_regime(
                     indicators.get("regime") or indicators.get("market_regime")
                 )
-                quality_corroborated = bool(
-                    structure_confirmed
-                    or event["volume_confirmation"]
+                # A single BOS/CHOCH generated from the option premium is
+                # correlated with the same option's flow/price observation.
+                # In RANGE it cannot independently validate the futures sweep.
+                # Accept a distinct futures-volume expansion OR a causally
+                # timestamped option retest plus reclaim. TREND retains its
+                # existing structural-confirmation contract.
+                range_quality_support = bool(
+                    event["volume_confirmation"]
                     or (retest_confirmed and premium_reclaim)
                 )
-                # In range conditions a naked sweep/displacement is an
-                # unconfirmed reversal thesis, not an executable SMC trigger.
-                # Continue using the same canonical adaptive regime and
-                # leave independent OrderFlow confirmation to StrategyManager.
-                if regime == MarketRegime.RANGE and not quality_corroborated:
-                    self._no_vote("smc_range_corroboration_missing")
+                quality_corroborated = bool(
+                    range_quality_support
+                    or (regime != MarketRegime.RANGE and structure_confirmed)
+                )
+                if regime == MarketRegime.RANGE and not range_quality_support:
+                    self._no_vote(
+                        "smc_range_correlated_structure_only"
+                        if structure_confirmed
+                        else "smc_range_corroboration_missing"
+                    )
                     return None
                 # SMC owns the structural setup. StrategyManager already owns
                 # independent confirmation (fresh OrderFlow or another trigger);
