@@ -3732,6 +3732,33 @@ class StrategyManager(_BaseStrategyManager):
                 self._record_strategy_no_vote_observability(strategy_name, reason)
                 no_vote_reason_counts[reason] = no_vote_reason_counts.get(reason, 0) + 1
                 strategy_reasons[strategy.name] = reason
+                # Quote freshness does not prove that this option candle traded.
+                # A bounded, per-symbol sample distinguishes an absent volume
+                # field from a genuine zero without relaxing this no-vote gate.
+                if strategy_name == "VWAPPro" and reason == "option_candle_no_trades":
+                    log_throttled(
+                        log,
+                        f"vwap_zero_volume:{symbol}",
+                        "VWAP_OPTION_VOLUME_REJECT symbol=%s raw_volume=%r avg_volume=%r bar_ts=%s bar_complete=%s bar_provisional=%s quote_version=%s data_age_s=%s history_source=%s",
+                        symbol,
+                        indicators.get("volume"),
+                        indicators.get("avg_volume"),
+                        indicators.get("latest_bar_ts"),
+                        indicators.get("is_complete"),
+                        indicators.get("is_provisional"),
+                        indicators.get("quote_update_version"),
+                        indicators.get("data_age_seconds"),
+                        indicators.get("history_source"),
+                        interval_sec=60.0,
+                        level=logging.INFO,
+                        extra={
+                            "event": "VWAP_OPTION_VOLUME_REJECT",
+                            "symbol": symbol,
+                            "raw_volume": indicators.get("volume"),
+                            "bar_ts": indicators.get("latest_bar_ts"),
+                            "quote_version": indicators.get("quote_update_version"),
+                        },
+                    )
                 continue
             adjusted = base_signal
             signals.append(adjusted)
