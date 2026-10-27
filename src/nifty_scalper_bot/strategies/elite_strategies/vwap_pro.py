@@ -213,7 +213,7 @@ class VWAPProStrategy(EliteStrategy):
         # another contract's structural state.
         self._thesis_anchor_by_scope: dict[tuple[str, str], str] = {}
         self._early_trend_min_context_conf = float(
-            os.getenv("VWAP_EARLY_TREND_MIN_CONTEXT_CONF", "0.90") or 0.90
+            os.getenv("VWAP_EARLY_TREND_MIN_CONTEXT_CONF", "0.80") or 0.80
         )
         self._early_trend_max_context_age = float(
             os.getenv("VWAP_EARLY_TREND_MAX_CONTEXT_AGE", "2.0") or 2.0
