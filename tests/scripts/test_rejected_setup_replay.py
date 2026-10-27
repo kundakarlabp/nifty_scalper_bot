@@ -45,16 +45,16 @@ def book(
     )
 
 
-def vote(second: int, setup_id: str = SETUP) -> str:
+def vote(second: int, version: int, setup_id: str = SETUP) -> str:
     return logged(
         second,
         f"STRATEGY_TRIGGER_VOTE strategy=SMC symbol={SYMBOL} "
-        f"side=CE setup_id={setup_id} quote_update_version=100",
+        f"side=CE setup_id={setup_id} quote_update_version={version}",
     )
 
 
 def test_deduplicates_triggers_and_qualified_logged_pair() -> None:
-    lines = [setup(), setup(5), vote(5), book(5, 10), vote(11), book(11, 20)]
+    lines = [setup(), setup(5), vote(5, 10), book(5, 10), vote(11, 20), book(11, 20)]
     result = analyze("\n".join(lines))
     assert result["setup_count"] == 1
     assert result["execution_or_pnl_replay_valid"] is False
@@ -67,11 +67,11 @@ def test_deduplicates_triggers_and_qualified_logged_pair() -> None:
 def test_neutral_research_variant_is_not_a_live_admission() -> None:
     lines = [
         setup(),
-        vote(5),
+        vote(5, 10),
         book(5, 10),
-        vote(8),
+        vote(8, 11),
         book(8, 11, reason="no_independent_flow_confirmation", aligned=False),
-        vote(11),
+        vote(11, 20),
         book(11, 20),
     ]
     sample = analyze("\n".join(lines))["setups"][0]
@@ -83,11 +83,11 @@ def test_neutral_research_variant_is_not_a_live_admission() -> None:
 def test_adverse_flow_resets_both_arms() -> None:
     lines = [
         setup(),
-        vote(5),
+        vote(5, 10),
         book(5, 10),
-        vote(8),
+        vote(8, 11),
         book(8, 11, reason="adverse_microstructure", aligned=False, conflict=True),
-        vote(11),
+        vote(11, 20),
         book(11, 20),
     ]
     sample = analyze("\n".join(lines))["setups"][0]
@@ -99,11 +99,11 @@ def test_adverse_flow_resets_both_arms() -> None:
 def test_three_second_ofi_misalignment_resets_both_arms() -> None:
     lines = [
         setup(),
-        vote(5),
+        vote(5, 10),
         book(5, 10),
-        vote(8),
+        vote(8, 11),
         book(8, 11, reason="ofi_3s_not_aligned", aligned=False),
-        vote(11),
+        vote(11, 20),
         book(11, 20),
     ]
     sample = analyze("\n".join(lines))["setups"][0]
@@ -115,11 +115,11 @@ def test_three_second_ofi_misalignment_resets_both_arms() -> None:
 def test_missing_fields_with_none_reason_do_not_make_neutral_proof() -> None:
     lines = [
         setup(),
-        vote(5),
+        vote(5, 10),
         book(5, 10),
-        vote(8),
+        vote(8, 11),
         book(8, 11, reason="None", aligned=False),
-        vote(11),
+        vote(11, 20),
         book(11, 20),
     ]
     sample = analyze("\n".join(lines))["setups"][0]
@@ -128,7 +128,7 @@ def test_missing_fields_with_none_reason_do_not_make_neutral_proof() -> None:
 
 
 def test_unmatched_throttled_vote_produces_unknown_not_negative() -> None:
-    sample = analyze("\n".join([setup(), vote(5), book(5, 10), vote(11)]))[
+    sample = analyze("\n".join([setup(), vote(5, 10), book(5, 10), vote(11, 20)]))[
         "setups"
     ][0]
     assert sample["strict_logged_pair"] is None
@@ -137,25 +137,65 @@ def test_unmatched_throttled_vote_produces_unknown_not_negative() -> None:
 
 
 def test_wrong_option_symbol_does_not_make_evidence() -> None:
-    lines = [setup(), vote(5), book(5, 10).replace(SYMBOL, "NFO:OTHERPE")]
+    lines = [setup(), vote(5, 10), book(5, 10).replace(SYMBOL, "NFO:OTHERPE")]
     sample = analyze("\n".join(lines))["setups"][0]
     assert sample["matched_book_observations"] == 0
     assert sample["strict_logged_pair"] is None
 
 
 def test_two_versions_but_less_than_four_seconds_never_confirm() -> None:
-    lines = [setup(), vote(5), book(5, 10), vote(8), book(8, 20)]
+    lines = [setup(), vote(5, 10), book(5, 10), vote(8, 20), book(8, 20)]
     sample = analyze("\n".join(lines))["setups"][0]
     assert sample["strict_logged_pair"] is False
+
+
+def test_repeated_same_quote_vote_does_not_create_a_false_missing_row() -> None:
+    lines = [
+        setup(),
+        vote(5, 10),
+        vote(5, 10),
+        book(5, 10),
+        vote(11, 20),
+        book(11, 20),
+    ]
+    sample = analyze("\n".join(lines))["setups"][0]
+    assert sample["trigger_vote_lines"] == 3
+    assert sample["distinct_vote_snapshots"] == 2
+    assert sample["unmatched_votes"] == 0
+    assert sample["strict_logged_pair"] is True
+
+
+def test_mismatched_quote_version_is_indeterminate() -> None:
+    sample = analyze("\n".join([setup(), vote(5, 10), book(5, 11)]))[
+        "setups"
+    ][0]
+    assert sample["unmatched_votes"] == 1
+    assert sample["strict_logged_pair"] is None
+
+
+def test_stale_or_ineligible_book_resets_both_arms() -> None:
+    lines = [
+        setup(),
+        vote(5, 10),
+        book(5, 10),
+        vote(8, 11),
+        book(8, 11, reason="no_independent_flow_confirmation", aligned=False)
+        .replace("eligible=True", "eligible=False"),
+        vote(11, 20),
+        book(11, 20),
+    ]
+    sample = analyze("\n".join(lines))["setups"][0]
+    assert sample["neutral_tolerant_logged_pair"] is False
+    assert sample["hard_reset_observations"] == 1
 
 
 def test_invalid_identity_is_not_promoted() -> None:
     lines = [
         setup(),
         setup(6).replace("side=CE", "side=PE"),
-        vote(5),
+        vote(5, 10),
         book(5, 10),
-        vote(11),
+        vote(11, 20),
         book(11, 20),
     ]
     sample = analyze("\n".join(lines))["setups"][0]
