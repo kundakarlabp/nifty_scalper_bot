@@ -1,6 +1,6 @@
 """Research-only comparison of SMC confirmation evidence in archived journald.
 
-Responsibilities: deduplicate strategy-owned SMC setup markers, compare
+Responsibilities: deduplicate both SMC lifecycle and trigger-vote setup IDs, compare
 strict and conservative neutral-tolerant logged confirmation sequences,
 and report incompleteness without fabricating executable opportunities.
 
@@ -125,6 +125,38 @@ def analyze(log_text: str, *, window_seconds: int = 120) -> dict[str, Any]:
     setups: dict[str, dict[str, Any]] = {}
     votes: list[tuple[str, str, datetime, int]] = []
     flow: list[Evidence] = []
+
+    def observe_setup(
+        setup_id: str, symbol: str, side: str, at: datetime, *, stage: bool
+    ) -> None:
+        """Count a unique vote-only setup without inventing its missing stage."""
+        if not setup_id:
+            return
+        existing = setups.get(setup_id)
+        if existing is not None:
+            if (
+                existing["side"] != side
+                or existing["symbol"] != symbol
+                or not symbol.endswith(side)
+            ):
+                existing["identity_conflict"] = True
+            existing["lifecycle_stage_observed"] |= stage
+            if at < existing["first_at"]:
+                existing["first_at"] = at
+                existing["first_trigger_at_ist"] = at.isoformat()
+            return
+        if side not in {"CE", "PE"} or not symbol.endswith(side):
+            return
+        setups[setup_id] = {
+            "setup_id": setup_id,
+            "symbol": symbol,
+            "side": side,
+            "first_trigger_at_ist": at.isoformat(),
+            "first_at": at,
+            "lifecycle_stage_observed": stage,
+            "identity_conflict": False,
+        }
+
     restarts = 0
     submission_lines = 0
     for line in log_text.splitlines():
@@ -148,33 +180,22 @@ def analyze(log_text: str, *, window_seconds: int = 120) -> dict[str, Any]:
         if "SETUP_LIFECYCLE stage=TRIGGER_QUALIFIED" in line:
             if fields.get("strategy") != "SMC":
                 continue
-            setup_id, symbol, side = (
+            observe_setup(
                 fields.get("setup_id", ""),
                 fields.get("symbol", ""),
                 fields.get("side", ""),
+                at,
+                stage=True,
             )
-            if not setup_id:
-                continue
-            if setup_id in setups:
-                current = setups[setup_id]
-                if current["side"] != side or current["symbol"] != symbol:
-                    current["identity_conflict"] = True
-                continue
-            if side not in {"CE", "PE"} or not symbol.endswith(side):
-                continue
-            setups[setup_id] = {
-                "setup_id": setup_id,
-                "symbol": symbol,
-                "side": side,
-                "first_trigger_at_ist": at.isoformat(),
-                "first_at": at,
-                "identity_conflict": False,
-            }
         elif "STRATEGY_TRIGGER_VOTE strategy=SMC" in line:
-            if fields.get("setup_id") and fields.get("symbol"):
+            setup_id = fields.get("setup_id", "")
+            symbol = fields.get("symbol", "")
+            side = fields.get("side", "")
+            if setup_id and symbol and side in {"CE", "PE"} and symbol.endswith(side):
+                observe_setup(setup_id, symbol, side, at, stage=False)
                 version_float = _float(fields, "quote_update_version", 0)
                 version = int(version_float) if math.isfinite(version_float) else 0
-                votes.append((fields["setup_id"], fields["symbol"], at, version))
+                votes.append((setup_id, symbol, at, version))
         elif "ORDERFLOW_CONTEXT_EVIDENCE" in line:
             item = _evidence(line, at)
             if item is not None:
@@ -224,6 +245,7 @@ def analyze(log_text: str, *, window_seconds: int = 120) -> dict[str, Any]:
             "symbol": symbol,
             "side": item["side"],
             "identity_conflict": item["identity_conflict"],
+            "lifecycle_stage_observed": item["lifecycle_stage_observed"],
             "trigger_vote_lines": len(selected),
             "distinct_vote_snapshots": len(unique_votes),
             "matched_book_observations": len(matched),
@@ -235,7 +257,8 @@ def analyze(log_text: str, *, window_seconds: int = 120) -> dict[str, Any]:
             "neutral_tolerant_logged_pair": None,
         }
         if (
-            not result["identity_conflict"]
+            item["lifecycle_stage_observed"]
+            and not result["identity_conflict"]
             and result["unmatched_votes"] == 0
             and matched
         ):
@@ -250,9 +273,15 @@ def analyze(log_text: str, *, window_seconds: int = 120) -> dict[str, Any]:
         "execution_or_pnl_replay_valid": False,
         "reason": (
             "Missing complete quote/candle/bid-ask/stop/fill provenance; "
-            "runtime calls may be throttled"
+            "runtime calls may be throttled; vote-only setups lack lifecycle provenance"
         ),
         "setup_count": len(report),
+        "lifecycle_stage_setup_count": sum(
+            bool(item["lifecycle_stage_observed"]) for item in report
+        ),
+        "vote_only_setup_count": sum(
+            not item["lifecycle_stage_observed"] for item in report
+        ),
         "server_start_lines": restarts,
         "order_submission_marker_lines": submission_lines,
         "comparison": {

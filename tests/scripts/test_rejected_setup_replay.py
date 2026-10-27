@@ -200,3 +200,61 @@ def test_invalid_identity_is_not_promoted() -> None:
     sample = analyze("\n".join(lines))["setups"][0]
     assert sample["identity_conflict"] is True
     assert sample["strict_logged_pair"] is None
+
+
+def test_vote_only_smc_setup_is_counted_but_never_assumed_confirmed() -> None:
+    fifth = "smcv2:NFO:NIFTY26OCTFUT:CE:2026-10-27T08:43:00+00:00"
+    lines = [
+        vote(5, 10, setup_id=fifth),
+        book(5, 10),
+        vote(11, 20, setup_id=fifth),
+        book(11, 20),
+    ]
+    result = analyze("\n".join(lines))
+    assert result["setup_count"] == 1
+    assert result["vote_only_setup_count"] == 1
+    assert result["lifecycle_stage_setup_count"] == 0
+    sample = result["setups"][0]
+    assert sample["setup_id"] == fifth
+    assert sample["lifecycle_stage_observed"] is False
+    assert sample["matched_book_observations"] == 2
+    assert sample["strict_logged_pair"] is None
+    assert sample["neutral_tolerant_logged_pair"] is None
+
+
+def test_stage_logged_after_first_vote_preserves_first_seen_identity() -> None:
+    lines = [vote(5, 10), book(5, 10), setup(8), vote(11, 20), book(11, 20)]
+    result = analyze("\n".join(lines))
+    assert result["setup_count"] == 1
+    assert result["vote_only_setup_count"] == 0
+    assert result["lifecycle_stage_setup_count"] == 1
+    sample = result["setups"][0]
+    assert sample["first_trigger_at_ist"].endswith("11:34:05+05:30")
+    assert sample["lifecycle_stage_observed"] is True
+    assert sample["strict_logged_pair"] is True
+
+
+def test_distinct_vote_only_setup_is_not_merged_into_a_logged_setup() -> None:
+    fifth = "smcv2:NFO:NIFTY26OCTFUT:CE:2026-10-27T08:43:00+00:00"
+    lines = [
+        setup(),
+        vote(5, 10),
+        book(5, 10),
+        vote(8, 20, setup_id=fifth),
+        book(8, 20),
+    ]
+    result = analyze("\n".join(lines))
+    assert result["setup_count"] == 2
+    assert result["lifecycle_stage_setup_count"] == 1
+    assert result["vote_only_setup_count"] == 1
+    assert len({row["setup_id"] for row in result["setups"]}) == 2
+
+
+def test_mismatched_vote_only_symbol_is_not_validated_as_same_setup() -> None:
+    lines = [
+        vote(5, 10),
+        vote(8, 11).replace(SYMBOL, "NFO:NIFTY26OCT22700CE"),
+    ]
+    sample = analyze("\n".join(lines))["setups"][0]
+    assert sample["identity_conflict"] is True
+    assert sample["strict_logged_pair"] is None
