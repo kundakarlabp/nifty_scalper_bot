@@ -53,12 +53,17 @@ from nifty_scalper_bot.ops.service_control import (
     queue_validated_restart,
     restart_deployer,
 )
-from nifty_scalper_bot.superlite_admin_core import bounded_logs, quick_overview
+from nifty_scalper_bot.superlite_admin_core import (
+    ENV_PATH as CANONICAL_ENV_PATH,
+    bounded_logs,
+    quick_overview,
+    write_env as write_canonical_env,
+)
 from nifty_scalper_bot.superlite_admin_style import SCRIPT as _SCRIPT, STYLE as _CSS
 
 router = APIRouter()
 
-ENV_PATH = Path(os.getenv("BOT_ENV_FILE", "/home/ubuntu/nifty_scalper_bot/.env"))
+ENV_PATH = CANONICAL_ENV_PATH
 LOG_PATH = Path(os.getenv("BOT_LOG_FILE", str(Path(os.getenv("LOG_DIR", "logs")).expanduser() / "bot.log")))
 SERVICE_NAME = os.getenv("BOT_SERVICE_NAME", "niftybot")
 APP_DIR = Path(os.getenv("BOT_APP_DIR", "/home/ubuntu/nifty_scalper_bot"))
@@ -92,28 +97,9 @@ def _read_env() -> dict[str, str]:
 
 
 def _write_env(updates: dict[str, str]) -> None:
-    existing = ENV_PATH.read_text().splitlines() if ENV_PATH.exists() else []
-    seen: set[str] = set()
-    out: list[str] = []
-    for line in existing:
-        s = line.strip()
-        if not s or s.startswith("#") or "=" not in s:
-            out.append(line)
-            continue
-        key = s.split("=", 1)[0].strip()
-        if key in updates:
-            out.append(f"{key}={updates[key]}")
-            seen.add(key)
-        else:
-            out.append(line)
-    for k, v in updates.items():
-        if k not in seen:
-            out.append(f"{k}={v}")
-    ENV_PATH.parent.mkdir(parents=True, exist_ok=True)
-    ENV_PATH.write_text("\n".join(out) + "\n")
-    os.chmod(ENV_PATH, 0o600)
+    """Update the same protected environment that the runtime reads."""
+    write_canonical_env(updates)
     _ENV_CACHE.update({"at": 0.0, "data": {}})
-
 
 def _check_auth(request: Request) -> None:
     """Require the verified Zerodha-owner session, never a second admin password.
@@ -267,6 +253,12 @@ def _complete_kite_session(request_token: str) -> RedirectResponse:
     verified, detail = _verify_access_token(api_key, result)
     if not verified:
         return RedirectResponse(f"/admin?token=err&msg={urllib.parse.quote(('verification failed: ' + detail)[:120])}", status_code=303)
+    if os.getenv("DEPLOYMENT_PLATFORM") == "aws_lightsail":
+        expected_owner = owner_user_id(env)
+        if not expected_owner or not hmac.compare_digest(detail, expected_owner):
+            return RedirectResponse(
+                "/admin?token=err&msg=Zerodha+account+mismatch", status_code=303
+            )
     restart_result = _activate_access_token(result)
     if restart_result.ok:
         return RedirectResponse("/admin?token=ok", status_code=303)
@@ -365,7 +357,16 @@ def _topbar(live_on: bool) -> str:
 
 def _flash(request: Request) -> str:
     q = request.query_params
-    if q.get("saved"): return '<div class="flash ok">Settings saved. Restart to apply.</div>'
+    if q.get("saved"):
+        return '<div class="flash ok">Settings saved. Engine changes require a validated restart.</div>'
+    if q.get("power") == "queued":
+        return ('<div class="flash ok">Operating mode saved; safe transition '
+                'queued. Watch the Engine status for confirmation.</div>')
+    if q.get("power") == "saved_not_applied":
+        return ('<div class="flash err">Operating mode saved, but the validated '
+                'transition could not be queued. Engine state is unchanged.</div>')
+    if q.get("power") == "unchanged":
+        return '<div class="flash ok">Operating mode is already selected.</div>'
     if q.get("token") == "ok":
         return (
             '<div class="flash ok">Zerodha token verified and saved; '
@@ -480,6 +481,10 @@ def _full_dashboard(request: Request, *, preview: bool = False) -> HTMLResponse:
         ),
         "",
     )
+    # Import lazily: operating_control uses this module for canonical writes.
+    from nifty_scalper_bot.operating_control import admin_power_card
+
+    power_card = admin_power_card(editable=owner_verified)
     login_url = _kite_login_url(api_key) if api_key else ""
     login_button = (
         f'<a class="btn primary full" href="{html.escape(login_url, quote=True)}" rel="noopener">'
@@ -531,6 +536,7 @@ def _full_dashboard(request: Request, *, preview: bool = False) -> HTMLResponse:
       <div class="metric"><div class="k">Blocker</div><div class="v" id="blocker-value">Checking…</div>
       <small>Trading readiness</small></div>
     </section>
+    {power_card}
     <div class="cta-strip"><div class="statusline">
       <span>Release: <b id="release-value">Checking…</b></span>
       <span>Engine SHA: <b id="revision-value">—</b></span>
@@ -610,6 +616,18 @@ def _full_dashboard(request: Request, *, preview: bool = False) -> HTMLResponse:
             Never share an access token in screenshots.</p>
             <form method="post" action="/admin/save">{rows}
               <button type="submit" class="full">Save settings</button></form>
+            <div class="subheading">Daily Zerodha request token</div>
+            <p>Paste the full Zerodha callback URL or one-time request token.
+            Verification exchanges it for an access token, checks your broker
+            account and queues the safe engine refresh. The request token is
+            never stored in settings.</p>
+            <form method="post" action="/admin/token">
+              <label for="settings-request-token">Request token / callback URL</label>
+              <input id="settings-request-token" name="request_token"
+                type="text" autocomplete="off" spellcheck="false"
+                placeholder="Paste fresh Zerodha request token or URL" required>
+              <button type="submit" class="full green">Verify and save Zerodha token</button>
+            </form>
           </div></details>
           <details><summary>Research &amp; backtesting</summary><div class="detail-body">
             <p>On-demand replay and component analysis, separate from live order execution.</p>
@@ -629,14 +647,14 @@ def _full_dashboard(request: Request, *, preview: bool = False) -> HTMLResponse:
     </div>
     <div class="footer">Nifty Scalper · Independent admin control plane · All times reflect your device’s clock.</div>
     </main>"""
+    # Always expose the existing daily token paste form on mobile.
+    body = body.replace(
+        "<details><summary>Paste callback URL / request token instead</summary>",
+        "<details open><summary>Paste callback URL / request token</summary>",
+        1,
+    )
     if preview and not owner_verified:
-        # Keep the original daily token entry visible without an intermediate
-        # owner-verification page. All other forms remain non-interactive here.
-        body = body.replace(
-            "<details><summary>Paste callback URL / request token instead</summary>",
-            "<details open><summary>Paste callback URL / request token</summary>",
-            1,
-        )
+        # Other controls remain unavailable until Kite owner verification.
         body = re.sub(
             r'(<form method="post" action="/admin/(?!token\b)[^"]+")',
             r"\1 inert", body,
@@ -656,7 +674,6 @@ def _full_dashboard(request: Request, *, preview: bool = False) -> HTMLResponse:
             '<form method="post" action="/admin/token">',
             '<form method="post" action="/admin/token">'
             f'<input type="hidden" name="owner_state" value="{html.escape(challenge, quote=True)}">',
-            1,
         )
         response.body = _page(body).encode("utf-8")
         response.headers["content-length"] = str(len(response.body))

@@ -433,6 +433,45 @@ def test_fresh_same_side_context_conflict_vetoes_trigger_consensus(
     assert decision.blocked_at == "context_contract"
 
 
+def test_adverse_orderflow_preserves_smc_trigger_stage_without_entry(
+    monkeypatch,
+) -> None:
+    from nifty_scalper_bot.core import strategy_manager as module
+
+    transitions = []
+
+    def capture_transition(stage, **kwargs):
+        transitions.append((stage, kwargs))
+
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setattr(module, "transition_setup", capture_transition)
+    manager = _manager()
+    smc_signal, smc_evidence = _signal_evidence("SMC")
+    smc_signal.metadata["setup_id"] = "smcv2:test:adverse:one"
+    smc_evidence.metadata["setup_id"] = smc_signal.metadata["setup_id"]
+    adverse = _signal_evidence(
+        "OrderFlow",
+        role="context",
+        aligned_context=False,
+    )
+
+    result = manager._combine_strategy_votes(
+        symbol=_CE,
+        signals=[(smc_signal, smc_evidence), adverse],
+        indicators=_live_indicators("CE"),
+    )
+
+    assert result is None
+    assert manager._last_no_signal_decision_by_symbol[_CE].reason == (
+        "fresh_opposing_context"
+    )
+    assert len(transitions) == 1
+    stage, metadata = transitions[0]
+    assert stage.name == "TRIGGER_QUALIFIED"
+    assert metadata["setup_id"] == "smcv2:test:adverse:one"
+    assert metadata["reason"] == "fresh_opposing_context"
+
+
 def test_opposite_trigger_sides_fail_closed(monkeypatch) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     manager = _manager()

@@ -707,3 +707,65 @@ def test_trend_retest_extension_fails_closed_on_missing_structural_quality(
     strategy, signal = _evaluate(monkeypatch, **inputs)
     assert signal is None
     assert strategy.last_no_vote_reason == expected
+
+
+@pytest.mark.parametrize(
+    ("configured_floor", "admitted"),
+    [("0.90", False), ("0.80", True)],
+)
+def test_vwap_confidence_floor_counterfactual_is_only_a_unit_fixture(
+    monkeypatch, configured_floor, admitted
+):
+    """Compare one unchanged completed bar; do not claim economic replay."""
+    monkeypatch.setenv("VWAP_EARLY_TREND_MIN_CONTEXT_CONF", configured_floor)
+    strategy, signal = _evaluate(monkeypatch, underlying_direction_confidence=0.80)
+    assert strategy._early_trend_min_context_conf == float(configured_floor)
+    assert (signal is not None) is admitted
+    if not admitted:
+        assert (
+            strategy.last_no_vote_reason
+            == "trend_momentum_underlying_quality_unconfirmed"
+        )
+    else:
+        assert signal.metadata["trend_momentum_underlying_quality_confirmed"]
+
+
+@pytest.mark.parametrize(
+    ("changes", "reason"),
+    [
+        ({"context_age_seconds": 3.0}, "trend_momentum_underlying_quality_unconfirmed"),
+        ({"regime": "RANGE"}, "trend_momentum_regime_not_trend"),
+        ({"is_complete": False}, "trend_momentum_bar_unconfirmed"),
+    ],
+)
+def test_research_080_floor_still_requires_fresh_trend_and_final_bar(
+    monkeypatch, changes, reason
+):
+    """An alternate confidence floor cannot replace independent proof."""
+    monkeypatch.setenv("VWAP_EARLY_TREND_MIN_CONTEXT_CONF", "0.80")
+    strategy, signal = _evaluate(
+        monkeypatch, underlying_direction_confidence=0.80, **changes
+    )
+    assert signal is None
+    assert strategy.last_no_vote_reason == reason
+
+
+@pytest.mark.parametrize(
+    ("confidence", "eligible"),
+    [(0.79, False), (0.80, True), (0.85, True)],
+)
+def test_default_080_confidence_floor_accepts_080_but_not_weaker_context(
+    monkeypatch, confidence, eligible
+):
+    """Exact live default boundary; do not replace independent quality checks."""
+    monkeypatch.delenv("VWAP_EARLY_TREND_MIN_CONTEXT_CONF", raising=False)
+    strategy, signal = _evaluate(
+        monkeypatch, underlying_direction_confidence=confidence
+    )
+    assert strategy._early_trend_min_context_conf == 0.80
+    assert (signal is not None) is eligible
+    if not eligible:
+        assert (
+            strategy.last_no_vote_reason
+            == "trend_momentum_underlying_quality_unconfirmed"
+        )

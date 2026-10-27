@@ -1,13 +1,16 @@
 """Stable signal identity and setup-context utilities.
 
-This module owns pure identity/observability helpers only. It does not mutate
-strategy classes at import time; native owners call these helpers explicitly.
+This module owns pure identity/observability helpers only, including
+bounded decision-time SMC book-evidence logging. The sample is NOT an
+executable bid/ask history and cannot authorize trades or change quote truth.
+No strategy classes are modified at import time; native owners call helpers.
 """
 
 from __future__ import annotations
 
 import hashlib
 import logging
+import math
 import re
 import threading
 from collections import OrderedDict
@@ -217,6 +220,59 @@ def stamp_evaluation_identity(signal: Any, indicators: Mapping[str, Any]) -> Any
     return signal
 
 
+def _bounded_smc_book_observation(
+    indicators: Mapping[str, Any], metadata: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Describe existing indicator book fields without claiming an executable fill.
+
+    A bid/ask pair is only logged when the stamped signal version is present
+    in the indicator snapshot as well. This remains *observational*: merged
+    indicator fields are not guaranteed to be an atomic broker book.
+    """
+
+    def positive_number(value: Any) -> float | None:
+        try:
+            number = float(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return number if math.isfinite(number) and number > 0 else None
+
+    def positive_version(value: Any) -> int | None:
+        number = positive_number(value)
+        if number is None or not number.is_integer():
+            return None
+        return int(number)
+
+    version = positive_version(metadata.get("quote_update_version"))
+    same_version = version is not None and version == positive_version(
+        indicators.get("quote_update_version")
+    )
+    bid = positive_number(indicators.get("bid")) if same_version else None
+    ask = positive_number(indicators.get("ask")) if same_version else None
+    state = (
+        "indicator_book_present"
+        if bid is not None and ask is not None and ask >= bid
+        else "book_missing_or_incoherent" if same_version else "quote_version_unproven"
+    )
+    if state != "indicator_book_present":
+        bid = ask = None
+    timestamp_ms = (
+        positive_number(indicators.get("timestamp_ms")) if same_version else None
+    )
+    return {
+        "book_state": state,
+        "book_bid": bid,
+        "book_ask": ask,
+        "book_tick_ts_ms": timestamp_ms,
+        "depth_present": bool(
+            same_version
+            and isinstance(indicators.get("depth"), Mapping)
+            and indicators["depth"].get("buy")
+            and indicators["depth"].get("sell")
+        ),
+    }
+
+
 def finalize_signal_observability(
     signal: Any,
     indicators: Mapping[str, Any],
@@ -278,6 +334,36 @@ def finalize_signal_observability(
             "role": role,
         },
     )
+    # Existing trigger-vote logging is unchanged. Record a companion, bounded
+    # observational sample for every SMC vote (including vetoed votes).
+    # No polling, second quote owner, decision gate, secrets or raw depth.
+    if strategy.upper() == "SMC" and role != "context":
+        book = _bounded_smc_book_observation(indicators, metadata)
+        LOGGER.info(
+            "SMC_QUOTE_OBSERVATION symbol=%s setup_id=%s "
+            "quote_update_version=%s evaluation_snapshot_id=%s "
+            "book_state=%s book_bid=%s book_ask=%s "
+            "book_tick_ts_ms=%s depth_present=%s",
+            getattr(signal, "symbol", symbol),
+            setup_id,
+            metadata.get("quote_update_version"),
+            metadata.get("evaluation_snapshot_id"),
+            book["book_state"],
+            book["book_bid"],
+            book["book_ask"],
+            book["book_tick_ts_ms"],
+            book["depth_present"],
+            extra={
+                "event": "SMC_QUOTE_OBSERVATION",
+                "strategy": strategy,
+                "symbol": getattr(signal, "symbol", symbol),
+                "side": side,
+                "setup_id": setup_id,
+                "quote_update_version": metadata.get("quote_update_version"),
+                "evaluation_snapshot_id": metadata.get("evaluation_snapshot_id"),
+                **book,
+            },
+        )
     return signal
 
 

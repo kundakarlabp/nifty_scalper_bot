@@ -15,9 +15,11 @@ from fastapi import FastAPI
 from fastapi.responses import RedirectResponse
 
 from nifty_scalper_bot.admin_dashboard import router as _admin_router
+from nifty_scalper_bot.operating_control import router as _operating_router
 
 app = FastAPI(title="Nifty Scalper Bot — Admin", docs_url=None, redoc_url=None)
 app.include_router(_admin_router)
+app.include_router(_operating_router)
 
 
 @app.get("/")

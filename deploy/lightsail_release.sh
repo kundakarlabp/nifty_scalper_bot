@@ -526,6 +526,40 @@ acquire_release_entry_hold() {
   chmod 600 "$RELEASE_HOLD_FILE"
 }
 
+# A confirmed QUIET control process has NO trading stack, entry worker,
+# live bracket manager or protective exit handler to interrupt. Replacing
+# that process is safe without a broker-flat proof, unlike a LIVE engine.
+# This also permits scheduled AUTO wake when the daily Kite token is expired:
+# the new engine must still independently authenticate/reconcile before entry.
+# Require TWO live localhost probes and exact running-build provenance.
+quiet_control_plane_unloaded() {
+  local live_json release_json
+  [ -n "${BEFORE:-}" ] || return 1
+  live_json="$(curl -fsS --max-time 3 "http://127.0.0.1:${PORT}/livez" 2>/dev/null)" || return 1
+  release_json="$(curl -fsS --max-time 3 "http://127.0.0.1:${PORT}/releasez" 2>/dev/null)" || return 1
+  "$VENV/bin/python" - "$BEFORE" "$live_json" "$release_json" <<'PY_UNLOADED_QUIET'
+import json
+import sys
+
+try:
+    sha, live_raw, release_raw = sys.argv[1:]
+    live = json.loads(live_raw)
+    release = json.loads(release_raw)
+    safe = (
+        isinstance(live, dict)
+        and isinstance(release, dict)
+        and live.get("quiet") is True
+        and live.get("bot_loaded") is False
+        and live.get("engine_http_responsive") is True
+        and release.get("engine_expected") is False
+        and str(release.get("effective_sha") or "").startswith(sha[:12])
+    )
+except (ValueError, TypeError, IndexError):
+    safe = False
+sys.exit(0 if safe else 1)
+PY_UNLOADED_QUIET
+}
+
 auto_release_should_defer() {
   # An unchanged, healthy, non-restart build needs no broker API calls.
   if [ "$AUTO_MODE" = true ] \
@@ -538,6 +572,12 @@ auto_release_should_defer() {
   # Pre-CI and pre-validation perform no checkout change or restart. The
   # mandatory broker-flat proof occurs only after the entry hold is acquired.
   if [ "$RELEASE_HOLD_ACTIVE" != true ]; then
+    return 1
+  fi
+  # Never require an expired broker token to reboot an unloaded QUIET app.
+  # An active or unverified engine still needs the full broker-flat guard.
+  if quiet_control_plane_unloaded; then
+    log "verified unloaded QUIET process; safe control-plane handoff"
     return 1
   fi
   intraday_flat_broker_confirmed && return 1

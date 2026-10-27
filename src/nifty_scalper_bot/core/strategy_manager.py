@@ -48,6 +48,7 @@ from nifty_scalper_bot.core.adaptive_calibration import (
 )
 from nifty_scalper_bot.core.market_regime import RegimeSnapshot
 from nifty_scalper_bot.core.market_regime_manager import MarketRegimeManager
+from nifty_scalper_bot.core.option_volume_diagnostics import describe_option_volume_evidence
 from nifty_scalper_bot.core.strategy_vote_policy import (
     independent_same_side_confirmation,
     partition_votes,
@@ -2989,6 +2990,7 @@ class StrategyManager(_BaseStrategyManager):
         indicators["symbol_role"] = symbol_role
         indicators["_regime_adjustments"] = adjustments
         self._augment_futures_metrics(indicators)
+        opt_quote = None
         # ✅ FIX S3: Inject exchange VWAP for options
         if self._data_hub is not None:
             try:
@@ -3732,6 +3734,103 @@ class StrategyManager(_BaseStrategyManager):
                 self._record_strategy_no_vote_observability(strategy_name, reason)
                 no_vote_reason_counts[reason] = no_vote_reason_counts.get(reason, 0) + 1
                 strategy_reasons[strategy.name] = reason
+                # Quote freshness does not prove that this option candle traded.
+                # A bounded, per-symbol sample distinguishes an absent volume
+                # field from a genuine zero without relaxing this no-vote gate.
+                if strategy_name == "VWAPPro" and reason == "option_candle_no_trades":
+                    # This is strictly a sampled diagnostic. The no-vote
+                    # remains unchanged. Sampling before history calls also
+                    # bounds the read overhead, not only the log emission.
+                    seen = getattr(self, "_option_volume_parity_sampled_at", None)
+                    if not isinstance(seen, dict):
+                        seen = {}
+                        self._option_volume_parity_sampled_at = seen
+                    now_sample = time.monotonic()
+                    if now_sample - float(seen.get(symbol, -1e10)) >= 60.0:
+                        seen[symbol] = now_sample
+                        latest_bar = None
+                        indicator_complete = None
+                        canonical_complete = None
+                        history_getter = getattr(
+                            self._indicator_engine, "get_history", None
+                        )
+                        if callable(history_getter):
+                            try:
+                                history_tail = history_getter(
+                                    symbol, count=5, field="bars"
+                                )
+                                if history_tail:
+                                    if isinstance(history_tail[-1], t.Mapping):
+                                        latest_bar = history_tail[-1]
+                                    indicator_complete = next(
+                                        (
+                                            bar
+                                            for bar in reversed(history_tail)
+                                            if isinstance(bar, t.Mapping)
+                                            and bar.get("is_complete") is not False
+                                            and bar.get("is_provisional") is not True
+                                        ),
+                                        None,
+                                    )
+                            except Exception:
+                                pass  # Read-only diagnostic must not affect admission.
+                        if self._data_hub is not None:
+                            get_canonical_bars = getattr(
+                                self._data_hub, "get_ohlc_bars", None
+                            )
+                            if callable(get_canonical_bars):
+                                try:
+                                    bars = get_canonical_bars(symbol, limit=1)
+                                    if bars and isinstance(bars[-1], t.Mapping):
+                                        canonical_complete = bars[-1]
+                                except Exception:
+                                    pass
+                        evidence = describe_option_volume_evidence(
+                            indicators,
+                            latest_bar=latest_bar,
+                            quote=(
+                                opt_quote if isinstance(opt_quote, t.Mapping) else None
+                            ),
+                            indicator_completed_bar=indicator_complete,
+                            canonical_completed_bar=canonical_complete,
+                        )
+                        log_throttled(
+                            log,
+                            f"vwap_zero_volume:{symbol}",
+                            "VWAP_OPTION_VOLUME_REJECT symbol=%s raw_volume=%r avg_volume=%r bar_ts=%s bar_complete=%s bar_provisional=%s quote_version=%s data_age_s=%s history_source=%s evidence_state=%s history_bar_volume=%s quote_delta=%s quote_cumulative=%s quote_transition=%s quote_source=%s parity=%s indicator_completed_ts=%s indicator_completed_volume=%s canonical_completed_ts=%s canonical_completed_volume=%s",
+                            symbol,
+                            indicators.get("volume"),
+                            indicators.get("avg_volume"),
+                            evidence["history_bar_ts"],
+                            evidence["history_bar_complete"],
+                            evidence["history_bar_provisional"],
+                            indicators.get("quote_update_version"),
+                            indicators.get("data_age_seconds"),
+                            indicators.get("history_source"),
+                            evidence["state"],
+                            evidence["history_bar_volume"],
+                            evidence["quote_volume_delta"],
+                            evidence["quote_volume_cumulative"],
+                            evidence["quote_volume_transition_state"],
+                            evidence["quote_source"],
+                            evidence["completed_bar_parity"],
+                            evidence["indicator_completed_ts"],
+                            evidence["indicator_completed_volume"],
+                            evidence["canonical_completed_ts"],
+                            evidence["canonical_completed_volume"],
+                            interval_sec=60.0,
+                            level=logging.INFO,
+                            extra={
+                                "event": "VWAP_OPTION_VOLUME_REJECT",
+                                "symbol": symbol,
+                                "raw_volume": indicators.get("volume"),
+                                "bar_ts": evidence["history_bar_ts"],
+                                "quote_version": indicators.get(
+                                    "quote_update_version"
+                                ),
+                                "volume_evidence": evidence,
+                            },
+                        )
                 continue
             adjusted = base_signal
             signals.append(adjusted)
@@ -4329,32 +4428,6 @@ class StrategyManager(_BaseStrategyManager):
             )
             return None
 
-        conflicting_context = [
-            evidence
-            for _signal, evidence in context_votes
-            if self._context_vote_is_timestamped(evidence)
-            and bool((evidence.metadata or {}).get("context_quality_eligible"))
-            and bool((evidence.metadata or {}).get("effective_context_conflict"))
-        ]
-        if conflicting_context:
-            _record_no_signal(
-                "context_conflict",
-                "fresh_opposing_context",
-                "context_contract",
-                trigger_vote_count=len(trigger_votes),
-                context_vote_count=len(context_votes),
-            )
-            return None
-
-        same_side_context = [
-            evidence
-            for _signal, evidence in context_votes
-            if str(evidence.side or "").upper() == side
-            and self._context_vote_is_timestamped(evidence)
-            and bool((evidence.metadata or {}).get("context_quality_eligible"))
-            and bool((evidence.metadata or {}).get("effective_context_alignment"))
-        ]
-
         # Capture SMC provenance before filtering unconfirmed votes: a valid
         # VWAP vote must not erase SMC's distinct confirmation-wait record.
         smc_trigger_votes = [
@@ -4384,6 +4457,35 @@ class StrategyManager(_BaseStrategyManager):
                     side=side,
                     reason=reason,
                 )
+
+        conflicting_context = [
+            evidence
+            for _signal, evidence in context_votes
+            if self._context_vote_is_timestamped(evidence)
+            and bool((evidence.metadata or {}).get("context_quality_eligible"))
+            and bool((evidence.metadata or {}).get("effective_context_conflict"))
+        ]
+        if conflicting_context:
+            # Preserve the SMC trigger lifecycle even when adverse fresh OFI
+            # vetoes admission. This is attribution only, not a new entry.
+            _observe_smc_confirmation_wait("fresh_opposing_context")
+            _record_no_signal(
+                "context_conflict",
+                "fresh_opposing_context",
+                "context_contract",
+                trigger_vote_count=len(trigger_votes),
+                context_vote_count=len(context_votes),
+            )
+            return None
+
+        same_side_context = [
+            evidence
+            for _signal, evidence in context_votes
+            if str(evidence.side or "").upper() == side
+            and self._context_vote_is_timestamped(evidence)
+            and bool((evidence.metadata or {}).get("context_quality_eligible"))
+            and bool((evidence.metadata or {}).get("effective_context_alignment"))
+        ]
 
         independent_trigger_confirmation, confirming_trigger_strategies = (
             independent_same_side_confirmation(trigger_votes)
