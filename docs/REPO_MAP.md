@@ -35,6 +35,15 @@ docs/architecture/agent_manifest.json
 
 This repository map is navigational only. Do not copy ownership/routing tables back into this file; update the manifest and its tests instead.
 
+## File overview convention
+
+Read a module's opening docstring first: it summarizes responsibility,
+important interfaces, ownership boundaries and safety considerations. The
+required coverage set comes from `docs/architecture/agent_manifest.json`;
+see [module documentation policy](MODULE_DOCUMENTATION.md) and the
+[chronological lifecycle](TRADING_LIFECYCLE.md). If you change callable
+interfaces, the module header must be reviewed and updated in the same PR.
+
 ## Support modules
 
 ### Contracts and symbols

@@ -87,6 +87,22 @@ Before a non-trivial edit:
 
 Prefer existing owners/public interfaces. Do not add helpers, wrappers, compatibility layers, dependencies, or managers unless the requested behavior cannot be expressed cleanly through the existing architecture.
 
+## Source and lifecycle documentation rule
+
+Before editing a major runtime module, read its opening module docstring and
+[documentation policy](docs/MODULE_DOCUMENTATION.md). After changing its API,
+functions, responsibilities or safety semantics, revise that header in the same
+PR. Review [lifecycle guide](docs/TRADING_LIFECYCLE.md), the canonical
+`ARCHITECTURE_TRADING_PATH.md`, deployment runbooks and the manifest when
+the corresponding lifecycle/ownership/operations contract changes. For purely
+internal implementation edits where the summary remains accurate, record that
+review in the PR template rather than making a meaningless header change.
+
+The manifest-driven `scripts/module_doc_guard.py` runs in the single
+`agent_task.py` validation façade and in draft/final CI. It enforces header
+coverage and callable-interface/header changes; human reviewers must verify
+semantic accuracy. Do not auto-generate fabricated descriptions from names.
+
 ## Validation
 
 Use the single public agent façade rather than hand-building validation commands:
@@ -130,3 +146,15 @@ Production diagnosis is read-only by default. Do not restart, redeploy, enable l
 Never commit or print secrets, tokens, broker session material, private account data, or operator-only credentials.
 
 Cross-repository edits are required only when the requested behavior changes a real shared interface, schema, protocol, deployment contract, or user workflow.
+
+## Production HTTP/HTTPS reachability (2026-10-25 incident)
+
+For subsequent ChatGPT investigations **read `docs/ops/PRODUCTION_HTTP_ACCESS.md` first**.
+A direct fresh external HTTP client independently verified public Lightsail
+`:8080/livez`, `:8080/releasez` and `:8501/_stcore/health` despite
+connection timeouts from Supabase SQL HTTP and restricted tool environments.
+Never label the bot down from those timeouts alone. Supabase heartbeat is
+host-local monitoring, not proof of public ingress. Control-plane access is
+separate: HTTPS requires a publicly trusted certificate and authentication;
+independent port 8081 must bind to localhost. Do not use AppDeploy/SSH,
+change trading risk, or bypass broker-safe deployment to troubleshoot HTTP.

@@ -85,16 +85,18 @@ def test_agent_task_check_runs_style_validation_and_relevant_benchmarks(
 
     assert result == 0
     assert [call[0] for call in calls] == [
+        "module_doc_guard.py",
         "agent_style_fix.py",
         "agent_check.py",
         "agent_check.py",
         "agent_benchmark.py",
         "agent_benchmark.py",
     ]
-    assert "--run" in calls[2][1]
-    assert "focused" in calls[2][1]
-    assert "--area" in calls[3][1]
-    assert "market-data" in calls[3][1]
+    assert calls[0][1] == ("--base-ref", "origin/main")
+    assert "--run" in calls[3][1]
+    assert "focused" in calls[3][1]
+    assert "--area" in calls[4][1]
+    assert "market-data" in calls[4][1]
 
 
 def test_agent_task_fails_before_style_mutation_when_python_does_not_compile(

@@ -1,4 +1,13 @@
-"""Nightly replay automation to validate live trading against backtests."""
+"""Purpose: Build overnight replay diagnostics for trading research.
+
+Responsibilities:
+- ReplaySummary records processed inputs, P&L, latency and mismatches.
+- Produce a bounded report from replay/monitoring observations.
+- Reuse shared metrics rather than introduce an execution path.
+
+Boundaries: Offline reporting only; never place a live order.
+Safety: Historical replay output is not proof of live profitability.
+"""
 
 from __future__ import annotations
 

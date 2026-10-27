@@ -1,4 +1,13 @@
-"""Durable persistence for trades, positions, and shadow equity."""
+"""Purpose: Persist local trade, position, order and shadow execution state.
+
+Responsibilities:
+- PersistentStateDB manages durable on-disk state across process restarts.
+- Serialize trade, bracket, fill and position records for recovery consumers.
+- Provide consistent persistence boundaries for runtime components.
+
+Boundaries: Storage is not authoritative broker execution or live contract selection.
+Safety: Persisted requests or acknowledgements do not prove broker-confirmed fills.
+"""
 
 from __future__ import annotations
 import os

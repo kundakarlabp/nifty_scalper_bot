@@ -305,6 +305,33 @@ def test_partial_fills_apply_only_cumulative_delta(tmp_path) -> None:
     assert position.quantity == 65
 
 
+def test_cancelled_entry_applies_late_incremental_fill_only_once(tmp_path) -> None:
+    manager = PositionManager(state_file=str(tmp_path / "positions.json"))
+    manager.add_pending_order(
+        "late-cancel-entry", SYMBOL, "BUY", 130, 100.0, "MARKET", intent="ENTRY"
+    )
+    manager.apply_broker_order_update(
+        "late-cancel-entry",
+        {"status": "PARTIALLY FILLED", "filled_quantity": 65, "average_price": 100.0},
+    )
+    manager.apply_broker_order_update(
+        "late-cancel-entry",
+        {"status": "CANCELLED", "filled_quantity": 65, "average_price": 100.0},
+    )
+    manager.apply_broker_order_update(
+        "late-cancel-entry",
+        {"status": "CANCELLED", "filled_quantity": 100, "average_price": 101.0},
+    )
+    position = manager.get_position(SYMBOL)
+    assert position is not None
+    assert position.quantity == 100
+    manager.apply_broker_order_update(
+        "late-cancel-entry",
+        {"status": "CANCELLED", "filled_quantity": 100, "average_price": 101.0},
+    )
+    assert manager.get_position(SYMBOL).quantity == 100
+
+
 def test_partial_exit_fill_reduces_only_cumulative_delta(tmp_path) -> None:
     manager = _position_manager(tmp_path)
     manager.add_pending_order(

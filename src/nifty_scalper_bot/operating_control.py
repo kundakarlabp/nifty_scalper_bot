@@ -1,14 +1,23 @@
-"""Low-resource operating-mode control for the production ASGI wrapper.
+"""Purpose: Bound production AUTO/QUIET/ACTIVE operating modes and transitions.
 
-AUTO keeps the full trading engine loaded only around the NSE cash session on
-weekdays. QUIET keeps only HTTP/admin controls alive. ACTIVE keeps the engine
-loaded continuously. This reduces off-hours CPU/network work; it does not by
-itself change the fixed Lightsail bundle price.
+Responsibilities:
+- Compute AUTO schedule-target state (08:55–15:40 IST weekdays) while keeping
+  operating-mode selection separate from LIVE/SHADOW order authorization.
+- Render authenticated AUTO, ACTIVE and QUIET controls on the independent admin
+  process and accept changes at /admin/power/mode (owner cookie path /admin).
+- Persist changes through the canonical protected environment writer and queue
+  a guarded restart; display whether it was queued, never claim activation.
+- Queue/retry AUTO boundary transitions through the validated release runner
+  without relaxing live position, exit-order, or broker-authentication checks.
+
+Safety: Never restart trading directly or bypass broker-flat release gates.
+Off-hours unloading reduces CPU work, not the fixed Lightsail bundle price.
 """
 
 from __future__ import annotations
 
 import html
+import logging
 import os
 import threading
 import time
@@ -31,6 +40,7 @@ VALID_MODES = {"AUTO", "ACTIVE", "QUIET"}
 DEFAULT_START = dt_time(8, 55)
 DEFAULT_STOP = dt_time(15, 40)
 router = APIRouter()
+_LOGGER = logging.getLogger(__name__)
 
 
 def operating_mode() -> str:
@@ -115,8 +125,17 @@ def start_transition_watchdog(
                 continue
             current = engine_should_run()
             if current != expected:
-                _restart_service()
-                return
+                # A rejected queue request must not strand AUTO in the
+                # wrong process mode for the entire market session.
+                # The existing guarded deployer still owns broker-flat
+                # restart authorization.
+                result = _restart_service()
+                if result.ok:
+                    return
+                _LOGGER.warning(
+                    "AUTO mode transition restart request rejected; "
+                    "will retry on next watchdog tick"
+                )
 
     thread = threading.Thread(
         target=watch,
@@ -127,15 +146,17 @@ def start_transition_watchdog(
     return thread
 
 
-def _mode_controls(mode: str, *, return_to: str = "/admin") -> str:
+def _mode_controls(
+    mode: str, *, return_to: str = "/admin", editable: bool = True
+) -> str:
     buttons: list[str] = []
     choices = (("AUTO", "AUTO"), ("ACTIVE", "ACTIVE"), ("QUIET", "QUIET"))
     safe_return = html.escape(return_to, quote=True)
     for value, label in choices:
-        disabled = " disabled" if mode == value else ""
+        disabled = " disabled" if mode == value or not editable else ""
         css = "gray" if value == "QUIET" else "blu" if value == "ACTIVE" else ""
         buttons.append(
-            '<form method="post" action="/power/mode" style="display:inline">'
+            '<form method="post" action="/admin/power/mode" style="display:inline">'
             f'<input type="hidden" name="mode" value="{value}">'
             f'<input type="hidden" name="return_to" value="{safe_return}">'
             f'<button class="{css}" type="submit"{disabled}>'
@@ -144,53 +165,49 @@ def _mode_controls(mode: str, *, return_to: str = "/admin") -> str:
     return "".join(buttons)
 
 
-def admin_power_card() -> str:
-    """Render operating controls inside the existing admin dashboard."""
+def admin_power_card(*, editable: bool = True) -> str:
+    """Render operating mode controls in the independently hosted admin page.
+
+    The schedule is a requested target, never evidence of a loaded engine.
+    Token login unlocks writes; rendering this panel does not contact Kite.
+    """
     mode = operating_mode()
-    running = engine_should_run()
-    state = "FULL ENGINE ACTIVE" if running else "QUIET — ADMIN ONLY"
-    state_class = "on" if running else "off"
+    scheduled_active = engine_should_run()
+    target = "ACTIVE" if scheduled_active else "QUIET"
     start = _clock("BOT_AUTO_START_IST", DEFAULT_START).strftime("%H:%M")
     stop = _clock("BOT_AUTO_STOP_IST", DEFAULT_STOP).strftime("%H:%M")
     transition = next_auto_transition()
-    controls = _mode_controls(mode)
-    return (
-        '<div class="card session">'
-        "<h2>Operating Mode &amp; Off-hours Power</h2>"
-        f'<p><span class="pill {state_class}">● {state}</span> '
-        f"&nbsp; Configured: <b>{mode}</b></p>"
-        f"<p><b>AUTO (recommended)</b> runs the full trading engine "
-        f"{start}–{stop} IST on weekdays and keeps only the lightweight "
-        "admin/API process outside that window.</p>"
-        f'<div class="row">{controls}</div>'
-        '<p class="muted" style="margin-top:12px">'
-        f"Next AUTO transition: <b>{transition}</b>. ACTIVE is a manual "
-        "always-on override; QUIET is a manual sleep override. Changing "
-        "mode restarts the bot service once.</p></div>"
+    controls = _mode_controls(mode, editable=editable)
+    auth_note = (
+        ""
+        if editable
+        else '<p class="muted">Verify your Zerodha owner session using '
+        "the request-token form above to enable mode changes.</p>"
     )
-
-
-def install_admin_power_card() -> None:
-    """Inject the operating card into the existing admin page."""
-    from nifty_scalper_bot import admin_dashboard
-
-    if getattr(admin_dashboard, "_OPERATING_CARD_INSTALLED", False):
-        return
-    original_page = admin_dashboard._page
-
-    def page_with_operating_card(body: str) -> str:
-        marker = "<div class=wrap>"
-        if marker in body:
-            body = body.replace(marker, marker + admin_power_card(), 1)
-        return original_page(body)
-
-    admin_dashboard._page = page_with_operating_card
-    admin_dashboard._OPERATING_CARD_INSTALLED = True
+    return (
+        '<section class="card" id="operating-mode">'
+        "<h2>Operating mode</h2>"
+        f"<p>Configured: <b>{html.escape(mode)}</b> · "
+        f"Schedule target now: <b>{target}</b></p>"
+        f"<p><b>AUTO</b>: engine requested {start}–{stop} IST "
+        "Monday–Friday; QUIET outside the window. "
+        "AUTO's weekday window is not a holiday calendar; "
+        "broker readiness remains a separate requirement. "
+        "<b>ACTIVE</b>: manual always-on override. "
+        "<b>QUIET</b>: manual control-only override.</p>"
+        f'<div class="row">{controls}</div>'
+        f"{auth_note}"
+        '<p class="muted">Changing mode queues a guarded release. '
+        "The live Engine and Zerodha indicators above determine whether "
+        "the new state actually became ready.</p>"
+        f'<p class="muted">Next AUTO transition: '
+        f"{html.escape(transition)}</p></section>"
+    )
 
 
 def _mode_page(mode: str, running: bool) -> str:
     state = "FULL ENGINE ACTIVE" if running else "QUIET — ADMIN ONLY"
-    controls = _mode_controls(mode, return_to="/power")
+    controls = _mode_controls(mode, return_to="/admin/power")
     transition = next_auto_transition()
     return (
         "<!doctype html><html><head>"
@@ -215,14 +232,14 @@ def _mode_page(mode: str, running: bool) -> str:
     )
 
 
-@router.get("/power", response_class=HTMLResponse)
+@router.get("/admin/power", response_class=HTMLResponse)
 def power_page(request: Request) -> HTMLResponse:
     """Render the operating-mode control page."""
     _check_auth(request)
     return HTMLResponse(_mode_page(operating_mode(), engine_should_run()))
 
 
-@router.post("/power/mode")
+@router.post("/admin/power/mode")
 def set_operating_mode(
     request: Request,
     mode: str = Form(...),
@@ -231,9 +248,11 @@ def set_operating_mode(
     """Persist a validated operating mode and restart the service."""
     _check_auth(request)
     selected = mode.strip().upper()
-    target = return_to if return_to in {"/admin", "/power"} else "/admin"
+    target = return_to if return_to in {"/admin", "/admin/power"} else "/admin"
     if selected not in VALID_MODES:
         return RedirectResponse(target, status_code=303)
+    if selected == operating_mode():
+        return RedirectResponse(target + "?power=unchanged", status_code=303)
     _write_env(
         {
             "BOT_OPERATING_MODE": selected,
@@ -241,5 +260,7 @@ def set_operating_mode(
             "BOT_AUTO_STOP_IST": "15:40",
         }
     )
-    _restart_service()
-    return RedirectResponse(target, status_code=303)
+    restart = _restart_service()
+    if restart.ok:
+        return RedirectResponse(target + "?power=queued", status_code=303)
+    return RedirectResponse(target + "?power=saved_not_applied", status_code=303)

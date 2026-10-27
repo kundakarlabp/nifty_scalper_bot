@@ -1,4 +1,13 @@
-"""Single source of truth for the mobile-first admin CSS and progressive enhancement."""
+"""Purpose: Single source of truth for the mobile-first admin CSS and JavaScript.
+
+Responsibilities:
+- Render live engine/broker readiness without separate browser owner login.
+- Distinguish privileged journal access errors from engine unavailability.
+- Preserve daily token-entry form and operator control affordances.
+
+Boundaries: Visual-only assets; browser scripts do not own broker or release state.
+Safety: Render only fixed read-only status fields before owner verification.
+"""
 
 # Embedded HTML/CSS/JS assets have intentional long literal lines.
 # ruff: noqa: E501
@@ -52,15 +61,24 @@ SCRIPT = r"""
   }
   function drawOverview(data) {
     var online = data.engine_ok === true;
-    setText("engine-value", online ? (data.bot_loaded ? "Running" : "Starting") : "Unreachable");
-    highlight("engine-value", online ? (data.bot_loaded ? "good" : "warning") : "failure");
-    setText("broker-value", online ? labelBroker(data.broker_authenticated) : "Unknown");
-    highlight("broker-value", online && labelBroker(data.broker_authenticated) === "Authenticated" ? "good" : "warning");
-    setText("mode-value", online ? data.mode : "Unknown");
-    setText("blocker-value", online ? (data.primary_blocker || "None") : "Engine unavailable");
+    var quiet = online && data.quiet === true;
+    setText("engine-value", !online ? "Unreachable" : quiet ? "QUIET (planned)" : data.bot_loaded ? "Running" : "Starting");
+    highlight("engine-value", !online ? "failure" : quiet || data.bot_loaded ? "good" : "warning");
+    var brokerLabel = online && !quiet ? labelBroker(data.broker_authenticated) : "Not checked";
+    setText("broker-value", brokerLabel);
+    highlight("broker-value", brokerLabel === "Authenticated" ? "good" : "warning");
+    var ownerNote = document.getElementById("admin-access-note");
+    if (ownerNote && brokerLabel === "Authenticated")
+      ownerNote.textContent = "Zerodha is already authenticated on the running bot. No additional broker token renewal is needed. Engine and release status below are independent of this browser session. Owner verification is only needed before changing private trading controls.";
+    else if (ownerNote && brokerLabel === "Login required")
+      ownerNote.textContent = "Zerodha broker login is required. Use the existing daily request-token field below to renew the broker session and enable controls.";
+    else if (ownerNote)
+      ownerNote.textContent = "Dashboard is accessible; broker authentication is not yet confirmed by the engine. Do not assume an expired token or a healthy session until the engine reports it.";
+    setText("mode-value", quiet ? "AUTO · QUIET" : online ? data.mode : "Unknown");
+    setText("blocker-value", quiet ? "Scheduled idle" : online ? (data.primary_blocker || "None") : "Engine unavailable");
     setText("release-value", data.updater_state || "Unknown");
     setText("revision-value", online && data.runtime_sha ? data.runtime_sha.slice(0, 10) : "—");
-    var result = online ? "Engine reachable" : "Engine unavailable — check service";
+    var result = !online ? "Engine unavailable — check service" : quiet ? "AUTO quiet · control plane online" : "Engine reachable";
     if (data.updater_state && /deploying|restarting|validating|recovering|fetching/.test(data.updater_state))
       result += " · Deployment in progress";
     status.textContent = result + " · " + new Date().toLocaleTimeString();
@@ -100,8 +118,12 @@ SCRIPT = r"""
     var params = new URLSearchParams({ lines: logLines.value, contains: query });
     getJSON("/admin/api/logs?" + params.toString(), 14000).then(function (data) {
       logOutput.textContent = data.text || "No matching log lines.";
-    }).catch(function () { logOutput.textContent = "Logs unavailable. Try again or use Download Logs."; })
-      .finally(function () { logButton.disabled = false; });
+    }).catch(function (error) {
+      var denied = /HTTP (401|403)/.test(String(error && error.message || error));
+      logOutput.textContent = denied
+        ? "Detailed logs require this browser to be verified using the existing daily Zerodha token field above. The engine and broker may already be healthy; see live status above."
+        : "Live logs could not be loaded. Check admin service health or retry.";
+    }).finally(function () { logButton.disabled = false; });
   }
   if (logButton) {
     logButton.addEventListener("click", logs);

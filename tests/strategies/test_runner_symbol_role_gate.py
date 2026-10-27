@@ -160,6 +160,11 @@ class _MDM:
             ),
         }
 
+    def get_candle_engine(self, _symbol):
+        # A LIVE MDM always exposes the authoritative accessor, even before
+        # a candle engine has warmed. The fixture must preserve that contract.
+        return None
+
     def current_live_token(self, _symbol):
         return 1
 

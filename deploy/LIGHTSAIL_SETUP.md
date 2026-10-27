@@ -19,7 +19,34 @@ The repository path `/home/ubuntu/nifty_scalper_bot/.env` is only a compatibilit
 symlink to that external file. Git pulls, resets, validation worktrees, and code
 rollbacks therefore cannot overwrite broker or Telegram credentials.
 
-Never commit a populated `.env` file. `.env.example` is the repository template.
+Never commit a populated `.env` file. `.env.example` is an example
+for development, **not** the source of production strategy defaults. The
+runtime's GitHub-owned configuration modules own those defaults.
+
+Fresh Lightsail installations now create only a minimal secret/operator file
+(`ENABLE_LIVE=false`, `EXECUTION_MODE=SHADOW`); neither setup nor Python's
+config normalizer silently authorizes real orders. To enable an existing LIVE
+installation, both canonical flags must already be explicitly set and agree.
+Inconsistent settings fail closed and do not rewrite the host's protected file.
+
+Existing populated host environment files are preserved to avoid unexpected
+changes to trading behavior. A subsequent migration of legacy strategy
+overrides must compare *effective* values, not blindly delete keys while
+trading. Do not run the full setup script merely to edit credentials.
+
+## No credential migration in routine releases
+
+The automatic `deploy/lightsail_release.sh` path **never copies**
+`$APP_DIR/.env` into the protected `BOT_ENV_FILE`. If the protected
+file is missing, release validation fails closed *before* checkout mutation
+or broker-facing service restarts. An old repository `.env` cannot silently
+re-enable trading, and the existing running revision is left untouched.
+
+For genuinely legacy installations, only a deliberate, operator-invoked
+`deploy/lightsail_setup.sh` can perform a one-time import. Review
+`ENABLE_LIVE` and `EXECUTION_MODE` together and preserve broker credentials
+before using that migration. Do not run the installer as part of normal CI,
+post-merge release, or a recovery timer.
 
 ## One-time setup or migration
 
@@ -42,27 +69,51 @@ validated release runner below, not a separate ad-hoc deployment path.
 
 The setup script:
 
-- migrates the historic in-repository `.env` file;
+- preserves existing external credentials, migrating a legacy `.env` only once;
+- creates a minimal SHADOW-only host env on fresh installs, with no strategy defaults;
 - installs the `niftybot` engine service;
 - installs the isolated `.streamlit-venv` and `niftybot-streamlit` console service;
 - points the engine to the external environment file;
-- installs the validated release runner and two-minute update timer;
+- installs the validated release runner and 30-second non-overlapping update timer;
 - keeps `nifty_scalper_bot.main:app` as the canonical engine entrypoint;
 - restarts both engine and console after validated GitHub updates.
 
-Allow TCP `443` and TCP `8501` in the Lightsail firewall. Port `8080` is needed
-only when direct admin fallback access is required.
+Keep the AWS inbound firewall restricted to required services: 443 for encrypted
+admin access, 8501 for the read-only console and optional 8080 for direct
+liveness/release diagnostics. The independent admin server (8081) must bind
+to 127.0.0.1 only; do not expose TCP 8081 publicly. For the canonical
+external probe procedure and known client timeouts, see
+[Production HTTP access](../docs/ops/PRODUCTION_HTTP_ACCESS.md).
 
 ## Console URLs
 
 ```text
 Operations console: http://LIGHTSAIL_STATIC_IP:8501
-Admin dashboard:    https://LIGHTSAIL_STATIC_IP/admin
-Admin fallback:     http://LIGHTSAIL_STATIC_IP:8080/admin
+Admin dashboard:    https://LIGHTSAIL_STATIC_IP/admin (trusted TLS + username admin + protected ADMIN_PASSWORD)
+Engine diagnostics: http://LIGHTSAIL_STATIC_IP:8080/livez
 ```
 
 The operations console is read-only. Historical journal scans run only after the
 **Generate download** button is pressed. Live fragments never scan historical logs.
+
+The validated release runner also applies `deploy/caddy/Caddyfile` and the
+loopback-only admin service unit. Caddy 2.10.1+ obtains a publicly trusted
+short-lived IP certificate with the ACME `shortlived` profile; its reload
+does not prove that issuance succeeded. After a release, verify HTTPS with
+normal certificate verification enabled. No admin password or broker token
+may be submitted over public HTTP. A failed Caddy validation/reload retains
+the previous Caddyfile, records an operator-ingress degradation marker, and
+never restarts the trading engine just to repair HTTPS.
+
+The independent admin process also exposes
+`/admin/api/service-health` on port `8081`, and Streamlit's
+**Service liveness (host-local)** section displays the result. It checks
+engine `/livez`, the responding admin process, and Streamlit
+`/_stcore/health` without invoking broker APIs. A green local probe does
+**not** prove that the public firewall, proxy or external browser can reach
+that service, and it does not mean LIVE entries are armed. Supabase's
+existing runtime heartbeat remains an independent engine/release monitor,
+not an admin/Streamlit availability assertion.
 
 ## Entering broker credentials
 
@@ -104,7 +155,7 @@ The runner:
 9. rolls code back if the trading engine fails health validation;
 10. reports console failure separately so a healthy trading engine is not disrupted.
 
-The automatic update timer fetches `origin/main` every two minutes. PR commits
+The automatic release timer checks `origin/main` 30 seconds after its previous run finishes. PR commits
 are not deployed until merged into `main` (unreviewed PR heads must never
 replace production). After a merge, the updater additionally requires a
 **completed successful push-triggered GitHub CI run for the exact main SHA**
@@ -116,25 +167,30 @@ retry on the next timer invocation. An already deployed revision does not need
 a new CI request to remain healthy or restart under the existing safety policy.
 
 When a new CI-approved main SHA is available, the updater validates the
-candidate in a detached worktree before attempting a release. The two-minute
+candidate in a detached worktree before attempting a release. The 30-second
 interval is the polling interval, **not a guaranteed deployment deadline**:
 CI duration, broker exposure/arming, and transient network failures can defer
 a release without compromising live position protection.
 
-There is **no market-hours restart blackout**: automatic updates may run
-during an NSE session as soon as the safety check passes. Before changing the
-checkout or restarting the engine, the updater still requires a reconciled,
-**disarmed** engine and two broker-confirmed snapshots with **no** positions
-or outstanding orders. A flat account alone is insufficient while live entries
-are armed, because a new entry could be submitted between checks. The updater
-does not automatically disarm the engine or interrupt a protective exit.
-When in canonical off-hours **QUIET** mode (trading stack unloaded), the
-updater verifies that mode via `/livez` and still requires the same broker
-proof. If any safety proof fails, session credentials expire, validation fails,
-or exposure is active, the pending SHA remains queued and is retried by the
-timer irrespective of market time. Candidate checkout and engine restart
-each have a fresh exposure check. Never reset a risk limit or cancel
-protective orders to accelerate deployment.
+There is **no market-hours restart blackout**. After full candidate
+validation the updater exclusively locks the live BUY order-submission path
+and publishes an entry hold acknowledged by the running engine. Protective
+SELL exits remain available. Two independently fresh Kite snapshots must
+show zero net/day positions and **only terminal orders**, with fresh reconciled
+engine health and no entry arming. A pending/unknown order, open position,
+unavailable API, failed reconciliation or missing hold acknowledgement
+defers the deployment **automatically** until the next timer check. No
+risk budget, stop order, or live position is modified to facilitate release.
+The lock and hold cover checkout mutation, reinstall and engine restart;
+on normal completion the hold is released, allowing the new engine to arm
+from its own readiness policy.
+
+For the initial upgrade from an older engine without entry-hold support,
+the existing engine must be independently QUIET/disarmed and broker-flat.
+Do not bypass this one-time bootstrap guard while LIVE-armed. An engine
+that cannot acknowledge the hold is **not** automatically treated as safe
+to restart. CI and deploy health checks remain separate; neither PR merge
+nor a green GitHub workflow proves that production is running the new SHA.
 
 See `data/auto_update_status.json` or the Admin status page for
 `deferred_broker_exposure`, `deferred_unsafe_recovery`, validation failures,
@@ -180,6 +236,46 @@ Routine updates must continue through the single canonical
 `deploy/lightsail_release.sh` installed in the repo; the dashboard validator
 compiles the actual candidate dashboard tree rather than pinning retired
 internal helper filenames.
+
+## Console dependency failures are explicit, not silent
+
+Code-only releases and same-commit restarts do not reinstall Streamlit
+packages. Only a change in `dashboard/requirements.txt` triggers that
+isolated-venv refresh. If pip fails, the deployer does **not** claim the
+console is healthy or restart it against an unverified dependency set:
+the release status explicitly records `deployed_console_dependencies_degraded`
+(or a combined degraded state when admin/broker authentication is impaired).
+
+A healthy trading engine continues to serve protective exits; console
+dependency failures do not bypass broker-flat checks, change strategy/risk
+settings, or turn an engine restart into a forced rollback. A protected marker
+(`streamlit_dependency_refresh_failed` under the host configuration directory)
+retains the degraded status across same-SHA restarts and code-only releases.
+A subsequent validated release, including an explicitly forced same-SHA
+restart, retries installation; **only a successful pip refresh clears the
+marker**. Regular unchanged timer ticks report
+`current_console_dependencies_degraded` without restarting the trading
+engine. Missing/inaccessible console environments keep the degraded status
+rather than silently claiming success. Investigate and
+repair only the optional console before treating it as operational. This
+optimization introduces no extra AWS service.
+
+## Fast code-only releases
+
+The single validated Lightsail release runner now reuses an already-installed
+editable Python package when the committed packaging and dependency manifests
+are unchanged. Ordinary changes to `src/` need only the guarded checkout,
+service restart and health verification; they do not mutate installed Python
+dependencies. A missing editable install or changes to `pyproject.toml`,
+setup files, requirements or lockfiles retain the full `pip install -e .`
+path. When a dependency installation was attempted, rollback restores the
+previous dependency environment as before. All GitHub CI, broker-flat
+verification, entry hold, SHA validation and systemd rollback guards remain.
+
+This is a deployment-speed optimization, **not** a second deployment system.
+A future fully versioned/atomic virtual environment migration would require
+separate systemd and rollback regression tests before it could replace the
+existing service path.
 
 ## Log exports
 

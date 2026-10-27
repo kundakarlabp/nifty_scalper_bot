@@ -1,5 +1,14 @@
 # fmt: off
-"""Pure policy helpers for native final risk admission."""
+"""Purpose: Provide pure final entry-risk and exposure policy helpers.
+
+Responsibilities:
+- Distinguish reducing intent from new broker-live risk.
+- Derive daily risk, re-entry and stop-distance block reasons.
+- Delegate reward/risk computation to the canonical net_rr_gate module.
+
+Boundaries: Callers gather state and own broker authorization/execution.
+Safety: Reducing exposure must remain distinct from authorizing new risk.
+"""
 
 from __future__ import annotations
 

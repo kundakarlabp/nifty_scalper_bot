@@ -74,12 +74,11 @@ if [ ! -f "$ENV_FILE" ]; then
     log "Migrated existing .env outside the Git checkout"
   else
     ADMIN_PW="$(python3 -c 'import secrets;print(secrets.token_urlsafe(18))')"
-    if [ -f "$APP_DIR/.env.example" ]; then
-      cp "$APP_DIR/.env.example" "$ENV_FILE"
-      printf '\nADMIN_PASSWORD=%s\n' "$ADMIN_PW" >> "$ENV_FILE"
-    else
-      cat > "$ENV_FILE" <<EOF_ENV
-# Managed locally on the Lightsail host. Never commit or share this file.
+    # Fresh hosts must not inherit 600+ sample strategy/risk parameters.
+    # GitHub owns defaults; the protected host file owns secrets, operator
+    # enablement and host-only service settings.
+    cat > "$ENV_FILE" <<EOF_ENV
+# Host secrets and operator-controlled mode only; GitHub owns strategy defaults.
 ADMIN_PASSWORD=$ADMIN_PW
 PORT=$PORT
 BOT_ENV_FILE=$ENV_FILE
@@ -96,7 +95,6 @@ TELEGRAM_BOT_TOKEN=
 TELEGRAM_CHAT_ID=
 TELEGRAM_ALLOWED_ID=
 EOF_ENV
-    fi
     log "Created an execution-disabled environment file from safe defaults"
   fi
 else
@@ -110,15 +108,8 @@ ensure_env_default BOT_APP_DIR "$APP_DIR"
 ensure_env_default DEPLOYMENT_PLATFORM aws_lightsail
 ensure_env_default ALLOW_DEBUG_ENV false
 ensure_env_default PORT "$PORT"
-ensure_env_default SUPABASE_TRADE_REPLICATION_ENABLED true
-ensure_env_default SUPABASE_TRADE_REPLICATION_URL "https://dehdptgkqbrkyzyodicd.supabase.co/functions/v1/nifty-trade-ingest"
-ensure_env_default SUPABASE_TRADE_REPLICATION_SOURCE lightsail
-ensure_env_default SUPABASE_TRADE_REPLICATION_INTERVAL_SECONDS 30
-ensure_env_default SUPABASE_TRADE_REPLICATION_BATCH_SIZE 100
-ensure_env_default SUPABASE_TRADE_REPLICATION_TIMEOUT_SECONDS 5
-ensure_env_default SUPABASE_LOG_ARCHIVE_ENABLED true
-ensure_env_default SUPABASE_LOG_ARCHIVE_URL "https://dehdptgkqbrkyzyodicd.supabase.co/functions/v1/nifty-log-archive-ingest"
-ensure_env_default SUPABASE_LOG_ARCHIVE_INTERVAL_SECONDS 300
+# Supabase endpoint/interval/enable defaults now live in GitHub Python config.
+# Existing host-specific overrides remain untouched; new hosts need no copies.
 
 if [ -e "$LEGACY_ENV" ] && [ ! -L "$LEGACY_ENV" ]; then
   mv "$LEGACY_ENV" "$CONFIG_DIR/legacy.env.$(date +%Y%m%d_%H%M%S)"
@@ -216,23 +207,18 @@ if ! command -v caddy >/dev/null 2>&1; then
   sudo apt-get install -y -qq caddy
 fi
 
-sudo tee /etc/caddy/Caddyfile >/dev/null <<EOF_CADDY
-{
-  auto_https disable_redirects
-}
-:443 {
-  tls internal
-  reverse_proxy 127.0.0.1:${PORT}
-}
-EOF_CADDY
-sudo systemctl restart caddy || log "Caddy restart failed; HTTP remains available on port ${PORT}"
+# Apply exactly the same reviewed ingress policy as guarded GitHub updates.
+# Failure is explicitly reported, not mistaken for successful HTTPS.
+if ! bash "$APP_DIR/deploy/scripts/apply_operator_ingress.sh"; then
+  log "WARNING: operator HTTPS hardening incomplete; inspect Caddy version and ACME issuance"
+fi
 
 IP="$(curl -fsSL https://checkip.amazonaws.com 2>/dev/null || echo 'YOUR_STATIC_IP')"
 printf '\n============================================================\n'
 printf 'Setup complete.\n'
 printf 'Operations console: http://%s:%s\n' "$IP" "$STREAMLIT_PORT"
 printf 'Admin dashboard:    https://%s/admin\n' "$IP"
-printf 'Admin fallback:     http://%s:%s/admin\n' "$IP" "$PORT"
+printf 'Diagnostics:        http://%s:%s/livez\n' "$IP" "$PORT"
 printf 'Environment:        %s\n' "$ENV_FILE"
 printf 'Password:           %s\n' "${ADMIN_PW:-already configured}"
 printf 'Allow TCP 443 and TCP %s in Lightsail Networking.\n' "$STREAMLIT_PORT"

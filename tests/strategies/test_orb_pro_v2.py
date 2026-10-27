@@ -1163,3 +1163,138 @@ def test_orb_nonfinite_numeric_configuration_uses_safe_defaults(
     assert actual is not None
     assert actual.stop_loss == pytest.approx(baseline.stop_loss)
     assert actual.take_profit == pytest.approx(baseline.take_profit)
+
+
+def test_orb_retest_retries_same_bar_after_slope_alignment_recovers(
+    monkeypatch,
+) -> None:
+    """Dynamic slope may recover; breakout evidence and bar remain immutable."""
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    monkeypatch.setenv("ORB_MOMENTUM_BRANCH_ENABLED", "false")
+    monkeypatch.setenv("ORB_BALANCED_RANGE_MAX_ATR", "2.0")
+    rows = _opening_rows()
+    rows.append(
+        _bar(
+            15,
+            open_=24_014.0,
+            high=24_034.0,
+            low=24_012.0,
+            close=24_030.0,
+            volume=1_600.0,
+        )
+    )
+    strategy = _strategy({FUTURE: rows})
+    first = _base_indicators("CE", rows[-1]["timestamp"])
+    assert strategy.generate_signal(CE, first, 50.0) is None
+    rows.append(
+        _bar(
+            16,
+            open_=24_024.0,
+            high=24_026.0,
+            low=24_019.0,
+            close=24_021.0,
+            volume=400.0,
+        )
+    )
+    context = _base_indicators("CE", rows[-1]["timestamp"])
+    context["futures_vwap_slope"] = -1.0
+    assert strategy.generate_signal(CE, context, 50.0) is None
+    assert strategy.last_no_vote_reason == "orb_futures_vwap_slope_not_aligned"
+    key = ("2026-09-01", FUTURE, "CE")
+    assert strategy._events[key]["status"] == "AWAITING_RETEST"
+    assert key not in strategy._last_bar_by_key
+    context["futures_vwap_slope"] = 1.0
+    recovered = strategy.generate_signal(CE, context, 50.0)
+    assert recovered is not None
+    assert recovered.metadata["entry_branch"] == "retest"
+    assert (
+        recovered.metadata["breakout_timestamp"]
+        < recovered.metadata["retest_timestamp"]
+    )
+
+
+def test_orb_wrong_slope_at_breakout_can_only_recover_with_later_retest(
+    monkeypatch,
+) -> None:
+    """Do not manufacture a late same-bar momentum signal from recovered context."""
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    monkeypatch.setenv("ORB_BALANCED_RANGE_MAX_ATR", "2.0")
+    rows = _opening_rows()
+    rows.append(
+        _bar(
+            15,
+            open_=24_008.0,
+            high=24_034.0,
+            low=24_006.0,
+            close=24_030.0,
+            volume=3_000.0,
+        )
+    )
+    strategy = _strategy({FUTURE: rows})
+    context = _base_indicators("CE", rows[-1]["timestamp"])
+    context["futures_vwap_slope"] = -1.0
+    assert strategy.generate_signal(CE, context, 50.0) is None
+    key = ("2026-09-01", FUTURE, "CE")
+    assert strategy._events[key]["status"] == "AWAITING_RETEST"
+    context["futures_vwap_slope"] = 1.0
+    assert strategy.generate_signal(CE, context, 50.0) is None
+    assert strategy.last_no_vote_reason == "awaiting_orb_retest"
+    rows.append(
+        _bar(
+            16,
+            open_=24_024.0,
+            high=24_026.0,
+            low=24_019.0,
+            close=24_021.0,
+            volume=400.0,
+        )
+    )
+    retest = _base_indicators("CE", rows[-1]["timestamp"])
+    signal = strategy.generate_signal(CE, retest, 50.0)
+    assert signal is not None
+    assert signal.metadata["entry_branch"] == "retest"
+
+
+def test_orb_immutable_breakout_volume_failure_remains_terminal(
+    monkeypatch,
+) -> None:
+    """A slope recovery cannot override inadequate breakout participation."""
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    monkeypatch.setenv("ORB_MOMENTUM_BRANCH_ENABLED", "false")
+    monkeypatch.setenv("ORB_BALANCED_RANGE_MAX_ATR", "2.0")
+    rows = _opening_rows()
+    rows.append(
+        _bar(
+            15,
+            open_=24_014.0,
+            high=24_034.0,
+            low=24_012.0,
+            close=24_030.0,
+            volume=900.0,
+        )
+    )
+    strategy = _strategy({FUTURE: rows})
+    assert (
+        strategy.generate_signal(
+            CE, _base_indicators("CE", rows[-1]["timestamp"]), 50.0
+        )
+        is None
+    )
+    rows.append(
+        _bar(
+            16,
+            open_=24_024.0,
+            high=24_026.0,
+            low=24_019.0,
+            close=24_021.0,
+            volume=400.0,
+        )
+    )
+    context = _base_indicators("CE", rows[-1]["timestamp"])
+    assert strategy.generate_signal(CE, context, 50.0) is None
+    assert "underlying_volume_confirmation" in strategy.last_structural_failure_reasons
+    key = ("2026-09-01", FUTURE, "CE")
+    assert strategy._events[key]["status"] == "CONTRACT_REJECTED"
+    context["futures_vwap_slope"] = 1.0
+    assert strategy.generate_signal(CE, context, 50.0) is None
+    assert strategy._events[key]["status"] == "CONTRACT_REJECTED"

@@ -1,8 +1,12 @@
-"""Canonical strategy-evidence policy used by StrategyManager.
+"""Purpose: Apply canonical trigger-versus-context strategy vote policy.
 
-There is deliberately no synthetic numeric admission model here. Strategies
-either prove their structural setup or produce no trigger. Context strategies can
-corroborate a valid trigger but can never manufacture one.
+Responsibilities:
+- vote_role and partition_votes distinguish trigger from context strategies.
+- setup_gate_decision validates actionable structural setup evidence.
+- independent_same_side_confirmation checks corroborating evidence.
+
+Boundaries: Pure vote policy; no quote fetching, symbol selection or order entry.
+Safety: Context-only votes cannot create a trigger or override direction.
 """
 
 from __future__ import annotations

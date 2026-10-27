@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import time
 
+import pytest
+
 from nifty_scalper_bot.core.strategy_manager import (
     Signal,
     StrategyEvidence,
     StrategyManager,
+    _context_snapshot_fresh,
 )
 from nifty_scalper_bot.data.market_data_manager import MarketDataManager
 
@@ -150,6 +153,47 @@ def test_single_trigger_requires_fresh_independent_context(monkeypatch) -> None:
     assert result.metadata["setup_contract"]["passed"] is True
     assert result.metadata["confirmation_contract"]["passed"] is True
     assert result.metadata["context_confirmation_strategies"] == ["OrderFlow"]
+
+
+def test_smc_proof_is_audited_without_admission_when_flag_disabled(monkeypatch) -> None:
+    """Research observation cannot silently authorize a real SMC order."""
+    from nifty_scalper_bot.core import strategy_manager as module
+
+    observations = []
+
+    class AlwaysProven:
+        def observe(self, **kwargs):
+            observations.append(kwargs)
+            return True
+
+    monkeypatch.setattr(module, "SustainedSMCFlow", AlwaysProven)
+    monkeypatch.setenv("SMC_SUSTAINED_FLOW_CONFIRMATION_ENABLED", "false")
+    manager = _manager()
+    smc_signal, smc_evidence = _signal_evidence("SMC")
+    smc_signal.metadata["setup_id"] = "smcv2:20261023:CE:one"
+    smc_evidence.metadata["setup_id"] = smc_signal.metadata["setup_id"]
+    context = _signal_evidence("OrderFlow", role="context")
+
+    rejected = manager._combine_strategy_votes(
+        symbol=_CE,
+        signals=[(smc_signal, smc_evidence), context],
+        indicators=_live_indicators(),
+    )
+    assert rejected is None
+    assert len(observations) == 1
+    assert observations[0]["setup_id"] == "smcv2:20261023:CE:one"
+    assert manager._last_no_signal_decision_by_symbol[_CE].reason == (
+        "smc_independent_confirmation_missing"
+    )
+
+    monkeypatch.setenv("SMC_SUSTAINED_FLOW_CONFIRMATION_ENABLED", "true")
+    approved = manager._combine_strategy_votes(
+        symbol=_CE,
+        signals=[(smc_signal, smc_evidence), context],
+        indicators=_live_indicators(),
+    )
+    assert approved is not None
+    assert approved.metadata["approval_path"] == "smc_sustained_orderflow_confirmed"
 
 
 def test_smc_is_not_confirmed_by_short_orderflow_context_alone(
@@ -354,6 +398,14 @@ def test_two_independent_same_side_triggers_can_confirm(monkeypatch) -> None:
     assert result.metadata["approval_path"] == "aligned_trigger_consensus"
     assert result.metadata["confirmation_contract"]["trigger_consensus"] is True
     assert result.metadata["confirming_trigger_strategies"] == ["ORBPro"]
+    assert result.metadata["strategy_name"] == "VWAPPro"
+    assert result.metadata["primary_selection_policy"] == "first_eligible_trigger"
+    assert [
+        vote["strategy"] for vote in result.metadata["qualified_trigger_candidates"]
+    ] == ["VWAPPro", "ORBPro"]
+    assert result.metadata["confidence_semantics"] == "binary_structural_admission"
+    assert result.metadata["confidence_calibrated"] is False
+    assert result.confidence == 1.0
 
 
 def test_fresh_same_side_context_conflict_vetoes_trigger_consensus(
@@ -379,6 +431,45 @@ def test_fresh_same_side_context_conflict_vetoes_trigger_consensus(
     decision = manager._last_no_signal_decision_by_symbol[_CE]
     assert decision.reason == "fresh_opposing_context"
     assert decision.blocked_at == "context_contract"
+
+
+def test_adverse_orderflow_preserves_smc_trigger_stage_without_entry(
+    monkeypatch,
+) -> None:
+    from nifty_scalper_bot.core import strategy_manager as module
+
+    transitions = []
+
+    def capture_transition(stage, **kwargs):
+        transitions.append((stage, kwargs))
+
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setattr(module, "transition_setup", capture_transition)
+    manager = _manager()
+    smc_signal, smc_evidence = _signal_evidence("SMC")
+    smc_signal.metadata["setup_id"] = "smcv2:test:adverse:one"
+    smc_evidence.metadata["setup_id"] = smc_signal.metadata["setup_id"]
+    adverse = _signal_evidence(
+        "OrderFlow",
+        role="context",
+        aligned_context=False,
+    )
+
+    result = manager._combine_strategy_votes(
+        symbol=_CE,
+        signals=[(smc_signal, smc_evidence), adverse],
+        indicators=_live_indicators("CE"),
+    )
+
+    assert result is None
+    assert manager._last_no_signal_decision_by_symbol[_CE].reason == (
+        "fresh_opposing_context"
+    )
+    assert len(transitions) == 1
+    stage, metadata = transitions[0]
+    assert stage.name == "TRIGGER_QUALIFIED"
+    assert metadata["setup_id"] == "smcv2:test:adverse:one"
+    assert metadata["reason"] == "fresh_opposing_context"
 
 
 def test_opposite_trigger_sides_fail_closed(monkeypatch) -> None:
@@ -483,3 +574,167 @@ def test_unknown_normal_queue_remains_fail_closed() -> None:
         mdm._pending_heap_push_locked(tick, unknown)
         mdm._update_pipeline_overload_locked()
     assert mdm.pipeline_overloaded is True
+
+
+def test_opt_in_smc_is_disabled_by_default(monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.delenv("SMC_SUSTAINED_FLOW_CONFIRMATION_ENABLED", raising=False)
+    manager = _manager()
+    manager._smc_sustained_flow_tracker = SimpleNamespace(observe=lambda **kw: True)
+    smc = _signal_evidence("SMC")
+    smc[0].metadata["setup_id"] = "smcv2:underlying:CE:2026-10-22T12:39"
+    flow = _signal_evidence("OrderFlow", role="context")
+    assert (
+        manager._combine_strategy_votes(
+            symbol=_CE, signals=[smc, flow], indicators=_live_indicators("CE")
+        )
+        is None
+    )
+
+
+def test_opt_in_smc_sustained_evidence_preserves_order_execution_checks(monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("SMC_SUSTAINED_FLOW_CONFIRMATION_ENABLED", "true")
+    manager = _manager()
+    manager._smc_sustained_flow_tracker = SimpleNamespace(observe=lambda **kw: True)
+    smc = _signal_evidence("SMC")
+    smc[0].metadata["setup_id"] = "smcv2:underlying:CE:2026-10-22T12:39"
+    flow = _signal_evidence("OrderFlow", role="context")
+    result = manager._combine_strategy_votes(
+        symbol=_CE, signals=[smc, flow], indicators=_live_indicators("CE")
+    )
+    assert result is not None
+    assert result.metadata["approval_path"] == "smc_sustained_orderflow_confirmed"
+    assert result.metadata["requires_runner_execution_validation"] is True
+    contract = result.metadata["confirmation_contract"]
+    assert contract["smc_sustained_flow_confirmed"] is True
+
+
+def test_smc_capacity_rejection_still_requires_independent_trigger(monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("SMC_SUSTAINED_FLOW_CONFIRMATION_ENABLED", "true")
+    manager = _manager()
+    manager._smc_sustained_flow_tracker = SimpleNamespace(observe=lambda **kw: True)
+    smc = _signal_evidence("SMC")
+    smc[0].metadata["setup_id"] = "smcv2:underlying:CE:2026-10-22T12:49"
+    smc[0].metadata["capacity_rejection_retry"] = True
+    flow = _signal_evidence("OrderFlow", role="context")
+    result = manager._combine_strategy_votes(
+        symbol=_CE, signals=[smc, flow], indicators=_live_indicators("CE")
+    )
+    assert result is None
+    decision = manager._last_no_signal_decision_by_symbol[_CE]
+    assert decision.reason == "capacity_retry_independent_confirmation_missing"
+
+
+@pytest.mark.parametrize("trigger_order", [("SMC", "VWAPPro"), ("VWAPPro", "SMC")])
+@pytest.mark.parametrize("capacity_retry", [False, True])
+def test_unconfirmed_smc_cannot_veto_independently_confirmed_vwap(
+    monkeypatch, trigger_order, capacity_retry
+) -> None:
+    """An SMC-only corroboration rule must not suppress a valid VWAP entry."""
+    from nifty_scalper_bot.strategies import setup_lifecycle
+
+    registry = setup_lifecycle.SetupLifecycleRegistry()
+    monkeypatch.setattr(setup_lifecycle, "SETUP_LIFECYCLE", registry)
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("SMC_SUSTAINED_FLOW_CONFIRMATION_ENABLED", "false")
+    manager = _manager()
+    votes = []
+    for name in trigger_order:
+        signal, evidence = _signal_evidence(name)
+        signal.metadata["setup_id"] = f"{name}:setup-1"
+        evidence.metadata["setup_id"] = signal.metadata["setup_id"]
+        if name == "SMC" and capacity_retry:
+            signal.metadata["capacity_rejection_retry"] = True
+        votes.append((signal, evidence))
+    votes.append(_signal_evidence("OrderFlow", role="context"))
+
+    approved = manager._combine_strategy_votes(
+        symbol=_CE,
+        signals=votes,
+        indicators=_live_indicators(),
+    )
+
+    assert approved is not None
+    assert approved.metadata["strategy_name"] == "VWAPPro"
+    assert approved.metadata["approval_path"] == "single_trigger_context_confirmed"
+    assert approved.metadata["excluded_unconfirmed_triggers"] == ["SMC"]
+    assert approved.metadata["confirmation_contract"]["passed"] is True
+    assert approved.metadata["primary_selection_policy"] == "first_eligible_trigger"
+    assert [
+        item["strategy"] for item in approved.metadata["qualified_trigger_candidates"]
+    ] == ["VWAPPro"]
+    smc_records = [
+        item for item in registry.snapshot()["active"] if item["strategy"] == "SMC"
+    ]
+    assert len(smc_records) == 1
+    assert smc_records[0]["setup_id"] == "SMC:setup-1"
+    assert smc_records[0]["stage"] == "TRIGGER_QUALIFIED"
+    assert smc_records[0]["reason"] == (
+        "capacity_retry_independent_confirmation_missing"
+        if capacity_retry
+        else "smc_independent_confirmation_missing"
+    )
+
+
+@pytest.mark.parametrize("strike_distance", [-25.0, float("inf"), float("nan")])
+def test_near_atm_rejects_invalid_distance(strike_distance) -> None:
+    manager = _manager()
+    eligible, _metadata = manager._is_selected_or_near_atm(
+        "NFO:NIFTY26102622900CE",
+        {"strike_distance_from_atm": strike_distance},
+        {"selected_ce": _CE, "selected_pe": _PE},
+    )
+    assert eligible is False
+
+
+def test_near_atm_accepts_valid_unsigned_distance() -> None:
+    manager = _manager()
+    eligible, metadata = manager._is_selected_or_near_atm(
+        "NFO:NIFTY26102622900CE",
+        {"strike_distance_from_atm": 25.0},
+        {"selected_ce": _CE, "selected_pe": _PE},
+    )
+    assert eligible is True
+    assert metadata["selected_ok_reason"] == "near_atm"
+
+
+@pytest.mark.parametrize(
+    "context",
+    [
+        {"timestamp": 1_800_000_000.5},
+        {"last_tick_ts_ms": 1_800_000_000_500.0, "tick_age_ms": 100},
+        {"last_tick_ts_ms": float("inf"), "tick_age_ms": 100},
+        {"timestamp": float("nan")},
+    ],
+)
+def test_underlying_context_never_trusts_future_or_nonfinite_times(context) -> None:
+    assert (
+        _context_snapshot_fresh(
+            context,
+            max_age_seconds=5.0,
+            now_ts=1_800_000_000.0,
+        )
+        is False
+    )
+
+
+def test_underlying_context_timestamp_age_is_bounded() -> None:
+    now_ts = 1_800_000_000.0
+    assert _context_snapshot_fresh(
+        {"timestamp": now_ts - 1.0},
+        max_age_seconds=5.0,
+        now_ts=now_ts,
+    )
+    assert not _context_snapshot_fresh(
+        {"timestamp": now_ts - 6.0},
+        max_age_seconds=5.0,
+        now_ts=now_ts,
+    )

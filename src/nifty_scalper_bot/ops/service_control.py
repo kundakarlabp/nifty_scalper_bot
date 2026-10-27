@@ -1,8 +1,12 @@
-"""Bounded system-control helpers for low-memory Lightsail recovery.
+"""Purpose: Provide bounded Lightsail restart/update controls for operators.
 
-These helpers intentionally expose only a tiny allow-list of operations needed by
-remote operator surfaces: restart the trading engine and restart the lightweight
-console. Instance shutdown is intentionally not performed from the web process.
+Responsibilities:
+- restart_bot and restart_deployer invoke permitted system services.
+- queue_validated_restart routes requested updates to the release mechanism.
+- ControlResult exposes explicit success/failure without masking command errors.
+
+Boundaries: Operator control does not own strategy/order logic or host secrets.
+Safety: Never treat an accepted restart request as a verified new release.
 """
 from __future__ import annotations
 
@@ -77,11 +81,11 @@ def restart_deployer() -> ControlResult:
 
 
 def queue_validated_restart() -> ControlResult:
-    """Queue a validated engine restart through the canonical release owner.
+    """Queue an engine restart only through the validated release runner.
 
-    Never restart the engine directly from HTTP. By default deployments are
-    not deferred for open positions or armed trading; the operator must be
-    aware that an engine restart can interrupt live order management.
+    LIVE new entries are held during the broker-flat release handoff.
+    Pending orders, open positions or unavailable broker proof defer the
+    restart and are automatically rechecked on the next release timer.
     """
     action = "restart_bot"
     config = Path(os.getenv("NIFTYBOT_CONFIG_DIR", "/home/ubuntu/.config/niftybot"))
@@ -111,8 +115,8 @@ def queue_validated_restart() -> ControlResult:
     return ControlResult(
         True,
         action,
-        "Validated restart queued; live order management may be interrupted "
-        "when the engine restarts",
+        "Validated restart queued; engine will restart only after confirmed "
+        "broker-flat and terminal-order handoff",
         triggered.command,
     )
 

@@ -1,4 +1,13 @@
-"""Central policy for websocket-first market-data behavior."""
+"""Purpose: Hold the canonical websocket-first market-data source policy.
+
+Responsibilities:
+- MarketDataPolicy captures REST fallback, quote freshness and WS requirements.
+- Normalize configured controls into a single reusable policy snapshot.
+- Clarify degraded-source behavior for data owners and readiness gates.
+
+Boundaries: A policy definition does not subscribe streams or fetch broker data.
+Safety: REST/fallback values must not silently override newer FULL WebSocket quotes.
+"""
 
 from __future__ import annotations
 

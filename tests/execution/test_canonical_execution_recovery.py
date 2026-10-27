@@ -291,6 +291,11 @@ def test_live_restart_validates_saved_exchange_stop_without_new_orders(
     assert bracket is not None
     bracket.exchange_stop_order_id = stop_id
     bracket.exchange_stop_quantity = 65 if stop_id else 0
+    trigger, limit_price = initial._exchange_stop_prices(
+        bracket, bracket.sl_trigger_price
+    )
+    bracket.exchange_stop_trigger_price = trigger if stop_id else None
+    bracket.exchange_stop_limit_price = limit_price if stop_id else None
     initial.save_state()
 
     status_calls: list[str] = []
@@ -300,7 +305,20 @@ def test_live_restart_validates_saved_exchange_stop_without_new_orders(
         status_calls.append(order_id)
         if not broker_status:
             return {}
-        return {"status": broker_status, "quantity": broker_quantity}
+        return {
+            "order_id": order_id,
+            "status": broker_status,
+            "quantity": broker_quantity,
+            "pending_quantity": broker_quantity,
+            "filled_quantity": 0,
+            "tradingsymbol": SYMBOL.removeprefix("NFO:"),
+            "exchange": "NFO",
+            "transaction_type": "SELL",
+            "product": bracket.product,
+            "order_type": "SL",
+            "trigger_price": trigger,
+            "price": limit_price,
+        }
 
     broker = SimpleNamespace(get_order_status=read_order_status, get_orders=lambda: [])
     order_manager = SimpleNamespace(

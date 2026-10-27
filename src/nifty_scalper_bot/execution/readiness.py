@@ -1,7 +1,9 @@
-"""Readiness helpers used by the live arming gate.
+"""Purpose: Canonical quote parsing and deterministic live-readiness decisions.
 
-The decision functions keep arming semantics deterministic while emitting compact,
-rate-controlled diagnostics for operator validation.
+Responsibilities: Resolve finite bid/ask, spread, quote age and tradability;
+provide arming and gate diagnostics without inventing market evidence.
+Boundaries: Trading strategy and broker submission remain with their owners.
+Safety: Non-finite prices and crossed quote books cannot prove tradability.
 """
 
 from __future__ import annotations
@@ -10,6 +12,7 @@ import logging
 import os
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+from math import isfinite
 from typing import Mapping
 
 from nifty_scalper_bot.config.env_utils import parse_float_env
@@ -531,7 +534,7 @@ def _quote_float(payload: dict | object, *keys: str) -> float | None:
             number = float(value)
         except (TypeError, ValueError):
             continue
-        if number == number:
+        if isfinite(number):
             return number
     return None
 

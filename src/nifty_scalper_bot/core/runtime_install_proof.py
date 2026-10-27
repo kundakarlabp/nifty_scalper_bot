@@ -1,7 +1,12 @@
-"""Runtime install-proof snapshot for market-data hardening patches.
+"""Purpose: Report which runtime hardening adapters are actually installed.
 
-This module is observability only. It reports whether the runtime process has the
-expected hardening/adapter hooks installed without mutating trading state.
+Responsibilities:
+- build_runtime_install_proof inspects registered hooks and active modules.
+- Identify missing/duplicate adapter installations for operator diagnostics.
+- Keep the proof read-only and scoped to the running Python process.
+
+Boundaries: Does not install patches, import missing trading modules or place orders.
+Safety: Installed-hook evidence is not itself proof of healthy market or broker data.
 """
 
 from __future__ import annotations

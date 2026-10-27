@@ -26,7 +26,6 @@ from nifty_scalper_bot.core.release_guard import (
 )
 from nifty_scalper_bot.operating_control import (
     engine_should_run,
-    install_admin_power_card,
     operating_mode,
     start_transition_watchdog,
 )
@@ -40,10 +39,29 @@ if _ENGINE_EXPECTED:
     # Import trading code only when the configured operating profile requires it.
     from nifty_scalper_bot.main import app  # noqa: E402
 else:
-    # Keep the management plane reachable while the trading stack is asleep.
-    from nifty_scalper_bot.admin_dashboard import router as admin_router
+    # Quiet mode still publishes a small health heartbeat to Supabase; the
+    # trading engine remains unloaded and no broker endpoints are invoked.
+    import asyncio
+    from collections.abc import AsyncIterator
+    from contextlib import asynccontextmanager, suppress
 
-    app = FastAPI(title="Nifty Scalper Quiet Control")
+    from nifty_scalper_bot.admin_dashboard import router as admin_router
+    from nifty_scalper_bot.infra.scheduled_tasks import (
+        start_runtime_heartbeat_task,
+    )
+
+    @asynccontextmanager
+    async def quiet_lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        heartbeat_task = start_runtime_heartbeat_task()
+        try:
+            yield
+        finally:
+            if heartbeat_task is not None and not heartbeat_task.done():
+                heartbeat_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await heartbeat_task
+
+    app = FastAPI(title="Nifty Scalper Quiet Control", lifespan=quiet_lifespan)
     app.include_router(admin_router)
 
     @app.get("/")
@@ -66,8 +84,7 @@ else:
         }
 
 
-# The same card is visible in the canonical /admin page in both ACTIVE and QUIET.
-install_admin_power_card()
+# The canonical admin renders its operating card in both ACTIVE and QUIET.
 app.include_router(operating_router)
 app.state.release = _RELEASE.as_dict()
 app.state.release_watchdog_started = _RELEASE_WATCHDOG is not None

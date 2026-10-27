@@ -38,6 +38,7 @@ class _Broker:
         self.cancel_confirms = cancel_confirms
         self.statuses: dict[str, str] = {"old-exit": "OPEN PENDING"}
         self.quantities: dict[str, int] = {}
+        self.protective_order_fields: dict[str, dict[str, Any]] = {}
         self.positions: list[dict[str, Any]] = [{"symbol": SYMBOL, "quantity": 65}]
         self.cancel_calls: list[str] = []
         self.modify_calls: list[tuple[str, dict[str, Any]]] = []
@@ -46,6 +47,7 @@ class _Broker:
         result: dict[str, Any] = {"status": self.statuses.get(order_id, "")}
         if order_id in self.quantities:
             result["quantity"] = self.quantities[order_id]
+        result.update(self.protective_order_fields.get(order_id, {}))
         return result
 
     def get_positions(self) -> list[dict[str, Any]]:
@@ -91,6 +93,23 @@ class _OrderManager:
         self._next_id += 1
         self._broker.statuses[order_id] = "OPEN"
         self._broker.quantities[order_id] = int(kwargs["quantity"])
+        if (
+            kwargs.get("order_type") == "SL"
+            and "trigger_price" in kwargs
+            and "price" in kwargs
+        ):
+            self._broker.protective_order_fields[order_id] = {
+                "order_id": order_id,
+                "tradingsymbol": str(kwargs["symbol"]).removeprefix("NFO:"),
+                "exchange": "NFO",
+                "transaction_type": kwargs["side"],
+                "product": kwargs.get("product", "MIS"),
+                "order_type": "SL",
+                "pending_quantity": int(kwargs["quantity"]),
+                "filled_quantity": 0,
+                "trigger_price": kwargs["trigger_price"],
+                "price": kwargs["price"],
+            }
         return order_id
 
     def cancel_order(self, order_id: str, *args: Any, **kwargs: Any) -> bool:
@@ -100,6 +119,12 @@ class _OrderManager:
         self.modify_calls.append((str(order_id), dict(kwargs)))
         if "quantity" in kwargs:
             self._broker.quantities[str(order_id)] = int(kwargs["quantity"])
+        if str(order_id) in self._broker.protective_order_fields:
+            fields = self._broker.protective_order_fields[str(order_id)]
+            for key in ("trigger_price", "price", "quantity"):
+                if key in kwargs:
+                    target = "pending_quantity" if key == "quantity" else key
+                    fields[target] = kwargs[key]
         return True
 
     def submit_trade_plan_result(self, _plan: Any) -> str:
@@ -1562,13 +1587,27 @@ def test_exchange_stop_cannot_be_loosened_by_stale_virtual_trail() -> None:
 def test_parallel_virtual_ratchets_preserve_latest_broker_stop(monkeypatch) -> None:
     from threading import Event, Thread
 
-    manager, order_manager, _broker = _manager()
+    manager, order_manager, broker = _manager()
     bracket = manager.get_bracket("entry-1")
     assert bracket is not None
     bracket.exchange_stop_order_id = "protect-1"
     bracket.exchange_stop_trigger_price = 140.0
     bracket.exchange_stop_limit_price = 133.0
     bracket.sl_trigger_price = 145.0
+    broker.statuses["protect-1"] = "TRIGGER PENDING"
+    broker.quantities["protect-1"] = 65
+    broker.protective_order_fields["protect-1"] = {
+        "order_id": "protect-1",
+        "tradingsymbol": SYMBOL.removeprefix("NFO:"),
+        "exchange": "NFO",
+        "transaction_type": "SELL",
+        "product": "MIS",
+        "order_type": "SL",
+        "pending_quantity": 65,
+        "filled_quantity": 0,
+        "trigger_price": 140.0,
+        "price": 133.0,
+    }
     entered = Event()
     release = Event()
     acknowledged: list[float] = []
@@ -1580,6 +1619,10 @@ def test_parallel_virtual_ratchets_preserve_latest_broker_stop(monkeypatch) -> N
             entered.set()
             assert release.wait(2.0)
         acknowledged.append(trigger)
+        # Return from modify only after exchange orderbook fields match the
+        # acknowledged trigger; the serialized second ratchet needs proof.
+        broker.protective_order_fields[order_id]["trigger_price"] = trigger
+        broker.protective_order_fields[order_id]["price"] = changes["price"]
         return True
 
     monkeypatch.setattr(order_manager, "modify_order", delayed_modify)
@@ -1675,16 +1718,30 @@ def test_exchange_stop_pending_modify_does_not_issue_another_ratchet(
         "broker_stop_status_unverified:MODIFY PENDING"
     )
     bracket.sl_trigger_price = 150.0
+    confirmed_stop = {
+        "order_id": "protect-1",
+        "status": "TRIGGER PENDING",
+        "quantity": 65,
+        "pending_quantity": 65,
+        "filled_quantity": 0,
+        "tradingsymbol": SYMBOL.removeprefix("NFO:"),
+        "exchange": "NFO",
+        "transaction_type": "SELL",
+        "product": bracket.product,
+        "order_type": "SL",
+        "trigger_price": 140.0,
+        "price": 133.0,
+    }
     statuses = iter(
         [
             {"status": "MODIFY PENDING", "quantity": 65},
-            {"status": "TRIGGER PENDING", "quantity": 65},
+            confirmed_stop,
         ]
     )
     monkeypatch.setattr(
         manager,
         "_get_broker_order_status",
-        lambda _order_id: next(statuses, {"status": "TRIGGER PENDING", "quantity": 65}),
+        lambda _order_id: next(statuses, confirmed_stop),
     )
 
     assert manager._sync_exchange_protective_stop(bracket) is False
@@ -1773,3 +1830,130 @@ def test_prior_day_404_reconcile_fails_closed_without_full_proof(
     assert manager.get_bracket("entry-1") is bracket
     assert status_calls == ["old-stop"]
     assert broker.cancel_calls == []
+
+
+def test_pending_exchange_stop_ratchet_reconciles_without_duplicate_modification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A broker MODIFY PENDING is not proof, but must converge once accepted."""
+    manager, order_manager, broker = _manager()
+    manager._exchange_protective_stop_enabled = True
+    monkeypatch.setattr(manager, "_is_live_execution", lambda: True)
+    monkeypatch.setattr(manager, "save_state", lambda: None)
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    assert manager._ensure_exchange_protective_stop(bracket)
+    stop_id = bracket.exchange_stop_order_id
+    assert stop_id is not None
+    assert bracket.exchange_stop_degraded_reason is None
+
+    original_modify = order_manager.modify_order
+
+    def pending_modify(order_id: str, **kwargs: Any) -> bool:
+        accepted = original_modify(order_id, **kwargs)
+        broker.statuses[order_id] = "MODIFY PENDING"
+        return accepted
+
+    monkeypatch.setattr(order_manager, "modify_order", pending_modify)
+    bracket.last_ltp = 160.0
+    assert manager._virtual_modify_sl(bracket.virtual_sl_id, 150.0)
+    assert bracket.sl_trigger_price == pytest.approx(150.0)
+    assert bracket.exchange_stop_degraded_reason == (
+        "broker_stop_status_unverified:MODIFY PENDING"
+    )
+    assert len(order_manager.modify_calls) == 1
+    trail = bracket.trailing_config["trail_history"]
+    assert len(trail) == 1
+    assert trail[0]["old_sl"] == pytest.approx(140.0)
+    assert trail[0]["new_sl"] == pytest.approx(150.0)
+    assert trail[0]["broker_confirmed"] is False
+
+    # Repeated ratchet attempts must never create another modification
+    # while the broker has not settled the first one.
+    assert not manager._sync_exchange_protective_stop(bracket)
+    assert len(order_manager.modify_calls) == 1
+
+    broker.statuses[stop_id] = "TRIGGER PENDING"
+    assert manager._confirm_exchange_protective_stop(bracket)
+    assert bracket.exchange_stop_degraded_reason is None
+    assert bracket.trailing_config["trail_history"][-1]["broker_confirmed"] is True
+    assert bracket.exchange_stop_modify_count == 1
+    assert len(order_manager.modify_calls) == 1
+
+
+def test_persisted_bracket_contains_bounded_trailing_history(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, _, _ = _manager()
+    monkeypatch.setattr(manager, "save_state", lambda: None)
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    bracket.last_ltp = 160.0
+    assert manager._virtual_modify_sl(bracket.virtual_sl_id, 150.0)
+    serialized = bracket.to_dict()
+    record = serialized["trailing_config"]["trail_history"][0]
+    assert record["new_sl"] == pytest.approx(150.0)
+    assert record["revision"] == 1
+    assert record["exchange_order_id"] is None
+
+
+def test_unsettled_broker_trigger_readback_blocks_competing_ratchets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Do not stack stop modifications while the broker still has old geometry.
+
+    Zerodha can report TRIGGER PENDING with the previous trigger even after
+    acknowledging a modify request; status alone cannot prove the ratchet.
+    """
+    manager, order_manager, broker = _manager()
+    manager._exchange_protective_stop_enabled = True
+    monkeypatch.setattr(manager, "_is_live_execution", lambda: True)
+    monkeypatch.setattr(manager, "save_state", lambda: None)
+    bracket = manager.get_bracket("entry-1")
+    assert bracket is not None
+    assert manager._ensure_exchange_protective_stop(bracket)
+    stop_id = bracket.exchange_stop_order_id
+    assert stop_id is not None
+    broker.statuses[stop_id] = "TRIGGER PENDING"
+
+    # Broker accepts the request, but the orderbook still shows old 140 SL.
+    def delayed_modify(order_id: str, **kwargs: Any) -> bool:
+        order_manager.modify_calls.append((str(order_id), dict(kwargs)))
+        return True
+
+    monkeypatch.setattr(order_manager, "modify_order", delayed_modify)
+    bracket.last_ltp = 160.0
+    assert manager._virtual_modify_sl(bracket.virtual_sl_id, 150.0)
+    assert len(order_manager.modify_calls) == 1
+    assert bracket.exchange_stop_degraded_reason == "broker_stop_trigger_mismatch"
+    assert manager.has_unresolved_exit()
+
+    # A second virtual improvement is allowed, but NOT another broker request
+    # until the first orderbook trigger/limit has been independently verified.
+    bracket.last_ltp = 165.0
+    assert manager._virtual_modify_sl(bracket.virtual_sl_id, 152.0)
+    assert len(order_manager.modify_calls) == 1
+    history = bracket.trailing_config["trail_history"]
+    statuses = [row["broker_confirmed"] for row in history]
+    assert statuses == [False, False]
+
+    # Broker eventually catches up to the first order modification.
+    first = order_manager.modify_calls[0][1]
+    broker.protective_order_fields[stop_id]["trigger_price"] = first["trigger_price"]
+    broker.protective_order_fields[stop_id]["price"] = first["price"]
+    assert manager._confirm_exchange_protective_stop(bracket)
+    assert bracket.exchange_stop_degraded_reason is None
+    assert bracket.trailing_config["trail_history"][0]["broker_confirmed"] is True
+    assert bracket.trailing_config["trail_history"][1]["broker_confirmed"] is False
+
+    # Only after proof can the later desired stop be submitted.
+    manager._sync_exchange_protective_stop(bracket)
+    assert len(order_manager.modify_calls) == 2
+    second = order_manager.modify_calls[1][1]
+    broker.protective_order_fields[stop_id]["trigger_price"] = second["trigger_price"]
+    broker.protective_order_fields[stop_id]["price"] = second["price"]
+    assert manager._confirm_exchange_protective_stop(bracket)
+    assert all(
+        record["broker_confirmed"]
+        for record in bracket.trailing_config["trail_history"]
+    )

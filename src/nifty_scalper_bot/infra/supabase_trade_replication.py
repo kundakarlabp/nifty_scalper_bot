@@ -1,8 +1,12 @@
-"""Off-hot-path replication of canonical trade observability to Supabase.
+"""Purpose: Replicate committed trade observations to optional Supabase storage.
 
-SQLite remains the source of truth. This module owns no execution state and no
-event queue; it periodically reads committed TradeJournal rows and advances one
-local checkpoint only after the remote batch is acknowledged.
+Responsibilities:
+- build_supabase_trade_replicator uses canonical telemetry enablement and URL.
+- SupabaseTradeReplicator.replicate_once ships journal and ledger batches.
+- Persist checkpoints only after acknowledged replication.
+
+Boundaries: Local SQLite journal owns truth; Supabase is observability only.
+Safety: Replication failure cannot create orders or alter broker exposure.
 """
 
 from __future__ import annotations
@@ -18,25 +22,18 @@ from zoneinfo import ZoneInfo
 
 import requests
 
+from nifty_scalper_bot.config.defaults import DEFAULT_SUPABASE_TRADE_URL
+from nifty_scalper_bot.config.env_utils import supabase_telemetry_enabled
 from nifty_scalper_bot.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
 
-DEFAULT_REPLICATION_URL = (
-    "https://dehdptgkqbrkyzyodicd.supabase.co/functions/v1/nifty-trade-ingest"
-)
+DEFAULT_REPLICATION_URL = DEFAULT_SUPABASE_TRADE_URL
 _DEFAULT_SOURCE = "lightsail"
 _IST = ZoneInfo("Asia/Kolkata")
 _REPLICATION_SINK = "supabase_trade_observability"
 
 Transport = Callable[[str, Mapping[str, Any], float], Mapping[str, Any]]
-
-
-def _env_enabled(name: str, default: bool = False) -> bool:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def replication_interval_seconds() -> float:
@@ -53,7 +50,7 @@ def build_supabase_trade_replicator(
     db_path: str | Path,
 ) -> "SupabaseTradeReplicator | None":
     """Build the optional remote sink from runtime configuration."""
-    if not _env_enabled("SUPABASE_TRADE_REPLICATION_ENABLED", default=False):
+    if not supabase_telemetry_enabled("SUPABASE_TRADE_REPLICATION_ENABLED"):
         return None
     endpoint = (
         os.getenv("SUPABASE_TRADE_REPLICATION_URL", DEFAULT_REPLICATION_URL).strip()

@@ -63,4 +63,5 @@ def test_offhours_override_allowed_in_shadow_mode(monkeypatch) -> None:
     monkeypatch.setenv('SESSION_ALLOW_OUT_OF_HOURS', 'true')
     monkeypatch.setenv('EXECUTION_MODE', 'SHADOW')
     monkeypatch.setenv('ENABLE_LIVE', 'false')
+    monkeypatch.setenv("ENABLE_LIVE_TRADING", "false")
     assert market_hours.allow_offhours_testing_safe() is True

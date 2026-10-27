@@ -8793,7 +8793,7 @@ class MarketDataManager:
             payload["volume"] = 0
             payload["volume_delta_untrusted"] = True
             return payload
-        if cumulative < 0:
+        if not math.isfinite(cumulative) or cumulative < 0:
             payload["volume_transition"] = transition
             payload["volume_delta"] = 0
             payload["effective_volume_delta"] = 0

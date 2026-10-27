@@ -91,4 +91,33 @@ def test_unknown_spread_is_non_blocking_but_not_passed_evidence(monkeypatch) -> 
     assert evidence["spread_observed"] is False
     assert evidence["spread_ok"] is None
     assert evidence["spread_pct"] is None
-    assert evidence["execution_evidence_pass"] is True
+    # A producer's provisional flag is not an executable bid/ask proof.
+    assert evidence["execution_evidence_pass"] is False
+
+
+def test_proven_quote_evidence_requires_finite_bid_ask_and_spread(monkeypatch) -> None:
+    monkeypatch.setenv("ORDER_MAX_SPREAD_PCT", "1.0")
+    baseline = {
+        "underlying_direction_bias": "CE",
+        "required_data_present": True,
+        "tradable_quote": True,
+        "bid": 99.9,
+        "ask": 100.1,
+    }
+    assert (
+        build_execution_evidence(baseline, side="CE")["execution_evidence_pass"] is True
+    )
+    for invalid in (
+        {"bid": float("nan")},
+        {"ask": float("inf")},
+        {"bid": 101.0, "ask": 100.0},
+        {"stale_data_used": True},
+        {"required_data_present": False},
+        {"bid": None, "ask": None},
+    ):
+        assert (
+            build_execution_evidence({**baseline, **invalid}, side="CE")[
+                "execution_evidence_pass"
+            ]
+            is False
+        )

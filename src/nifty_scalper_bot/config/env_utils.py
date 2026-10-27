@@ -1,17 +1,30 @@
-"""Environment normalization helpers for live/paper defaults."""
+"""Purpose: Normalize execution-mode settings and runtime environment defaults.
+
+Responsibilities:
+- normalise_live_env_defaults enforces explicit LIVE authorization and risk caps.
+- _bounded_live_risk_pct reconciles restrictive operator aliases and migrates
+  the superseded 2% LIVE envelope to the authorized 5% GitHub policy.
+- supabase_telemetry_enabled controls monitoring; parse_float_env and
+  resolve_build_sha provide safe configuration and release identity.
+
+Boundaries: GitHub configuration owns policy; protected AWS env holds secrets.
+Safety: Conflicting trading-mode settings fail closed; telemetry cannot arm LIVE.
+"""
 
 from __future__ import annotations
 
 import logging
+import math
 import os
-from pathlib import Path
+
+from nifty_scalper_bot.config import defaults
 
 LOGGER = logging.getLogger(__name__)
-LIVE_PER_TRADE_RISK_PCT = "5.0"
+LIVE_PER_TRADE_RISK_PCT = defaults.DEFAULT_LIVE_PER_TRADE_RISK_PCT
 # Daily loss is an independent portfolio-level circuit breaker. An indivisible
 # lot that cannot fit the per-trade risk budget is skipped rather than widening
 # either limit at runtime.
-LIVE_DAILY_LOSS_PCT = "5.0"
+LIVE_DAILY_LOSS_PCT = defaults.DEFAULT_LIVE_DAILY_LOSS_PCT
 PRODUCTION_LIVE_DEFAULT_INITIALIZED = "PRODUCTION_LIVE_DEFAULT_INITIALIZED"
 
 
@@ -106,75 +119,85 @@ def setdefault_env(key: str, value: str) -> None:
         os.environ[key] = value
 
 
-def _is_lightsail_production() -> bool:
+def supabase_telemetry_enabled(key: str) -> bool:
+    """Enable only on the receiver-authorized Lightsail host unless overridden.
+
+    Secrets, trade control, and broker execution are never read or modified.
+    """
+    explicit = os.getenv(key)
+    if explicit is not None:
+        return truthy(explicit)
     return (os.getenv("DEPLOYMENT_PLATFORM") or "").strip().lower() == "aws_lightsail"
 
 
-def _production_live_default_enabled() -> bool:
-    """Return whether this Lightsail host needs its one-time LIVE migration."""
-    if not _is_lightsail_production():
-        return False
-    if truthy(os.getenv(PRODUCTION_LIVE_DEFAULT_INITIALIZED)):
-        return False
-    preference = os.getenv("PRODUCTION_DEFAULT_LIVE")
-    if preference is not None and preference.strip() and not truthy(preference):
-        return False
-    return True
+def _bounded_live_risk_pct(
+    keys: tuple[str, ...], ceiling: str, *, superseded_pct: float | None = None
+) -> str:
+    """Use the strictest valid cap, migrating the explicitly retired LIVE 2%.
 
-
-def _persist_production_live_defaults(defaults: dict[str, str]) -> None:
-    """Persist the one-time Lightsail LIVE migration without touching secrets."""
-    env_path = (os.getenv("BOT_ENV_FILE") or "").strip()
-    if not env_path:
-        return
-    path = Path(env_path).expanduser()
-    if not path.exists() or not path.is_file():
-        return
-
-    updates = dict(defaults)
-    updates[PRODUCTION_LIVE_DEFAULT_INITIALIZED] = "true"
-    existing = path.read_text(encoding="utf-8").splitlines()
-    seen: set[str] = set()
-    out: list[str] = []
-    for line in existing:
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#") or "=" not in stripped:
-            out.append(line)
+    The user-authorized 5% policy supersedes legacy 2% risk aliases. Other
+    explicitly stricter caps still win, and values above GitHub's ceiling
+    cannot widen risk. All aliases are inspected and invalid values fail closed.
+    """
+    selected = float(ceiling)
+    for key in keys:
+        raw = os.getenv(key)
+        if raw is None or not raw.strip():
             continue
-        key = stripped.split("=", 1)[0].strip()
-        if key in updates:
-            if key not in seen:
-                out.append(f"{key}={updates[key]}")
-                seen.add(key)
-            continue
-        out.append(line)
-    for key, value in updates.items():
-        if key not in seen:
-            out.append(f"{key}={value}")
-
-    tmp = path.with_name(f".{path.name}.live-default.tmp")
-    try:
-        tmp.write_text("\n".join(out).rstrip() + "\n", encoding="utf-8")
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, path)
-        os.environ[PRODUCTION_LIVE_DEFAULT_INITIALIZED] = "true"
-    except OSError as exc:
-        LOGGER.warning("Could not persist Lightsail LIVE default migration: %s", exc)
         try:
-            tmp.unlink(missing_ok=True)
-        except OSError:
-            pass
+            value = float(_strip_inline_comment(raw))
+        except ValueError as exc:
+            raise ValueError(f"invalid_live_risk_limit:{key}") from exc
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError(f"invalid_live_risk_limit:{key}")
+        if superseded_pct is not None and value == superseded_pct:
+            LOGGER.warning(
+                "LIVE_RISK_LEGACY_CAP_MIGRATED key=%s old_pct=%s new_pct=%s",
+                key,
+                value,
+                ceiling,
+            )
+            continue
+        selected = min(selected, value)
+    return str(selected)
 
 
 def normalise_live_env_defaults() -> None:
-    """Derive live/paper env defaults. Args: none. Returns: None. Raises: none."""
+    """Resolve a coherent trading mode from explicit operator settings.
+
+    LIVE requires both canonical controls. Missing/conflicting controls fail
+    closed, including on a fresh AWS instance. No environment file is written.
+    """
     enable_live = truthy(os.getenv("ENABLE_LIVE"))
-    execution_mode = (os.getenv("EXECUTION_MODE") or "").strip().upper()
-    production_default_live = _production_live_default_enabled()
-    live_requested = production_default_live or enable_live or execution_mode == "LIVE"
+    mode = (os.getenv("EXECUTION_MODE") or "").strip().upper()
+    live_requested = enable_live and mode == "LIVE"
+    invalid_live_risk: ValueError | None = None
+    per_trade_limit = LIVE_PER_TRADE_RISK_PCT
+    daily_limit = LIVE_DAILY_LOSS_PCT
+    if live_requested:
+        try:
+            per_trade_limit = _bounded_live_risk_pct(
+                ("RISK__PER_TRADE_RISK_PCT", "RISK_PER_TRADE_PCT"),
+                LIVE_PER_TRADE_RISK_PCT,
+                superseded_pct=2.0,
+            )
+            daily_limit = _bounded_live_risk_pct(
+                (
+                    "RISK_DAILY_LOSS_PCT",
+                    "RISK_DAILY_PNL_CAP_PCT",
+                    "RISK_MAX_DAILY_LOSS_PCT",
+                    "DAILY_PNL_CAP_PCT",
+                ),
+                LIVE_DAILY_LOSS_PCT,
+                superseded_pct=2.0,
+            )
+        except ValueError as exc:
+            invalid_live_risk = exc
+            live_requested = False
+            LOGGER.error("LIVE_RISK_CONFIG_INVALID_FAIL_CLOSED key=%s", exc)
 
     if live_requested:
-        defaults = {
+        values = {
             "ENABLE_LIVE": "true",
             "ENABLE_LIVE_TRADING": "true",
             "EXECUTION_MODE": "LIVE",
@@ -184,45 +207,68 @@ def normalise_live_env_defaults() -> None:
             "SHADOW_MODE": "false",
         }
     else:
-        non_live_mode = (
-            execution_mode if execution_mode in {"SHADOW", "PAPER"} else "PAPER"
+        # Conflicting ENABLE_LIVE / EXECUTION_MODE settings always disable
+        # live orders; retain an explicit paper or shadow request where valid.
+        nonlive = (
+            mode
+            if mode in {"SHADOW", "PAPER"}
+            else ("SHADOW" if mode or enable_live else "PAPER")
         )
-        defaults = {
+        values = {
             "ENABLE_LIVE": "false",
             "ENABLE_LIVE_TRADING": "false",
-            "EXECUTION_MODE": non_live_mode,
+            "EXECUTION_MODE": nonlive,
             "ORDERS__ENABLE_LIVE": "false",
             "PAPER__ENABLED": "true",
             "PAPER_MODE": "true",
             "SHADOW_MODE": "true",
         }
+        if enable_live or mode == "LIVE":
+            LOGGER.error(
+                "LIVE_MODE_CONFLICT_FAIL_CLOSED enable_live=%s execution_mode=%s",
+                enable_live,
+                mode,
+            )
 
-    production_initialized = _is_lightsail_production() and truthy(
-        os.getenv(PRODUCTION_LIVE_DEFAULT_INITIALIZED)
-    )
-    for key, value in defaults.items():
-        if production_default_live or production_initialized:
-            # On the first upgraded boot, migrate the legacy SHADOW env to LIVE.
-            # Thereafter ENABLE_LIVE + EXECUTION_MODE are canonical and the
-            # derived aliases are synchronized in-process, so an explicit admin
-            # switch back to SHADOW remains authoritative across restarts.
-            os.environ[key] = value
-        else:
-            setdefault_env(key, value)
+    # This is one canonical, in-process normalization owner; legacy aliases
+    # cannot re-arm a supposedly disarmed environment.
+    for key, value in values.items():
+        os.environ[key] = value
 
-    if production_default_live:
-        _persist_production_live_defaults(defaults)
+    if invalid_live_risk is not None:
+        # Leave every broker-live alias disabled; startup must not silently
+        # replace a malformed restrictive cap with the permissive default.
+        raise invalid_live_risk
 
     if live_requested:
-        # Canonical live risk envelope. Accepted aliases are synchronized here
-        # so stale deployment values cannot silently change per-trade risk.
-        # Existing sizing clamps and final RiskManager breakers remain unchanged.
-        os.environ["RISK__PER_TRADE_RISK_PCT"] = LIVE_PER_TRADE_RISK_PCT
-        os.environ["RISK_PER_TRADE_PCT"] = LIVE_PER_TRADE_RISK_PCT
-        os.environ["RISK_DAILY_LOSS_PCT"] = LIVE_DAILY_LOSS_PCT
-        os.environ["RISK_DAILY_PNL_CAP_PCT"] = LIVE_DAILY_LOSS_PCT
-        os.environ["RISK_MAX_DAILY_LOSS_PCT"] = LIVE_DAILY_LOSS_PCT
-        os.environ["DAILY_PNL_CAP_PCT"] = LIVE_DAILY_LOSS_PCT
+        # Operator-approved bounded entry paths; each explicit false wins.
+        setdefault_env("SMC_SUSTAINED_FLOW_CONFIRMATION_ENABLED", "true")
+        setdefault_env("VWAP_TREND_RETEST_EXTENSION_ENABLED", "true")
+        setdefault_env("ORDERFLOW_OFI_ADAPTIVE_HOLDOFF_ENABLED", "true")
+        LOGGER.warning(
+            "SMC_SUSTAINED_FLOW_ADMISSION_CONFIG enabled=%s mode=LIVE",
+            truthy(os.getenv("SMC_SUSTAINED_FLOW_CONFIRMATION_ENABLED")),
+        )
+        LOGGER.warning(
+            "LIVE_ENTRY_QUALITY_CONFIG vwap_retest=%s adaptive_ofi=%s mode=LIVE",
+            truthy(os.getenv("VWAP_TREND_RETEST_EXTENSION_ENABLED")),
+            truthy(os.getenv("ORDERFLOW_OFI_ADAPTIVE_HOLDOFF_ENABLED")),
+        )
+
+        # Apply the current user-authorized 5% LIVE envelope. The canonical
+        # values live in config/defaults.py; aliases are normalized for older
+        # consumers, with superseded 2% operator settings migrated above.
+        os.environ["RISK__PER_TRADE_RISK_PCT"] = per_trade_limit
+        os.environ["RISK_PER_TRADE_PCT"] = per_trade_limit
+        os.environ["RISK_DAILY_LOSS_PCT"] = daily_limit
+        os.environ["RISK_DAILY_PNL_CAP_PCT"] = daily_limit
+        os.environ["RISK_MAX_DAILY_LOSS_PCT"] = daily_limit
+        os.environ["DAILY_PNL_CAP_PCT"] = daily_limit
+        LOGGER.warning(
+            "LIVE_RISK_ENVELOPE_CONFIG per_trade_pct=%s daily_loss_pct=%s",
+            per_trade_limit,
+            daily_limit,
+        )
 
 
 def resolve_build_sha() -> str:

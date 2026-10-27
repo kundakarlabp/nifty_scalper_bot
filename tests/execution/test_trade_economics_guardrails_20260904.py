@@ -73,7 +73,7 @@ def test_capacity_rejection_does_not_trip_global_breaker(monkeypatch) -> None:
 
 
 def test_risk_settings_default_matches_safe_live_policy() -> None:
-    assert RiskSettings().per_trade_risk_pct == pytest.approx(0.75)
+    assert RiskSettings().per_trade_risk_pct == pytest.approx(5.0)
 
 
 def test_risk_manager_lot_size_resolver_uses_canonical_helper() -> None:

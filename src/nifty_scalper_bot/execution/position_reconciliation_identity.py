@@ -1,8 +1,12 @@
-"""Pure broker-position identity helpers for PositionManager reconciliation.
+"""Purpose: Normalize broker-position identities for PositionManager.
 
-This module contains no runtime patch installation.  PositionManager owns the
-broker-position reconciliation lifecycle; compatibility overlays may reuse these
-helpers while the remaining ordered patch stack is migrated incrementally.
+Responsibilities:
+- Canonicalize symbol, quantity and broker cost-basis observations.
+- Decode broker position snapshots using position_snapshot helpers.
+- Preserve local lifecycle fields while identifying broker-backed exposure.
+
+Boundaries: Pure helpers; PositionManager owns the reconciliation lifecycle.
+Safety: Quarantine ambiguous position identities instead of claiming broker-flat.
 """
 
 from __future__ import annotations

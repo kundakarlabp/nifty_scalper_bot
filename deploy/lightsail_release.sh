@@ -19,11 +19,19 @@ VENV="${BOT_VENV:-$APP_DIR/.venv}"
 STREAMLIT_VENV="${BOT_STREAMLIT_VENV:-$APP_DIR/.streamlit-venv}"
 LOCK_FILE="${BOT_DEPLOY_LOCK_FILE:-/tmp/niftybot-deploy.lock}"
 RESTART_PENDING_FILE="${CONFIG_DIR}/auto_release_restart_pending"
+VERIFIED_TOKEN_ROTATION_FILE="${CONFIG_DIR}/auto_release_verified_token_rotation"
+RELEASE_HOLD_FILE="${CONFIG_DIR}/auto_release_entry_hold"
+RELEASE_ENTRY_LOCK_FILE="${CONFIG_DIR}/auto_release_entry_lock"
+RELEASE_HOLD_ACTIVE=false
 FORCE_RESTART=false
 AUTO_MODE=false
 SYSTEMD_ENTRYPOINT_MIGRATED=false
 AUTODEPLOY_ENTRYPOINT_MIGRATED=false
 RUNTIME_ENV_CHANGED=false
+PACKAGE_INSTALL_ATTEMPTED=false
+STREAMLIT_DEPENDENCY_FAILED=false
+STREAMLIT_DEPENDENCY_FAILURE_MARKER="${CONFIG_DIR}/streamlit_dependency_refresh_failed"
+OPERATOR_INGRESS_DEGRADED_MARKER="${CONFIG_DIR}/operator_ingress_degraded"
 
 for arg in "$@"; do
   case "$arg" in
@@ -68,28 +76,6 @@ ensure_env_default() {
     chmod 600 "$ENV_FILE" 2>/dev/null || true
     RUNTIME_ENV_CHANGED=true
   fi
-}
-
-set_env_value() {
-  local key="$1" value="$2" current tmp
-  current="$(first_nonempty_env "$key" 2>/dev/null || true)"
-  if [ "$current" = "$value" ]; then return 0; fi
-  tmp="$(mktemp "${ENV_FILE}.runtime.XXXXXX")" || return 1
-  if ! awk -v key="$key" -v value="$value" '
-    BEGIN { written = 0 }
-    index($0, key "=") == 1 {
-      if (!written) { print key "=" value; written = 1 }
-      next
-    }
-    { print }
-    END { if (!written) print key "=" value }
-  ' "$ENV_FILE" > "$tmp"; then
-    rm -f "$tmp"
-    return 1
-  fi
-  chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
-  mv "$tmp" "$ENV_FILE"
-  RUNTIME_ENV_CHANGED=true
 }
 
 set_runtime_build_sha() {
@@ -391,9 +377,10 @@ poll_research_request() {
 }
 
 
-# No market-hours ban. For immediate post-CI deployment the exposure
-# deferral is OFF by default. The legacy broker-flat guard remains available
-# for an explicit emergency policy override only.
+# No market-clock blackout: validate and deploy as soon as the account is
+# broker-flat, all orders are terminal, and the engine acknowledges an entry
+# hold. The release lock and entry-submit lock close the entry race; exits are
+# never blocked. No forced deployment on missing broker/engine authority.
 intraday_flat_broker_confirmed() {
   local api_key access_token
   api_key="$(first_nonempty_env BROKER_API_KEY ZERODHA_API_KEY KITE_API_KEY 2>/dev/null || true)"
@@ -404,7 +391,10 @@ intraday_flat_broker_confirmed() {
   fi
   BOT_RELEASE_KITE_API_KEY="$api_key" BOT_RELEASE_KITE_ACCESS_TOKEN="$access_token" \
     BOT_RELEASE_LOCAL_PORT="$PORT" BOT_RELEASE_RESTART_PENDING="$RESTART_PENDING_FILE" \
+    BOT_RELEASE_VERIFIED_TOKEN_ROTATION="$VERIFIED_TOKEN_ROTATION_FILE" \
+    BOT_RELEASE_ENTRY_HOLD_REQUIRED="$RELEASE_HOLD_ACTIVE" \
     "$VENV/bin/python" - <<'PY_FLAT_GUARD'
+import hashlib
 import json
 import os
 import sys
@@ -422,43 +412,67 @@ kite.set_access_token(os.environ["BOT_RELEASE_KITE_ACCESS_TOKEN"])
 # broker positions and orders still have to be proved flat twice.
 restart_marker = os.environ.get("BOT_RELEASE_RESTART_PENDING") or ""
 token_rotation_requested = bool(restart_marker and os.path.isfile(restart_marker))
+hold_required = os.environ.get("BOT_RELEASE_ENTRY_HOLD_REQUIRED") == "true"
+
+# Only an access token verified with Kite's profile endpoint may bypass an
+# *old process* authentication-state check. A generic restart marker is not
+# sufficient. External Kite position/order snapshots remain mandatory.
+rotation_proof = os.environ.get("BOT_RELEASE_VERIFIED_TOKEN_ROTATION") or ""
+token_rotation_verified = False
+if token_rotation_requested and rotation_proof and os.path.isfile(rotation_proof):
+    try:
+        with open(rotation_proof, encoding="utf-8") as proof_stream:
+            proof = json.load(proof_stream)
+        age = time.time() - float(proof["verified_at"])
+        expected = hashlib.sha256(
+            os.environ["BOT_RELEASE_KITE_ACCESS_TOKEN"].encode("utf-8")
+        ).hexdigest()
+        token_rotation_verified = (
+            0 <= age <= 12 * 3600
+            and str(proof.get("token_sha256") or "") == expected
+        )
+    except (OSError, ValueError, TypeError, KeyError):
+        token_rotation_verified = False
+
+def blocked(reason: str) -> bool:
+    # Fixed diagnostic token only: never print credentials or broker payloads.
+    print(f"intraday_release_guard_blocked: {reason}", file=sys.stderr)
+    return False
 
 def is_safe() -> bool:
     with urllib.request.urlopen(f"http://127.0.0.1:{port}/livez", timeout=3) as response:
         live = json.load(response)
     if live.get("engine_http_responsive") is not True:
-        return False
+        return blocked("engine_http_unresponsive")
     if live.get("quiet") is True:
         # The canonical off-hours control plane has no trading stack and no
         # live entry worker. Broker positions/orders remain authoritative.
         if live.get("bot_loaded") is not False:
-            return False
+            return blocked("quiet_runtime_not_unloaded")
     else:
         if live.get("bot_loaded") is not True:
-            return False
+            return blocked("runtime_not_loaded")
         with urllib.request.urlopen(f"http://127.0.0.1:{port}/health/trading", timeout=3) as response:
             health = json.load(response)
         reconciliation = health.get("reconciliation") or {}
         broker = health.get("broker") or {}
-        # A fail-closed, unrestarted engine reports its previous token invalid.
-        # Accept only a queued token rotation with explicit invalid-auth proof;
-        # never treat an unknown auth state as permission to restart.
-        token_rotation_recovery = (
-            token_rotation_requested
-            and broker.get("authenticated") is False
-            and broker.get("auth_invalid") is True
-            and health.get("broker_authentication") == "invalid"
-            and health.get("broker_session_state") == "invalid"
-            and health.get("authentication_known") is True
-        )
-        if (
-            health.get("live_orders_armed") is not False
-            or reconciliation.get("completed") is not True
-            or reconciliation.get("failed") is True
-            or reconciliation.get("unprotected_positions")
-            or (broker.get("authenticated") is not True and not token_rotation_recovery)
-        ):
-            return False
+        if hold_required and health.get("release_entry_hold_active") is not True:
+            return blocked("entry_hold_not_acknowledged")
+        # A new verified token can make the *old process's* auth state stale.
+        # Only this fresh, token-bound proof permits skipping that single
+        # local auth bit. Flat broker positions and terminal orders are still
+        # verified twice using the new token, with an active entry hold.
+        token_rotation_recovery = token_rotation_verified and hold_required
+        if health.get("live_orders_armed") is not False:
+            return blocked("entry_path_not_disarmed")
+        if reconciliation.get("completed") is not True:
+            return blocked("local_reconciliation_incomplete")
+        if reconciliation.get("failed") is True:
+            return blocked("local_reconciliation_failed")
+        if reconciliation.get("unprotected_positions"):
+            return blocked("unprotected_position_reported")
+        if broker.get("authenticated") is not True and not token_rotation_recovery:
+            return blocked("local_broker_auth_unverified")
     positions = kite.positions()
     orders = kite.orders()
     if (
@@ -467,15 +481,15 @@ def is_safe() -> bool:
         or not isinstance(positions.get("day"), list)
         or not isinstance(orders, list)
     ):
-        return False
+        return blocked("broker_snapshot_shape_invalid")
     for row in positions["net"] + positions["day"]:
         if not isinstance(row, dict) or "quantity" not in row:
-            return False
+            return blocked("broker_position_row_invalid")
         if float(row["quantity"]) != 0:
-            return False
+            return blocked("broker_position_nonflat")
     for row in orders:
         if not isinstance(row, dict) or str(row.get("status") or "").upper() not in TERMINAL:
-            return False
+            return blocked("broker_order_not_terminal")
     return True
 
 try:
@@ -491,26 +505,81 @@ except Exception as exc:
 PY_FLAT_GUARD
 }
 
-auto_release_should_defer() {
-  [ "$AUTO_MODE" = true ] || return 1
-  # Owner-selected deployment policy: do not hold code updates because the
-  # trading engine is armed, positions are open, or Kite exposure cannot be
-  # queried. This is intentionally disabled by default, not a hidden market
-  # hours condition. Emergency opt-in is available without a code change:
-  # BOT_AUTO_DEPLOY_EXPOSURE_GUARD_ENABLED=true.
-  if [ "${BOT_AUTO_DEPLOY_EXPOSURE_GUARD_ENABLED:-false}" != "true" ]; then
+
+acquire_release_entry_hold() {
+  mkdir -p "$CONFIG_DIR"
+  if [ -L "$RELEASE_HOLD_FILE" ] || [ -L "$RELEASE_ENTRY_LOCK_FILE" ]; then
+    log "release entry hold/lock path is a symlink"
     return 1
   fi
-  # Already-current, healthy builds require no broker requests. Route through
-  # the no-change branch, which still confirms the deployed SHA and reports
-  # status; do not poll Kite positions/orders every two minutes unnecessarily.
-  if [ -n "${BEFORE:-}" ] && [ "$BEFORE" = "${AFTER:-}" ] \
+  exec 8>"$RELEASE_ENTRY_LOCK_FILE"
+  chmod 600 "$RELEASE_ENTRY_LOCK_FILE"
+  # An in-flight LIVE BUY holds a shared lock until the broker call completes.
+  # Taking the exclusive lock therefore drains active order submissions.
+  if ! flock -w 10 8; then
+    log "release entry submission still in flight; retry automatically"
+    return 1
+  fi
+  printf '%s\n' "$BASHPID" > "$RELEASE_HOLD_FILE"
+  # Trap cleanup must own the marker even if chmod fails under set -e.
+  RELEASE_HOLD_ACTIVE=true
+  chmod 600 "$RELEASE_HOLD_FILE"
+}
+
+# A confirmed QUIET control process has NO trading stack, entry worker,
+# live bracket manager or protective exit handler to interrupt. Replacing
+# that process is safe without a broker-flat proof, unlike a LIVE engine.
+# This also permits scheduled AUTO wake when the daily Kite token is expired:
+# the new engine must still independently authenticate/reconcile before entry.
+# Require TWO live localhost probes and exact running-build provenance.
+quiet_control_plane_unloaded() {
+  local live_json release_json
+  [ -n "${BEFORE:-}" ] || return 1
+  live_json="$(curl -fsS --max-time 3 "http://127.0.0.1:${PORT}/livez" 2>/dev/null)" || return 1
+  release_json="$(curl -fsS --max-time 3 "http://127.0.0.1:${PORT}/releasez" 2>/dev/null)" || return 1
+  "$VENV/bin/python" - "$BEFORE" "$live_json" "$release_json" <<'PY_UNLOADED_QUIET'
+import json
+import sys
+
+try:
+    sha, live_raw, release_raw = sys.argv[1:]
+    live = json.loads(live_raw)
+    release = json.loads(release_raw)
+    safe = (
+        isinstance(live, dict)
+        and isinstance(release, dict)
+        and live.get("quiet") is True
+        and live.get("bot_loaded") is False
+        and live.get("engine_http_responsive") is True
+        and release.get("engine_expected") is False
+        and str(release.get("effective_sha") or "").startswith(sha[:12])
+    )
+except (ValueError, TypeError, IndexError):
+    safe = False
+sys.exit(0 if safe else 1)
+PY_UNLOADED_QUIET
+}
+
+auto_release_should_defer() {
+  # An unchanged, healthy, non-restart build needs no broker API calls.
+  if [ "$AUTO_MODE" = true ] \
+    && [ -n "${BEFORE:-}" ] && [ "$BEFORE" = "${AFTER:-}" ] \
     && [ "${FORCE_RESTART:-false}" = false ] \
     && [ ! -f "${RESTART_PENDING_FILE:-}" ] \
     && service_healthy_confirmed "$BEFORE"; then
     return 0
   fi
-  # Optional legacy exposure policy, disabled in the default automatic flow.
+  # Pre-CI and pre-validation perform no checkout change or restart. The
+  # mandatory broker-flat proof occurs only after the entry hold is acquired.
+  if [ "$RELEASE_HOLD_ACTIVE" != true ]; then
+    return 1
+  fi
+  # Never require an expired broker token to reboot an unloaded QUIET app.
+  # An active or unverified engine still needs the full broker-flat guard.
+  if quiet_control_plane_unloaded; then
+    log "verified unloaded QUIET process; safe control-plane handoff"
+    return 1
+  fi
   intraday_flat_broker_confirmed && return 1
   return 0
 }
@@ -523,10 +592,32 @@ if [ ! -d .git ]; then
   write_status repository_missing "Git repository missing at $APP_DIR"; exit 1
 fi
 
-# Independently heal token-entry controls on every scheduled release check,
-# including when broker exposure or a pending GitHub CI run forbids deployment.
-# Never change engine state merely because the admin page is unavailable.
+# The first release of an ingress helper may run under the OLD release
+# script, so reconcile Caddy/admin independently on the next timer tick.
+# No trading restart, broker calls, credential writes, or entry hold is needed.
+repair_operator_ingress_if_needed() {
+  [ "$AUTO_MODE" = true ] || return 0
+  local helper="$APP_DIR/deploy/scripts/apply_operator_ingress.sh"
+  [ -f "$helper" ] || return 0
+  if [ ! -f "$OPERATOR_INGRESS_DEGRADED_MARKER" ] \
+    && sudo -n cmp -s "$APP_DIR/deploy/caddy/Caddyfile" /etc/caddy/Caddyfile \
+    && sudo -n cmp -s "$APP_DIR/deploy/systemd/niftybot-admin.service" /etc/systemd/system/niftybot-admin.service; then
+    return 0
+  fi
+  if bash "$helper" && restart_admin; then
+    rm -f "$OPERATOR_INGRESS_DEGRADED_MARKER"
+    log "Operator ingress reconciled without changing trading engine"
+  else
+    mkdir -p "$CONFIG_DIR"
+    : > "$OPERATOR_INGRESS_DEGRADED_MARKER"
+    log "WARNING: operator HTTPS/admin ingress repair incomplete; engine unchanged"
+  fi
+}
+
+# Recover control-plane access even if CI is pending or broker exposure keeps
+# the release deferred. These checks never restart the trading engine.
 if [ "$AUTO_MODE" = true ]; then
+  repair_operator_ingress_if_needed
   recover_admin_control || true
 fi
 
@@ -595,10 +686,14 @@ if [ "$AUTO_MODE" = true ]; then
     fi
     poll_research_request
     if [ "$BEFORE" != "$AFTER" ]; then
-      write_status deferred_broker_exposure "pending main ${AFTER:0:7}; deployed ${BEFORE:0:7}; retry when broker-flat and engine disarmed"
+      write_status deferred_broker_exposure "pending main ${AFTER:0:7}; deployed ${BEFORE:0:7}; retry when broker-flat with no active orders"
       log "Automatic release deferred: broker exposure, armed engine, or unavailable safety proof"
     else
-      if admin_healthy; then
+      if [ -f "$STREAMLIT_DEPENDENCY_FAILURE_MARKER" ]; then
+        write_status current_console_dependencies_degraded "running ${BEFORE:0:7}; console dependencies unverified; repair awaits safe release handoff"
+      elif [ -f "$OPERATOR_INGRESS_DEGRADED_MARKER" ]; then
+        write_status current_operator_ingress_degraded "running ${BEFORE:0:7}; public TLS/admin bind repair required"
+      elif admin_healthy; then
         write_status current "running ${BEFORE:0:7}; no pending revision"
       else
         write_status current_admin_degraded "running ${BEFORE:0:7}; admin service unavailable after recovery attempt"
@@ -611,20 +706,14 @@ fi
 chmod +x "$APP_DIR/deploy/lightsail_release.sh" 2>/dev/null || true
 mkdir -p "$CONFIG_DIR" "$(dirname "$STATUS_FILE")"
 chmod 700 "$CONFIG_DIR" 2>/dev/null || true
-if [ ! -f "$ENV_FILE" ] && [ -f "$APP_DIR/.env" ]; then
-  cp -p "$APP_DIR/.env" "$ENV_FILE"; chmod 600 "$ENV_FILE"
-fi
+# The validated release path never migrates or reconstructs credentials.
+# If the protected operator file is missing, fail closed before checking out
+# main or restarting any broker-facing service. One-time migration belongs to
+# explicitly invoked lightsail_setup.sh only.
 validate_environment
 ensure_env_default BOT_RESEARCH_LAUNCHER systemd
-ensure_env_default SUPABASE_TRADE_REPLICATION_ENABLED true
-ensure_env_default SUPABASE_TRADE_REPLICATION_URL "https://dehdptgkqbrkyzyodicd.supabase.co/functions/v1/nifty-trade-ingest"
-ensure_env_default SUPABASE_TRADE_REPLICATION_SOURCE lightsail
-ensure_env_default SUPABASE_TRADE_REPLICATION_INTERVAL_SECONDS 30
-ensure_env_default SUPABASE_TRADE_REPLICATION_BATCH_SIZE 100
-ensure_env_default SUPABASE_TRADE_REPLICATION_TIMEOUT_SECONDS 5
-set_env_value SUPABASE_LOG_ARCHIVE_ENABLED true
-ensure_env_default SUPABASE_LOG_ARCHIVE_URL "https://dehdptgkqbrkyzyodicd.supabase.co/functions/v1/nifty-log-archive-ingest"
-ensure_env_default SUPABASE_LOG_ARCHIVE_INTERVAL_SECONDS 300
+# Off-hot-path Supabase defaults are GitHub-owned in Python. Host file
+# contains only secrets/operational overrides, not replicated sink settings.
 if [ "$RUNTIME_ENV_CHANGED" = true ]; then FORCE_RESTART=true; fi
 # Preserve explicit restart requests across failed validation/deployment.
 # Exposure no longer defers the default automatic release.
@@ -671,7 +760,11 @@ fi
 if [ "$BEFORE" = "$AFTER" ] && [ "$FORCE_RESTART" = false ]; then
   if service_healthy_confirmed "$BEFORE"; then
     if [ "$current_runtime_sha" = "$BEFORE" ]; then
-      if admin_healthy; then
+      if [ -f "$STREAMLIT_DEPENDENCY_FAILURE_MARKER" ]; then
+        write_status current_console_dependencies_degraded "running ${BEFORE:0:7}; console dependency refresh failed; retry on next validated release"
+      elif [ -f "$OPERATOR_INGRESS_DEGRADED_MARKER" ]; then
+        write_status current_operator_ingress_degraded "running ${BEFORE:0:7}; HTTPS/admin loopback repair required"
+      elif admin_healthy; then
         write_status current "running ${BEFORE:0:7}"
       else
         write_status current_admin_degraded "running ${BEFORE:0:7}; admin service unavailable after recovery attempt"
@@ -687,7 +780,16 @@ if [ "$BEFORE" = "$AFTER" ] && [ "$FORCE_RESTART" = false ]; then
 fi
 
 CANDIDATE="/tmp/niftybot-candidate-${AFTER:0:12}"
-cleanup() { git worktree remove --force "$CANDIDATE" >/dev/null 2>&1 || true; }
+cleanup() {
+  # A successfully restarted engine must be able to re-arm normally; a
+  # deferred or failed release must also release the temporary entry hold.
+  if [ "$RELEASE_HOLD_ACTIVE" = true ]; then
+    rm -f "$RELEASE_HOLD_FILE"
+    flock -u 8 || true
+    RELEASE_HOLD_ACTIVE=false
+  fi
+  git worktree remove --force "$CANDIDATE" >/dev/null 2>&1 || true
+}
 trap cleanup EXIT
 git worktree prune
 rm -rf "$CANDIDATE"
@@ -715,6 +817,7 @@ TARGETED_TESTS=(
   tests/architecture/test_lightsail_release_contract.py
   tests/architecture/test_release_ci_gate.py
   tests/architecture/test_token_rotation_release_guard.py
+  tests/core/test_release_entry_handoff.py
   tests/ops/test_research_jobs.py
   tests/scripts/test_archive_kite_history.py
   tests/backtests/test_strategy_bar_research.py
@@ -757,15 +860,20 @@ if [ "${#EXISTING_TESTS[@]}" -gt 0 ]; then
   }
 fi
 
-# Recheck broker exposure and entry arming after candidate validation,
-# immediately before checkout mutation (at any hour).
+# Acquire the exclusive entry-submit barrier only after validation. Block
+# new BUY submissions while allowing protective SELL exits; then confirm two
+# independently fresh broker position/order snapshots at any market hour.
+if ! acquire_release_entry_hold; then
+  write_status deferred_entry_handoff "candidate ${AFTER:0:7} validated; entry submission busy; retry automatically"
+  exit 0
+fi
 if auto_release_should_defer; then
   if [ "$FORCE_RESTART" = true ]; then
     mkdir -p "$CONFIG_DIR"
     : > "$RESTART_PENDING_FILE"
   fi
   poll_research_request
-  write_status deferred_broker_exposure "candidate ${AFTER:0:7} validated; checkout untouched until broker-flat and disarmed"
+  write_status deferred_broker_exposure "candidate ${AFTER:0:7} validated; checkout untouched until broker-flat, terminal orders and engine hold acknowledgement"
   exit 0
 fi
 
@@ -779,29 +887,90 @@ if [ ! -f "$CONFIG_DIR/control_sudoers_v2_installed" ]; then
   fi
 fi
 
-mkdir -p "$CONFIG_DIR/backups"
-cp -p "$ENV_FILE" "$CONFIG_DIR/backups/niftybot.env.$(date +%Y%m%d_%H%M%S)"
+# Limit automatically generated copies of protected broker credentials.
+# Human-named backups, symlinks, and unrecognized files are never deleted.
+# Failure to preserve the current environment blocks the checkout/restart.
+save_protected_env_backup() {
+  local MAX_MANAGED_ENV_BACKUPS=5
+  local backup_dir="$CONFIG_DIR/backups" new_backup item name seen=0
+  (
+    umask 077
+    [[ ! -L "$backup_dir" ]] || exit 1
+    mkdir -p -- "$backup_dir" || exit 1
+    chmod 700 -- "$backup_dir" || exit 1
+    new_backup="$(mktemp "$backup_dir/niftybot.env.$(date +%Y%m%d_%H%M%S).XXXXXX")" || exit 1
+    if ! cp -p -- "$ENV_FILE" "$new_backup"; then
+      rm -f -- "$new_backup"
+      exit 1
+    fi
+    chmod 600 -- "$new_backup" || { rm -f -- "$new_backup"; exit 1; }
+    while IFS= read -r item; do
+      name="${item##*/}"
+      [[ "$name" =~ ^niftybot[.]env[.][0-9]{8}_[0-9]{6}([.][[:alnum:]]{6})?$ ]] || continue
+      [[ -f "$item" && ! -L "$item" ]] || continue
+      seen=$((seen + 1))
+      if (( seen > MAX_MANAGED_ENV_BACKUPS )); then
+        rm -f -- "$item" || exit 1
+      fi
+    done < <(printf '%s\n' "$backup_dir"/niftybot.env.* | LC_ALL=C sort -r)
+  )
+}
+if ! save_protected_env_backup; then
+  write_status backup_failed "protected environment backup failed; retaining ${BEFORE:0:7}"
+  exit 1
+fi
 write_status deploying "deploying ${AFTER:0:7}"
 [ "$BEFORE" = "$AFTER" ] || git reset --hard --quiet "$AFTER"
 
-if ! "$VENV/bin/python" -m pip install --quiet -e .; then
-  if [ "$BEFORE" != "$AFTER" ]; then
-    git reset --hard --quiet "$BEFORE"; "$VENV/bin/python" -m pip install --quiet -e . || true
+# Most updates only change GitHub-owned Python code. The established
+# editable install points at APP_DIR/src and needs no pip operation unless
+# packaging/dependencies change or the installed package is missing. Avoid
+# mutating the running interpreter's site-packages for ordinary commits.
+if BOT_DEPLOY_APP_DIR="$APP_DIR" "$VENV/bin/python" -c 'from importlib.util import find_spec; from pathlib import Path; import os; spec = find_spec("nifty_scalper_bot"); assert spec is not None and spec.origin and Path(spec.origin).resolve().is_relative_to(Path(os.environ["BOT_DEPLOY_APP_DIR"]).resolve() / "src")' >/dev/null 2>&1 \
+  && git diff --quiet "$BEFORE" "$AFTER" -- \
+    pyproject.toml setup.cfg setup.py requirements.txt 'requirements*.txt' \
+    requirements/ uv.lock poetry.lock Pipfile Pipfile.lock; then
+  log "Skipping pip install: installed editable package and unchanged packaging"
+else
+  PACKAGE_INSTALL_ATTEMPTED=true
+  if ! "$VENV/bin/python" -m pip install --quiet -e .; then
+    if [ "$BEFORE" != "$AFTER" ]; then
+      git reset --hard --quiet "$BEFORE"; "$VENV/bin/python" -m pip install --quiet -e . || true
+    fi
+    write_status install_failed "install failed; restored ${BEFORE:0:7}"; exit 1
   fi
-  write_status install_failed "install failed; restored ${BEFORE:0:7}"; exit 1
 fi
 
+# Failed console dependency updates survive a restart and later code-only
+# commits. Never silently clear degradation until pip successfully retries.
+if [ -f "$STREAMLIT_DEPENDENCY_FAILURE_MARKER" ]; then
+  STREAMLIT_DEPENDENCY_FAILED=true
+fi
 if [ -x "$STREAMLIT_VENV/bin/python" ] && [ -f dashboard/requirements.txt ]; then
-  if [ "$BEFORE" = "$AFTER" ] || ! git diff --quiet "$BEFORE" "$AFTER" -- dashboard/requirements.txt; then
-    "$STREAMLIT_VENV/bin/python" -m pip install --quiet -r dashboard/requirements.txt || \
-      log "WARNING: dashboard dependency refresh failed"
+  # Skip healthy same-revision/code-only releases. A persisted failure always
+  # attempts recovery, including when the revision or manifest is unchanged.
+  if [ "$STREAMLIT_DEPENDENCY_FAILED" = true ] || {
+    [ "$BEFORE" != "$AFTER" ] && ! git diff --quiet "$BEFORE" "$AFTER" -- dashboard/requirements.txt
+  }; then
+    if ! "$STREAMLIT_VENV/bin/python" -m pip install --quiet -r dashboard/requirements.txt; then
+      STREAMLIT_DEPENDENCY_FAILED=true
+      mkdir -p "$(dirname "$STREAMLIT_DEPENDENCY_FAILURE_MARKER")"
+      : > "$STREAMLIT_DEPENDENCY_FAILURE_MARKER.tmp"
+      mv "$STREAMLIT_DEPENDENCY_FAILURE_MARKER.tmp" "$STREAMLIT_DEPENDENCY_FAILURE_MARKER"
+      log "ERROR: dashboard dependency refresh failed; console degraded until successful verified retry"
+    else
+      rm -f "$STREAMLIT_DEPENDENCY_FAILURE_MARKER"
+      STREAMLIT_DEPENDENCY_FAILED=false
+    fi
   fi
 fi
 
 if ! set_runtime_build_sha "$AFTER"; then
   if [ "$BEFORE" != "$AFTER" ]; then
     git reset --hard --quiet "$BEFORE"
-    "$VENV/bin/python" -m pip install --quiet -e . || true
+    if [ "$PACKAGE_INSTALL_ATTEMPTED" = true ]; then
+      "$VENV/bin/python" -m pip install --quiet -e . || true
+    fi
   fi
   write_status env_update_failed "could not publish runtime build SHA ${AFTER:0:7}"
   exit 1
@@ -818,22 +987,32 @@ if auto_release_should_defer; then
       write_status runtime_restore_failed "checkout restoration failed; candidate may be partially installed"
       exit 1
     fi
-    if ! "$VENV/bin/python" -m pip install --quiet -e .; then
-      write_status runtime_restore_failed "retained revision dependency restoration failed; manual recovery required"
-      exit 1
+    if [ "$PACKAGE_INSTALL_ATTEMPTED" = true ]; then
+      if ! "$VENV/bin/python" -m pip install --quiet -e .; then
+        write_status runtime_restore_failed "retained revision dependency restoration failed; manual recovery required"
+        exit 1
+      fi
     fi
   fi
   if ! set_runtime_build_sha "$BEFORE"; then
     write_status runtime_restore_failed "retained revision build provenance restoration failed; manual recovery required"
     exit 1
   fi
-  write_status deferred_broker_exposure "broker/arming state changed before engine restart; current revision ${BEFORE:0:7} restored"
+  write_status deferred_broker_exposure "broker/holding state changed before engine restart; current revision ${BEFORE:0:7} restored"
   poll_research_request
   exit 0
 fi
 sudo systemctl restart "$SERVICE"
 if wait_for_service "$AFTER"; then
-  rm -f "$RESTART_PENDING_FILE"
+  rm -f "$RESTART_PENDING_FILE" "$VERIFIED_TOKEN_ROTATION_FILE"
+  # Auxiliary networking hardening happens only after the guarded engine
+  # restart passed release checks. It never restarts or reconfigures trading.
+  if bash "$APP_DIR/deploy/scripts/apply_operator_ingress.sh"; then
+    rm -f "$OPERATOR_INGRESS_DEGRADED_MARKER"
+  else
+    : > "$OPERATOR_INGRESS_DEGRADED_MARKER"
+    log "WARNING: Caddy/admin ingress hardening incomplete; engine unchanged"
+  fi
   admin_ready=false
   if restart_admin; then
     admin_ready=true
@@ -841,13 +1020,34 @@ if wait_for_service "$AFTER"; then
     log "WARNING: admin service restart/health check failed; research manifest launch skipped"
   fi
   if broker_auth_dependency_degraded; then
-    restart_streamlit || log "WARNING: dashboard restart failed while broker auth is degraded"
-    if [ "$admin_ready" = true ]; then
-      write_status deployed_dependency_degraded "deployed ${AFTER:0:7}; engine healthy, broker authentication unavailable; trading blocked"
+    if [ "$STREAMLIT_DEPENDENCY_FAILED" = true ]; then
+      log "ERROR: Streamlit restart skipped after failed dependency refresh; broker auth also degraded"
     else
-      write_status deployed_admin_and_broker_degraded "deployed ${AFTER:0:7}; engine healthy, admin service unavailable, broker authentication unavailable"
+      restart_streamlit || log "WARNING: dashboard restart failed while broker auth is degraded"
+    fi
+    if [ "$admin_ready" = true ]; then
+      if [ "$STREAMLIT_DEPENDENCY_FAILED" = true ]; then
+        write_status deployed_broker_and_console_dependencies_degraded "deployed ${AFTER:0:7}; broker authentication unavailable; console dependency refresh failed"
+      else
+        write_status deployed_dependency_degraded "deployed ${AFTER:0:7}; engine healthy, broker authentication unavailable; trading blocked"
+      fi
+    else
+      if [ "$STREAMLIT_DEPENDENCY_FAILED" = true ]; then
+        write_status deployed_admin_broker_and_console_dependencies_degraded "deployed ${AFTER:0:7}; admin unavailable; broker auth and console dependencies degraded"
+      else
+        write_status deployed_admin_and_broker_degraded "deployed ${AFTER:0:7}; engine healthy, admin service unavailable, broker authentication unavailable"
+      fi
     fi
     logger -t niftybot-deploy "candidate deployed; broker authentication unavailable, trading remains blocked"
+  elif [ "$STREAMLIT_DEPENDENCY_FAILED" = true ]; then
+    # Console is ancillary; report degraded instead of blocking healthy
+    # protective trading paths or claiming unverified console availability.
+    if [ "$admin_ready" = true ]; then
+      write_status deployed_console_dependencies_degraded "deployed ${AFTER:0:7}; bot and admin healthy; console dependency refresh failed"
+    else
+      write_status deployed_admin_console_dependencies_degraded "deployed ${AFTER:0:7}; bot healthy; admin unavailable and console dependency refresh failed"
+    fi
+    logger -t niftybot-deploy "console dependency installation failed; engine remains available"
   elif restart_streamlit; then
     if [ "$admin_ready" = true ]; then
       write_status deployed "deployed ${AFTER:0:7}; bot, admin and console healthy"
@@ -862,6 +1062,10 @@ if wait_for_service "$AFTER"; then
     fi
     logger -t niftybot-deploy "bot deployed; Streamlit health check failed"
   fi
+  if [ -f "$OPERATOR_INGRESS_DEGRADED_MARKER" ] && [ "$admin_ready" = true ] \
+    && [ "$STREAMLIT_DEPENDENCY_FAILED" = false ]; then
+    write_status deployed_operator_ingress_degraded "deployed ${AFTER:0:7}; engine healthy; operator TLS/admin ingress needs repair"
+  fi
   logger -t niftybot-deploy "validated and deployed ${BEFORE:0:7} -> ${AFTER:0:7}"
   if [ "$admin_ready" = true ]; then
     poll_research_request
@@ -871,7 +1075,9 @@ fi
 
 if [ "$BEFORE" != "$AFTER" ]; then
   git reset --hard --quiet "$BEFORE"
-  "$VENV/bin/python" -m pip install --quiet -e . || true
+  if [ "$PACKAGE_INSTALL_ATTEMPTED" = true ]; then
+    "$VENV/bin/python" -m pip install --quiet -e . || true
+  fi
   set_runtime_build_sha "$BEFORE" || true
   sudo systemctl restart "$SERVICE"
   restart_admin || true

@@ -1,4 +1,13 @@
-"""Read-only, bounded and low-overhead Streamlit review console."""
+"""Purpose: Render the low-memory read-only Streamlit operations console.
+
+Responsibilities:
+- status_snapshot, service_health_snapshot and recent_events fetch bounded data.
+- render shows readiness, engine health, P&L summaries and event feed.
+- Display labels distinguish missing evidence from confirmed broker state.
+
+Boundaries: Console does not run strategy, orders or release activation.
+Safety: A responsive UI is not proof that the live trading engine is ready.
+"""
 from __future__ import annotations
 
 import html
@@ -20,13 +29,16 @@ from nifty_scalper_bot.admin_install_proof_display import install_proof_display
 IST = ZoneInfo("Asia/Kolkata")
 ADMIN_API = os.getenv("BOT_ADMIN_API_URL", "http://127.0.0.1:8081").rstrip("/")
 _configured_admin = os.getenv("BOT_ADMIN_PUBLIC_URL", "").strip()
-# Older systemd units override the environment file with a retired static IP.
-# Recover that exact legacy default without changing an operator-set custom URL.
+_parsed_admin = urllib.parse.urlsplit(_configured_admin)
+_public_ip = os.getenv("BOT_PUBLIC_IP", "65.0.255.84").strip() or "65.0.255.84"
+# Never direct a broker token to a legacy plain-HTTP port or retired IP.
+# Honor explicit custom HTTPS hostnames.
 if (
     not _configured_admin
-    or urllib.parse.urlsplit(_configured_admin).hostname == "15.206.3.6"
+    or _parsed_admin.scheme != "https"
+    or _parsed_admin.hostname in {"15.206.3.6", _public_ip}
 ):
-    ADMIN_PUBLIC = "http://" + os.getenv("BOT_PUBLIC_IP", "65.0.255.84") + ":8081/admin"
+    ADMIN_PUBLIC = f"https://{_public_ip}/admin#session"
 else:
     ADMIN_PUBLIC = _configured_admin
 SERVICE = os.getenv("BOT_SERVICE_NAME", "niftybot")
@@ -89,6 +101,12 @@ def _post(path: str) -> tuple[bool, str]:
 @st.cache_data(ttl=STATUS_TTL, show_spinner=False)
 def status_snapshot() -> dict:
     return _get_json("/admin/api/status")
+
+
+@st.cache_data(ttl=STATUS_TTL, show_spinner=False)
+def service_health_snapshot() -> dict:
+    """Read only independent host-local HTTP liveness, not trading readiness."""
+    return _get_json("/admin/api/service-health")
 
 
 @st.cache_data(ttl=EVENT_TTL, show_spinner=False)
@@ -217,7 +235,7 @@ if ops[1].button("Check GitHub update", type="primary", width="stretch"):
     st.cache_data.clear()
     accepted, message = _post("/admin/update")
     (st.info if accepted else st.error)(message)
-ops[2].link_button("Hard admin", ADMIN_PUBLIC, width="stretch")
+ops[2].link_button("Paste request token", ADMIN_PUBLIC, width="stretch")
 ops[3].caption(
     "Controls request the validated deployment service. "
     "Updates and restarts can interrupt LIVE position and stop management. "
@@ -227,6 +245,7 @@ ops[3].caption(
 
 def render() -> None:
     status = status_snapshot()
+    services = service_health_snapshot()
     rows_all = recent_events()
     rows = filter_events(rows_all, event_type, query)
     if trade_only:
@@ -288,6 +307,15 @@ def render() -> None:
     st.download_button("Download current filtered events", csv_bytes(rows), file_name=f"niftybot-events-{datetime.now(IST):%Y%m%d-%H%M}.csv", mime="text/csv", width="stretch")
     with st.expander("Hardening install proof", expanded=False):
         st.json({"display": proof_status, "install_proof": proof})
+    with st.expander("Service liveness (host-local)", expanded=False):
+        if services:
+            st.json(services)
+            st.caption(
+                "Local HTTP liveness does not verify public firewall reachability "
+                "or broker/trading readiness."
+            )
+        else:
+            st.warning("Admin service probe unavailable; liveness is unknown.")
     with st.expander("Technical status", expanded=False):
         st.json(status)
 

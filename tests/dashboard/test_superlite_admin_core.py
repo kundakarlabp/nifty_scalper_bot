@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import ast
 import os
+from pathlib import Path
 
 from starlette.requests import Request
 
@@ -306,3 +308,97 @@ def test_dashboard_runtime_sha_differs_from_checkout(monkeypatch) -> None:
     assert status["stale"] is True
     assert status["remote_source"] == "cached_local_origin/main"
     assert status["updater"]["state"] == "deferred_market_window"
+
+
+def test_host_local_service_health_separates_quiet_from_liveness(monkeypatch) -> None:
+    import nifty_scalper_bot.superlite_admin_core as core
+
+    monkeypatch.setattr(
+        core, "_http_json", lambda _path: {"quiet": True, "bot_loaded": False}
+    )
+    monkeypatch.setattr(core, "_streamlit_reachable", lambda: True)
+    monkeypatch.setattr(
+        core, "_update_state", lambda: {"state": "current", "api_key": "SECRET"}
+    )
+    core.SERVICE_HEALTH_CACHE.update({"at": 0.0, "data": {}})
+    probe = core.service_health_snapshot()
+    assert probe["scope"] == "host_local_only"
+    assert probe["engine_http_responsive"] is True
+    assert probe["engine_quiet"] is True
+    assert probe["admin_http_responsive"] is True
+    assert probe["streamlit_http_responsive"] is True
+    assert probe["release_state"] == "current"
+    assert "SECRET" not in str(probe)
+    assert "api_key" not in probe
+
+
+def test_host_local_service_health_unknown_fail_closed_and_cached(monkeypatch) -> None:
+    import nifty_scalper_bot.superlite_admin_core as core
+
+    observed = []
+    monkeypatch.setattr(
+        core, "_http_json", lambda path: observed.append(path) or {"_error": "timeout"}
+    )
+    monkeypatch.setattr(core, "_streamlit_reachable", lambda: False)
+    monkeypatch.setattr(core, "_update_state", lambda: {"state": "api_key=DO_NOT_LEAK"})
+    core.SERVICE_HEALTH_CACHE.update({"at": 0.0, "data": {}})
+    probe = core.service_health_snapshot()
+    assert probe["engine_http_responsive"] is False
+    assert probe["engine_quiet"] is None
+    assert probe["streamlit_http_responsive"] is False
+    assert probe["release_state"] == "unknown"
+    assert core.service_health_snapshot() == probe
+    assert observed == ["/livez"]
+
+
+def test_streamlit_probe_requires_exact_health_response(monkeypatch) -> None:
+    import nifty_scalper_bot.superlite_admin_core as core
+
+    responses = []
+
+    class FakeResponse:
+        status = 302
+
+        def read(self, _max_bytes: int) -> bytes:
+            return b"redirect"
+
+    class FakeHTTPConnection:
+        def __init__(self, host, port, timeout):
+            assert (host, port, timeout) == ("127.0.0.1", 8501, 1.0)
+            responses.append(self)
+
+        def request(self, method, path):
+            assert (method, path) == ("GET", "/_stcore/health")
+
+        def getresponse(self):
+            return FakeResponse()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(core.http.client, "HTTPConnection", FakeHTTPConnection)
+    assert core._streamlit_reachable() is False
+    assert len(responses) == 1
+
+
+def test_service_health_route_registered_without_app_import() -> None:
+    """Inspect route metadata without mutating global dashboard auth hooks."""
+    root = Path(__file__).resolve().parents[2]
+    module = root / "src/nifty_scalper_bot/superlite_admin.py"
+    tree = ast.parse(module.read_text(encoding="utf-8"))
+    route = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "service_health"
+    )
+    assert any(
+        isinstance(decorator, ast.Call)
+        and isinstance(decorator.func, ast.Attribute)
+        and isinstance(decorator.func.value, ast.Name)
+        and decorator.func.value.id == "app"
+        and decorator.func.attr == "get"
+        and len(decorator.args) == 1
+        and isinstance(decorator.args[0], ast.Constant)
+        and decorator.args[0].value == "/admin/api/service-health"
+        for decorator in route.decorator_list
+    )

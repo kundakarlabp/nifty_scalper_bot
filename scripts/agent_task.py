@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-"""Single public entry point for coding-agent context, validation, and merge checks."""
+"""Purpose: Provide coding-agent context discovery and validation commands.
+
+Responsibilities:
+- Resolve affected modules, safety tests and historical regression benchmarks.
+- Check syntax, source-file documentation and the generated module index.
+- Route scoped and deterministic validation for reviewable GitHub changes.
+
+Boundaries: Tooling only; no imports of the live trading engine or broker calls.
+Safety: Failed validations block the workflow without changing production state.
+"""
 
 from __future__ import annotations
 
@@ -119,6 +128,14 @@ def _validate(
     syntax = _syntax_preflight(root)
     if syntax != 0:
         return syntax
+
+    doc_guard = _python(root, "module_doc_guard.py", "--base-ref", base_ref)
+    if doc_guard.returncode != 0:
+        return doc_guard.returncode
+
+    index = _run(root, [sys.executable, "-m", "scripts.module_index", "--check"])
+    if index.returncode != 0:
+        return index.returncode
 
     if style_fix:
         style = _python(

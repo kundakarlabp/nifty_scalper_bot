@@ -1,13 +1,17 @@
-"""Browser admin dashboard for non-technical operation on the Lightsail VM.
+"""Purpose: Expose daily broker authentication and operational admin controls.
 
-The daily Zerodha session flow is deliberately small and canonical:
-- open the official Kite login from this dashboard;
-- Zerodha redirects the browser back here with request_token when the app redirect
-  URL is configured to /admin/kite/callback;
-- exchange request_token for access_token, verify it, persist aliases, restart.
+Responsibilities:
+- dashboard redirects legacy HTTP /admin to the secure original dashboard.
+- Render existing daily request-token form immediately without separate login page.
+- Verify owner through the same request-token form before enabling any writes.
+- Signed Zerodha owner session replaces the redundant admin Basic password.
+- Serve sanitized runtime overview, protected logs and research-status endpoints.
+- Route GitHub-update/restart requests through service-control owners.
 
-A paste fallback accepts either the raw request token or the complete redirect URL.
-The dashboard never collects or stores the Zerodha login password or TOTP secret.
+Boundaries: The release runner and engine retain execution authority.
+Safety: Public status never exposes secrets, logs, or mutable broker controls.
+Sensitive writes and the full UI keep HTTPS/authentication and broker release gates.
+Do not collect Kite passwords/TOTP or bypass broker release safeguards.
 """
 
 # Embedded HTML/CSS/JS assets have intentional long literal lines.
@@ -15,6 +19,7 @@ The dashboard never collects or stores the Zerodha login password or TOTP secret
 from __future__ import annotations
 
 import hashlib
+import hmac
 import html
 import json
 import os
@@ -25,7 +30,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from fastapi import APIRouter, Form, Request, Response
+from fastapi import APIRouter, Form, HTTPException, Request, Response
 from fastapi.responses import (
     HTMLResponse,
     JSONResponse,
@@ -33,17 +38,32 @@ from fastapi.responses import (
     RedirectResponse,
 )
 
+from nifty_scalper_bot.admin_owner_auth import (
+    LOGIN_COOKIE,
+    clear_challenge,
+    create_challenge,
+    grant_owner_session,
+    owner_user_id,
+    require_https,
+    valid_owner_session,
+    verify_challenge,
+)
 from nifty_scalper_bot.ops.service_control import (
     ControlResult,
     queue_validated_restart,
     restart_deployer,
 )
-from nifty_scalper_bot.superlite_admin_core import bounded_logs, quick_overview
+from nifty_scalper_bot.superlite_admin_core import (
+    ENV_PATH as CANONICAL_ENV_PATH,
+    bounded_logs,
+    quick_overview,
+    write_env as write_canonical_env,
+)
 from nifty_scalper_bot.superlite_admin_style import SCRIPT as _SCRIPT, STYLE as _CSS
 
 router = APIRouter()
 
-ENV_PATH = Path(os.getenv("BOT_ENV_FILE", "/home/ubuntu/nifty_scalper_bot/.env"))
+ENV_PATH = CANONICAL_ENV_PATH
 LOG_PATH = Path(os.getenv("BOT_LOG_FILE", str(Path(os.getenv("LOG_DIR", "logs")).expanduser() / "bot.log")))
 SERVICE_NAME = os.getenv("BOT_SERVICE_NAME", "niftybot")
 APP_DIR = Path(os.getenv("BOT_APP_DIR", "/home/ubuntu/nifty_scalper_bot"))
@@ -77,37 +97,34 @@ def _read_env() -> dict[str, str]:
 
 
 def _write_env(updates: dict[str, str]) -> None:
-    existing = ENV_PATH.read_text().splitlines() if ENV_PATH.exists() else []
-    seen: set[str] = set()
-    out: list[str] = []
-    for line in existing:
-        s = line.strip()
-        if not s or s.startswith("#") or "=" not in s:
-            out.append(line)
-            continue
-        key = s.split("=", 1)[0].strip()
-        if key in updates:
-            out.append(f"{key}={updates[key]}")
-            seen.add(key)
-        else:
-            out.append(line)
-    for k, v in updates.items():
-        if k not in seen:
-            out.append(f"{k}={v}")
-    ENV_PATH.parent.mkdir(parents=True, exist_ok=True)
-    ENV_PATH.write_text("\n".join(out) + "\n")
-    os.chmod(ENV_PATH, 0o600)
+    """Update the same protected environment that the runtime reads."""
+    write_canonical_env(updates)
     _ENV_CACHE.update({"at": 0.0, "data": {}})
 
-
 def _check_auth(request: Request) -> None:
-    # Host security-group/IP allowlist remains the access boundary for this legacy
-    # console. Do not add broker login passwords or TOTP seeds to this application.
-    return None
+    """Require the verified Zerodha-owner session, never a second admin password.
 
-
-def _admin_password() -> str:
-    return ""
+    The public engine also mounts these routes, so HTTP access to mutable
+    controls remains denied. Host-local diagnostics stay available.
+    """
+    if os.getenv("DEPLOYMENT_PLATFORM") != "aws_lightsail":
+        return
+    peer = request.client.host if request.client else ""
+    if peer in {"127.0.0.1", "::1"} and not request.headers.get("x-forwarded-for"):
+        return
+    if request.url.scheme != "https":
+        raise HTTPException(status_code=403, detail="admin_https_required")
+    owner = owner_user_id(_read_env())
+    if not owner:
+        raise HTTPException(status_code=503, detail="admin_owner_not_configured")
+    if not valid_owner_session(request, owner):
+        # No WWW-Authenticate: browsers must never show an admin Basic popup.
+        raise HTTPException(status_code=401, detail="owner_login_required")
+    if request.method.upper() not in {"GET", "HEAD", "OPTIONS"}:
+        source = request.headers.get("origin") or request.headers.get("referer", "")
+        parsed = urllib.parse.urlsplit(source)
+        if parsed.scheme != "https" or parsed.netloc != request.headers.get("host"):
+            raise HTTPException(status_code=403, detail="admin_same_origin_required")
 
 
 # ---------------- Zerodha daily session ----------------
@@ -169,18 +186,65 @@ def _verify_access_token(api_key: str, access_token: str) -> tuple[bool, str]:
 
 
 def _activate_access_token(access_token: str) -> ControlResult:
-    _write_env({
-        "KITE_ACCESS_TOKEN": access_token,
-        "ZERODHA_ACCESS_TOKEN": access_token,
-        "BROKER_ACCESS_TOKEN": access_token,
-    })
+    """Persist verified token, then queue restart with a bounded rotation proof."""
+    _write_env(
+        {
+            "KITE_ACCESS_TOKEN": access_token,
+            "ZERODHA_ACCESS_TOKEN": access_token,
+            "BROKER_ACCESS_TOKEN": access_token,
+        }
+    )
+    # Ordinary restart markers never authorize an old-authentication bypass.
+    # The broker's /user/profile was verified immediately before this call.
+    import tempfile
+
+    proof_dir = Path(os.getenv("NIFTYBOT_CONFIG_DIR", "/home/ubuntu/.config/niftybot"))
+    proof_file = proof_dir / "auto_release_verified_token_rotation"
+    if not proof_dir.is_dir() or proof_dir.is_symlink() or proof_file.is_symlink():
+        return ControlResult(False, "restart_bot", "token proof location unavailable")
+    try:
+        fd, temporary = tempfile.mkstemp(prefix=".verified-token.", dir=proof_dir)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as target:
+                json.dump(
+                    {
+                        "token_sha256": hashlib.sha256(
+                            access_token.encode("utf-8")
+                        ).hexdigest(),
+                        "verified_at": time.time(),
+                    },
+                    target,
+                )
+                target.flush()
+                os.fsync(target.fileno())
+            os.chmod(temporary, 0o600)
+            os.replace(temporary, proof_file)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+    except OSError:
+        return ControlResult(False, "restart_bot", "token proof could not be stored")
     return _restart_service()
 
 
 def _complete_kite_session(request_token: str) -> RedirectResponse:
     env = _read_env()
-    api_key = env.get("KITE_API_KEY", "").strip()
-    api_secret = env.get("KITE_API_SECRET", "").strip()
+    api_key = next(
+        (
+            env.get(k, "").strip()
+            for k in ("BROKER_API_KEY", "ZERODHA_API_KEY", "KITE_API_KEY")
+            if env.get(k, "").strip()
+        ),
+        "",
+    )
+    api_secret = next(
+        (
+            env.get(k, "").strip()
+            for k in ("BROKER_API_SECRET", "ZERODHA_API_SECRET", "KITE_API_SECRET")
+            if env.get(k, "").strip()
+        ),
+        "",
+    )
     if not api_key or not api_secret:
         return RedirectResponse("/admin?token=err&msg=set+API+key+and+secret+first", status_code=303)
     ok, result = _exchange_request_token(api_key, api_secret, request_token)
@@ -189,6 +253,12 @@ def _complete_kite_session(request_token: str) -> RedirectResponse:
     verified, detail = _verify_access_token(api_key, result)
     if not verified:
         return RedirectResponse(f"/admin?token=err&msg={urllib.parse.quote(('verification failed: ' + detail)[:120])}", status_code=303)
+    if os.getenv("DEPLOYMENT_PLATFORM") == "aws_lightsail":
+        expected_owner = owner_user_id(env)
+        if not expected_owner or not hmac.compare_digest(detail, expected_owner):
+            return RedirectResponse(
+                "/admin?token=err&msg=Zerodha+account+mismatch", status_code=303
+            )
     restart_result = _activate_access_token(result)
     if restart_result.ok:
         return RedirectResponse("/admin?token=ok", status_code=303)
@@ -287,7 +357,16 @@ def _topbar(live_on: bool) -> str:
 
 def _flash(request: Request) -> str:
     q = request.query_params
-    if q.get("saved"): return '<div class="flash ok">Settings saved. Restart to apply.</div>'
+    if q.get("saved"):
+        return '<div class="flash ok">Settings saved. Engine changes require a validated restart.</div>'
+    if q.get("power") == "queued":
+        return ('<div class="flash ok">Operating mode saved; safe transition '
+                'queued. Watch the Engine status for confirmation.</div>')
+    if q.get("power") == "saved_not_applied":
+        return ('<div class="flash err">Operating mode saved, but the validated '
+                'transition could not be queued. Engine state is unchanged.</div>')
+    if q.get("power") == "unchanged":
+        return '<div class="flash ok">Operating mode is already selected.</div>'
     if q.get("token") == "ok":
         return (
             '<div class="flash ok">Zerodha token verified and saved; '
@@ -315,8 +394,8 @@ def _flash(request: Request) -> str:
     if q.get("restart") == "queued":
         return (
             '<div class="flash ok">Validated bot restart queued. '
-            "Deployment no longer waits for a flat broker account; "
-            "open-position management may be interrupted. "
+            "Restart waits for verified flat broker positions and terminal orders; "
+            "protective position management must not be interrupted. "
             "Queued does not mean completed.</div>"
         )
     if q.get("restart") == "err":
@@ -343,15 +422,69 @@ def _flash(request: Request) -> str:
 
 
 @router.get("/admin", response_class=HTMLResponse)
-def dashboard(request: Request) -> HTMLResponse:
-    """Serve the UI immediately; live metrics are fetched independently on demand."""
-    _check_auth(request)
-    env = _read_env()
+def dashboard(request: Request) -> Response:
+    """Use the familiar /admin URL for complete owner controls over HTTPS."""
+    if os.getenv("DEPLOYMENT_PLATFORM") == "aws_lightsail":
+        if request.url.scheme != "https":
+            # The old :8080 bookmark opens the secure dashboard, not a dead end.
+            return RedirectResponse(
+                "https://65.0.255.84/admin", status_code=307,
+                headers={"Cache-Control": "no-store"},
+            )
+        return admin_manage(request)
+    return _full_dashboard(request)
+
+
+@router.get("/admin/manage", response_class=HTMLResponse)  # type: ignore[untyped-decorator]
+def admin_manage(request: Request) -> Response:
+    """Render the original dashboard immediately; verified token unlocks controls."""
+    if os.getenv("DEPLOYMENT_PLATFORM") == "aws_lightsail":
+        if request.url.scheme != "https":
+            raise HTTPException(status_code=403, detail="admin_https_required")
+        return _full_dashboard(request, preview=True)
+    return _full_dashboard(request)
+
+
+def _full_dashboard(request: Request, *, preview: bool = False) -> HTMLResponse:
+    owner_verified = False
+    if preview and os.getenv("DEPLOYMENT_PLATFORM") == "aws_lightsail":
+        owner = owner_user_id(_read_env())
+        if not owner:
+            raise HTTPException(status_code=503, detail="admin_owner_not_configured")
+        owner_verified = valid_owner_session(request, owner)
+        if owner_verified:
+            _check_auth(request)
+    else:
+        _check_auth(request)
+        owner_verified = True
+    private_env = _read_env()
+    # The page may render before daily login, but never populate credential
+    # values or expose private integration IDs to an unauthenticated browser.
+    env = private_env if owner_verified else {
+        "KITE_API_KEY": next(
+            (private_env.get(k, "").strip()
+             for k in ("BROKER_API_KEY", "ZERODHA_API_KEY", "KITE_API_KEY")
+             if private_env.get(k, "").strip()), ""
+        ),
+        "ENABLE_LIVE": private_env.get("ENABLE_LIVE", "false"),
+        "EXECUTION_MODE": private_env.get("EXECUTION_MODE", "SHADOW"),
+    }
     live_on = (
         env.get("ENABLE_LIVE", "false").strip().lower() in {"1", "true", "yes", "on"}
         and env.get("EXECUTION_MODE", "SHADOW").strip().upper() == "LIVE"
     )
-    api_key = env.get("KITE_API_KEY", "").strip()
+    api_key = next(
+        (
+            env.get(key, "").strip()
+            for key in ("BROKER_API_KEY", "ZERODHA_API_KEY", "KITE_API_KEY")
+            if env.get(key, "").strip()
+        ),
+        "",
+    )
+    # Import lazily: operating_control uses this module for canonical writes.
+    from nifty_scalper_bot.operating_control import admin_power_card
+
+    power_card = admin_power_card(editable=owner_verified)
     login_url = _kite_login_url(api_key) if api_key else ""
     login_button = (
         f'<a class="btn primary full" href="{html.escape(login_url, quote=True)}" rel="noopener">'
@@ -403,6 +536,7 @@ def dashboard(request: Request) -> HTMLResponse:
       <div class="metric"><div class="k">Blocker</div><div class="v" id="blocker-value">Checking…</div>
       <small>Trading readiness</small></div>
     </section>
+    {power_card}
     <div class="cta-strip"><div class="statusline">
       <span>Release: <b id="release-value">Checking…</b></span>
       <span>Engine SHA: <b id="revision-value">—</b></span>
@@ -482,6 +616,18 @@ def dashboard(request: Request) -> HTMLResponse:
             Never share an access token in screenshots.</p>
             <form method="post" action="/admin/save">{rows}
               <button type="submit" class="full">Save settings</button></form>
+            <div class="subheading">Daily Zerodha request token</div>
+            <p>Paste the full Zerodha callback URL or one-time request token.
+            Verification exchanges it for an access token, checks your broker
+            account and queues the safe engine refresh. The request token is
+            never stored in settings.</p>
+            <form method="post" action="/admin/token">
+              <label for="settings-request-token">Request token / callback URL</label>
+              <input id="settings-request-token" name="request_token"
+                type="text" autocomplete="off" spellcheck="false"
+                placeholder="Paste fresh Zerodha request token or URL" required>
+              <button type="submit" class="full green">Verify and save Zerodha token</button>
+            </form>
           </div></details>
           <details><summary>Research &amp; backtesting</summary><div class="detail-body">
             <p>On-demand replay and component analysis, separate from live order execution.</p>
@@ -501,15 +647,121 @@ def dashboard(request: Request) -> HTMLResponse:
     </div>
     <div class="footer">Nifty Scalper · Independent admin control plane · All times reflect your device’s clock.</div>
     </main>"""
+    # Always expose the existing daily token paste form on mobile.
+    body = body.replace(
+        "<details><summary>Paste callback URL / request token instead</summary>",
+        "<details open><summary>Paste callback URL / request token</summary>",
+        1,
+    )
+    if preview and not owner_verified:
+        # Other controls remain unavailable until Kite owner verification.
+        body = re.sub(
+            r'(<form method="post" action="/admin/(?!token\b)[^"]+")',
+            r"\1 inert", body,
+        )
+        body = body.replace(
+            '<div class="intro">',
+            '<p id="admin-access-note" class="flash">Dashboard is open. '
+            'Loading the real engine and broker status below; a browser '
+            'session is not the same as Zerodha broker authentication.'
+            '</p><div class="intro">', 1,
+        )
+        response = HTMLResponse(
+            "", headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"}
+        )
+        challenge = create_challenge(response)
+        body = body.replace(
+            '<form method="post" action="/admin/token">',
+            '<form method="post" action="/admin/token">'
+            f'<input type="hidden" name="owner_state" value="{html.escape(challenge, quote=True)}">',
+        )
+        response.body = _page(body).encode("utf-8")
+        response.headers["content-length"] = str(len(response.body))
+        return response
     return HTMLResponse(_page(body), headers={"Cache-Control": "no-store"})
 
 
 # fmt: on
 
 
+
+# fmt: off  # This block owns intentional long embedded HTML literals.
+# A single official Zerodha login can both rotate the daily broker token and
+# establish a short-lived, HttpOnly owner session. No public unauthenticated
+# token, LIVE-mode, or restart endpoint is created.
+@router.get("/admin/kite/start")  # type: ignore[untyped-decorator]
+def owner_login_start(request: Request) -> RedirectResponse:
+    """Legacy bookmark opens the original dashboard, not a second login form."""
+    require_https(request)
+    return RedirectResponse("/admin", status_code=303)
+
+
+def _finish_owner_login(request: Request, owner_state: str, request_token: str) -> RedirectResponse:
+    require_https(request)
+    if not verify_challenge(request, owner_state):
+        raise HTTPException(status_code=403, detail="owner_login_challenge_invalid")
+    env = _read_env()
+    owner = owner_user_id(env)
+    if not owner:
+        raise HTTPException(status_code=503, detail="owner_account_not_configured")
+    key = next(
+        (env[k].strip() for k in ("BROKER_API_KEY", "ZERODHA_API_KEY", "KITE_API_KEY")
+         if env.get(k, "").strip()), ""
+    )
+    secret = next(
+        (env[k].strip() for k in ("BROKER_API_SECRET", "ZERODHA_API_SECRET", "KITE_API_SECRET")
+         if env.get(k, "").strip()), ""
+    )
+    if not key or not secret:
+        raise HTTPException(status_code=503, detail="kite_credentials_missing")
+    token = _extract_request_token(request_token)
+    if not token:
+        raise HTTPException(status_code=422, detail="request_token_missing")
+    ok, access_token = _exchange_request_token(key, secret, token)
+    if not ok:
+        # Never return raw exchange errors to an unauthenticated browser.
+        raise HTTPException(status_code=401, detail="kite_token_exchange_failed")
+    verified, user_id = _verify_access_token(key, access_token)
+    if not verified or not hmac.compare_digest(user_id, owner):
+        raise HTTPException(status_code=403, detail="zerodha_owner_mismatch")
+    restart = _activate_access_token(access_token)
+    location = (
+        "/admin?token=ok"
+        if restart.ok
+        else "/admin?token=saved_not_applied"
+    )
+    response = RedirectResponse(location, status_code=303)
+    clear_challenge(response)
+    grant_owner_session(response, owner)
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@router.post("/admin/kite/complete")  # type: ignore[untyped-decorator]
+def owner_login_complete(
+    request: Request,
+    owner_state: str = Form(...),
+    request_token: str = Form(...),
+) -> RedirectResponse:
+    # Same-origin form submission + signed one-time login challenge.
+    require_https(request)
+    source = request.headers.get("origin") or request.headers.get("referer", "")
+    parsed = urllib.parse.urlsplit(source)
+    if parsed.scheme != "https" or parsed.netloc != request.headers.get("host"):
+        raise HTTPException(status_code=403, detail="owner_login_same_origin_required")
+    return _finish_owner_login(request, owner_state, request_token)
+
+
 @router.get("/admin/kite/callback")
-def kite_callback(request: Request, request_token: str = "", status: str = "", action: str = "") -> RedirectResponse:
-    """Registered Kite redirect target; no request/access token is rendered back to the browser."""
+def kite_callback(request: Request, request_token: str = "", status: str = "", action: str = "", owner_state: str = "") -> RedirectResponse:
+    """Registered Kite redirect; owner-state permits passwordless verification."""
+    if os.getenv("DEPLOYMENT_PLATFORM") == "aws_lightsail":
+        owner = owner_user_id(_read_env())
+        if owner and not valid_owner_session(request, owner):
+            if status and status.lower() not in {"success", "ok"}:
+                return RedirectResponse("/admin?token=err", status_code=303)
+            challenge = owner_state or request.cookies.get(LOGIN_COOKIE, "")
+            return _finish_owner_login(request, challenge, request_token)
     _check_auth(request)
     req_tok = _extract_request_token(request_token)
     if status and status.lower() not in {"success", "ok"}:
@@ -519,8 +771,29 @@ def kite_callback(request: Request, request_token: str = "", status: str = "", a
     return _complete_kite_session(req_tok)
 
 
+# fmt: on
+
+
 @router.post("/admin/token")
-def update_token(request: Request, request_token: str = Form(""), access_token: str = Form("")) -> RedirectResponse:
+def update_token(
+    request: Request,
+    request_token: str = Form(""),
+    access_token: str = Form(""),
+    owner_state: str = Form(""),
+) -> RedirectResponse:
+    if os.getenv("DEPLOYMENT_PLATFORM") == "aws_lightsail":
+        owner = owner_user_id(_read_env())
+        if not owner or not valid_owner_session(request, owner):
+            require_https(request)
+            source = request.headers.get("origin") or request.headers.get("referer", "")
+            parsed = urllib.parse.urlsplit(source)
+            if parsed.scheme != "https" or parsed.netloc != request.headers.get("host"):
+                raise HTTPException(
+                    status_code=403, detail="admin_same_origin_required"
+                )
+            if access_token:
+                raise HTTPException(status_code=401, detail="owner_login_required")
+            return _finish_owner_login(request, owner_state, request_token)
     _check_auth(request)
     req_tok = _extract_request_token(request_token)
     acc_tok = access_token.strip()
@@ -529,7 +802,14 @@ def update_token(request: Request, request_token: str = Form(""), access_token: 
     if not acc_tok:
         return RedirectResponse("/admin?token=err&msg=no+token+provided", status_code=303)
     env = _read_env()
-    api_key = env.get("KITE_API_KEY", "").strip()
+    api_key = next(
+        (
+            env.get(k, "").strip()
+            for k in ("BROKER_API_KEY", "ZERODHA_API_KEY", "KITE_API_KEY")
+            if env.get(k, "").strip()
+        ),
+        "",
+    )
     if not api_key:
         return RedirectResponse("/admin?token=err&msg=set+API+key+first", status_code=303)
     verified, detail = _verify_access_token(api_key, acc_tok)
@@ -550,8 +830,14 @@ def set_mode(request: Request, mode: str = Form(...)) -> RedirectResponse:
     _check_auth(request)
     if mode.strip().lower() == "live":
         env = _read_env()
-        has_key = any(env.get(k, "").strip() for k in ("KITE_API_KEY", "ZERODHA_API_KEY", "BROKER_API_KEY"))
-        has_secret = any(env.get(k, "").strip() for k in ("KITE_API_SECRET", "ZERODHA_API_SECRET", "BROKER_API_SECRET"))
+        has_key = any(
+            env.get(k, "").strip()
+            for k in ("BROKER_API_KEY", "ZERODHA_API_KEY", "KITE_API_KEY")
+        )
+        has_secret = any(
+            env.get(k, "").strip()
+            for k in ("BROKER_API_SECRET", "ZERODHA_API_SECRET", "KITE_API_SECRET")
+        )
         has_token = any(env.get(k, "").strip() for k in ("KITE_ACCESS_TOKEN", "ZERODHA_ACCESS_TOKEN", "BROKER_ACCESS_TOKEN"))
         if not (has_key and has_secret and has_token):
             return RedirectResponse("/admin?mode=err", status_code=303)
@@ -666,8 +952,18 @@ def update_from_github(request: Request) -> Response:
 # fmt: off  # Short, stable JSON UI endpoints.
 @router.get("/admin/api/overview")  # type: ignore[untyped-decorator]
 def overview_api(request: Request) -> JSONResponse:
-    """Lightweight independent heartbeat for mobile auto-refresh."""
-    _check_auth(request)
+    """Show the existing sanitized runtime heartbeat before daily owner login.
+
+    quick_overview returns fixed process, broker-auth state and release
+    labels, never credentials, orders, account IDs or private journal lines.
+    Browser ownership is required for *mutating* admin controls, not for
+    recognizing a broker session already verified by the running engine.
+    """
+    if (
+        os.getenv("DEPLOYMENT_PLATFORM") == "aws_lightsail"
+        and request.url.scheme != "https"
+    ):
+        raise HTTPException(status_code=403, detail="admin_https_required")
     return JSONResponse(quick_overview(), headers={"Cache-Control": "no-store"})
 
 
@@ -693,28 +989,53 @@ _STATUS_CACHE: dict[str, object] = {"at": 0.0, "label": "running", "color": "#3f
 
 @router.get("/admin/status.json")
 def status_json(request: Request) -> JSONResponse:
-    _check_auth(request)
+    """Expose only the process-status label; no private controls or logs."""
+    if (
+        os.getenv("DEPLOYMENT_PLATFORM") == "aws_lightsail"
+        and request.url.scheme != "https"
+    ):
+        raise HTTPException(status_code=403, detail="admin_https_required")
     now = time.time()
     ttl = float(os.getenv("ADMIN_STATUS_CACHE_SECONDS", "10") or "10")
     if now - float(_STATUS_CACHE["at"]) < ttl:
-        return JSONResponse({"label": _STATUS_CACHE["label"], "color": _STATUS_CACHE["color"]})
-    label, color = "running", "#3fb950"
+        return JSONResponse(
+            {"label": _STATUS_CACHE["label"], "color": _STATUS_CACHE["color"]},
+            headers={"Cache-Control": "no-store"},
+        )
+    # Do not infer engine health from old log lines: use the same canonical
+    # fast status snapshot as the visible dashboard, with no journal scan.
     try:
-        tail = _gather_logs(60, clean=True)
-        if "degraded mode" in tail or "Missing required env" in tail:
-            label, color = "degraded", "#d29922"
-        elif "fully operational" in tail:
-            label, color = "operational", "#3fb950"
+        overview = quick_overview()
+        if overview.get("engine_ok") is not True:
+            label, color = "unreachable", "#ff7586"
+        elif overview.get("quiet") is True:
+            label, color = "quiet", "#38d6a0"
+        elif overview.get("bot_loaded") is True:
+            label, color = "operational", "#38d6a0"
+        else:
+            label, color = "starting", "#f5bb5a"
     except Exception:
         label, color = "unknown", "#8b97a6"
     _STATUS_CACHE.update({"at": now, "label": label, "color": color})
-    return JSONResponse({"label": label, "color": color})
+    return JSONResponse(
+        {"label": label, "color": color},
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 _TRADE_MARKERS = (
-    "ORDER_SENT", "Sending Order", "FILLED", "average_price", "EXIT",
-    "TRADE_ATTEMPT", "ORDER_REJECTED", "ORDER_BROKER_CONFIG_ERROR", "pnl",
-    "TRADE_CLOSED", "ORDER_COMPLETE", "SIGNAL_GENERATED",
+    "ORDER_SENT",
+    "Sending Order",
+    "FILLED",
+    "average_price",
+    "EXIT",
+    "TRADE_ATTEMPT",
+    "ORDER_REJECTED",
+    "ORDER_BROKER_CONFIG_ERROR",
+    "pnl",
+    "TRADE_CLOSED",
+    "ORDER_COMPLETE",
+    "SIGNAL_GENERATED",
 )
 
 

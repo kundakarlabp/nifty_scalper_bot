@@ -1,14 +1,66 @@
-"""Centralized trading switch for operator pause and cooldown controls."""
+"""Purpose: Coordinate operator entry controls and release-safe submission.
+
+Responsibilities:
+- TradingSwitch tracks pause/cooldown and entry-admission state.
+- release_entry_hold_active reports the deployment's entry hold.
+- live_entry_submission_slot synchronizes new broker entries with release handoff.
+
+Boundaries: Entry control is not broker order placement or position truth.
+Safety: Release holds block opening exposure, not protective exit orders.
+"""
 
 from __future__ import annotations
 
+import fcntl
+import os
 import threading
 import time
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
+from pathlib import Path
 
 from nifty_scalper_bot.utils.logging import get_logger
 
 log = get_logger(__name__)
+
+
+def _release_control_path(name: str) -> Path:
+    root = os.getenv("NIFTYBOT_CONFIG_DIR", "/home/ubuntu/.config/niftybot")
+    return Path(root) / name
+
+
+def release_entry_hold_active() -> bool:
+    """Read the deployment entry hold; protective exits are never affected."""
+    return _release_control_path("auto_release_entry_hold").is_file()
+
+
+@contextmanager
+def live_entry_submission_slot(payload: Mapping[str, object]) -> Iterator[None]:
+    """Serialize LIVE entry submission with a deployment's broker-flat handoff.
+
+    Every live opening order takes a shared advisory lock across its entire
+    broker API call. The release runner exclusively holds the same lock from
+    before the no-exposure snapshots through engine restart. Exit SELL orders
+    do not take this lock and remain available for protective execution.
+    """
+    side = str(payload.get("side") or payload.get("transaction_type") or "").upper()
+    live_mode = os.getenv("EXECUTION_MODE", "SHADOW").strip().upper() == "LIVE"
+    if not live_mode or side == "SELL":
+        yield
+        return
+    lock_path = _release_control_path("auto_release_entry_lock")
+    descriptor = os.open(
+        lock_path, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600
+    )
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_SH)
+        if release_entry_hold_active():
+            raise RuntimeError("release_entry_hold_blocks_new_entry")
+        yield
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
 
 
 @dataclass(slots=True)
@@ -113,6 +165,8 @@ class TradingSwitch:
         changed = False
         try:
             with self._lock:
+                if release_entry_hold_active():
+                    return False
                 if self._operator_paused:
                     return False
                 if self._resume_at > now:
@@ -243,6 +297,7 @@ class TradingSwitch:
         allowed = bool(
             enabled
             and not operator_paused
+            and not release_entry_hold_active()
             and (resume_at == 0.0 or now >= resume_at)
         )
         if not allowed:
@@ -323,6 +378,7 @@ class TradingSwitch:
         allowed = bool(
             enabled
             and not operator_paused
+            and not release_entry_hold_active()
             and (resume_at == 0.0 or remaining == 0.0)
         )
         state = TradingSwitchState(

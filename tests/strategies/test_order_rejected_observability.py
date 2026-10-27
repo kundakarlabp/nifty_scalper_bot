@@ -261,3 +261,98 @@ def test_decision_research_context_does_not_invent_setup_identity() -> None:
 
     assert "setup_id" not in context
     assert "setup_structure_id" not in context
+
+
+def test_capacity_rejection_is_persisted_with_bounded_cash_risk_evidence() -> None:
+    captured: list[dict[str, object]] = []
+    runner = SimpleNamespace(
+        _runtime_live_orders_armed=True,
+        _last_trade_decision=None,
+        _order_manager=SimpleNamespace(
+            record_trade_decision=lambda snapshot, trace_id=None: captured.append(
+                snapshot
+            )
+        ),
+        _logger=SimpleNamespace(debug=lambda *_args, **_kwargs: None),
+    )
+    capacity = {
+        "NFO:NIFTY26OCT22700CE": {
+            "reason": "minimum_lot_risk_unaffordable",
+            "capacity_blocker": "risk",
+            "cash_affordable": True,
+            "plan_risk_affordable": False,
+            "required": 10104.25,
+            "executable_capacity": 13737.78,
+            "plan_cost_inclusive_risk": 1007.78,
+            "effective_one_lot_risk_budget": 305.28,
+            "remaining_daily_risk_budget": 305.28,
+            "trace_id": "internal-trace",
+            "ignore_me": "should-not-persist",
+        },
+        "NFO:NIFTY26OCT22600CE": {
+            "reason": "minimum_lot_unaffordable",
+            "capacity_blocker": "cash",
+            "cash_affordable": False,
+            "required": 14485.25,
+            "executable_capacity": 13737.78,
+        },
+    }
+
+    StrategyRunner._record_trade_decision_snapshot(
+        runner,
+        symbol="NFO:NIFTY26OCT22700CE",
+        direction="CE",
+        final_reason="no_affordable_execution_candidate",
+        candidate_count=2,
+        candidate_rejects={"invalid_rr": 0},
+        candidate_capacity_decisions=capacity,
+        trace_id="blocked-trace",
+    )
+
+    entry = captured[0]
+    assert entry["candidate_rejects"] == {"invalid_rr": 0}
+    first = entry["candidate_capacity_decisions"]["NFO:NIFTY26OCT22700CE"]
+    assert first["capacity_blocker"] == "risk"
+    assert first["plan_cost_inclusive_risk"] == 1007.78
+    assert first["effective_one_lot_risk_budget"] == 305.28
+    assert "trace_id" not in first
+    assert "ignore_me" not in first
+    assert (
+        entry["candidate_capacity_decisions"]["NFO:NIFTY26OCT22600CE"][
+            "capacity_blocker"
+        ]
+        == "cash"
+    )
+
+
+def test_reject_signal_execution_forwards_capacity_details_to_existing_journal() -> (
+    None
+):
+    captured: list[dict[str, object]] = []
+    runner = SimpleNamespace(
+        _emit_signal_execution_result=lambda **_kwargs: None,
+        _record_trade_decision_snapshot=lambda **kwargs: captured.append(kwargs),
+        _logger=SimpleNamespace(info=lambda *_args, **_kwargs: None),
+    )
+    details = {
+        "direction": "CE",
+        "candidate_total": 1,
+        "candidate_capacity_decisions": {
+            "NFO:NIFTYCE": {
+                "capacity_blocker": "risk",
+                "plan_cost_inclusive_risk": 731.12,
+                "effective_one_lot_risk_budget": 305.28,
+            }
+        },
+    }
+    StrategyRunner._reject_signal_execution(
+        runner,
+        symbol="NFO:NIFTYCE",
+        trace_id="cap-reject",
+        reason="no_affordable_execution_candidate",
+        details=details,
+    )
+    assert (
+        captured[0]["candidate_capacity_decisions"]
+        == details["candidate_capacity_decisions"]
+    )

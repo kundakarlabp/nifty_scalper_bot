@@ -29,30 +29,45 @@ async def test_tail_file_is_byte_bounded(tmp_path: Path) -> None:
     assert rows[-1] == "line 99999"  # still anchored to the file's end
 
 
-async def test_status_json_uses_no_subprocess(monkeypatch) -> None:
-    # The Logs page polls status.json every few seconds. It must derive health
-    # from the in-memory log tail (the dashboard runs inside the bot process, so
-    # answering at all means it's alive) and spawn NO subprocess — the old
-    # systemctl-per-poll saturated the threadpool and hung the dashboard.
+async def test_status_json_uses_engine_status_without_subprocess(monkeypatch) -> None:
+    # Never infer healthy from stale journal output; the dashboard uses the
+    # bounded canonical overview without subprocess or log scans.
     import json as _json
 
     import nifty_scalper_bot.admin_dashboard as dash
 
-    calls = {"n": 0}
+    def fail(*_args, **_kwargs):
+        raise AssertionError("status.json must not inspect logs or spawn commands")
 
-    def _boom(*_a, **_k):
-        calls["n"] += 1
-        raise AssertionError("status.json must not spawn a subprocess")
-
-    monkeypatch.setattr(dash.subprocess, "run", _boom)
-    monkeypatch.setattr(dash.subprocess, "Popen", _boom)
-    monkeypatch.setattr(dash, "_gather_logs", lambda *_a, **_k: "fully operational")
+    monkeypatch.setattr(dash.subprocess, "run", fail)
+    monkeypatch.setattr(dash.subprocess, "Popen", fail)
+    monkeypatch.setattr(dash, "_gather_logs", fail)
+    monkeypatch.setattr(
+        dash,
+        "quick_overview",
+        lambda: {"engine_ok": True, "bot_loaded": True, "quiet": False},
+    )
     monkeypatch.setattr(dash, "_check_auth", lambda _r: None)
-    dash._STATUS_CACHE.update({"at": 0.0})  # force a cold call
-
+    dash._STATUS_CACHE.update({"at": 0.0})
     resp = dash.status_json(request=None)
-    assert calls["n"] == 0
     assert _json.loads(bytes(resp.body))["label"] == "operational"
+    assert resp.headers["cache-control"] == "no-store"
+
+
+async def test_status_json_reports_outage_and_quiet_truthfully(monkeypatch) -> None:
+    import json as _json
+
+    import nifty_scalper_bot.admin_dashboard as dash
+
+    for summary, expected in (
+        ({"engine_ok": False}, "unreachable"),
+        ({"engine_ok": True, "quiet": True}, "quiet"),
+        ({"engine_ok": True, "bot_loaded": False}, "starting"),
+    ):
+        monkeypatch.setattr(dash, "quick_overview", lambda x=summary: x)
+        dash._STATUS_CACHE.update({"at": 0.0})
+        result = _json.loads(bytes(dash.status_json(request=None).body))
+        assert result["label"] == expected
 
 
 async def test_read_env_is_cached(tmp_path, monkeypatch) -> None:

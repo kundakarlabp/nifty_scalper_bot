@@ -46,7 +46,15 @@ def _tick(symbol, *, full=True, source="ws"):
     }
 
 
-def _record(tmp_path, *, quote=True, changed=False):
+def _record(
+    tmp_path,
+    *,
+    quote=True,
+    changed=False,
+    rotated_quotes=False,
+    rotated_ce_depth=True,
+    redundant_snapshot=False,
+):
     recorder = ReplayArchive(tmp_path)
     t = datetime(2026, 10, 21, 10, 0, tzinfo=IST)
     recorder.record("snapshot", _snapshot(), t)
@@ -55,12 +63,17 @@ def _record(tmp_path, *, quote=True, changed=False):
         if not quote:
             tick.pop("depth")
         recorder.record("tick", tick, t + timedelta(seconds=1))
+    if redundant_snapshot:
+        recorder.record("snapshot", _snapshot(), t + timedelta(seconds=2))
     if changed:
-        recorder.record(
-            "snapshot",
-            _snapshot("NFO:NIFTY26OCT23200CE"),
-            t + timedelta(minutes=1),
-        )
+        new_ce = "NFO:NIFTY26OCT23200CE"
+        recorder.record("snapshot", _snapshot(new_ce), t + timedelta(minutes=1))
+        if rotated_quotes:
+            for symbol in (new_ce, PE, FUT, "NSE:NIFTY 50"):
+                tick = _tick(symbol, full=True)
+                if symbol == new_ce and not rotated_ce_depth:
+                    tick.pop("depth")
+                recorder.record("tick", tick, t + timedelta(minutes=1, seconds=1))
     recorder.close()
     return tmp_path / "2026-10-21.jsonl"
 
@@ -87,9 +100,52 @@ def test_no_depth_is_reported_not_reshaped_into_executable_fill(tmp_path):
     assert report["account_pnl"] is None
 
 
-def test_dynamic_basket_is_recorded_and_rejects_single_basket_parity(tmp_path):
+def test_dynamic_basket_without_new_quote_context_is_blocked(tmp_path):
     report = audit_session(_record(tmp_path, changed=True))
     assert report["basket_versions"] == 2
+    assert not report["observed_selected_context_available"]
+
+
+def test_complete_rotated_baskets_pass_strict_per_basket_quote_fidelity(tmp_path):
+    report = audit_session(_record(tmp_path, changed=True, rotated_quotes=True))
+
+    assert report["basket_versions"] == 2
+    assert report["basket_segments"] == 2
+    assert report["basket_segments_with_quote_context"] == 2
+    assert report["observed_selected_context_available"]
+    assert report["basket_segments_missing_quote_context"] == 0
+    # A successful tape audit still does not establish executable fill parity.
+    assert not report["promotion_eligible"]
+    assert not report["live_equivalent"]
+
+
+def test_repeated_same_basket_snapshot_reuses_verified_quote_segment(tmp_path):
+    report = audit_session(_record(tmp_path, redundant_snapshot=True))
+
+    assert report["snapshot_count"] == 2
+    assert report["basket_versions"] == 1
+    assert report["basket_segments"] == 1
+    assert report["basket_segments_with_quote_context"] == 1
+    assert report["observed_selected_context_available"]
+
+
+def test_rotated_basket_without_new_quotes_remains_blocked(tmp_path):
+    report = audit_session(_record(tmp_path, changed=True))
+
+    assert report["basket_versions"] == 2
+    assert report["basket_segments_missing_quote_context"] == 1
+    assert not report["observed_selected_context_available"]
+
+
+def test_second_basket_missing_depth_is_not_rescued_by_first_basket(tmp_path):
+    report = audit_session(
+        _record(tmp_path, changed=True, rotated_quotes=True, rotated_ce_depth=False)
+    )
+    assert report["basket_segments_with_quote_context"] == 1
+    assert report["basket_segments_missing_quote_context"] == 1
+    assert report["basket_segments_missing_by_requirement"] == {
+        "CE_no_two_sided_depth": 1
+    }
     assert not report["observed_selected_context_available"]
 
 

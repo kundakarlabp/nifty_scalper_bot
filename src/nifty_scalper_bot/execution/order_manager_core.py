@@ -7,7 +7,7 @@ Runtime role:
   guardrails around each order.
 
 Position in the pipeline:
-    strategies/runner.py -> THIS FILE (order_manager.py)
+    strategies/runner.py -> THIS FILE (order_manager_core.py)
     -> execution/bracket_manager.py / execution/position_manager.py
 
 Owns / does NOT own:
@@ -21,6 +21,14 @@ Safe-edit notes:
   guard/idempotency boundaries and do not introduce a second placement route.
 - order_executor.py is NOT the live path (it is a separate, non-live executor);
   do not confuse the two.
+- Reference midpoints and live entry depth require finite, uncrossed bid/ask
+  evidence; malformed depth quantities cannot bypass entry preflight.
+- Fast fill confirmation accepts only matching broker order identity (when
+  present), positive filled quantity and finite positive execution price.
+- Out-of-order broker statuses cannot reopen terminal orders. Genuine
+  additional cumulative fills still reach position and protection owners.
+- Impossible cumulative quantities are quarantined before lifecycle mutations;
+  the existing entry gate stays blocked pending broker reconciliation.
 """
 
 from __future__ import annotations
@@ -57,7 +65,11 @@ import nifty_scalper_bot.config.settings as app_settings
 from nifty_scalper_bot.config.paths import get_data_dir
 from nifty_scalper_bot.core.active_basket import active_contract_selection_from_basket
 from nifty_scalper_bot.core.signal_arbitrator import SignalArbitrator
-from nifty_scalper_bot.core.trading_switch import TradingSwitchState, trading_switch
+from nifty_scalper_bot.core.trading_switch import (
+    TradingSwitchState,
+    live_entry_submission_slot,
+    trading_switch,
+)
 from nifty_scalper_bot.data.bracket_store import BracketStore
 from nifty_scalper_bot.data.data_hub import DataHub
 from nifty_scalper_bot.data.persistent_state import (
@@ -247,7 +259,14 @@ def _mid(bid: float | None, ask: float | None) -> float | None:
         None.
     """
 
-    if bid is None or ask is None or bid <= 0 or ask <= 0:
+    if (
+        bid is None
+        or ask is None
+        or not math.isfinite(bid)
+        or not math.isfinite(ask)
+        or bid <= 0
+        or ask <= bid
+    ):
         return None
     return (bid + ask) / 2.0
 
@@ -1696,6 +1715,13 @@ class OrderManager:
                     bracket_manager.set_notifier(self._notify_bracket_event)
                 if hasattr(bracket_manager, "attach_exit_executor"):
                     bracket_manager.attach_exit_executor(self.exit_position)
+                # A restored canonical owner supersedes any pre-existing
+                # legacy direct-broker trailing controller for that symbol.
+                for entry_id, (controller, _) in list(
+                    getattr(self, "_trailing", {}).items()
+                ):
+                    if bracket_manager.is_symbol_managed(controller.symbol):
+                        self.stop_trailing(entry_id)
                 self._logger.info(
                     "Bracket manager attached to order manager",
                     extra={"event": "order_manager.bracket_manager_attached"},
@@ -1838,12 +1864,34 @@ class OrderManager:
         spec: TrailingSpec,
         variety: str = "regular",
     ) -> str:
-        """Attach a trailing stop controller to an existing bracket order."""
+        """Attach a legacy trailing controller only for legacy-owned orders.
+
+        Canonical BracketManager already owns every virtual stop, broker
+        ratchet and protection proof for its symbols. A second market-data
+        listener with direct broker.modify_order access must never coexist.
+        """
 
         if not entry_order_id:
             raise ValueError("entry_order_id is required for trailing stops")
         if not sl_order_id:
             raise ValueError("sl_order_id is required for trailing stops")
+        canonical = self._bracket_manager
+        if canonical is not None and canonical.is_symbol_managed(symbol):
+            # Also detach any older legacy listener when canonical ownership
+            # was acquired after the listener was originally registered.
+            self.stop_trailing(entry_order_id)
+            self._logger.info(
+                "LEGACY_TRAILING_SKIPPED_CANONICAL_OWNER symbol=%s entry_id=%s",
+                symbol,
+                entry_order_id,
+                extra={"event": "LEGACY_TRAILING_SKIPPED_CANONICAL_OWNER"},
+            )
+            return entry_order_id
+        prior = self._trailing.get(entry_order_id)
+        if prior is not None:
+            if str(getattr(prior[0], "order_id", "")) == str(sl_order_id):
+                return entry_order_id
+            self.stop_trailing(entry_order_id)
         if self._market_data is None:
             raise RuntimeError(
                 "MarketDataManager must be configured before attaching trailing stops"
@@ -1907,9 +1955,17 @@ class OrderManager:
         def _listener(tick: dict[str, Any]) -> None:
             controller.on_tick(tick)
 
-        md.subscribe(symbol, _listener)
+        # Use the single DataHub/MDM subscription route so cleanup targets the
+        # SAME callback provider; a direct md.subscribe() leaked callbacks
+        # whenever DataHub was also configured.
+        if not self._subscribe_market_callback(symbol, _listener):
+            raise RuntimeError("Market-data tick subscription unavailable")
         self._trailing[entry_order_id] = (controller, _listener)
-        controller.on_tick(None)
+        try:
+            controller.on_tick(None)
+        except Exception:
+            self.stop_trailing(entry_order_id)
+            raise
         return entry_order_id
 
     def attach_dynamic_tp(
@@ -1979,9 +2035,7 @@ class OrderManager:
             return False
         controller, callback = record
         try:
-            hub = self._data_hub or self._market_data
-            if hub is not None:
-                hub.unsubscribe(controller.symbol, callback)
+            self._unsubscribe_market_callback(controller.symbol, callback)
             self._trailing_journal.delete(controller.order_id)
         except Exception as exc:
             self._logger.warning(
@@ -4455,7 +4509,7 @@ class OrderManager:
         def _safe_int(value: object, default: int = 0) -> int:
             try:
                 return int(float(value))
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 return default
 
         bid = _safe_float(
@@ -4689,7 +4743,7 @@ class OrderManager:
         LTP-only quote with bid=0/ask=0 and no depth passed straight through to
         the broker. Returns None when the quote is fully proven.
         """
-        if qd["bid"] <= 0 or qd["ask"] < qd["bid"]:
+        if qd["bid"] <= 0 or qd["ask"] <= qd["bid"]:
             return OrderPreflightResult(
                 False,
                 "entry_bid_ask_missing",
@@ -7728,6 +7782,71 @@ class OrderManager:
             return
         self.apply_broker_order_update(str(order_id), order_update)
 
+    def _is_stale_broker_order_update(
+        self, order: OrderDetails, payload: Mapping[str, Any]
+    ) -> bool:
+        """Ignore regressive or impossible broker updates before any lifecycle mutation.
+
+        Invalid cumulative fills must not advance order/protection accounting.
+        Preserve the existing entry-reconciliation blocker for operator review.
+        """
+        previous_status = order.status
+        incoming_status = self._parse_status(payload.get("status"))
+        raw_quantity = payload.get("filled_quantity")
+        incoming_quantity = 0
+        if raw_quantity is not None and raw_quantity != "":
+            try:
+                numeric_quantity = float(raw_quantity)
+            except (TypeError, ValueError, OverflowError):
+                numeric_quantity = math.nan
+            requested_quantity = int(getattr(order, "quantity", 0) or 0)
+            if (
+                not math.isfinite(numeric_quantity)
+                or numeric_quantity < 0
+                or not numeric_quantity.is_integer()
+                or numeric_quantity > requested_quantity
+            ):
+                blocker = getattr(self, "_entry_lifecycle_blocker", None)
+                if not isinstance(blocker, Mapping):
+                    blocker = {
+                        "block_reason": "broker_fill_quantity_reconciliation_required",
+                        "broker_attempted": True,
+                        "details": {
+                            "order_id": order.order_id,
+                            "symbol": order.symbol,
+                            "requested_quantity": requested_quantity,
+                            "reported_filled_quantity": (
+                                numeric_quantity
+                                if math.isfinite(numeric_quantity)
+                                else None
+                            ),
+                        },
+                    }
+                    self._entry_lifecycle_blocker = blocker
+                    self._last_order_decision = blocker
+                    self._logger.critical(
+                        "BROKER_FILL_QUANTITY_RECONCILIATION_REQUIRED "
+                        "order_id=%s requested=%s reported=%s",
+                        order.order_id,
+                        requested_quantity,
+                        blocker["details"]["reported_filled_quantity"],
+                        extra={
+                            "event": "BROKER_FILL_QUANTITY_RECONCILIATION_REQUIRED",
+                            "order_id": order.order_id,
+                            "symbol": order.symbol,
+                        },
+                    )
+                return True
+            incoming_quantity = int(numeric_quantity)
+        previous_quantity = int(getattr(order, "filled_quantity", 0) or 0)
+        if incoming_quantity > previous_quantity:
+            return False
+        if previous_status in self.FINAL_STATUSES:
+            return incoming_status != previous_status
+        if previous_status == OrderStatus.PARTIALLY_FILLED:
+            return incoming_status in {OrderStatus.PENDING, OrderStatus.SUBMITTED}
+        return False
+
     def _apply_broker_order_update(
         self, order_update: dict[str, Any]
     ) -> OrderDetails | None:
@@ -7843,10 +7962,23 @@ class OrderManager:
             # -----------------------------------------------------
             # 🔄 STATE SYNCHRONIZATION
             # -----------------------------------------------------
+            if self._is_stale_broker_order_update(order, order_update):
+                self._logger.debug(
+                    "BROKER_STALE_ORDER_UPDATE_IGNORED order_id=%s status=%s",
+                    order_id,
+                    status_raw,
+                )
+                return None
             old_status = order.status
             new_status = self._parse_status(status_raw)
-
-            order.status = new_status
+            # A later cumulative fill does not make a cancelled/rejected
+            # order open again. Preserve the terminal order status while
+            # processing the extra execution through the existing owners.
+            if old_status in self.FINAL_STATUSES:
+                new_status = old_status
+            elif old_status == OrderStatus.PARTIALLY_FILLED:
+                if new_status in {OrderStatus.PENDING, OrderStatus.SUBMITTED}:
+                    new_status = old_status
             incoming_filled_quantity = max(
                 0, int(float(order_update.get("filled_quantity", 0) or 0))
             )
@@ -7859,6 +7991,15 @@ class OrderManager:
             broker_filled_quantity = max(
                 previous_broker_filled, incoming_filled_quantity
             )
+            # OPEN may carry an executed partial fill before the broker emits
+            # PARTIALLY_FILLED. Protect the exposure without inventing COMPLETE.
+            if (
+                old_status not in self.FINAL_STATUSES
+                and new_status in {OrderStatus.PENDING, OrderStatus.SUBMITTED}
+                and broker_filled_quantity > 0
+            ):
+                new_status = OrderStatus.PARTIALLY_FILLED
+            order.status = new_status
             order.filled_quantity = broker_filled_quantity
 
             # Update Price: Prefer actual fill price ('average_price')
@@ -7872,12 +8013,10 @@ class OrderManager:
             # ✅ FILL PROCESSING (Trigger Stop Loss / Target)
             # -----------------------------------------------------
             fill_delta = max(0, broker_filled_quantity - applied_filled_quantity)
-            is_fill_update = status_raw in [
-                "PARTIALLY FILLED",
-                "PARTIAL",
-                "COMPLETE",
-                "FILLED",
-            ] and fill_delta > 0
+            is_fill_update = fill_delta > 0 and (
+                new_status in self.FINAL_STATUSES
+                or new_status == OrderStatus.PARTIALLY_FILLED
+            )
 
             if is_fill_update or (adopted and order.filled_quantity > 0):
                 self._logger.info(
@@ -7896,7 +8035,7 @@ class OrderManager:
                             order.order_id,
                             {
                                 **order_update,
-                                "status": status_raw,
+                                "status": order.status.name,
                                 "average_price": order.fill_price,
                                 "filled_quantity": order.filled_quantity,
                             },
@@ -8558,6 +8697,19 @@ class OrderManager:
                     backoff_ms = min(backoff_ms * 1.5, max_backoff_ms)
                     continue
 
+                # A broker response for another order must never confirm or
+                # transition the order currently being checked.
+                response_order_id = str(status.get("order_id") or "").strip()
+                if response_order_id and response_order_id != str(order_id):
+                    self._logger.warning(
+                        "BROKER_FILL_IDENTITY_MISMATCH requested=%s returned=%s",
+                        order_id,
+                        response_order_id,
+                    )
+                    time.sleep(backoff_ms / 1000.0)
+                    backoff_ms = min(backoff_ms * 1.5, max_backoff_ms)
+                    continue
+
                 status_text = str(status.get("status") or "").strip().upper()
                 if status_text in {"COMPLETE", "FILLED"}:
                     try:
@@ -8568,7 +8720,7 @@ class OrderManager:
                                 or 0
                             )
                         )
-                    except (TypeError, ValueError):
+                    except (TypeError, ValueError, OverflowError):
                         filled_qty = 0
                     try:
                         fill_price = float(
@@ -8579,7 +8731,7 @@ class OrderManager:
                         )
                     except (TypeError, ValueError):
                         fill_price = 0.0
-                    if filled_qty > 0 and fill_price > 0:
+                    if filled_qty > 0 and math.isfinite(fill_price) and fill_price > 0:
                         payload = dict(status)
                         payload["filled_quantity"] = filled_qty
                         payload["average_price"] = fill_price
@@ -12112,7 +12264,8 @@ class OrderManager:
                 self._logger.debug("broker_order_attempt_metric_failed", exc_info=True)
             try:
                 # [FIX] Unpack payload so Broker Client receives named arguments
-                response = self._call_broker(self._broker.place_order, **payload)
+                with live_entry_submission_slot(payload):
+                    response = self._call_broker(self._broker.place_order, **payload)
             except RateLimitError as exc:
                 last_error = exc
                 break
@@ -12589,19 +12742,36 @@ class OrderManager:
         self, order: OrderDetails, payload: dict[str, Any]
     ) -> OrderDetails:
         with self._lock:
+            if self._is_stale_broker_order_update(order, payload):
+                return order
             previous_status = order.status
+            previous_filled = int(order.filled_quantity or 0)
             status = self._parse_status(payload.get("status"))
             filled_qty = (
                 self._coerce_int(payload.get("filled_quantity"))
                 or order.filled_quantity
             )
+            filled_qty = max(filled_qty, previous_filled)
+            if previous_status in self.FINAL_STATUSES:
+                status = previous_status
+            elif previous_status == OrderStatus.PARTIALLY_FILLED:
+                if status in {OrderStatus.PENDING, OrderStatus.SUBMITTED}:
+                    status = previous_status
 
             average_price = payload.get("average_price") or payload.get("averagePrice")
             message = payload.get("status_message") or payload.get("message")
 
             order.status = status
             order.filled_quantity = filled_qty
-            if filled_qty >= order.quantity and status != OrderStatus.CANCELLED:
+            if filled_qty > previous_filled and average_price is not None:
+                latest_average = self._coerce_float(average_price)
+                if latest_average and math.isfinite(latest_average):
+                    order.fill_price = latest_average
+            if filled_qty >= order.quantity and status not in {
+                OrderStatus.CANCELLED,
+                OrderStatus.REJECTED,
+                OrderStatus.EXPIRED,
+            }:
                 order.status = OrderStatus.FILLED
             elif 0 < filled_qty < order.quantity and status not in self.FINAL_STATUSES:
                 order.status = OrderStatus.PARTIALLY_FILLED
@@ -12614,9 +12784,25 @@ class OrderManager:
                 order.rejection_reason = message
 
             self._register_order(order)
-            self._positions.update_order_status(
-                order.order_id, order.status.name, order.fill_price
-            )
+            if (
+                filled_qty > int(getattr(order, "applied_filled_quantity", 0) or 0)
+                and previous_status in self.FINAL_STATUSES
+                and hasattr(self._positions, "apply_broker_order_update")
+            ):
+                self._positions.apply_broker_order_update(
+                    order.order_id,
+                    {
+                        **payload,
+                        "status": order.status.name,
+                        "filled_quantity": filled_qty,
+                        "average_price": order.fill_price or average_price,
+                    },
+                )
+                order.applied_filled_quantity = filled_qty
+            else:
+                self._positions.update_order_status(
+                    order.order_id, order.status.name, order.fill_price
+                )
 
         self._publish_order_to_hub(order, payload)
         self._sync_positions_to_hub()
@@ -14348,7 +14534,13 @@ class OrderManager:
                 if entry_id in self._trailing or state.remaining_position() <= 0:
                     continue
 
-                # Check if this bracket HAD a trailing spec
+                # Canonical BracketManager restores its own trailing state.
+                # Never resurrect the legacy broker-modifying controller on
+                # top of that live owner.
+                if self._bracket_manager and self._bracket_manager.is_symbol_managed(
+                    state.symbol
+                ):
+                    continue
                 if not state.trailing_spec:
                     continue
 
@@ -14444,12 +14636,14 @@ class OrderManager:
                     if broker_sym in recently_handled:
                         continue
 
-                    recently_handled.add(broker_sym)
-                    self._recent_orphans = recently_handled
-
+                    # The canonical BracketManager owns both active and
+                    # pending-entry lifecycles. A legacy OrderManager bracket
+                    # map is not proof of missing protection. Do not mark
+                    # managed broker exposure as an orphan in the dedup set:
+                    # if ownership later disappears, true recovery must work.
                     if (
                         self._bracket_manager
-                        and self._bracket_manager.has_active_bracket(broker_sym)
+                        and self._bracket_manager.is_symbol_managed(broker_sym)
                     ):
                         continue
 
@@ -14507,8 +14701,13 @@ class OrderManager:
                                     break
 
                     if is_active_locally:
-                        # self._logger.debug(f"⏳ Skipping Orphan Check for {broker_sym} (Busy)")
+                        # An in-flight entry or recent fill can acquire its
+                        # canonical bracket on the next reconciliation. Do not
+                        # latch it as an orphan before that can happen.
                         continue
+
+                    recently_handled.add(broker_sym)
+                    self._recent_orphans = recently_handled
 
                     # If we get here, it is a TRUE Orphan (Manual/Old trade)
                     self._logger.warning(
@@ -14588,18 +14787,19 @@ class OrderManager:
                 # CASE C: Perfect Match... BUT IS IT SAFE? (The Missing Link)
                 elif broker_positions[lsym]["qty"] == pos.quantity:
                     self._missing_counts[lsym] = 0
-                    # 1. Check if a bracket is actually managing this symbol
-                    is_managed = False
-                    if self._bracket_manager:
-                        # Fast check: Does bracket manager know this order ID or symbol?
-                        # We iterate because bracket ID != Position ID usually
-                        with self._lock:
-                            for b in self._brackets.values():
-                                if b.symbol == lsym and b.active:
-                                    is_managed = True
-                                    break
+                    # Only the canonical bracket lifecycle owns virtual stops,
+                    # pending entries, and broker SL evidence. OrderManager's
+                    # legacy self._brackets may be empty for a fully managed
+                    # trade; using it here falsely emitted "Naked Position"
+                    # every 15 seconds and repeatedly entered orphan recovery.
+                    # Ownership is distinct from broker-confirmed stop proof:
+                    # the BracketManager enforces that separately, fail-closed.
+                    is_managed = bool(
+                        self._bracket_manager
+                        and self._bracket_manager.is_symbol_managed(lsym)
+                    )
 
-                    # 2. If not managed, WE MUST ADOPT IT NOW
+                    # Only genuinely unmanaged broker exposure needs rescue.
                     if not is_managed:
                         self._logger.warning(
                             f"🛡️ Naked Position Detected (Qty Match): {lsym}. Forcing Guard...",

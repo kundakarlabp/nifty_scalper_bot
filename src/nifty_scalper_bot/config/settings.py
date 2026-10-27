@@ -1,17 +1,12 @@
-"""Runtime settings facade used by hardened infrastructure components.
+"""Purpose: Provide shared, validated trading runtime configuration.
 
-This module centralises environment driven configuration so that new
-infrastructure additions – resilient streaming, safe order routing,
-risk management gates, notifications, health endpoints and structured
-logging – can share a common source of truth.  The legacy configuration
-models under :mod:`nifty_scalper_bot.config.base` are still used for the
-core trading stack; ``Settings`` simply wraps the existing
-``AppConfig`` while exposing new knobs required by the refactor.
+Responsibilities:
+- Settings groups execution, risk, streaming and instrument options.
+- get_settings exposes the runtime facade over configured inputs.
+- Centralize effective defaults, environment parsing and safe startup provenance.
 
-The implementation intentionally avoids additional dependencies (for
-example ``pydantic-settings``) so that the production footprint remains
-unchanged.  All parsing helpers perform strict validation and provide
-clear error messages to ease troubleshooting in Railway deployments.
+Boundaries: Configuration does not itself authorize a live order.
+Safety: Final LIVE-mode and risk authorization remain with owning gates.
 """
 
 from __future__ import annotations
@@ -28,6 +23,7 @@ from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from nifty_scalper_bot.analytics.regime_gate import RegimeGateConfig
+from nifty_scalper_bot.config import defaults
 from nifty_scalper_bot.config.base import AppConfig
 from nifty_scalper_bot.config.env import load_from_env
 from nifty_scalper_bot.config.env_utils import normalise_live_env_defaults
@@ -66,43 +62,64 @@ OPTION_HISTORY_WARM_CACHE_SIZE: int = 5
 
 
 def _ensure_env_loaded_before_settings() -> None:
-    """Load .env file before any settings are built.
+    """Resolve exactly one source, normalize once, and log safe effective state.
 
-    ✅ CRITICAL FIX: This MUST run at import time!
-
-    Problem: Python imports settings.py which calls _build_order_settings()
-    at module level. If load_dotenv() hasn't run yet, os.getenv("ENABLE_LIVE")
-    returns None, and the bot starts in SHADOW mode.
-
-    Solution: Load .env here, before any settings classes are built.
+    Systemd variables take precedence over the protected operator file.
+    Production never discovers a repository .env if the configured source
+    is absent. Only fixed source labels and validated mode booleans are logged.
     """
     from dotenv import load_dotenv
 
-    search_paths = [
-        Path.cwd() / ".env",
-        Path("/app/.env"),
-        Path(__file__).resolve().parent.parent.parent / ".env",  # src/../.env
-        Path(__file__).resolve().parent.parent / ".env",
-    ]
-
-    for env_path in search_paths:
-        try:
-            if env_path.exists() and env_path.is_file():
+    canonical = os.getenv("BOT_ENV_FILE")
+    production = (
+        os.getenv("DEPLOYMENT_PLATFORM") or ""
+    ).strip().lower() == "aws_lightsail"
+    source = "environment"
+    if canonical:
+        path = Path(canonical).expanduser()
+        if production and not path.is_absolute():
+            source = "operator_env_relative"
+            LOGGER.error("CONFIG_SOURCE_RELATIVE_FAIL_CLOSED")
+            os.environ["ENABLE_LIVE"] = "false"
+            os.environ["EXECUTION_MODE"] = "SHADOW"
+        elif path.is_file():
+            load_dotenv(dotenv_path=str(path), override=False)
+            source = "operator_env_file"
+        else:
+            source = "operator_env_missing"
+            LOGGER.error("CONFIG_SOURCE_MISSING_FAIL_CLOSED")
+            os.environ["ENABLE_LIVE"] = "false"
+            os.environ["EXECUTION_MODE"] = "SHADOW"
+    elif production:
+        # No repo/cwd fallback may authorize orders on an unconfigured host.
+        source = "production_env_missing"
+        LOGGER.error("CONFIG_SOURCE_UNSET_FAIL_CLOSED")
+        os.environ["ENABLE_LIVE"] = "false"
+        os.environ["EXECUTION_MODE"] = "SHADOW"
+    else:
+        search_paths = [
+            Path.cwd() / ".env",
+            Path("/app/.env"),
+            Path(__file__).resolve().parent.parent.parent / ".env",
+            Path(__file__).resolve().parent.parent / ".env",
+        ]
+        for env_path in search_paths:
+            if env_path.is_file():
                 load_dotenv(dotenv_path=str(env_path), override=False)
-                normalise_live_env_defaults()
-                enable_live = os.getenv("ENABLE_LIVE", "NOT_SET")
-                print(f"[SETTINGS] Loaded .env from {env_path}", flush=True)
-                print(f"   ENABLE_LIVE={enable_live}", flush=True)
-                return
-        except Exception as e:
-            print(f"[SETTINGS] Error loading {env_path}: {e}", flush=True)
-            continue
-
-    # Fallback
-    load_dotenv(override=False)
-    print("[SETTINGS] No .env found, using system environment", flush=True)
+                source = "development_dotenv"
+                break
+        else:
+            load_dotenv(override=False)
 
     normalise_live_env_defaults()
+    # Source labels are static: never emit a path, token, credential, or raw
+    # host environment value to journald or remote archived logs.
+    LOGGER.warning(
+        "CONFIG_EFFECTIVE_PROFILE source=%s mode=%s live_orders=%s",
+        source,
+        os.environ["EXECUTION_MODE"],
+        os.environ["ORDERS__ENABLE_LIVE"],
+    )
 
 
 # ✅ EXECUTE IMMEDIATELY when settings.py is imported
@@ -748,10 +765,10 @@ class OrderSettings:
 class RiskSettings:
     """Risk guardrails enforced before routing live orders."""
 
-    daily_loss_pct: float = 2.0
-    daily_pnl_cap_pct: float = 2.0
+    daily_loss_pct: float = float(defaults.DEFAULT_LIVE_DAILY_LOSS_PCT)
+    daily_pnl_cap_pct: float = float(defaults.DEFAULT_LIVE_DAILY_LOSS_PCT)
     max_daily_loss_absolute: float = 0.0
-    per_trade_risk_pct: float = 0.75
+    per_trade_risk_pct: float = float(defaults.DEFAULT_LIVE_PER_TRADE_RISK_PCT)
     per_trade_cap_pct: float = 25.0
     max_consecutive_losses: int = 3
     max_trades_per_day: int = 6  # enforced by RiskManager failsafe; 0 = unlimited
@@ -1191,7 +1208,11 @@ def _build_order_settings() -> OrderSettings:
 
 
 def _build_risk_settings() -> RiskSettings:
-    daily_loss_pct = _env_float("RISK_DAILY_LOSS_PCT", default=2.0, minimum=0.0)
+    daily_loss_pct = _env_float(
+        "RISK_DAILY_LOSS_PCT",
+        default=float(defaults.DEFAULT_LIVE_DAILY_LOSS_PCT),
+        minimum=0.0,
+    )
     abs_loss_cap = _env_float(
         "RISK__MAX_DAY_LOSS", "RISK_MAX_DAY_LOSS", default=0.0, minimum=0.0
     )
@@ -1230,7 +1251,7 @@ def _build_risk_settings() -> RiskSettings:
         per_trade_risk_pct=_env_float(
             "RISK__PER_TRADE_RISK_PCT",
             "RISK_PER_TRADE_PCT",
-            default=0.75,
+            default=float(defaults.DEFAULT_LIVE_PER_TRADE_RISK_PCT),
             minimum=0.0,
         ),
         per_trade_cap_pct=_env_float(
