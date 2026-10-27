@@ -304,7 +304,7 @@ def analyze(log_text: str, *, window_seconds: int = 120) -> dict[str, Any]:
         # Each sample must match the setup, option, version and same-second
         # trigger. These are indicator-book observations, not executable quotes.
         matched_quote_samples = {
-            (sample_at, sample_version, state)
+            (book_at, version, state)
             for sid, sym, book_at, version, state in quote_samples
             if sid == setup_id
             and sym == symbol
