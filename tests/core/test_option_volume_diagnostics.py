@@ -90,3 +90,83 @@ def test_nonfinite_quote_volume_is_not_logged_as_legitimate_volume() -> None:
     )
     assert out["quote_volume_cumulative"] is None
     assert out["quote_volume_delta"] is None
+
+def test_finalized_candle_parity_matches_aware_timestamps_and_volume() -> None:
+    from datetime import timedelta
+
+    indicator = _bar(150.0)
+    canonical = {
+        "timestamp": datetime(2026, 10, 27, 14, 0, tzinfo=timezone(timedelta(hours=5, minutes=30))),
+        "volume": 150.0,
+    }
+    out = describe_option_volume_evidence(
+        {"volume": 0.0},
+        latest_bar=_bar(0.0, complete=False, provisional=True),
+        indicator_completed_bar=indicator,
+        canonical_completed_bar=canonical,
+    )
+    assert out["state"] == "unfinalized_history_tail"
+    assert out["completed_bar_parity"] == "same_minute_volume_match"
+    assert out["indicator_completed_ts"] == "2026-10-27T08:30:00+00:00"
+    assert out["canonical_completed_ts"] == out["indicator_completed_ts"]
+
+
+def test_finalized_candle_volume_mismatch_same_minute_is_detected() -> None:
+    out = describe_option_volume_evidence(
+        {"volume": 0.0},
+        latest_bar=_bar(0.0),
+        indicator_completed_bar=_bar(0.0),
+        canonical_completed_bar=_bar(125.0),
+    )
+    assert out["completed_bar_parity"] == "same_minute_volume_mismatch"
+    assert out["indicator_completed_volume"] == 0.0
+    assert out["canonical_completed_volume"] == 125.0
+
+
+def test_mismatched_minutes_are_not_a_volume_mismatch() -> None:
+    old = _bar(0.0)
+    recent = {
+        **_bar(125.0),
+        "timestamp": datetime(2026, 10, 27, 8, 31, tzinfo=timezone.utc),
+    }
+    out = describe_option_volume_evidence(
+        {"volume": 0.0},
+        indicator_completed_bar=old,
+        canonical_completed_bar=recent,
+    )
+    assert out["completed_bar_parity"] == "different_completed_minutes"
+
+
+def test_missing_completed_candle_is_indeterminate_not_match() -> None:
+    out = describe_option_volume_evidence(
+        {"volume": 0.0},
+        latest_bar=_bar(0.0),
+        canonical_completed_bar=_bar(0.0),
+    )
+    assert out["completed_bar_parity"] == "missing_or_invalid_completed_timestamp"
+    assert out["indicator_completed_volume"] is None
+
+
+def test_naive_timestamp_is_not_silently_assumed_utc() -> None:
+    out = describe_option_volume_evidence(
+        {"volume": 0.0},
+        indicator_completed_bar={
+            "timestamp": "2026-10-27T08:30:00",
+            "volume": 0.0,
+        },
+        canonical_completed_bar=_bar(0.0),
+    )
+    assert out["completed_bar_parity"] == "missing_or_invalid_completed_timestamp"
+
+
+def test_equal_minute_missing_volume_is_unknown_not_zero() -> None:
+    out = describe_option_volume_evidence(
+        {"volume": 0.0},
+        indicator_completed_bar={
+            "timestamp": "2026-10-27T08:30:00Z",
+            "volume": None,
+        },
+        canonical_completed_bar=_bar(0.0),
+    )
+    assert out["completed_bar_parity"] == "missing_or_invalid_completed_volume"
+
