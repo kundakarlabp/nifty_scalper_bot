@@ -432,9 +432,7 @@ def test_price_only_tick_never_replays_previous_interval_volume() -> None:
         ("vwap", 24023.75),
     ],
 )
-def test_broker_vwap_survives_both_quote_normalizers(
-    field: str, price: float
-) -> None:
+def test_broker_vwap_survives_both_quote_normalizers(field: str, price: float) -> None:
     mdm = _mdm()
     sym = "NFO:NIFTY26JUN24000CE"
     raw = {
@@ -549,4 +547,3 @@ def test_rest_quote_ingress_persists_real_broker_average_price() -> None:
     assert quote["vwap_source_field"] == "average_price"
     assert quote["volume_cumulative"] == 12000.0
     assert quote["volume_delta"] == 0
-
