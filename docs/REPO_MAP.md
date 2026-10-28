@@ -60,6 +60,7 @@ interfaces, the module header must be reviewed and updated in the same PR.
 
 ### Strategy and market context
 
+- `strategies/runner_liveness.py` — runner-bound worker-liveness snapshots and stall disarming; the runner owns worker and readiness state.
 - `core/strategy_manager.py` — strategy scoring and allocation.
 - `strategies/signal_generator.py` — scored signal production.
 - `strategies/indicators.py` — indicator calculations.
