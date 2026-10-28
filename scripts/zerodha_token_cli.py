@@ -211,100 +211,119 @@ def get_automated_request_token(
 
 def main() -> None:
     ap = argparse.ArgumentParser()
+    ap.add_argument("--env", help="Canonical protected broker environment file")
+    ap.add_argument("--write-env", action="store_true", default=True)
+    ap.add_argument("--request-token", help="One-time Zerodha request token")
     ap.add_argument(
-        "--env",
-        help="Operator env path (BOT_ENV_FILE in production; .env in development)",
-    )
-    ap.add_argument(
-        "--write-env",
+        "--recover-saved-token",
         action="store_true",
-        default=True,
-        help="Write access tokens to the environment file",
+        help="Reverify today's already-saved token and queue the guarded restart",
     )
-    ap.add_argument("--request-token", help="Provide request_token manually to skip login")
     args = ap.parse_args()
+    if args.recover_saved_token and args.request_token:
+        ap.error("choose either --recover-saved-token or --request-token")
 
     try:
         env_path = resolve_token_env_path(args.env)
     except ValueError as exc:
-        print(f"Token helper configuration refused: {exc}", file=sys.stderr)
-        sys.exit(2)
+        sys.exit(f"Token helper configuration refused: {exc}")
     if env_path.is_file():
-        load_dotenv(env_path, override=False)
+        # The protected host file, not stale interactive-shell exports, owns credentials.
+        load_dotenv(env_path, override=True)
 
-    # Load API Credentials
     api_key = (
-        os.getenv("ZERODHA_API_KEY")
+        os.getenv("BROKER_API_KEY")
+        or os.getenv("ZERODHA_API_KEY")
         or os.getenv("KITE_API_KEY")
-        or os.getenv("BROKER_API_KEY")
     )
     api_secret = (
-        os.getenv("ZERODHA_API_SECRET")
+        os.getenv("BROKER_API_SECRET")
+        or os.getenv("ZERODHA_API_SECRET")
         or os.getenv("KITE_API_SECRET")
-        or os.getenv("BROKER_API_SECRET")
     )
-    
     if not api_key or not api_secret:
-        print("❌ Error: ZERODHA_API_KEY and ZERODHA_API_SECRET must be configured in environment or .env file.", file=sys.stderr)
-        sys.exit(1)
+        sys.exit("Broker API key/secret missing from protected environment")
+    if len({os.getenv(k) for k in ("BROKER_API_KEY", "ZERODHA_API_KEY", "KITE_API_KEY") if os.getenv(k)}) > 1:
+        sys.exit("Conflicting broker API-key aliases; refusing session rotation")
+    if len({os.getenv(k) for k in ("BROKER_API_SECRET", "ZERODHA_API_SECRET", "KITE_API_SECRET") if os.getenv(k)}) > 1:
+        sys.exit("Conflicting broker API-secret aliases; refusing session rotation")
 
-    request_token = args.request_token
-
-    # Check for automated login credentials if request_token wasn't passed directly
-    if not request_token:
-        user_id = os.getenv("ZERODHA_USER_ID") or os.getenv("KITE_USER_ID")
-        password = os.getenv("ZERODHA_PASSWORD") or os.getenv("KITE_PASSWORD")
-        totp_secret = os.getenv("ZERODHA_TOTP_SECRET") or os.getenv("KITE_TOTP_SECRET")
-        
-        if user_id and password and totp_secret:
-            request_token = get_automated_request_token(user_id, password, totp_secret, api_key)
+    kite = KiteConnect(api_key=api_key)
+    if args.recover_saved_token:
+        access_token = (
+            os.getenv("BROKER_ACCESS_TOKEN")
+            or os.getenv("ZERODHA_ACCESS_TOKEN")
+            or os.getenv("KITE_ACCESS_TOKEN")
+        )
+        if not access_token:
+            sys.exit("No saved broker access token available to recover")
+    else:
+        request_token = args.request_token
+        if not request_token:
+            user_id = os.getenv("ZERODHA_USER_ID") or os.getenv("KITE_USER_ID")
+            password = os.getenv("ZERODHA_PASSWORD") or os.getenv("KITE_PASSWORD")
+            totp_secret = os.getenv("ZERODHA_TOTP_SECRET") or os.getenv("KITE_TOTP_SECRET")
+            if user_id and password and totp_secret:
+                request_token = get_automated_request_token(user_id, password, totp_secret, api_key)
             if not request_token:
-                print("⚠️ Automated login failed. Falling back to manual mode...", file=sys.stderr)
-        else:
-            print("ℹ️ Automated login credentials not complete (needs USER_ID, PASSWORD, and TOTP_SECRET).")
-
-    # Manual fallback
-    if not request_token:
-        kite = KiteConnect(api_key=api_key)
-        login_url = kite.login_url()
-        print("\n=== MANUAL LOGIN REQUIRED ===")
-        print("1. Open this URL in your web browser:")
-        print(f"   {login_url}")
-        print("2. Login and complete the 2FA on the Zerodha page.")
-        print("3. You will be redirected to an address (e.g. 127.0.0.1:8000/?status=success&request_token=xyz).")
+                print("Open the official Zerodha login URL:", kite.login_url())
+                request_token = input("Enter the one-time request token: ").strip()
+        if not request_token:
+            sys.exit("No request token supplied")
         try:
-            request_token = input("4. Enter the 'request_token' parameter value: ").strip()
-        except KeyboardInterrupt:
-            print("\nAborted.")
-            sys.exit(1)
+            access_token = kite.generate_session(
+                request_token, api_secret=api_secret
+            ).get("access_token")
+        except Exception as exc:
+            sys.exit(f"Zerodha session exchange failed: {type(exc).__name__}")
+        if not access_token:
+            sys.exit("Zerodha did not return an access token")
 
-    if not request_token:
-        print("❌ Error: No request token supplied.", file=sys.stderr)
-        sys.exit(1)
-
-    # 4. Exchange Request Token for Access Token
-    print("Exchanging request token for session...")
+    # A successful token exchange alone is not sufficient. Authenticate the
+    # actual runtime API key and owner's broker account before persisting proof.
+    kite.set_access_token(access_token)
     try:
-        kite = KiteConnect(api_key=api_key)
-        session_data = kite.generate_session(request_token, api_secret=api_secret)
+        profile = kite.profile()
+        verified_user = str(profile.get("user_id") or "").strip()
+        if not verified_user:
+            raise ValueError("missing broker owner")
+        production = os.getenv("DEPLOYMENT_PLATFORM", "").strip().lower() == "aws_lightsail"
+        expected_owner = (
+            os.getenv("ADMIN_ZERODHA_USER_ID")
+            or os.getenv("ZERODHA_USER_ID")
+            or os.getenv("KITE_USER_ID")
+            or ""
+        ).strip()
+        if production and (not expected_owner or not __import__("hmac").compare_digest(verified_user, expected_owner)):
+            raise ValueError("owner account mismatch")
+        segment = os.getenv("BROKER_MARGIN_SEGMENT", "equity").strip().lower()
+        if segment not in {"equity", "commodity"}:
+            raise ValueError("invalid broker margin segment")
+        margins = kite.margins(segment)
+        available = margins.get("available") if isinstance(margins, dict) else None
+        if not isinstance(available, dict) or not any(
+            available.get(k) is not None for k in ("cash", "live_balance")
+        ):
+            raise ValueError("broker balance not verifiable")
     except Exception as exc:
-        print(f"❌ Failed to exchange request token with Zerodha: {exc}", file=sys.stderr)
-        sys.exit(1)
+        sys.exit(f"Saved session not verified: {type(exc).__name__}")
 
-    access_token = session_data.get("access_token")
-    if not access_token:
-        print("❌ Error: Zerodha session generation did not return an access token.", file=sys.stderr)
-        sys.exit(1)
+    print("Zerodha owner and broker funds verified; no credentials displayed.")
+    if not args.write_env:
+        return
+    if production:
+        # Reuse the admin's canonical atomic token writer, fresh proof and
+        # broker-flat validated release. Never restart systemd directly.
+        os.environ["BOT_ENV_FILE"] = str(env_path.resolve())
+        from nifty_scalper_bot.admin_dashboard import _activate_access_token
 
-    print("Zerodha authenticated successfully; access token value not displayed.")
-
-    if args.write_env:
-        try:
-            write_env_tokens(env_path, access_token)
-            print("Access token aliases stored in the selected operator env file.")
-        except Exception:
-            print("Failed to update the selected operator env file.", file=sys.stderr)
-            sys.exit(1)
+        result = _activate_access_token(access_token)
+        print(result.message)
+        if not result.ok:
+            sys.exit("Token saved but guarded restart could not be queued")
+    else:
+        write_env_tokens(env_path, access_token)
+        print("Access token aliases stored in the selected environment file.")
 
 
 if __name__ == "__main__":
