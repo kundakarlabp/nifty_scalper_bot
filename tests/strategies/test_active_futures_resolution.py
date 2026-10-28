@@ -255,3 +255,91 @@ def test_invalid_future_vwap_is_not_replaced_with_ltp() -> None:
     assert indicators.get("futures_vwap") is None
     assert indicators.get("nifty_fut_vwap") is None
     assert indicators["futures_ltp"] == 24120.0
+
+
+def test_canonical_futures_quote_vwap_and_cumulative_volume_are_both_usable() -> None:
+    symbol = "NFO:NIFTY26JUNFUT"
+    hub = _VolumeHub(
+        [
+            {
+                "ltp": 24120.0,
+                "vwap": 24102.5,
+                "vwap_source_field": "average_price",
+                "volume_cumulative": 1000.0,
+            },
+            {
+                "ltp": 24124.0,
+                "vwap": 24104.0,
+                "vwap_source_field": "average_price",
+                "volume_cumulative": 1050.0,
+            },
+        ],
+        active=symbol,
+    )
+    manager = _manager(hub=hub)
+    first: dict[str, Any] = {}
+    manager._augment_futures_metrics(first)
+    assert first["futures_vwap"] == 24102.5
+    assert first["futures_vwap_quote_field"] == "average_price"
+    assert first["futures_volume_source"] == "volume_cumulative"
+    assert first["futures_volume_trusted"] is True
+    assert first["futures_volume_ratio"] is None
+
+    second: dict[str, Any] = {}
+    manager._augment_futures_metrics(second)
+    assert second["futures_vwap"] == 24104.0
+    assert second["futures_volume"] == 1050.0
+    assert second["futures_volume_ratio"] == 1.0
+    assert second["futures_volume_trusted"] is True
+    assert manager._last_futures_volume_symbol == symbol
+
+
+def test_untrusted_cumulative_quote_does_not_advance_baseline() -> None:
+    symbol = "NFO:NIFTY26JUNFUT"
+    hub = _VolumeHub(
+        [
+            {"volume_cumulative": 1000.0},
+            {"volume_cumulative": 900.0, "volume_delta_untrusted": True},
+            {"volume_cumulative": 1040.0},
+        ],
+        active=symbol,
+    )
+    manager = _manager(hub=hub)
+    manager._augment_futures_metrics({})
+    untrusted: dict[str, Any] = {}
+    manager._augment_futures_metrics(untrusted)
+    assert manager._last_futures_volume == 1000.0
+    assert untrusted["futures_volume_trusted"] is False
+    assert untrusted["futures_volume_ratio"] is None
+
+    recovered: dict[str, Any] = {}
+    manager._augment_futures_metrics(recovered)
+    assert recovered["futures_volume"] == 1040.0
+    assert recovered["futures_volume_ratio"] == 1.0
+
+
+def test_resolved_future_rotation_is_not_conflated_when_config_symbol_absent() -> None:
+    hub = _VolumeHub(
+        [
+            {"volume_cumulative": 1000.0},
+            {"volume_cumulative": 100.0},
+            {"volume_cumulative": 125.0},
+        ]
+    )
+    manager = _manager(hub=hub)
+    first: dict[str, Any] = {}
+    manager._augment_futures_metrics(first)
+    assert manager._last_futures_volume_symbol == "NFO:NIFTY26JUNFUT"
+
+    hub._active = "NFO:NIFTY26JULFUT"
+    rotated: dict[str, Any] = {}
+    manager._augment_futures_metrics(rotated)
+    assert manager._last_futures_volume_symbol == hub._active
+    assert rotated["futures_volume_trusted"] is True
+    assert rotated["futures_volume_ratio"] is None
+
+    advanced: dict[str, Any] = {}
+    manager._augment_futures_metrics(advanced)
+    assert advanced["futures_volume_ratio"] == 1.0
+    assert manager._last_futures_volume == 125.0
+
