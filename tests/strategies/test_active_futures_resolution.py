@@ -342,4 +342,3 @@ def test_resolved_future_rotation_is_not_conflated_when_config_symbol_absent() -
     manager._augment_futures_metrics(advanced)
     assert advanced["futures_volume_ratio"] == 1.0
     assert manager._last_futures_volume == 125.0
-
