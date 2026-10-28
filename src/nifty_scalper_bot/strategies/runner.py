@@ -8,7 +8,7 @@ Runtime role:
   using cached bars, live quotes, readiness, regime, and quality gates.
 - On an accepted signal, prepares execution state and hands off to the order
   path (OrderManager) for placement; there is no separate runner executor.
-- Maintains per-symbol runner/indicator history counts used by the readiness SSOT.
+- Maintains active per-symbol runner/indicator history counts for readiness.
 - Binds worker-liveness and stall-disarming methods from runner_liveness.
 - Delegates position sizing and ATR-based trailing to execution owners.
 - Persists bounded, read-only candidate cash/risk rejection evidence in the
@@ -145,7 +145,6 @@ from nifty_scalper_bot.execution.readiness import (
     resolve_quote_bid_ask_spread,
 )
 from nifty_scalper_bot.options.strike_selector import (
-    SelectedContract,
     StrikeSelector,
     _parse_strike_from_symbol,
 )
@@ -1088,7 +1087,6 @@ class StrategyRunner:
         self._callbacks: MutableMapping[str, Callable[[dict], None]] = {}
         self._bar_builders: Dict[str, OneMinuteBarBuilder] = {}
         self._last_bar_ts: dict[str, datetime] = {}
-        self._gating_log_bar_cache: dict[tuple[str, str], datetime] = {}
         self._orchestrator = getattr(strategy_manager, "orchestrator", None)
         self._persistent_state: PersistentStateManager | None = None
         self._orders_in_flight: dict[str, float] = {}
@@ -1278,8 +1276,6 @@ class StrategyRunner:
         )
         self._symbol_has_completed_strategy_eval: set[str] = set()
         self._gap_repair_inflight: set[str] = set()
-        self._history_refresh_interval_seconds: float = 60.0
-        self._last_history_refresh_by_symbol: dict[str, float] = {}
         # BUG W1 FIX: track symbols that have received at least one LIVE (non-backfill)
         # completed bar.  Used by the PHASE-9 stale-bar gate instead of
         # _symbol_history, which is populated by hydration bars (hours old).
@@ -1839,10 +1835,6 @@ class StrategyRunner:
         self._hydrate_from_mdm_cache(normalized)
 
         self._logger.info("Tracking symbol %s", normalized)
-
-    def _prehydrate_symbol_history(self, symbol: str) -> None:
-        """Hydrate startup candles from cache only. Args: symbol. Returns: None. Raises: None."""
-        self._hydrate_from_mdm_cache(symbol)
 
     def _get_mdm_bars(self, symbol: str, limit: int) -> list[dict[str, Any]]:
         """Read canonical cached bars; broaden only underlying context windows."""
@@ -6561,21 +6553,6 @@ class StrategyRunner:
         finally:
             self._gap_repair_inflight.discard(symbol)
 
-    def _refresh_history_if_due(self, symbol: str) -> None:
-        """Trigger periodic historical refresh. Args: symbol. Returns: None. Raises: None."""
-        if not symbol or self._main_loop is None or not self._main_loop.is_running():
-            return
-        now_mono = time.monotonic()
-        last_refresh = self._last_history_refresh_by_symbol.get(symbol, 0.0)
-        if now_mono - last_refresh < self._history_refresh_interval_seconds:
-            return
-        self._last_history_refresh_by_symbol[symbol] = now_mono
-        self._logger.info(
-            "Condition met: historical_refresh_triggered",
-            extra={"event": "historical_refresh_triggered", "symbol": symbol},
-        )
-        self._request_mdm_hydration(symbol, self._required_bars_for_symbol(symbol))
-
     def _emit_composite_reports(self) -> None:
         """Emit periodic system/strategy aggregate logs. Args: none; Returns: none; Raises: none."""
         now = time.monotonic()
@@ -6728,24 +6705,6 @@ class StrategyRunner:
                 gaps += 1
         self._session_gap_count[symbol] = gaps
         return gaps > 0
-
-    def _refresh_symbol_hydration_state(self, symbol: str) -> SymbolState:
-        """Set DISCOVERED/HYDRATING/READY from bar count and VWAP validity."""
-        try:
-            bars = self._indicator_engine.get_history(symbol)
-        except Exception:
-            bars = []
-        with self._lock:
-            runtime_state = self._symbol_state.get(symbol)
-            vwap_value = runtime_state.vwap if runtime_state is not None else None
-            vwap_state = dict(self._vwap_state.get(symbol, {}))
-        indicators = {
-            symbol: {
-                "vwap": vwap_value,
-                "cum_volume": float(vwap_state.get("cum_vol", 0.0)),
-            }
-        }
-        return self.update_symbol_hydration(symbol, bars, indicators)
 
     def _update_symbol_readiness(self, symbol: str) -> SymbolState:
         """Update lifecycle state from bar history and cumulative VWAP health.
@@ -9349,35 +9308,6 @@ class StrategyRunner:
             return []
         self._set_symbol_hydration_state(symbol, SymbolState.READY)
         return normalized
-
-    def _log_once_per_symbol_per_bar(
-        self, symbol: str, event: str, reason: str
-    ) -> None:
-        """Emit edge-triggered per-symbol per-bar logs for noisy gates."""
-        bar_ts = self._last_bar_ts.get(symbol)
-        if bar_ts is None:
-            return
-        cache_key = (symbol, event)
-        if self._gating_log_bar_cache.get(cache_key) == bar_ts:
-            return
-        self._gating_log_bar_cache[cache_key] = bar_ts
-        self._logger.info(
-            event,
-            extra={
-                "event": event,
-                "symbol": symbol,
-                "reason": reason,
-                "bar_ts": bar_ts.isoformat(),
-            },
-        )
-
-    def _regime_manager_ready(self) -> bool:
-        """Return True when regime manager has produced an actionable snapshot."""
-        regime_manager = getattr(self._strategy_manager, "_regime_manager", None)
-        if regime_manager is None:
-            return True
-        snapshot = getattr(regime_manager, "get_latest_snapshot", lambda: None)()
-        return snapshot is not None
 
     def _compute_regime_snapshot(self, symbol: str) -> MarketRegime:
         """Resolve the accepted regime from the central regime manager SSOT."""
@@ -20650,34 +20580,6 @@ class StrategyRunner:
             msg = "symbol must not be empty"
             raise ValueError(msg)
         return normalized
-
-    def _update_last_signal_selection(
-        self, symbol: str, selection: SelectedContract
-    ) -> None:
-        """Update strategy data with last selected contract info."""
-        with self._lock:
-            state = self._symbol_state.get(symbol)
-            if state is None:
-                return
-
-            info = state.strategy_data.get("last_signal")
-            if isinstance(info, dict):
-                info["selected_symbol"] = selection.symbol
-                info["selected_strike"] = selection.strike
-                info["selected_expiry"] = selection.expiry.isoformat()
-
-    @staticmethod
-    def _format_reason(reason: str | None, trade_symbol: str, base_symbol: str) -> str:
-        """Format reason string with symbol context if needed."""
-        if not reason:
-            reason = ""
-
-        reason_text = str(reason)
-
-        if trade_symbol != base_symbol and trade_symbol not in reason_text:
-            return f"{reason_text} [{trade_symbol}]".strip()
-
-        return reason_text
 
 
 __all__ = [
