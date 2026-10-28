@@ -14,6 +14,7 @@ Safety: Never write an incidental production .env, log token fragments, or arm L
 from __future__ import annotations
 
 import argparse
+import hmac
 import os
 import sys
 import tempfile
@@ -294,7 +295,7 @@ def main() -> None:
             or os.getenv("KITE_USER_ID")
             or ""
         ).strip()
-        if production and (not expected_owner or not __import__("hmac").compare_digest(verified_user, expected_owner)):
+        if production and (not expected_owner or not hmac.compare_digest(verified_user, expected_owner)):
             raise ValueError("owner account mismatch")
         segment = os.getenv("BROKER_MARGIN_SEGMENT", "equity").strip().lower()
         if segment not in {"equity", "commodity"}:
