@@ -4665,15 +4665,24 @@ class StrategyManager(_BaseStrategyManager):
                 }
                 for _signal, evidence in context_votes
             ]
+            reason_codes = sorted(
+                {
+                    str(item.get("alignment_block_reason") or "not_aligned")
+                    for item in context_diagnostics
+                }
+            )
             log.info(
-                "STRATEGY_CONFIRMATION_MISSING symbol=%s side=%s context=%s",
+                "STRATEGY_CONFIRMATION_MISSING symbol=%s side=%s "
+                "reason_codes=%s context=%s",
                 symbol_norm,
                 side,
+                ",".join(reason_codes) if reason_codes else "no_context_votes",
                 context_diagnostics,
                 extra={
                     "event": "STRATEGY_CONFIRMATION_MISSING",
                     "symbol": symbol_norm,
                     "side": side,
+                    "reason_codes": reason_codes,
                     "context_diagnostics": context_diagnostics,
                 },
             )
