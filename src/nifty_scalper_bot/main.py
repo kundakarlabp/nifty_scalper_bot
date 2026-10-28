@@ -3,6 +3,7 @@
 Responsibilities: Initialize canonical settings, supervise the app background task,
 expose /livez, /readyz, /releasez and structured health/status diagnostics,
 and provide explicit startup/shutdown management.
+Health also reports effective, read-only canonical risk settings.
 Health labels separate execution permission from observed signal pipeline activity.
 Key interfaces: lifespan, livez, readyz and trading/status handlers.
 Boundaries: This HTTP shell does not own market direction, risk or order policy;
@@ -900,6 +901,63 @@ def _history_count_diagnostics(history, *, ctx=None, selected=None):  # noqa: AN
     }
 
 
+def _effective_risk_policy_status(ctx: Any) -> dict[str, Any]:
+    """Report the canonical LIVE risk manager's effective limits, never enforce them."""
+    import math
+
+    from nifty_scalper_bot.config.defaults import DEFAULT_LIVE_PER_TRADE_RISK_PCT
+
+    manager = getattr(ctx, "risk_manager", None) or getattr(
+        getattr(ctx, "order_manager", None), "_risk_manager", None
+    )
+    settings = getattr(manager, "settings", None)
+    try:
+        pct = float(getattr(settings, "per_trade_risk_pct"))
+        if not math.isfinite(pct) or pct < 0:
+            raise ValueError("invalid risk percentage")
+    except (TypeError, ValueError, AttributeError):
+        return {"known": False, "source": "risk_manager_unavailable"}
+
+    policy_limit = float(DEFAULT_LIVE_PER_TRADE_RISK_PCT)
+    # Live env normalization caps against the GitHub-owned policy. A value
+    # equal to the cap cannot distinguish a default from an equal override.
+    if pct < policy_limit:
+        source = "stricter_effective_setting"
+    elif pct == policy_limit:
+        source = "github_policy_or_equal_override"
+    else:
+        source = "above_github_policy_investigate"
+    validated = bool(getattr(ctx, "broker_balance_valid", False))
+    balance: float | None = None
+    try:
+        balance = float(getattr(ctx, "last_valid_broker_balance"))
+        if not validated or not math.isfinite(balance) or balance < 0:
+            raise ValueError("broker balance not currently validated")
+    except (TypeError, ValueError, AttributeError):
+        balance = None
+    switches = getattr(manager, "_switches", None)
+    daily_cap: float | None = None
+    try:
+        daily_cap = float(getattr(switches, "max_day_loss"))
+        if not math.isfinite(daily_cap) or daily_cap < 0:
+            daily_cap = None
+    except (TypeError, ValueError, AttributeError):
+        daily_cap = None
+    budget = round(balance * pct / 100.0, 2) if balance is not None else None
+    return {
+        "known": True,
+        "per_trade_risk_pct": pct,
+        "github_policy_ceiling_pct": policy_limit,
+        "source": source,
+        "validated_balance": balance,
+        "per_trade_budget_rupees": budget,
+        "max_day_loss_rupees": daily_cap,
+        "timestamp_basis": "current_runtime_snapshot",
+        "warning": "risk_above_github_policy" if pct > policy_limit else None,
+        "authority": "RiskManager",
+    }
+
+
 def _structured_runtime_status(ctx):  # noqa: ANN001
     basket = getattr(ctx, "active_contract_basket", None) or {}
 
@@ -939,6 +997,7 @@ def _structured_runtime_status(ctx):  # noqa: ANN001
         "unknown": "unknown",
     }.get(str(broker_status["broker_session_state"]), "unknown")
     return {
+        "effective_risk_policy": _effective_risk_policy_status(ctx),
         "selected": selected,
         "history": history,
         "history_diagnostics": _history_count_diagnostics(
