@@ -421,3 +421,132 @@ def test_price_only_tick_never_replays_previous_interval_volume() -> None:
     assert price_only is not None
     assert price_only.get("volume", 0) == 0
     assert price_only.get("volume_delta", 0) == 0
+
+
+# Broker VWAP is quote metadata, not option/futures candle volume and not LTP.
+@pytest.mark.parametrize(
+    ("field", "price"),
+    [
+        ("average_price", 24021.25),
+        ("average_traded_price", 24022.5),
+        ("vwap", 24023.75),
+    ],
+)
+def test_broker_vwap_survives_both_quote_normalizers(
+    field: str, price: float
+) -> None:
+    mdm = _mdm()
+    sym = "NFO:NIFTY26JUN24000CE"
+    raw = {
+        "symbol": sym,
+        "last_price": 24050.0,
+        field: price,
+        "instrument_token": 1,
+        "timestamp": datetime(2026, 1, 1, 9, 15, 1, tzinfo=timezone.utc),
+        "source": "rest",
+    }
+    intermediate = mdm._normalize_tick(sym, raw)
+    assert intermediate is not None
+    assert intermediate["vwap"] == price
+    assert intermediate["average_price"] == price
+    assert intermediate["vwap_source_field"] == field
+
+    published = mdm.normalize_live_tick(intermediate, source="rest")
+    assert published is not None
+    assert published["vwap"] == price
+    assert published["average_price"] == price
+    assert published["vwap_source_field"] == field
+    assert published["ltp"] == 24050.0
+    assert published["timestamp"] == raw["timestamp"]
+
+
+def test_broker_websocket_average_traded_price_is_preserved() -> None:
+    mdm = _mdm()
+    sym = "NFO:NIFTY26JUN24000CE"
+    tick = {
+        "symbol": sym,
+        "instrument_token": 1,
+        "last_price": 120.0,
+        "average_traded_price": 118.6,
+        "timestamp": datetime(2026, 1, 1, 9, 15, 1, tzinfo=timezone.utc),
+    }
+    published = mdm.normalize_live_tick(tick, source="ws")
+    assert published is not None
+    assert published["vwap"] == 118.6
+    assert published["vwap_source_field"] == "average_traded_price"
+
+
+@pytest.mark.parametrize(
+    "invalid", [0.0, -1.0, float("nan"), float("inf"), "not-a-price"]
+)
+def test_invalid_broker_average_does_not_derive_vwap_from_ltp(invalid) -> None:
+    mdm = _mdm()
+    raw = {
+        "symbol": "NFO:NIFTY26JUN24000CE",
+        "last_price": 120.0,
+        "close": 119.0,
+        "average_price": invalid,
+        "timestamp": datetime(2026, 1, 1, 9, 15, 1, tzinfo=timezone.utc),
+    }
+    first = mdm._normalize_tick(raw["symbol"], raw)
+    second = mdm.normalize_live_tick(raw, source="ws")
+    assert first is not None and second is not None
+    assert "vwap" not in first
+    assert "vwap" not in second
+    assert "average_price" not in first
+    assert "average_price" not in second
+
+
+def test_price_only_next_tick_does_not_replay_previous_broker_vwap() -> None:
+    mdm = _mdm()
+    raw = {
+        "symbol": "NFO:NIFTY26JUN24000CE",
+        "instrument_token": 1,
+        "last_price": 120.0,
+        "average_price": 118.0,
+        "timestamp": datetime(2026, 1, 1, 9, 15, 1, tzinfo=timezone.utc),
+    }
+    assert mdm.normalize_live_tick(raw, source="ws")["vwap"] == 118.0
+    raw.pop("average_price")
+    raw["last_price"] = 121.0
+    later = mdm.normalize_live_tick(raw, source="ws")
+    assert later is not None
+    assert "vwap" not in later
+
+
+def test_untraded_nifty_spot_quote_does_not_get_vwap() -> None:
+    mdm = _mdm()
+    raw = {
+        "symbol": "NSE:NIFTY",
+        "last_price": 24000.0,
+        "average_price": 24010.0,
+        "timestamp": datetime(2026, 1, 1, 9, 15, 1, tzinfo=timezone.utc),
+    }
+    a = mdm._normalize_tick("NSE:NIFTY", raw)
+    b = mdm.normalize_live_tick(raw)
+    assert a is not None and b is not None
+    assert "vwap" not in a and "vwap" not in b
+
+
+def test_rest_quote_ingress_persists_real_broker_average_price() -> None:
+    mdm = _mdm()
+    mdm._is_duplicate = lambda *_args, **_kwargs: False  # type: ignore[method-assign]
+    mdm._enqueue_tick_threadsafe = mdm._process_queued_tick  # type: ignore[method-assign]
+    mdm.ingest_rest_quote(
+        _SYM,
+        {
+            "last_price": 120.0,
+            "average_price": 117.25,
+            "volume": 12000,
+            "instrument_token": 1,
+            "timestamp": datetime(2026, 1, 1, 9, 15, 1, tzinfo=timezone.utc),
+        },
+    )
+    quote = mdm.get_latest_tick(_SYM)
+    assert quote is not None
+    assert quote["vwap"] == 117.25
+    assert quote["average_price"] == 117.25
+    assert quote["vwap_source_field"] == "average_price"
+    assert quote["volume_cumulative"] == 12000.0
+    assert quote["volume_delta"] == 0
+
