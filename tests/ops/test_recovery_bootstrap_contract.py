@@ -11,9 +11,12 @@ SCRIPT = ROOT / "deploy/scripts/recover_failed_live_startup.sh"
 
 def test_bootstrap_is_shell_valid_and_embedded_python_compiles() -> None:
     assert SCRIPT.exists()
-    assert subprocess.run(
-        ["bash", "-n", str(SCRIPT)], capture_output=True, check=False
-    ).returncode == 0
+    assert (
+        subprocess.run(
+            ["bash", "-n", str(SCRIPT)], capture_output=True, check=False
+        ).returncode
+        == 0
+    )
     source = SCRIPT.read_text(encoding="utf-8")
     for name in ("RECOVER", "READY"):
         start = f"<<'PY_{name}'\n"
@@ -43,11 +46,11 @@ def test_broker_fail_closed_proofs_precede_restart() -> None:
         "LIVE startup requires validated broker balance",
         'live.get("bot_loaded") is False',
         'health.get("live_orders_armed") is False',
-        'kite.profile()',
-        'kite.margins(segment)',
-        'kite.positions()',
-        'kite.orders()',
-        'for _ in range(2):',
+        "kite.profile()",
+        "kite.margins(segment)",
+        "kite.positions()",
+        "kite.orders()",
+        "for _ in range(2):",
         'float(row["quantity"]) == 0',
         '"token_sha256"',
         '"verified_at"',
