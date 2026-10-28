@@ -508,7 +508,7 @@ def test_failed_exit_hold_clear_keeps_subsequent_orders_blocked(monkeypatch, tmp
         intent="EXIT",
     )
     assert exit_order == "EXIT-CONFIRMED"
-    assert manager.execution_health_snapshot()["uncertain_exit_ledger_corrupt"]
+    assert manager.execution_health_snapshot()["uncertain_exit_orders_count"] == 1
     entry_order = manager.place_order(
         symbol="NFO:NIFTY2671423950CE",
         side="BUY",
