@@ -7,13 +7,27 @@ import logging
 
 import pytest
 
+from nifty_scalper_bot.core.boot_log_safety import BootLogRateControl
 from nifty_scalper_bot.strategies.indicators import IndicatorEngine
 from nifty_scalper_bot.utils import logging as nsb_logging
 
 
 @pytest.fixture(autouse=True)
-def _reset_throttle_state():
-    """Args: none. Returns: None. Raises: none."""
+def _reset_throttle_state(monkeypatch):
+    """Isolate logger throttle state and restore installed filters after each test."""
+    logger = logging.getLogger("nifty_scalper_bot.strategies.indicators")
+    monkeypatch.setattr(
+        logger,
+        "filters",
+        [
+            (
+                BootLogRateControl(item.interval_seconds)
+                if isinstance(item, BootLogRateControl)
+                else item
+            )
+            for item in logger.filters
+        ],
+    )
     with nsb_logging._THROTTLE_LOCK:
         nsb_logging._THROTTLE_STATE.clear()
     yield
