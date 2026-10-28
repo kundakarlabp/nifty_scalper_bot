@@ -215,9 +215,9 @@ def test_rotation_exception_is_scoped_and_double_sampled() -> None:
         'ready.get("error") == "LIVE startup requires validated broker balance"'
         in guard
     )
-    assert 'token_rotation_verified and hold_required' in guard
-    assert 'profile = kite.profile()' in guard
-    assert 'margins = kite.margins(' in guard
+    assert "token_rotation_verified and hold_required" in guard
+    assert "profile = kite.profile()" in guard
+    assert "margins = kite.margins(" in guard
     assert 'reconciliation.get("completed") is not True' in guard
     assert 'reconciliation.get("unprotected_positions")' in guard
     assert "token_rotation_verified and hold_required" in guard
