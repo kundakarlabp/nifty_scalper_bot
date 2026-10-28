@@ -8,7 +8,7 @@ Runtime role:
   using cached bars, live quotes, readiness, regime, and quality gates.
 - On an accepted signal, prepares execution state and hands off to the order
   path (OrderManager) for placement; there is no separate runner executor.
-- Maintains active per-symbol runner/indicator history counts for readiness.
+- Maintains active history counts and uses shared direction-context resolution.
 - Binds worker-liveness and stall-disarming methods from runner_liveness.
 - Delegates position sizing and ATR-based trailing to execution owners.
 - Persists bounded, read-only candidate cash/risk rejection evidence in the
@@ -158,6 +158,10 @@ from nifty_scalper_bot.strategies.premium_risk_geometry import (
     apply_premium_risk_contract,
     replacement_plan_rejection_reason,
     validate_option_premium_geometry,
+)
+from nifty_scalper_bot.strategies.runtime_context_contract import (
+    resolve_entry_direction,
+    resolve_entry_context_freshness,
 )
 from nifty_scalper_bot.strategies.runner_liveness import (
     _disarm_stalled_entry_worker_if_needed,
@@ -15863,18 +15867,7 @@ class StrategyRunner:
                                 trace_id=trace_id,
                             )
                             return
-                        direction_bias = str(
-                            (indicators_ctx.get("direction_bias") or "")
-                        ).upper()
-                        underlying_bias = str(
-                            (indicators_ctx.get("underlying_direction_bias") or "")
-                        ).upper()
-                        resolved_bias = underlying_bias or direction_bias
-                        resolved_confidence = float(
-                            indicators_ctx.get("direction_confidence")
-                            or indicators_ctx.get("underlying_direction_confidence")
-                            or 0.0
-                        )
+                        resolved_bias, resolved_confidence = resolve_entry_direction(indicators_ctx)
                         runtime_indicators = getattr(self, "_runtime_indicators", None)
                         if runtime_indicators is None:
                             self._runtime_indicators = {}
@@ -15893,16 +15886,7 @@ class StrategyRunner:
                             ),
                         }
                         self._last_direction_context = runtime_indicators[symbol]
-                        spot_fresh = bool(indicators_ctx.get("spot_fresh"))
-                        fut_fresh = bool(
-                            indicators_ctx.get("futures_fresh")
-                            or indicators_ctx.get("fut_fresh")
-                        )
-                        context_fresh = bool(
-                            indicators_ctx.get("context_fresh")
-                            or spot_fresh
-                            or fut_fresh
-                        )
+                        spot_fresh, fut_fresh, context_fresh = resolve_entry_context_freshness(indicators_ctx)
                         live_mode = (
                             str(os.getenv("EXECUTION_MODE", "SHADOW") or "SHADOW")
                             .strip()
@@ -15918,33 +15902,8 @@ class StrategyRunner:
                             if refreshed_context:
                                 runtime_ctx.update(refreshed_context)
                                 indicators_ctx.update(refreshed_context)
-                                direction_bias = str(
-                                    (indicators_ctx.get("direction_bias") or "")
-                                ).upper()
-                                underlying_bias = str(
-                                    (
-                                        indicators_ctx.get("underlying_direction_bias")
-                                        or ""
-                                    )
-                                ).upper()
-                                resolved_bias = underlying_bias or direction_bias
-                                resolved_confidence = float(
-                                    indicators_ctx.get("direction_confidence")
-                                    or indicators_ctx.get(
-                                        "underlying_direction_confidence"
-                                    )
-                                    or 0.0
-                                )
-                                spot_fresh = bool(indicators_ctx.get("spot_fresh"))
-                                fut_fresh = bool(
-                                    indicators_ctx.get("futures_fresh")
-                                    or indicators_ctx.get("fut_fresh")
-                                )
-                                context_fresh = bool(
-                                    indicators_ctx.get("context_fresh")
-                                    or spot_fresh
-                                    or fut_fresh
-                                )
+                                resolved_bias, resolved_confidence = resolve_entry_direction(indicators_ctx)
+                                spot_fresh, fut_fresh, context_fresh = resolve_entry_context_freshness(indicators_ctx)
                             if resolved_bias in {"CE", "PE"} and context_fresh:
                                 runtime_indicators[symbol] = {
                                     **(runtime_indicators.get(symbol, {}) or {}),

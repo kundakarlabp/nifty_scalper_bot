@@ -1,4 +1,4 @@
-"""Runtime context contract for live directional and quote-age strategy gates."""
+"""Runtime context contract and shared entry direction/freshness resolution."""
 
 from __future__ import annotations
 
@@ -290,3 +290,26 @@ def normalise_live_direction_context(context: Mapping[str, Any]) -> dict[str, An
         preserved["context_freshness_state"] = "STALE"
 
     return preserved
+
+
+def resolve_entry_direction(context: Mapping[str, Any]) -> tuple[str, float]:
+    """Resolve entry bias and confidence using the established fallback order."""
+    direction_bias = str((context.get("direction_bias") or "")).upper()
+    underlying_bias = str((context.get("underlying_direction_bias") or "")).upper()
+    resolved_bias = underlying_bias or direction_bias
+    resolved_confidence = float(
+        context.get("direction_confidence")
+        or context.get("underlying_direction_confidence")
+        or 0.0
+    )
+    return resolved_bias, resolved_confidence
+
+
+def resolve_entry_context_freshness(
+    context: Mapping[str, Any],
+) -> tuple[bool, bool, bool]:
+    """Resolve entry freshness without inferring direction from fresh quotes."""
+    spot_fresh = bool(context.get("spot_fresh"))
+    fut_fresh = bool(context.get("futures_fresh") or context.get("fut_fresh"))
+    context_fresh = bool(context.get("context_fresh") or spot_fresh or fut_fresh)
+    return spot_fresh, fut_fresh, context_fresh
