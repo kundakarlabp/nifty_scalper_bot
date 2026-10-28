@@ -443,3 +443,32 @@ def test_corrupt_exit_write_ahead_state_blocks_orders(monkeypatch, tmp_path):
     assert manager._last_order_decision["block_reason"] == (
         "uncertain_exit_ledger_unreadable"
     )
+
+
+def test_acknowledged_exit_releases_durable_submission_hold(monkeypatch, tmp_path):
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+
+    class Broker:
+        is_simulated_adapter = True
+
+    manager = OrderManager(
+        Broker(), PositionManager(str(tmp_path / "positions.json")), RateLimiter()
+    )
+    manager._positions.open_position(
+        "NFO:NIFTY2671423950CE", "LONG", 65, 100.0, order_id="entry-1"
+    )
+    monkeypatch.setattr(manager, "_lot_size_for_symbol", lambda _: 65)
+    monkeypatch.setattr(
+        manager, "_submit_broker_order", lambda _: {"order_id": "EXIT-CONFIRMED"}
+    )
+    order_id = manager.place_order(
+        symbol="NFO:NIFTY2671423950CE",
+        side="SELL",
+        quantity=65,
+        order_type=OrderType.MARKET,
+        check_risk=False,
+        intent="EXIT",
+    )
+    assert order_id == "EXIT-CONFIRMED"
+    assert manager.execution_health_snapshot()["uncertain_exit_orders_count"] == 0
