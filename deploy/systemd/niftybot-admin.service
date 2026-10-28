@@ -3,7 +3,7 @@
 # Operational constraints: Never bind port 8081 publicly or restart trading.
 [Unit]
 Description=Nifty Bot Lightweight Admin Controls
-After=network-online.target niftybot.service
+After=network-online.target
 Wants=network-online.target
 
 [Service]
