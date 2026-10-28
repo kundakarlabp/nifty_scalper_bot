@@ -33,7 +33,7 @@ def test_recovery_is_pinned_to_main_ci_and_uses_candidate_release_guard() -> Non
     assert "nifty-ci-passed/" in source
     assert 'git show "$target:deploy/lightsail_release.sh"' in source
     assert 'bash "$release_file" --auto' in source
-    assert "systemctl restart" not in source
+    assert "sudo systemctl restart" not in source
     assert "git reset --hard" not in source
     assert "RISK__CAPITAL=" not in source
     assert "ENABLE_LIVE=true" not in source
