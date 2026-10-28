@@ -9455,9 +9455,8 @@ class OrderManager:
                     with self._lock:
                         self._orders[oid] = order
                         if order.client_order_id:
-                            self._client_order_index[str(order.client_order_id)] = (
-                                str(order.order_id)
-                            )
+                            client_key = str(order.client_order_id)
+                            self._client_order_index[client_key] = str(order.order_id)
                     restored_count += 1
 
                 except Exception as e:
