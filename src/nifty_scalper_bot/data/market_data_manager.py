@@ -1,8 +1,9 @@
 """Central market data manager: the single owner of ticks and OHLC history.
 
 Runtime role:
-- Receives broker ticks (WebSocket/REST), maintains the live quote cache, and
-  routes accepted ticks/history through CandleEngine for one-minute OHLC bars.
+- Receives broker ticks (WebSocket/REST), maintains the live quote cache
+  including finite, broker-supplied VWAP/average-price provenance (never LTP
+  substitutes), and routes ticks/history through CandleEngine for OHLC bars.
 - Fans ticks out to subscribers via the message bus.
 - Performs broker history fetch/backfill (ensure_history) into the per-symbol
   CandleEngine registry used as the finalized-OHLC SSOT.
@@ -13494,6 +13495,7 @@ class MarketDataManager:
                 "spread": spread,
                 "last_price": ltp,
                 "instrument_token": token,
+                **self._broker_quote_vwap_fields(raw, self._canonical_symbol(symbol)),
                 "volume": volume_delta_value,
                 "volume_delta": volume_delta_value,
                 "volume_cumulative": volume_cumulative_value,
@@ -13797,6 +13799,38 @@ class MarketDataManager:
                 return value
         return None
 
+    @staticmethod
+    def _broker_quote_vwap_fields(
+        quote: Mapping[str, Any], symbol: str
+    ) -> dict[str, Any]:
+        """Preserve broker-quoted VWAP only, never infer it from price/close.
+
+        The NIFTY spot index has no exchange-traded volume. No previous quote
+        or price substitute is permitted when the current observation lacks
+        a finite positive broker average.
+        """
+        if symbol == "NSE:NIFTY":
+            return {}
+        for key in ("vwap", "average_price", "average_traded_price"):
+            try:
+                value = float(quote[key])
+            except (KeyError, TypeError, ValueError, OverflowError):
+                continue
+            if math.isfinite(value) and value > 0:
+                observed_field = str(quote.get("vwap_source_field") or "")
+                if observed_field not in {
+                    "vwap",
+                    "average_price",
+                    "average_traded_price",
+                }:
+                    observed_field = key
+                return {
+                    "vwap": value,
+                    "average_price": value,
+                    "vwap_source_field": observed_field,
+                }
+        return {}
+
     def _normalize_tick(
         self,
         symbol: str,
@@ -13876,6 +13910,7 @@ class MarketDataManager:
             "symbol": symbol,
             "ltp": float(ltp),
             "last_price": float(ltp),
+            **self._broker_quote_vwap_fields(tick, symbol),
             "bid": float(bid) if not bid_missing else None,
             "ask": float(ask) if not ask_missing else None,
             "timestamp": timestamp,
