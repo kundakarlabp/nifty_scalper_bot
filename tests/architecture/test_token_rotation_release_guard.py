@@ -49,9 +49,39 @@ health = {
         "unprotected_positions": [],
     },
 }
-live = {"engine_http_responsive": True, "bot_loaded": True}
+live = {
+    "engine_http_responsive": True,
+    "bot_loaded": os.environ.get("TEST_BOT_LOADED", "1") == "1",
+}
+ready = {
+    "status": (
+        "degraded" if os.environ.get("TEST_STARTUP_FAILED", "0") == "1"
+        else "starting"
+    ),
+    "primary_blocker": (
+        "startup_failed" if os.environ.get("TEST_STARTUP_FAILED", "0") == "1"
+        else "startup_incomplete"
+    ),
+    "error": os.environ.get(
+        "TEST_STARTUP_ERROR", "LIVE startup requires validated broker balance"
+    ),
+}
+release = {"effective_sha": os.environ.get("TEST_RELEASE_SHA", "a" * 12)}
+if not live["bot_loaded"]:
+    health.update({
+        "status": "starting",
+        "primary_blocker": "startup_incomplete",
+        "live_orders_armed": False,
+    })
 def response(url, timeout=3):
-    value = live if url.endswith("/livez") else health
+    if url.endswith("/livez"):
+        value = live
+    elif url.endswith("/readyz"):
+        value = ready
+    elif url.endswith("/releasez"):
+        value = release
+    else:
+        value = health
     return io.BytesIO(json.dumps(value).encode("utf-8"))
 urllib.request.urlopen = response
 time.sleep = lambda seconds: None
@@ -70,11 +100,20 @@ class FakeKite:
         }
     def orders(self):
         return [{"status": "OPEN"}] if os.environ["TEST_OPEN_ORDER"] == "1" else []
+    def profile(self):
+        return {"user_id": os.environ.get("TEST_PROFILE_USER", "AB1234")}
+    def margins(self, segment):
+        if os.environ.get("TEST_MARGIN_MISSING") == "1":
+            return {}
+        return {"available": {"live_balance": 1000.0}}
 
 kiteconnect = types.ModuleType("kiteconnect")
 kiteconnect.KiteConnect = FakeKite
 sys.modules["kiteconnect"] = kiteconnect
 """
+
+
+_FAILED_START = {"TEST_BOT_LOADED": "0", "TEST_STARTUP_FAILED": "1"}
 
 
 @pytest.mark.parametrize(
@@ -94,6 +133,18 @@ sys.modules["kiteconnect"] = kiteconnect
         ("invalid", True, {"TEST_BAD_DIGEST": "1"}, False),
         ("invalid", True, {"TEST_STALE_PROOF": "1"}, False),
         ("invalid", True, {"TEST_GENERIC_ONLY": "1"}, False),
+        # A constructor failure cannot complete local reconciliation. Permit
+        # recovery only with fresh, broker-bound proof and no trading stack.
+        ("invalid", True, {**_FAILED_START, "TEST_RECONCILED": "0"}, True),
+        ("invalid", False, _FAILED_START, False),
+        ("invalid", True, {"TEST_BOT_LOADED": "0"}, False),
+        ("invalid", True, {**_FAILED_START, "TEST_POSITION": "1"}, False),
+        ("invalid", True, {**_FAILED_START, "TEST_OPEN_ORDER": "1"}, False),
+        ("invalid", True, {**_FAILED_START, "TEST_PROFILE_USER": "WRONG"}, False),
+        ("invalid", True, {**_FAILED_START, "TEST_MARGIN_MISSING": "1"}, False),
+        ("invalid", True, {**_FAILED_START, "TEST_STARTUP_ERROR": "other"}, False),
+        ("invalid", True, {**_FAILED_START, "TEST_RELEASE_SHA": "b" * 12}, False),
+        ("invalid", True, {**_FAILED_START, "TEST_API_FAIL": "1"}, False),
     ],
 )
 def test_queued_token_rotation_requires_verified_token_and_broker_flat(
@@ -129,6 +180,9 @@ def test_queued_token_rotation_requires_verified_token_and_broker_flat(
         "BOT_RELEASE_ENTRY_HOLD_REQUIRED": (
             "false" if overrides.get("TEST_HOLD") == "0" else "true"
         ),
+        "BOT_RELEASE_EXPECTED_OWNER": "AB1234",
+        "BOT_RELEASE_EXPECTED_SHA": "a" * 40,
+        "BOT_RELEASE_MARGIN_SEGMENT": "equity",
         "TEST_AUTH": mode,
         "TEST_ARMED": "0",
         "TEST_HOLD": "1",
@@ -156,6 +210,14 @@ def test_rotation_exception_is_scoped_and_double_sampled() -> None:
     assert 'BOT_RELEASE_RESTART_PENDING="$RESTART_PENDING_FILE"' in release
     assert "os.path.isfile(restart_marker)" in guard
     assert 'health.get("live_orders_armed") is not False' in guard
+    assert 'ready.get("primary_blocker") == "startup_failed"' in guard
+    assert (
+        'ready.get("error") == "LIVE startup requires validated broker balance"'
+        in guard
+    )
+    assert "token_rotation_verified and hold_required" in guard
+    assert "profile = kite.profile()" in guard
+    assert "margins = kite.margins(" in guard
     assert 'reconciliation.get("completed") is not True' in guard
     assert 'reconciliation.get("unprotected_positions")' in guard
     assert "token_rotation_verified and hold_required" in guard

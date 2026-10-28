@@ -122,3 +122,108 @@ def test_unconfigured_manual_shell_does_not_run_token_cli(tmp_path: Path) -> Non
     )
     assert result.returncode == 2
     assert "absolute BOT_ENV_FILE" in result.stderr
+
+
+class _RecoveredKite:
+    def __init__(self, api_key: str, **_kwargs):
+        assert api_key == "production-key"
+        self.token = None
+
+    def set_access_token(self, token: str) -> None:
+        self.token = token
+
+    def profile(self):
+        return {"user_id": "AB1234"}
+
+    def margins(self, segment: str):
+        assert segment == "equity"
+        return {"available": {"cash": 0.0, "live_balance": 5000.0}}
+
+
+def _configure_saved_session(monkeypatch, tmp_path: Path):
+    from scripts import zerodha_token_cli as cli
+
+    env_file = tmp_path / "niftybot.env"
+    env_file.write_text(
+        "BROKER_API_KEY=production-key\n"
+        "BROKER_API_SECRET=production-secret\n"
+        "BROKER_ACCESS_TOKEN=saved-token\n"
+        "ADMIN_ZERODHA_USER_ID=AB1234\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DEPLOYMENT_PLATFORM", "aws_lightsail")
+    monkeypatch.setenv("BOT_ENV_FILE", str(env_file))
+    monkeypatch.setenv("BROKER_API_KEY", "production-key")
+    monkeypatch.setenv("BROKER_API_SECRET", "production-secret")
+    monkeypatch.setenv("BROKER_ACCESS_TOKEN", "saved-token")
+    monkeypatch.setenv("ADMIN_ZERODHA_USER_ID", "AB1234")
+    for alias in (
+        "ZERODHA_API_KEY",
+        "KITE_API_KEY",
+        "ZERODHA_API_SECRET",
+        "KITE_API_SECRET",
+    ):
+        monkeypatch.delenv(alias, raising=False)
+    monkeypatch.setattr(cli, "load_dotenv", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli, "KiteConnect", _RecoveredKite)
+    monkeypatch.setattr(
+        __import__("sys"),
+        "argv",
+        ["zerodha_token_cli.py", "--recover-saved-token", "--env", str(env_file)],
+    )
+    return cli, env_file
+
+
+def test_recover_saved_token_verifies_broker_and_queues_safe_restart(
+    monkeypatch, tmp_path, capsys
+):
+    from nifty_scalper_bot import admin_dashboard
+    from nifty_scalper_bot.ops.service_control import ControlResult
+
+    cli, _env_file = _configure_saved_session(monkeypatch, tmp_path)
+    calls = []
+    monkeypatch.setattr(
+        admin_dashboard,
+        "_activate_access_token",
+        lambda token: calls.append(token)
+        or ControlResult(True, "restart_bot", "Validated restart queued"),
+    )
+    cli.main()
+    assert calls == ["saved-token"]
+    output = capsys.readouterr().out
+    assert "broker funds verified" in output
+    assert "saved-token" not in output
+    assert "Validated restart queued" in output
+
+
+def test_recover_saved_token_rejects_wrong_owner_without_rotating(
+    monkeypatch, tmp_path
+):
+    from nifty_scalper_bot import admin_dashboard
+
+    cli, _env_file = _configure_saved_session(monkeypatch, tmp_path)
+
+    class WrongOwnerKite(_RecoveredKite):
+        def profile(self):
+            return {"user_id": "OTHER"}
+
+    monkeypatch.setattr(cli, "KiteConnect", WrongOwnerKite)
+    monkeypatch.setattr(
+        admin_dashboard,
+        "_activate_access_token",
+        lambda *_: (_ for _ in ()).throw(AssertionError("must not rotate")),
+    )
+    with pytest.raises(SystemExit, match="Saved session not verified"):
+        cli.main()
+
+
+def test_recover_saved_token_requires_broker_margin_response(monkeypatch, tmp_path):
+    cli, _env_file = _configure_saved_session(monkeypatch, tmp_path)
+
+    class NoMarginsKite(_RecoveredKite):
+        def margins(self, segment):
+            return {}
+
+    monkeypatch.setattr(cli, "KiteConnect", NoMarginsKite)
+    with pytest.raises(SystemExit, match="Saved session not verified"):
+        cli.main()
