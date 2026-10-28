@@ -265,8 +265,8 @@ def main() -> None:
         if not request_token:
             user_id = os.getenv("ZERODHA_USER_ID") or os.getenv("KITE_USER_ID")
             password = os.getenv("ZERODHA_PASSWORD") or os.getenv("KITE_PASSWORD")
-            totp_secret = (
-                os.getenv("ZERODHA_TOTP_SECRET") or os.getenv("KITE_TOTP_SECRET")
+            totp_secret = os.getenv("ZERODHA_TOTP_SECRET") or os.getenv(
+                "KITE_TOTP_SECRET"
             )
             if user_id and password and totp_secret:
                 request_token = get_automated_request_token(
