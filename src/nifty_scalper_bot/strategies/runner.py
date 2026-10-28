@@ -9,6 +9,7 @@ Runtime role:
 - On an accepted signal, prepares execution state and hands off to the order
   path (OrderManager) for placement; there is no separate runner executor.
 - Maintains per-symbol runner/indicator history counts used by the readiness SSOT.
+- Delegates position sizing and ATR-based trailing to execution owners.
 - Persists bounded, read-only candidate cash/risk rejection evidence in the
   existing trade-decision journal without adding a second risk authority.
 - Checks independently parsed original/replacement expiries using the pure
@@ -1082,7 +1083,6 @@ class StrategyRunner:
         self._bar_builders: Dict[str, OneMinuteBarBuilder] = {}
         self._last_bar_ts: dict[str, datetime] = {}
         self._gating_log_bar_cache: dict[tuple[str, str], datetime] = {}
-        self._hydration_log_bar_cache: dict[str, datetime] = {}
         self._orchestrator = getattr(strategy_manager, "orchestrator", None)
         self._persistent_state: PersistentStateManager | None = None
         self._orders_in_flight: dict[str, float] = {}
@@ -1142,7 +1142,6 @@ class StrategyRunner:
         self._entry_eval_completed_count: int = 0
         self._last_entry_eval_completed_at: float = 0.0
         self._selected_candidate_eval_completed_count: int = 0
-        self._last_dispatch_stall_logged: bool = False
         self._last_tick_time_by_symbol: dict[str, float] = defaultdict(float)
         self._runtime_indicators: dict[str, dict[str, Any]] = {}
         self._last_direction_context: dict[str, Any] | None = None
@@ -1191,7 +1190,6 @@ class StrategyRunner:
         )
         self._history_cache_dir = Path(".cache/candles")
         self._history_cache_dir.mkdir(parents=True, exist_ok=True)
-        self._hydrate_failures: dict[str, int] = {}
         self._ingest_lock = asyncio.Lock()
         self._hydration_complete = False
         self._quarantined_symbols: set[str] = set()
@@ -20682,147 +20680,6 @@ class StrategyRunner:
             has_position,
         )
 
-    def _get_atr_with_fallback(
-        self, symbol: str, metadata: dict, current_price: float
-    ) -> float:
-        """
-        Get ATR with multiple fallback sources.
-
-        Priority:
-        1. Signal metadata (from strategy)
-        2. Symbol state (from tick processing)
-        3. Indicator engine (live calculation)
-        4. Price-based estimate (1% of price)
-
-        Args:
-            symbol: Trading symbol
-            metadata: Signal metadata dict
-            current_price: Current LTP
-
-        Returns:
-            ATR value (never None, always positive)
-        """
-        if not is_strategy_instrument(symbol):
-            raise RuntimeError("ATR requested for non-strategy instrument")
-
-        _bars_source = self._data_hub or self._market_data
-        bars = _bars_source.get_ohlc_bars(symbol) if _bars_source else []
-        if len(bars) < self._required_candles:
-            fallback_atr = max(float(current_price) * 0.015, 1.0)
-            self._logger.warning(
-                "ATR_FALLBACK_USED symbol=%s atr=%.4f reason=insufficient_bars bars=%d required=%d",
-                symbol,
-                fallback_atr,
-                len(bars),
-                int(self._required_candles),
-                extra={
-                    "event": "ATR_FALLBACK_USED",
-                    "symbol": symbol,
-                    "atr": fallback_atr,
-                    "bars": len(bars),
-                    "required": int(self._required_candles),
-                    "reason": "insufficient_bars",
-                },
-            )
-            return fallback_atr
-
-        atr_val = 0.0
-        source = "unknown"
-
-        # 1. Try signal metadata
-        if metadata:
-            raw = metadata.get("atr")
-            if raw is not None:
-                try:
-                    atr_val = float(raw)
-                    if atr_val > 0:
-                        source = "metadata"
-                except (TypeError, ValueError):
-                    pass
-
-        # 2. Try symbol state
-        if atr_val <= 0:
-            with self._lock:
-                state = self._symbol_state.get(symbol)
-                if state and hasattr(state, "atr") and state.atr:
-                    try:
-                        atr_val = float(state.atr)
-                        if atr_val > 0:
-                            source = "symbol_state"
-                    except (TypeError, ValueError):
-                        pass
-
-        # 3. Try indicator engine
-        if atr_val <= 0 and self._indicator_engine:
-            try:
-                indicators = self._indicator_engine.get_indicators(symbol, ["atr"])
-                raw = indicators.get("atr")
-                if raw is not None:
-                    atr_val = float(raw)
-                    if atr_val > 0:
-                        source = "indicator_engine"
-            except Exception:
-                LOGGER.exception("[CRITICAL] unhandled exception", exc_info=True)
-                raise
-
-        # 4. Try base underlying (e.g., NIFTY instead of NIFTY2620325200CE)
-        if atr_val <= 0:
-            base = self._extract_underlying(symbol)
-            if base and base != symbol:
-                with self._lock:
-                    state = self._symbol_state.get(base)
-                    if state and hasattr(state, "atr") and state.atr:
-                        try:
-                            atr_val = float(state.atr)
-                            if atr_val > 0:
-                                source = "underlying_state"
-                        except (TypeError, ValueError):
-                            pass
-
-        if atr_val <= 0:
-            fallback_atr = max(float(current_price) * 0.015, 1.0)
-            self._logger.warning(
-                "ATR_FALLBACK_USED symbol=%s atr=%.4f reason=atr_unavailable",
-                symbol,
-                fallback_atr,
-                extra={
-                    "event": "ATR_FALLBACK_USED",
-                    "symbol": symbol,
-                    "atr": fallback_atr,
-                    "reason": "atr_unavailable",
-                },
-            )
-            return fallback_atr
-
-        spread = 0.0
-        try:
-            quote = self.get_quote(symbol)
-            if quote:
-                ask_price = float(quote.get("ask") or quote.get("ask_price") or 0.0)
-                bid_price = float(quote.get("bid") or quote.get("bid_price") or 0.0)
-                spread = max(0.0, ask_price - bid_price)
-        except Exception as exc:
-            self._logger.error(
-                "Failure in StrategyRunner._get_atr_with_fallback spread read: %s",
-                exc,
-                extra={"event": "atr_spread_read_failed", "symbol": symbol},
-                exc_info=exc,
-            )
-
-        min_atr = max(current_price * 0.01, spread * 1.5, 1.0)
-        atr_val = max(atr_val, min_atr)
-
-        self._logger.debug(
-            f"ATR resolved: {symbol} = {atr_val:.2f} (source: {source})",
-            extra={
-                "event": "atr_resolved",
-                "symbol": symbol,
-                "atr": atr_val,
-                "source": source,
-            },
-        )
-
-        return atr_val
 
     def _extract_underlying(self, symbol: str) -> str:
         """Extract underlying symbol. Args: symbol. Returns: underlying. Raises: none."""
