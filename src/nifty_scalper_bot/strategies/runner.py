@@ -7,7 +7,7 @@ Runtime role:
 - Runs strategy evaluation over the active basket symbols using cached bars and
   live quotes; applies readiness, regime, and quality gates.
 - On an accepted signal, prepares execution state and hands off to the order
-  path (OrderManager) for placement.
+  path (OrderManager) for placement; there is no separate runner executor.
 - Maintains per-symbol runner/indicator history counts used by the readiness SSOT.
 - Persists bounded, read-only candidate cash/risk rejection evidence in the
   existing trade-decision journal without adding a second risk authority.
@@ -102,7 +102,6 @@ from nifty_scalper_bot.core.history_roles import (
 )
 from nifty_scalper_bot.core.message_bus import Message, MessageBus
 from nifty_scalper_bot.core.strategy_manager import StrategyManager
-from nifty_scalper_bot.core.trade_manager import TradeManager
 from nifty_scalper_bot.core.universe_controller import UniverseController
 
 # Assumes you created the data/constants.py file as advised
@@ -115,10 +114,6 @@ from nifty_scalper_bot.strategies.order_flow_evidence import TemporalOfiAccumula
 from nifty_scalper_bot.data.pipeline import (
     MarketDataPipeline,
     get_pipeline,
-)
-from nifty_scalper_bot.data.source import (
-    DataIntegrityError,
-    ensure_ltp,
 )
 
 # Signals route directly through OrderManager submit/place APIs; no execution hub layer.
@@ -154,12 +149,6 @@ from nifty_scalper_bot.options.strike_selector import (
 )
 from nifty_scalper_bot.risk import RiskManager
 from nifty_scalper_bot.risk.expiry_gate import expiry_theta_block, midday_pause_block
-from nifty_scalper_bot.risk.position_sizing import (
-    RiskManager as DeterministicRiskManager,
-)
-from nifty_scalper_bot.risk.position_sizing import (
-    RiskSnapshot,
-)
 from nifty_scalper_bot.strategies.bar_builder import OneMinuteBar, OneMinuteBarBuilder
 from nifty_scalper_bot.strategies.indicators import IndicatorEngine
 from nifty_scalper_bot.strategies.premium_risk_geometry import (
@@ -184,7 +173,7 @@ from nifty_scalper_bot.utils.log_throttle import (
 from nifty_scalper_bot.utils.log_throttle import (
     log_throttled as log_throttled_live,
 )
-from nifty_scalper_bot.utils.logging import LogThrottle, get_logger, log_throttled
+from nifty_scalper_bot.utils.logging import get_logger, log_throttled
 from nifty_scalper_bot.utils.market_hours import (
     SAFE_END,
     SAFE_START,
@@ -492,48 +481,6 @@ class TradeDecisionSnapshot:
 
 
 LAST_TRADE_DECISION_SNAPSHOT: TradeDecisionSnapshot | None = None
-
-
-@dataclass(slots=True)
-class DeterministicExecutionPipeline:
-    """Data->signal->validation->risk->execution pipeline."""
-
-    trade_manager: TradeManager
-    risk_manager: DeterministicRiskManager
-    order_executor: Any
-    log_throttle: LogThrottle
-
-    def on_new_candle(
-        self, symbol: str, signal: Signal | None, ltp: float, risk: RiskSnapshot
-    ) -> str:
-        """Process one closed-candle decision. Args: symbol/signal/ltp/risk. Returns: status. Raises: Exception."""
-        if signal is None:
-            return "NO_SIGNAL"
-        try:
-            _ = ensure_ltp(ltp)
-            signal = signal.with_metadata(signal_price=ltp, pipeline="deterministic")
-            order_id = self.order_executor.execute(signal)
-            if not order_id:
-                LOGGER.info(
-                    '{"event":"SIGNAL_REJECTED","symbol":"%s","reason":"execution_rejected"}',
-                    symbol,
-                )
-                return "REJECTED_EXECUTION"
-            return "ORDER_PLACED"
-        except DataIntegrityError:
-            LOGGER.info(
-                '{"event":"SIGNAL_REJECTED","symbol":"%s","reason":"data_integrity"}',
-                symbol,
-            )
-            raise
-        except Exception as e:
-            LOGGER.exception(
-                '{"event":"ORDER_FAILED","symbol":"%s","error":"%s"}',
-                symbol,
-                e,
-                exc_info=True,
-            )
-            raise
 
 
 class OrderRouter(Protocol):
@@ -882,9 +829,6 @@ class StrategyRunner:
         self._position_manager = position_manager
         self._message_bus = message_bus
         self._config = config or StrategyRunnerConfig()
-        self._execution_engine = (
-            None  # Removed — signals route directly via order_manager
-        )
         self._logger = get_logger(__name__)
         self._logger.debug(
             "StrategyRunner using MessageBus id=%s", id(self._message_bus)
@@ -929,8 +873,6 @@ class StrategyRunner:
         self._legacy_tick_subscription_mode = os.getenv(
             "STRATEGY_RUNNER_LEGACY_SUBSCRIBE", "false"
         ).strip().lower() in {"1", "true", "yes", "on"}
-        # Time block logging throttle
-        self._time_block_logged: Dict[str, float] = {}
         self._allow_eval_without_new_bar = os.getenv(
             "RUNNER_ALLOW_EVAL_WITHOUT_NEW_BAR", "true"
         ).strip().lower() in {"1", "true", "yes", "on"}
@@ -1035,7 +977,6 @@ class StrategyRunner:
         self._max_order_attempts_per_minute = max(
             1, int(os.getenv("RUNNER_MAX_ORDER_ATTEMPTS_PER_MINUTE", "5") or 5)
         )
-        self._last_execution_halted_log_ts: float = 0.0
         self._runtime_data_hard_ready = False
         self._runtime_evaluation_ready = False
         self._runtime_live_orders_armed = False
@@ -1120,7 +1061,6 @@ class StrategyRunner:
         self._trade_counter_by_symbol_candle: Dict[str, dict] = {}
         self._settings = get_settings()
         self._lock = threading.RLock()
-        self._eval_lock = threading.Lock()
         self._trade_counter_lock = threading.Lock()
         self._running = False
         self._trading_paused = False
@@ -1213,7 +1153,6 @@ class StrategyRunner:
         )
         self._last_ws_stale_log_ts_by_symbol: dict[str, float] = defaultdict(float)
         self._last_ws_reconnect_attempt_ts: float = 0.0
-        self._last_stall_warn_ts: float = 0.0  # throttle stall warnings to 30s
         # Health-watchdog cadence: the scan was previously executed for every
         # accepted tick on the tick thread.
         self._health_watchdog_lock = threading.Lock()
@@ -1236,8 +1175,6 @@ class StrategyRunner:
         self._candle_engines: dict[str, Any] = {}
         # STEP 1/4: Single deterministic pipeline — ticks flow here → closed candles only
         self._pipeline: MarketDataPipeline = get_pipeline(store_maxlen=1500)
-        # STEP 5: counter for "invalid data" drops — never silently discarded
-        self._invalid_data_skip_counter: int = 0
         self._symbol_history: dict[str, list[OneMinuteBar]] = {}
         self._recent_history_cache: dict[str, list[OneMinuteBar]] = {}
         self._restored_from_cache_symbols: set[str] = set()
@@ -1319,10 +1256,6 @@ class StrategyRunner:
         self._structural_approved_total_count = 0
         self._regime_block_counter = 0
         self._capital_block_counter = 0
-        self._last_candle_eval: dict[str, float] = {}
-        self._regime_skip_log_ts: dict[str, float] = {}
-        self._qty_zero_log_ts: dict[str, float] = {}
-        self._last_spot_warn_ts = 0.0
         self._spot_stale_flag = False
         self._last_summary_log = time.monotonic()
         self._last_system_heartbeat_log = time.monotonic()
@@ -1356,8 +1289,6 @@ class StrategyRunner:
         # BUG W2 FIX: emit a one-shot INFO log when indicator warmup first clears
         # for each symbol so Railway logs confirm the moment strategies become active.
         self._warmup_complete_logged: set[str] = set()
-        self._max_trades_per_symbol_per_candle = 1
-        self._min_trade_interval_seconds = 60.0
         self._session_allow_out_of_hours = allow_offhours_testing_safe()
         self._max_nifty_positions = int(os.getenv("MAX_NIFTY_POSITIONS", "1"))
         self._last_regime_by_symbol: dict[str, MarketRegime] = {}
@@ -18764,10 +18695,7 @@ class StrategyRunner:
                 trade_symbol or base_symbol or signal.symbol
             )
             selected_snapshot: dict[str, Any] = {}
-            dedup_reserved = False
-            dedup_key_context: dict[str, str] | None = None
-
-            def reject_after_dedup(
+            def _reject_after_dedup(
                 *,
                 reason: str,
                 details: Mapping[str, Any] | None = None,
@@ -18779,8 +18707,8 @@ class StrategyRunner:
                         reason=reason_key,
                     )
                 self._reset_execution_state(base_symbol)
-                rejection_details = dict(details or {})
-                if decision_research_context:
+                rejection_details = details if dedup_reserved else dict(details or {})
+                if not dedup_reserved and decision_research_context:
                     rejection_details.setdefault(
                         "research_context",
                         {
@@ -18796,7 +18724,6 @@ class StrategyRunner:
                     details=rejection_details,
                 )
 
-            _reject_after_dedup = reject_after_dedup
             existing_snapshots = (
                 candidate_snapshots_obj
                 if isinstance(candidate_snapshots_obj, list)
@@ -19716,25 +19643,6 @@ class StrategyRunner:
                     "option_side": option_side,
                     "reason": reason_key,
                 }
-
-                def _reject_after_dedup(
-                    *,
-                    reason: str,
-                    details: Mapping[str, Any] | None = None,
-                ) -> SignalExecutionResult:
-                    if dedup_reserved:
-                        self._mark_directional_dedup_failed(
-                            underlying=underlying,
-                            option_side=option_side,
-                            reason=reason_key,
-                        )
-                    self._reset_execution_state(base_symbol)
-                    return self._reject_signal_execution(
-                        symbol=base_symbol,
-                        trace_id=trace_id,
-                        reason=reason,
-                        details=details,
-                    )
 
                 if is_live_mode:
                     readiness = self._ensure_symbol_execution_ready_result(

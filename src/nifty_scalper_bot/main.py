@@ -3,6 +3,7 @@
 Responsibilities: Initialize canonical settings, supervise the app background task,
 expose /livez, /readyz, /releasez and structured health/status diagnostics,
 and provide explicit startup/shutdown management.
+Health labels separate execution permission from observed signal pipeline activity.
 Key interfaces: lifespan, livez, readyz and trading/status handlers.
 Boundaries: This HTTP shell does not own market direction, risk or order policy;
 core/app.py orchestrates the trading components.
@@ -532,7 +533,7 @@ def _live_order_readiness(ctx, *, blockers=None):  # noqa: ANN001
     return {"ready": ready, "missing": list(dict.fromkeys(missing))}
 
 
-def _signal_observability(ctx):  # noqa: ANN001
+def _signal_observability(ctx: Any) -> dict[str, Any]:
     """Return bounded, read-only strategy observability for health consumers."""
     runner = getattr(ctx, "strategy_runner", None)
     getter = getattr(runner, "get_status", None)
@@ -669,6 +670,22 @@ def _no_trade_diagnostics(
         "risk_limit_is_independent_of_signal_generation": True,
         "setup_lifecycle": signals.get("setup_lifecycle") or {},
     }
+
+
+def _trade_pipeline_state(
+    live_orders_armed: bool, diagnostics: dict[str, Any]
+) -> dict[str, str]:
+    """Describe observed pipeline evidence, not a promise of an order."""
+    if not live_orders_armed:
+        return {"stage": "NOT_ARMED", "reason": "live_order_readiness_blocked"}
+    reason = str(diagnostics.get("reason") or "strategy_telemetry_unavailable")
+    stages = {
+        "awaiting_strategy_evaluations": "EVALUATION_PENDING",
+        "no_valid_strategy_trigger_since_start": "SIGNAL_WAITING",
+        "candidates_not_approved_since_start": "CANDIDATE_NOT_APPROVED",
+        "approved_candidate_seen_since_start": "CANDIDATE_SEEN_HISTORICALLY",
+    }
+    return {"stage": stages.get(reason, "UNKNOWN"), "reason": reason}
 
 
 def _bar_minute_identity(row):  # noqa: ANN001
@@ -1071,6 +1088,9 @@ def health_trading():
     no_trade_diagnostics = _no_trade_diagnostics(
         signal_observability, structured_status.get("minimum_lot_affordability")
     )
+    trade_pipeline_state = _trade_pipeline_state(
+        live_orders_armed and not blockers, no_trade_diagnostics
+    )
     return JSONResponse(
         status_code=200,
         content={
@@ -1115,6 +1135,7 @@ def health_trading():
             },
             "signal_observability": signal_observability,
             "no_trade_diagnostics": no_trade_diagnostics,
+            "trade_pipeline_state": trade_pipeline_state,
             "live_order_readiness": live_order_readiness,
             "reconciliation": {
                 "started": bool(getattr(ctx, "position_reconciliation_started", False)),
@@ -1211,6 +1232,13 @@ def trading_status():
         and isinstance(runtime_state, dict)
         and runtime_state.get("live_orders_armed")
     )
+    signal_observability = _signal_observability(ctx) if ctx is not None else {}
+    no_trade_diagnostics = _no_trade_diagnostics(
+        signal_observability, structured.get("minimum_lot_affordability")
+    )
+    trade_pipeline_state = _trade_pipeline_state(
+        can_place_live_order_now, no_trade_diagnostics
+    )
     return {
         "enable_live": enable_live,
         "research_job": read_status(
@@ -1229,9 +1257,11 @@ def trading_status():
         "execution_mode": exec_mode,
         "configured_for_live": configured_for_live,
         "can_place_live_order_now": can_place_live_order_now,
-        # Compatibility key: now reflects current executable readiness rather
-        # than configuration intent.
+        # Compatibility key reports execution permission, never a signal,
+        # an order attempt or a successful fill.
         "will_trade": can_place_live_order_now,
+        "will_trade_semantics": "execution_permission_only_not_signal_or_order",
+        "trade_pipeline_state": trade_pipeline_state,
         "engine_http_responsive": True,
         "bot_loaded": app.state.bot is not None,
         "event_loop_lag_ms": round(float(_EVENT_LOOP_LAG_MS), 3),

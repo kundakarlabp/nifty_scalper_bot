@@ -733,7 +733,7 @@ def test_smc_contract_switch_cannot_reset_prior_option_risk_reference(
     [
         ("RANGE", False, False),
         ("CHOPPY", False, False),
-        ("RANGE", True, True),
+        ("RANGE", True, False),
         ("TREND", False, True),
     ],
 )
@@ -768,7 +768,11 @@ def test_regime_aware_smc_requires_corroboration_in_ranges(
         assert signal.metadata["smc_quality_corroborated"] is structure
     else:
         assert signal is None
-        assert strategy.last_no_vote_reason == "smc_range_corroboration_missing"
+        assert strategy.last_no_vote_reason == (
+            "smc_range_correlated_structure_only"
+            if structure
+            else "smc_range_corroboration_missing"
+        )
 
 
 @pytest.mark.parametrize(
@@ -785,7 +789,7 @@ def test_smc_manager_option_structure_must_follow_its_actual_sweep(
     rows.append(sweep)
     indicators = _indicators(
         latest_bar_ts=sweep["timestamp"],
-        regime="RANGE",
+        regime="TREND",
         bos_confirmed=True,
         bos_side="CE",
         bos_ts_epoch=(
@@ -800,12 +804,8 @@ def test_smc_manager_option_structure_must_follow_its_actual_sweep(
     rows.append(_bar(31, open_=23984, high=23999, low=23982, close=23997, volume=1000))
     indicators["latest_bar_ts"] = rows[-1]["timestamp"]
     signal = strategy.generate_signal(CE, indicators, 103.0)
-    if should_vote:
-        assert signal is not None
-        assert signal.metadata["structure_confirmed"] is True
-    else:
-        assert signal is None
-        assert strategy.last_no_vote_reason == "smc_range_corroboration_missing"
+    assert signal is not None
+    assert signal.metadata["structure_confirmed"] is should_vote
 
 
 def test_smc_manager_option_retest_and_reclaim_do_not_use_pre_sweep_bars(
@@ -1154,3 +1154,49 @@ def test_conflicting_completed_futures_candles_fail_closed(
 
     assert signal is None
     assert strategy.last_no_vote_reason == "underlying_context_not_ready"
+
+
+def test_range_smc_requires_distinct_support(monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    rows = _base_rows()
+    strategy = _strategy(rows, volume_spike_mult=1.5)
+    rows.append(_bar(30, open_=23988, high=23991, low=23974, close=23984, volume=2400))
+    ctx = _indicators(
+        latest_bar_ts=rows[-1]["timestamp"],
+        regime="RANGE",
+        bos_confirmed=False,
+        choch_confirmed=False,
+        retest_confirmed=False,
+        premium_reclaim=False,
+    )
+    assert strategy.generate_signal(CE, ctx, 102.0) is None
+    rows.append(_bar(31, open_=23984, high=23999, low=23982, close=23997, volume=1000))
+    ctx["latest_bar_ts"] = rows[-1]["timestamp"]
+    assert strategy.generate_signal(CE, ctx, 103.0) is not None
+
+
+def test_range_smc_accepts_timestamped_retest_reclaim(monkeypatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    rows = _base_rows()
+    strategy = _strategy(rows, volume_spike_mult=10.0)
+    rows.append(_bar(30, open_=23988, high=23991, low=23974, close=23984, volume=1000))
+    ctx = _indicators(
+        latest_bar_ts=rows[-1]["timestamp"],
+        regime="RANGE",
+        bos_confirmed=False,
+        choch_confirmed=False,
+        retest_confirmed=True,
+        premium_reclaim=True,
+        smc_enrichment_source="strategy_manager_pre_strategy",
+    )
+    assert strategy.generate_signal(CE, ctx, 102.0) is None
+    rows.append(_bar(31, open_=23984, high=23999, low=23982, close=23997, volume=1000))
+    stamp = rows[-1]["timestamp"].timestamp()
+    ctx.update(
+        latest_bar_ts=rows[-1]["timestamp"],
+        retest_ts_epoch=stamp,
+        premium_reclaim_ts_epoch=stamp,
+    )
+    signal = strategy.generate_signal(CE, ctx, 103.0)
+    assert signal is not None
+    assert signal.metadata["smc_quality_corroborated"] is True

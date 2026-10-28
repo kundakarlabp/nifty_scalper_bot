@@ -426,6 +426,105 @@ def test_entry_path_rejects_stale_pe_candidate_before_order_manager(monkeypatch)
     assert runner._accepted_strategy_notifications == []
 
 
+def test_unreserved_structural_rejection_preserves_research_context(monkeypatch):
+    runner, _ = _execution_runner(monkeypatch, ce_ok=True, pe_ok=False)
+    events = []
+    runner._mark_directional_dedup_failed = lambda **kwargs: events.append(
+        ("rollback", kwargs)
+    )
+    runner._reset_execution_state = lambda symbol: events.append(("reset", symbol))
+    runner._decision_research_context = lambda **kwargs: {"marker": "research"}
+    signal = _signal("NFO:CE")
+    signal = dataclasses.replace(
+        signal,
+        metadata={
+            **signal.metadata,
+            "direction_contract": {
+                **signal.metadata["direction_contract"],
+                "passed": False,
+            },
+        },
+    )
+
+    result = runner._handle_entry_signal_inner(
+        signal,
+        "NSE:NIFTY",
+        "NFO:CE",
+        100.0,
+        datetime.now(timezone.utc),
+        trace_id="characterize",
+    )
+
+    assert result.reason == "direction_contract_not_passed"
+    assert result.details["research_context"]["marker"] == "research"
+    assert events == [("reset", "NSE:NIFTY")]
+    assert runner._order_manager.plans == []
+
+
+def test_reserved_structural_rejection_rolls_back_before_reset(monkeypatch):
+    runner, _ = _execution_runner(monkeypatch, ce_ok=True, pe_ok=False)
+    events = []
+    runner._mark_directional_dedup_failed = lambda **kwargs: events.append(
+        ("rollback", kwargs)
+    )
+    runner._reset_execution_state = lambda symbol: events.append(("reset", symbol))
+    runner._decision_research_context = lambda **kwargs: {"marker": "research"}
+    candidate = SimpleNamespace(
+        symbol="NFO:CE",
+        entry_price=100.0,
+        stop_loss=90.0,
+        target=120.0,
+        rr=2.0,
+        net_rr=1.8,
+        spread_pct=1.0,
+    )
+    runner._trade_candidate_selector = SimpleNamespace(
+        _last_rejects={},
+        min_option_premium=25.0,
+        max_option_premium=650.0,
+        select_ranked_candidates=lambda **kwargs: [candidate],
+    )
+    runner._select_capital_eligible_candidate = lambda **kwargs: (candidate, {})
+    signal = _signal("NFO:CE")
+    signal = dataclasses.replace(
+        signal,
+        metadata={
+            **signal.metadata,
+            "atm_strike": 25000,
+            "candidate_snapshots": [
+                {
+                    "symbol": "NFO:CE",
+                    "side": "CE",
+                    "strike": 25000,
+                    "bid": 99.0,
+                    "ask": 100.0,
+                    "ltp": 99.5,
+                    "tick_age_ms": 10.0,
+                }
+            ],
+            "direction_contract": {
+                **signal.metadata["direction_contract"],
+                "passed": False,
+            },
+        },
+    )
+    result = runner._handle_entry_signal_inner(
+        signal,
+        "NSE:NIFTY",
+        "NFO:CE",
+        100.0,
+        datetime.now(timezone.utc),
+        trace_id="characterize",
+    )
+    assert result.reason == "direction_contract_not_passed", result
+    assert "research_context" not in result.details
+    assert events == [
+        ("rollback", {"underlying": "NIFTY", "option_side": "CE", "reason": "test"}),
+        ("reset", "NSE:NIFTY"),
+    ]
+    assert runner._order_manager.plans == []
+
+
 def test_entry_path_rejects_unmapped_nifty_option_before_order_manager(monkeypatch):
     runner, calls = _execution_runner(monkeypatch, ce_ok=True, pe_ok=True)
     result = runner._handle_entry_signal_inner(
