@@ -1,4 +1,10 @@
-"""Runtime context contract and shared entry direction/freshness resolution."""
+"""Runtime context contract and shared entry direction/freshness resolution.
+
+Preserves live directional fields and quote-age semantics across strategy gates.
+Entry resolvers retain bias/confidence fallback order and explicit freshness
+flags; fresh quotes alone do not supply an executable option direction.
+These pure calculations neither mutate caller context nor place orders.
+"""
 
 from __future__ import annotations
 
