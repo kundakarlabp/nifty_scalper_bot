@@ -738,3 +738,38 @@ def test_underlying_context_timestamp_age_is_bounded() -> None:
         max_age_seconds=5.0,
         now_ts=now_ts,
     )
+
+
+def test_unconfirmed_context_logs_parseable_reasons_without_allowing_entry(
+    monkeypatch, caplog
+) -> None:
+    import logging
+
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    manager = _manager()
+    trigger = _signal_evidence("VWAPPro")
+    context = _signal_evidence(
+        "OrderFlow", role="context", aligned_context=False
+    )
+    context[1].metadata["effective_context_conflict"] = False
+    context[1].metadata["context_alignment_block_reason"] = "ofi_reversal_holdoff"
+
+    with caplog.at_level(logging.INFO):
+        result = manager._combine_strategy_votes(
+            symbol=_CE,
+            signals=[trigger, context],
+            indicators=_live_indicators("CE"),
+        )
+
+    assert result is None
+    matching = [
+        record
+        for record in caplog.records
+        if "STRATEGY_CONFIRMATION_MISSING" in record.getMessage()
+    ]
+    assert matching
+    assert "reason_codes=ofi_reversal_holdoff" in matching[-1].getMessage()
+    assert matching[-1].reason_codes == ["ofi_reversal_holdoff"]
+    assert manager._last_no_signal_decision_by_symbol[_CE].blocked_at == (
+        "context_contract"
+    )
