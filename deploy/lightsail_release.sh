@@ -25,6 +25,7 @@ RELEASE_ENTRY_LOCK_FILE="${CONFIG_DIR}/auto_release_entry_lock"
 RELEASE_HOLD_ACTIVE=false
 FORCE_RESTART=false
 AUTO_MODE=false
+WAIT_FOR_LOCK=false
 SYSTEMD_ENTRYPOINT_MIGRATED=false
 AUTODEPLOY_ENTRYPOINT_MIGRATED=false
 RUNTIME_ENV_CHANGED=false
@@ -37,6 +38,7 @@ for arg in "$@"; do
   case "$arg" in
     --force|--force-restart) FORCE_RESTART=true ;;
     --auto) AUTO_MODE=true ;;
+    --wait-for-lock) WAIT_FOR_LOCK=true ;;
     *) printf '[lightsail-release] unknown argument: %s\n' "$arg" >&2; exit 2 ;;
   esac
 done
@@ -645,7 +647,15 @@ auto_release_should_defer() {
 }
 
 exec 9>"$LOCK_FILE"
-if ! flock -n 9; then log "Another deployment is already running"; exit 0; fi
+if [ "$WAIT_FOR_LOCK" = true ]; then
+  if ! flock -w 180 9; then
+    log "Operator recovery timed out waiting for deployment lock"
+    exit 75
+  fi
+elif ! flock -n 9; then
+  log "Automatic deployment is already running; periodic retry remains queued"
+  exit 0
+fi
 
 cd "$APP_DIR"
 if [ ! -d .git ]; then
