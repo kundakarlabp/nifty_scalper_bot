@@ -145,10 +145,10 @@ def _configure_saved_session(monkeypatch, tmp_path: Path):
 
     env_file = tmp_path / "niftybot.env"
     env_file.write_text(
-        "BROKER_API_KEY=production-key\\n"
-        "BROKER_API_SECRET=production-secret\\n"
-        "BROKER_ACCESS_TOKEN=saved-token\\n"
-        "ADMIN_ZERODHA_USER_ID=AB1234\\n",
+        "BROKER_API_KEY=production-key\n"
+        "BROKER_API_SECRET=production-secret\n"
+        "BROKER_ACCESS_TOKEN=saved-token\n"
+        "ADMIN_ZERODHA_USER_ID=AB1234\n",
         encoding="utf-8",
     )
     monkeypatch.setenv("DEPLOYMENT_PLATFORM", "aws_lightsail")
