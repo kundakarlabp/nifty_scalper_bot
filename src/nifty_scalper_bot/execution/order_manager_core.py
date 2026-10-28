@@ -3903,7 +3903,8 @@ class OrderManager:
                         exit_block_reason = "uncertain_exit_ledger_write_failed"
             if exit_block_reason:
                 self._logger.critical(
-                    "EXIT_SUBMISSION_HELD symbol=%s reason=%s broker_reconciliation_required=True",
+                    "EXIT_SUBMISSION_HELD symbol=%s reason=%s "
+                    "broker_reconciliation_required=True",
                     normalized_symbol,
                     exit_block_reason,
                 )
@@ -4504,7 +4505,8 @@ class OrderManager:
                     # Submission may have reached the exchange despite an
                     # exception or absent order ID. Never send it again.
                     self._logger.critical(
-                        "EXIT_SUBMISSION_UNCERTAIN symbol=%s reason=%s broker_reconciliation_required=True",
+                        "EXIT_SUBMISSION_UNCERTAIN symbol=%s reason=%s "
+                        "broker_reconciliation_required=True",
                         normalized_symbol,
                         failure_class,
                     )
