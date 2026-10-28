@@ -1852,7 +1852,11 @@ class StrategyManager:
                     indicators["futures_vwap_source"] = "active_future_quote_vwap"
                     indicators["futures_vwap_quote_field"] = futures_quote.get(
                         "vwap_source_field"
-                    ) or ("vwap" if futures_quote.get("vwap") is not None else "average_price")
+                    ) or (
+                        "vwap"
+                        if futures_quote.get("vwap") is not None
+                        else "average_price"
+                    )
                 elif (
                     futures_ltp is not None
                     and math.isfinite(futures_ltp)
