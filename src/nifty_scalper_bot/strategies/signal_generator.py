@@ -2,7 +2,8 @@
 
 Runtime role:
 - Generates signals from prepared strategy context.
-- Consumes selected option quote/OHLC/depth/OI fields.
+- Consumes selected option quote/OHLC/depth/OI fields and canonical active-
+  futures cumulative volume plus broker-quoted VWAP without price substitution.
 - Must not select contracts or fetch broker history."""
 
 from __future__ import annotations
@@ -1708,7 +1709,10 @@ class StrategyManager:
         if quote:
             volume = None
             volume_source = None
-            for key in ("volume_traded_today", "volume_traded"):
+            # Normalized MarketDataManager quotes use volume_cumulative,
+            # while raw broker quotes may use volume_traded_today/traded.
+            # Both represent a session counter, never per-tick volume.
+            for key in ("volume_traded_today", "volume_traded", "volume_cumulative"):
                 candidate = self._extract_float(quote, (key,))
                 if (
                     candidate is not None
@@ -1719,10 +1723,12 @@ class StrategyManager:
                     volume_source = key
                     break
 
-            if volume is not None:
+            # An out-of-order/rolled-back broker counter cannot reset the
+            # strategy's previously trusted session-volume baseline.
+            if volume is not None and not quote.get("volume_delta_untrusted"):
                 current_date = dt.datetime.now().date()
                 same_stream = (
-                    self._last_futures_volume_symbol == self._futures_symbol
+                    self._last_futures_volume_symbol == active_future
                     and self._last_futures_volume_date == current_date
                 )
                 volume_delta: float | None = None
@@ -1731,7 +1737,7 @@ class StrategyManager:
                 if not same_stream or self._last_futures_volume is None:
                     self._futures_volume_history.clear()
                     self._last_futures_volume = volume
-                    self._last_futures_volume_symbol = self._futures_symbol
+                    self._last_futures_volume_symbol = active_future
                     self._last_futures_volume_date = current_date
                 elif volume >= self._last_futures_volume:
                     volume_delta = volume - self._last_futures_volume
@@ -1740,12 +1746,12 @@ class StrategyManager:
                     trusted = False
                     self._logger.warning(
                         "FUTURES_VOLUME_DECREASE_REJECTED symbol=%s last=%s current=%s",
-                        self._futures_symbol,
+                        active_future,
                         self._last_futures_volume,
                         volume,
                         extra={
                             "event": "FUTURES_VOLUME_DECREASE_REJECTED",
-                            "symbol": self._futures_symbol,
+                            "symbol": active_future,
                             "last_volume": self._last_futures_volume,
                             "current_volume": volume,
                             "volume_source": volume_source,
@@ -1770,7 +1776,7 @@ class StrategyManager:
                             "Condition met: futures_volume_ratio_updated",
                             extra={
                                 "event": "futures_volume_ratio_updated",
-                                "symbol": self._futures_symbol,
+                                "symbol": active_future,
                                 "volume_delta": volume_delta,
                                 "volume_avg": avg,
                                 "volume_ratio": indicators["futures_volume_ratio"],
@@ -1844,6 +1850,9 @@ class StrategyManager:
                     indicators["futures_vwap"] = futures_vwap
                     indicators["nifty_fut_vwap"] = futures_vwap
                     indicators["futures_vwap_source"] = "active_future_quote_vwap"
+                    indicators["futures_vwap_quote_field"] = futures_quote.get(
+                        "vwap_source_field"
+                    ) or ("vwap" if futures_quote.get("vwap") is not None else "average_price")
                 elif (
                     futures_ltp is not None
                     and math.isfinite(futures_ltp)
