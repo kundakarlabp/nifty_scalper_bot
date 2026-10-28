@@ -1,4 +1,9 @@
-"""Durable key-value journal for persisting controller state."""
+"""Persist small controller-state mappings in an atomic JSON journal.
+
+AtomicKV owns serialized in-process access and disk replacement. Failed deletes
+retain their previous in-memory value and propagate the persistence error so
+callers cannot mistake a failed write for a released safety reservation.
+"""
 
 from __future__ import annotations
 
