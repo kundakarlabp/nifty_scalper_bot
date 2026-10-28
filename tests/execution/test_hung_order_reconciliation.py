@@ -472,3 +472,54 @@ def test_acknowledged_exit_releases_durable_submission_hold(monkeypatch, tmp_pat
     )
     assert order_id == "EXIT-CONFIRMED"
     assert manager.execution_health_snapshot()["uncertain_exit_orders_count"] == 0
+
+
+def test_failed_exit_hold_clear_keeps_subsequent_orders_blocked(monkeypatch, tmp_path):
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+
+    class Broker:
+        is_simulated_adapter = True
+
+    manager = OrderManager(
+        Broker(), PositionManager(str(tmp_path / "positions.json")), RateLimiter()
+    )
+    manager._positions.open_position(
+        "NFO:NIFTY2671423950CE", "LONG", 65, 100.0, order_id="entry-1"
+    )
+    monkeypatch.setattr(manager, "_lot_size_for_symbol", lambda _: 65)
+    monkeypatch.setattr(
+        manager, "_submit_broker_order", lambda _: {"order_id": "EXIT-CONFIRMED"}
+    )
+    original_flush = manager._uncertain_exit_ledger._flush
+
+    def fail_clear():
+        if not manager._uncertain_exit_ledger.snapshot():
+            raise OSError("simulated disk failure")
+        original_flush()
+
+    monkeypatch.setattr(manager._uncertain_exit_ledger, "_flush", fail_clear)
+    exit_order = manager.place_order(
+        symbol="NFO:NIFTY2671423950CE",
+        side="SELL",
+        quantity=65,
+        order_type=OrderType.MARKET,
+        check_risk=False,
+        intent="EXIT",
+    )
+    assert exit_order == "EXIT-CONFIRMED"
+    assert manager.execution_health_snapshot()["uncertain_exit_orders_count"] == 1
+    entry_order = manager.place_order(
+        symbol="NFO:NIFTY2671423950CE",
+        side="BUY",
+        quantity=65,
+        order_type=OrderType.LIMIT,
+        price=100.0,
+        stop_loss=95.0,
+        take_profit=110.0,
+        check_risk=False,
+        intent="ENTRY",
+        signal_id="after-failed-clear",
+    )
+    assert entry_order is None
+    assert manager._last_skip_reason == "uncertain_exit_reconciliation_required"

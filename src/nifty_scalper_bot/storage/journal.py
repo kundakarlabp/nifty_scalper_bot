@@ -1,4 +1,9 @@
-"""Durable key-value journal for persisting controller state."""
+"""Persist small controller-state mappings in an atomic JSON journal.
+
+AtomicKV owns serialized in-process access and disk replacement. Failed deletes
+retain their previous in-memory value and propagate the persistence error so
+callers cannot mistake a failed write for a released safety reservation.
+"""
 
 from __future__ import annotations
 
@@ -31,8 +36,12 @@ class AtomicKV:
     def delete(self, key: str) -> None:
         with self._lock:
             if key in self._data:
-                self._data.pop(key, None)
-                self._flush()
+                value = self._data.pop(key)
+                try:
+                    self._flush()
+                except Exception:
+                    self._data[key] = value
+                    raise
 
     def snapshot(self) -> Dict[str, Any]:
         with self._lock:
