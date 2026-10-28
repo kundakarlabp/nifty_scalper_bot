@@ -499,16 +499,17 @@ def test_failed_exit_hold_clear_keeps_subsequent_orders_blocked(monkeypatch, tmp
         original_flush()
 
     monkeypatch.setattr(manager._uncertain_exit_ledger, "_flush", fail_clear)
-    assert manager.place_order(
+    exit_order = manager.place_order(
         symbol="NFO:NIFTY2671423950CE",
         side="SELL",
         quantity=65,
         order_type=OrderType.MARKET,
         check_risk=False,
         intent="EXIT",
-    ) == "EXIT-CONFIRMED"
+    )
+    assert exit_order == "EXIT-CONFIRMED"
     assert manager.execution_health_snapshot()["uncertain_exit_ledger_corrupt"]
-    assert manager.place_order(
+    entry_order = manager.place_order(
         symbol="NFO:NIFTY2671423950CE",
         side="BUY",
         quantity=65,
@@ -519,5 +520,6 @@ def test_failed_exit_hold_clear_keeps_subsequent_orders_blocked(monkeypatch, tmp
         check_risk=False,
         intent="ENTRY",
         signal_id="after-failed-clear",
-    ) is None
+    )
+    assert entry_order is None
     assert manager._last_skip_reason == "uncertain_exit_reconciliation_required"
