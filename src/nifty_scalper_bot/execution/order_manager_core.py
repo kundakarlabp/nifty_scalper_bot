@@ -31,6 +31,8 @@ Safe-edit notes:
   the existing entry gate stays blocked pending broker reconciliation.
 - EXIT/REDUCE broker submissions are write-ahead reserved; ambiguous broker
   responses remain blocked across timeout and process restart until reconciled.
+- Restored broker SL/SL-M order types retain stop semantics; unknown persisted
+  types are rejected rather than silently replaced with LIMIT or MARKET.
 """
 
 from __future__ import annotations
@@ -9414,19 +9416,12 @@ class OrderManager:
             restored_count = 0
             for oid, record in data.items():
                 try:
-                    # Reconstruct OrderStatus enum
-                    status_str = record.get("status", "PENDING")
-                    if hasattr(OrderStatus, status_str):
-                        status = getattr(OrderStatus, status_str)
-                    else:
-                        status = OrderStatus.PENDING
-
-                    # Reconstruct OrderType enum
-                    order_type_str = record.get("order_type", "LIMIT")
-                    if hasattr(OrderType, order_type_str):
-                        order_type = getattr(OrderType, order_type_str)
-                    else:
-                        order_type = OrderType.LIMIT
+                    status = self._parse_status(record.get("status", "PENDING"))
+                    # The persisted broker codes SL and SL-M are stop orders.
+                    # Never silently turn an unknown protective order into LIMIT.
+                    order_type = self._parse_order_type_token(
+                        record.get("order_type"), strict=True
+                    )
 
                     # Create the order object (OrderDetails is the class actually
                     # stored in self._orders; 'Order' does not exist, which made
@@ -9449,10 +9444,19 @@ class OrderManager:
                             record.get("applied_filled_quantity", 0) or 0
                         ),
                         intent=record.get("intent") or "UNKNOWN",
+                        client_order_id=record.get("client_order_id"),
+                        tag=record.get("tag"),
+                        product=record.get("product") or "MIS",
+                        signal_id=record.get("signal_id"),
+                        trade_lifecycle_id=record.get("trade_lifecycle_id"),
+                        linked_entry_order_id=record.get("linked_entry_order_id"),
                     )
 
                     with self._lock:
                         self._orders[oid] = order
+                        if order.client_order_id:
+                            client_key = str(order.client_order_id)
+                            self._client_order_index[client_key] = str(order.order_id)
                     restored_count += 1
 
                 except Exception as e:
