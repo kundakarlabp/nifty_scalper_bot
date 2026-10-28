@@ -31,8 +31,12 @@ class AtomicKV:
     def delete(self, key: str) -> None:
         with self._lock:
             if key in self._data:
-                self._data.pop(key, None)
-                self._flush()
+                value = self._data.pop(key)
+                try:
+                    self._flush()
+                except Exception:
+                    self._data[key] = value
+                    raise
 
     def snapshot(self) -> Dict[str, Any]:
         with self._lock:
