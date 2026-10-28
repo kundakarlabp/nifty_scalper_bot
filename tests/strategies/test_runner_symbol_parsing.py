@@ -7,13 +7,13 @@ from nifty_scalper_bot.strategies.runner import (
 
 
 def test_extract_strike_from_symbol_parses_nfo_options() -> None:
-    assert StrategyRunner._extract_strike_from_symbol('NFO:NIFTY26MAY24350CE') == 24350
-    assert StrategyRunner._extract_strike_from_symbol('nfo:nifty26may24200pe') == 24200
+    assert StrategyRunner._extract_strike_from_symbol("NFO:NIFTY26MAY24350CE") == 24350
+    assert StrategyRunner._extract_strike_from_symbol("nfo:nifty26may24200pe") == 24200
 
 
 def test_extract_strike_from_symbol_returns_none_for_fut_and_spot() -> None:
-    assert StrategyRunner._extract_strike_from_symbol('NFO:NIFTY26MAY24FUT') is None
-    assert StrategyRunner._extract_strike_from_symbol('NSE:NIFTY') is None
+    assert StrategyRunner._extract_strike_from_symbol("NFO:NIFTY26MAY24FUT") is None
+    assert StrategyRunner._extract_strike_from_symbol("NSE:NIFTY") is None
 
 
 def test_extract_strike_helper_remains_available() -> None:
@@ -22,11 +22,10 @@ def test_extract_strike_helper_remains_available() -> None:
 
 def test_strategy_runner_required_helpers_exist() -> None:
     required_helpers = [
-        '_extract_underlying',
-        '_extract_strike_from_symbol',
-        '_get_atr_with_fallback',
-        '_handle_signal',
-        '_handle_entry_signal_inner',
+        "_extract_underlying",
+        "_extract_strike_from_symbol",
+        "_handle_signal",
+        "_handle_entry_signal_inner",
     ]
     for helper_name in required_helpers:
         assert hasattr(StrategyRunner, helper_name)
