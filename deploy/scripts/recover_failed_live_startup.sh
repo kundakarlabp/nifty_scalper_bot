@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Purpose: One-time, fail-closed bootstrap for a LIVE constructor that failed
-# before position reconciliation after today's verified Zerodha token rotation.
-# It never restarts services directly or changes risk / strategy configuration.
+# File purpose: Recover a failed LIVE startup through a CI-proven release.
+# Key responsibilities: Verify broker safety and run the validated candidate guard.
+# Operational constraints: No direct restart, unverified token or risk override.
 set -euo pipefail
 
 APP_DIR="/home/ubuntu/nifty_scalper_bot"
