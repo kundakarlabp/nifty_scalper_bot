@@ -230,3 +230,196 @@ def test_hung_exit_with_unverified_tag_is_not_resubmitted(monkeypatch, tmp_path)
     )
     assert second is None
     assert BlockedThread.starts == 1
+
+
+@pytest.mark.parametrize("second_tag", ["manual-square-off", "another-exit-tag"])
+def test_hung_exit_hold_survives_restart_and_tag_change(
+    monkeypatch, tmp_path, second_tag
+):
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+
+    class Broker:
+        is_simulated_adapter = True
+
+    class BlockedThread:
+        starts = 0
+
+        def __init__(self, **kwargs):
+            pass
+
+        def start(self):
+            type(self).starts += 1
+
+        def join(self, timeout=None):
+            pass
+
+        def is_alive(self):
+            return True
+
+    positions = PositionManager(str(tmp_path / "positions.json"))
+    positions.open_position(
+        "NFO:NIFTY2671423950CE", "LONG", 65, 100.0, order_id="entry-1"
+    )
+    first_manager = OrderManager(Broker(), positions, RateLimiter())
+    monkeypatch.setattr(order_manager_core, "Thread", BlockedThread)
+    monkeypatch.setattr(order_manager_core.time, "sleep", lambda _: None)
+    monkeypatch.setattr(first_manager, "_lot_size_for_symbol", lambda _: 65)
+    monkeypatch.setattr(first_manager, "_find_open_order", lambda _: None)
+    kwargs = {
+        "symbol": "NFO:NIFTY2671423950CE",
+        "side": "SELL",
+        "quantity": 65,
+        "order_type": OrderType.MARKET,
+        "check_risk": False,
+        "intent": "EXIT",
+        "tag": "manual-square-off",
+    }
+    assert first_manager.place_order(**kwargs) is None
+    assert BlockedThread.starts == 1
+    assert (tmp_path / "uncertain_exit_orders.json").exists()
+
+    later = order_manager_core.time.time() + 7200
+    monkeypatch.setattr(order_manager_core.time, "time", lambda: later)
+    restarted = OrderManager(
+        Broker(), PositionManager(str(tmp_path / "positions.json")), RateLimiter()
+    )
+    monkeypatch.setattr(restarted, "_lot_size_for_symbol", lambda _: 65)
+    kwargs["tag"] = second_tag
+    assert restarted.place_order(**kwargs) is None
+    assert BlockedThread.starts == 1
+    assert restarted._last_order_decision["block_reason"] == (
+        "uncertain_exit_reconciliation_required"
+    )
+
+
+@pytest.mark.parametrize("broker_status", ["COMPLETE", "OPEN"])
+def test_ambiguous_exit_cannot_adopt_unsettled_broker_order(
+    monkeypatch, tmp_path, broker_status
+):
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+
+    class Broker:
+        is_simulated_adapter = True
+
+    class BlockedThread:
+        starts = 0
+
+        def __init__(self, **kwargs):
+            pass
+
+        def start(self):
+            type(self).starts += 1
+
+        def join(self, timeout=None):
+            pass
+
+        def is_alive(self):
+            return True
+
+    manager = OrderManager(
+        Broker(), PositionManager(str(tmp_path / "positions.json")), RateLimiter()
+    )
+    manager._positions.open_position(
+        "NFO:NIFTY2671423950CE", "LONG", 65, 100.0, order_id="entry-1"
+    )
+    monkeypatch.setattr(order_manager_core, "Thread", BlockedThread)
+    monkeypatch.setattr(order_manager_core.time, "sleep", lambda _: None)
+    monkeypatch.setattr(manager, "_lot_size_for_symbol", lambda _: 65)
+    monkeypatch.setattr(
+        manager,
+        "_find_open_order",
+        lambda client_id: {
+            "order_id": "EXIT-LATE",
+            "client_order_id": client_id,
+            "tradingsymbol": "NIFTY2671423950CE",
+            "transaction_type": "SELL",
+            "quantity": 65,
+            "product": "MIS",
+            "status": broker_status,
+            "filled_quantity": 32 if broker_status == "OPEN" else 65,
+        },
+    )
+    assert (
+        manager.place_order(
+            symbol="NFO:NIFTY2671423950CE",
+            side="SELL",
+            quantity=65,
+            order_type=OrderType.MARKET,
+            check_risk=False,
+            intent="EXIT",
+        )
+        is None
+    )
+    assert BlockedThread.starts == 1
+    assert manager._uncertain_exit_ledger.get("NFO:NIFTY2671423950CE")
+    assert not manager._orders
+
+
+def test_exit_submission_exception_not_retried(monkeypatch, tmp_path):
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+
+    class Broker:
+        is_simulated_adapter = True
+
+    manager = OrderManager(
+        Broker(), PositionManager(str(tmp_path / "positions.json")), RateLimiter()
+    )
+    manager._positions.open_position(
+        "NFO:NIFTY2671423950CE", "LONG", 65, 100.0, order_id="entry-1"
+    )
+    monkeypatch.setattr(manager, "_lot_size_for_symbol", lambda _: 65)
+    monkeypatch.setattr(order_manager_core.time, "sleep", lambda _: None)
+    calls = []
+
+    def unavailable(_kwargs):
+        calls.append(1)
+        raise TimeoutError("response timed out")
+
+    monkeypatch.setattr(manager, "_submit_broker_order", unavailable)
+    assert (
+        manager.place_order(
+            symbol="NFO:NIFTY2671423950CE",
+            side="SELL",
+            quantity=65,
+            order_type=OrderType.MARKET,
+            check_risk=False,
+            intent="EXIT",
+        )
+        is None
+    )
+    assert len(calls) == 1
+    assert manager._uncertain_exit_ledger.get("NFO:NIFTY2671423950CE")
+
+
+def test_corrupt_exit_write_ahead_state_blocks_orders(monkeypatch, tmp_path):
+    monkeypatch.setenv("EXECUTION_MODE", "SHADOW")
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    (tmp_path / "uncertain_exit_orders.json").write_text("not-json")
+
+    class Broker:
+        is_simulated_adapter = True
+
+    manager = OrderManager(
+        Broker(), PositionManager(str(tmp_path / "positions.json")), RateLimiter()
+    )
+    manager._positions.open_position(
+        "NFO:NIFTY2671423950CE", "LONG", 65, 100.0, order_id="entry-1"
+    )
+    monkeypatch.setattr(manager, "_lot_size_for_symbol", lambda _: 65)
+    assert (
+        manager.place_order(
+            symbol="NFO:NIFTY2671423950CE",
+            side="SELL",
+            quantity=65,
+            order_type=OrderType.MARKET,
+            check_risk=False,
+            intent="EXIT",
+        )
+        is None
+    )
+    assert manager._last_order_decision["block_reason"] == (
+        "uncertain_exit_ledger_unreadable"
+    )

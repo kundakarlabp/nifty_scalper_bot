@@ -3811,6 +3811,20 @@ class OrderManager:
             try:
                 existing = self._find_open_order(unique_client_id)
                 if isinstance(existing, Mapping):
+                    # An orderbook observation is not a fill reconciliation.
+                    # EXIT/REDUCE must be settled by the position/bracket owner,
+                    # and terminal entries must not be re-registered as PENDING.
+                    if normalized_intent in {"EXIT", "REDUCE"}:
+                        return None
+                    broker_status = str(existing.get("status") or "").strip().upper()
+                    if broker_status in {
+                        "COMPLETE",
+                        "COMPLETED",
+                        "CANCELLED",
+                        "CANCELED",
+                        "REJECTED",
+                    }:
+                        return None
                     # The legacy finder can return a partial-tag match. Never
                     # adopt it as this order without exact identity and geometry.
                     found_id = str(existing.get("client_order_id") or "").strip()
