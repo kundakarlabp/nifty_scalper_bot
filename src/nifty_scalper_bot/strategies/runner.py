@@ -20082,33 +20082,15 @@ class StrategyRunner:
                     "order_manager_depth_insufficient",
                     "order_manager_kill_switch_active",
                 }
-                uncertain_markers = {
-                    "timeout",
-                    "network_timeout",
-                    "reconciliation_pending",
-                    "order_status_unknown",
-                    "broker_response_unknown",
-                    "placement_uncertain",
-                }
-                submit_reason_lc = str(submit_reason or "").lower()
                 if not broker_attempted or submit_reason in deterministic_rejections:
                     self._mark_directional_dedup_failed(
                         underlying=underlying,
                         option_side=option_side,
                         reason=reason_key,
                     )
-                elif any(marker in submit_reason_lc for marker in uncertain_markers):
-                    self._mark_directional_dedup_uncertain(
-                        underlying=underlying,
-                        option_side=option_side,
-                        reason=reason_key,
-                        trace_id=trace_id,
-                        details={
-                            "submit_reason": submit_reason,
-                            **dict(submit_details or {}),
-                        },
-                    )
                 else:
+                    # Both the former reason-matching and default paths marked
+                    # broker-attempted ambiguous failures identically.
                     self._mark_directional_dedup_uncertain(
                         underlying=underlying,
                         option_side=option_side,
