@@ -15,6 +15,8 @@ Position in the pipeline:
 Owns / does NOT own:
 - Owns: tick cache, read-only CandleEngine OHLC projection, broker history
   fetch, tick fan-out, the committed active-contract basket's futures symbol
+  and same-loop canonical-history lock/inflight ownership; completed simulation
+  loops may hand off only after all hydration tasks finish, never concurrently.
   (read via the basket).
 - Does NOT own: contract selection (InstrumentManager owns that) and strategy
   logic. MDM returns the active future from the committed basket only.
