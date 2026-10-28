@@ -229,7 +229,7 @@ def main() -> None:
     except ValueError as exc:
         sys.exit(f"Token helper configuration refused: {exc}")
     if env_path.is_file():
-        # The protected host file, not stale interactive-shell exports, owns credentials.
+        # The protected file takes precedence over stale interactive-shell values.
         load_dotenv(env_path, override=True)
 
     api_key = (
@@ -244,9 +244,11 @@ def main() -> None:
     )
     if not api_key or not api_secret:
         sys.exit("Broker API key/secret missing from protected environment")
-    if len({os.getenv(k) for k in ("BROKER_API_KEY", "ZERODHA_API_KEY", "KITE_API_KEY") if os.getenv(k)}) > 1:
+    key_aliases = ("BROKER_API_KEY", "ZERODHA_API_KEY", "KITE_API_KEY")
+    if len({os.getenv(k) for k in key_aliases if os.getenv(k)}) > 1:
         sys.exit("Conflicting broker API-key aliases; refusing session rotation")
-    if len({os.getenv(k) for k in ("BROKER_API_SECRET", "ZERODHA_API_SECRET", "KITE_API_SECRET") if os.getenv(k)}) > 1:
+    secret_aliases = ("BROKER_API_SECRET", "ZERODHA_API_SECRET", "KITE_API_SECRET")
+    if len({os.getenv(k) for k in secret_aliases if os.getenv(k)}) > 1:
         sys.exit("Conflicting broker API-secret aliases; refusing session rotation")
 
     kite = KiteConnect(api_key=api_key)
@@ -263,9 +265,13 @@ def main() -> None:
         if not request_token:
             user_id = os.getenv("ZERODHA_USER_ID") or os.getenv("KITE_USER_ID")
             password = os.getenv("ZERODHA_PASSWORD") or os.getenv("KITE_PASSWORD")
-            totp_secret = os.getenv("ZERODHA_TOTP_SECRET") or os.getenv("KITE_TOTP_SECRET")
+            totp_secret = (
+                os.getenv("ZERODHA_TOTP_SECRET") or os.getenv("KITE_TOTP_SECRET")
+            )
             if user_id and password and totp_secret:
-                request_token = get_automated_request_token(user_id, password, totp_secret, api_key)
+                request_token = get_automated_request_token(
+                    user_id, password, totp_secret, api_key
+                )
             if not request_token:
                 print("Open the official Zerodha login URL:", kite.login_url())
                 request_token = input("Enter the one-time request token: ").strip()
@@ -288,14 +294,19 @@ def main() -> None:
         verified_user = str(profile.get("user_id") or "").strip()
         if not verified_user:
             raise ValueError("missing broker owner")
-        production = os.getenv("DEPLOYMENT_PLATFORM", "").strip().lower() == "aws_lightsail"
+        production = (
+            os.getenv("DEPLOYMENT_PLATFORM", "").strip().lower() == "aws_lightsail"
+        )
         expected_owner = (
             os.getenv("ADMIN_ZERODHA_USER_ID")
             or os.getenv("ZERODHA_USER_ID")
             or os.getenv("KITE_USER_ID")
             or ""
         ).strip()
-        if production and (not expected_owner or not hmac.compare_digest(verified_user, expected_owner)):
+        owner_mismatch = not expected_owner or not hmac.compare_digest(
+            verified_user, expected_owner
+        )
+        if production and owner_mismatch:
             raise ValueError("owner account mismatch")
         segment = os.getenv("BROKER_MARGIN_SEGMENT", "equity").strip().lower()
         if segment not in {"equity", "commodity"}:
