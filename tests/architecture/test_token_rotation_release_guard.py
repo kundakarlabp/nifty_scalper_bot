@@ -54,13 +54,25 @@ live = {
     "bot_loaded": os.environ.get("TEST_BOT_LOADED", "1") == "1",
 }
 ready = {
-    "status": "degraded" if os.environ.get("TEST_STARTUP_FAILED", "0") == "1" else "starting",
-    "primary_blocker": "startup_failed" if os.environ.get("TEST_STARTUP_FAILED", "0") == "1" else "startup_incomplete",
-    "error": os.environ.get("TEST_STARTUP_ERROR", "LIVE startup requires validated broker balance"),
+    "status": (
+        "degraded" if os.environ.get("TEST_STARTUP_FAILED", "0") == "1"
+        else "starting"
+    ),
+    "primary_blocker": (
+        "startup_failed" if os.environ.get("TEST_STARTUP_FAILED", "0") == "1"
+        else "startup_incomplete"
+    ),
+    "error": os.environ.get(
+        "TEST_STARTUP_ERROR", "LIVE startup requires validated broker balance"
+    ),
 }
 release = {"effective_sha": os.environ.get("TEST_RELEASE_SHA", "a" * 12)}
 if not live["bot_loaded"]:
-    health.update({"status": "starting", "primary_blocker": "startup_incomplete", "live_orders_armed": False})
+    health.update({
+        "status": "starting",
+        "primary_blocker": "startup_incomplete",
+        "live_orders_armed": False,
+    })
 def response(url, timeout=3):
     if url.endswith("/livez"):
         value = live
@@ -101,6 +113,9 @@ sys.modules["kiteconnect"] = kiteconnect
 """
 
 
+_FAILED_START = {"TEST_BOT_LOADED": "0", "TEST_STARTUP_FAILED": "1"}
+
+
 @pytest.mark.parametrize(
     ("mode", "verified", "overrides", "expected_success"),
     [
@@ -120,16 +135,16 @@ sys.modules["kiteconnect"] = kiteconnect
         ("invalid", True, {"TEST_GENERIC_ONLY": "1"}, False),
         # A constructor failure cannot complete local reconciliation. Permit
         # recovery only with fresh, broker-bound proof and no trading stack.
-        ("invalid", True, {"TEST_BOT_LOADED": "0", "TEST_STARTUP_FAILED": "1", "TEST_RECONCILED": "0"}, True),
-        ("invalid", False, {"TEST_BOT_LOADED": "0", "TEST_STARTUP_FAILED": "1"}, False),
+        ("invalid", True, {**_FAILED_START, "TEST_RECONCILED": "0"}, True),
+        ("invalid", False, _FAILED_START, False),
         ("invalid", True, {"TEST_BOT_LOADED": "0"}, False),
-        ("invalid", True, {"TEST_BOT_LOADED": "0", "TEST_STARTUP_FAILED": "1", "TEST_POSITION": "1"}, False),
-        ("invalid", True, {"TEST_BOT_LOADED": "0", "TEST_STARTUP_FAILED": "1", "TEST_OPEN_ORDER": "1"}, False),
-        ("invalid", True, {"TEST_BOT_LOADED": "0", "TEST_STARTUP_FAILED": "1", "TEST_PROFILE_USER": "WRONG"}, False),
-        ("invalid", True, {"TEST_BOT_LOADED": "0", "TEST_STARTUP_FAILED": "1", "TEST_MARGIN_MISSING": "1"}, False),
-        ("invalid", True, {"TEST_BOT_LOADED": "0", "TEST_STARTUP_FAILED": "1", "TEST_STARTUP_ERROR": "different failure"}, False),
-        ("invalid", True, {"TEST_BOT_LOADED": "0", "TEST_STARTUP_FAILED": "1", "TEST_RELEASE_SHA": "b" * 12}, False),
-        ("invalid", True, {"TEST_BOT_LOADED": "0", "TEST_STARTUP_FAILED": "1", "TEST_API_FAIL": "1"}, False),
+        ("invalid", True, {**_FAILED_START, "TEST_POSITION": "1"}, False),
+        ("invalid", True, {**_FAILED_START, "TEST_OPEN_ORDER": "1"}, False),
+        ("invalid", True, {**_FAILED_START, "TEST_PROFILE_USER": "WRONG"}, False),
+        ("invalid", True, {**_FAILED_START, "TEST_MARGIN_MISSING": "1"}, False),
+        ("invalid", True, {**_FAILED_START, "TEST_STARTUP_ERROR": "other"}, False),
+        ("invalid", True, {**_FAILED_START, "TEST_RELEASE_SHA": "b" * 12}, False),
+        ("invalid", True, {**_FAILED_START, "TEST_API_FAIL": "1"}, False),
     ],
 )
 def test_queued_token_rotation_requires_verified_token_and_broker_flat(
@@ -196,7 +211,10 @@ def test_rotation_exception_is_scoped_and_double_sampled() -> None:
     assert "os.path.isfile(restart_marker)" in guard
     assert 'health.get("live_orders_armed") is not False' in guard
     assert 'ready.get("primary_blocker") == "startup_failed"' in guard
-    assert 'ready.get("error") == "LIVE startup requires validated broker balance"' in guard
+    assert (
+        'ready.get("error") == "LIVE startup requires validated broker balance"'
+        in guard
+    )
     assert 'token_rotation_verified and hold_required' in guard
     assert 'profile = kite.profile()' in guard
     assert 'margins = kite.margins(' in guard
