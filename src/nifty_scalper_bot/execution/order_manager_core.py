@@ -29,6 +29,8 @@ Safe-edit notes:
   additional cumulative fills still reach position and protection owners.
 - Impossible cumulative quantities are quarantined before lifecycle mutations;
   the existing entry gate stays blocked pending broker reconciliation.
+- EXIT/REDUCE broker submissions are write-ahead reserved; ambiguous broker
+  responses remain blocked across timeout and process restart until reconciled.
 """
 
 from __future__ import annotations
@@ -1016,6 +1018,19 @@ class OrderManager:
         self._broker_circuit = CircuitBreaker()
         _data_dir = get_data_dir()
         self._history_path = Path(history_path or _data_dir / "order_history.json")
+        # The OrderManager owns this write-ahead exit submission reservation.
+        # Never TTL-prune ambiguous exits: an order can fill after API timeout.
+        exit_ledger_path = self._history_path.parent / "uncertain_exit_orders.json"
+        self._exit_ledger_corrupt = False
+        if exit_ledger_path.exists():
+            try:
+                if not isinstance(
+                    json.loads(exit_ledger_path.read_text(encoding="utf-8")), dict
+                ):
+                    self._exit_ledger_corrupt = True
+            except (OSError, ValueError, TypeError):
+                self._exit_ledger_corrupt = True
+        self._uncertain_exit_ledger = AtomicKV(exit_ledger_path)
         self._orders: dict[str, OrderDetails] = {}
         # ENTRY submissions currently between the single-position gate and
         # local order registration (symbol -> reservation wall-clock ts).
@@ -2589,11 +2604,15 @@ class OrderManager:
         with self._lock:
             self._prune_pending_signals()
             self._prune_uncertain_orders()
+            uncertain_exits = self._uncertain_exit_ledger.snapshot()
             return {
                 "kill_switch": self.get_kill_switch_status(),
                 "last_order_decision": dict(self._last_order_decision),
                 "pending_orders_count": len(self._pending_signal_ids),
                 "uncertain_orders_count": len(self._uncertain_client_order_ids),
+                "uncertain_exit_orders_count": len(uncertain_exits),
+                "uncertain_exit_symbols": sorted(uncertain_exits),
+                "uncertain_exit_ledger_corrupt": self._exit_ledger_corrupt,
                 "consecutive_failures": self._consecutive_failures,
             }
 
@@ -2735,6 +2754,17 @@ class OrderManager:
             "UNKNOWN",
         }:
             normalized_intent = "UNKNOWN"
+        # An unresolved EXIT may already have filled at the broker. Do not
+        # permit another entry until the durable reservation is reconciled.
+        if normalized_intent in {"ENTRY", "SCALE_IN", "REVERSAL"} and (
+            self._exit_ledger_corrupt or self._uncertain_exit_ledger.snapshot()
+        ):
+            self.set_last_skip_reason("uncertain_exit_reconciliation_required")
+            self._logger.critical(
+                "ENTRY_HELD_FOR_UNCERTAIN_EXIT symbol=%s",
+                symbol,
+            )
+            return None
         if normalized_intent == "UNKNOWN" and self.is_live_mode():
             self.set_last_skip_reason("order_intent_required")
             self._logger.error(
@@ -3796,7 +3826,53 @@ class OrderManager:
             try:
                 existing = self._find_open_order(unique_client_id)
                 if isinstance(existing, Mapping):
-                    return dict(existing)
+                    # An orderbook observation is not a fill reconciliation.
+                    # EXIT/REDUCE must be settled by the position/bracket owner,
+                    # and terminal entries must not be re-registered as PENDING.
+                    if normalized_intent in {"EXIT", "REDUCE"}:
+                        return None
+                    broker_status = str(existing.get("status") or "").strip().upper()
+                    if broker_status in {
+                        "COMPLETE",
+                        "COMPLETED",
+                        "CANCELLED",
+                        "CANCELED",
+                        "REJECTED",
+                    }:
+                        return None
+                    # The legacy finder can return a partial-tag match. Never
+                    # adopt it as this order without exact identity and geometry.
+                    found_id = str(existing.get("client_order_id") or "").strip()
+                    found_tag = str(existing.get("tag") or "").strip()
+                    found_symbol = existing.get("tradingsymbol") or existing.get(
+                        "symbol"
+                    )
+                    found_symbol = str(found_symbol or "").strip().upper()
+                    found_symbol = found_symbol.split(":")[-1]
+                    found_side = existing.get("transaction_type") or existing.get(
+                        "side"
+                    )
+                    found_side = str(found_side or "").strip().upper()
+                    found_product = str(existing.get("product") or "").strip().upper()
+                    raw_qty = existing.get("quantity")
+                    if raw_qty is None or isinstance(raw_qty, bool):
+                        return None
+                    try:
+                        found_qty = float(raw_qty)
+                    except (TypeError, ValueError, OverflowError):
+                        return None
+                    if (
+                        (
+                            found_id == unique_client_id
+                            or (entry_lifecycle and found_tag == unique_client_id)
+                        )
+                        and found_symbol == normalized_symbol.upper().split(":")[-1]
+                        and found_side == normalized_side
+                        and found_product == str(product).strip().upper()
+                        and math.isfinite(found_qty)
+                        and found_qty == quantity
+                    ):
+                        return dict(existing)
             except Exception as exc:
                 self._logger.warning(
                     "ORDER_RECONCILE_AFTER_TIMEOUT_FAILED signal_id=%s client_order_id=%s error=%s",
@@ -3815,8 +3891,47 @@ class OrderManager:
                 return str(response)
             return None
 
+        if normalized_intent in {"EXIT", "REDUCE"}:
+            # Atomic, durable write-ahead reservation before any broker request.
+            # A different tag/client ID must not bypass an unresolved EXIT.
+            with self._lock:
+                if self._exit_ledger_corrupt:
+                    exit_block_reason = "uncertain_exit_ledger_unreadable"
+                elif self._uncertain_exit_ledger.get(normalized_symbol) is not None:
+                    exit_block_reason = "uncertain_exit_reconciliation_required"
+                else:
+                    try:
+                        self._uncertain_exit_ledger.set(
+                            normalized_symbol,
+                            {
+                                "client_order_id": unique_client_id,
+                                "symbol": normalized_symbol,
+                                "side": normalized_side,
+                                "quantity": int(quantity),
+                                "product": str(product),
+                                "intent": normalized_intent,
+                                "submitted_at": datetime.now(timezone.utc).isoformat(),
+                            },
+                        )
+                        exit_block_reason = None
+                    except (OSError, TypeError, ValueError):
+                        exit_block_reason = "uncertain_exit_ledger_write_failed"
+            if exit_block_reason:
+                self._logger.critical(
+                    "EXIT_SUBMISSION_HELD symbol=%s reason=%s "
+                    "broker_reconciliation_required=True",
+                    normalized_symbol,
+                    exit_block_reason,
+                )
+                _log_order_decision(
+                    allowed=False,
+                    block_reason=exit_block_reason,
+                    broker_attempted=False,
+                )
+                return None
+
         if self._is_uncertain_order(unique_client_id):
-            existing_uncertain = self._find_open_order(unique_client_id)
+            existing_uncertain = _find_existing_order_after_uncertain_submit()
             if existing_uncertain is not None:
                 existing_order_id = _extract_order_id(existing_uncertain)
                 if existing_order_id:
@@ -3836,7 +3951,7 @@ class OrderManager:
 
         for attempt in range(1, 4):
             if self._is_uncertain_order(unique_client_id):
-                existing_uncertain = self._find_open_order(unique_client_id)
+                existing_uncertain = _find_existing_order_after_uncertain_submit()
                 if existing_uncertain is not None:
                     existing_order_id = _extract_order_id(existing_uncertain)
                     if existing_order_id:
@@ -3885,6 +4000,7 @@ class OrderManager:
                 t.start()
                 t.join(timeout=8.0)
 
+                response = None
                 if t.is_alive():
                     self._logger.warning(
                         "Broker call exceeded 8s for %s (attempt %s); waiting recovery window",
@@ -3918,7 +4034,8 @@ class OrderManager:
                         normalized_symbol,
                     )
 
-                response = result_holder["resp"]
+                if response is None:
+                    response = result_holder["resp"]
                 if response is None:
                     existing_after_timeout = (
                         _find_existing_order_after_uncertain_submit()
@@ -4002,6 +4119,7 @@ class OrderManager:
                     # intent=UNKNOWN -> BROKER_POSITION_QUARANTINED_FOR_
                     # UNKNOWN_ORDER every sync -> all new entries blocked and
                     # the position left on a wide guard bracket.
+                    position_sync_ok = False
                     if hasattr(self._positions, "add_pending_order"):
                         try:
                             self._positions.add_pending_order(
@@ -4016,6 +4134,7 @@ class OrderManager:
                                 signal_id=details.signal_id,
                                 signal_fingerprint=details.signal_fingerprint,
                             )
+                            position_sync_ok = True
                         except Exception as _pm_sync_exc:  # noqa: BLE001
                             self._logger.error(
                                 "POSITION_MANAGER_PENDING_SYNC_FAILED order_id=%s error=%s",
@@ -4025,6 +4144,19 @@ class OrderManager:
                                     "event": "POSITION_MANAGER_PENDING_SYNC_FAILED",
                                     "order_id": details.order_id,
                                 },
+                            )
+                    # Only broker-acknowledged, locally registered and
+                    # position-tracked exits release the write-ahead hold.
+                    # Unknown/late/partial fills must otherwise be reconciled
+                    # by the canonical position/bracket owners before retry.
+                    if normalized_intent in {"EXIT", "REDUCE"} and position_sync_ok:
+                        try:
+                            self._uncertain_exit_ledger.delete(normalized_symbol)
+                        except OSError as exc:
+                            self._logger.critical(
+                                "EXIT_SUBMISSION_HOLD_CLEAR_FAILED symbol=%s error=%s",
+                                normalized_symbol,
+                                exc,
                             )
                     # Local order record now owns the symbol — release the
                     # single-position gate's in-flight reservation.
@@ -4384,6 +4516,21 @@ class OrderManager:
                         self._clear_pending_signal(signal_id)
                     return None
 
+                if normalized_intent in {"EXIT", "REDUCE"}:
+                    # Submission may have reached the exchange despite an
+                    # exception or absent order ID. Never send it again.
+                    self._logger.critical(
+                        "EXIT_SUBMISSION_UNCERTAIN symbol=%s reason=%s "
+                        "broker_reconciliation_required=True",
+                        normalized_symbol,
+                        failure_class,
+                    )
+                    _log_order_decision(
+                        allowed=False,
+                        block_reason="uncertain_exit_reconciliation_required",
+                        broker_attempted=True,
+                    )
+                    return None
                 self._logger.warning(f"⚠️ Retry {attempt}/3 failed: {e}")
                 time.sleep(0.5 * attempt)
 

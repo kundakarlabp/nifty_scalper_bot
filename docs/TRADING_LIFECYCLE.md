@@ -51,6 +51,8 @@ flowchart TD
 
 Stops must never be loosened by a trailing update. Reconciliation must use broker-confirmed positions/fills as exposure truth; rejected or partial exits are not 'closed' states. Any ambiguous exposure blocks **new entries**, not protective reductions. Logs, Telegram, and dashboards report state; they do not own it.
 
+**Ambiguous exit submissions:** A timeout or missing broker acknowledgement is not proof that an EXIT/REDUCE failed. OrderManager durably reserves the symbol *before* submitting the exit, preventing a second blind submission (even with a different tag or after process restart). There is no TTL-based release. Broker history including COMPLETE/partial orders, current positions, and the canonical bracket/protection ledger must be reconciled before an operator clears an uncertain reservation; never simply delete the persisted hold as a restart workaround. Confirmed existing stops remain under the bracket owner's control. If unresolved, alert the operator and keep the affected execution path held rather than risk an oversell. An acknowledged exit releases its reservation only after local order registration and PositionManager pending-order synchronization. The execution-health snapshot reports unresolved exit symbols and journal corruption.
+
 ## 4. Source-code change to production
 
 ```mermaid
