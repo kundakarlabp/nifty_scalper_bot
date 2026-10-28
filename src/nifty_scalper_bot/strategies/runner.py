@@ -4,8 +4,8 @@
 """Event-driven strategy runner: the evaluation loop that turns data into orders.
 
 Runtime role:
-- Runs strategy evaluation over the active basket symbols using cached bars and
-  live quotes; applies readiness, regime, and quality gates.
+- Receives DataHub or market-data callbacks and evaluates the active basket
+  using cached bars, live quotes, readiness, regime, and quality gates.
 - On an accepted signal, prepares execution state and hands off to the order
   path (OrderManager) for placement; there is no separate runner executor.
 - Maintains per-symbol runner/indicator history counts used by the readiness SSOT.
@@ -7763,77 +7763,6 @@ class StrategyRunner:
                     exc,
                 )
 
-    # Cooldown logic moved to ExecutionEngine
-
-    async def _handle_tick_message(self, message: Message) -> None:
-        """Process incoming TICK messages from the MessageBus."""
-        # [MODIFIED] Using defined helper correctly
-        log_throttled(
-            self._logger,
-            "msg_bus_tick",
-            f"🔔 MESSAGE BUS TICK: type={message.type}",
-            interval_sec=60.0,
-            level=logging.DEBUG,
-        )
-        if not self._running or self._trading_paused:
-            return
-
-        # FIX #1: Capture the running loop for thread callbacks
-        if self._main_loop is None:
-            self._main_loop = asyncio.get_running_loop()
-
-        tick: dict = message.data
-        now_ts = time.time()
-        tick_timestamp = _extract_timestamp(message.data, datetime.now(timezone.utc))
-        tick_age_ms = max(
-            0.0,
-            (now_ts - tick_timestamp.astimezone(timezone.utc).timestamp()) * 1000.0,
-        )
-
-        # CRITICAL FIX 1: Relax stale data guard to 15 seconds.
-        # Options do not tick as fast as the spot index. 3 seconds is too tight
-        # and will cause perfectly valid entry signals to be dropped.
-        if tick_age_ms > 15000.0:
-            log_throttled(
-                self._logger,
-                "stale_reconnect_tick_drop",
-                (
-                    "Condition met: stale_reconnect_tick_drop "
-                    f"age_ms={tick_age_ms:.1f}"
-                ),
-                interval_sec=15.0,
-                level=logging.DEBUG,
-            )
-            return
-
-        symbol_value = tick.get("symbol")
-        symbol = (
-            enforce_canonical(normalize_symbol(str(symbol_value)))
-            if symbol_value
-            else "UNKNOWN"
-        )
-        self._logger.debug("RUNNER_RECEIVED_TICK %s", symbol)
-
-        # CRITICAL FIX 2: Throttling to prevent ThreadPool Exhaustion and 90s deadlocks
-        if not hasattr(self, "_last_eval_time"):
-            self._last_eval_time = {}
-
-        last_eval = self._last_eval_time.get(symbol, 0.0)
-
-        # Limit processing to 1 tick per symbol per second to unblock the event loop
-        # The DataHub still records the tick price, but we skip the heavy strategy math
-        if now_ts - last_eval < 1.0:
-            return
-
-        self._last_eval_time[symbol] = now_ts
-
-        try:
-            # Offload heavy synchronous processing (and blocking broker calls) to a thread
-            # We are now safely spawning a maximum of 1 thread per symbol, per second.
-            await asyncio.to_thread(self._on_tick_safe, tick)
-        except Exception as exc:
-            # Fixed variable reference: Ensure we use self._logger instead of undefined LOGGER
-            self._logger.error(f"Error in async tick processing: {exc}", exc_info=True)
 
     def _strategy_worker(self) -> None:
         """Consume events and run tick evaluation. Args: none. Returns: none. Raises: none."""
@@ -13739,28 +13668,6 @@ class StrategyRunner:
             else self._option_required_bars
         )
 
-    def _sync_indicator_history_if_needed(self, symbol: str) -> None:
-        """Ensure indicator engine has runner bars for symbol. Args: symbol. Returns: none. Raises: none."""
-        runner_hist = self._symbol_history.get(symbol) or []
-        indicator_count = len(self._indicator_engine.get_history(symbol) or [])
-        if runner_hist and indicator_count == 0:
-            limit = max(self._context_required_bars, self._option_required_bars)
-            for bar in runner_hist[-limit:]:
-                if hasattr(self._indicator_engine, "update_bar"):
-                    self._indicator_engine.update_bar(symbol, bar)
-                else:
-                    self._indicator_engine.update_price(
-                        symbol,
-                        bar.as_mapping(),
-                        volume=bar.volume,
-                        timestamp=bar.timestamp,
-                        is_complete=True,
-                    )
-            self._logger.warning(
-                "INDICATOR_HISTORY_AUTO_SYNC symbol=%s synced=%d",
-                symbol,
-                len(runner_hist[-limit:]),
-            )
 
     def _strategy_evaluation_allowed(
         self, symbol: str, trace_id: str | None = None
@@ -14316,72 +14223,7 @@ class StrategyRunner:
             self._mark_symbol_unready(symbol, "universe_validation_error")
             return False
 
-    def _classify_symbol(self, symbol: str) -> str:
-        """Classify symbol into index, option or other buckets."""
-        upper = symbol.upper()
-        if upper.startswith("NSE:") and all(
-            tok not in upper for tok in ("CE", "PE", "FUT")
-        ):
-            return "index"
-        if upper.endswith("CE") or upper.endswith("PE"):
-            return "option"
-        return "other"
 
-    def _validate_symbol_universe(self) -> bool:
-        """Validate index/option composition with non-blocking dynamic diagnostics."""
-        with self._lock:
-            symbols = sorted(self._active_symbols)
-        if self._max_symbol_count > 0 and len(symbols) > self._max_symbol_count:
-            self._logger.error(
-                "Condition met: symbol_universe_mismatch",
-                extra={
-                    "event": "symbol_universe_mismatch",
-                    "reason": "max_symbol_count_exceeded",
-                    "actual_count": len(symbols),
-                    "max_count": self._max_symbol_count,
-                },
-            )
-            return False
-        if self._universe_dynamic_mode:
-            # Keep diagnostics informative, but avoid frozen snapshot gating.
-            self._logger.debug(
-                "Condition met: symbol_universe_dynamic_validation",
-                extra={
-                    "event": "symbol_universe_dynamic_validation",
-                    "all_symbols": symbols,
-                },
-            )
-        index_symbols = [
-            sym for sym in symbols if self._classify_symbol(sym) == "index"
-        ]
-        option_symbols = [
-            sym for sym in symbols if self._classify_symbol(sym) == "option"
-        ]
-        if not option_symbols:
-            self._logger.info(
-                "Condition met: symbol_universe_mismatch",
-                extra={
-                    "event": "symbol_universe_mismatch",
-                    "reason": "missing_option_symbols",
-                    "all_symbols": symbols,
-                    "index_symbols": index_symbols,
-                    "option_symbols": option_symbols,
-                },
-            )
-            return False
-        if len(index_symbols) != 1:
-            self._logger.info(
-                "Condition met: symbol_universe_mismatch",
-                extra={
-                    "event": "symbol_universe_mismatch",
-                    "reason": "index_count_mismatch",
-                    "all_symbols": symbols,
-                    "index_symbols": index_symbols,
-                    "option_symbols": option_symbols,
-                },
-            )
-            return False
-        return True
 
     def validate_market_depth(self) -> bool:
         """
@@ -17877,111 +17719,6 @@ class StrategyRunner:
                 f"📊 Orphan Adoption Complete: {adopted_count} positions protected"
             )
 
-    def _resolve_contract_safely(
-        self, base_symbol: str, action: str, price: float, option_type: str | None
-    ) -> SelectedContract | None:
-        """
-        CRITICAL FIX: Safely resolves option contracts with Null Guards.
-        Prevents crash if DataHub failed to initialize or Option Chain is empty.
-        """
-        # 1. GUARD: Check if Strike Selector component exists
-        if self._strike_selector is None:
-            self._logger.info(
-                "RUNNER_SIGNAL_DECISION",
-                extra={
-                    "event": "RUNNER_SIGNAL_DECISION",
-                    "symbol": base_symbol,
-                    "underlying_symbol": base_symbol,
-                    "action": action,
-                    "proceed_to_order": False,
-                    "reason": "strike_selector_none",
-                },
-            )
-            log_throttled(
-                self._logger,
-                "strike_selector_none",
-                f"🛑 CRITICAL: Strike Selector is None! DataHub likely failed. Cannot trade {base_symbol}.",
-                interval_sec=60.0,
-                level=logging.CRITICAL,
-            )
-            return None
-
-        # 2. GUARD: Check if we have actual chain data (Prevents selecting from empty chain)
-        # We rely on DataHub to tell us if the chain is alive.
-        if self._data_hub:
-            if hasattr(
-                self._data_hub, "has_chain_data"
-            ) and not self._data_hub.has_chain_data(base_symbol):
-                self._logger.info(
-                    "RUNNER_SIGNAL_DECISION",
-                    extra={
-                        "event": "RUNNER_SIGNAL_DECISION",
-                        "symbol": base_symbol,
-                        "action": action,
-                        "proceed_to_order": False,
-                        "reason": "missing_chain_data",
-                    },
-                )
-                log_throttled(
-                    self._logger,
-                    f"missing_chain_{base_symbol}",
-                    f"🛑 MISSING CHAIN DATA: Cannot select strike for {base_symbol}. DataHub returned no chain.",
-                    interval_sec=60.0,
-                    level=logging.ERROR,
-                )
-                return None
-
-        try:
-            # 3. EXECUTE: Safe selection
-            # Map action to selector side
-            selector_side = "BUY" if action == "BUY" else "SELL"
-            safe_opt_type = (
-                cast(Literal["CE", "PE"], option_type)
-                if option_type in ("CE", "PE")
-                else None
-            )
-
-            selection = self._strike_selector.select_contract(
-                underlying=base_symbol,
-                side=selector_side,
-                underlying_price=price,
-                option_type=safe_opt_type,
-            )
-
-            if not selection:
-                self._logger.info(
-                    "RUNNER_SIGNAL_DECISION",
-                    extra={
-                        "event": "RUNNER_SIGNAL_DECISION",
-                        "symbol": base_symbol,
-                        "action": action,
-                        "proceed_to_order": False,
-                        "reason": "strike_selection_none",
-                    },
-                )
-                self._logger.warning(
-                    f"⚠️ Strike Selector returned None for {base_symbol} {action} @ {price}"
-                )
-                return None
-
-            return selection
-
-        except Exception as e:
-            self._logger.info(
-                "RUNNER_SIGNAL_DECISION",
-                extra={
-                    "event": "RUNNER_SIGNAL_DECISION",
-                    "symbol": base_symbol,
-                    "action": action,
-                    "proceed_to_order": False,
-                    "reason": "strike_selection_exception",
-                },
-            )
-            self._logger.error(
-                f"💥 EXCEPTION in strike selection for {base_symbol}: {e}",
-                exc_info=True,
-            )
-            return None
 
     def _handle_entry_signal(
         self,
