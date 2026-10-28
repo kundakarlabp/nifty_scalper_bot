@@ -1697,7 +1697,11 @@ class StrategyManager:
         # 1. FUTURES VOLUME DATA
         # ═══════════════════════════════════════════════════════════
         try:
-            quote = data_hub.get_quote(active_future) if active_future else None
+            quote = (
+                data_hub.get_quote(active_future, allow_pull=False)
+                if active_future
+                else None
+            )
         except Exception as exc:
             self._logger.error(
                 "Failure in StrategyManager._augment_futures_metrics futures quote: %s",
@@ -1788,7 +1792,7 @@ class StrategyManager:
         # Never relabel futures LTP, quote average price or a fixed-basis
         # adjustment as an index VWAP. Futures VWAP has its own domain.
         try:
-            index_quote = data_hub.get_quote("NSE:NIFTY", allow_pull=True) or {}
+            index_quote = data_hub.get_quote("NSE:NIFTY", allow_pull=False) or {}
             index_ltp = self._extract_float(index_quote, ("last_price", "ltp", "close"))
             indicators["nifty_index_vwap"] = None
             indicators["nifty_index_vwap_source"] = "untraded_index_no_vwap"
@@ -1819,15 +1823,9 @@ class StrategyManager:
                     indicators["nifty_index_ltp_age_s"] = round(cache_age, 2)
 
             if active_future:
-                # Use one coherent futures quote for cumulative volume,
-                # LTP and VWAP when the active symbol matches the earlier
-                # volume observation. A second fetch may advance the source.
-                if active_future == self._futures_symbol:
-                    futures_quote = quote or {}
-                else:
-                    futures_quote = (
-                        data_hub.get_quote(active_future, allow_pull=True) or {}
-                    )
+                # Reuse the exact cached futures quote observed for volume.
+                # Never pull a second broker quote inside strategy evaluation.
+                futures_quote = quote or {}
                 futures_ltp = self._extract_float(
                     futures_quote, ("last_price", "ltp", "close")
                 )
