@@ -7341,45 +7341,6 @@ class StrategyRunner:
             tp_mult=tp_mult,
         )
 
-    def _select_best_option(
-        self,
-        base_symbol: str,
-        candidates: Sequence[SelectedContract],
-    ) -> SelectedContract | None:
-        """Return the highest ranked option candidate for execution."""
-        self._logger.debug(
-            "Entered StrategyRunner._select_best_option",
-            extra={"candidate_count": len(candidates)},
-        )
-
-        if not candidates:
-            return None
-
-        best = candidates[0]
-        label = base_symbol.strip().upper() or best.symbol.strip().upper()
-        metadata = dict(best.metadata or {})
-        try:
-            delta_value = best.delta or 0.0
-            _NIFTY_OPTION_DELTA_GAUGE.labels(underlying=label).set(float(delta_value))
-            iv = metadata.get("iv")
-            if isinstance(iv, (int, float)):
-                _NIFTY_OPTION_IV_GAUGE.labels(underlying=label).set(float(iv))
-        except Exception:
-            LOGGER.exception("[CRITICAL] unhandled exception", exc_info=True)
-            raise
-
-        self._logger.info(
-            "Condition met: best_option_selected",
-            extra={
-                "symbol": best.symbol,
-                "underlying": label,
-                "spread_pct": metadata.get("spread_pct"),
-                "iv": metadata.get("iv"),
-                "iv_rank": metadata.get("iv_rank"),
-            },
-        )
-
-        return best
 
     def _get_spot_tick(self) -> dict[str, Any] | None:
         """Resilient spot tick fetcher with aliases and snapshot fallback."""
