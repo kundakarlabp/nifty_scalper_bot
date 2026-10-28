@@ -158,7 +158,7 @@ git show "$target:deploy/lightsail_release.sh" > "$release_file" ||
   die "failed to retrieve verified release runner"
 bash -n "$release_file" || die "candidate release runner syntax invalid"
 echo "[recovery] Invoking validated release guard; no direct systemctl restart"
-bash "$release_file" --auto || die "validated release runner failed"
+bash "$release_file" --auto --wait-for-lock || die "validated release runner failed"
 current="$(git rev-parse HEAD)"
 printf '[recovery] Deployed checkout: %.12s; expected: %.12s\n' "$current" "$target"
 if [ "$current" != "$target" ]; then
