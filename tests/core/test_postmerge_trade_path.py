@@ -748,9 +748,7 @@ def test_unconfirmed_context_logs_parseable_reasons_without_allowing_entry(
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     manager = _manager()
     trigger = _signal_evidence("VWAPPro")
-    context = _signal_evidence(
-        "OrderFlow", role="context", aligned_context=False
-    )
+    context = _signal_evidence("OrderFlow", role="context", aligned_context=False)
     context[1].metadata["effective_context_conflict"] = False
     context[1].metadata["context_alignment_block_reason"] = "ofi_reversal_holdoff"
 
