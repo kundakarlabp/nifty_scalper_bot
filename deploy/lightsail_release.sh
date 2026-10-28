@@ -389,17 +389,25 @@ intraday_flat_broker_confirmed() {
     log "intraday_release_guard_blocked: broker credentials or Python unavailable"
     return 1
   fi
+  local expected_owner margin_segment
+  expected_owner="$(first_nonempty_env ADMIN_ZERODHA_USER_ID ZERODHA_USER_ID KITE_USER_ID 2>/dev/null || true)"
+  margin_segment="$(first_nonempty_env BROKER_MARGIN_SEGMENT 2>/dev/null || true)"
   BOT_RELEASE_KITE_API_KEY="$api_key" BOT_RELEASE_KITE_ACCESS_TOKEN="$access_token" \
     BOT_RELEASE_LOCAL_PORT="$PORT" BOT_RELEASE_RESTART_PENDING="$RESTART_PENDING_FILE" \
     BOT_RELEASE_VERIFIED_TOKEN_ROTATION="$VERIFIED_TOKEN_ROTATION_FILE" \
+    BOT_RELEASE_EXPECTED_OWNER="$expected_owner" BOT_RELEASE_EXPECTED_SHA="$BEFORE" \
+    BOT_RELEASE_MARGIN_SEGMENT="${margin_segment:-equity}" \
     BOT_RELEASE_ENTRY_HOLD_REQUIRED="$RELEASE_HOLD_ACTIVE" \
     "$VENV/bin/python" - <<'PY_FLAT_GUARD'
 import hashlib
+import hmac
 import json
+import math
 import os
 import sys
 import time
 import urllib.request
+from urllib.error import HTTPError
 
 from kiteconnect import KiteConnect
 
@@ -450,29 +458,81 @@ def is_safe() -> bool:
         if live.get("bot_loaded") is not False:
             return blocked("quiet_runtime_not_unloaded")
     else:
-        if live.get("bot_loaded") is not True:
+        unloaded_failed_startup = False
+        if live.get("bot_loaded") is False:
+            # No trading stack was constructed. A fresh broker-verified
+            # rotation can recover this exact failed-startup state, without
+            # asking the nonexistent old engine to reconcile positions.
+            if not (token_rotation_verified and hold_required):
+                return blocked("startup_recovery_requires_verified_rotation")
+            try:
+                with urllib.request.urlopen(f"http://127.0.0.1:{port}/readyz", timeout=3) as response:
+                    ready = json.load(response)
+            except HTTPError as exc:
+                if exc.code != 503:
+                    raise
+                with exc:
+                    ready = json.load(exc)
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/health/trading", timeout=3) as response:
+                health = json.load(response)
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/releasez", timeout=3) as response:
+                release = json.load(response)
+            expected_sha = os.environ.get("BOT_RELEASE_EXPECTED_SHA") or ""
+            unloaded_failed_startup = (
+                ready.get("status") == "degraded"
+                and ready.get("primary_blocker") == "startup_failed"
+                and ready.get("error") == "LIVE startup requires validated broker balance"
+                and health.get("status") == "starting"
+                and health.get("primary_blocker") == "startup_incomplete"
+                and health.get("live_orders_armed") is False
+                and len(expected_sha) == 40
+                and str(release.get("effective_sha") or "").startswith(expected_sha[:12])
+            )
+            if not unloaded_failed_startup:
+                return blocked("startup_failure_not_proven")
+            # The replacement session must belong to the pinned owner and
+            # provide real broker funds. Flat positions and terminal orders
+            # are checked below, twice, even in this recovery state.
+            expected_owner = os.environ.get("BOT_RELEASE_EXPECTED_OWNER") or ""
+            profile = kite.profile()
+            if not expected_owner or not hmac.compare_digest(
+                str(profile.get("user_id") or ""), expected_owner
+            ):
+                return blocked("startup_recovery_owner_unverified")
+            margins = kite.margins(os.environ.get("BOT_RELEASE_MARGIN_SEGMENT") or "equity")
+            available = margins.get("available") if isinstance(margins, dict) else None
+            if not isinstance(available, dict):
+                return blocked("startup_recovery_balance_unverified")
+            amount = available.get("live_balance")
+            if amount is None:
+                amount = available.get("cash")
+            try:
+                balance = float(amount)
+            except (TypeError, ValueError):
+                return blocked("startup_recovery_balance_unverified")
+            if not math.isfinite(balance) or balance < 0:
+                return blocked("startup_recovery_balance_unverified")
+        elif live.get("bot_loaded") is not True:
             return blocked("runtime_not_loaded")
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/health/trading", timeout=3) as response:
-            health = json.load(response)
-        reconciliation = health.get("reconciliation") or {}
-        broker = health.get("broker") or {}
-        if hold_required and health.get("release_entry_hold_active") is not True:
-            return blocked("entry_hold_not_acknowledged")
-        # A new verified token can make the *old process's* auth state stale.
-        # Only this fresh, token-bound proof permits skipping that single
-        # local auth bit. Flat broker positions and terminal orders are still
-        # verified twice using the new token, with an active entry hold.
-        token_rotation_recovery = token_rotation_verified and hold_required
-        if health.get("live_orders_armed") is not False:
-            return blocked("entry_path_not_disarmed")
-        if reconciliation.get("completed") is not True:
-            return blocked("local_reconciliation_incomplete")
-        if reconciliation.get("failed") is True:
-            return blocked("local_reconciliation_failed")
-        if reconciliation.get("unprotected_positions"):
-            return blocked("unprotected_position_reported")
-        if broker.get("authenticated") is not True and not token_rotation_recovery:
-            return blocked("local_broker_auth_unverified")
+        if not unloaded_failed_startup:
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/health/trading", timeout=3) as response:
+                health = json.load(response)
+            reconciliation = health.get("reconciliation") or {}
+            broker = health.get("broker") or {}
+            if hold_required and health.get("release_entry_hold_active") is not True:
+                return blocked("entry_hold_not_acknowledged")
+            # A verified new token can bypass only the old process's auth bit.
+            token_rotation_recovery = token_rotation_verified and hold_required
+            if health.get("live_orders_armed") is not False:
+                return blocked("entry_path_not_disarmed")
+            if reconciliation.get("completed") is not True:
+                return blocked("local_reconciliation_incomplete")
+            if reconciliation.get("failed") is True:
+                return blocked("local_reconciliation_failed")
+            if reconciliation.get("unprotected_positions"):
+                return blocked("unprotected_position_reported")
+            if broker.get("authenticated") is not True and not token_rotation_recovery:
+                return blocked("local_broker_auth_unverified")
     positions = kite.positions()
     orders = kite.orders()
     if (
