@@ -2604,11 +2604,15 @@ class OrderManager:
         with self._lock:
             self._prune_pending_signals()
             self._prune_uncertain_orders()
+            uncertain_exits = self._uncertain_exit_ledger.snapshot()
             return {
                 "kill_switch": self.get_kill_switch_status(),
                 "last_order_decision": dict(self._last_order_decision),
                 "pending_orders_count": len(self._pending_signal_ids),
                 "uncertain_orders_count": len(self._uncertain_client_order_ids),
+                "uncertain_exit_orders_count": len(uncertain_exits),
+                "uncertain_exit_symbols": sorted(uncertain_exits),
+                "uncertain_exit_ledger_corrupt": self._exit_ledger_corrupt,
                 "consecutive_failures": self._consecutive_failures,
             }
 
