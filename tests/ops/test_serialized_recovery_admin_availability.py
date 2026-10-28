@@ -15,9 +15,7 @@ ADMIN = ROOT / "deploy/systemd/niftybot-admin.service"
 
 def _lock_section() -> str:
     source = RELEASE.read_text(encoding="utf-8")
-    return source.split('exec 9>"$LOCK_FILE"\n', 1)[1].split(
-        '\ncd "$APP_DIR"', 1
-    )[0]
+    return source.split('exec 9>"$LOCK_FILE"\n', 1)[1].split('\ncd "$APP_DIR"', 1)[0]
 
 
 def test_operator_release_waits_for_held_lock(tmp_path: Path) -> None:
@@ -44,11 +42,11 @@ def test_operator_release_waits_for_held_lock(tmp_path: Path) -> None:
 def test_release_has_bounded_operator_lock_wait() -> None:
     source = RELEASE.read_text(encoding="utf-8")
     assert "--wait-for-lock) WAIT_FOR_LOCK=true" in source
-    assert 'flock -w 180 9' in source
-    assert 'exit 75' in source
-    assert 'flock -n 9' in source
-    assert 'acquire_release_entry_hold' in source
-    assert 'intraday_flat_broker_confirmed' in source
+    assert "flock -w 180 9" in source
+    assert "exit 75" in source
+    assert "flock -n 9" in source
+    assert "acquire_release_entry_hold" in source
+    assert "intraday_flat_broker_confirmed" in source
 
 
 def test_admin_is_independent_and_token_form_remains_available() -> None:
@@ -63,7 +61,7 @@ def test_admin_is_independent_and_token_form_remains_available() -> None:
     assert "After=network-online.target niftybot.service" not in unit
     assert "Restart=always" in unit
     assert 'action="/admin/token"' in admin
-    assert "@router.post(\"/admin/token\")" in admin
+    assert '@router.post("/admin/token")' in admin
     assert "DEFAULT_START = dt_time(8, 55)" in operating
     assert "DEFAULT_STOP = dt_time(15, 40)" in operating
     assert 'mode == "AUTO" and auto_window_active(now)' in operating
