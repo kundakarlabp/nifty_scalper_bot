@@ -14227,6 +14227,39 @@ class MarketDataManager:
         except Exception:
             return 0
 
+
+    def _claim_canonical_history_loop(self) -> None:
+        """Keep asyncio history locks/tasks on their owning loop.
+
+        One MDM instance is normally bound to one application loop. Sequential
+        simulation loops may reuse the instance only after the original loop
+        has stopped and all its history tasks have finished; sharing an active
+        manager across loops is an error, not an invitation to silently drop
+        an in-flight broker response.
+        """
+        current = asyncio.get_running_loop()
+        with getattr(self, "_lock", threading.RLock()):
+            prior = getattr(self, "_canonical_history_event_loop", None)
+            if prior is current:
+                return
+            if prior is None:
+                self._canonical_history_event_loop = current
+                return
+            pending = [
+                task
+                for _, task in getattr(self, "_canonical_history_inflight", {}).values()
+                if not task.done()
+            ]
+            if prior.is_running() or pending:
+                raise RuntimeError(
+                    "canonical_history_cross_event_loop_active: "
+                    "finish hydration on the owning loop before reuse"
+                )
+            self._canonical_history_lock = asyncio.Lock()
+            self._canonical_history_inflight_lock = asyncio.Lock()
+            self._canonical_history_inflight = {}
+            self._canonical_history_event_loop = current
+
     async def ensure_history(
         self,
         symbol: str,
@@ -14338,6 +14371,7 @@ class MarketDataManager:
                 accepted_rows=0,
             )
 
+        self._claim_canonical_history_loop()
         if not hasattr(self, "_canonical_history_inflight"):
             self._canonical_history_inflight = {}
         if not hasattr(self, "_canonical_history_inflight_lock"):
@@ -14665,6 +14699,7 @@ class MarketDataManager:
         tried (production: mdm_after=41, required_bars=50). With min_rows
         set, a short-but-nonempty response keeps trying wider windows.
         """
+        self._claim_canonical_history_loop()
         symbol = (
             self._canonical_symbol(symbol.strip().upper())
             if hasattr(self, "_canonical_symbol")
