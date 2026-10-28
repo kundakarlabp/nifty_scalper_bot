@@ -291,6 +291,26 @@ def test_hung_exit_hold_survives_restart_and_tag_change(
     assert restarted._last_order_decision["block_reason"] == (
         "uncertain_exit_reconciliation_required"
     )
+    health = restarted.execution_health_snapshot()
+    assert health["uncertain_exit_orders_count"] == 1
+    assert health["uncertain_exit_symbols"] == ["NFO:NIFTY2671423950CE"]
+    assert (
+        restarted.place_order(
+            symbol="NFO:NIFTY2671424000PE",
+            side="BUY",
+            quantity=65,
+            order_type=OrderType.LIMIT,
+            price=100.0,
+            stop_loss=95.0,
+            take_profit=110.0,
+            check_risk=False,
+            intent="ENTRY",
+            signal_id="new-entry-after-uncertain-exit",
+        )
+        is None
+    )
+    assert restarted._last_skip_reason == "uncertain_exit_reconciliation_required"
+    assert BlockedThread.starts == 1
 
 
 @pytest.mark.parametrize("broker_status", ["COMPLETE", "OPEN"])

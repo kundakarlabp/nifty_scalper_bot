@@ -2754,6 +2754,17 @@ class OrderManager:
             "UNKNOWN",
         }:
             normalized_intent = "UNKNOWN"
+        # An unresolved EXIT may already have filled at the broker. Do not
+        # permit another entry until the durable reservation is reconciled.
+        if normalized_intent in {"ENTRY", "SCALE_IN", "REVERSAL"} and (
+            self._exit_ledger_corrupt or self._uncertain_exit_ledger.snapshot()
+        ):
+            self.set_last_skip_reason("uncertain_exit_reconciliation_required")
+            self._logger.critical(
+                "ENTRY_HELD_FOR_UNCERTAIN_EXIT symbol=%s",
+                symbol,
+            )
+            return None
         if normalized_intent == "UNKNOWN" and self.is_live_mode():
             self.set_last_skip_reason("order_intent_required")
             self._logger.error(
