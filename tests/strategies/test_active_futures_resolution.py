@@ -342,3 +342,55 @@ def test_resolved_future_rotation_is_not_conflated_when_config_symbol_absent() -
     manager._augment_futures_metrics(advanced)
     assert advanced["futures_volume_ratio"] == 1.0
     assert manager._last_futures_volume == 125.0
+
+
+class _NoRestPullHub(_Hub):
+    def __init__(self, *, futures_available: bool = True) -> None:
+        super().__init__()
+        self.futures_available = futures_available
+        self.requests: list[tuple[str, bool]] = []
+
+    def get_quote(self, symbol: str, allow_pull: bool = False):
+        self.requests.append((symbol, allow_pull))
+        if allow_pull:
+            raise AssertionError("strategy evaluation cannot pull REST quotes")
+        if symbol == "NSE:NIFTY":
+            return None
+        if symbol == "NFO:NIFTY26JUNFUT" and self.futures_available:
+            return {
+                "ltp": 24120.0,
+                "vwap": 24102.5,
+                "volume_cumulative": 1500.0,
+            }
+        return None
+
+
+def test_futures_metrics_reads_cached_quotes_only_without_spot_fallback() -> None:
+    hub = _NoRestPullHub()
+    manager = _manager(hub=hub)
+    indicators: dict[str, Any] = {}
+    manager._augment_futures_metrics(indicators)
+
+    assert hub.requests == [
+        ("NFO:NIFTY26JUNFUT", False),
+        ("NSE:NIFTY", False),
+    ]
+    assert indicators["futures_vwap"] == 24102.5
+    assert indicators["futures_volume"] == 1500.0
+    assert indicators["nifty_index_ltp"] is None
+    assert indicators["nifty_index_vwap"] is None
+
+
+def test_missing_cached_futures_quote_does_not_trigger_broker_pull() -> None:
+    hub = _NoRestPullHub(futures_available=False)
+    manager = _manager(hub=hub)
+    indicators: dict[str, Any] = {}
+    manager._augment_futures_metrics(indicators)
+
+    assert hub.requests == [
+        ("NFO:NIFTY26JUNFUT", False),
+        ("NSE:NIFTY", False),
+    ]
+    assert indicators["futures_volume"] is None
+    assert indicators["futures_volume_trusted"] is False
+    assert indicators.get("futures_vwap") is None
