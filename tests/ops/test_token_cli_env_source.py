@@ -158,14 +158,17 @@ def _configure_saved_session(monkeypatch, tmp_path: Path):
     monkeypatch.setenv("BROKER_ACCESS_TOKEN", "saved-token")
     monkeypatch.setenv("ADMIN_ZERODHA_USER_ID", "AB1234")
     for alias in (
-        "ZERODHA_API_KEY", "KITE_API_KEY",
-        "ZERODHA_API_SECRET", "KITE_API_SECRET",
+        "ZERODHA_API_KEY",
+        "KITE_API_KEY",
+        "ZERODHA_API_SECRET",
+        "KITE_API_SECRET",
     ):
         monkeypatch.delenv(alias, raising=False)
     monkeypatch.setattr(cli, "load_dotenv", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(cli, "KiteConnect", _RecoveredKite)
     monkeypatch.setattr(
-        __import__("sys"), "argv",
+        __import__("sys"),
+        "argv",
         ["zerodha_token_cli.py", "--recover-saved-token", "--env", str(env_file)],
     )
     return cli, env_file
@@ -180,7 +183,8 @@ def test_recover_saved_token_verifies_broker_and_queues_safe_restart(
     cli, _env_file = _configure_saved_session(monkeypatch, tmp_path)
     calls = []
     monkeypatch.setattr(
-        admin_dashboard, "_activate_access_token",
+        admin_dashboard,
+        "_activate_access_token",
         lambda token: calls.append(token)
         or ControlResult(True, "restart_bot", "Validated restart queued"),
     )
@@ -198,23 +202,24 @@ def test_recover_saved_token_rejects_wrong_owner_without_rotating(
     from nifty_scalper_bot import admin_dashboard
 
     cli, _env_file = _configure_saved_session(monkeypatch, tmp_path)
+
     class WrongOwnerKite(_RecoveredKite):
         def profile(self):
             return {"user_id": "OTHER"}
 
     monkeypatch.setattr(cli, "KiteConnect", WrongOwnerKite)
     monkeypatch.setattr(
-        admin_dashboard, "_activate_access_token",
+        admin_dashboard,
+        "_activate_access_token",
         lambda *_: (_ for _ in ()).throw(AssertionError("must not rotate")),
     )
     with pytest.raises(SystemExit, match="Saved session not verified"):
         cli.main()
 
 
-def test_recover_saved_token_requires_broker_margin_response(
-    monkeypatch, tmp_path
-):
+def test_recover_saved_token_requires_broker_margin_response(monkeypatch, tmp_path):
     cli, _env_file = _configure_saved_session(monkeypatch, tmp_path)
+
     class NoMarginsKite(_RecoveredKite):
         def margins(self, segment):
             return {}
