@@ -1145,7 +1145,7 @@ class MarketDataManager:
             diag_before = engine.diagnostics() if hasattr(engine, "diagnostics") else {}
             engine.import_history(frame, mode="incremental", source="historical")
             diag_after = engine.diagnostics() if hasattr(engine, "diagnostics") else {}
-            self._refresh_candle_projection(normalized_symbol, source="historical")
+            self._refresh_candle_projection(normalized_symbol, source="historical_import")
             after = self.get_ohlc_bars(normalized_symbol)
             self.update_hydration_status(normalized_symbol, after)
             latest = engine.latest_finalized_minute()
@@ -1471,9 +1471,7 @@ class MarketDataManager:
             # without changing its count. The import caller explicitly owns
             # this provenance, so equal-length reconciliations are expected
             # too. Unattributed live mismatches remain warnings.
-            historical_refresh = (
-                source == "historical" and lag_after_bars == 0.0
-            )
+            historical_refresh = source == "historical_import" and lag_after_bars == 0.0
             classification = (
                 "history_reconciliation" if historical_refresh else "live_mismatch"
             )
