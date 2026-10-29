@@ -280,9 +280,7 @@ def _repair_selected_pair_evaluation(runner: Any, *, now: float | None = None) -
     if not callable(ws_age):
         return
     try:
-        if any(
-            (age := ws_age(symbol)) is None or float(age) > 5.0 for symbol in pair
-        ):
+        if any((age := ws_age(symbol)) is None or float(age) > 5.0 for symbol in pair):
             return
     except (TypeError, ValueError, RuntimeError):
         return
