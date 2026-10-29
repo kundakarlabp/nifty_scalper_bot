@@ -2,7 +2,8 @@
 
 Responsibilities:
 - audit_session_startups counts canonical WebSocket, reconciliation and ready events.
-- Extract only clock times and bounded aggregate counters from archived journal lines.
+- Extract clock times, first-ready/opening-window observations and bounded counts.
+- Mark missing readiness markers explicitly; do not infer continuous availability.
 - Mark absent evidence explicitly instead of inferring broker or stop safety.
 
 Boundaries: Offline/read-only log parsing; no broker, engine or scheduler imports.
@@ -83,6 +84,14 @@ def audit_session_startups(log_text: str) -> dict[str, int | str | None]:
             used.add(index)
             lags.append(max(0, int((ready - starts[index]).total_seconds())))
 
+    first_ready_time = min(readiness).strftime("%H:%M:%S") if readiness else None
+    last_ready_time = max(readiness).strftime("%H:%M:%S") if readiness else None
+    opening_ready_seen = False
+    for ready in readiness:
+        if ready.hour == 9 and 15 <= ready.minute < 30:
+            opening_ready_seen = True
+            break
+
     return {
         "schema_version": 1,
         "observed_startup_count": len(starts),
@@ -101,9 +110,10 @@ def audit_session_startups(log_text: str) -> dict[str, int | str | None]:
         **stop_counts,
         "first_startup_at_ist": starts[0].strftime("%H:%M:%S") if starts else None,
         "last_startup_at_ist": starts[-1].strftime("%H:%M:%S") if starts else None,
-        "last_live_ready_at_ist": (
-            readiness[-1].strftime("%H:%M:%S") if readiness else None
-        ),
+        "first_live_ready_at_ist": first_ready_time,
+        "last_live_ready_at_ist": last_ready_time,
+        # Observed READY transition, not evidence of continuous availability.
+        "opening_window_ready_event_observed": opening_ready_seen,
         "max_startup_to_ready_seconds": max(lags) if lags else None,
         "protective_stop_verification": "not_established_from_log_markers",
         "restart_cause": "unknown_without_process_and_deployment_events",
