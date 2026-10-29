@@ -431,8 +431,10 @@ def local_risk_reset(request: Request) -> dict[str, Any]:
     if risk is None:
         risk = getattr(getattr(ctx, "order_manager", None), "_risk_manager", None)
     manager = getattr(risk, "position_manager", None)
-    if manager is None or not callable(getattr(manager, "get_all_positions", None)) or not callable(
-        getattr(manager, "get_pending_orders", None)
+    if (
+        manager is None
+        or not callable(getattr(manager, "get_all_positions", None))
+        or not callable(getattr(manager, "get_pending_orders", None))
     ):
         raise HTTPException(status_code=503, detail="position_state_unavailable")
     if manager.get_all_positions() or manager.get_pending_orders():
