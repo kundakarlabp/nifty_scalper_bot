@@ -234,6 +234,38 @@ def test_later_rejection_does_not_erase_prior_approved_setup() -> None:
     assert opportunity.blocked_reasons == ("later_option_candidate_rejected",)
 
 
+def test_approved_setup_uses_approved_contract_and_proof_after_rotation() -> None:
+    approved = _decision(
+        "2026-10-29T03:58:51Z",
+        event_name="candidate.approved",
+        symbol="NFO:NIFTY26N0322750CE",
+        reason="order_submitted",
+    )
+    approved["meta"]["research_context"]["regime"] = "TREND"
+    approved["meta"]["research_context"]["decision_stage"] = "order_submitted"
+    blocked = _decision(
+        "2026-10-29T04:01:00Z",
+        symbol="NFO:NIFTY26N0322800CE",
+        reason="later_option_candidate_rejected",
+    )
+    blocked["meta"]["research_context"]["regime"] = "RANGE"
+    blocked["meta"]["research_context"]["decision_stage"] = "order_manager"
+
+    outcome = canonicalize_setup_opportunities([blocked, approved])[0]
+
+    assert outcome.approved is True
+    assert outcome.symbol == "NFO:NIFTY26N0322750CE"
+    assert outcome.observed_symbols == (
+        "NFO:NIFTY26N0322750CE",
+        "NFO:NIFTY26N0322800CE",
+    )
+    assert outcome.regime == "TREND"
+    assert outcome.research_context["decision_stage"] == "order_submitted"
+    assert outcome.final_reason == "order_submitted"
+    assert outcome.decision_count == 2
+    assert outcome.blocked_reasons == ("later_option_candidate_rejected",)
+
+
 def test_stage_provenance_counts_unique_setups_not_repeated_bar_votes() -> None:
     rows = [
         _decision("2026-09-30T04:00:00Z", reason="confirmation_missing"),
