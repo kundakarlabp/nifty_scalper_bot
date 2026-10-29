@@ -462,11 +462,16 @@ class SMCStrategy(EliteStrategy):
             (str(indicators.get("futures_symbol") or "").strip(), "futures"),
             (str(indicators.get("spot_symbol") or "").strip(), "spot_fallback"),
         )
-        option_anchor = _coerce_datetime(
+        raw_option_anchor = (
             indicators.get("latest_bar_ts")
             or indicators.get("bar_timestamp")
             or indicators.get("setup_candle_timestamp")
         )
+        option_anchor = _coerce_datetime(raw_option_anchor)
+        # An explicitly malformed option clock cannot be treated as missing:
+        # doing so would allow the latest futures bar to authorize past votes.
+        if raw_option_anchor not in (None, "") and option_anchor is None:
+            return None
         max_lag_seconds = max(
             60.0,
             safe_float_env("SMC_UNDERLYING_MAX_LAG_SECONDS", 120.0),
