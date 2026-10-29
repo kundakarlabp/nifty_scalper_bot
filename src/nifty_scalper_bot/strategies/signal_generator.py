@@ -1884,7 +1884,10 @@ class StrategyManager:
                         futures_quote.get("source"),
                         quote_age_s,
                         futures_ltp,
-                        futures_quote.get("instrument_token") or futures_quote.get("token"),
+                        (
+                            futures_quote.get("instrument_token")
+                            or futures_quote.get("token")
+                        ),
                         interval_sec=300.0,
                     )
                 elif (
