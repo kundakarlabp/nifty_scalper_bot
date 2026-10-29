@@ -100,6 +100,28 @@ def test_no_depth_is_reported_not_reshaped_into_executable_fill(tmp_path):
     assert report["account_pnl"] is None
 
 
+def test_single_level_depth_does_not_certify_five_level_option_quotes(tmp_path):
+    recorder = ReplayArchive(tmp_path)
+    now = datetime(2026, 10, 21, 10, 0, tzinfo=IST)
+    recorder.record("snapshot", _snapshot(), now)
+    for symbol in (CE, PE, FUT, "NSE:NIFTY 50"):
+        recorder.record(
+            "tick",
+            _tick(symbol, full=symbol not in {CE, PE}),
+            now + timedelta(seconds=1),
+        )
+    recorder.close()
+
+    report = audit_session(tmp_path / "2026-10-21.jsonl")
+    assert not report["observed_selected_context_available"]
+    assert report["roles"]["CE"]["uncrossed_two_sided_depth_ticks"] == 1
+    assert report["roles"]["CE"]["five_level_depth_ticks"] == 0
+    assert report["basket_segments_missing_by_requirement"] == {
+        "CE_no_five_level_depth": 1,
+        "PE_no_five_level_depth": 1,
+    }
+
+
 def test_dynamic_basket_without_new_quote_context_is_blocked(tmp_path):
     report = audit_session(_record(tmp_path, changed=True))
     assert report["basket_versions"] == 2
