@@ -1342,9 +1342,7 @@ def _emit_option_symbol_pipeline_status(
                 # authoritative proof. Internal _active_tokens/_subscribed_tokens
                 # are optional manager implementation details and were reporting
                 # False even while fresh, confirmed option ticks were flowing.
-                confirmed: set[int] = getattr(
-                    mdm, "_confirmed_subscriptions", set()
-                )
+                confirmed: set[int] = getattr(mdm, "_confirmed_subscriptions", set())
                 desired: set[int] = getattr(mdm, "_desired_tokens", set())
                 ws_age_getter = getattr(mdm, "time_since_last_live_ws_tick", None)
                 live_ws_age_s = (
