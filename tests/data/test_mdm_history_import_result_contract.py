@@ -396,7 +396,7 @@ def test_candle_projection_labels_historical_size_reconciliation() -> None:
     assert len(mdm.get_ohlc_bars(SYMBOL)) == 1
 
 
-def test_same_length_candle_corruption_is_not_marked_expected_history_reconciliation() -> None:
+def test_same_length_corruption_is_not_expected_history_reconciliation() -> None:
     mdm = _mdm()
     assert mdm.ingest_historical_ohlc(SYMBOL, [_bar()]) == 1
     mdm._ohlc[SYMBOL][0]["close"] = 999.0
