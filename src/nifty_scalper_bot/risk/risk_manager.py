@@ -9,7 +9,8 @@ Key interfaces: RiskManager.check_order, RiskSnapshot, RiskState, OrderSignal.
 Boundaries: Strategy produces intent; broker order submission and fill truth live
 in execution/position management. This module must not place broker orders.
 Safety: Protective risk-reducing exits are not equivalent to new BUY entries;
-never bypass live exposure, margin or loss limits to increase trade frequency.
+manual loss allowance rebases are at most once per IST trading day, durable,
+and never bypass live exposure, margin, loss streak or protective exits.
 """
 
 from __future__ import annotations
@@ -64,6 +65,7 @@ COOLDOWN_SLOP_MS = max(int(os.getenv("RISK_COOLDOWN_SLOP_MS", "250")), 0)
 
 
 LOGGER = get_logger(__name__)
+_OPERATOR_RISK_RESET_LOCK = threading.RLock()
 
 
 def _balance_refresher_sleep_seconds(base_interval: float) -> float:
@@ -231,6 +233,7 @@ class RiskManager:
     _completed_trade_costs_today: float = field(init=False, repr=False, default=0.0)
     _operator_reset_realized_baseline: float = field(init=False, repr=False, default=0.0)
     _operator_reset_cost_baseline: float = field(init=False, repr=False, default=0.0)
+    _operator_reset_trading_date: str = field(init=False, repr=False, default="")
 
     def __post_init__(self) -> None:
         self._logger = get_logger(__name__)
@@ -1494,6 +1497,9 @@ class RiskManager:
             )
             self._switches.reset_day()
             self._completed_trade_costs_today = 0.0
+            self._operator_reset_trading_date = ""
+            self._operator_reset_realized_baseline = 0.0
+            self._operator_reset_cost_baseline = 0.0
             broker_realized = _resolve_broker_realized_pnl(
                 self.position_manager, force=True
             )
@@ -1614,6 +1620,17 @@ class RiskManager:
             return
         if not isinstance(state, Mapping):
             return
+        today_reader = getattr(self.position_manager, "_trading_date_ist", None)
+        today = (
+            str(today_reader())
+            if callable(today_reader)
+            else datetime.now(timezone(timedelta(hours=5, minutes=30))).date().isoformat()
+        )
+        if str(state.get("trading_date") or "") != today:
+            return
+        self._operator_reset_trading_date = str(
+            state.get("operator_reset_trading_date") or ""
+        )
         self._operator_reset_realized_baseline = float(
             state.get("operator_reset_realized_baseline", 0.0) or 0.0
         )
@@ -1622,54 +1639,95 @@ class RiskManager:
         )
 
     def operator_reset_daily_loss_budget(self) -> dict[str, float]:
-        """Rebase only today's loss allowance; preserve accounting and loss streak."""
-        broker_realized = _resolve_broker_realized_pnl(
-            self.position_manager, force=True
-        )
-        realized = (
-            broker_realized
-            if broker_realized is not None
-            else float(self.position_manager.get_realized_pnl())
-        )
-        costs = float(getattr(self, "_completed_trade_costs_today", 0.0) or 0.0)
-        prior_day_loss = float(self._switches.day_loss())
-        self._operator_reset_realized_baseline = realized
-        self._operator_reset_cost_baseline = max(costs, 0.0)
-        self._last_pnl_snapshot = realized
-        self._switches.rebase_day_pnl()
+        """Explicit one-time IST-day rebase; never erase trading loss history."""
+        with _OPERATOR_RISK_RESET_LOCK:
+            date_reader = getattr(self.position_manager, "_trading_date_ist", None)
+            today = (
+                str(date_reader())
+                if callable(date_reader)
+                else datetime.now(timezone(timedelta(hours=5, minutes=30))).date().isoformat()
+            )
+            if getattr(self, "_operator_reset_trading_date", "") == today:
+                raise ValueError("daily_risk_reset_already_applied")
+            state_reader = getattr(self.position_manager, "get_risk_circuit_state", None)
+            if callable(state_reader):
+                state = state_reader() or {}
+                if (
+                    isinstance(state, Mapping)
+                    and str(state.get("trading_date") or "") == today
+                    and str(state.get("operator_reset_trading_date") or "") == today
+                ):
+                    raise ValueError("daily_risk_reset_already_applied")
 
-        remaining_reason = self._switches.breach_reason()
-        if remaining_reason:
-            self._breaker_tripped = True
-            self._breaker_reason = self._format_switch_reason(remaining_reason)
-        else:
-            self._breaker_tripped = False
-            self._breaker_reason = None
-            self._breaker_alerted = False
-            self._shadow_forced = False
-        self._last_rejection = None
-        self._persist_risk_circuit_state()
-        self._logger.warning(
-            "OPERATOR_DAILY_RISK_RESET prior_day_loss=%.2f realized_baseline=%.2f "
-            "cost_baseline=%.2f streak=%d",
-            prior_day_loss,
-            realized,
-            costs,
-            self._switches.consecutive_losses(),
-            extra={
-                "event": "OPERATOR_DAILY_RISK_RESET",
+            broker_realized = _resolve_broker_realized_pnl(
+                self.position_manager, force=True
+            )
+            realized = (
+                broker_realized
+                if broker_realized is not None
+                else float(self.position_manager.get_realized_pnl())
+            )
+            if not math.isfinite(realized):
+                raise ValueError("daily_risk_realized_pnl_unverified")
+            costs = float(getattr(self, "_completed_trade_costs_today", 0.0) or 0.0)
+            if not math.isfinite(costs):
+                raise ValueError("daily_risk_costs_unverified")
+            prior_day_loss = float(self._switches.day_loss())
+            if not math.isfinite(prior_day_loss):
+                raise ValueError("daily_risk_loss_unverified")
+
+            # Persist the operator's explicit baseline before clearing the
+            # loss circuit. A failed state write must never grant a fresh budget.
+            writer = getattr(self.position_manager, "persist_risk_circuit_state", None)
+            if not callable(writer):
+                raise RuntimeError("daily_risk_persistence_unavailable")
+            writer(
+                operator_reset_realized_baseline=realized,
+                operator_reset_cost_baseline=max(costs, 0.0),
+                operator_reset_trading_date=today,
+                daily_loss_cap=float(self._switches.max_day_loss),
+                completed_trade_costs_today=max(costs, 0.0),
+                consecutive_losses=int(self._switches.consecutive_losses()),
+                loss_cooldown_until_epoch=float(self._switches.cooldown_until_epoch()),
+            )
+            self._operator_reset_realized_baseline = realized
+            self._operator_reset_cost_baseline = max(costs, 0.0)
+            self._operator_reset_trading_date = today
+            self._last_pnl_snapshot = realized
+            self._switches.rebase_day_pnl()
+            remaining_reason = self._switches.breach_reason()
+            if remaining_reason:
+                self._breaker_tripped = True
+                self._breaker_reason = self._format_switch_reason(remaining_reason)
+            else:
+                self._breaker_tripped = False
+                self._breaker_reason = None
+                self._breaker_alerted = False
+                self._shadow_forced = False
+            self._last_rejection = None
+            self._logger.warning(
+                "OPERATOR_DAILY_RISK_RESET prior_day_loss=%.2f realized_baseline=%.2f "
+                "cost_baseline=%.2f streak=%d trading_date=%s",
+                prior_day_loss,
+                realized,
+                costs,
+                self._switches.consecutive_losses(),
+                today,
+                extra={
+                    "event": "OPERATOR_DAILY_RISK_RESET",
+                    "prior_day_loss": prior_day_loss,
+                    "realized_baseline": realized,
+                    "cost_baseline": costs,
+                    "consecutive_losses": self._switches.consecutive_losses(),
+                    "trading_date": today,
+                },
+            )
+            return {
                 "prior_day_loss": prior_day_loss,
                 "realized_baseline": realized,
                 "cost_baseline": costs,
-                "consecutive_losses": self._switches.consecutive_losses(),
-            },
-        )
-        return {
-            "prior_day_loss": prior_day_loss,
-            "realized_baseline": realized,
-            "cost_baseline": costs,
-            "new_day_loss": float(self._switches.day_loss()),
-        }
+                "new_day_loss": float(self._switches.day_loss()),
+            }
 
     def _seed_day_pnl_from_persisted_state(self) -> None:
         """Seed the day-loss circuit from broker P&L or same-day local state.
@@ -1835,6 +1893,7 @@ class RiskManager:
                     getattr(self, "_operator_reset_realized_baseline", 0.0)
                 ),
                 operator_reset_cost_baseline=float(getattr(self, "_operator_reset_cost_baseline", 0.0)),
+                operator_reset_trading_date=str(getattr(self, "_operator_reset_trading_date", "")),
             )
         except Exception:  # noqa: BLE001 - persistence must not break trading
             self._logger.warning("RISK_CIRCUIT_PERSIST_FAILED", exc_info=True)
