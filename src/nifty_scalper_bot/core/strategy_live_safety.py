@@ -5,7 +5,8 @@ unreadiness, approved-signal filter bypass, and unsafe OrderFlow candidates.
 Deterministic signal identity is generated at the live-safety boundary so
 approved signals are idempotent without depending on every strategy to stamp it.
 The approved SMC freshness guard rejects stale or unproven original sweeps
-using the live wall clock; it leaves close and non-SMC signals unchanged.
+using the live wall clock; a separate opt-in VWAP continuation freshness guard
+uses that same decision-time safety boundary without a nondeterministic strategy.
 """
 
 from __future__ import annotations
@@ -633,6 +634,35 @@ def _approved_smc_freshness_block(
     return None
 
 
+def _approved_vwap_continuation_freshness_block(
+    signal: Signal, *, now_epoch: float
+) -> dict[str, Any] | None:
+    """Use the actual LIVE decision time for an opt-in VWAP BUY thesis expiry."""
+    if str(getattr(signal, "action", "")).upper() != "BUY":
+        return None
+    metadata = dict(getattr(signal, "metadata", {}) or {})
+    strategy = str(metadata.get("strategy_name") or metadata.get("strategy") or "")
+    if strategy.replace("_", "").strip().upper() != "VWAPPRO":
+        return None
+    if str(metadata.get("setup_type") or "") != "vwap_continuation":
+        return None
+    if not _env_true("VWAP_STRICT_CONTINUATION_ENABLED"):
+        return None
+
+    anchor = _coerce_epoch_seconds(metadata.get("setup_candle_timestamp"))
+    if anchor is None or not math.isfinite(anchor):
+        return {"reason": "live_vwap_thesis_timestamp_missing"}
+    if not math.isfinite(now_epoch):
+        return {"reason": "live_vwap_clock_unavailable"}
+    age = now_epoch - anchor
+    proof = {"thesis_age_seconds": round(age, 3), "max_thesis_age_seconds": 180.0}
+    if age < -_clock_skew_tolerance_seconds():
+        return {"reason": "live_vwap_thesis_future_timestamp", **proof}
+    if age > 180.0:
+        return {"reason": "live_vwap_thesis_expired", **proof}
+    return None
+
+
 def _orderflow_selected_option_block(signal: Signal) -> dict[str, Any] | None:
     metadata = dict(getattr(signal, "metadata", {}) or {})
     strategy_name = str(metadata.get("strategy_name") or metadata.get("strategy") or "")
@@ -769,7 +799,10 @@ def apply_patches() -> None:
             signal = _add_identity(signal)
             metadata = dict(getattr(signal, "metadata", {}) or {})
         candidate_symbol = normalize_symbol(getattr(signal, "symbol", ""))
-        freshness_block = _approved_smc_freshness_block(signal, now_epoch=time.time())
+        decision_epoch = time.time()
+        freshness_block = _approved_smc_freshness_block(
+            signal, now_epoch=decision_epoch
+        )
         if freshness_block is not None:
             _record(
                 self,
@@ -783,6 +816,24 @@ def apply_patches() -> None:
                 candidate_symbol,
                 freshness_block["reason"],
                 freshness_block,
+            )
+            return None
+        vwap_freshness_block = _approved_vwap_continuation_freshness_block(
+            signal, now_epoch=decision_epoch
+        )
+        if vwap_freshness_block is not None:
+            _record(
+                self,
+                candidate_symbol,
+                str(vwap_freshness_block["reason"]),
+                trace_id,
+                vwap_freshness_block,
+            )
+            LOG.warning(
+                "LIVE_VWAP_THESIS_FRESHNESS_BLOCK symbol=%s reason=%s details=%s",
+                candidate_symbol,
+                vwap_freshness_block["reason"],
+                vwap_freshness_block,
             )
             return None
         block = _candidate_execution_block(self, candidate_symbol)
