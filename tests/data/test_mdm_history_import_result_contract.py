@@ -383,6 +383,7 @@ def test_research_mode_history_import_keeps_afterhours_rows(
     assert result.accepted_rows == 1
     assert mdm._candle_metrics["history_offsession_rows_quarantined_total"] == 0
 
+
 def test_candle_projection_labels_historical_size_reconciliation() -> None:
     mdm = _mdm()
     assert mdm.ingest_historical_ohlc(SYMBOL, [_bar()]) == 1
