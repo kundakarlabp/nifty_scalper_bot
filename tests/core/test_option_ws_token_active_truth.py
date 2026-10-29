@@ -43,6 +43,7 @@ def _context(*, confirmed: bool, age: float = 0.1):
             _requested_tokens={123},
             _subscribed_tokens=set(),
             _active_tokens=set(),
+            time_since_last_live_ws_tick=lambda _symbol: age if confirmed else None,
         ),
     )
 
