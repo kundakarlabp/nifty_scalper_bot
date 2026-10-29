@@ -432,6 +432,7 @@ def test_invalid_raw_kiteticker_average_price_never_becomes_ltp_vwap() -> None:
     assert indicators.get("futures_vwap") is None
     assert indicators["nifty_index_vwap"] is None
 
+
 def test_futures_vwap_provenance_reports_actual_consumed_quote(monkeypatch) -> None:
     import nifty_scalper_bot.strategies.signal_generator as module
 
