@@ -625,6 +625,7 @@ def _submit_with_setup_price_guard(manager: Any, plan: Any) -> Any:
     response is uncertain, and removed only on a proven pre-broker rejection.
     Exit/reduce orders and other independently identified setups are untouched.
     """
+
     def _submit() -> Any:
         return _recover_submit(_submit_core_with_exit_provenance, manager, plan)
 
@@ -644,9 +645,7 @@ def _submit_with_setup_price_guard(manager: Any, plan: Any) -> Any:
 
     contract = provenance.get("setup_contract")
     setup_id = (
-        str(contract.get("setup_id") or "")
-        if isinstance(contract, Mapping)
-        else ""
+        str(contract.get("setup_id") or "") if isinstance(contract, Mapping) else ""
     ) or str(provenance.get("setup_id") or "")
     signal_id = str(getattr(plan, "signal_id", "") or "")
     symbol = str(getattr(plan, "symbol", "") or "").strip().upper()
@@ -686,7 +685,8 @@ def _submit_with_setup_price_guard(manager: Any, plan: Any) -> Any:
             )
             anchors = dict(prior) if isinstance(prior, Mapping) else {}
             anchors = {
-                str(k): v for k, v in anchors.items()
+                str(k): v
+                for k, v in anchors.items()
                 if isinstance(v, Mapping)
                 and isinstance(v.get("at"), (int, float))
                 and 0 <= now - float(v["at"]) <= 900
@@ -702,9 +702,12 @@ def _submit_with_setup_price_guard(manager: Any, plan: Any) -> Any:
                     warn = getattr(logger, "warning", None)
                     if callable(warn):
                         warn(
-                            ("ENTRY_SAME_SETUP_PRICE_CHASE_BLOCKED symbol=%s "
-                             "drift_pct=%.2f"),
-                            symbol, drift,
+                            (
+                                "ENTRY_SAME_SETUP_PRICE_CHASE_BLOCKED symbol=%s "
+                                "drift_pct=%.2f"
+                            ),
+                            symbol,
+                            drift,
                             extra={
                                 "event": "ENTRY_SAME_SETUP_PRICE_CHASE_BLOCKED",
                                 "symbol": symbol,
