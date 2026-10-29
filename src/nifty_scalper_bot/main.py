@@ -367,8 +367,7 @@ def _require_local_risk_command(request: Request, action: str) -> None:
 
     peer = request.client.host if request.client else ""
     if peer not in {"127.0.0.1", "::1"} or any(
-        key in request.headers
-        for key in ("x-forwarded-for", "forwarded", "x-real-ip")
+        key in request.headers for key in ("x-forwarded-for", "forwarded", "x-real-ip")
     ):
         raise HTTPException(status_code=403, detail="risk_control_loopback_only")
     token = request.headers.get("x-nifty-internal-command", "")
