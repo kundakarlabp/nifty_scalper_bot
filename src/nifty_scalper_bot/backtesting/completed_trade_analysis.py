@@ -1,9 +1,9 @@
 """Research-only analysis for canonical completed trades.
 
-The live trading path does not import this module. It accepts already-materialized
-trade-ledger rows, keeps only economically complete CLOSED trades, validates the
-post-cost identity, and exposes chronological summaries plus attribution
-readiness. Parameter selection remains owned by the walk-forward research layer.
+Responsibilities: Validate CLOSED ledger rows and post-cost identity; report
+chronological trade summaries, exact OOS fold-path drawdown and attribution.
+Boundaries: Consumes materialized completed trades; never enters the live path.
+Safety: Incomplete OOS paths cannot be labelled ready for parameter promotion.
 """
 
 from __future__ import annotations
