@@ -1695,16 +1695,23 @@ class RiskManager:
             self._operator_reset_trading_date = today
             self._last_pnl_snapshot = realized
             self._switches.rebase_day_pnl()
+            # Resetting a daily loss allowance must not clear a breaker
+            # raised by any OTHER safety subsystem.
+            old_reason = str(getattr(self, "_breaker_reason", "") or "").lower()
+            preserve_other_breaker = bool(getattr(self, "_breaker_tripped", False)) and not (
+                "day loss" in old_reason or "daily loss" in old_reason
+            )
             remaining_reason = self._switches.breach_reason()
             if remaining_reason:
                 self._breaker_tripped = True
                 self._breaker_reason = self._format_switch_reason(remaining_reason)
-            else:
+            elif not preserve_other_breaker:
                 self._breaker_tripped = False
                 self._breaker_reason = None
                 self._breaker_alerted = False
                 self._shadow_forced = False
-            self._last_rejection = None
+            if not preserve_other_breaker:
+                self._last_rejection = None
             self._logger.warning(
                 "OPERATOR_DAILY_RISK_RESET prior_day_loss=%.2f realized_baseline=%.2f "
                 "cost_baseline=%.2f streak=%d trading_date=%s",
