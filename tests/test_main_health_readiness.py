@@ -855,6 +855,17 @@ def test_trading_status_distinguishes_live_configuration_from_current_arming(
 
 def test_health_trading_exposes_signal_observability_without_changing_readiness():
     class Runner:
+        _strategy_profile = {
+            "version": "production-v3-test",
+            "strategies": {
+                "mode": "directional_scalp",
+                "active": ["SMC", "VWAPPro", "ORBPro", "OrderFlow"],
+                "trigger_capable": ["SMC", "VWAPPro", "ORBPro"],
+                "context_only": ["OrderFlow"],
+            },
+            "decision_environment": {"UNSAFE_PRIVATE_KEY": "do-not-leak"},
+        }
+
         def get_status(self):
             return {
                 "tick_count": 11,
@@ -905,6 +916,15 @@ def test_health_trading_exposes_signal_observability_without_changing_readiness(
     assert observability["last_tick_age_sec"] == 0.8
     assert observability["last_eval_age_sec"] == 17.2
     assert observability["runner_state"] == "RunnerState.EXECUTION_ENABLED"
+    assert observability["effective_strategy_profile"] == {
+        "known": True,
+        "version": "production-v3-test",
+        "mode": "directional_scalp",
+        "active": ["SMC", "VWAPPro", "ORBPro", "OrderFlow"],
+        "trigger_capable": ["SMC", "VWAPPro", "ORBPro"],
+        "context_only": ["OrderFlow"],
+    }
+    assert "UNSAFE_PRIVATE_KEY" not in str(observability)
     assert observability["completed_strategy_evaluations_window"]["SMC"] == 4
     assert (
         observability["no_vote_reason_counts_by_strategy_window"]["ORBPro"][
@@ -925,6 +945,12 @@ def test_health_trading_exposes_signal_observability_without_changing_readiness(
         "reason": "non_breakout_regime",
         "count": 4,
     }
+
+
+def test_missing_runtime_profile_is_unknown_not_an_empty_strategy_registry() -> None:
+    runner = SimpleNamespace(get_status=lambda: {"tick_count": 1})
+    observed = main._signal_observability(SimpleNamespace(strategy_runner=runner))
+    assert observed["effective_strategy_profile"] == {"known": False}
 
 
 def test_no_trade_diagnostics_separates_missing_signal_from_risk_gate() -> None:

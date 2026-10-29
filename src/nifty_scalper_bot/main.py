@@ -4,7 +4,8 @@ Responsibilities: Initialize canonical settings, supervise the app background ta
 expose /livez, /readyz, /releasez and structured health/status diagnostics,
 and authenticate host-local administrative daily-risk requests,
 and provide explicit startup/shutdown management.
-Health also reports effective, read-only canonical risk settings.
+Health also reports effective, read-only canonical risk settings and a safe
+allowlisted summary of the actual loaded runtime strategy profile.
 Health labels separate execution permission from observed signal pipeline activity.
 Key interfaces: lifespan, livez, readyz and trading/status handlers.
 Boundaries: This HTTP shell does not own market direction, risk or order policy;
@@ -640,6 +641,25 @@ def _signal_observability(ctx: Any) -> dict[str, Any]:
         status = dict(getter() or {})
     except Exception:
         return {}
+    # Use the production builder's already-captured profile, not legacy YAML,
+    # and expose only strategy names/roles (never decision_environment values).
+    profile = getattr(runner, "_strategy_profile", None)
+    if not isinstance(profile, dict):
+        profile = {}
+    configured = profile.get("strategies")
+    effective_profile: dict[str, Any] = {"known": False}
+    if isinstance(configured, dict) and all(
+        isinstance(configured.get(field), list)
+        for field in ("active", "trigger_capable", "context_only")
+    ):
+        effective_profile = {
+            "known": True,
+            "version": profile.get("version"),
+            "mode": configured.get("mode"),
+            "active": list(configured["active"]),
+            "trigger_capable": list(configured["trigger_capable"]),
+            "context_only": list(configured["context_only"]),
+        }
     # Read the same central regime authority used by the strategy manager.
     # Without this, "non_breakout_regime" cannot be differentiated from stale
     # or under-evidenced regime state in the production health response.
@@ -667,6 +687,7 @@ def _signal_observability(ctx: Any) -> dict[str, Any]:
             regime_evidence = {"diagnostic_error": "regime_snapshot_unavailable"}
     return {
         "regime_evidence": regime_evidence,
+        "effective_strategy_profile": effective_profile,
         "runner_tick_count": status.get("tick_count"),
         "phase9_evaluation_count": status.get("phase9_evaluation_count"),
         "legacy_activity_count": status.get("legacy_activity_count"),
