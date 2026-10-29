@@ -1868,7 +1868,8 @@ class StrategyManager:
                         self._logger,
                         f"future_vwap_missing:{active_future}",
                         "FUTURES_VWAP_UNAVAILABLE_LTP_NOT_SUBSTITUTED "
-                        "symbol=%s source=%s mode=%s raw_average_traded_price_present=%s",
+                        "symbol=%s source=%s mode=%s "
+                        "raw_average_traded_price_present=%s",
                         active_future,
                         futures_quote.get("source"),
                         futures_quote.get("mode"),
