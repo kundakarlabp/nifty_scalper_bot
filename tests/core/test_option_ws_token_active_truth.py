@@ -63,7 +63,9 @@ def test_broker_ws_active_uses_confirmed_current_tick_not_empty_internal_sets(
         reason="test",
     )
     record = next(
-        r for r in caplog.records if r.message.startswith("OPTION_SYMBOL_PIPELINE_STATUS")
+        r
+        for r in caplog.records
+        if r.message.startswith("OPTION_SYMBOL_PIPELINE_STATUS")
     )
     assert record.broker_ws_token_active is True
 
@@ -81,6 +83,8 @@ def test_requested_token_alone_does_not_claim_confirmed_ws_active(caplog) -> Non
         reason="test",
     )
     record = next(
-        r for r in caplog.records if r.message.startswith("OPTION_SYMBOL_PIPELINE_STATUS")
+        r
+        for r in caplog.records
+        if r.message.startswith("OPTION_SYMBOL_PIPELINE_STATUS")
     )
     assert record.broker_ws_token_active is False
