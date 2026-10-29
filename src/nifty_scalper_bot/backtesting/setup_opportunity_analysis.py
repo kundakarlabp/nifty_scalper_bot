@@ -1,8 +1,9 @@
 """Research-only setup opportunity and counterfactual outcome analysis.
 
-This module is intentionally outside the live trading path. It consumes persisted
-runner decisions and already-recorded market observations; it never generates a
-signal, infers direction, changes a threshold, sizes an order, or routes execution.
+Responsibilities: Deduplicate structural decisions and preserve the approved
+contract, decision context, and chronological forward-path provenance.
+Boundaries: Consumes persisted decisions and observed quotes; never places orders.
+Safety: Later blocked candidates cannot overwrite an approved setup identity.
 """
 
 from __future__ import annotations
@@ -165,13 +166,15 @@ def canonicalize_setup_opportunities(
         }
         if len(strategies) != 1 or len(sides) != 1:
             continue
-        last_ts, last_row, last_context = sample[-1]
+        last_ts, _, last_context = sample[-1]
         approved_rows = [
             item for item in sample if item[1].get("event_name") == "candidate.approved"
         ]
-        # A later rejection of a different option must not erase an already
-        # approved underlying setup; use the latest approval as its outcome.
-        outcome_row = approved_rows[-1][1] if approved_rows else last_row
+        # Keep the latest approval's contract/context together with its outcome;
+        # a later rejection on a rotated contract is not the approved trade.
+        _, outcome_row, outcome_context = (
+            approved_rows[-1] if approved_rows else sample[-1]
+        )
         setup_id = str(
             last_context.get("setup_id") or last_context.get("setup_structure_id") or ""
         ).strip()
@@ -196,7 +199,7 @@ def canonicalize_setup_opportunities(
         observed_stages = tuple(sorted(observed_stage_values))
         blocked_reasons = tuple(sorted(blocked_reason_values))
         symbol = str(
-            last_row.get("selected_candidate") or last_row.get("symbol") or ""
+            outcome_row.get("selected_candidate") or outcome_row.get("symbol") or ""
         ).strip()
         opportunities.append(
             CanonicalSetupOpportunity(
@@ -211,8 +214,8 @@ def canonicalize_setup_opportunities(
                 decision_count=len(sample),
                 approved=bool(approved_rows),
                 final_reason=final_reason,
-                regime=str(last_context.get("regime") or "").strip().upper(),
-                research_context=dict(last_context),
+                regime=str(outcome_context.get("regime") or "").strip().upper(),
+                research_context=dict(outcome_context),
                 observed_stages=observed_stages,
                 blocked_reasons=blocked_reasons,
             )
