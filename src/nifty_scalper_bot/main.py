@@ -644,7 +644,9 @@ def _signal_observability(ctx: Any) -> dict[str, Any]:
     # Use the production builder's already-captured profile, not legacy YAML,
     # and expose only strategy names/roles (never decision_environment values).
     profile = getattr(runner, "_strategy_profile", None)
-    configured = profile.get("strategies") if isinstance(profile, dict) else None
+    if not isinstance(profile, dict):
+        profile = {}
+    configured = profile.get("strategies")
     effective_profile: dict[str, Any] = {"known": False}
     if isinstance(configured, dict) and all(
         isinstance(configured.get(field), list)
