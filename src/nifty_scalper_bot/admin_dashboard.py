@@ -414,10 +414,22 @@ def _daily_risk_panel(owner_verified: bool) -> str:
     label = "Already rebased today; another reset is not permitted." if applied else (
         "Risk budget can be rebased once today, with explicit owner confirmation."
     )
+    action = (
+        ""
+        if applied
+        else (
+            '<form method="post" action="/admin/risk/reset-day">'
+            '<input type="hidden" name="confirm" value="RESET">'
+            '<button type="submit" class="amb full" '
+            "onclick=\"return confirm('Grant one more daily loss allowance? "
+            "This increases permitted loss today. Realised P&L is unchanged.')\">"
+            "Rebase today's risk allowance (once per day)</button></form>"
+        )
+    )
     return (
         f"<p><b>Remaining risk: ₹{remaining:,.2f}</b> "
         f"/ daily limit ₹{cap:,.2f}; loss since reset ₹{loss:,.2f}.</p>"
-        f"<p>{html.escape(label)}</p>"
+        f"<p>{html.escape(label)}</p>{action}"
     )
 
 
@@ -675,11 +687,6 @@ def _full_dashboard(request: Request, *, preview: bool = False) -> HTMLResponse:
             loss, actual P&amp;L, loss streak, cooldown, and broker history remain intact.
             Does not force a trade or bypass entry eligibility.</p>
             {risk_panel}
-            <form method="post" action="/admin/risk/reset-day">
-              <input type="hidden" name="confirm" value="RESET">
-              <button type="submit" class="amb full"
-              onclick="return confirm('Grant one more daily loss allowance? This increases permitted loss today. Ledger and realised P&L remain unchanged.')">
-              Rebase today’s risk allowance (once per day)</button></form>
           </div></details>
           <details><summary>Credentials &amp; integration settings</summary><div class="detail-body">
             <p>Existing secrets remain unchanged when their placeholders are left as-is.
