@@ -77,7 +77,7 @@ function cleanStartupAudit(raw: unknown): Record<string, unknown> | null {
   if (input.first_live_ready_at_ist !== undefined) {
     const first = input.first_live_ready_at_ist
     if (first !== null && (typeof first !== 'string' ||
-        !/^(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d$/.test(first))) return null
+        !/^(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d$/.test(first))) return null
     safe.first_live_ready_at_ist = first
   }
   if (input.opening_window_ready_event_observed !== undefined) {
