@@ -1133,8 +1133,7 @@ class VWAPProStrategy(EliteStrategy):
                     current_high = float(confirmed_bar["high"])
                     current_low = float(confirmed_bar["low"])
                     current_vol = float(confirmed_bar["volume"])
-                    decision_ts = datetime.now(timezone.utc) if is_live else current_ts
-                    thesis_age = (decision_ts - anchor_ts).total_seconds()
+                    thesis_age = (current_ts - anchor_ts).total_seconds()
                     contiguous = current_ts - prior_ts == timedelta(minutes=1)
                     valid_prior = (
                         prior.get("is_complete") is True
