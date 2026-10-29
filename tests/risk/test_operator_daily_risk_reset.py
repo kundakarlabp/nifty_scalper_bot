@@ -212,3 +212,32 @@ def test_restoring_stale_reset_baseline_cannot_erase_next_day_loss() -> None:
     RiskManager._restore_operator_reset_baseline(owner)
     assert owner._operator_reset_realized_baseline == 0.0
     assert owner._operator_reset_trading_date == ""
+
+
+def test_operator_rebase_never_clears_an_unrelated_breaker() -> None:
+    switches = RiskSwitches(
+        max_day_loss=800.0,
+        max_consecutive_losses=3,
+        cooldown_minutes=0.0,
+        reset_hour_utc=3,
+    )
+    switches.record_pnl(-100.0)
+    owner = SimpleNamespace(
+        position_manager=SimpleNamespace(
+            get_realized_pnl=lambda: -100.0,
+            persist_risk_circuit_state=lambda **_values: None,
+        ),
+        _switches=switches,
+        _completed_trade_costs_today=0.0,
+        _breaker_tripped=True,
+        _breaker_reason="broker_position_reconciliation_failed",
+        _shadow_forced=True,
+        _last_rejection="broker_position_reconciliation_failed",
+        _logger=SimpleNamespace(warning=lambda *args, **kwargs: None),
+        _format_switch_reason=lambda reason: reason,
+    )
+    RiskManager.operator_reset_daily_loss_budget(owner)
+    assert owner._breaker_tripped is True
+    assert owner._breaker_reason == "broker_position_reconciliation_failed"
+    assert owner._shadow_forced is True
+    assert owner._last_rejection == "broker_position_reconciliation_failed"
