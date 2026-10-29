@@ -406,6 +406,7 @@ def test_same_length_corruption_is_not_expected_history_reconciliation() -> None
     assert mdm._candle_metrics["candle_projection_divergence_total"] == 1
     assert mdm._candle_metrics["candle_projection_history_reconciled_total"] == 0
 
+
 def test_history_overlap_is_labeled_reconciliation_even_when_count_is_same() -> None:
     """REST can revise a completed WS candle without adding any rows."""
     mdm = _mdm()
