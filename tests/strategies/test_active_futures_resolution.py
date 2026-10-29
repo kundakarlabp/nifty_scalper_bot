@@ -394,3 +394,40 @@ def test_missing_cached_futures_quote_does_not_trigger_broker_pull() -> None:
     assert indicators["futures_volume"] is None
     assert indicators["futures_volume_trusted"] is False
     assert indicators.get("futures_vwap") is None
+
+
+def test_raw_kiteticker_average_traded_price_reaches_futures_strategy() -> None:
+    """KiteTicker uses average_traded_price, unlike REST average_price."""
+    hub = _PriceHub(
+        {"ltp": 24000.0},
+        {
+            "ltp": 24120.0,
+            "average_traded_price": 24102.25,
+            "volume_traded": 2000,
+            "source": "ws",
+            "mode": "full",
+        },
+    )
+    manager = _manager(hub=hub)
+    indicators: dict[str, Any] = {}
+    manager._augment_futures_metrics(indicators)
+
+    assert indicators["nifty_index_vwap"] is None
+    assert indicators["futures_vwap"] == 24102.25
+    assert indicators["nifty_fut_vwap"] == 24102.25
+    assert indicators["futures_vwap_quote_field"] == "average_traded_price"
+    assert indicators["futures_volume_source"] == "volume_traded"
+
+
+def test_invalid_raw_kiteticker_average_price_never_becomes_ltp_vwap() -> None:
+    hub = _PriceHub(
+        {"ltp": 24000.0},
+        {"ltp": 24120.0, "average_traded_price": 0.0, "mode": "ltp"},
+    )
+    manager = _manager(hub=hub)
+    indicators: dict[str, Any] = {}
+    manager._augment_futures_metrics(indicators)
+
+    assert indicators["futures_ltp"] == 24120.0
+    assert indicators.get("futures_vwap") is None
+    assert indicators["nifty_index_vwap"] is None

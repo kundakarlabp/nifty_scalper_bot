@@ -547,3 +547,52 @@ def test_rest_quote_ingress_persists_real_broker_average_price() -> None:
     assert quote["vwap_source_field"] == "average_price"
     assert quote["volume_cumulative"] == 12000.0
     assert quote["volume_delta"] == 0
+
+
+def test_fast_websocket_cache_normalizes_raw_kiteticker_average_price() -> None:
+    """The cache is consumed before the queued tick normalization completes."""
+    mdm = _mdm()
+    mdm._record_ws_arrival_fast(
+        symbol=_SYM,
+        token=1,
+        ltp=105.0,
+        raw_tick={
+            "instrument_token": 1,
+            "last_price": 105.0,
+            "average_traded_price": 102.25,
+            "volume_traded": 10_000,
+            "source": "ws",
+            "mode": "full",
+        },
+    )
+    quote = mdm.get_latest_tick(_SYM)
+    assert quote is not None
+    assert quote["vwap"] == 102.25
+    assert quote["average_price"] == 102.25
+    assert quote["vwap_source_field"] == "average_traded_price"
+    assert quote["volume_traded"] == 10_000
+
+
+def test_fast_websocket_cache_never_fabricates_zero_or_index_vwap() -> None:
+    mdm = _mdm()
+    mdm._record_ws_arrival_fast(
+        symbol=_SYM,
+        token=1,
+        ltp=105.0,
+        raw_tick={"last_price": 105.0, "average_traded_price": 0.0},
+    )
+    quote = mdm.get_latest_tick(_SYM)
+    assert quote is not None
+    assert "vwap" not in quote
+    assert "average_price" not in quote
+
+    mdm._record_ws_arrival_fast(
+        symbol="NSE:NIFTY",
+        token=256265,
+        ltp=24120.0,
+        raw_tick={"last_price": 24120.0, "average_traded_price": 24115.0},
+    )
+    spot = mdm.get_latest_tick("NSE:NIFTY")
+    assert spot is not None
+    assert "vwap" not in spot
+    assert "average_price" not in spot
