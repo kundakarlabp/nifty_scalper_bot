@@ -69,7 +69,7 @@ class ChronologicalBlock:
 
 @dataclass(frozen=True, slots=True)
 class WalkForwardFold:
-    """One expanding-history, strictly later out-of-sample evaluation fold."""
+    """One expanding-history fold retaining the exact later OOS trade path."""
 
     index: int
     train_start_trade_id: str
@@ -78,6 +78,7 @@ class WalkForwardFold:
     test_end_trade_id: str
     train_summary: CompletedTradeSummary
     test_summary: CompletedTradeSummary
+    test_trades: tuple[CanonicalCompletedTrade, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -749,6 +750,7 @@ def chronological_walk_forward(
                 test_end_trade_id=test[-1].trade_id,
                 train_summary=summarize_completed_trades(train),
                 test_summary=summarize_completed_trades(test),
+                test_trades=tuple(test),
             )
         )
         train_end += test_size
@@ -770,47 +772,19 @@ def walk_forward_stability(
     if len(folds) < required:
         blockers.append(f"insufficient_oos_folds:{len(folds)}<{required}")
 
-    oos_trade_count = sum(fold.test_summary.trade_count for fold in folds)
-    aggregate = CompletedTradeSummary(
-        trade_count=oos_trade_count,
-        gross_pnl=round(sum(fold.test_summary.gross_pnl for fold in folds), 2),
-        estimated_costs=round(
-            sum(fold.test_summary.estimated_costs for fold in folds), 2
-        ),
-        effective_costs=round(
-            sum(fold.test_summary.effective_costs for fold in folds), 2
-        ),
-        broker_cost_trade_count=sum(
-            fold.test_summary.broker_cost_trade_count for fold in folds
-        ),
-        net_pnl=round(sum(fold.test_summary.net_pnl for fold in folds), 2),
-        expectancy=(
-            round(
-                sum(fold.test_summary.net_pnl for fold in folds) / oos_trade_count,
-                4,
-            )
-            if oos_trade_count
-            else 0.0
-        ),
-        win_rate=(
-            round(
-                sum(
-                    fold.test_summary.win_rate * fold.test_summary.trade_count
-                    for fold in folds
-                )
-                / oos_trade_count,
-                4,
-            )
-            if oos_trade_count
-            else 0.0
-        ),
-        average_win=0.0,
-        average_loss=0.0,
-        profit_factor=None,
-        max_drawdown=max(
-            (fold.test_summary.max_drawdown for fold in folds), default=0.0
-        ),
-    )
+    oos_trades = tuple(trade for fold in folds for trade in fold.test_trades)
+    expected_count = sum(fold.test_summary.trade_count for fold in folds)
+    if len(oos_trades) != expected_count:
+        blockers.append(
+            f"incomplete_oos_trade_path:{len(oos_trades)}<{expected_count}"
+        )
+    if any(
+        (current.closed_at, current.trade_id)
+        >= (following.closed_at, following.trade_id)
+        for current, following in zip(oos_trades, oos_trades[1:])
+    ):
+        blockers.append("non_chronological_oos_trade_path")
+    aggregate = summarize_completed_trades(oos_trades)
     positive = sum(fold.test_summary.net_pnl > 0 for fold in folds)
     return WalkForwardStability(
         ready=not blockers,
