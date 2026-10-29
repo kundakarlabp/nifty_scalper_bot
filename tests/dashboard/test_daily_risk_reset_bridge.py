@@ -142,9 +142,7 @@ def test_engine_never_resets_with_unknown_broker_exposure(
     monkeypatch, positions, orders, reconciled, reason
 ):
     monkeypatch.setattr(admin_owner_auth, "_signing_key", lambda: b"K" * 32)
-    ctx, calls = _context(
-        positions=positions, orders=orders, reconciled=reconciled
-    )
+    ctx, calls = _context(positions=positions, orders=orders, reconciled=reconciled)
     monkeypatch.setattr(engine, "_latest_context", lambda: ctx)
     token = admin_owner_auth.issue_local_engine_command("risk_reset")
     with pytest.raises(HTTPException) as error:
