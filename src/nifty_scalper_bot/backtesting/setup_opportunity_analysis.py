@@ -166,13 +166,15 @@ def canonicalize_setup_opportunities(
         }
         if len(strategies) != 1 or len(sides) != 1:
             continue
-        last_ts, last_row, last_context = sample[-1]
+        last_ts, _, last_context = sample[-1]
         approved_rows = [
             item for item in sample if item[1].get("event_name") == "candidate.approved"
         ]
         # Keep the latest approval's contract/context together with its outcome;
         # a later rejection on a rotated contract is not the approved trade.
-        _, outcome_row, outcome_context = approved_rows[-1] if approved_rows else sample[-1]
+        _, outcome_row, outcome_context = (
+            approved_rows[-1] if approved_rows else sample[-1]
+        )
         setup_id = str(
             last_context.get("setup_id") or last_context.get("setup_structure_id") or ""
         ).strip()
