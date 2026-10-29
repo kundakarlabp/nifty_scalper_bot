@@ -111,6 +111,10 @@ def test_rest_reply_rejected_after_ws_race_cannot_replace_mid_or_age(
     monkeypatch,
 ) -> None:
     mdm = _manager()
+    # Accepted WS FULL timestamp is more recent than the delayed REST reply.
+    mdm._tick_cache[SYMBOL]["timestamp"] = time.time()
+    mdm._tick_cache[SYMBOL]["received_at"] = time.time()
+    mdm._latest_ticks[SYMBOL] = dict(mdm._tick_cache[SYMBOL])
     quote_before = mdm.get_latest_tick(SYMBOL)
     mid_before = mdm._last_mid[SYMBOL]
     stamp_before = mdm._last_quote_ts_ms[SYMBOL]
