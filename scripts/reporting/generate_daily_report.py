@@ -1,4 +1,13 @@
-"""Utility to generate markdown daily performance reports from backtest output."""
+"""Purpose: Build offline cost-aware daily execution and strategy reports.
+
+Responsibilities:
+- Load canonical completed outcomes and summarize measured trade quality.
+- Report setup funnel, execution-quote coverage and realized loss-tail metrics.
+- Keep unmeasured broker exit prices explicitly unknown, never zero.
+
+Boundaries: Reporting only; does not modify runner, broker, risk or stops.
+Safety: Descriptive samples do not establish profitable counterfactuals.
+"""
 
 from __future__ import annotations
 
@@ -307,11 +316,23 @@ def _execution_summary(measured: list[dict[str, Any]]) -> dict[str, Any]:
     market_fallback_trades = 0
     rejected_exit_attempts = 0
     trades_with_quality = 0
+    missing_exit_quotes_by_type: dict[str, int] = defaultdict(int)
+    exit_quote_complete = 0
+    exchange_stop_deviation_measured = 0
     for trade in measured:
         quality = trade.get("execution_quality")
         if not isinstance(quality, Mapping):
             continue
         trades_with_quality += 1
+        quote_bid = _number(quality.get("exit_quote_bid"))
+        quote_ask = _number(quality.get("exit_quote_ask"))
+        if quote_bid is not None and quote_ask is not None:
+            exit_quote_complete += 1
+        else:
+            order_type = str(quality.get("exit_order_type") or "UNKNOWN").upper()
+            missing_exit_quotes_by_type[order_type] += 1
+        if _number(quality.get("stop_trigger_fill_deviation_points")) is not None:
+            exchange_stop_deviation_measured += 1
         for field in fields:
             value = _number(quality.get(field))
             if value is not None:
@@ -325,6 +346,8 @@ def _execution_summary(measured: list[dict[str, Any]]) -> dict[str, Any]:
         rejected_exit_attempts += int(
             _number(quality.get("exit_rejected_attempts")) or 0
         )
+    missing_quotes_by_type = dict(sorted(missing_exit_quotes_by_type.items()))
+    missing_slippage = trades_with_quality - len(values["exit_slippage_bps"])
     return {
         "measured_trades": len(measured),
         "trades_with_quality": trades_with_quality,
@@ -337,6 +360,40 @@ def _execution_summary(measured: list[dict[str, Any]]) -> dict[str, Any]:
         ),
         "market_fallback_trades": market_fallback_trades,
         "rejected_exit_attempts": rejected_exit_attempts,
+        "exit_quote_complete_trades": exit_quote_complete,
+        "exit_quote_missing_by_order_type": missing_quotes_by_type,
+        "exchange_stop_deviation_measured_trades": exchange_stop_deviation_measured,
+        "exit_slippage_unmeasured_trades": missing_slippage,
+    }
+
+
+def _loss_tail_summary(measured: list[dict[str, Any]]) -> dict[str, Any]:
+    """Describe realized losses without claiming a stop-policy counterfactual."""
+    net_values = []
+    for trade in measured:
+        value = _number(trade.get("net_pnl"))
+        if value is not None:
+            net_values.append(value)
+    winners = [value for value in net_values if value > 0]
+    losers = [value for value in net_values if value < 0]
+    average_win = round(sum(winners) / len(winners), 2) if winners else None
+    average_loss = round(sum(losers) / len(losers), 2) if losers else None
+    worst_loss_share = None
+    if losers:
+        worst_loss_share = round(abs(min(losers)) / abs(sum(losers)) * 100.0, 2)
+    sample_evidence = "exploratory_small_sample"
+    if len(net_values) >= 30:
+        sample_evidence = "descriptive_not_causal"
+    return {
+        "measured_trades": len(measured),
+        "net_expectancy_rupees": (
+            round(sum(net_values) / len(net_values), 2) if net_values else None
+        ),
+        "worst_net_trade_rupees": min(net_values) if net_values else None,
+        "average_win_rupees": average_win,
+        "average_loss_rupees": average_loss,
+        "worst_loss_share_pct": worst_loss_share,
+        "sample_evidence": sample_evidence,
     }
 
 
@@ -509,6 +566,7 @@ def summarise_completed_trades(
         "microstructure_confirmation_coverage": microstructure_confirmation_coverage,
         "execution_quality": _execution_summary(measured),
         "exit_quality": _exit_summary(measured),
+        "loss_tail": _loss_tail_summary(measured),
     }
     if entry_funnel is not None:
         summary["entry_funnel"] = dict(entry_funnel)
@@ -604,10 +662,22 @@ def _append_observational_sections(
             f"{int(execution.get('market_fallback_trades', 0))}**  ",
             f"Rejected exit attempts: **"
             f"{int(execution.get('rejected_exit_attempts', 0))}**",
+            f"Executable exit bid/ask captured: **"
+            f"{int(execution.get('exit_quote_complete_trades', 0))}/"
+            f"{int(execution.get('trades_with_quality', 0))}**  ",
+            f"Measured exchange-stop trigger/fill deviations: **"
+            f"{int(execution.get('exchange_stop_deviation_measured_trades', 0))}**  ",
+            f"Exit slippage unmeasured: **"
+            f"{int(execution.get('exit_slippage_unmeasured_trades', 0))}**  ",
+            "Missing exit quotes by order type: **"
+            f"{execution.get('exit_quote_missing_by_order_type', {})}**",
+            "Missing exit quotes are **unknown execution evidence**, "
+            "not zero slippage.",
         ]
     )
 
     exit_quality = summary.get("exit_quality", {})
+    loss_tail = summary.get("loss_tail", {})
     lines.extend(
         [
             "",
@@ -619,7 +689,18 @@ def _append_observational_sections(
             f"Average profit surrendered: **"
             f"{_display(exit_quality.get('average_profit_surrendered'))}**  ",
             f"Aggregate MFE capture: **"
-            f"{_display(exit_quality.get('mfe_capture_pct'), suffix='%')}**",
+            f"{_display(exit_quality.get('mfe_capture_pct'), suffix='%')}**  ",
+            f"Observed net expectancy/trade: **"
+            f"{_display(loss_tail.get('net_expectancy_rupees'))}**  ",
+            f"Worst net trade: **"
+            f"{_display(loss_tail.get('worst_net_trade_rupees'))}**  ",
+            f"Mean winning / losing net trade: **"
+            f"{_display(loss_tail.get('average_win_rupees'))} / "
+            f"{_display(loss_tail.get('average_loss_rupees'))}**  ",
+            f"Worst loss as share of all losses: **"
+            f"{_display(loss_tail.get('worst_loss_share_pct'), suffix='%')}**",
+            "These are descriptive results, not evidence that a different stop"
+            " or earlier exit would have improved realized P&L.",
             "",
             "| Exit reason | Trades | Net P&L |",
             "|---|---:|---:|",
