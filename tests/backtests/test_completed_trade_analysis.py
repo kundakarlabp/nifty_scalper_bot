@@ -265,10 +265,7 @@ def test_oos_path_aggregates_cross_fold_drawdown_and_realized_statistics() -> No
 
 def test_oos_path_incompleteness_is_reported_not_promoted() -> None:
     trades = canonicalize_completed_trades(
-        [
-            _trade(f"t{index}", float(index))
-            for index in range(1, 9)
-        ]
+        [_trade(f"t{index}", float(index)) for index in range(1, 9)]
     )
     folds = chronological_walk_forward(trades, min_train_trades=4, test_trades=2)
     incomplete = replace(folds[0], test_trades=())
