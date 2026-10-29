@@ -447,7 +447,7 @@ def test_volume_spike_config_is_consumed_as_structural_confirmation(
     assert "volume_confirmation" in signal.metadata["setup_reasons"]
 
 
-def test_smc_setup_leaves_independent_confirmation_to_strategy_manager(
+def test_smc_naked_trend_sweep_cannot_be_rescued_by_manager_confirmation(
     monkeypatch,
 ) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
@@ -508,11 +508,8 @@ def test_smc_setup_leaves_independent_confirmation_to_strategy_manager(
         103.0,
     )
 
-    assert signal is not None
-    assert signal.metadata["requires_independent_confirmation"] is True
-    assert signal.metadata["confirmation_owner"] == "StrategyManager"
-    assert signal.metadata["smc_local_support_present"] is False
-    assert signal.metadata["smc_local_support_sources"] == []
+    assert signal is None
+    assert strategy.last_no_vote_reason == "smc_trend_corroboration_missing"
 
 
 def test_bearish_underlying_sweep_confirms_long_pe(monkeypatch) -> None:
