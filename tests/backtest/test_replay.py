@@ -445,9 +445,9 @@ def test_replay_uses_first_post_latency_quote_without_explicit_clock() -> None:
                 assert order["status"] == "open"
 
     frame = _sample_frame().iloc[:2]
-    result = ReplayHarness(
-        _PlacingRunner(), paper, option_symbol="OPT"
-    ).run_dataframe(frame)
+    result = ReplayHarness(_PlacingRunner(), paper, option_symbol="OPT").run_dataframe(
+        frame
+    )
 
     assert len(result.orders) == 1
     order = result.orders[0]
@@ -457,6 +457,7 @@ def test_replay_uses_first_post_latency_quote_without_explicit_clock() -> None:
         frame.index[1].to_pydatetime().timestamp()
     )
     assert order["fill_latency_seconds"] == pytest.approx(60.0)
+
 
 def test_replay_harness_applies_completed_outcome_fill_calibration() -> None:
     paper = PaperFillEngine(_DummyDataHub(), _DummyResolver())
