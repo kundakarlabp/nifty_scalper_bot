@@ -207,7 +207,7 @@ def test_risk_control_stays_visible_when_engine_in_auto_quiet(monkeypatch):
     assert "Reset daily risk" in panel
     assert "disabled" in panel
     assert 'action="/admin/risk/reset-day"' not in panel
-    assert "No reset was applied or queued" in panel
+    assert "prior reset status is unverified" in panel
 
 
 def test_reset_rejects_forged_engine_ack_without_applied_marker(monkeypatch):
