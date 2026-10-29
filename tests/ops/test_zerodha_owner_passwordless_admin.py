@@ -201,7 +201,8 @@ def test_missing_origin_still_requires_valid_cookie_bound_challenge(
     client = _setup(monkeypatch, tmp_path)
     _start(client)
     monkeypatch.setattr(
-        dashboard, "_exchange_request_token",
+        dashboard,
+        "_exchange_request_token",
         lambda *_: (_ for _ in ()).throw(AssertionError("must not exchange")),
     )
     response = client.post(
@@ -225,7 +226,8 @@ def test_mobile_privacy_policy_and_secondary_login_submit(
     )
     monkeypatch.setattr(dashboard, "_verify_access_token", lambda *_: (True, "AB1234"))
     monkeypatch.setattr(
-        dashboard, "_activate_access_token",
+        dashboard,
+        "_activate_access_token",
         lambda *_: ControlResult(True, "restart_bot", "queued"),
     )
     result = client.post(
