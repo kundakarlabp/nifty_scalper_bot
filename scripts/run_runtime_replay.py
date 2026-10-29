@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Fixed no-network production replay worker; never load broker credentials."""
+"""Purpose: Run isolated no-network production-composition replay research.
+
+Responsibilities: Preflight recorded quote/depth integrity and compare matched
+adaptive-versus-disabled-legacy exit policies with realistic modeled fills.
+Ownership: One existing offline worker; never a second live strategy or exit owner.
+Safety: Reject unresolved orders, incomplete evidence and divergent entries;
+never load broker credentials or claim modeled improvement is live profitability.
+"""
 
 from __future__ import annotations
 
