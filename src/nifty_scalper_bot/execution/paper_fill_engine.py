@@ -1,4 +1,8 @@
-"""Enhanced paper trading fill engine with queue-aware fills."""
+"""Paper execution simulator with queue, depth and observed-time fill calibration.
+
+Calibrated latency defers eligibility until a later quote; it never backdates
+execution or fills from a future observation. This is not a live broker path.
+"""
 
 from __future__ import annotations
 
@@ -180,6 +184,12 @@ class PaperFillEngine:
         limit_price = payload.get("price")
 
         order_id = self._next_id()
+        placed_at = self._clock()
+        latency = (
+            self._calibrated_entry_fill_latency_s
+            if side == "BUY"
+            else self._calibrated_exit_fill_latency_s
+        ) or 0.0
         parent_id_raw = payload.get("parent_order_id")
         parent_id = None
         if isinstance(parent_id_raw, str):
@@ -198,7 +208,8 @@ class PaperFillEngine:
             "transaction_type": side,
             "order_type": order_type,
             "price": _safe_float(limit_price, 0.0) if limit_price is not None else None,
-            "timestamp": self._clock(),
+            "timestamp": placed_at,
+            "eligible_fill_at": placed_at + latency,
             "parent_order_id": parent_id,
             "remaining_quantity": quantity,
             "fees": 0.0,
@@ -232,6 +243,14 @@ class PaperFillEngine:
             order["price"] = float(price)
             order["queue_ahead"] = self._queue_depth_default
         order["timestamp"] = self._clock()
+        if not int(order.get("filled_quantity") or 0):
+            side = str(order.get("transaction_type") or "").upper()
+            latency = (
+                self._calibrated_entry_fill_latency_s
+                if side == "BUY"
+                else self._calibrated_exit_fill_latency_s
+            ) or 0.0
+            order["eligible_fill_at"] = order["timestamp"] + latency
         order.setdefault("filled_quantity", 0)
         order.setdefault("remaining_quantity", order.get("quantity", 0))
         order_type = str(order.get("order_type", "")).upper()
@@ -296,6 +315,9 @@ class PaperFillEngine:
                     ),
                 }
             )
+            return
+
+        if self._clock() < _safe_float(order.get("eligible_fill_at"), 0.0):
             return
 
         if order_type == "MARKET":
@@ -378,8 +400,12 @@ class PaperFillEngine:
         order["fees"] = self._execution_simulator.commission_model.calculate(
             float(order["filled_turnover"]), side=cast(Literal["BUY", "SELL"], side)
         )
-        order.setdefault("first_fill_timestamp", self._clock())
-        order["last_fill_timestamp"] = self._clock()
+        filled_at = self._clock()
+        order.setdefault("first_fill_timestamp", filled_at)
+        order["last_fill_timestamp"] = filled_at
+        order["fill_latency_seconds"] = max(
+            0.0, float(order["first_fill_timestamp"]) - float(order["timestamp"])
+        )
 
     def _fill_market(self, order: dict[str, Any], metrics: _QuoteMetrics) -> None:
         side = str(order.get("transaction_type") or "").upper()
@@ -490,15 +516,12 @@ class PaperFillEngine:
         order["fees"] = _safe_float(order.get("fees"), 0.0) + fill_fees
         order["filled_turnover"] = filled_turnover
         order["status"] = "complete" if new_total >= quantity else "open"
-        calibrated_latency = (
-            self._calibrated_entry_fill_latency_s
-            if side == "BUY"
-            else self._calibrated_exit_fill_latency_s
+        filled_at = self._clock()
+        order.setdefault("first_fill_timestamp", filled_at)
+        order["last_fill_timestamp"] = filled_at
+        order["fill_latency_seconds"] = max(
+            0.0, float(order["first_fill_timestamp"]) - float(order["timestamp"])
         )
-        latency = calibrated_latency or 0.0
-        order.setdefault("first_fill_timestamp", self._clock() + latency)
-        order["last_fill_timestamp"] = self._clock() + latency
-        order["fill_latency_seconds"] = latency
 
     # Helpers ------------------------------------------------------------
     def _next_id(self) -> str:
