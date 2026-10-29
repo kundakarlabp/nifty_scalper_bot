@@ -446,7 +446,9 @@ def local_risk_reset(request: Request) -> dict[str, Any]:
     except ValueError as exc:
         if str(exc) == "daily_risk_reset_already_applied":
             raise HTTPException(status_code=409, detail=str(exc)) from None
-        raise HTTPException(status_code=503, detail="daily_risk_state_unverified") from None
+        raise HTTPException(
+            status_code=503, detail="daily_risk_state_unverified"
+        ) from None
     except Exception:
         LOG.exception("OPERATOR_DAILY_RISK_RESET_FAILED")
         raise HTTPException(status_code=503, detail="daily_risk_reset_failed") from None
