@@ -255,11 +255,6 @@ def _live_ws_option_tick_fresh(
     return age_s <= limit_s
 
 
-
-
-
-
-
 def _repair_selected_pair_evaluation(runner: Any, *, now: float | None = None) -> None:
     """Recover a live selected pair whose quote stream outlived its evaluator.
 
@@ -268,9 +263,7 @@ def _repair_selected_pair_evaluation(runner: Any, *, now: float | None = None) -
     The existing single-worker drain is the sole owner of evaluation.
     """
     now = time.monotonic() if now is None else float(now)
-    last_probe = float(
-        getattr(runner, "_selected_eval_recovery_probe_at", 0.0) or 0.0
-    )
+    last_probe = float(getattr(runner, "_selected_eval_recovery_probe_at", 0.0) or 0.0)
     if now - last_probe < 5.0:
         return
     runner._selected_eval_recovery_probe_at = now
@@ -288,8 +281,7 @@ def _repair_selected_pair_evaluation(runner: Any, *, now: float | None = None) -
         return
     try:
         if any(
-            (age := ws_age(symbol)) is None or float(age) > 5.0
-            for symbol in pair
+            (age := ws_age(symbol)) is None or float(age) > 5.0 for symbol in pair
         ):
             return
     except (TypeError, ValueError, RuntimeError):
@@ -313,10 +305,7 @@ def _repair_selected_pair_evaluation(runner: Any, *, now: float | None = None) -
             )
 
     epoch = float(getattr(runner, "_selected_entry_eval_epoch_started_at", 0.0) or 0.0)
-    if (
-        epoch <= 0.0
-        or getattr(runner, "_selected_entry_eval_epoch_pair", None) != pair
-    ):
+    if epoch <= 0.0 or getattr(runner, "_selected_entry_eval_epoch_pair", None) != pair:
         return
     completed = float(
         getattr(runner, "_last_selected_candidate_eval_completed_ts", 0.0) or 0.0
@@ -340,7 +329,9 @@ def _repair_selected_pair_evaluation(runner: Any, *, now: float | None = None) -
             runner._logger.critical(
                 "SELECTED_PAIR_EVALUATION_STALLED_DISARMED "
                 "selected_ce=%s selected_pe=%s epoch_age_s=%.1f",
-                pair[0], pair[1], now - epoch,
+                pair[0],
+                pair[1],
+                now - epoch,
             )
         return
     if last_attempt >= epoch:
@@ -351,7 +342,10 @@ def _repair_selected_pair_evaluation(runner: Any, *, now: float | None = None) -
     runner._logger.warning(
         "SELECTED_PAIR_EVALUATION_RECOVERY "
         "selected_ce=%s selected_pe=%s scheduled=%s epoch_age_s=%.1f",
-        pair[0], pair[1], scheduled, now - epoch,
+        pair[0],
+        pair[1],
+        scheduled,
+        now - epoch,
     )
 
 
