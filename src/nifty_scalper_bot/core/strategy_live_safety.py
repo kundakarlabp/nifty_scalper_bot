@@ -637,8 +637,8 @@ def _approved_smc_freshness_block(
 def _approved_vwap_continuation_freshness_block(
     signal: Signal, *, now_epoch: float
 ) -> dict[str, Any] | None:
-    """Use the actual LIVE decision time for an opt-in VWAP thesis expiry."""
-    if str(getattr(signal, "action", "")).upper() not in {"BUY", "SELL"}:
+    """Use the actual LIVE decision time for an opt-in VWAP BUY thesis expiry."""
+    if str(getattr(signal, "action", "")).upper() != "BUY":
         return None
     metadata = dict(getattr(signal, "metadata", {}) or {})
     strategy = str(metadata.get("strategy_name") or metadata.get("strategy") or "")
