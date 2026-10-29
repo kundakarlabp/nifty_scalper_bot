@@ -268,7 +268,10 @@ def _repair_selected_pair_evaluation(runner: Any, *, now: float | None = None) -
     The existing single-worker drain is the sole owner of evaluation.
     """
     now = time.monotonic() if now is None else float(now)
-    if now - float(getattr(runner, "_selected_eval_recovery_probe_at", 0.0) or 0.0) < 5.0:
+    last_probe = float(
+        getattr(runner, "_selected_eval_recovery_probe_at", 0.0) or 0.0
+    )
+    if now - last_probe < 5.0:
         return
     runner._selected_eval_recovery_probe_at = now
     pair = _active_selected_pair(runner)
@@ -335,7 +338,8 @@ def _repair_selected_pair_evaluation(runner: Any, *, now: float | None = None) -
         if not bool(getattr(runner, "_selected_eval_recovery_disarm_logged", False)):
             runner._selected_eval_recovery_disarm_logged = True
             runner._logger.critical(
-                "SELECTED_PAIR_EVALUATION_STALLED_DISARMED selected_ce=%s selected_pe=%s epoch_age_s=%.1f",
+                "SELECTED_PAIR_EVALUATION_STALLED_DISARMED "
+                "selected_ce=%s selected_pe=%s epoch_age_s=%.1f",
                 pair[0], pair[1], now - epoch,
             )
         return
@@ -345,7 +349,8 @@ def _repair_selected_pair_evaluation(runner: Any, *, now: float | None = None) -
     runner._selected_eval_recovery_disarm_logged = False
     scheduled = _schedule_selected_pair_evaluation(runner, pair, now=now)
     runner._logger.warning(
-        "SELECTED_PAIR_EVALUATION_RECOVERY selected_ce=%s selected_pe=%s scheduled=%s epoch_age_s=%.1f",
+        "SELECTED_PAIR_EVALUATION_RECOVERY "
+        "selected_ce=%s selected_pe=%s scheduled=%s epoch_age_s=%.1f",
         pair[0], pair[1], scheduled, now - epoch,
     )
 
@@ -519,7 +524,9 @@ def apply_patches() -> None:
     StrategyRunner._on_tick = on_tick
     StrategyRunner._entry_eval_liveness_snapshot = entry_eval_liveness_snapshot
     StrategyRunner._is_option_symbol_tick_fresh = option_symbol_tick_fresh
-    StrategyRunner._run_health_watchdog_on_cadence = health_watchdog_with_selected_pair_recovery
+    StrategyRunner._run_health_watchdog_on_cadence = (
+        health_watchdog_with_selected_pair_recovery
+    )
     StrategyRunner._dynamic_universe_safety_installed = True
 
 
