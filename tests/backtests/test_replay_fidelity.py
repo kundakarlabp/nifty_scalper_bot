@@ -166,7 +166,8 @@ def test_second_basket_missing_depth_is_not_rescued_by_first_basket(tmp_path):
     assert report["basket_segments_with_quote_context"] == 1
     assert report["basket_segments_missing_quote_context"] == 1
     assert report["basket_segments_missing_by_requirement"] == {
-        "CE_no_two_sided_depth": 1
+        "CE_no_two_sided_depth": 1,
+        "CE_no_five_level_depth": 1,
     }
     assert not report["observed_selected_context_available"]
 
