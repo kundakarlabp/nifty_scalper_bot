@@ -1,4 +1,13 @@
-"""Keep StrategyRunner's dynamic universe and live evaluation state safe."""
+"""Keep StrategyRunner's dynamic universe and live evaluation state safe.
+
+Runtime role: maintain the runner's selected CE/PE eligibility, current-generation
+WebSocket freshness and single-worker evaluation liveness across ATM rotation.
+The _repair_selected_pair_evaluation entrypoint checks native WS receipts,
+reattaches only missing callbacks, and schedules the existing evaluation drain;
+it disarms new entries after an unsuccessful recovery rather than inventing a
+signal or touching position protection. apply_patches installs these guards
+idempotently while preserving the canonical runner's strategy/order ownership.
+"""
 
 from __future__ import annotations
 
