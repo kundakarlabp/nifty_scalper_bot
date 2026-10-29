@@ -7891,10 +7891,7 @@ class MarketDataManager:
                         self._logger.error(
                             "MDM_TICK_DRAIN_ERROR error=%r", exc, exc_info=True
                         )
-                    if (
-                        processed_in_invocation
-                        >= self._tick_drain_invocation_max_ticks
-                    ):
+                    if processed_in_invocation >= self._tick_drain_invocation_max_ticks:
                         self._requeue_unprocessed_ticks(batch[index + 1 :])
                         return
                     if time.monotonic() - start >= self._tick_drain_budget_s:
