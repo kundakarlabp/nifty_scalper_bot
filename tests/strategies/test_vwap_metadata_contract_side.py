@@ -1,10 +1,18 @@
 import inspect
 
+import pytest
+
 from nifty_scalper_bot.core.strategy_manager import signal_to_evidence
 from nifty_scalper_bot.strategies.elite_strategies.config_models import (
     VWAPProStrategyConfig,
 )
 from nifty_scalper_bot.strategies.elite_strategies.vwap_pro import VWAPProStrategy
+
+
+@pytest.fixture(autouse=True)
+def _preserve_legacy_vwap_contract_profile(monkeypatch):
+    """Existing indicator-contract cases intentionally test the rollback profile."""
+    monkeypatch.setenv("VWAP_STRICT_CONTINUATION_ENABLED", "false")
 
 
 class _DummyEngine:
