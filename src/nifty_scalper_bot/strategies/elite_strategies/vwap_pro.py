@@ -860,7 +860,12 @@ class VWAPProStrategy(EliteStrategy):
 
             confirmed_bar = None
             last_bars = []
-            if premium_momentum_required or self._require_finalized_signal_bar or self._strict_continuation_enabled:
+            strict_continuation_bar_required = bool(
+                self._strict_continuation_enabled
+                and continuation_confirmed
+                and not pullback_flag
+            )
+            if premium_momentum_required or self._require_finalized_signal_bar or strict_continuation_bar_required:
                 # Confirm exactly the completed premium candle used by this vote.
                 # One proof owner serves both research profiles without a second
                 # signal path or an unconditional LIVE admission change.
@@ -1402,7 +1407,7 @@ class VWAPProStrategy(EliteStrategy):
                 "trend_momentum_enabled": self._trend_momentum_enabled,
                 "vwap_neutral_slope_premium_proof_required": premium_momentum_required,
                 "vwap_finalized_bar_required": (
-                    self._require_finalized_signal_bar or premium_momentum_required or self._strict_continuation_enabled
+                    self._require_finalized_signal_bar or premium_momentum_required or strict_continuation_bar_required
                 ),
                 "vwap_finalized_bar_confirmed": confirmed_bar is not None,
                 "trend_momentum_regime": trend_momentum_regime.value,
