@@ -230,11 +230,12 @@ def verify_local_engine_command(token: str, action: str) -> bool:
     if not payload:
         return False
     issued = payload.get("iat")
+    nonce = payload.get("nonce")
     return bool(
         payload.get("kind") == "local_engine_command"
         and payload.get("action") == action
-        and isinstance(payload.get("nonce"), str)
-        and len(payload["nonce"]) >= 24
+        and isinstance(nonce, str)
+        and len(nonce) >= 24
         and isinstance(issued, int)
         and 0 <= time.time() - issued <= 20
     )
