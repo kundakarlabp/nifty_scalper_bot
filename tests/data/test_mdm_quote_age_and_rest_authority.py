@@ -88,3 +88,22 @@ def test_direct_rest_ltp_failure_does_not_corrupt_canonical_quote(
     assert mdm.get_ltp(SYMBOL, allow_rest_fallback=True) == 201.0
     assert mdm.get_latest_tick(SYMBOL) == original
     assert mdm._last_quote_ts_ms[SYMBOL] == original_stamp
+
+def test_accepted_ws_tick_updates_mid_without_a_quote_read() -> None:
+    mdm = _manager()
+    quote = {
+        "symbol": SYMBOL,
+        "ltp": 102.0,
+        "bid": 101.9,
+        "ask": 102.1,
+        "timestamp": time.time(),
+        "received_at": time.time(),
+        "source": "ws",
+    }
+
+    assert mdm._store_tick(SYMBOL, quote) is True
+    mid, age_ms = mdm.cached_mid(SYMBOL)
+
+    assert mid == 102.0
+    assert age_ms is not None and age_ms < 1000
+    assert mdm.quote_age_ms(SYMBOL) < 1000
