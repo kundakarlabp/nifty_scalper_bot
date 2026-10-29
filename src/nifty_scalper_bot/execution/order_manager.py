@@ -252,7 +252,10 @@ def _submit_trade_plan_with_setup_price_guard(self, plan):
     signal_id = str(getattr(plan, "signal_id", "") or "")
     symbol = str(getattr(plan, "symbol", "") or "")
     if not (
-        live and intent == "ENTRY" and signal_id and symbol
+        live
+        and intent == "ENTRY"
+        and signal_id
+        and symbol
         and str(getattr(plan, "side", "") or "").upper() == "BUY"
     ):
         return _original_submit_trade_plan_result(self, plan)
@@ -278,12 +281,17 @@ def _submit_trade_plan_with_setup_price_guard(self, plan):
                 if callable(warning):
                     warning(
                         "ENTRY_SAME_SETUP_PRICE_CHASE_BLOCKED symbol=%s drift_pct=%s",
-                        symbol, drift,
-                        extra={"event": "ENTRY_SAME_SETUP_PRICE_CHASE_BLOCKED",
-                               "signal_id": signal_id, "drift_pct": drift},
+                        symbol,
+                        drift,
+                        extra={
+                            "event": "ENTRY_SAME_SETUP_PRICE_CHASE_BLOCKED",
+                            "signal_id": signal_id,
+                            "drift_pct": drift,
+                        },
                     )
                 return _core.TradePlanSubmitResult(
-                    accepted=False, order_id=None,
+                    accepted=False,
+                    order_id=None,
                     reason="same_setup_adverse_reprice",
                     details={"drift_pct": drift, "limit_pct": cap},
                     broker_attempted=False,
@@ -292,7 +300,9 @@ def _submit_trade_plan_with_setup_price_guard(self, plan):
     result = _original_submit_trade_plan_result(self, plan)
     if (
         getattr(result, "broker_attempted", False)
-        and math.isfinite(price) and price > 0 and key not in anchors
+        and math.isfinite(price)
+        and price > 0
+        and key not in anchors
     ):
         if len(anchors) >= 512:
             anchors.pop(next(iter(anchors)))
