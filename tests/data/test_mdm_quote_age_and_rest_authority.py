@@ -106,3 +106,32 @@ def test_accepted_ws_tick_updates_mid_without_a_quote_read() -> None:
     assert mid == 102.0
     assert age_ms is not None and age_ms < 1000
     assert mdm.quote_age_ms(SYMBOL) < 1000
+
+def test_rest_reply_rejected_after_ws_race_cannot_replace_mid_or_age(
+    monkeypatch,
+) -> None:
+    mdm = _manager()
+    quote_before = mdm.get_latest_tick(SYMBOL)
+    mid_before = mdm._last_mid[SYMBOL]
+    stamp_before = mdm._last_quote_ts_ms[SYMBOL]
+    monkeypatch.setattr(mdm, "_candidate_quote_keys", lambda _symbol: [SYMBOL])
+    monkeypatch.setattr(
+        mdm,
+        "_broker_quote_any",
+        lambda _symbol: {"last_price": 99.0, "bid": 50.0, "ask": 51.0},
+    )
+    monkeypatch.setattr(
+        mdm, "_normalize_tick",
+        lambda _symbol, _raw, _prev: {
+            "symbol": SYMBOL,
+            "ltp": 99.0,
+            "timestamp": time.time() - 100,
+            "source": "rest",
+        },
+    )
+
+    mdm.refresh_quote_now(SYMBOL)
+
+    assert mdm.get_latest_tick(SYMBOL) == quote_before
+    assert mdm._last_mid[SYMBOL] == mid_before
+    assert mdm._last_quote_ts_ms[SYMBOL] == stamp_before
