@@ -442,7 +442,7 @@ def _daily_risk_panel(owner_verified: bool) -> str:
         return (
             f'<p class="warning">{explanation}</p>'
             + disabled_button
-            + '<p class="muted">No reset was applied or queued. Refresh this '
+            + '<p class="muted">No new reset was queued by this page load; prior reset status is unverified. Refresh this '
             "page when the engine is running. A reset does not restart the bot.</p>"
         )
     if applied:
@@ -525,7 +525,7 @@ def _flash(request: Request) -> str:
         )
     if q.get("riskreset") == "err":
         explanations = {
-            "engine_risk_request_unavailable": "Engine not reachable; no reset was applied.",
+            "engine_risk_request_unavailable": "Engine unreachable; reset could not be confirmed.",
             "live_engine_unavailable": "Engine risk manager unavailable (possibly AUTO QUIET).",
             "broker_reconciliation_unverified": "Broker reconciliation incomplete.",
             "broker_positions_or_orders_open": "Broker positions or orders still open.",
@@ -534,7 +534,7 @@ def _flash(request: Request) -> str:
         }
         reason = q.get("msg", "")
         msg = html.escape(explanations.get(reason, reason[:80]))
-        return f'<div class="flash err">Risk reset not applied: {msg}</div>'
+        return f'<div class="flash err">Risk reset not confirmed: {msg}</div>'
     if q.get("upd") in {"queued", "ok"}:
         return (
             '<div class="flash ok">GitHub update check requested. '
@@ -1003,7 +1003,7 @@ def reset_daily_risk(request: Request, confirm: str = Form("")) -> RedirectRespo
         result = _engine_risk_request("risk_reset")
     except Exception as exc:  # noqa: BLE001 - never pretend an engine failure succeeded
         reason = str(exc)[:100]
-        LOGGER.warning("ADMIN_RISK_RESET_REJECTED reason=%s", reason)
+        LOGGER.warning("ADMIN_RISK_RESET_NOT_CONFIRMED reason=%s", reason)
         return RedirectResponse(
             "/admin?riskreset=err&msg=" + urllib.parse.quote(reason),
             status_code=303,
