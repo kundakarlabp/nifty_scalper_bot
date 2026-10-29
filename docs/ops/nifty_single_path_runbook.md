@@ -23,6 +23,42 @@ daily broker-token operation may require AppDeploy.
 - Never paste the request-token URL, access tokens, or TOTP into chat,
   screenshots, GitHub Actions, or Supabase telemetry.
 
+## Daily loss allowance: explicit owner reset
+
+The public HTTPS admin dashboard is hosted independently on
+`niftybot-admin:8081`, not inside the trading-engine process. Its
+**Rebase today's risk allowance** control uses the existing verified Zerodha
+owner session and a fresh signed host-local command to the canonical
+`niftybot:8080` engine. The engine receives commands only from an actual
+loopback peer without proxy-origin headers and validates the 20-second
+scope-bound HMAC against the existing private `owner_session_key`. No
+new external service, key, scheduler or risk authority is introduced.
+
+The engine refuses this command if broker reconciliation is incomplete or
+failed, any broker position is unprotected, or tracked open positions or
+pending orders exist. It also refuses any second operator reset on the
+same IST date. A confirmed reset first durably records that day's operator
+P&L/cost baseline and reset date via PositionManager, then clears only the
+running daily-loss allowance. **Original broker/strategy P&L, trade ledger,
+charges, loss streak, cooldown, and protective exits remain unchanged.**
+Do not use a reset as an automatic way to increase trade frequency.
+
+The admin page reads the *engine's* daily cap, loss since last reset,
+remaining allowance, and reset-used flag. Green preliminary cash
+affordability is **not** proof that a proposed 65-unit stop-risk will fit
+the remaining daily budget; the candidate-specific minimum-lot gate still
+applies. A failed, timed-out, unavailable or rejected engine request
+must display a failure, never a reset-success banner. The engine logs
+`OPERATOR_DAILY_RISK_RESET` only for an actually applied reset; a page
+refresh or `riskreset=ok` URL by itself is not audit evidence.
+
+Deployment verification: wait for the broker-safe release to show the
+intended GitHub SHA, authenticate as the owner, inspect the live risk
+summary, and review the first *actual* operator action only if the owner
+chooses to grant additional allowable losses. Verify the engine audit event,
+subsequent risk summary, and durable reset marker across a later safe
+restart. Do not test by actually spending or resetting money.
+
 ## Legacy command-line token helper — protected-file only
 
 The authenticated admin token workflow remains the operational default. The
