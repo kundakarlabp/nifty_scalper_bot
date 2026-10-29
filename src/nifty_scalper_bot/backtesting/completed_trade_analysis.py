@@ -775,9 +775,7 @@ def walk_forward_stability(
     oos_trades = tuple(trade for fold in folds for trade in fold.test_trades)
     expected_count = sum(fold.test_summary.trade_count for fold in folds)
     if len(oos_trades) != expected_count:
-        blockers.append(
-            f"incomplete_oos_trade_path:{len(oos_trades)}<{expected_count}"
-        )
+        blockers.append(f"incomplete_oos_trade_path:{len(oos_trades)}<{expected_count}")
     if any(
         (current.closed_at, current.trade_id)
         >= (following.closed_at, following.trade_id)
