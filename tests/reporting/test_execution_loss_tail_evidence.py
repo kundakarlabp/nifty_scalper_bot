@@ -1,6 +1,9 @@
 """Read-only reporting evidence regressions."""
 
-from scripts.reporting.generate_daily_report import _execution_summary, _loss_tail_summary
+from scripts.reporting.generate_daily_report import (
+    _execution_summary,
+    _loss_tail_summary,
+)
 
 
 def test_unknown_exit_price_provenance_is_not_zero_slippage() -> None:
