@@ -138,7 +138,9 @@ class ReplayHarness:
         clock_time = getattr(clock, "time", None)
         set_clock = getattr(paper_engine, "set_clock", None)
         if callable(set_clock):
-            set_clock(clock_time if callable(clock_time) else lambda: self._replay_epoch)
+            set_clock(
+                clock_time if callable(clock_time) else lambda: self._replay_epoch
+            )
 
     def run_dataframe(
         self, data: pd.DataFrame, *, bar_interval: timedelta | None = None
