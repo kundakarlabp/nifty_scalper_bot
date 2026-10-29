@@ -432,6 +432,44 @@ def test_paired_adaptive_rejects_unfinished_and_empty_buy_fills():
     assert result["blocker"] == "paired_replay_entry_divergence_or_no_fills"
 
 
+@pytest.mark.parametrize("pending_side", ["BUY", "SELL"])
+@pytest.mark.parametrize("pending_status", ["open", "trigger pending", "partially filled"])
+def test_paired_runtime_rejects_unresolved_order_even_when_positions_are_flat(
+    pending_side, pending_status
+):
+    baseline = _paired_report()
+    adaptive = _paired_report(net=260)
+    adaptive["orders"].append(
+        {
+            "transaction_type": pending_side,
+            "symbol": "NFO:NIFTY26OCT23100CE",
+            "status": pending_status,
+            "filled_quantity": 0,
+            "timestamp": 105.0,
+        }
+    )
+    comparison = worker.compare_paired_reports(
+        baseline,
+        adaptive,
+        _paired_fidelity(),
+        expected_sha="verified_sha",
+        slippage_bps=25,
+    )
+    assert comparison["state"] == "UNRESOLVED"
+    assert comparison["blocker"] == "paired_replay_unresolved_order"
+    assert comparison["net_delta"] is None
+
+
+def test_paired_comparison_labels_legacy_control_not_assumed_live_baseline():
+    row = _paired_report()
+    result = worker.compare_paired_reports(
+        row, row, _paired_fidelity(), expected_sha="verified_sha", slippage_bps=10
+    )
+    assert result["baseline_policy"] == "adaptive_disabled_research_control"
+    assert result["adaptive_policy"] == "adaptive_enabled"
+    assert result["net_delta_semantics"] == "adaptive_minus_legacy_control"
+
+
 def test_paired_run_uses_sanitized_isolated_offline_workers(monkeypatch, tmp_path):
     session = tmp_path / "2026-10-21.jsonl"
     session.write_text("immutable archive")
