@@ -12,6 +12,12 @@ from nifty_scalper_bot.strategies.elite_strategies.config_models import (
 from nifty_scalper_bot.strategies.elite_strategies.vwap_pro import VWAPProStrategy
 
 
+@pytest.fixture(autouse=True)
+def _baseline_vwap_research_profile(monkeypatch):
+    """Older momentum/retest fixtures stay isolated from the default-on gate."""
+    monkeypatch.setenv("VWAP_STRICT_CONTINUATION_ENABLED", "false")
+
+
 def _evaluate(
     monkeypatch,
     *,
